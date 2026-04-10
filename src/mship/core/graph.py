@@ -1,0 +1,64 @@
+from mship.core.config import WorkspaceConfig
+
+
+class DependencyGraph:
+    """Repo dependency graph with topological sort and traversal."""
+
+    def __init__(self, config: WorkspaceConfig) -> None:
+        self._config = config
+        # adjacency: dep -> list of dependents
+        self._forward: dict[str, list[str]] = {name: [] for name in config.repos}
+        # reverse: dependent -> list of deps
+        self._reverse: dict[str, list[str]] = {name: [] for name in config.repos}
+
+        for name, repo in config.repos.items():
+            for dep in repo.depends_on:
+                self._forward[dep].append(name)
+                self._reverse[name].append(dep)
+
+    def topo_sort(self, repos: list[str] | None = None) -> list[str]:
+        """Return repos in dependency order (dependencies first)."""
+        target_set = set(repos) if repos else set(self._config.repos.keys())
+
+        in_degree: dict[str, int] = {}
+        for name in target_set:
+            in_degree[name] = sum(
+                1 for dep in self._reverse[name] if dep in target_set
+            )
+
+        queue = sorted(n for n, d in in_degree.items() if d == 0)
+        result: list[str] = []
+
+        while queue:
+            node = queue.pop(0)
+            result.append(node)
+            for neighbor in self._forward[node]:
+                if neighbor in target_set:
+                    in_degree[neighbor] -= 1
+                    if in_degree[neighbor] == 0:
+                        queue.append(neighbor)
+            queue.sort()
+
+        return result
+
+    def dependents(self, repo: str) -> list[str]:
+        """Return all transitive downstream dependents of a repo."""
+        visited: set[str] = set()
+        stack = list(self._forward[repo])
+        while stack:
+            node = stack.pop()
+            if node not in visited:
+                visited.add(node)
+                stack.extend(self._forward[node])
+        return sorted(visited)
+
+    def dependencies(self, repo: str) -> list[str]:
+        """Return all transitive upstream dependencies of a repo."""
+        visited: set[str] = set()
+        stack = list(self._reverse[repo])
+        while stack:
+            node = stack.pop()
+            if node not in visited:
+                visited.add(node)
+                stack.extend(self._reverse[node])
+        return sorted(visited)
