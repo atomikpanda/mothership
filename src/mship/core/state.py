@@ -21,6 +21,8 @@ class Task(BaseModel):
     worktrees: dict[str, Path] = {}
     branch: str
     test_results: dict[str, TestResult] = {}
+    blocked_reason: str | None = None
+    blocked_at: datetime | None = None
 
 
 class WorkspaceState(BaseModel):

@@ -108,3 +108,61 @@ def test_get_current_task(state_dir: Path):
 def test_get_current_task_none(state_dir: Path):
     mgr = StateManager(state_dir)
     assert mgr.get_current_task() is None
+
+
+def test_task_blocked_fields_default_none(state_dir: Path):
+    mgr = StateManager(state_dir)
+    task = Task(
+        slug="test",
+        description="Test",
+        phase="dev",
+        created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
+        affected_repos=["shared"],
+        branch="feat/test",
+    )
+    assert task.blocked_reason is None
+    assert task.blocked_at is None
+
+
+def test_task_blocked_roundtrip(state_dir: Path):
+    mgr = StateManager(state_dir)
+    now = datetime(2026, 4, 10, 15, 0, 0, tzinfo=timezone.utc)
+    task = Task(
+        slug="test",
+        description="Test",
+        phase="dev",
+        created_at=now,
+        affected_repos=["shared"],
+        branch="feat/test",
+        blocked_reason="waiting on API key",
+        blocked_at=now,
+    )
+    state = WorkspaceState(current_task="test", tasks={"test": task})
+    mgr.save(state)
+    loaded = mgr.load()
+    assert loaded.tasks["test"].blocked_reason == "waiting on API key"
+    assert loaded.tasks["test"].blocked_at == now
+
+
+def test_task_blocked_cleared(state_dir: Path):
+    mgr = StateManager(state_dir)
+    now = datetime(2026, 4, 10, 15, 0, 0, tzinfo=timezone.utc)
+    task = Task(
+        slug="test",
+        description="Test",
+        phase="dev",
+        created_at=now,
+        affected_repos=["shared"],
+        branch="feat/test",
+        blocked_reason="waiting",
+        blocked_at=now,
+    )
+    state = WorkspaceState(current_task="test", tasks={"test": task})
+    mgr.save(state)
+    loaded = mgr.load()
+    loaded.tasks["test"].blocked_reason = None
+    loaded.tasks["test"].blocked_at = None
+    mgr.save(loaded)
+    reloaded = mgr.load()
+    assert reloaded.tasks["test"].blocked_reason is None
+    assert reloaded.tasks["test"].blocked_at is None
