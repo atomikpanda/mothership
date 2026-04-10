@@ -21,6 +21,8 @@ def get_container() -> Container:
             state_dir = Path(config_path).parent / ".mothership"
             container.state_dir.override(state_dir)
     except FileNotFoundError:
+        import sys
+        print("Error: No mothership.yaml found in any parent directory", file=sys.stderr)
         raise typer.Exit(code=1)
     return container
 

@@ -103,10 +103,17 @@ def register(app: typer.Typer, get_container):
         graph = container.graph()
         ordered = graph.topo_sort(task.affected_repos)
 
-        output.print(f"[bold]Finishing task:[/bold] {task.slug}")
-        output.print(f"[bold]Merge order:[/bold]")
-        for i, repo in enumerate(ordered, 1):
-            output.print(f"  {i}. {repo}")
+        if output.is_tty:
+            output.print(f"[bold]Finishing task:[/bold] {task.slug}")
+            output.print(f"[bold]Merge order:[/bold]")
+            for i, repo in enumerate(ordered, 1):
+                output.print(f"  {i}. {repo}")
+        else:
+            output.json({
+                "task": task.slug,
+                "merge_order": ordered,
+                "status": "manual_pr_required",
+            })
 
         output.warning(
             "PR creation not yet implemented in v1. "
