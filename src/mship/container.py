@@ -6,6 +6,7 @@ from mship.core.graph import DependencyGraph
 from mship.core.log import LogManager
 from mship.core.phase import PhaseManager
 from mship.core.state import StateManager
+from mship.core.pr import PRManager
 from mship.core.prune import PruneManager
 from mship.core.worktree import WorktreeManager
 from mship.util.git import GitRunner
@@ -65,6 +66,11 @@ class Container(containers.DeclarativeContainer):
         PhaseManager,
         state_manager=state_manager,
         log=log_manager,
+    )
+
+    pr_manager = providers.Factory(
+        PRManager,
+        shell=shell,
     )
 
     prune_manager = providers.Factory(

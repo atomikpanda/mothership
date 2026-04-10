@@ -1,12 +1,14 @@
 import os
 import subprocess
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from typer.testing import CliRunner
 
 from mship.cli import app, container
 from mship.core.state import StateManager
+from mship.util.shell import ShellResult, ShellRunner
 
 runner = CliRunner()
 
@@ -69,3 +71,57 @@ def test_finish_handoff(configured_git_app: Path):
     assert result.exit_code == 0
     handoff_file = configured_git_app / ".mothership" / "handoffs" / "handoff-test.yaml"
     assert handoff_file.exists()
+
+
+def test_finish_creates_prs(configured_git_app: Path):
+    from mship.cli import container as cli_container
+
+    # Spawn a task first
+    runner.invoke(app, ["spawn", "test prs", "--repos", "shared"])
+
+    # Mock shell for finish operations
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://github.com/org/shared/pull/1\n", stderr="")
+        if "gh pr view" in cmd:
+            return ShellResult(returncode=0, stdout="body text", stderr="")
+        if "gh pr edit" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    cli_container.shell.override(mock_shell)
+
+    result = runner.invoke(app, ["finish"])
+    assert result.exit_code == 0, result.output
+
+    # Verify PR URL stored in state
+    from mship.core.state import StateManager
+    mgr = StateManager(configured_git_app / ".mothership")
+    state = mgr.load()
+    assert "test-prs" in state.tasks
+    assert state.tasks["test-prs"].pr_urls.get("shared") == "https://github.com/org/shared/pull/1"
+
+    cli_container.shell.reset_override()
+
+
+def test_finish_gh_not_available(configured_git_app: Path):
+    from mship.cli import container as cli_container
+
+    runner.invoke(app, ["spawn", "test no gh", "--repos", "shared"])
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.return_value = ShellResult(returncode=127, stdout="", stderr="command not found")
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    cli_container.shell.override(mock_shell)
+
+    result = runner.invoke(app, ["finish"])
+    assert result.exit_code != 0 or "gh" in result.output.lower()
+
+    cli_container.shell.reset_override()

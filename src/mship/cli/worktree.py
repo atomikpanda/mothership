@@ -91,7 +91,7 @@ def register(app: typer.Typer, get_container):
     def finish(
         handoff: bool = typer.Option(False, "--handoff", help="Generate CI handoff manifest"),
     ):
-        """Create PRs and clean up worktrees in dependency order."""
+        """Create PRs across repos in dependency order."""
         from pathlib import Path
 
         container = get_container()
@@ -128,19 +128,85 @@ def register(app: typer.Typer, get_container):
                 output.json({"handoff": str(path), "task": task.slug})
             return
 
+        # PR creation flow
+        pr_mgr = container.pr_manager()
+
+        try:
+            pr_mgr.check_gh_available()
+        except RuntimeError as e:
+            output.error(str(e))
+            raise typer.Exit(code=1)
+
+        pr_list: list[dict] = []
+
+        for i, repo_name in enumerate(ordered, 1):
+            # Skip if PR already created (idempotent re-run)
+            if repo_name in task.pr_urls:
+                if output.is_tty:
+                    output.print(f"  {repo_name}: already has PR {task.pr_urls[repo_name]}")
+                pr_list.append({
+                    "repo": repo_name,
+                    "url": task.pr_urls[repo_name],
+                    "order": i,
+                })
+                continue
+
+            repo_config = config.repos[repo_name]
+
+            # Push branch
+            try:
+                pr_mgr.push_branch(repo_config.path, task.branch)
+            except RuntimeError as e:
+                output.error(f"{repo_name}: {e}")
+                raise typer.Exit(code=1)
+
+            # Create PR
+            try:
+                pr_url = pr_mgr.create_pr(
+                    repo_path=repo_config.path,
+                    branch=task.branch,
+                    title=task.description,
+                    body=task.description,
+                )
+            except RuntimeError as e:
+                output.error(f"{repo_name}: {e}")
+                raise typer.Exit(code=1)
+
+            # Store in state (crash-safe: save after each PR)
+            task.pr_urls[repo_name] = pr_url
+            state_mgr.save(state)
+
+            pr_list.append({"repo": repo_name, "url": pr_url, "order": i})
+
+            if output.is_tty:
+                output.success(f"  {repo_name}: {pr_url}")
+
+        # Update PRs with coordination blocks (multi-repo only)
+        if len(pr_list) > 1:
+            for pr_info in pr_list:
+                block = pr_mgr.build_coordination_block(
+                    task.slug, pr_list, current_repo=pr_info["repo"]
+                )
+                if block:
+                    existing_body = pr_mgr.get_pr_body(pr_info["url"])
+                    new_body = existing_body + block
+                    pr_mgr.update_pr_body(pr_info["url"], new_body)
+
+        # Log PR URLs
+        log_mgr = container.log_manager()
+        for pr_info in pr_list:
+            log_mgr.append(
+                state.current_task,
+                f"PR created for {pr_info['repo']}: {pr_info['url']}",
+            )
+
         if output.is_tty:
-            output.print(f"[bold]Finishing task:[/bold] {task.slug}")
-            output.print(f"[bold]Merge order:[/bold]")
-            for i, repo in enumerate(ordered, 1):
-                output.print(f"  {i}. {repo}")
+            output.print("")
+            output.success(f"Created {len(pr_list)} PR(s) for task: {task.slug}")
+            if len(pr_list) > 1:
+                output.print("Merge in dependency order as shown in each PR description.")
         else:
             output.json({
                 "task": task.slug,
-                "merge_order": ordered,
-                "status": "manual_pr_required",
+                "prs": pr_list,
             })
-
-        output.warning(
-            "PR creation not yet implemented in v1. "
-            "Use `gh pr create` manually in each repo in the order shown above."
-        )
