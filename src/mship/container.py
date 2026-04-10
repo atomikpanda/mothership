@@ -3,6 +3,7 @@ from dependency_injector import containers, providers
 from mship.core.config import ConfigLoader, WorkspaceConfig
 from mship.core.executor import RepoExecutor
 from mship.core.graph import DependencyGraph
+from mship.core.log import LogManager
 from mship.core.phase import PhaseManager
 from mship.core.state import StateManager
 from mship.core.worktree import WorktreeManager
@@ -41,6 +42,14 @@ class Container(containers.DeclarativeContainer):
         shell=shell,
     )
 
+    log_manager = providers.Singleton(
+        LogManager,
+        logs_dir=providers.Factory(
+            lambda state_dir: state_dir / "logs",
+            state_dir,
+        ),
+    )
+
     worktree_manager = providers.Factory(
         WorktreeManager,
         config=config,
@@ -48,9 +57,11 @@ class Container(containers.DeclarativeContainer):
         state_manager=state_manager,
         git=git,
         shell=shell,
+        log=log_manager,
     )
 
     phase_manager = providers.Factory(
         PhaseManager,
         state_manager=state_manager,
+        log=log_manager,
     )

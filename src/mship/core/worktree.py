@@ -3,6 +3,7 @@ from pathlib import Path
 
 from mship.core.config import WorkspaceConfig
 from mship.core.graph import DependencyGraph
+from mship.core.log import LogManager
 from mship.core.state import StateManager, Task, WorkspaceState
 from mship.util.git import GitRunner
 from mship.util.shell import ShellRunner
@@ -19,12 +20,14 @@ class WorktreeManager:
         state_manager: StateManager,
         git: GitRunner,
         shell: ShellRunner,
+        log: LogManager,
     ) -> None:
         self._config = config
         self._graph = graph
         self._state_manager = state_manager
         self._git = git
         self._shell = shell
+        self._log = log
 
     def spawn(
         self,
@@ -77,6 +80,12 @@ class WorktreeManager:
         state.tasks[slug] = task
         state.current_task = slug
         self._state_manager.save(state)
+
+        self._log.create(slug)
+        self._log.append(
+            slug,
+            f"Task spawned. Repos: {', '.join(ordered)}. Branch: {branch}",
+        )
 
         return task
 

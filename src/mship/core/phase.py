@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Literal
 
+from mship.core.log import LogManager
 from mship.core.state import StateManager
 
 Phase = Literal["plan", "dev", "review", "run"]
@@ -16,16 +17,29 @@ class PhaseTransition:
 class PhaseManager:
     """Manages phase transitions with soft gates."""
 
-    def __init__(self, state_manager: StateManager) -> None:
+    def __init__(self, state_manager: StateManager, log: LogManager) -> None:
         self._state_manager = state_manager
+        self._log = log
 
     def transition(self, task_slug: str, target: Phase) -> PhaseTransition:
         state = self._state_manager.load()
         task = state.tasks[task_slug]
+        old_phase = task.phase
         warnings = self._check_gates(task_slug, task.phase, target)
+
+        # Clear blocked state on phase transition
+        if task.blocked_reason is not None:
+            self._log.append(
+                task_slug,
+                f"Unblocked (phase transition to {target})",
+            )
+            task.blocked_reason = None
+            task.blocked_at = None
 
         task.phase = target
         self._state_manager.save(state)
+
+        self._log.append(task_slug, f"Phase transition: {old_phase} → {target}")
 
         return PhaseTransition(new_phase=target, warnings=warnings)
 

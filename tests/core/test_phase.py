@@ -1,8 +1,10 @@
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
+from mship.core.log import LogManager
 from mship.core.phase import PhaseManager, PhaseTransition
 from mship.core.state import StateManager, Task, TestResult, WorkspaceState
 
@@ -30,34 +32,34 @@ def state_with_task(tmp_path: Path) -> StateManager:
 
 
 def test_transition_plan_to_dev(state_with_task: StateManager):
-    pm = PhaseManager(state_with_task)
+    pm = PhaseManager(state_with_task, MagicMock(spec=LogManager))
     result = pm.transition("add-labels", "dev")
     assert result.new_phase == "dev"
     assert any("spec" in w.lower() for w in result.warnings)
 
 
 def test_transition_saves_state(state_with_task: StateManager):
-    pm = PhaseManager(state_with_task)
+    pm = PhaseManager(state_with_task, MagicMock(spec=LogManager))
     pm.transition("add-labels", "dev")
     reloaded = state_with_task.load()
     assert reloaded.tasks["add-labels"].phase == "dev"
 
 
 def test_transition_to_plan_no_warnings(state_with_task: StateManager):
-    pm = PhaseManager(state_with_task)
+    pm = PhaseManager(state_with_task, MagicMock(spec=LogManager))
     result = pm.transition("add-labels", "plan")
     assert result.warnings == []
 
 
 def test_transition_to_review_warns_no_test_results(state_with_task: StateManager):
-    pm = PhaseManager(state_with_task)
+    pm = PhaseManager(state_with_task, MagicMock(spec=LogManager))
     pm.transition("add-labels", "dev")
     result = pm.transition("add-labels", "review")
     assert any("test" in w.lower() for w in result.warnings)
 
 
 def test_transition_to_review_warns_failing_tests(state_with_task: StateManager):
-    pm = PhaseManager(state_with_task)
+    pm = PhaseManager(state_with_task, MagicMock(spec=LogManager))
     state = state_with_task.load()
     now = datetime(2026, 4, 10, 15, 0, 0, tzinfo=timezone.utc)
     state.tasks["add-labels"].phase = "dev"
@@ -71,7 +73,7 @@ def test_transition_to_review_warns_failing_tests(state_with_task: StateManager)
 
 
 def test_transition_to_review_no_warning_all_pass(state_with_task: StateManager):
-    pm = PhaseManager(state_with_task)
+    pm = PhaseManager(state_with_task, MagicMock(spec=LogManager))
     state = state_with_task.load()
     now = datetime(2026, 4, 10, 15, 0, 0, tzinfo=timezone.utc)
     state.tasks["add-labels"].phase = "dev"
@@ -85,7 +87,7 @@ def test_transition_to_review_no_warning_all_pass(state_with_task: StateManager)
 
 
 def test_backward_transition_allowed(state_with_task: StateManager):
-    pm = PhaseManager(state_with_task)
+    pm = PhaseManager(state_with_task, MagicMock(spec=LogManager))
     pm.transition("add-labels", "dev")
     result = pm.transition("add-labels", "plan")
     assert result.new_phase == "plan"

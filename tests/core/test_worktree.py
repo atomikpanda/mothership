@@ -8,6 +8,7 @@ import pytest
 
 from mship.core.config import ConfigLoader, WorkspaceConfig
 from mship.core.graph import DependencyGraph
+from mship.core.log import LogManager
 from mship.core.state import StateManager, Task, WorkspaceState
 from mship.core.worktree import WorktreeManager
 from mship.util.git import GitRunner
@@ -26,12 +27,13 @@ def worktree_deps(workspace_with_git: Path):
     git = GitRunner()
     shell = MagicMock(spec=ShellRunner)
     shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
-    return config, graph, state_mgr, git, shell, workspace
+    log = MagicMock(spec=LogManager)
+    return config, graph, state_mgr, git, shell, workspace, log
 
 
 def test_spawn_creates_worktrees(worktree_deps):
-    config, graph, state_mgr, git, shell, workspace = worktree_deps
-    mgr = WorktreeManager(config, graph, state_mgr, git, shell)
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
     mgr.spawn("add labels to tasks", repos=["shared", "auth-service"])
     state = state_mgr.load()
     assert state.current_task == "add-labels-to-tasks"
@@ -45,8 +47,8 @@ def test_spawn_creates_worktrees(worktree_deps):
 
 
 def test_spawn_dependency_order(worktree_deps):
-    config, graph, state_mgr, git, shell, workspace = worktree_deps
-    mgr = WorktreeManager(config, graph, state_mgr, git, shell)
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
     mgr.spawn("fix auth", repos=["auth-service", "shared"])
     state = state_mgr.load()
     task = state.tasks["fix-auth"]
@@ -55,8 +57,8 @@ def test_spawn_dependency_order(worktree_deps):
 
 
 def test_spawn_all_repos(worktree_deps):
-    config, graph, state_mgr, git, shell, workspace = worktree_deps
-    mgr = WorktreeManager(config, graph, state_mgr, git, shell)
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
     mgr.spawn("big change")
     state = state_mgr.load()
     task = state.tasks["big-change"]
@@ -64,8 +66,8 @@ def test_spawn_all_repos(worktree_deps):
 
 
 def test_spawn_ensures_gitignore(worktree_deps):
-    config, graph, state_mgr, git, shell, workspace = worktree_deps
-    mgr = WorktreeManager(config, graph, state_mgr, git, shell)
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
     mgr.spawn("test gitignore", repos=["shared"])
     gitignore = workspace / "shared" / ".gitignore"
     assert gitignore.exists()
@@ -86,7 +88,7 @@ def test_spawn_custom_branch_pattern(workspace_with_git: Path):
     shell = MagicMock(spec=ShellRunner)
     shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
 
-    mgr = WorktreeManager(config, graph, state_mgr, git, shell)
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, MagicMock(spec=LogManager))
     mgr.spawn("custom branch", repos=["shared"])
     state = state_mgr.load()
     task = state.tasks["custom-branch"]
@@ -94,8 +96,8 @@ def test_spawn_custom_branch_pattern(workspace_with_git: Path):
 
 
 def test_abort_removes_worktrees(worktree_deps):
-    config, graph, state_mgr, git, shell, workspace = worktree_deps
-    mgr = WorktreeManager(config, graph, state_mgr, git, shell)
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
     mgr.spawn("to abort", repos=["shared"])
     state = state_mgr.load()
     wt_path = state.tasks["to-abort"].worktrees["shared"]
@@ -108,7 +110,7 @@ def test_abort_removes_worktrees(worktree_deps):
 
 
 def test_spawn_runs_setup_task(worktree_deps):
-    config, graph, state_mgr, git, shell, workspace = worktree_deps
-    mgr = WorktreeManager(config, graph, state_mgr, git, shell)
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
     mgr.spawn("with setup", repos=["shared"])
     shell.run_task.assert_called()
