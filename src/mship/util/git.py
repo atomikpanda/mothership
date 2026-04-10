@@ -63,6 +63,14 @@ class GitRunner:
         )
         return bool(result.stdout.strip())
 
+    def run_worktree_prune(self, repo_path: Path) -> None:
+        """Clean up stale git worktree tracking."""
+        subprocess.run(
+            ["git", "worktree", "prune"],
+            cwd=repo_path,
+            capture_output=True,
+        )
+
     def worktree_list(self, repo_path: Path) -> list[dict[str, str]]:
         result = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
