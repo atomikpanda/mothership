@@ -225,7 +225,77 @@ Agents get structured JSON they can parse. Humans get readable output. Same comm
 uv tool install .
 ```
 
-Requires Python 3.14+.
+Requires Python 3.14+ and [uv](https://docs.astral.sh/uv/).
+
+Optional: install [go-task](https://taskfile.dev) (for task execution) and [gh](https://cli.github.com) (for PR creation).
+
+## Getting Started
+
+### 1. Install mothership
+
+```bash
+git clone https://github.com/atomikpanda/mothership.git
+cd mothership
+uv tool install .
+```
+
+### 2. Initialize your workspace
+
+**Interactive (for humans):**
+```bash
+cd ~/my-project
+mship init
+```
+
+The wizard walks you through repo detection, types, dependencies, and optional Taskfile scaffolding.
+
+**Non-interactive (for agents):**
+```bash
+# Single repo
+mship init --name my-app --repo ./.:service
+
+# Multi-repo
+mship init --name my-platform \
+  --repo ./shared:library \
+  --repo ./auth-service:service:shared \
+  --repo ./api-gateway:service:shared,auth-service
+```
+
+### 3. Verify your setup
+
+```bash
+mship doctor    # Check everything is configured correctly
+mship status    # Should show "No active task"
+mship graph     # Shows your repo dependency graph
+```
+
+### 4. Start working
+
+```bash
+mship spawn "add user avatars"     # Create worktrees
+mship phase dev                     # Enter development phase
+# ... do your work ...
+mship log "implemented avatar upload endpoint"
+mship test                          # Run tests
+mship phase review                  # Enter review phase
+mship finish                        # Create coordinated PRs
+```
+
+### 5. Clean up
+
+```bash
+mship abort --yes                   # Remove worktrees after PRs are merged
+```
+
+### For AI agents
+
+Install the superpowers skill to teach agents how to use mothership:
+
+```
+skills/working-with-mothership/SKILL.md
+```
+
+Register this skill in your Claude Code or agent configuration. The skill guides agents through the phase workflow, context recovery, and all mothership commands.
 
 ## What Mothership Is Not
 
