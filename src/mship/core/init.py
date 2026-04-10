@@ -67,3 +67,79 @@ class WorkspaceInitializer:
             if (path / marker).exists():
                 markers.append(marker)
         return markers
+
+    TASKFILE_TEMPLATE = """\
+version: '3'
+
+tasks:
+  test:
+    desc: Run tests
+    cmds:
+      - echo "TODO: add test command"
+
+  run:
+    desc: Start the service
+    cmds:
+      - echo "TODO: add run command"
+
+  lint:
+    desc: Run linter
+    cmds:
+      - echo "TODO: add lint command"
+
+  setup:
+    desc: Set up development environment
+    cmds:
+      - echo "TODO: add setup command"
+"""
+
+    def generate_config(
+        self,
+        workspace_name: str,
+        repos: list[dict],
+        env_runner: str | None,
+    ) -> WorkspaceConfig:
+        """Build and validate a WorkspaceConfig from user inputs."""
+        repo_configs: dict[str, RepoConfig] = {}
+        for repo in repos:
+            repo_configs[repo["name"]] = RepoConfig(
+                path=Path(repo["path"]),
+                type=repo["type"],
+                depends_on=repo.get("depends_on", []),
+            )
+
+        config = WorkspaceConfig(
+            workspace=workspace_name,
+            env_runner=env_runner,
+            repos=repo_configs,
+        )
+        return config
+
+    def write_config(self, path: Path, config: WorkspaceConfig) -> None:
+        """Write mothership.yaml."""
+        data: dict = {
+            "workspace": config.workspace,
+        }
+        if config.env_runner:
+            data["env_runner"] = config.env_runner
+
+        repos_data: dict = {}
+        for name, repo in config.repos.items():
+            repo_data: dict = {
+                "path": str(repo.path),
+                "type": repo.type,
+            }
+            if repo.depends_on:
+                repo_data["depends_on"] = repo.depends_on
+            repos_data[name] = repo_data
+        data["repos"] = repos_data
+
+        with open(path, "w") as f:
+            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+    def write_taskfile(self, repo_path: Path) -> None:
+        """Write a starter Taskfile.yml if one doesn't exist."""
+        taskfile = repo_path / "Taskfile.yml"
+        if taskfile.exists():
+            return
+        taskfile.write_text(self.TASKFILE_TEMPLATE)
