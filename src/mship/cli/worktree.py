@@ -67,7 +67,7 @@ def register(app: typer.Typer, get_container):
         state = state_mgr.load()
 
         if state.current_task is None:
-            output.error("No active task to abort")
+            output.error("No active task to abort. Run `mship spawn` to start one.")
             raise typer.Exit(code=1)
 
         task_slug = state.current_task
@@ -100,7 +100,7 @@ def register(app: typer.Typer, get_container):
         state = state_mgr.load()
 
         if state.current_task is None:
-            output.error("No active task to finish")
+            output.error("No active task to finish. Run `mship spawn` to start one.")
             raise typer.Exit(code=1)
 
         task = state.tasks[state.current_task]

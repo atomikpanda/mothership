@@ -15,7 +15,7 @@ def register(app: typer.Typer, get_container):
         state = state_mgr.load()
 
         if state.current_task is None:
-            output.error("No active task")
+            output.error("No active task. Run `mship spawn \"description\"` to start one.")
             raise typer.Exit(code=1)
 
         task = state.tasks[state.current_task]
@@ -40,12 +40,12 @@ def register(app: typer.Typer, get_container):
         state = state_mgr.load()
 
         if state.current_task is None:
-            output.error("No active task")
+            output.error("No active task. Run `mship spawn \"description\"` to start one.")
             raise typer.Exit(code=1)
 
         task = state.tasks[state.current_task]
         if task.blocked_reason is None:
-            output.error("Task is not blocked")
+            output.error("Task is not blocked. Use `mship block \"reason\"` to mark it as blocked.")
             raise typer.Exit(code=1)
 
         task.blocked_reason = None
