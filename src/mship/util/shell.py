@@ -18,13 +18,21 @@ class ShellRunner:
             return f"{env_runner} {command}"
         return command
 
-    def run(self, command: str, cwd: Path) -> ShellResult:
+    def run(
+        self, command: str, cwd: Path, env: dict[str, str] | None = None
+    ) -> ShellResult:
+        import os
+
+        run_env = None
+        if env:
+            run_env = {**os.environ, **env}
         result = subprocess.run(
             command,
             shell=True,
             cwd=cwd,
             capture_output=True,
             text=True,
+            env=run_env,
         )
         return ShellResult(
             returncode=result.returncode,
@@ -38,9 +46,10 @@ class ShellRunner:
         actual_task_name: str,
         cwd: Path,
         env_runner: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> ShellResult:
         command = self.build_command(f"task {actual_task_name}", env_runner)
-        return self.run(command, cwd)
+        return self.run(command, cwd, env=env)
 
     def run_streaming(self, command: str, cwd: Path) -> subprocess.Popen:
         """Run a command with stdout/stderr streaming (for logs, run)."""

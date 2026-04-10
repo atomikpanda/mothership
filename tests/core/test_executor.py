@@ -179,3 +179,75 @@ def test_execute_updates_test_results(executor_deps):
     assert task.test_results["shared"].status == "pass"
     assert task.test_results["auth-service"].status == "pass"
     assert task.test_results["api-gateway"].status == "pass"
+
+
+def test_upstream_env_no_task_slug(executor_deps):
+    config, graph, state_mgr, mock_shell = executor_deps
+    executor = RepoExecutor(config, graph, state_mgr, mock_shell)
+    env = executor.resolve_upstream_env("auth-service", None)
+    assert env == {}
+
+
+def test_upstream_env_no_worktrees(executor_deps):
+    config, graph, state_mgr, mock_shell = executor_deps
+    executor = RepoExecutor(config, graph, state_mgr, mock_shell)
+    # test-task has no worktrees
+    env = executor.resolve_upstream_env("auth-service", "test-task")
+    assert env == {}
+
+
+def test_upstream_env_with_worktrees(executor_deps):
+    config, graph, state_mgr, mock_shell = executor_deps
+    # Add worktrees to the task
+    state = state_mgr.load()
+    state.tasks["test-task"].worktrees = {
+        "shared": Path("/tmp/shared-wt"),
+        "auth-service": Path("/tmp/auth-wt"),
+    }
+    state_mgr.save(state)
+
+    executor = RepoExecutor(config, graph, state_mgr, mock_shell)
+    env = executor.resolve_upstream_env("auth-service", "test-task")
+    assert env == {"UPSTREAM_SHARED": "/tmp/shared-wt"}
+
+
+def test_upstream_env_hyphenated_name(executor_deps):
+    config, graph, state_mgr, mock_shell = executor_deps
+    state = state_mgr.load()
+    state.tasks["test-task"].worktrees = {
+        "shared": Path("/tmp/shared-wt"),
+        "auth-service": Path("/tmp/auth-wt"),
+        "api-gateway": Path("/tmp/api-wt"),
+    }
+    state_mgr.save(state)
+
+    executor = RepoExecutor(config, graph, state_mgr, mock_shell)
+    env = executor.resolve_upstream_env("api-gateway", "test-task")
+    assert "UPSTREAM_SHARED" in env
+    assert "UPSTREAM_AUTH_SERVICE" in env
+
+
+def test_execute_passes_upstream_env(executor_deps):
+    config, graph, state_mgr, mock_shell = executor_deps
+    state = state_mgr.load()
+    state.tasks["test-task"].worktrees = {
+        "shared": Path("/tmp/shared-wt"),
+        "auth-service": Path("/tmp/auth-wt"),
+    }
+    state_mgr.save(state)
+
+    executor = RepoExecutor(config, graph, state_mgr, mock_shell)
+    executor.execute(
+        "test",
+        repos=["shared", "auth-service"],
+        task_slug="test-task",
+    )
+
+    # auth-service call should have UPSTREAM_SHARED env
+    calls = mock_shell.run_task.call_args_list
+    auth_call = next(c for c in calls if "auth-service" in str(c.kwargs["cwd"]))
+    assert auth_call.kwargs["env"] == {"UPSTREAM_SHARED": "/tmp/shared-wt"}
+
+    # shared call should have no upstream env (no dependencies)
+    shared_call = next(c for c in calls if "shared" in str(c.kwargs["cwd"]) and "auth" not in str(c.kwargs["cwd"]))
+    assert shared_call.kwargs["env"] is None

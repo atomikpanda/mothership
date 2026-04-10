@@ -53,6 +53,25 @@ class RepoExecutor:
             return repo.env_runner
         return self._config.env_runner
 
+    def resolve_upstream_env(
+        self, repo_name: str, task_slug: str | None
+    ) -> dict[str, str]:
+        """Compute UPSTREAM_* env vars for a repo's dependencies."""
+        if task_slug is None:
+            return {}
+        state = self._state_manager.load()
+        task = state.tasks.get(task_slug)
+        if task is None or not task.worktrees:
+            return {}
+
+        env: dict[str, str] = {}
+        repo_config = self._config.repos[repo_name]
+        for dep in repo_config.depends_on:
+            if dep in task.worktrees:
+                var_name = f"UPSTREAM_{dep.upper().replace('-', '_')}"
+                env[var_name] = str(task.worktrees[dep])
+        return env
+
     def execute(
         self,
         canonical_task: str,
@@ -67,12 +86,14 @@ class RepoExecutor:
             actual_name = self.resolve_task_name(repo_name, canonical_task)
             env_runner = self.resolve_env_runner(repo_name)
             repo_config = self._config.repos[repo_name]
+            upstream_env = self.resolve_upstream_env(repo_name, task_slug)
 
             shell_result = self._shell.run_task(
                 task_name=canonical_task,
                 actual_task_name=actual_name,
                 cwd=repo_config.path,
                 env_runner=env_runner,
+                env=upstream_env or None,
             )
 
             repo_result = RepoResult(

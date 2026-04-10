@@ -46,3 +46,24 @@ def test_run_with_env_runner():
     )
     # task binary likely not installed in test env, so we just check it tried
     assert isinstance(result, ShellResult)
+
+
+def test_run_with_env_vars():
+    runner = ShellRunner()
+    result = runner.run(
+        'echo "$UPSTREAM_SHARED"',
+        cwd=Path("."),
+        env={"UPSTREAM_SHARED": "/tmp/shared-wt"},
+    )
+    assert result.returncode == 0
+    assert "/tmp/shared-wt" in result.stdout
+
+
+def test_run_task_passes_env():
+    runner = ShellRunner()
+    result = runner.run(
+        'echo "$MY_VAR"',
+        cwd=Path("."),
+        env={"MY_VAR": "hello"},
+    )
+    assert "hello" in result.stdout
