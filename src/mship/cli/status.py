@@ -21,7 +21,12 @@ def register(app: typer.Typer, get_container):
         task = state.tasks[state.current_task]
         if output.is_tty:
             output.print(f"[bold]Task:[/bold] {task.slug}")
-            output.print(f"[bold]Phase:[/bold] {task.phase}")
+            phase_str = task.phase
+            if task.blocked_reason:
+                phase_str = f"{task.phase} (BLOCKED: {task.blocked_reason})"
+            output.print(f"[bold]Phase:[/bold] {phase_str}")
+            if task.blocked_at:
+                output.print(f"[bold]Blocked since:[/bold] {task.blocked_at}")
             output.print(f"[bold]Branch:[/bold] {task.branch}")
             output.print(f"[bold]Repos:[/bold] {', '.join(task.affected_repos)}")
             if task.worktrees:
@@ -38,7 +43,10 @@ def register(app: typer.Typer, get_container):
                     )
                     output.print(f"  {repo}: {status_str}")
         else:
-            output.json(task.model_dump(mode="json"))
+            data = task.model_dump(mode="json")
+            if task.blocked_reason:
+                data["phase_display"] = f"{task.phase} (BLOCKED: {task.blocked_reason})"
+            output.json(data)
 
     @app.command()
     def graph():
