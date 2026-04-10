@@ -88,8 +88,12 @@ def register(app: typer.Typer, get_container):
         output.success(f"Aborted task: {task_slug}")
 
     @app.command()
-    def finish():
+    def finish(
+        handoff: bool = typer.Option(False, "--handoff", help="Generate CI handoff manifest"),
+    ):
         """Create PRs and clean up worktrees in dependency order."""
+        from pathlib import Path
+
         container = get_container()
         output = Output()
         state_mgr = container.state_manager()
@@ -101,7 +105,28 @@ def register(app: typer.Typer, get_container):
 
         task = state.tasks[state.current_task]
         graph = container.graph()
+        config = container.config()
         ordered = graph.topo_sort(task.affected_repos)
+
+        if handoff:
+            from mship.core.handoff import generate_handoff
+
+            state_dir = container.state_dir()
+            repo_paths = {name: config.repos[name].path for name in ordered}
+            repo_deps = {name: config.repos[name].depends_on for name in ordered}
+            path = generate_handoff(
+                handoffs_dir=Path(state_dir) / "handoffs",
+                task_slug=task.slug,
+                branch=task.branch,
+                ordered_repos=ordered,
+                repo_paths=repo_paths,
+                repo_deps=repo_deps,
+            )
+            if output.is_tty:
+                output.success(f"Handoff manifest written to: {path}")
+            else:
+                output.json({"handoff": str(path), "task": task.slug})
+            return
 
         if output.is_tty:
             output.print(f"[bold]Finishing task:[/bold] {task.slug}")

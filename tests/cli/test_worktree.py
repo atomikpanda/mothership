@@ -61,3 +61,11 @@ def test_abort(configured_git_app: Path):
     state = mgr.load()
     assert state.current_task is None
     assert "to-abort" not in state.tasks
+
+
+def test_finish_handoff(configured_git_app: Path):
+    runner.invoke(app, ["spawn", "handoff test", "--repos", "shared,auth-service"])
+    result = runner.invoke(app, ["finish", "--handoff"])
+    assert result.exit_code == 0
+    handoff_file = configured_git_app / ".mothership" / "handoffs" / "handoff-test.yaml"
+    assert handoff_file.exists()
