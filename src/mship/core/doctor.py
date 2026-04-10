@@ -1,0 +1,91 @@
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from mship.core.config import WorkspaceConfig
+from mship.util.shell import ShellRunner
+
+
+@dataclass
+class CheckResult:
+    name: str
+    status: str  # "pass" | "warn" | "fail"
+    message: str
+
+
+@dataclass
+class DoctorReport:
+    checks: list[CheckResult] = field(default_factory=list)
+
+    @property
+    def warnings(self) -> int:
+        return sum(1 for c in self.checks if c.status == "warn")
+
+    @property
+    def errors(self) -> int:
+        return sum(1 for c in self.checks if c.status == "fail")
+
+    @property
+    def ok(self) -> bool:
+        return self.errors == 0
+
+
+class DoctorChecker:
+    """Run health checks on a mothership workspace."""
+
+    def __init__(self, config: WorkspaceConfig, shell: ShellRunner) -> None:
+        self._config = config
+        self._shell = shell
+
+    def run(self) -> DoctorReport:
+        report = DoctorReport()
+
+        for name, repo in self._config.repos.items():
+            # Path exists
+            if repo.path.is_dir():
+                report.checks.append(CheckResult(name=f"{name}/path", status="pass", message="path exists"))
+            else:
+                report.checks.append(CheckResult(name=f"{name}/path", status="fail", message=f"path not found: {repo.path}"))
+                continue  # skip further checks for this repo
+
+            # Taskfile.yml
+            if (repo.path / "Taskfile.yml").exists():
+                report.checks.append(CheckResult(name=f"{name}/taskfile", status="pass", message="Taskfile.yml found"))
+            else:
+                report.checks.append(CheckResult(name=f"{name}/taskfile", status="fail", message="Taskfile.yml not found"))
+
+            # Git
+            if (repo.path / ".git").exists():
+                report.checks.append(CheckResult(name=f"{name}/git", status="pass", message="git initialized"))
+            else:
+                report.checks.append(CheckResult(name=f"{name}/git", status="warn", message="not a git repository"))
+
+            # Standard tasks
+            result = self._shell.run("task --list", cwd=repo.path)
+            if result.returncode == 0:
+                task_output = result.stdout
+                for task_name in ["test", "run", "lint", "setup"]:
+                    if task_name in task_output:
+                        report.checks.append(CheckResult(name=f"{name}/task:{task_name}", status="pass", message=f"task '{task_name}' available"))
+                    else:
+                        report.checks.append(CheckResult(name=f"{name}/task:{task_name}", status="warn", message=f"missing task: {task_name}"))
+
+        # gh CLI
+        gh_result = self._shell.run("gh auth status", cwd=Path("."))
+        if gh_result.returncode == 0:
+            report.checks.append(CheckResult(name="gh", status="pass", message="authenticated"))
+        elif gh_result.returncode == 127:
+            report.checks.append(CheckResult(name="gh", status="warn", message="gh CLI not installed (optional — needed for mship finish)"))
+        else:
+            report.checks.append(CheckResult(name="gh", status="warn", message="gh CLI not authenticated (run gh auth login)"))
+
+        # env_runner
+        env_runner = self._config.env_runner
+        if env_runner:
+            binary = env_runner.split()[0]
+            which_result = self._shell.run(f"which {binary}", cwd=Path("."))
+            if which_result.returncode == 0:
+                report.checks.append(CheckResult(name="env_runner", status="pass", message=f"{env_runner} — found"))
+            else:
+                report.checks.append(CheckResult(name="env_runner", status="warn", message=f"{binary} not found in PATH"))
+
+        return report
