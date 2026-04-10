@@ -32,8 +32,12 @@ from mship.cli import status as _status_mod
 from mship.cli import phase as _phase_mod
 from mship.cli import worktree as _worktree_mod
 from mship.cli import exec as _exec_mod
+from mship.cli import block as _block_mod
+from mship.cli import log as _log_mod
 
 _status_mod.register(app, get_container)
 _phase_mod.register(app, get_container)
 _worktree_mod.register(app, get_container)
 _exec_mod.register(app, get_container)
+_block_mod.register(app, get_container)
+_log_mod.register(app, get_container)
