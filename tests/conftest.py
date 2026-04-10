@@ -1,0 +1,52 @@
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+
+@pytest.fixture
+def workspace(tmp_path: Path) -> Path:
+    """Create a minimal workspace with repos that have Taskfile.yml files."""
+    config = tmp_path / "mothership.yaml"
+    config.write_text(
+        """\
+workspace: test-platform
+
+repos:
+  shared:
+    path: ./shared
+    type: library
+    depends_on: []
+  auth-service:
+    path: ./auth-service
+    type: service
+    depends_on: [shared]
+  api-gateway:
+    path: ./api-gateway
+    type: service
+    depends_on: [shared, auth-service]
+"""
+    )
+    for name in ["shared", "auth-service", "api-gateway"]:
+        repo_dir = tmp_path / name
+        repo_dir.mkdir()
+        (repo_dir / "Taskfile.yml").write_text(f"version: '3'\ntasks:\n  test:\n    cmds:\n      - echo {name}\n")
+    return tmp_path
+
+
+@pytest.fixture
+def workspace_with_git(workspace: Path) -> Path:
+    """Workspace where each repo is a git repo."""
+    for name in ["shared", "auth-service", "api-gateway"]:
+        repo_dir = workspace / name
+        subprocess.run(["git", "init", str(repo_dir)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "init"],
+            cwd=repo_dir,
+            check=True,
+            capture_output=True,
+            env={**os.environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t.com",
+                 "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t.com"},
+        )
+    return workspace
