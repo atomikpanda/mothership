@@ -1,21 +1,26 @@
 # Mothership (`mship`)
 
-Phase-based workflow engine for multi-repo AI development.
+Phase-based workflow engine for agentic development.
 
 ## The Problem
 
-AI coding agents (Claude Code, Codex, Gemini CLI) are powerful within a single repo. Tools like [superpowers](https://github.com/obra/superpowers) handle methodology — brainstorming, planning, TDD, code review — and [go-task](https://taskfile.dev) handles execution. Both work brilliantly inside one repository.
+AI coding agents (Claude Code, Codex, Gemini CLI) are fast and capable, but they lack workflow structure. An agent can write code, run tests, and commit — but it doesn't know what *phase* of work it's in, whether it should be planning or coding, whether tests should pass before it moves to review, or how to coordinate worktrees for isolated feature work.
 
-But real systems aren't one repo. When a feature touches `auth-service` AND `api-gateway` AND a shared library, the agent has no way to:
+For single-repo projects, agents need:
 
-- **Know which repos are affected** by a given change
-- **Understand the dependency order** between repos (shared must build before auth-service)
-- **Create coordinated worktrees** across multiple repos for a single task
-- **Run tests in the right order** — if shared breaks, don't bother testing downstream repos
-- **Track what phase of work you're in** across the whole effort
-- **Merge PRs in the right order** so CI doesn't break on main
+- **Phase tracking** — know whether you're planning, developing, reviewing, or running
+- **Soft gates** — warnings when you skip steps (no spec before coding, no tests before review)
+- **Worktree management** — isolated branches for each task, clean setup and teardown
+- **Structured task execution** — run tests, start services, tail logs through a consistent interface
 
-Every agent today works in isolation. Mothership gives them the cross-repo awareness they're missing.
+For multi-repo projects, agents also need:
+
+- **Dependency awareness** — which repos depend on which, what order to build/test/merge
+- **Coordinated worktrees** — matching branches across multiple repos for a single task
+- **Cross-repo execution** — run tests across repos in dependency order, fail-fast or run all
+- **Merge ordering** — know which PR to merge first so CI doesn't break on main
+
+Mothership handles both. Start with one repo, expand to many when your system grows.
 
 ## How It Works
 
@@ -24,15 +29,27 @@ Mothership is a CLI tool that agents call via bash. It's not an agent itself —
 ```
 Agent (Claude Code, Codex, etc.)
     ↓ calls
-Mothership (cross-repo coordination)
+Mothership (workflow orchestration)
     ↓ delegates to
 go-task (per-repo execution)
 ```
 
 ### 1. Declare your workspace
 
+A workspace can be a single repo or many:
+
 ```yaml
-# mothership.yaml
+# mothership.yaml — single repo
+workspace: my-app
+
+repos:
+  my-app:
+    path: .
+    type: service
+```
+
+```yaml
+# mothership.yaml — multi-repo
 workspace: my-platform
 
 repos:
@@ -49,7 +66,7 @@ repos:
     depends_on: [shared, auth-service]
 ```
 
-Each repo has its own `Taskfile.yml` with standard task names (`test`, `run`, `lint`, `logs`, `setup`). Mothership orchestrates across repos by calling `task` in the right directory, in the right order.
+Each repo has its own `Taskfile.yml` with standard task names (`test`, `run`, `lint`, `logs`, `setup`). Mothership calls `task` in the right directory, in the right order.
 
 ### 2. Spawn coordinated worktrees
 
@@ -113,15 +130,17 @@ $ mship graph
 
 ## Why Agents Need This
 
-### Without Mothership
+### Single repo: discipline without overhead
 
-The agent changes `shared`, runs its tests (pass), moves to `auth-service`, changes it, runs tests (fail). It has no idea if the failure is because of the `shared` change or a bug in `auth-service`. It doesn't know it should have tested `shared` first. It creates PRs in random order and CI breaks on main because `auth-service` was merged before `shared`.
+Without mothership, the agent jumps straight to coding. There's no spec, no plan, no phase awareness. It writes code, maybe runs tests, commits — and you end up reviewing a diff with no structure behind it.
 
-### With Mothership
+With mothership, `mship spawn "add user avatars"` creates an isolated worktree. `mship phase dev` warns if there's no spec. `mship phase review` warns if tests haven't been run. The agent gets guardrails that keep it on track without slowing it down.
 
-The agent calls `mship spawn`, gets coordinated worktrees. It calls `mship test`, which runs `shared` first (dependency order) and stops if it fails. It calls `mship finish` and gets told the merge order. The cross-repo PR descriptions tell reviewers which PR to merge first.
+### Multi-repo: coordination without chaos
 
-The agent doesn't need to understand the repo graph. Mothership does.
+Without mothership, the agent changes `shared`, runs its tests (pass), moves to `auth-service`, changes it, runs tests (fail). It has no idea if the failure is because of the `shared` change or a bug in `auth-service`. It creates PRs in random order and CI breaks on main.
+
+With mothership, `mship test` runs `shared` first (dependency order) and stops if it fails. `mship finish` tells you the merge order. The agent doesn't need to understand the repo graph — mothership does.
 
 ## CLI Reference
 
@@ -133,16 +152,16 @@ mship graph                     # show repo dependency graph
 # Phase management
 mship phase plan|dev|review|run # transition with soft gate warnings
 
-# Cross-repo worktrees
-mship spawn "description"      # create coordinated worktrees (all repos)
-mship spawn "desc" --repos a,b # explicit repo list
+# Worktree management
+mship spawn "description"      # create worktrees for a new task
+mship spawn "desc" --repos a,b # explicit repo list (multi-repo)
 mship worktrees                # list active worktrees
 mship abort [--yes]            # discard worktrees, abandon task
 mship finish                   # show merge order for PRs
 
 # Execution (delegates to go-task per repo)
-mship test [--all]             # run tests in dependency order
-mship run                     # start services in dependency order
+mship test [--all]             # run tests (in dependency order for multi-repo)
+mship run                     # start services
 mship logs <service>           # tail logs for a service
 ```
 
@@ -213,7 +232,7 @@ Requires Python 3.14+.
 - **Not a replacement for superpowers** — methodology stays with superpowers per repo
 - **Not a task runner** — delegates to go-task
 - **Not an AI agent** — it's a tool agents call
-- **Not a monorepo tool** — works with separate repos in a shared workspace
+- **Not a monorepo tool** — works with single repos or separate repos in a shared workspace
 
 ## Stack
 
