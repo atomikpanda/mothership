@@ -1,0 +1,106 @@
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
+from mship.core.pr import PRManager
+from mship.util.shell import ShellRunner, ShellResult
+
+
+@pytest.fixture
+def mock_shell() -> MagicMock:
+    shell = MagicMock(spec=ShellRunner)
+    return shell
+
+
+def test_check_gh_available_success(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="Logged in", stderr="")
+    mgr = PRManager(mock_shell)
+    mgr.check_gh_available()
+
+
+def test_check_gh_available_not_installed(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(returncode=127, stdout="", stderr="command not found")
+    mgr = PRManager(mock_shell)
+    with pytest.raises(RuntimeError, match="gh"):
+        mgr.check_gh_available()
+
+
+def test_check_gh_available_not_authenticated(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(returncode=1, stdout="", stderr="not logged in")
+    mgr = PRManager(mock_shell)
+    with pytest.raises(RuntimeError, match="auth"):
+        mgr.check_gh_available()
+
+
+def test_push_branch(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    mgr = PRManager(mock_shell)
+    mgr.push_branch(Path("/tmp/repo"), "feat/test")
+    mock_shell.run.assert_called_once()
+    cmd = mock_shell.run.call_args.args[0]
+    assert "git push" in cmd
+    assert "feat/test" in cmd
+
+
+def test_create_pr(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(
+        returncode=0,
+        stdout="https://github.com/org/repo/pull/42\n",
+        stderr="",
+    )
+    mgr = PRManager(mock_shell)
+    url = mgr.create_pr(
+        repo_path=Path("/tmp/repo"),
+        branch="feat/test",
+        title="Add labels",
+        body="Task description",
+    )
+    assert url == "https://github.com/org/repo/pull/42"
+    cmd = mock_shell.run.call_args.args[0]
+    assert "gh pr create" in cmd
+
+
+def test_create_pr_failure(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(returncode=1, stdout="", stderr="error")
+    mgr = PRManager(mock_shell)
+    with pytest.raises(RuntimeError, match="Failed to create PR"):
+        mgr.create_pr(Path("/tmp/repo"), "feat/test", "title", "body")
+
+
+def test_update_pr_body(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    mgr = PRManager(mock_shell)
+    mgr.update_pr_body("https://github.com/org/repo/pull/42", "new body")
+    cmd = mock_shell.run.call_args.args[0]
+    assert "gh pr edit" in cmd
+
+
+def test_get_pr_body(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="existing body\n", stderr="")
+    mgr = PRManager(mock_shell)
+    body = mgr.get_pr_body("https://github.com/org/repo/pull/42")
+    assert body == "existing body"
+
+
+def test_build_coordination_block():
+    mgr = PRManager(MagicMock())
+    prs = [
+        {"repo": "shared", "url": "https://github.com/org/shared/pull/18", "order": 1},
+        {"repo": "auth-service", "url": "https://github.com/org/auth/pull/42", "order": 2},
+    ]
+    block = mgr.build_coordination_block("add-labels", prs, current_repo="auth-service")
+    assert "add-labels" in block
+    assert "shared" in block
+    assert "auth-service" in block
+    assert "merge first" in block
+    assert "this PR" in block
+
+
+def test_build_coordination_block_single_repo():
+    mgr = PRManager(MagicMock())
+    prs = [
+        {"repo": "shared", "url": "https://github.com/org/shared/pull/18", "order": 1},
+    ]
+    block = mgr.build_coordination_block("add-labels", prs, current_repo="shared")
+    assert block == ""
