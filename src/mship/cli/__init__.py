@@ -35,6 +35,7 @@ from mship.cli import exec as _exec_mod
 from mship.cli import block as _block_mod
 from mship.cli import log as _log_mod
 from mship.cli import prune as _prune_mod
+from mship.cli import init as _init_mod
 
 _status_mod.register(app, get_container)
 _phase_mod.register(app, get_container)
@@ -43,3 +44,4 @@ _exec_mod.register(app, get_container)
 _block_mod.register(app, get_container)
 _log_mod.register(app, get_container)
 _prune_mod.register(app, get_container)
+_init_mod.register(app, get_container)
