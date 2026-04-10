@@ -166,3 +166,33 @@ def test_task_blocked_cleared(state_dir: Path):
     reloaded = mgr.load()
     assert reloaded.tasks["test"].blocked_reason is None
     assert reloaded.tasks["test"].blocked_at is None
+
+
+def test_task_pr_urls_default_empty(state_dir: Path):
+    mgr = StateManager(state_dir)
+    task = Task(
+        slug="test",
+        description="Test",
+        phase="dev",
+        created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
+        affected_repos=["shared"],
+        branch="feat/test",
+    )
+    assert task.pr_urls == {}
+
+
+def test_task_pr_urls_roundtrip(state_dir: Path):
+    mgr = StateManager(state_dir)
+    task = Task(
+        slug="test",
+        description="Test",
+        phase="dev",
+        created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
+        affected_repos=["shared"],
+        branch="feat/test",
+        pr_urls={"shared": "https://github.com/org/shared/pull/18"},
+    )
+    state = WorkspaceState(current_task="test", tasks={"test": task})
+    mgr.save(state)
+    loaded = mgr.load()
+    assert loaded.tasks["test"].pr_urls["shared"] == "https://github.com/org/shared/pull/18"

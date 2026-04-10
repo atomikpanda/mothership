@@ -23,6 +23,7 @@ class Task(BaseModel):
     test_results: dict[str, TestResult] = {}
     blocked_reason: str | None = None
     blocked_at: datetime | None = None
+    pr_urls: dict[str, str] = {}
 
 
 class WorkspaceState(BaseModel):
