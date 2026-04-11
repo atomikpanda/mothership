@@ -5,12 +5,32 @@ import yaml
 from pydantic import BaseModel, model_validator
 
 
+class Dependency(BaseModel):
+    repo: str
+    type: Literal["compile", "runtime"] = "compile"
+
+
 class RepoConfig(BaseModel):
     path: Path
     type: Literal["library", "service"]
-    depends_on: list[str] = []
+    depends_on: list[Dependency] = []
     env_runner: str | None = None
     tasks: dict[str, str] = {}
+    tags: list[str] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_depends_on(cls, data):
+        """Normalize string depends_on entries to Dependency objects."""
+        if isinstance(data, dict) and "depends_on" in data:
+            normalized = []
+            for dep in data["depends_on"]:
+                if isinstance(dep, str):
+                    normalized.append({"repo": dep, "type": "compile"})
+                else:
+                    normalized.append(dep)
+            data["depends_on"] = normalized
+        return data
 
 
 class WorkspaceConfig(BaseModel):
@@ -24,9 +44,9 @@ class WorkspaceConfig(BaseModel):
         repo_names = set(self.repos.keys())
         for name, repo in self.repos.items():
             for dep in repo.depends_on:
-                if dep not in repo_names:
+                if dep.repo not in repo_names:
                     raise ValueError(
-                        f"Repo '{name}' depends on '{dep}' which does not exist. "
+                        f"Repo '{name}' depends on '{dep.repo}' which does not exist. "
                         f"Valid repos: {sorted(repo_names)}"
                     )
         return self
@@ -38,7 +58,7 @@ class WorkspaceConfig(BaseModel):
         adjacency: dict[str, list[str]] = {name: [] for name in self.repos}
         for name, repo in self.repos.items():
             for dep in repo.depends_on:
-                adjacency[dep].append(name)
+                adjacency[dep.repo].append(name)
                 in_degree[name] += 1
 
         queue = [name for name, degree in in_degree.items() if degree == 0]

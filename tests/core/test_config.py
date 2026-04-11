@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from mship.core.config import WorkspaceConfig, ConfigLoader
+from mship.core.config import WorkspaceConfig, ConfigLoader, Dependency
 
 
 def test_load_minimal_config(workspace: Path):
@@ -10,7 +10,8 @@ def test_load_minimal_config(workspace: Path):
     assert config.workspace == "test-platform"
     assert len(config.repos) == 3
     assert config.repos["shared"].type == "library"
-    assert config.repos["auth-service"].depends_on == ["shared"]
+    assert len(config.repos["auth-service"].depends_on) == 1
+    assert config.repos["auth-service"].depends_on[0].repo == "shared"
 
 
 def test_paths_resolved_relative_to_workspace(workspace: Path):
@@ -117,3 +118,71 @@ repos:
     )
     config = ConfigLoader.load(cfg)
     assert config.repos["shared"].tasks == {"test": "unit"}
+
+
+def test_dependency_model():
+    dep = Dependency(repo="shared", type="compile")
+    assert dep.repo == "shared"
+    assert dep.type == "compile"
+
+
+def test_dependency_default_type():
+    dep = Dependency(repo="shared")
+    assert dep.type == "compile"
+
+
+def test_depends_on_string_normalized(workspace: Path):
+    config = ConfigLoader.load(workspace / "mothership.yaml")
+    deps = config.repos["auth-service"].depends_on
+    assert len(deps) == 1
+    assert isinstance(deps[0], Dependency)
+    assert deps[0].repo == "shared"
+    assert deps[0].type == "compile"
+
+
+def test_depends_on_mixed_format(workspace: Path):
+    cfg = workspace / "mothership.yaml"
+    cfg.write_text("""\
+workspace: test
+repos:
+  shared:
+    path: ./shared
+    type: library
+  backend:
+    path: ./auth-service
+    type: service
+  ios-app:
+    path: ./api-gateway
+    type: service
+    depends_on:
+      - repo: shared
+        type: compile
+      - repo: backend
+        type: runtime
+""")
+    config = ConfigLoader.load(cfg)
+    deps = config.repos["ios-app"].depends_on
+    assert len(deps) == 2
+    assert deps[0].repo == "shared"
+    assert deps[0].type == "compile"
+    assert deps[1].repo == "backend"
+    assert deps[1].type == "runtime"
+
+
+def test_tags_default_empty(workspace: Path):
+    config = ConfigLoader.load(workspace / "mothership.yaml")
+    assert config.repos["shared"].tags == []
+
+
+def test_tags_loaded(workspace: Path):
+    cfg = workspace / "mothership.yaml"
+    cfg.write_text("""\
+workspace: test
+repos:
+  shared:
+    path: ./shared
+    type: library
+    tags: [apple, core]
+""")
+    config = ConfigLoader.load(cfg)
+    assert config.repos["shared"].tags == ["apple", "core"]
