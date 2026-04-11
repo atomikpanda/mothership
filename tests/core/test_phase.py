@@ -92,3 +92,22 @@ def test_backward_transition_allowed(state_with_task: StateManager):
     result = pm.transition("add-labels", "plan")
     assert result.new_phase == "plan"
     assert result.warnings == []
+
+
+def test_transition_while_blocked_warns(state_with_task: StateManager):
+    """Phase transition while blocked should warn and implicitly unblock."""
+    state = state_with_task.load()
+    from datetime import datetime, timezone
+    state.tasks["add-labels"].blocked_reason = "waiting on API key"
+    state.tasks["add-labels"].blocked_at = datetime(2026, 4, 10, 15, 0, 0, tzinfo=timezone.utc)
+    state_with_task.save(state)
+
+    pm = PhaseManager(state_with_task, MagicMock(spec=LogManager))
+    result = pm.transition("add-labels", "dev")
+    assert result.new_phase == "dev"
+    assert any("blocked" in w.lower() and "waiting on API key" in w for w in result.warnings)
+
+    # Should be unblocked after transition
+    reloaded = state_with_task.load()
+    assert reloaded.tasks["add-labels"].blocked_reason is None
+    assert reloaded.tasks["add-labels"].blocked_at is None

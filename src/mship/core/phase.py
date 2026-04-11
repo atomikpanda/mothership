@@ -27,8 +27,11 @@ class PhaseManager:
         old_phase = task.phase
         warnings = self._check_gates(task_slug, task.phase, target)
 
-        # Clear blocked state on phase transition
+        # Clear blocked state on phase transition, but warn
         if task.blocked_reason is not None:
+            warnings.append(
+                f"Task was blocked: {task.blocked_reason} — implicitly unblocked by phase transition"
+            )
             self._log.append(
                 task_slug,
                 f"Unblocked (phase transition to {target})",
