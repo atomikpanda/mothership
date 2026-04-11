@@ -153,9 +153,16 @@ def register(app: typer.Typer, get_container):
 
             repo_config = config.repos[repo_name]
 
+            # Use worktree path if available
+            repo_path = repo_config.path
+            if repo_name in task.worktrees:
+                wt_path = Path(task.worktrees[repo_name])
+                if wt_path.exists():
+                    repo_path = wt_path
+
             # Push branch
             try:
-                pr_mgr.push_branch(repo_config.path, task.branch)
+                pr_mgr.push_branch(repo_path, task.branch)
             except RuntimeError as e:
                 output.error(f"{repo_name}: {e}")
                 raise typer.Exit(code=1)
@@ -163,7 +170,7 @@ def register(app: typer.Typer, get_container):
             # Create PR
             try:
                 pr_url = pr_mgr.create_pr(
-                    repo_path=repo_config.path,
+                    repo_path=repo_path,
                     branch=task.branch,
                     title=task.description,
                     body=task.description,

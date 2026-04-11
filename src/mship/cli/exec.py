@@ -81,10 +81,22 @@ def register(app: typer.Typer, get_container):
         actual_task = repo.tasks.get("logs", "logs")
         env_runner = repo.env_runner or config.env_runner
 
+        # Use worktree path if available
+        from pathlib import Path
+        cwd = repo.path
+        state_mgr = container.state_manager()
+        state = state_mgr.load()
+        if state.current_task:
+            task = state.tasks.get(state.current_task)
+            if task and service in task.worktrees:
+                wt_path = Path(task.worktrees[service])
+                if wt_path.exists():
+                    cwd = wt_path
+
         result = shell.run_task(
             task_name="logs",
             actual_task_name=actual_task,
-            cwd=repo.path,
+            cwd=cwd,
             env_runner=env_runner,
         )
         output.print(result.stdout)

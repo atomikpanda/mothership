@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 from mship.core.config import WorkspaceConfig
 from mship.core.graph import DependencyGraph
@@ -88,10 +89,20 @@ class RepoExecutor:
             repo_config = self._config.repos[repo_name]
             upstream_env = self.resolve_upstream_env(repo_name, task_slug)
 
+            # Use worktree path if available, otherwise repo path
+            cwd = repo_config.path
+            if task_slug:
+                state = self._state_manager.load()
+                task = state.tasks.get(task_slug)
+                if task and repo_name in task.worktrees:
+                    wt_path = Path(task.worktrees[repo_name])
+                    if wt_path.exists():
+                        cwd = wt_path
+
             shell_result = self._shell.run_task(
                 task_name=canonical_task,
                 actual_task_name=actual_name,
-                cwd=repo_config.path,
+                cwd=cwd,
                 env_runner=env_runner,
                 env=upstream_env or None,
             )

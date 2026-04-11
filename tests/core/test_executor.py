@@ -251,3 +251,49 @@ def test_execute_passes_upstream_env(executor_deps):
     # shared call should have no upstream env (no dependencies)
     shared_call = next(c for c in calls if "shared" in str(c.kwargs["cwd"]) and "auth" not in str(c.kwargs["cwd"]))
     assert shared_call.kwargs["env"] is None
+
+
+def test_execute_uses_worktree_path_when_available(workspace: Path):
+    """When a task has worktrees, executor should run in the worktree, not the repo path."""
+    config = ConfigLoader.load(workspace / "mothership.yaml")
+    graph = DependencyGraph(config)
+    state_dir = workspace / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    state_mgr = StateManager(state_dir)
+
+    # Create a fake worktree directory
+    wt_dir = workspace / "shared" / ".worktrees" / "feat" / "test-wt"
+    wt_dir.mkdir(parents=True)
+
+    task = Task(
+        slug="wt-test",
+        description="Test worktree execution",
+        phase="dev",
+        created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
+        affected_repos=["shared"],
+        branch="feat/test-wt",
+        worktrees={"shared": wt_dir},
+    )
+    state = WorkspaceState(current_task="wt-test", tasks={"wt-test": task})
+    state_mgr.save(state)
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+
+    executor = RepoExecutor(config, graph, state_mgr, mock_shell)
+    executor.execute("test", repos=["shared"], task_slug="wt-test")
+
+    # Should run in worktree path, not repo config path
+    call_kwargs = mock_shell.run_task.call_args.kwargs
+    assert str(call_kwargs["cwd"]) == str(wt_dir)
+
+
+def test_execute_falls_back_to_repo_path_without_worktree(executor_deps):
+    """Without worktrees, executor uses the repo config path."""
+    config, graph, state_mgr, mock_shell = executor_deps
+    executor = RepoExecutor(config, graph, state_mgr, mock_shell)
+    executor.execute("test", repos=["shared"], task_slug="test-task")
+
+    call_kwargs = mock_shell.run_task.call_args.kwargs
+    assert "shared" in str(call_kwargs["cwd"])
+    assert ".worktrees" not in str(call_kwargs["cwd"])
