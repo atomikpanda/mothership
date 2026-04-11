@@ -6,7 +6,10 @@ from mship.core.phase import PHASE_ORDER
 
 def register(app: typer.Typer, get_container):
     @app.command()
-    def phase(target: str):
+    def phase(
+        target: str,
+        force: bool = typer.Option(False, "--force", "-f", help="Force transition even if task is blocked"),
+    ):
         """Transition the current task to a new phase."""
         container = get_container()
         output = Output()
@@ -22,8 +25,16 @@ def register(app: typer.Typer, get_container):
             output.error("No active task. Run `mship spawn \"description\"` to start one.")
             raise typer.Exit(code=1)
 
+        task = state.tasks[state.current_task]
+        if task.blocked_reason and not force:
+            output.error(
+                f"Task is blocked: {task.blocked_reason}. "
+                f"Run `mship unblock` first, or `mship phase {target} --force` to unblock and transition."
+            )
+            raise typer.Exit(code=1)
+
         phase_mgr = container.phase_manager()
-        result = phase_mgr.transition(state.current_task, target)
+        result = phase_mgr.transition(state.current_task, target, force_unblock=force)
 
         for w in result.warnings:
             output.warning(w)

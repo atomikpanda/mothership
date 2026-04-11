@@ -21,20 +21,22 @@ class PhaseManager:
         self._state_manager = state_manager
         self._log = log
 
-    def transition(self, task_slug: str, target: Phase) -> PhaseTransition:
+    def transition(
+        self, task_slug: str, target: Phase, force_unblock: bool = False
+    ) -> PhaseTransition:
         state = self._state_manager.load()
         task = state.tasks[task_slug]
         old_phase = task.phase
         warnings = self._check_gates(task_slug, task.phase, target)
 
-        # Clear blocked state on phase transition, but warn
-        if task.blocked_reason is not None:
+        # Clear blocked state only if force_unblock is set
+        if task.blocked_reason is not None and force_unblock:
             warnings.append(
-                f"Task was blocked: {task.blocked_reason} — implicitly unblocked by phase transition"
+                f"Task was blocked: {task.blocked_reason} — force-unblocked by phase transition"
             )
             self._log.append(
                 task_slug,
-                f"Unblocked (phase transition to {target})",
+                f"Unblocked (forced phase transition to {target})",
             )
             task.blocked_reason = None
             task.blocked_at = None

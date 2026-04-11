@@ -94,8 +94,8 @@ def test_backward_transition_allowed(state_with_task: StateManager):
     assert result.warnings == []
 
 
-def test_transition_while_blocked_warns(state_with_task: StateManager):
-    """Phase transition while blocked should warn and implicitly unblock."""
+def test_transition_while_blocked_without_force_keeps_blocked(state_with_task: StateManager):
+    """Phase transition without force_unblock should not clear blocked state."""
     state = state_with_task.load()
     from datetime import datetime, timezone
     state.tasks["add-labels"].blocked_reason = "waiting on API key"
@@ -105,9 +105,26 @@ def test_transition_while_blocked_warns(state_with_task: StateManager):
     pm = PhaseManager(state_with_task, MagicMock(spec=LogManager))
     result = pm.transition("add-labels", "dev")
     assert result.new_phase == "dev"
+
+    # Should still be blocked (no force_unblock)
+    reloaded = state_with_task.load()
+    assert reloaded.tasks["add-labels"].blocked_reason == "waiting on API key"
+
+
+def test_transition_while_blocked_with_force_unblocks(state_with_task: StateManager):
+    """Phase transition with force_unblock should clear blocked state and warn."""
+    state = state_with_task.load()
+    from datetime import datetime, timezone
+    state.tasks["add-labels"].blocked_reason = "waiting on API key"
+    state.tasks["add-labels"].blocked_at = datetime(2026, 4, 10, 15, 0, 0, tzinfo=timezone.utc)
+    state_with_task.save(state)
+
+    pm = PhaseManager(state_with_task, MagicMock(spec=LogManager))
+    result = pm.transition("add-labels", "dev", force_unblock=True)
+    assert result.new_phase == "dev"
     assert any("blocked" in w.lower() and "waiting on API key" in w for w in result.warnings)
 
-    # Should be unblocked after transition
+    # Should be unblocked after forced transition
     reloaded = state_with_task.load()
     assert reloaded.tasks["add-labels"].blocked_reason is None
     assert reloaded.tasks["add-labels"].blocked_at is None

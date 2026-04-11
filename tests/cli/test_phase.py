@@ -67,3 +67,31 @@ def test_phase_no_task(workspace: Path):
     container.config.reset()
     container.state_manager.reset_override()
     container.state_manager.reset()
+
+
+def test_phase_blocked_without_force_errors(configured_app_with_task, workspace: Path):
+    mgr = StateManager(workspace / ".mothership")
+    state = mgr.load()
+    state.tasks["add-labels"].blocked_reason = "waiting on API key"
+    state.tasks["add-labels"].blocked_at = datetime(2026, 4, 10, 15, 0, 0, tzinfo=timezone.utc)
+    mgr.save(state)
+
+    result = runner.invoke(app, ["phase", "dev"])
+    assert result.exit_code != 0
+    assert "blocked" in result.output.lower()
+    assert "waiting on API key" in result.output
+
+
+def test_phase_blocked_with_force_transitions(configured_app_with_task, workspace: Path):
+    mgr = StateManager(workspace / ".mothership")
+    state = mgr.load()
+    state.tasks["add-labels"].blocked_reason = "waiting on API key"
+    state.tasks["add-labels"].blocked_at = datetime(2026, 4, 10, 15, 0, 0, tzinfo=timezone.utc)
+    mgr.save(state)
+
+    result = runner.invoke(app, ["phase", "dev", "--force"])
+    assert result.exit_code == 0
+
+    state = mgr.load()
+    assert state.tasks["add-labels"].phase == "dev"
+    assert state.tasks["add-labels"].blocked_reason is None
