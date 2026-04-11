@@ -1,8 +1,9 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mship.core.config import WorkspaceConfig
+from mship.core.config import WorkspaceConfig, Dependency
 from mship.core.graph import DependencyGraph
 from mship.core.state import StateManager, TestResult
 from mship.util.shell import ShellRunner, ShellResult
@@ -30,7 +31,7 @@ class ExecutionResult:
 
 
 class RepoExecutor:
-    """Execute tasks across repos in dependency order."""
+    """Execute tasks across repos in dependency order, parallel within tiers."""
 
     def __init__(
         self,
@@ -57,7 +58,7 @@ class RepoExecutor:
     def resolve_upstream_env(
         self, repo_name: str, task_slug: str | None
     ) -> dict[str, str]:
-        """Compute UPSTREAM_* env vars for a repo's dependencies."""
+        """Compute UPSTREAM_* and UPSTREAM_*_TYPE env vars."""
         if task_slug is None:
             return {}
         state = self._state_manager.load()
@@ -68,11 +69,52 @@ class RepoExecutor:
         env: dict[str, str] = {}
         repo_config = self._config.repos[repo_name]
         for dep in repo_config.depends_on:
-            dep_name = dep.repo
+            dep_name = dep.repo if isinstance(dep, Dependency) else dep
+            dep_type = dep.type if isinstance(dep, Dependency) else "compile"
             if dep_name in task.worktrees:
                 var_name = f"UPSTREAM_{dep_name.upper().replace('-', '_')}"
                 env[var_name] = str(task.worktrees[dep_name])
+                env[f"{var_name}_TYPE"] = dep_type
         return env
+
+    def _resolve_cwd(self, repo_name: str, task_slug: str | None) -> Path:
+        """Get execution directory: worktree if available, otherwise repo path."""
+        repo_config = self._config.repos[repo_name]
+        cwd = repo_config.path
+        if task_slug:
+            state = self._state_manager.load()
+            task = state.tasks.get(task_slug)
+            if task and repo_name in task.worktrees:
+                wt_path = Path(task.worktrees[repo_name])
+                if wt_path.exists():
+                    cwd = wt_path
+        return cwd
+
+    def _execute_one(
+        self,
+        repo_name: str,
+        canonical_task: str,
+        task_slug: str | None,
+    ) -> RepoResult:
+        """Execute a single repo's task. Thread-safe."""
+        actual_name = self.resolve_task_name(repo_name, canonical_task)
+        env_runner = self.resolve_env_runner(repo_name)
+        upstream_env = self.resolve_upstream_env(repo_name, task_slug)
+        cwd = self._resolve_cwd(repo_name, task_slug)
+
+        shell_result = self._shell.run_task(
+            task_name=canonical_task,
+            actual_task_name=actual_name,
+            cwd=cwd,
+            env_runner=env_runner,
+            env=upstream_env or None,
+        )
+
+        return RepoResult(
+            repo=repo_name,
+            task_name=actual_name,
+            shell_result=shell_result,
+        )
 
     def execute(
         self,
@@ -81,57 +123,45 @@ class RepoExecutor:
         run_all: bool = False,
         task_slug: str | None = None,
     ) -> ExecutionResult:
-        ordered = self._graph.topo_sort(repos)
+        tiers = self._graph.topo_tiers(repos)
         result = ExecutionResult()
 
-        for repo_name in ordered:
-            actual_name = self.resolve_task_name(repo_name, canonical_task)
-            env_runner = self.resolve_env_runner(repo_name)
-            repo_config = self._config.repos[repo_name]
-            upstream_env = self.resolve_upstream_env(repo_name, task_slug)
+        for tier in tiers:
+            tier_results: list[RepoResult] = []
 
-            # Use worktree path if available, otherwise repo path
-            cwd = repo_config.path
-            if task_slug:
+            if len(tier) == 1:
+                # Single repo in tier — no threading overhead
+                repo_result = self._execute_one(tier[0], canonical_task, task_slug)
+                tier_results.append(repo_result)
+            else:
+                # Multiple repos — run in parallel
+                with ThreadPoolExecutor(max_workers=len(tier)) as pool:
+                    futures = {
+                        pool.submit(self._execute_one, repo_name, canonical_task, task_slug): repo_name
+                        for repo_name in tier
+                    }
+                    for future in as_completed(futures):
+                        tier_results.append(future.result())
+
+            # Sort tier results for deterministic output order
+            tier_results.sort(key=lambda r: r.repo)
+            result.results.extend(tier_results)
+
+            # Batch-save test results for this tier
+            if task_slug and canonical_task == "test":
                 state = self._state_manager.load()
                 task = state.tasks.get(task_slug)
-                if task and repo_name in task.worktrees:
-                    wt_path = Path(task.worktrees[repo_name])
-                    if wt_path.exists():
-                        cwd = wt_path
+                if task:
+                    for repo_result in tier_results:
+                        task.test_results[repo_result.repo] = TestResult(
+                            status="pass" if repo_result.success else "fail",
+                            at=datetime.now(timezone.utc),
+                        )
+                    self._state_manager.save(state)
 
-            shell_result = self._shell.run_task(
-                task_name=canonical_task,
-                actual_task_name=actual_name,
-                cwd=cwd,
-                env_runner=env_runner,
-                env=upstream_env or None,
-            )
-
-            repo_result = RepoResult(
-                repo=repo_name,
-                task_name=actual_name,
-                shell_result=shell_result,
-            )
-            result.results.append(repo_result)
-
-            if task_slug and canonical_task == "test":
-                self._update_test_result(task_slug, repo_name, shell_result)
-
-            if not repo_result.success and not run_all:
+            # Fail-fast between tiers
+            tier_success = all(r.success for r in tier_results)
+            if not tier_success and not run_all:
                 break
 
         return result
-
-    def _update_test_result(
-        self, task_slug: str, repo_name: str, shell_result: ShellResult
-    ) -> None:
-        state = self._state_manager.load()
-        task = state.tasks.get(task_slug)
-        if task is None:
-            return
-        task.test_results[repo_name] = TestResult(
-            status="pass" if shell_result.returncode == 0 else "fail",
-            at=datetime.now(timezone.utc),
-        )
-        self._state_manager.save(state)

@@ -208,7 +208,8 @@ def test_upstream_env_with_worktrees(executor_deps):
 
     executor = RepoExecutor(config, graph, state_mgr, mock_shell)
     env = executor.resolve_upstream_env("auth-service", "test-task")
-    assert env == {"UPSTREAM_SHARED": "/tmp/shared-wt"}
+    assert env["UPSTREAM_SHARED"] == "/tmp/shared-wt"
+    assert env["UPSTREAM_SHARED_TYPE"] == "compile"
 
 
 def test_upstream_env_hyphenated_name(executor_deps):
@@ -246,7 +247,8 @@ def test_execute_passes_upstream_env(executor_deps):
     # auth-service call should have UPSTREAM_SHARED env
     calls = mock_shell.run_task.call_args_list
     auth_call = next(c for c in calls if "auth-service" in str(c.kwargs["cwd"]))
-    assert auth_call.kwargs["env"] == {"UPSTREAM_SHARED": "/tmp/shared-wt"}
+    assert auth_call.kwargs["env"]["UPSTREAM_SHARED"] == "/tmp/shared-wt"
+    assert auth_call.kwargs["env"]["UPSTREAM_SHARED_TYPE"] == "compile"
 
     # shared call should have no upstream env (no dependencies)
     shared_call = next(c for c in calls if "shared" in str(c.kwargs["cwd"]) and "auth" not in str(c.kwargs["cwd"]))
@@ -297,3 +299,113 @@ def test_execute_falls_back_to_repo_path_without_worktree(executor_deps):
     call_kwargs = mock_shell.run_task.call_args.kwargs
     assert "shared" in str(call_kwargs["cwd"])
     assert ".worktrees" not in str(call_kwargs["cwd"])
+
+
+def test_upstream_env_includes_type(workspace: Path):
+    cfg = workspace / "mothership.yaml"
+    cfg.write_text("""\
+workspace: test
+repos:
+  shared:
+    path: ./shared
+    type: library
+  backend:
+    path: ./auth-service
+    type: service
+  ios-app:
+    path: ./api-gateway
+    type: service
+    depends_on:
+      - repo: shared
+        type: compile
+      - repo: backend
+        type: runtime
+""")
+    config = ConfigLoader.load(cfg)
+    graph = DependencyGraph(config)
+    state_dir = workspace / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    state_mgr = StateManager(state_dir)
+
+    task = Task(
+        slug="type-test",
+        description="Test",
+        phase="dev",
+        created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
+        affected_repos=["shared", "backend", "ios-app"],
+        branch="feat/type-test",
+        worktrees={
+            "shared": Path("/tmp/shared-wt"),
+            "backend": Path("/tmp/backend-wt"),
+        },
+    )
+    state = WorkspaceState(current_task="type-test", tasks={"type-test": task})
+    state_mgr.save(state)
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    executor = RepoExecutor(config, graph, state_mgr, mock_shell)
+    env = executor.resolve_upstream_env("ios-app", "type-test")
+    assert env["UPSTREAM_SHARED"] == "/tmp/shared-wt"
+    assert env["UPSTREAM_SHARED_TYPE"] == "compile"
+    assert env["UPSTREAM_BACKEND"] == "/tmp/backend-wt"
+    assert env["UPSTREAM_BACKEND_TYPE"] == "runtime"
+
+
+def test_execute_parallel_tiers(workspace: Path):
+    cfg = workspace / "mothership.yaml"
+    cfg.write_text("""\
+workspace: test
+repos:
+  shared:
+    path: ./shared
+    type: library
+  auth-service:
+    path: ./auth-service
+    type: service
+    depends_on: [shared]
+  api-gateway:
+    path: ./api-gateway
+    type: service
+    depends_on: [shared]
+""")
+    config = ConfigLoader.load(cfg)
+    graph = DependencyGraph(config)
+    state_dir = workspace / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    state_mgr = StateManager(state_dir)
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+
+    executor = RepoExecutor(config, graph, state_mgr, mock_shell)
+    result = executor.execute("test", repos=["shared", "auth-service", "api-gateway"])
+    assert result.success
+    assert mock_shell.run_task.call_count == 3
+
+
+def test_execute_parallel_failfast_between_tiers(workspace: Path):
+    cfg = workspace / "mothership.yaml"
+    cfg.write_text("""\
+workspace: test
+repos:
+  shared:
+    path: ./shared
+    type: library
+  auth-service:
+    path: ./auth-service
+    type: service
+    depends_on: [shared]
+""")
+    config = ConfigLoader.load(cfg)
+    graph = DependencyGraph(config)
+    state_dir = workspace / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    state_mgr = StateManager(state_dir)
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run_task.return_value = ShellResult(returncode=1, stdout="", stderr="fail")
+
+    executor = RepoExecutor(config, graph, state_mgr, mock_shell)
+    result = executor.execute("test", repos=["shared", "auth-service"])
+    assert not result.success
+    assert mock_shell.run_task.call_count == 1
