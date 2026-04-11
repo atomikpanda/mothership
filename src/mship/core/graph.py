@@ -1,4 +1,4 @@
-from mship.core.config import WorkspaceConfig
+from mship.core.config import WorkspaceConfig, Dependency
 
 
 class DependencyGraph:
@@ -6,15 +6,14 @@ class DependencyGraph:
 
     def __init__(self, config: WorkspaceConfig) -> None:
         self._config = config
-        # adjacency: dep -> list of dependents
         self._forward: dict[str, list[str]] = {name: [] for name in config.repos}
-        # reverse: dependent -> list of deps
         self._reverse: dict[str, list[str]] = {name: [] for name in config.repos}
 
         for name, repo in config.repos.items():
             for dep in repo.depends_on:
-                self._forward[dep].append(name)
-                self._reverse[name].append(dep)
+                dep_name = dep.repo if isinstance(dep, Dependency) else dep
+                self._forward[dep_name].append(name)
+                self._reverse[name].append(dep_name)
 
     def topo_sort(self, repos: list[str] | None = None) -> list[str]:
         """Return repos in dependency order (dependencies first)."""
@@ -40,6 +39,36 @@ class DependencyGraph:
             queue.sort()
 
         return result
+
+    def topo_tiers(self, repos: list[str] | None = None) -> list[list[str]]:
+        """Return repos grouped into dependency tiers.
+
+        Each tier is a list of repos that can run concurrently.
+        Tiers are ordered: tier N's deps are all in tiers 0..N-1.
+        """
+        target_set = set(repos) if repos else set(self._config.repos.keys())
+
+        in_degree: dict[str, int] = {}
+        for name in target_set:
+            in_degree[name] = sum(
+                1 for dep in self._reverse[name] if dep in target_set
+            )
+
+        tiers: list[list[str]] = []
+        remaining = set(target_set)
+
+        while remaining:
+            tier = sorted(n for n in remaining if in_degree[n] == 0)
+            if not tier:
+                break
+            tiers.append(tier)
+            for node in tier:
+                remaining.discard(node)
+                for neighbor in self._forward[node]:
+                    if neighbor in remaining:
+                        in_degree[neighbor] -= 1
+
+        return tiers
 
     def dependents(self, repo: str) -> list[str]:
         """Return all transitive downstream dependents of a repo."""
