@@ -114,3 +114,28 @@ def test_spawn_runs_setup_task(worktree_deps):
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
     mgr.spawn("with setup", repos=["shared"])
     shell.run_task.assert_called()
+
+
+def test_spawn_duplicate_slug_raises(worktree_deps):
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("duplicate test", repos=["shared"])
+    with pytest.raises(ValueError, match="already exists"):
+        mgr.spawn("duplicate test", repos=["shared"])
+
+
+def test_abort_succeeds_even_if_branch_delete_fails(worktree_deps):
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("abort fail test", repos=["shared"])
+
+    # Make branch_delete fail
+    original_branch_delete = git.branch_delete
+    git.branch_delete = MagicMock(side_effect=Exception("branch delete failed"))
+
+    mgr.abort("abort-fail-test")
+
+    # State should still be cleaned up
+    state = state_mgr.load()
+    assert "abort-fail-test" not in state.tasks
+    assert state.current_task is None

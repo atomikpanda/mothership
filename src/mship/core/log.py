@@ -44,8 +44,9 @@ class LogManager:
 
     def _parse(self, content: str) -> list[LogEntry]:
         entries: list[LogEntry] = []
+        # Lookahead requires ## followed by ISO timestamp, not just any ## line
         pattern = re.compile(
-            r"^## (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\n(.*?)(?=\n## |\Z)",
+            r"^## (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\n(.*?)(?=\n## \d{4}-\d{2}-\d{2}T|\Z)",
             re.MULTILINE | re.DOTALL,
         )
         for match in pattern.finditer(content):

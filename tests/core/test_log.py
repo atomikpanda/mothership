@@ -73,3 +73,15 @@ def test_log_entry_has_timestamp(logs_dir: Path):
     assert len(entries) == 1
     assert isinstance(entries[0].timestamp, datetime)
     assert entries[0].message == "Test entry"
+
+
+def test_log_message_containing_hash_headers(logs_dir: Path):
+    """Messages with ## in the body should not break the parser."""
+    mgr = LogManager(logs_dir)
+    mgr.create("hash-test")
+    mgr.append("hash-test", "Fixed issue with ## preventing commits")
+    mgr.append("hash-test", "Second entry after hash")
+    entries = mgr.read("hash-test")
+    assert len(entries) == 2
+    assert "## preventing commits" in entries[0].message
+    assert entries[1].message == "Second entry after hash"

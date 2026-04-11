@@ -37,6 +37,14 @@ class WorktreeManager:
         slug = slugify(description)
         branch = self._config.branch_pattern.replace("{slug}", slug)
 
+        # Check for duplicate task slug in state
+        state = self._state_manager.load()
+        if slug in state.tasks:
+            raise ValueError(
+                f"Task '{slug}' already exists. "
+                f"Run `mship abort --yes` to remove it first, or use a different description."
+            )
+
         if repos is None:
             repos = list(self._config.repos.keys())
 
@@ -93,17 +101,28 @@ class WorktreeManager:
         state = self._state_manager.load()
         task = state.tasks[task_slug]
 
+        # Best-effort cleanup: try each worktree/branch, continue on failure
         for repo_name, wt_path in task.worktrees.items():
             repo_config = self._config.repos[repo_name]
-            self._git.worktree_remove(
-                repo_path=repo_config.path,
-                worktree_path=Path(wt_path),
-            )
-            self._git.branch_delete(
-                repo_path=repo_config.path,
-                branch=task.branch,
-            )
+            try:
+                self._git.worktree_remove(
+                    repo_path=repo_config.path,
+                    worktree_path=Path(wt_path),
+                )
+            except Exception:
+                # Worktree may already be gone or locked — continue
+                import shutil
+                shutil.rmtree(Path(wt_path), ignore_errors=True)
+            try:
+                self._git.branch_delete(
+                    repo_path=repo_config.path,
+                    branch=task.branch,
+                )
+            except Exception:
+                # Branch may already be gone or is checked out elsewhere
+                pass
 
+        # Only update state after all cleanup attempts
         del state.tasks[task_slug]
         if state.current_task == task_slug:
             state.current_task = None

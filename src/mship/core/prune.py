@@ -86,11 +86,15 @@ class PruneManager:
                     if orphan.repo in task.worktrees:
                         wt_path = task.worktrees[orphan.repo]
                         if not Path(wt_path).exists():
-                            del state.tasks[task_slug]
-                            if state.current_task == task_slug:
-                                state.current_task = None
+                            # Remove just the worktree entry, not the entire task
+                            del task.worktrees[orphan.repo]
                             state_changed = True
                             pruned += 1
+                            # If task has no worktrees left, remove the task
+                            if not task.worktrees:
+                                del state.tasks[task_slug]
+                                if state.current_task == task_slug:
+                                    state.current_task = None
                             break
 
         if state_changed:

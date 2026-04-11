@@ -95,3 +95,39 @@ def test_prune_removes_state_orphan(prune_deps):
     state = state_mgr.load()
     assert "ghost" not in state.tasks
     assert state.current_task is None
+
+
+def test_prune_partial_missing_keeps_task(prune_deps):
+    """If only one worktree is missing, remove the entry but keep the task."""
+    config, state_mgr, git, workspace = prune_deps
+    # Create a real worktree for auth-service
+    auth_path = workspace / "auth-service"
+    wt_path = auth_path / ".worktrees" / "feat" / "partial"
+    git.worktree_add(repo_path=auth_path, worktree_path=wt_path, branch="feat/partial")
+
+    task = Task(
+        slug="partial",
+        description="Partial task",
+        phase="dev",
+        created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
+        affected_repos=["shared", "auth-service"],
+        branch="feat/partial",
+        worktrees={
+            "shared": Path("/tmp/nonexistent/worktree"),  # missing
+            "auth-service": wt_path,  # exists
+        },
+    )
+    state = WorkspaceState(current_task="partial", tasks={"partial": task})
+    state_mgr.save(state)
+
+    mgr = PruneManager(config, state_mgr, git)
+    orphans = mgr.scan()
+    count = mgr.prune(orphans)
+    assert count >= 1
+
+    state = state_mgr.load()
+    # Task should still exist (auth-service worktree is still valid)
+    assert "partial" in state.tasks
+    # But shared worktree entry should be removed
+    assert "shared" not in state.tasks["partial"].worktrees
+    assert "auth-service" in state.tasks["partial"].worktrees
