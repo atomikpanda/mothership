@@ -130,7 +130,13 @@ tasks:
                 "type": repo.type,
             }
             if repo.depends_on:
-                repo_data["depends_on"] = repo.depends_on
+                serialized_deps = []
+                for dep in repo.depends_on:
+                    if dep.type == "compile":
+                        serialized_deps.append(dep.repo)
+                    else:
+                        serialized_deps.append({"repo": dep.repo, "type": dep.type})
+                repo_data["depends_on"] = serialized_deps
             repos_data[name] = repo_data
         data["repos"] = repos_data
 

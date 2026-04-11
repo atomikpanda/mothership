@@ -68,9 +68,10 @@ class RepoExecutor:
         env: dict[str, str] = {}
         repo_config = self._config.repos[repo_name]
         for dep in repo_config.depends_on:
-            if dep in task.worktrees:
-                var_name = f"UPSTREAM_{dep.upper().replace('-', '_')}"
-                env[var_name] = str(task.worktrees[dep])
+            dep_name = dep.repo
+            if dep_name in task.worktrees:
+                var_name = f"UPSTREAM_{dep_name.upper().replace('-', '_')}"
+                env[var_name] = str(task.worktrees[dep_name])
         return env
 
     def execute(

@@ -104,7 +104,8 @@ def test_generate_config_with_deps(tmp_path: Path):
         ],
         env_runner=None,
     )
-    assert config.repos["auth"].depends_on == ["shared"]
+    from mship.core.config import Dependency
+    assert config.repos["auth"].depends_on == [Dependency(repo="shared", type="compile")]
 
 
 def test_generate_config_with_env_runner(tmp_path: Path):

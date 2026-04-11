@@ -113,7 +113,10 @@ def register(app: typer.Typer, get_container):
 
             state_dir = container.state_dir()
             repo_paths = {name: config.repos[name].path for name in ordered}
-            repo_deps = {name: config.repos[name].depends_on for name in ordered}
+            repo_deps = {
+                name: [d.repo for d in config.repos[name].depends_on]
+                for name in ordered
+            }
             path = generate_handoff(
                 handoffs_dir=Path(state_dir) / "handoffs",
                 task_slug=task.slug,

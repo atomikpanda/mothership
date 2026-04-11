@@ -61,7 +61,7 @@ def register(app: typer.Typer, get_container):
             for repo_name in order:
                 repo = config.repos[repo_name]
                 deps = repo.depends_on
-                dep_str = f" -> [{', '.join(deps)}]" if deps else ""
+                dep_str = f" -> [{', '.join(d.repo for d in deps)}]" if deps else ""
                 type_str = f"({repo.type})"
                 output.print(f"  {repo_name} {type_str}{dep_str}")
         else:
@@ -69,7 +69,7 @@ def register(app: typer.Typer, get_container):
             for name, repo in config.repos.items():
                 graph_data[name] = {
                     "type": repo.type,
-                    "depends_on": repo.depends_on,
+                    "depends_on": [d.repo for d in repo.depends_on],
                     "path": str(repo.path),
                 }
             output.json({"repos": graph_data, "order": order})
