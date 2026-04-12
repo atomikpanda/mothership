@@ -300,7 +300,7 @@ We recommend [superpowers](https://github.com/obra/superpowers) for per-repo met
 - **Not a per-repo methodology** — mothership owns the workflow stages; your per-repo tools (superpowers, custom prompts, CI checks) own the discipline within each stage
 - **Not a task runner** — delegates to go-task
 - **Not an AI agent** — it's a tool agents call
-- **Not a monorepo tool** — works with single repos or separate repos in a shared workspace
+- **Not limited to one repo layout** — works with single repos, monorepos, and metarepos (multiple repos in a shared workspace)
 
 ## Stack
 
