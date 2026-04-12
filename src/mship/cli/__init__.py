@@ -7,6 +7,28 @@ app = typer.Typer(name="mship", help="Cross-repo workflow engine")
 container = Container()
 
 
+def _resolve_state_dir(config_path):
+    """Get the workspace state dir, anchored to main repo if in a git worktree."""
+    import subprocess
+    from pathlib import Path
+
+    config_path = Path(config_path)
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=config_path.parent,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        git_common_dir = Path(result.stdout.strip())
+        if not git_common_dir.is_absolute():
+            git_common_dir = (config_path.parent / git_common_dir).resolve()
+        return git_common_dir.parent / ".mothership"
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return config_path.parent / ".mothership"
+
+
 def get_container() -> Container:
     """Lazy container initialization with config discovery."""
     from pathlib import Path
@@ -18,7 +40,7 @@ def get_container() -> Container:
             container.config_path.override(config_path)
         if not container.state_dir.overridden:
             config_path = container.config_path()
-            state_dir = Path(config_path).parent / ".mothership"
+            state_dir = _resolve_state_dir(config_path)
             container.state_dir.override(state_dir)
     except FileNotFoundError:
         import sys
