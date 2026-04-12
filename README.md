@@ -204,6 +204,74 @@ Mothership doesn't manage secrets. It delegates to your secret manager via `env_
 | Infisical | `infisical run --` |
 | None | omit `env_runner` |
 
+### Monorepo Support (`git_root`)
+
+For monorepos where multiple services share one git repo, use `git_root` to declare subdirectory services:
+
+```yaml
+repos:
+  backend:
+    path: .
+    type: service
+  web:
+    path: web              # relative — interpreted against backend's worktree
+    type: service
+    git_root: backend
+    depends_on: [backend]
+```
+
+The subdirectory service shares the parent's worktree. `mship spawn` creates one worktree for `backend` at `.worktrees/feat/<task>/`, and `web`'s effective path becomes `.worktrees/feat/<task>/web`.
+
+Rules:
+- `git_root` must reference another repo in the workspace
+- The referenced repo cannot itself have `git_root` set (no chaining)
+- The subdirectory must exist and contain a `Taskfile.yml`
+- Subdirectory services still have their own `depends_on`, `tags`, `tasks`, and `start_mode`
+
+### Service Start Modes (`start_mode`)
+
+For long-running services (dev servers, databases), set `start_mode: background`:
+
+```yaml
+repos:
+  infra:
+    path: ./infra
+    type: service
+    start_mode: background     # mship run launches and moves on
+  backend:
+    path: ./backend
+    type: service
+    start_mode: background
+    depends_on: [infra]
+  amplify:
+    path: ./amplify
+    type: service
+    # start_mode defaults to foreground
+    depends_on: [infra]
+```
+
+With `start_mode: background`, `mship run` launches the service in a thread (via `subprocess.Popen`) and continues to the next dependency tier without waiting for exit. Background services keep running until Ctrl-C propagates SIGINT through go-task to their child processes.
+
+`start_mode` only affects `mship run`. Tests and logs always run foreground.
+
+### Task Name Aliasing
+
+If your Taskfile uses different task names than mothership's defaults (`test`, `run`, `lint`, `setup`), add a `tasks:` mapping:
+
+```yaml
+repos:
+  my-app:
+    path: .
+    type: service
+    tasks:
+      run: dev                 # mship run → task dev
+      test: test:all           # mship test → task test:all
+      lint: lint:all
+      setup: infra:start
+```
+
+`mship doctor` respects the mapping when checking for standard tasks.
+
 ### Taskfile Contract
 
 Each repo needs a `Taskfile.yml` with standard task names. Mothership calls `task <name>` in each repo. Override names per repo in the `tasks` mapping.
