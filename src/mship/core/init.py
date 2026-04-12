@@ -75,22 +75,22 @@ tasks:
   test:
     desc: Run tests
     cmds:
-      - echo "TODO: add test command"
+      - echo "TODO - add test command"
 
   run:
     desc: Start the service
     cmds:
-      - echo "TODO: add run command"
+      - echo "TODO - add run command"
 
   lint:
     desc: Run linter
     cmds:
-      - echo "TODO: add lint command"
+      - echo "TODO - add lint command"
 
   setup:
     desc: Set up development environment
     cmds:
-      - echo "TODO: add setup command"
+      - echo "TODO - add setup command"
 """
 
     def generate_config(

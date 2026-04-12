@@ -61,32 +61,43 @@ class DoctorChecker:
 
             # Standard tasks (resolved through tasks mapping)
             result = self._shell.run("task --list", cwd=repo.path)
-            if result.returncode == 0:
-                task_output = result.stdout
-                for canonical in ["test", "run", "lint", "setup"]:
-                    actual = repo.tasks.get(canonical, canonical)
-                    if actual in task_output:
-                        msg = (
-                            f"task '{actual}' available"
-                            if actual == canonical
-                            else f"task '{actual}' available (alias for '{canonical}')"
-                        )
-                        report.checks.append(CheckResult(
-                            name=f"{name}/task:{canonical}",
-                            status="pass",
-                            message=msg,
-                        ))
-                    else:
-                        msg = (
-                            f"missing task: {actual}"
-                            if actual == canonical
-                            else f"missing task: {actual} (aliased from '{canonical}')"
-                        )
-                        report.checks.append(CheckResult(
-                            name=f"{name}/task:{canonical}",
-                            status="warn",
-                            message=msg,
-                        ))
+            if result.returncode != 0:
+                err_summary = (
+                    result.stderr.strip()[:200]
+                    if result.stderr
+                    else "unknown error"
+                )
+                report.checks.append(CheckResult(
+                    name=f"{name}/taskfile_parse",
+                    status="fail",
+                    message=f"Taskfile parse error: {err_summary}",
+                ))
+                continue  # skip per-task checks for this repo
+            task_output = result.stdout
+            for canonical in ["test", "run", "lint", "setup"]:
+                actual = repo.tasks.get(canonical, canonical)
+                if actual in task_output:
+                    msg = (
+                        f"task '{actual}' available"
+                        if actual == canonical
+                        else f"task '{actual}' available (alias for '{canonical}')"
+                    )
+                    report.checks.append(CheckResult(
+                        name=f"{name}/task:{canonical}",
+                        status="pass",
+                        message=msg,
+                    ))
+                else:
+                    msg = (
+                        f"missing task: {actual}"
+                        if actual == canonical
+                        else f"missing task: {actual} (aliased from '{canonical}')"
+                    )
+                    report.checks.append(CheckResult(
+                        name=f"{name}/task:{canonical}",
+                        status="warn",
+                        message=msg,
+                    ))
 
         # gh CLI
         gh_result = self._shell.run("gh auth status", cwd=Path("."))

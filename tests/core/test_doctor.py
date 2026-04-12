@@ -126,6 +126,47 @@ repos:
     assert "aliased" in run_check.message
 
 
+def test_doctor_reports_taskfile_parse_error(tmp_path: Path):
+    """When `task --list` returns non-zero, doctor emits a fail check."""
+    repo_dir = tmp_path / "my-app"
+    repo_dir.mkdir()
+    (repo_dir / "Taskfile.yml").write_text("version: '3'")
+
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: test
+repos:
+  my-app:
+    path: ./my-app
+    type: service
+"""
+    )
+    config = ConfigLoader.load(cfg)
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = lambda cmd, cwd, env=None: (
+        ShellResult(returncode=1, stdout="", stderr="err: invalid keys in command\nfile: Taskfile.yml:7:9")
+        if "task --list" in cmd
+        else ShellResult(returncode=0, stdout="Logged in", stderr="")
+    )
+
+    checker = DoctorChecker(config, mock_shell)
+    report = checker.run()
+
+    parse_check = next(
+        (c for c in report.checks if c.name == "my-app/taskfile_parse"),
+        None,
+    )
+    assert parse_check is not None
+    assert parse_check.status == "fail"
+    assert "parse" in parse_check.message.lower() or "invalid keys" in parse_check.message
+
+    # Per-task checks should NOT have been emitted
+    task_checks = [c for c in report.checks if "my-app/task:" in c.name]
+    assert task_checks == []
+
+
 def test_doctor_report_properties():
     report = DoctorReport()
     from mship.core.doctor import CheckResult

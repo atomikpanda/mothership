@@ -178,6 +178,19 @@ def test_write_taskfile(tmp_path: Path):
     assert "setup:" in content
 
 
+def test_taskfile_template_has_no_colon_in_echo_strings(tmp_path: Path):
+    """go-task 3.49.1 rejects colons inside echo strings. Template must not use them."""
+    repo = tmp_path / "my-repo"
+    repo.mkdir()
+    init = WorkspaceInitializer()
+    init.write_taskfile(repo)
+    content = (repo / "Taskfile.yml").read_text()
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- echo"):
+            assert "TODO:" not in stripped, f"Colon found in echo: {stripped}"
+
+
 def test_write_taskfile_does_not_overwrite(tmp_path: Path):
     repo = tmp_path / "my-repo"
     repo.mkdir()
