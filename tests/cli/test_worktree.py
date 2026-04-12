@@ -125,3 +125,41 @@ def test_finish_gh_not_available(configured_git_app: Path):
     assert result.exit_code != 0 or "gh" in result.output.lower()
 
     cli_container.shell.reset_override()
+
+
+def test_spawn_skip_setup_flag(configured_git_app: Path):
+    """--skip-setup should skip the setup task."""
+    from mship.cli import container as cli_container
+    from unittest.mock import MagicMock
+    from mship.util.shell import ShellResult, ShellRunner
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    cli_container.shell.override(mock_shell)
+
+    result = runner.invoke(app, ["spawn", "skip flag test", "--repos", "shared", "--skip-setup"])
+    assert result.exit_code == 0, result.output
+    # run_task should not have been called for setup
+    mock_shell.run_task.assert_not_called()
+
+    cli_container.shell.reset_override()
+
+
+def test_spawn_shows_setup_warnings(configured_git_app: Path):
+    """Setup failures should appear as warnings in output."""
+    from mship.cli import container as cli_container
+    from unittest.mock import MagicMock
+    from mship.util.shell import ShellResult, ShellRunner
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run_task.return_value = ShellResult(
+        returncode=1, stdout="", stderr="pnpm install failed"
+    )
+    cli_container.shell.override(mock_shell)
+
+    result = runner.invoke(app, ["spawn", "warning flag test", "--repos", "shared"])
+    assert result.exit_code == 0, result.output
+    # Setup failure should appear in output as a warning
+    assert "setup failed" in result.output.lower() or "pnpm install failed" in result.output
+
+    cli_container.shell.reset_override()

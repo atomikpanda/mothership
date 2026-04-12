@@ -10,6 +10,7 @@ def register(app: typer.Typer, get_container):
     def spawn(
         description: str,
         repos: Optional[str] = typer.Option(None, help="Comma-separated repo names"),
+        skip_setup: bool = typer.Option(False, "--skip-setup", help="Skip running `task setup` in new worktrees"),
     ):
         """Create coordinated worktrees across repos for a new task."""
         container = get_container()
@@ -18,7 +19,11 @@ def register(app: typer.Typer, get_container):
 
         repo_list = repos.split(",") if repos else None
 
-        task = wt_mgr.spawn(description, repos=repo_list)
+        if output.is_tty and not skip_setup:
+            output.print("[dim]Running setup in each worktree (use --skip-setup to skip)...[/dim]")
+
+        result = wt_mgr.spawn(description, repos=repo_list, skip_setup=skip_setup)
+        task = result.task
 
         if output.is_tty:
             output.success(f"Spawned task: {task.slug}")
@@ -27,8 +32,12 @@ def register(app: typer.Typer, get_container):
             output.print(f"  Repos: {', '.join(task.affected_repos)}")
             for repo, path in task.worktrees.items():
                 output.print(f"  {repo}: {path}")
+            for warning in result.setup_warnings:
+                output.warning(warning)
         else:
-            output.json(task.model_dump(mode="json"))
+            data = task.model_dump(mode="json")
+            data["setup_warnings"] = result.setup_warnings
+            output.json(data)
 
     @app.command()
     def worktrees():
