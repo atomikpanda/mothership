@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 
 import typer
@@ -107,16 +108,28 @@ def register(app: typer.Typer, get_container):
         executor = container.executor()
         result = executor.execute("run", repos=target_repos)
 
+        def _kill_group(proc, sig):
+            """Send sig to the whole process group. Cross-platform."""
+            try:
+                if os.name == "nt":
+                    proc.send_signal(signal.CTRL_BREAK_EVENT)
+                else:
+                    os.killpg(proc.pid, sig)
+            except (ProcessLookupError, OSError):
+                try:
+                    proc.send_signal(sig)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
         if not result.success:
             for repo_result in result.results:
                 if not repo_result.success:
                     output.error(f"{repo_result.repo}: failed to start")
             # Terminate any background processes that did start
             for proc in result.background_processes:
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
+                _kill_group(proc, signal.SIGINT)
             raise typer.Exit(code=1)
 
         if not result.background_processes:
@@ -128,10 +141,7 @@ def register(app: typer.Typer, get_container):
 
         def _forward_sigint(signum, frame):
             for proc in result.background_processes:
-                try:
-                    proc.send_signal(signal.SIGINT)
-                except Exception:
-                    pass
+                _kill_group(proc, signal.SIGINT)
 
         signal.signal(signal.SIGINT, _forward_sigint)
 
@@ -140,16 +150,14 @@ def register(app: typer.Typer, get_container):
                 proc.wait()
         except KeyboardInterrupt:
             for proc in result.background_processes:
-                try:
-                    proc.send_signal(signal.SIGINT)
-                except Exception:
-                    pass
+                _kill_group(proc, signal.SIGINT)
             for proc in result.background_processes:
                 try:
                     proc.wait(timeout=5)
                 except Exception:
+                    _kill_group(proc, signal.SIGKILL if os.name != "nt" else signal.SIGTERM)
                     try:
-                        proc.kill()
+                        proc.wait(timeout=2)
                     except Exception:
                         pass
 

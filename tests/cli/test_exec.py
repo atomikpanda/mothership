@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -209,6 +209,66 @@ repos:
 
     # Should have called wait() on the background process
     popen_mock.wait.assert_called()
+
+    cli_container.config_path.reset_override()
+    cli_container.state_dir.reset_override()
+    cli_container.config.reset()
+    cli_container.state_manager.reset()
+    cli_container.shell.reset_override()
+
+
+def test_mship_run_signals_process_group_on_failure(workspace: Path):
+    """On launch failure, background processes get signaled via killpg (not terminate())."""
+    from mship.cli import container as cli_container
+    from datetime import datetime, timezone
+
+    cfg = workspace / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: test
+repos:
+  shared:
+    path: ./shared
+    type: service
+    start_mode: background
+  auth-service:
+    path: ./auth-service
+    type: service
+    depends_on: [shared]
+"""
+    )
+    state_dir = workspace / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    cli_container.config_path.override(cfg)
+    cli_container.state_dir.override(state_dir)
+
+    mgr = StateManager(state_dir)
+    task = Task(
+        slug="grp-test",
+        description="Group test",
+        phase="dev",
+        created_at=datetime(2026, 4, 12, tzinfo=timezone.utc),
+        affected_repos=["shared", "auth-service"],
+        branch="feat/grp-test",
+    )
+    mgr.save(WorkspaceState(current_task="grp-test", tasks={"grp-test": task}))
+
+    # Mock shell: run_streaming succeeds, run_task fails on auth-service
+    mock_shell = MagicMock(spec=ShellRunner)
+    popen_mock = MagicMock()
+    popen_mock.pid = 99999
+    mock_shell.run_streaming.return_value = popen_mock
+    mock_shell.build_command.return_value = "task run"
+    mock_shell.run_task.return_value = ShellResult(returncode=1, stdout="", stderr="fail")
+    cli_container.shell.override(mock_shell)
+
+    with patch("mship.cli.exec.os") as mock_os:
+        mock_os.name = "posix"
+        result = runner.invoke(app, ["run"])
+
+    # Background process should be killed via killpg, not terminate()
+    assert mock_os.killpg.called
+    popen_mock.terminate.assert_not_called()
 
     cli_container.config_path.reset_override()
     cli_container.state_dir.reset_override()
