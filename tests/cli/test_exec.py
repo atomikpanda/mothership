@@ -277,6 +277,73 @@ repos:
     cli_container.shell.reset_override()
 
 
+def test_mship_run_shows_startup_summary_with_pids(workspace: Path):
+    """Startup summary should list each background service with its PID."""
+    from mship.cli import container as cli_container
+    from datetime import datetime, timezone
+
+    cfg = workspace / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: test
+repos:
+  shared:
+    path: ./shared
+    type: service
+    start_mode: background
+  auth-service:
+    path: ./auth-service
+    type: service
+    start_mode: background
+    depends_on: [shared]
+"""
+    )
+    state_dir = workspace / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    cli_container.config_path.override(cfg)
+    cli_container.state_dir.override(state_dir)
+
+    mgr = StateManager(state_dir)
+    task = Task(
+        slug="summary-test",
+        description="Summary test",
+        phase="dev",
+        created_at=datetime(2026, 4, 12, tzinfo=timezone.utc),
+        affected_repos=["shared", "auth-service"],
+        branch="feat/summary-test",
+    )
+    mgr.save(WorkspaceState(current_task="summary-test", tasks={"summary-test": task}))
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    pids = [11111, 22222]
+    popen_mocks = []
+
+    def make_popen(*args, **kwargs):
+        p = MagicMock()
+        p.pid = pids[len(popen_mocks)]
+        p.wait.return_value = 0
+        p.poll.return_value = 0
+        popen_mocks.append(p)
+        return p
+
+    mock_shell.run_streaming.side_effect = make_popen
+    mock_shell.build_command.return_value = "task run"
+    cli_container.shell.override(mock_shell)
+
+    result = runner.invoke(app, ["run"])
+    assert result.exit_code == 0
+    assert "11111" in result.output
+    assert "22222" in result.output
+    assert "shared" in result.output
+    assert "auth-service" in result.output
+
+    cli_container.config_path.reset_override()
+    cli_container.state_dir.reset_override()
+    cli_container.config.reset()
+    cli_container.state_manager.reset()
+    cli_container.shell.reset_override()
+
+
 def test_mship_run_kills_group_after_child_exits(workspace: Path):
     """After proc.wait() returns, the process group should be signaled to catch grandchildren."""
     from mship.cli import container as cli_container

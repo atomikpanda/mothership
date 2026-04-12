@@ -503,6 +503,51 @@ repos:
     assert result.background_processes[0] is popen_mock
 
 
+def test_background_repo_result_has_pid(workspace: Path):
+    """RepoResult.background_pid is set for background launches."""
+    cfg = workspace / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: test
+repos:
+  shared:
+    path: ./shared
+    type: service
+    start_mode: background
+"""
+    )
+    config = ConfigLoader.load(cfg)
+    graph = DependencyGraph(config)
+    state_dir = workspace / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    state_mgr = StateManager(state_dir)
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    popen_mock = MagicMock()
+    popen_mock.pid = 55555
+    mock_shell.run_streaming.return_value = popen_mock
+
+    executor = RepoExecutor(config, graph, state_mgr, mock_shell)
+    result = executor.execute("run", repos=["shared"])
+    assert result.results[0].background_pid == 55555
+
+
+def test_foreground_repo_result_has_no_pid(workspace: Path):
+    """RepoResult.background_pid is None for foreground tasks."""
+    config = ConfigLoader.load(workspace / "mothership.yaml")
+    graph = DependencyGraph(config)
+    state_dir = workspace / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    state_mgr = StateManager(state_dir)
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+
+    executor = RepoExecutor(config, graph, state_mgr, mock_shell)
+    result = executor.execute("test", repos=["shared"])
+    assert result.results[0].background_pid is None
+
+
 def test_execute_parallel_failfast_between_tiers(workspace: Path):
     cfg = workspace / "mothership.yaml"
     cfg.write_text("""\

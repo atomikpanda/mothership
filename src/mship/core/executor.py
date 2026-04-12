@@ -15,6 +15,7 @@ class RepoResult:
     task_name: str
     shell_result: ShellResult
     skipped: bool = False
+    background_pid: int | None = None
 
     @property
     def success(self) -> bool:
@@ -129,6 +130,7 @@ class RepoExecutor:
                     repo=repo_name,
                     task_name=actual_name,
                     shell_result=ShellResult(returncode=0, stdout="", stderr=""),
+                    background_pid=popen.pid,
                 ),
                 popen,
             )

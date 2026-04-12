@@ -137,7 +137,14 @@ def register(app: typer.Typer, get_container):
             return
 
         # Have background services — wait for them with signal forwarding
-        output.success(f"Started {len(result.background_processes)} background service(s). Press Ctrl-C to stop.")
+        output.success(f"Started {len(result.background_processes)} background service(s):")
+        for repo_result in result.results:
+            if repo_result.background_pid is not None:
+                output.print(
+                    f"  [green]✓[/green] {repo_result.repo} → task {repo_result.task_name}  (pid {repo_result.background_pid})"
+                )
+        output.print("")
+        output.print("Press Ctrl-C to stop.")
 
         def _forward_sigint(signum, frame):
             for proc in result.background_processes:
