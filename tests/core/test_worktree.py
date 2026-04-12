@@ -203,3 +203,35 @@ repos:
     web_wt = Path(task.worktrees["web"])
     assert web_wt == root_wt / "web"
     assert web_wt.exists()
+
+
+def test_spawn_returns_spawn_result_with_task(worktree_deps):
+    """spawn now returns SpawnResult, not Task."""
+    from mship.core.worktree import SpawnResult
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    result = mgr.spawn("result test", repos=["shared"])
+    assert isinstance(result, SpawnResult)
+    assert result.task.slug == "result-test"
+    assert result.setup_warnings == []
+
+
+def test_spawn_collects_setup_warnings_on_failure(worktree_deps):
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    # Make setup return non-zero
+    shell.run_task.return_value = ShellResult(
+        returncode=1, stdout="", stderr="setup task not found"
+    )
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    result = mgr.spawn("warning test", repos=["shared"])
+    assert len(result.setup_warnings) == 1
+    assert "shared" in result.setup_warnings[0]
+    assert "setup" in result.setup_warnings[0].lower()
+
+
+def test_spawn_skip_setup_does_not_call_setup(worktree_deps):
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("skip test", repos=["shared"], skip_setup=True)
+    # run_task should not have been called (no setup ran)
+    shell.run_task.assert_not_called()

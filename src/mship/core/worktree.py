@@ -1,3 +1,4 @@
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -8,6 +9,12 @@ from mship.core.state import StateManager, Task, WorkspaceState
 from mship.util.git import GitRunner
 from mship.util.shell import ShellRunner
 from mship.util.slug import slugify
+
+
+@dataclass
+class SpawnResult:
+    task: Task
+    setup_warnings: list[str] = field(default_factory=list)
 
 
 class WorktreeManager:
@@ -33,7 +40,8 @@ class WorktreeManager:
         self,
         description: str,
         repos: list[str] | None = None,
-    ) -> Task:
+        skip_setup: bool = False,
+    ) -> SpawnResult:
         slug = slugify(description)
         branch = self._config.branch_pattern.replace("{slug}", slug)
 
@@ -50,6 +58,8 @@ class WorktreeManager:
         ordered = self._graph.topo_sort(repos)
 
         worktrees: dict[str, Path] = {}
+        setup_warnings: list[str] = []
+
         for repo_name in ordered:
             repo_config = self._config.repos[repo_name]
 
@@ -57,19 +67,23 @@ class WorktreeManager:
                 # Subdirectory service: share parent's worktree
                 parent_wt = worktrees.get(repo_config.git_root)
                 if parent_wt is None:
-                    # Parent wasn't spawned in this call — use its config path
                     parent_wt = self._config.repos[repo_config.git_root].path
                 effective = parent_wt / repo_config.path
                 worktrees[repo_name] = effective
 
-                # Run setup task in the subdirectory
-                actual_setup = repo_config.tasks.get("setup", "setup")
-                self._shell.run_task(
-                    task_name="setup",
-                    actual_task_name=actual_setup,
-                    cwd=effective,
-                    env_runner=repo_config.env_runner or self._config.env_runner,
-                )
+                if not skip_setup:
+                    actual_setup = repo_config.tasks.get("setup", "setup")
+                    setup_result = self._shell.run_task(
+                        task_name="setup",
+                        actual_task_name=actual_setup,
+                        cwd=effective,
+                        env_runner=repo_config.env_runner or self._config.env_runner,
+                    )
+                    if setup_result.returncode != 0:
+                        setup_warnings.append(
+                            f"{repo_name}: setup failed (task '{actual_setup}') — "
+                            f"{setup_result.stderr.strip()[:200]}"
+                        )
                 continue
 
             # Normal repo: create its own worktree
@@ -86,13 +100,19 @@ class WorktreeManager:
             )
             worktrees[repo_name] = wt_path
 
-            actual_setup = repo_config.tasks.get("setup", "setup")
-            self._shell.run_task(
-                task_name="setup",
-                actual_task_name=actual_setup,
-                cwd=wt_path,
-                env_runner=repo_config.env_runner or self._config.env_runner,
-            )
+            if not skip_setup:
+                actual_setup = repo_config.tasks.get("setup", "setup")
+                setup_result = self._shell.run_task(
+                    task_name="setup",
+                    actual_task_name=actual_setup,
+                    cwd=wt_path,
+                    env_runner=repo_config.env_runner or self._config.env_runner,
+                )
+                if setup_result.returncode != 0:
+                    setup_warnings.append(
+                        f"{repo_name}: setup failed (task '{actual_setup}') — "
+                        f"{setup_result.stderr.strip()[:200]}"
+                    )
 
         task = Task(
             slug=slug,
@@ -110,12 +130,12 @@ class WorktreeManager:
         self._state_manager.save(state)
 
         self._log.create(slug)
-        self._log.append(
-            slug,
-            f"Task spawned. Repos: {', '.join(ordered)}. Branch: {branch}",
-        )
+        log_msg = f"Task spawned. Repos: {', '.join(ordered)}. Branch: {branch}"
+        if skip_setup:
+            log_msg += " (setup skipped)"
+        self._log.append(slug, log_msg)
 
-        return task
+        return SpawnResult(task=task, setup_warnings=setup_warnings)
 
     def abort(self, task_slug: str) -> None:
         state = self._state_manager.load()
