@@ -148,6 +148,13 @@ def register(app: typer.Typer, get_container):
         try:
             for proc in result.background_processes:
                 proc.wait()
+                # Catch any surviving grandchildren in the process group
+                _kill_group(proc, signal.SIGTERM)
+            # Brief grace period, then SIGKILL stragglers
+            import time
+            time.sleep(0.5)
+            for proc in result.background_processes:
+                _kill_group(proc, signal.SIGKILL if os.name != "nt" else signal.SIGTERM)
         except KeyboardInterrupt:
             for proc in result.background_processes:
                 _kill_group(proc, signal.SIGINT)
