@@ -84,6 +84,8 @@ def register(app: typer.Typer, get_container):
         tag: Optional[list[str]] = typer.Option(None, "--tag", help="Filter repos by tag"),
     ):
         """Start services across repos in dependency order."""
+        import signal
+
         container = get_container()
         output = Output()
         state_mgr = container.state_manager()
@@ -109,8 +111,49 @@ def register(app: typer.Typer, get_container):
             for repo_result in result.results:
                 if not repo_result.success:
                     output.error(f"{repo_result.repo}: failed to start")
+            # Terminate any background processes that did start
+            for proc in result.background_processes:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
             raise typer.Exit(code=1)
-        output.success("All services started")
+
+        if not result.background_processes:
+            output.success("All services started")
+            return
+
+        # Have background services — wait for them with signal forwarding
+        output.success(f"Started {len(result.background_processes)} background service(s). Press Ctrl-C to stop.")
+
+        def _forward_sigint(signum, frame):
+            for proc in result.background_processes:
+                try:
+                    proc.send_signal(signal.SIGINT)
+                except Exception:
+                    pass
+
+        signal.signal(signal.SIGINT, _forward_sigint)
+
+        try:
+            for proc in result.background_processes:
+                proc.wait()
+        except KeyboardInterrupt:
+            for proc in result.background_processes:
+                try:
+                    proc.send_signal(signal.SIGINT)
+                except Exception:
+                    pass
+            for proc in result.background_processes:
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+
+        output.print("All background services have exited")
 
     @app.command()
     def logs(

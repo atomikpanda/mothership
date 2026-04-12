@@ -160,3 +160,58 @@ repos:
     container.config.reset()
     container.state_manager.reset()
     container.shell.reset_override()
+
+
+def test_mship_run_waits_for_background_services(workspace: Path):
+    """mship run should block on background services, not exit immediately."""
+    from mship.cli import container as cli_container
+    from datetime import datetime, timezone
+
+    cfg = workspace / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: test
+repos:
+  shared:
+    path: ./shared
+    type: service
+    start_mode: background
+"""
+    )
+    state_dir = workspace / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    cli_container.config_path.override(cfg)
+    cli_container.state_dir.override(state_dir)
+
+    mgr = StateManager(state_dir)
+    task = Task(
+        slug="bg-test",
+        description="Background test",
+        phase="dev",
+        created_at=datetime(2026, 4, 12, tzinfo=timezone.utc),
+        affected_repos=["shared"],
+        branch="feat/bg-test",
+    )
+    mgr.save(WorkspaceState(current_task="bg-test", tasks={"bg-test": task}))
+
+    # Mock shell: run_streaming returns a Popen-like object that exits immediately
+    mock_shell = MagicMock(spec=ShellRunner)
+    popen_mock = MagicMock()
+    popen_mock.pid = 12345
+    popen_mock.wait.return_value = 0  # exits cleanly
+    popen_mock.poll.return_value = 0
+    mock_shell.run_streaming.return_value = popen_mock
+    mock_shell.build_command.return_value = "task run"
+    cli_container.shell.override(mock_shell)
+
+    result = runner.invoke(app, ["run"])
+    assert result.exit_code == 0
+
+    # Should have called wait() on the background process
+    popen_mock.wait.assert_called()
+
+    cli_container.config_path.reset_override()
+    cli_container.state_dir.reset_override()
+    cli_container.config.reset()
+    cli_container.state_manager.reset()
+    cli_container.shell.reset_override()
