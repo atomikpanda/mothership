@@ -420,6 +420,89 @@ repos:
     assert cwd == web
 
 
+def test_background_start_mode_uses_popen(workspace: Path):
+    """start_mode: background should call run_streaming, not run_task."""
+    cfg = workspace / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: test
+repos:
+  shared:
+    path: ./shared
+    type: service
+    start_mode: background
+"""
+    )
+    config = ConfigLoader.load(cfg)
+    graph = DependencyGraph(config)
+    state_dir = workspace / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    state_mgr = StateManager(state_dir)
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    # Mock streaming: returns a Popen-like object
+    popen_mock = MagicMock()
+    popen_mock.pid = 12345
+    mock_shell.run_streaming.return_value = popen_mock
+
+    executor = RepoExecutor(config, graph, state_mgr, mock_shell)
+    result = executor.execute("run", repos=["shared"])
+
+    assert result.success
+    # run_task should NOT have been called
+    mock_shell.run_task.assert_not_called()
+    # run_streaming SHOULD have been called
+    mock_shell.run_streaming.assert_called_once()
+
+
+def test_foreground_start_mode_uses_run_task(workspace: Path):
+    """Default start_mode is foreground — uses run_task."""
+    config = ConfigLoader.load(workspace / "mothership.yaml")
+    graph = DependencyGraph(config)
+    state_dir = workspace / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    state_mgr = StateManager(state_dir)
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+
+    executor = RepoExecutor(config, graph, state_mgr, mock_shell)
+    executor.execute("run", repos=["shared"])
+    mock_shell.run_task.assert_called_once()
+    mock_shell.run_streaming.assert_not_called()
+
+
+def test_background_returns_in_execution_result(workspace: Path):
+    """ExecutionResult should include the background Popen handles."""
+    cfg = workspace / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: test
+repos:
+  shared:
+    path: ./shared
+    type: service
+    start_mode: background
+"""
+    )
+    config = ConfigLoader.load(cfg)
+    graph = DependencyGraph(config)
+    state_dir = workspace / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    state_mgr = StateManager(state_dir)
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    popen_mock = MagicMock()
+    popen_mock.pid = 12345
+    mock_shell.run_streaming.return_value = popen_mock
+
+    executor = RepoExecutor(config, graph, state_mgr, mock_shell)
+    result = executor.execute("run", repos=["shared"])
+
+    assert len(result.background_processes) == 1
+    assert result.background_processes[0] is popen_mock
+
+
 def test_execute_parallel_failfast_between_tiers(workspace: Path):
     cfg = workspace / "mothership.yaml"
     cfg.write_text("""\

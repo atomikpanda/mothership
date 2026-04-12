@@ -24,6 +24,7 @@ class RepoResult:
 @dataclass
 class ExecutionResult:
     results: list[RepoResult] = field(default_factory=list)
+    background_processes: list = field(default_factory=list)  # list[Popen]
 
     @property
     def success(self) -> bool:
@@ -104,12 +105,33 @@ class RepoExecutor:
         repo_name: str,
         canonical_task: str,
         task_slug: str | None,
-    ) -> RepoResult:
-        """Execute a single repo's task. Thread-safe."""
+    ) -> tuple[RepoResult, object | None]:
+        """Execute a single repo's task. Thread-safe.
+
+        Returns (RepoResult, background_process_or_None).
+        """
         actual_name = self.resolve_task_name(repo_name, canonical_task)
         env_runner = self.resolve_env_runner(repo_name)
         upstream_env = self.resolve_upstream_env(repo_name, task_slug)
         cwd = self._resolve_cwd(repo_name, task_slug)
+        repo_config = self._config.repos[repo_name]
+
+        if repo_config.start_mode == "background" and canonical_task == "run":
+            # Launch as background subprocess, don't wait
+            command = self._shell.build_command(
+                f"task {actual_name}", env_runner
+            )
+            popen = self._shell.run_streaming(command, cwd=cwd)
+            # Mark as "success" — we launched it. If it crashes later, that's
+            # surfaced via Ctrl-C or process exit observation.
+            return (
+                RepoResult(
+                    repo=repo_name,
+                    task_name=actual_name,
+                    shell_result=ShellResult(returncode=0, stdout="", stderr=""),
+                ),
+                popen,
+            )
 
         shell_result = self._shell.run_task(
             task_name=canonical_task,
@@ -119,10 +141,13 @@ class RepoExecutor:
             env=upstream_env or None,
         )
 
-        return RepoResult(
-            repo=repo_name,
-            task_name=actual_name,
-            shell_result=shell_result,
+        return (
+            RepoResult(
+                repo=repo_name,
+                task_name=actual_name,
+                shell_result=shell_result,
+            ),
+            None,
         )
 
     def execute(
@@ -137,11 +162,14 @@ class RepoExecutor:
 
         for tier in tiers:
             tier_results: list[RepoResult] = []
+            tier_backgrounds: list = []
 
             if len(tier) == 1:
                 # Single repo in tier — no threading overhead
-                repo_result = self._execute_one(tier[0], canonical_task, task_slug)
+                repo_result, bg = self._execute_one(tier[0], canonical_task, task_slug)
                 tier_results.append(repo_result)
+                if bg is not None:
+                    tier_backgrounds.append(bg)
             else:
                 # Multiple repos — run in parallel
                 with ThreadPoolExecutor(max_workers=len(tier)) as pool:
@@ -150,11 +178,15 @@ class RepoExecutor:
                         for repo_name in tier
                     }
                     for future in as_completed(futures):
-                        tier_results.append(future.result())
+                        repo_result, bg = future.result()
+                        tier_results.append(repo_result)
+                        if bg is not None:
+                            tier_backgrounds.append(bg)
 
             # Sort tier results for deterministic output order
             tier_results.sort(key=lambda r: r.repo)
             result.results.extend(tier_results)
+            result.background_processes.extend(tier_backgrounds)
 
             # Batch-save test results for this tier
             if task_slug and canonical_task == "test":
