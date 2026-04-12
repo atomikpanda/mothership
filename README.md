@@ -289,17 +289,15 @@ mship abort --yes                   # Remove worktrees after PRs are merged
 
 ### For AI agents
 
-Install the superpowers skill to teach agents how to use mothership:
+Mothership is a control plane that any AI coding agent can call via bash. JSON output is auto-detected when piped, so agents get structured state without extra flags.
 
-```
-skills/working-with-mothership/SKILL.md
-```
+**Mothership assumes a disciplined workflow:** plan before you code, test before you review, review before you ship. The phase model (plan → dev → review → run) and soft gates enforce this structure. What mothership does *not* prescribe is how you work within each phase — that's up to your per-repo tools.
 
-Register this skill in your Claude Code or agent configuration. The skill guides agents through the phase workflow, context recovery, and all mothership commands.
+We recommend [superpowers](https://github.com/obra/superpowers) for per-repo methodology (TDD, brainstorming, code review). A superpowers skill is included at `skills/working-with-mothership/`. But any agent framework that calls shell commands integrates with mothership — the phases, state, and execution commands are tool-agnostic.
 
 ## What Mothership Is Not
 
-- **Not a replacement for superpowers** — methodology stays with superpowers per repo
+- **Not a per-repo methodology** — mothership owns the workflow stages; your per-repo tools (superpowers, custom prompts, CI checks) own the discipline within each stage
 - **Not a task runner** — delegates to go-task
 - **Not an AI agent** — it's a tool agents call
 - **Not a monorepo tool** — works with single repos or separate repos in a shared workspace
