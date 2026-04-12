@@ -37,7 +37,6 @@ class WorktreeManager:
         slug = slugify(description)
         branch = self._config.branch_pattern.replace("{slug}", slug)
 
-        # Check for duplicate task slug in state
         state = self._state_manager.load()
         if slug in state.tasks:
             raise ValueError(
@@ -53,6 +52,27 @@ class WorktreeManager:
         worktrees: dict[str, Path] = {}
         for repo_name in ordered:
             repo_config = self._config.repos[repo_name]
+
+            if repo_config.git_root is not None:
+                # Subdirectory service: share parent's worktree
+                parent_wt = worktrees.get(repo_config.git_root)
+                if parent_wt is None:
+                    # Parent wasn't spawned in this call — use its config path
+                    parent_wt = self._config.repos[repo_config.git_root].path
+                effective = parent_wt / repo_config.path
+                worktrees[repo_name] = effective
+
+                # Run setup task in the subdirectory
+                actual_setup = repo_config.tasks.get("setup", "setup")
+                self._shell.run_task(
+                    task_name="setup",
+                    actual_task_name=actual_setup,
+                    cwd=effective,
+                    env_runner=repo_config.env_runner or self._config.env_runner,
+                )
+                continue
+
+            # Normal repo: create its own worktree
             repo_path = repo_config.path
 
             if not self._git.is_ignored(repo_path, ".worktrees"):
@@ -101,16 +121,20 @@ class WorktreeManager:
         state = self._state_manager.load()
         task = state.tasks[task_slug]
 
-        # Best-effort cleanup: try each worktree/branch, continue on failure
         for repo_name, wt_path in task.worktrees.items():
             repo_config = self._config.repos[repo_name]
+
+            # Skip git_root repos — their "worktree" is just a subdirectory
+            # of the parent's worktree and will disappear with it
+            if repo_config.git_root is not None:
+                continue
+
             try:
                 self._git.worktree_remove(
                     repo_path=repo_config.path,
                     worktree_path=Path(wt_path),
                 )
             except Exception:
-                # Worktree may already be gone or locked — continue
                 import shutil
                 shutil.rmtree(Path(wt_path), ignore_errors=True)
             try:
@@ -119,7 +143,6 @@ class WorktreeManager:
                     branch=task.branch,
                 )
             except Exception:
-                # Branch may already be gone or is checked out elsewhere
                 pass
 
         # Only update state after all cleanup attempts

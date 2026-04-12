@@ -139,3 +139,67 @@ def test_abort_succeeds_even_if_branch_delete_fails(worktree_deps):
     state = state_mgr.load()
     assert "abort-fail-test" not in state.tasks
     assert state.current_task is None
+
+
+def test_spawn_skips_git_root_repos(tmp_path: Path):
+    """git_root repos don't get their own worktree — they share the parent's."""
+    import os
+    import subprocess
+
+    # Create a real git repo with a subdirectory
+    root = tmp_path / "monorepo"
+    root.mkdir()
+    (root / "Taskfile.yml").write_text("version: '3'")
+    web = root / "web"
+    web.mkdir()
+    (web / "Taskfile.yml").write_text("version: '3'")
+    git_env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t.com",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t.com"}
+    subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True, capture_output=True, env=git_env)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=root, check=True, capture_output=True,
+        env=git_env,
+    )
+
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: mono
+repos:
+  root:
+    path: ./monorepo
+    type: service
+  web:
+    path: web
+    type: service
+    git_root: root
+    depends_on: [root]
+"""
+    )
+    config = ConfigLoader.load(cfg)
+    graph = DependencyGraph(config)
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    state_mgr = StateManager(state_dir)
+    git = GitRunner()
+    shell = MagicMock(spec=ShellRunner)
+    shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    log = MagicMock(spec=LogManager)
+
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("mono test", repos=["root", "web"])
+
+    state = state_mgr.load()
+    task = state.tasks["mono-test"]
+
+    # root gets a worktree at <root>/.worktrees/feat/mono-test
+    assert "root" in task.worktrees
+    root_wt = Path(task.worktrees["root"])
+    assert root_wt.exists()
+    # web's worktree is a subdirectory of root's worktree
+    assert "web" in task.worktrees
+    web_wt = Path(task.worktrees["web"])
+    assert web_wt == root_wt / "web"
+    assert web_wt.exists()
