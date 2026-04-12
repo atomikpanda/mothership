@@ -10,6 +10,7 @@ from mship.core.init import WorkspaceInitializer, DetectedRepo
 def register(app: typer.Typer, get_container):
     @app.command()
     def init(
+        path: Optional[str] = typer.Argument(None, help="Workspace directory (defaults to current directory)"),
         name: Optional[str] = typer.Option(None, "--name", help="Workspace name"),
         repo: Optional[list[str]] = typer.Option(None, "--repo", help="Repo in format path:type[:dep1,dep2]"),
         detect: bool = typer.Option(False, "--detect", help="Auto-detect repos in current directory"),
@@ -19,7 +20,7 @@ def register(app: typer.Typer, get_container):
     ):
         """Initialize a new mothership workspace."""
         output = Output()
-        cwd = Path.cwd()
+        cwd = Path(path).resolve() if path else Path.cwd()
         config_path = cwd / "mothership.yaml"
         initializer = WorkspaceInitializer()
 
