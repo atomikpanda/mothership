@@ -296,18 +296,10 @@ We recommend [superpowers](https://github.com/obra/superpowers) for per-repo met
 **Installing the superpowers skill:**
 
 ```bash
-# Clone mothership (if you haven't already)
-git clone https://github.com/atomikpanda/mothership.git
-
-# Add to your Claude Code settings (~/.claude/settings.json)
-# under "skills": ["/path/to/mothership/skills/working-with-mothership"]
+mship skill install working-with-mothership
 ```
 
-Or symlink into your superpowers skills directory:
-
-```bash
-ln -s /path/to/mothership/skills/working-with-mothership ~/.claude/skills/working-with-mothership
-```
+This copies the skill to `~/.claude/skills/working-with-mothership/`. Use `--dest` for a custom location. Run `mship skill list` to see all available skills.
 
 The skill teaches agents the session start protocol (`mship status` → `mship log`), phase workflow, command reference, and context recovery.
 
