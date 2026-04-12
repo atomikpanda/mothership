@@ -299,7 +299,7 @@ We recommend [superpowers](https://github.com/obra/superpowers) for per-repo met
 mship skill install working-with-mothership
 ```
 
-This copies the skill to `~/.claude/skills/working-with-mothership/`. Use `--dest` for a custom location. Run `mship skill list` to see all available skills.
+This fetches the latest skill from GitHub and installs to `~/.agents/skills/working-with-mothership/` (the shared cross-agent skills directory). Use `--dest` for a custom location. Run `mship skill list` to see all available skills.
 
 The skill teaches agents the session start protocol (`mship status` → `mship log`), phase workflow, command reference, and context recovery.
 
