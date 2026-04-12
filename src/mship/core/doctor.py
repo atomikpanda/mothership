@@ -59,15 +59,34 @@ class DoctorChecker:
             else:
                 report.checks.append(CheckResult(name=f"{name}/git", status="warn", message="not a git repository"))
 
-            # Standard tasks
+            # Standard tasks (resolved through tasks mapping)
             result = self._shell.run("task --list", cwd=repo.path)
             if result.returncode == 0:
                 task_output = result.stdout
-                for task_name in ["test", "run", "lint", "setup"]:
-                    if task_name in task_output:
-                        report.checks.append(CheckResult(name=f"{name}/task:{task_name}", status="pass", message=f"task '{task_name}' available"))
+                for canonical in ["test", "run", "lint", "setup"]:
+                    actual = repo.tasks.get(canonical, canonical)
+                    if actual in task_output:
+                        msg = (
+                            f"task '{actual}' available"
+                            if actual == canonical
+                            else f"task '{actual}' available (alias for '{canonical}')"
+                        )
+                        report.checks.append(CheckResult(
+                            name=f"{name}/task:{canonical}",
+                            status="pass",
+                            message=msg,
+                        ))
                     else:
-                        report.checks.append(CheckResult(name=f"{name}/task:{task_name}", status="warn", message=f"missing task: {task_name}"))
+                        msg = (
+                            f"missing task: {actual}"
+                            if actual == canonical
+                            else f"missing task: {actual} (aliased from '{canonical}')"
+                        )
+                        report.checks.append(CheckResult(
+                            name=f"{name}/task:{canonical}",
+                            status="warn",
+                            message=msg,
+                        ))
 
         # gh CLI
         gh_result = self._shell.run("gh auth status", cwd=Path("."))

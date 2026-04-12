@@ -54,6 +54,78 @@ def test_doctor_gh_not_installed(workspace: Path):
     assert report.ok  # gh is optional
 
 
+def test_doctor_resolves_task_aliases(tmp_path: Path):
+    """Doctor should check the aliased task name, not the canonical name."""
+    repo_dir = tmp_path / "my-app"
+    repo_dir.mkdir()
+    (repo_dir / "Taskfile.yml").write_text("version: '3'")
+
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: test
+repos:
+  my-app:
+    path: ./my-app
+    type: service
+    tasks:
+      run: dev
+"""
+    )
+    config = ConfigLoader.load(cfg)
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    # task --list output contains "dev" but not "run"
+    mock_shell.run.side_effect = lambda cmd, cwd, env=None: (
+        ShellResult(returncode=0, stdout="test\ndev\nlint\nsetup\n", stderr="")
+        if "task --list" in cmd
+        else ShellResult(returncode=0, stdout="Logged in", stderr="")
+    )
+
+    checker = DoctorChecker(config, mock_shell)
+    report = checker.run()
+
+    # The "run" check should pass because "dev" exists (it's the alias)
+    run_check = next(c for c in report.checks if c.name == "my-app/task:run")
+    assert run_check.status == "pass"
+    assert "dev" in run_check.message
+
+
+def test_doctor_warns_when_alias_missing(tmp_path: Path):
+    repo_dir = tmp_path / "my-app"
+    repo_dir.mkdir()
+    (repo_dir / "Taskfile.yml").write_text("version: '3'")
+
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: test
+repos:
+  my-app:
+    path: ./my-app
+    type: service
+    tasks:
+      run: nonexistent
+"""
+    )
+    config = ConfigLoader.load(cfg)
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = lambda cmd, cwd, env=None: (
+        ShellResult(returncode=0, stdout="test\nlint\nsetup\n", stderr="")
+        if "task --list" in cmd
+        else ShellResult(returncode=0, stdout="Logged in", stderr="")
+    )
+
+    checker = DoctorChecker(config, mock_shell)
+    report = checker.run()
+
+    run_check = next(c for c in report.checks if c.name == "my-app/task:run")
+    assert run_check.status == "warn"
+    assert "nonexistent" in run_check.message
+    assert "aliased" in run_check.message
+
+
 def test_doctor_report_properties():
     report = DoctorReport()
     from mship.core.doctor import CheckResult
