@@ -320,3 +320,24 @@ repos:
     )
     config = ConfigLoader.load(cfg)
     assert config.repos["shared"].start_mode == "background"
+
+
+def test_symlink_dirs_default_empty(workspace: Path):
+    config = ConfigLoader.load(workspace / "mothership.yaml")
+    assert config.repos["shared"].symlink_dirs == []
+
+
+def test_symlink_dirs_loaded(workspace: Path):
+    cfg = workspace / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: test
+repos:
+  shared:
+    path: ./shared
+    type: service
+    symlink_dirs: [node_modules, .venv]
+"""
+    )
+    config = ConfigLoader.load(cfg)
+    assert config.repos["shared"].symlink_dirs == ["node_modules", ".venv"]

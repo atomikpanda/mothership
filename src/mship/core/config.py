@@ -19,6 +19,7 @@ class RepoConfig(BaseModel):
     tags: list[str] = []
     git_root: str | None = None
     start_mode: Literal["foreground", "background"] = "foreground"
+    symlink_dirs: list[str] = []
 
     @model_validator(mode="before")
     @classmethod

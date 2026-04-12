@@ -36,6 +36,46 @@ class WorktreeManager:
         self._shell = shell
         self._log = log
 
+    def _create_symlinks(
+        self,
+        repo_name: str,
+        repo_config,
+        worktree_path: Path,
+    ) -> list[str]:
+        """Create symlinks from source repo into the worktree. Returns warnings."""
+        warnings: list[str] = []
+        if not repo_config.symlink_dirs:
+            return warnings
+
+        if repo_config.git_root is not None:
+            parent = self._config.repos[repo_config.git_root]
+            source_root = parent.path / repo_config.path
+        else:
+            source_root = repo_config.path
+
+        for dir_name in repo_config.symlink_dirs:
+            source = source_root / dir_name
+            target = worktree_path / dir_name
+
+            if not source.exists():
+                warnings.append(
+                    f"{repo_name}: symlink source missing: {dir_name} (will not be linked)"
+                )
+                continue
+
+            if target.exists() and not target.is_symlink():
+                warnings.append(
+                    f"{repo_name}: symlink skipped, {dir_name} already exists as a real directory"
+                )
+                continue
+
+            if target.is_symlink():
+                target.unlink()
+
+            target.symlink_to(source.resolve())
+
+        return warnings
+
     def spawn(
         self,
         description: str,
@@ -71,6 +111,10 @@ class WorktreeManager:
                 effective = parent_wt / repo_config.path
                 worktrees[repo_name] = effective
 
+                # Create symlinks before setup so setup can use the linked dirs
+                symlink_warnings = self._create_symlinks(repo_name, repo_config, effective)
+                setup_warnings.extend(symlink_warnings)
+
                 if not skip_setup:
                     actual_setup = repo_config.tasks.get("setup", "setup")
                     setup_result = self._shell.run_task(
@@ -99,6 +143,10 @@ class WorktreeManager:
                 branch=branch,
             )
             worktrees[repo_name] = wt_path
+
+            # Create symlinks before setup so setup can use the linked dirs
+            symlink_warnings = self._create_symlinks(repo_name, repo_config, wt_path)
+            setup_warnings.extend(symlink_warnings)
 
             if not skip_setup:
                 actual_setup = repo_config.tasks.get("setup", "setup")

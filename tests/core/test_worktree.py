@@ -235,3 +235,187 @@ def test_spawn_skip_setup_does_not_call_setup(worktree_deps):
     mgr.spawn("skip test", repos=["shared"], skip_setup=True)
     # run_task should not have been called (no setup ran)
     shell.run_task.assert_not_called()
+
+
+def test_create_symlinks_creates_symlink_when_source_exists(tmp_path: Path):
+    """When source exists and target doesn't, create the symlink."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "Taskfile.yml").write_text("version: '3'")
+    (repo / "node_modules").mkdir()
+    (repo / "node_modules" / "some_pkg").mkdir()
+
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: test
+repos:
+  repo:
+    path: ./repo
+    type: service
+    symlink_dirs: [node_modules]
+"""
+    )
+    from mship.core.config import ConfigLoader
+    from mship.core.graph import DependencyGraph
+    from mship.core.state import StateManager
+    from mship.core.log import LogManager
+    from mship.util.git import GitRunner
+    from mship.util.shell import ShellRunner
+
+    config = ConfigLoader.load(cfg)
+    graph = DependencyGraph(config)
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    state_mgr = StateManager(state_dir)
+    git = GitRunner()
+    shell = MagicMock(spec=ShellRunner)
+    log = MagicMock(spec=LogManager)
+
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    warnings = mgr._create_symlinks("repo", config.repos["repo"], wt)
+
+    assert warnings == []
+    symlink = wt / "node_modules"
+    assert symlink.is_symlink()
+    assert symlink.resolve() == (repo / "node_modules").resolve()
+
+
+def test_create_symlinks_warns_when_source_missing(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "Taskfile.yml").write_text("version: '3'")
+
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: test
+repos:
+  repo:
+    path: ./repo
+    type: service
+    symlink_dirs: [node_modules]
+"""
+    )
+    from mship.core.config import ConfigLoader
+    from mship.core.graph import DependencyGraph
+    from mship.core.state import StateManager
+    from mship.core.log import LogManager
+    from mship.util.git import GitRunner
+    from mship.util.shell import ShellRunner
+
+    config = ConfigLoader.load(cfg)
+    graph = DependencyGraph(config)
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    state_mgr = StateManager(state_dir)
+    git = GitRunner()
+    shell = MagicMock(spec=ShellRunner)
+    log = MagicMock(spec=LogManager)
+
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    warnings = mgr._create_symlinks("repo", config.repos["repo"], wt)
+
+    assert len(warnings) == 1
+    assert "source missing" in warnings[0]
+    assert "node_modules" in warnings[0]
+    assert not (wt / "node_modules").exists()
+
+
+def test_create_symlinks_skips_when_target_is_real_dir(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "Taskfile.yml").write_text("version: '3'")
+    (repo / "node_modules").mkdir()
+
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: test
+repos:
+  repo:
+    path: ./repo
+    type: service
+    symlink_dirs: [node_modules]
+"""
+    )
+    from mship.core.config import ConfigLoader
+    from mship.core.graph import DependencyGraph
+    from mship.core.state import StateManager
+    from mship.core.log import LogManager
+    from mship.util.git import GitRunner
+    from mship.util.shell import ShellRunner
+
+    config = ConfigLoader.load(cfg)
+    graph = DependencyGraph(config)
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    state_mgr = StateManager(state_dir)
+    git = GitRunner()
+    shell = MagicMock(spec=ShellRunner)
+    log = MagicMock(spec=LogManager)
+
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / "node_modules").mkdir()
+
+    warnings = mgr._create_symlinks("repo", config.repos["repo"], wt)
+
+    assert len(warnings) == 1
+    assert "already exists as a real directory" in warnings[0]
+    assert not (wt / "node_modules").is_symlink()
+
+
+def test_create_symlinks_replaces_stale_symlink(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "Taskfile.yml").write_text("version: '3'")
+    (repo / "node_modules").mkdir()
+
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: test
+repos:
+  repo:
+    path: ./repo
+    type: service
+    symlink_dirs: [node_modules]
+"""
+    )
+    from mship.core.config import ConfigLoader
+    from mship.core.graph import DependencyGraph
+    from mship.core.state import StateManager
+    from mship.core.log import LogManager
+    from mship.util.git import GitRunner
+    from mship.util.shell import ShellRunner
+
+    config = ConfigLoader.load(cfg)
+    graph = DependencyGraph(config)
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    state_mgr = StateManager(state_dir)
+    git = GitRunner()
+    shell = MagicMock(spec=ShellRunner)
+    log = MagicMock(spec=LogManager)
+
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    stale_target = tmp_path / "nonexistent"
+    (wt / "node_modules").symlink_to(stale_target)
+
+    warnings = mgr._create_symlinks("repo", config.repos["repo"], wt)
+
+    assert warnings == []
+    assert (wt / "node_modules").is_symlink()
+    assert (wt / "node_modules").resolve() == (repo / "node_modules").resolve()
