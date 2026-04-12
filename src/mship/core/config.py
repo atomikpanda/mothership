@@ -17,6 +17,8 @@ class RepoConfig(BaseModel):
     env_runner: str | None = None
     tasks: dict[str, str] = {}
     tags: list[str] = []
+    git_root: str | None = None
+    start_mode: Literal["foreground", "background"] = "foreground"
 
     @model_validator(mode="before")
     @classmethod
@@ -75,6 +77,26 @@ class WorkspaceConfig(BaseModel):
             raise ValueError("Circular dependency detected in repo graph")
         return self
 
+    @model_validator(mode="after")
+    def validate_git_root_refs(self) -> "WorkspaceConfig":
+        repo_names = set(self.repos.keys())
+        for name, repo in self.repos.items():
+            if repo.git_root is None:
+                continue
+            if repo.git_root not in repo_names:
+                raise ValueError(
+                    f"Repo '{name}' has git_root '{repo.git_root}' which does not exist. "
+                    f"Valid repos: {sorted(repo_names)}"
+                )
+            # No chaining: the referenced repo cannot itself have git_root set
+            parent = self.repos[repo.git_root]
+            if parent.git_root is not None:
+                raise ValueError(
+                    f"Repo '{name}' git_root '{repo.git_root}' is itself a subdirectory service. "
+                    f"Cannot chain git_root references."
+                )
+        return self
+
 
 class ConfigLoader:
     """Loads and validates mothership.yaml."""
@@ -88,8 +110,10 @@ class ConfigLoader:
 
         config = WorkspaceConfig(**raw)
 
-        # Resolve relative paths and validate directories
+        # First pass: resolve paths and validate for repos WITHOUT git_root
         for name, repo in config.repos.items():
+            if repo.git_root is not None:
+                continue
             resolved = (workspace_root / repo.path).resolve()
             repo.path = resolved
             if not resolved.is_dir():
@@ -97,6 +121,21 @@ class ConfigLoader:
             if not (resolved / "Taskfile.yml").exists():
                 raise ValueError(
                     f"Repo '{name}' at {resolved} has no Taskfile.yml"
+                )
+
+        # Second pass: validate git_root repos against their parent's resolved path
+        for name, repo in config.repos.items():
+            if repo.git_root is None:
+                continue
+            parent = config.repos[repo.git_root]
+            effective = (parent.path / repo.path).resolve()
+            if not effective.is_dir():
+                raise ValueError(
+                    f"Repo '{name}' subdirectory does not exist: {effective}"
+                )
+            if not (effective / "Taskfile.yml").exists():
+                raise ValueError(
+                    f"Repo '{name}' at {effective} has no Taskfile.yml"
                 )
 
         return config
