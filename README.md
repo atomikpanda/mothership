@@ -222,7 +222,7 @@ Agents get structured JSON they can parse. Humans get readable output. Same comm
 ## Installation
 
 ```bash
-uv tool install .
+uv tool install git+https://github.com/atomikpanda/mothership.git
 ```
 
 Requires Python 3.14+ and [uv](https://docs.astral.sh/uv/).
@@ -234,9 +234,7 @@ Optional: install [go-task](https://taskfile.dev) (for task execution) and [gh](
 ### 1. Install mothership
 
 ```bash
-git clone https://github.com/atomikpanda/mothership.git
-cd mothership
-uv tool install .
+uv tool install git+https://github.com/atomikpanda/mothership.git
 ```
 
 ### 2. Initialize your workspace
