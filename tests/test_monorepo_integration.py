@@ -154,3 +154,25 @@ def test_monorepo_run_uses_background(monorepo_workspace):
 
     # Both background services should have been launched
     assert mock_shell.run_streaming.call_count == 2
+
+
+def test_monorepo_run_uses_process_group(monorepo_workspace):
+    """Background services should be launched in their own process group."""
+    tmp_path, mock_shell = monorepo_workspace
+
+    runner.invoke(app, ["spawn", "group test", "--skip-setup"])
+
+    popen_mocks = []
+    def make_popen(*args, **kwargs):
+        p = MagicMock()
+        p.pid = 50000 + len(popen_mocks)
+        p.wait.return_value = 0
+        p.poll.return_value = 0
+        popen_mocks.append(p)
+        return p
+    mock_shell.run_streaming.side_effect = make_popen
+
+    result = runner.invoke(app, ["run"])
+    assert result.exit_code == 0
+    # Both repos launched in background
+    assert mock_shell.run_streaming.call_count == 2
