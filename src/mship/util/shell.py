@@ -1,3 +1,4 @@
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,8 +22,6 @@ class ShellRunner:
     def run(
         self, command: str, cwd: Path, env: dict[str, str] | None = None
     ) -> ShellResult:
-        import os
-
         run_env = None
         if env:
             run_env = {**os.environ, **env}
@@ -52,12 +51,20 @@ class ShellRunner:
         return self.run(command, cwd, env=env)
 
     def run_streaming(self, command: str, cwd: Path) -> subprocess.Popen:
-        """Run a command with stdout/stderr streaming (for logs, run)."""
-        return subprocess.Popen(
-            command,
+        """Run a command with stdout/stderr streaming (for logs, run).
+
+        Launches the subprocess in its own process group so signal delivery
+        can reach the whole tree (including grandchildren) on termination.
+        """
+        kwargs = dict(
             shell=True,
             cwd=cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+        return subprocess.Popen(command, **kwargs)
