@@ -383,6 +383,43 @@ repos:
     assert mock_shell.run_task.call_count == 3
 
 
+def test_cwd_resolves_through_git_root(tmp_path: Path):
+    """When git_root is set and no worktree, cwd is parent.path / child.path."""
+    root = tmp_path / "monorepo"
+    root.mkdir()
+    (root / "Taskfile.yml").write_text("version: '3'")
+    web = root / "web"
+    web.mkdir()
+    (web / "Taskfile.yml").write_text("version: '3'")
+
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: mono
+repos:
+  root:
+    path: ./monorepo
+    type: service
+  web:
+    path: web
+    type: service
+    git_root: root
+"""
+    )
+    config = ConfigLoader.load(cfg)
+    graph = DependencyGraph(config)
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    state_mgr = StateManager(state_dir)
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+
+    executor = RepoExecutor(config, graph, state_mgr, mock_shell)
+    cwd = executor._resolve_cwd("web", None)
+    assert cwd == web
+
+
 def test_execute_parallel_failfast_between_tiers(workspace: Path):
     cfg = workspace / "mothership.yaml"
     cfg.write_text("""\

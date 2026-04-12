@@ -78,17 +78,26 @@ class RepoExecutor:
         return env
 
     def _resolve_cwd(self, repo_name: str, task_slug: str | None) -> Path:
-        """Get execution directory: worktree if available, otherwise repo path."""
+        """Get execution directory: worktree if available, otherwise resolved path.
+
+        For repos with git_root set, path is resolved as parent_path / path.
+        """
         repo_config = self._config.repos[repo_name]
-        cwd = repo_config.path
+
+        # If worktree exists in state, prefer it
         if task_slug:
             state = self._state_manager.load()
             task = state.tasks.get(task_slug)
             if task and repo_name in task.worktrees:
                 wt_path = Path(task.worktrees[repo_name])
                 if wt_path.exists():
-                    cwd = wt_path
-        return cwd
+                    return wt_path
+
+        # No worktree: compute effective path
+        if repo_config.git_root is not None:
+            parent = self._config.repos[repo_config.git_root]
+            return parent.path / repo_config.path
+        return repo_config.path
 
     def _execute_one(
         self,
