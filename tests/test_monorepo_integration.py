@@ -176,3 +176,54 @@ def test_monorepo_run_uses_process_group(monorepo_workspace):
     assert result.exit_code == 0
     # Both repos launched in background
     assert mock_shell.run_streaming.call_count == 2
+
+
+def test_monorepo_healthcheck_sleep_succeeds(monorepo_workspace):
+    """Integration: a repo with a sleep healthcheck reports ready in the summary."""
+    tmp_path, mock_shell = monorepo_workspace
+
+    # Rewrite config to add healthchecks
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: tailrd
+repos:
+  tailrd:
+    path: ./tailrd
+    type: service
+    tasks:
+      run: dev
+    start_mode: background
+    healthcheck:
+      sleep: 10ms
+  web:
+    path: web
+    type: service
+    git_root: tailrd
+    tasks:
+      run: dev
+    start_mode: background
+    depends_on: [tailrd]
+    healthcheck:
+      sleep: 10ms
+"""
+    )
+
+    runner.invoke(app, ["spawn", "hc integration", "--skip-setup"])
+
+    popen_mocks = []
+    def make_popen(*args, **kwargs):
+        p = MagicMock()
+        p.pid = 90000 + len(popen_mocks)
+        p.wait.return_value = 0
+        p.poll.return_value = 0
+        popen_mocks.append(p)
+        return p
+    mock_shell.run_streaming.side_effect = make_popen
+
+    result = runner.invoke(app, ["run"])
+    assert result.exit_code == 0
+    # Both services should have been started successfully
+    assert "Started 2 background service(s)" in result.output
+    assert "tailrd" in result.output
+    assert "web" in result.output
