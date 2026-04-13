@@ -167,6 +167,17 @@ mship run                     # start services
 mship logs <service>           # tail logs for a service
 ```
 
+### Live views
+
+`mship view` provides read-only TUIs designed for tmux/zellij panes. All views support `--watch` and `--interval N`.
+
+- `mship view status [--watch]` — current task, phase, worktrees, tests
+- `mship view logs [task-slug] [--watch]` — tail of the task log
+- `mship view diff [--watch]` — per-worktree git diff with untracked files inline
+- `mship view spec [name-or-path] [--watch] [--web]` — render newest spec; `--web` serves HTML on localhost
+
+Keys: `q` quit, `j/k` or arrows to scroll, `PgUp/PgDn`, `Home/End`, `r` force refresh.
+
 ## Configuration
 
 ### `mothership.yaml`
