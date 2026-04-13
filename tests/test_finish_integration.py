@@ -387,3 +387,84 @@ def test_finish_fails_when_branch_has_no_commits(finish_workspace):
     assert result.exit_code != 0
     assert "no commits" in result.output.lower() or "No commits to push" in result.output
     assert pushed == [], "no repo should be pushed when a branch is empty"
+
+
+def test_finish_stamps_finished_at(finish_workspace):
+    workspace, mock_shell = finish_workspace
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "git ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc\trefs/heads/main\n", stderr="")
+        if "git rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "git rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://x/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    result = runner.invoke(app, ["spawn", "stamp test", "--repos", "shared", "--force-audit"])
+    assert result.exit_code == 0, result.output
+
+    result = runner.invoke(app, ["finish"])
+    assert result.exit_code == 0, result.output
+    assert "mship close" in result.output
+
+    state = StateManager(workspace / ".mothership").load()
+    assert state.tasks["stamp-test"].finished_at is not None
+
+
+def test_finish_push_only_skips_gh_pr_create(finish_workspace):
+    workspace, mock_shell = finish_workspace
+    push_calls: list[str] = []
+    pr_calls: list[str] = []
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh pr create" in cmd:
+            pr_calls.append(cmd)
+            return ShellResult(returncode=0, stdout="https://x/1\n", stderr="")
+        if "git push" in cmd:
+            push_calls.append(cmd)
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "git rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "git rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    result = runner.invoke(app, ["spawn", "push only", "--repos", "shared", "--force-audit"])
+    assert result.exit_code == 0, result.output
+
+    result = runner.invoke(app, ["finish", "--push-only"])
+    assert result.exit_code == 0, result.output
+    assert len(push_calls) == 1
+    assert pr_calls == []
+    assert "mship close" in result.output
+    assert "Branch pushed" in result.output
+
+    state = StateManager(workspace / ".mothership").load()
+    task = state.tasks["push-only"]
+    assert task.finished_at is not None
+    assert task.pr_urls == {}
+
+
+def test_finish_push_only_rejects_base_flags(finish_workspace):
+    workspace, mock_shell = finish_workspace
+    mock_shell.run.side_effect = lambda cmd, cwd, env=None: ShellResult(returncode=0, stdout="", stderr="")
+
+    result = runner.invoke(app, ["spawn", "conflict flags", "--repos", "shared", "--force-audit"])
+    assert result.exit_code == 0
+
+    result = runner.invoke(app, ["finish", "--push-only", "--base", "main"])
+    assert result.exit_code != 0
+    assert "push-only" in result.output.lower()

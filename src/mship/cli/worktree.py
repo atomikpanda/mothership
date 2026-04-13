@@ -147,12 +147,17 @@ def register(app: typer.Typer, get_container):
         base: Optional[str] = typer.Option(None, "--base", help="Global override of PR base branch for all repos"),
         base_map: Optional[str] = typer.Option(None, "--base-map", help="Per-repo PR base overrides, e.g. 'cli=main,api=release/x'"),
         force_audit: bool = typer.Option(False, "--force-audit", help="Bypass audit gate for this finish"),
+        push_only: bool = typer.Option(False, "--push-only", help="Push branches only; skip gh pr create"),
     ):
         """Create PRs across repos in dependency order."""
         from pathlib import Path
 
         container = get_container()
         output = Output()
+
+        if push_only and (handoff or base is not None or base_map is not None):
+            output.error("--push-only is incompatible with --handoff/--base/--base-map")
+            raise typer.Exit(code=1)
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
@@ -222,6 +227,39 @@ def register(app: typer.Typer, get_container):
 
         # PR creation flow
         pr_mgr = container.pr_manager()
+
+        # --push-only: push branches, stamp finished_at, skip gh entirely.
+        if push_only:
+            push_list: list[dict] = []
+            for repo_name in ordered:
+                if repo_name in task.pr_urls:
+                    continue
+                repo_config = config.repos[repo_name]
+                repo_path = repo_config.path
+                if repo_name in task.worktrees:
+                    wt_path = Path(task.worktrees[repo_name])
+                    if wt_path.exists():
+                        repo_path = wt_path
+                try:
+                    pr_mgr.push_branch(repo_path, task.branch)
+                except RuntimeError as e:
+                    output.error(f"{repo_name}: {e}")
+                    raise typer.Exit(code=1)
+                if output.is_tty:
+                    output.print(f"  {repo_name}: {task.branch} pushed")
+                push_list.append({"repo": repo_name, "branch": task.branch, "pushed": True})
+
+            from datetime import datetime as _dt, timezone as _tz
+            if task.finished_at is None:
+                task.finished_at = _dt.now(_tz.utc)
+                state_mgr.save(state)
+
+            if output.is_tty:
+                output.print("[green]Branch pushed.[/green] After merge/review, run `mship close` to clean up.")
+            else:
+                output.json({"task": task.slug, "pushed": [p["repo"] for p in push_list], "finished_at": task.finished_at.isoformat()})
+                output.print("Branch pushed. After merge/review, run `mship close` to clean up.")
+            return
 
         try:
             pr_mgr.check_gh_available()
@@ -362,13 +400,22 @@ def register(app: typer.Typer, get_container):
                 f"PR created for {pr_info['repo']}: {pr_info['url']}",
             )
 
+        # Stamp finished_at on successful PR creation.
+        from datetime import datetime as _dt, timezone as _tz
+        if task.finished_at is None:
+            task.finished_at = _dt.now(_tz.utc)
+            state_mgr.save(state)
+
         if output.is_tty:
             output.print("")
             output.success(f"Created {len(pr_list)} PR(s) for task: {task.slug}")
             if len(pr_list) > 1:
                 output.print("Merge in dependency order as shown in each PR description.")
+            output.print("[green]Task finished.[/green] After merge, run `mship close` to clean up.")
         else:
             output.json({
                 "task": task.slug,
                 "prs": pr_list,
+                "finished_at": task.finished_at.isoformat(),
             })
+            output.print("Task finished. After merge, run `mship close` to clean up.")
