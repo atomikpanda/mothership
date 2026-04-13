@@ -101,7 +101,7 @@ JSON output is auto-emitted when stdout isn't a TTY — agents get structured st
 
 ```bash
 # Workspace awareness
-mship status                          # current phase, task, worktrees, test results
+mship status                          # current phase, task, worktrees, test results; also shows drift, phase duration, last log entry, and a warning if the task is already finished
 mship graph                           # show repo dependency graph
 mship doctor                          # validate config & tools (gh, env_runner, Taskfiles)
 
@@ -114,9 +114,10 @@ mship spawn "description"             # create worktrees for a new task
 mship spawn "desc" --repos a,b        # explicit repo list (multi-repo)
 mship worktrees                       # list active worktrees
 mship prune [--force]                 # remove orphaned worktrees
-mship abort [--yes]                   # discard worktrees, abandon task
+mship close [--yes] [--force] [--skip-pr-check]  # discard worktrees, abandon/close task
 mship finish [--base <branch>]        # coordinated PRs across repos
 mship finish --base-map a=main,b=x    # per-repo PR base overrides
+mship finish --push-only              # push branches without opening PRs
 
 # Execution (delegates to go-task per repo)
 mship test [--all] [--tag t]          # run tests in dependency order
@@ -195,7 +196,7 @@ audit:
 
 `mship view` provides read-only TUIs designed for tmux/zellij panes. All views support `--watch` and `--interval N`.
 
-- `mship view status [--watch]` — current task, phase, worktrees, tests
+- `mship view status [--watch]` — current task, phase, worktrees, tests, drift, phase duration, and last log entry
 - `mship view logs [task-slug] [--watch]` — tail of the task log
 - `mship view diff [--watch]` — per-worktree git diff with untracked files inline
 - `mship view spec [name-or-path] [--watch] [--web]` — render newest spec; `--web` serves HTML on localhost

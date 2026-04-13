@@ -187,14 +187,17 @@ mship finish --base main                # global override of PR base branch
 mship finish --base-map cli=main,api=release/7  # per-repo PR base overrides
 mship finish --handoff                  # write a CI handoff manifest instead
 mship finish --force-audit              # bypass the drift audit gate (logged to task log)
-mship abort --yes                       # remove worktrees and clean up state (best-effort cleanup on git failure)
+mship finish --push-only               # push branches without opening PRs
+mship close --yes                       # remove worktrees and clean up state (best-effort cleanup on git failure)
+mship close --yes --force               # skip PR-state check and close unconditionally
+mship close --yes --skip-pr-check       # alias: same as --force
 ```
 
 `mship finish` requires the `gh` CLI installed and authenticated. It creates PRs in dependency order so reviewers see a coordination block in each PR pointing to the others.
 
 PR base branches come from (most-specific wins): `--base-map` entry > `--base` flag > `repo.base_branch` in config > gh default. Every resolved base is verified to exist on origin before any push; missing bases fail fast with no partial state.
 
-After PRs are merged externally, `mship abort --yes` cleans up the local worktrees.
+After PRs are merged externally, `mship close --yes` cleans up the local worktrees.
 
 ### Workspace awareness
 
@@ -342,6 +345,7 @@ Then `mship test --tag mobile` runs both.
 - **Don't merge PRs out of order** — the coordination block in each PR description shows the correct order.
 - **Don't ignore healthcheck failures** — if `mship run` reports a service didn't become ready, the dependent services won't work either.
 - **Don't run `mship finish` with failing tests** — run `mship test` first.
+- **Don't keep editing a worktree after `mship finish`** — once `finish` stamps the task as done, phase transitions are blocked (except `run`). If you need to make changes, open a new task with `mship spawn`.
 - **Don't manually edit `.mothership/state.yaml`** — use the CLI commands instead.
 - **Don't assume `mship` knows what's running outside of it** — if you started services manually, mothership won't track them. Use `mship run` or accept that `mship status` won't reflect them.
 - **Don't `--force-audit` without reading the drift** — the gate is there to stop you from starting work on a dirty/wrong-branch repo. If you bypass, know why; the task log records the bypass.
