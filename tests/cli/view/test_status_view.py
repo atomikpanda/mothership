@@ -13,6 +13,8 @@ class _FakeTask:
     affected_repos = ["repo-a", "repo-b"]
     worktrees = {"repo-a": "/tmp/wta", "repo-b": "/tmp/wtb"}
     test_results = {}
+    finished_at = None
+    phase_entered_at = None
 
 
 class _FakeState:
@@ -50,3 +52,36 @@ async def test_status_view_no_active_task():
     async with view.run_test() as pilot:
         await pilot.pause()
         assert "No active task" in view.rendered_text()
+
+
+@pytest.mark.asyncio
+async def test_status_view_shows_finished_warning():
+    from datetime import datetime, timezone, timedelta
+
+    class _Task:
+        slug = "t"
+        phase = "review"
+        phase_entered_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        blocked_reason = None
+        blocked_at = None
+        branch = "feat/t"
+        affected_repos = ["r"]
+        worktrees = {}
+        test_results = {}
+        pr_urls = {}
+        finished_at = datetime.now(timezone.utc) - timedelta(hours=2)
+
+    class _State:
+        current_task = "t"
+        tasks = {"t": _Task()}
+
+    class _Mgr:
+        def load(self):
+            return _State()
+
+    view = StatusView(state_manager=_Mgr(), watch=False, interval=1.0)
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        text = view.rendered_text()
+        assert "Finished" in text or "finished" in text
+        assert "mship close" in text

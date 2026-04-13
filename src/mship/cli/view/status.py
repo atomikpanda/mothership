@@ -9,17 +9,26 @@ class StatusView(ViewApp):
         self._state_manager = state_manager
 
     def gather(self) -> str:
+        from mship.util.duration import format_relative
+
         state = self._state_manager.load()
         if state.current_task is None:
             return "No active task"
         task = state.tasks[state.current_task]
-        lines = [
-            f"Task:   {task.slug}",
-            f"Phase:  {task.phase}"
-            + (f"  (BLOCKED: {task.blocked_reason})" if task.blocked_reason else ""),
-            f"Branch: {task.branch}",
-            f"Repos:  {', '.join(task.affected_repos)}",
-        ]
+
+        lines = [f"Task:   {task.slug}"]
+        if task.finished_at is not None:
+            lines.append(
+                f"⚠ Finished: {format_relative(task.finished_at)} — run `mship close` after merge"
+            )
+        phase_line = task.phase
+        if task.phase_entered_at is not None:
+            phase_line = f"{task.phase} (entered {format_relative(task.phase_entered_at)})"
+        if task.blocked_reason:
+            phase_line += f"  (BLOCKED: {task.blocked_reason})"
+        lines.append(f"Phase:  {phase_line}")
+        lines.append(f"Branch: {task.branch}")
+        lines.append(f"Repos:  {', '.join(task.affected_repos)}")
         if task.worktrees:
             lines.append("Worktrees:")
             for repo, path in task.worktrees.items():
