@@ -61,6 +61,7 @@ from mship.cli import init as _init_mod
 from mship.cli import doctor as _doctor_mod
 from mship.cli import skill as _skill_mod
 from mship.cli import view as _view_mod
+from mship.cli import audit as _audit_mod
 
 _status_mod.register(app, get_container)
 _phase_mod.register(app, get_container)
@@ -73,3 +74,4 @@ _init_mod.register(app, get_container)
 _doctor_mod.register(app, get_container)
 _skill_mod.register(app, get_container)
 _view_mod.register(app, get_container)
+_audit_mod.register(app, get_container)
