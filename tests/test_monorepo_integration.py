@@ -113,7 +113,7 @@ def test_monorepo_spawn_shares_worktree(monorepo_workspace):
     assert web_wt.exists()
 
 
-def test_monorepo_abort_cleans_up(monorepo_workspace):
+def test_monorepo_close_cleans_up(monorepo_workspace):
     tmp_path, mock_shell = monorepo_workspace
 
     runner.invoke(app, ["spawn", "cleanup test"])
@@ -121,7 +121,7 @@ def test_monorepo_abort_cleans_up(monorepo_workspace):
     state = mgr.load()
     root_wt = Path(state.tasks["cleanup-test"].worktrees["tailrd"])
 
-    result = runner.invoke(app, ["abort", "--yes"])
+    result = runner.invoke(app, ["close", "--yes"])
     assert result.exit_code == 0
 
     # The parent worktree is removed

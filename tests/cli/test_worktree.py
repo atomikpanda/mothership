@@ -81,14 +81,144 @@ def test_worktrees_list(configured_git_app: Path):
     assert "test-list" in result.output
 
 
-def test_abort(configured_git_app: Path):
-    runner.invoke(app, ["spawn", "to abort", "--repos", "shared"])
-    result = runner.invoke(app, ["abort", "--yes"])
-    assert result.exit_code == 0
-    mgr = StateManager(configured_git_app / ".mothership")
-    state = mgr.load()
-    assert state.current_task is None
-    assert "to-abort" not in state.tasks
+def test_close_with_no_prs_cancelled_before_finish(configured_git_app):
+    from mship.core.state import StateManager, Task, WorkspaceState
+    from datetime import datetime, timezone
+
+    sm = StateManager(configured_git_app / ".mothership")
+    state = WorkspaceState(
+        current_task="t",
+        tasks={"t": Task(
+            slug="t", description="d", phase="dev",
+            created_at=datetime.now(timezone.utc),
+            affected_repos=["shared"], branch="feat/t",
+        )},
+    )
+    sm.save(state)
+
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+    r = CliRunner()
+    result = r.invoke(_app, ["close", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert sm.load().current_task is None
+
+
+def test_close_no_active_task_errors():
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+    r = CliRunner()
+    result = r.invoke(_app, ["close", "--yes"])
+    # Either No active task, or config-not-found — both exit 1.
+    assert result.exit_code != 0
+
+
+def test_close_with_all_merged_prs(configured_git_app):
+    from mship.cli import container
+    from mship.core.state import StateManager, Task, WorkspaceState
+    from datetime import datetime, timezone
+
+    sm = StateManager(configured_git_app / ".mothership")
+    state = WorkspaceState(
+        current_task="t",
+        tasks={"t": Task(
+            slug="t", description="d", phase="review",
+            created_at=datetime.now(timezone.utc),
+            affected_repos=["shared"], branch="feat/t",
+            pr_urls={"shared": "https://github.com/o/r/pull/1"},
+            finished_at=datetime.now(timezone.utc),
+        )},
+    )
+    sm.save(state)
+
+    from unittest.mock import MagicMock
+    from mship.util.shell import ShellRunner, ShellResult
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="MERGED\n", stderr="")
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        from typer.testing import CliRunner
+        from mship.cli import app as _app
+        r = CliRunner()
+        result = r.invoke(_app, ["close", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert "completed" in result.output.lower() or "merged" in result.output.lower()
+        assert sm.load().current_task is None
+    finally:
+        container.shell.reset_override()
+
+
+def test_close_with_open_pr_refuses_without_force(configured_git_app):
+    from mship.cli import container
+    from mship.core.state import StateManager, Task, WorkspaceState
+    from datetime import datetime, timezone
+
+    sm = StateManager(configured_git_app / ".mothership")
+    state = WorkspaceState(
+        current_task="t",
+        tasks={"t": Task(
+            slug="t", description="d", phase="review",
+            created_at=datetime.now(timezone.utc),
+            affected_repos=["shared"], branch="feat/t",
+            pr_urls={"shared": "https://x/1"},
+            finished_at=datetime.now(timezone.utc),
+        )},
+    )
+    sm.save(state)
+
+    from unittest.mock import MagicMock
+    from mship.util.shell import ShellRunner, ShellResult
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="OPEN\n", stderr="")
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        from typer.testing import CliRunner
+        from mship.cli import app as _app
+        r = CliRunner()
+        result = r.invoke(_app, ["close", "--yes"])
+        assert result.exit_code != 0
+        assert "open" in result.output.lower()
+        # State unchanged
+        assert sm.load().current_task == "t"
+    finally:
+        container.shell.reset_override()
+
+
+def test_close_with_open_pr_proceeds_under_force(configured_git_app):
+    from mship.cli import container
+    from mship.core.state import StateManager, Task, WorkspaceState
+    from datetime import datetime, timezone
+
+    sm = StateManager(configured_git_app / ".mothership")
+    state = WorkspaceState(
+        current_task="t",
+        tasks={"t": Task(
+            slug="t", description="d", phase="review",
+            created_at=datetime.now(timezone.utc),
+            affected_repos=["shared"], branch="feat/t",
+            pr_urls={"shared": "https://x/1"},
+            finished_at=datetime.now(timezone.utc),
+        )},
+    )
+    sm.save(state)
+
+    from unittest.mock import MagicMock
+    from mship.util.shell import ShellRunner, ShellResult
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="OPEN\n", stderr="")
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        from typer.testing import CliRunner
+        from mship.cli import app as _app
+        r = CliRunner()
+        result = r.invoke(_app, ["close", "--yes", "--force"])
+        assert result.exit_code == 0, result.output
+        assert sm.load().current_task is None
+    finally:
+        container.shell.reset_override()
 
 
 def test_finish_handoff(configured_git_app: Path):

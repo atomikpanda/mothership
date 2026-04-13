@@ -111,35 +111,81 @@ def register(app: typer.Typer, get_container):
             output.json({"current_task": state.current_task, "tasks": data})
 
     @app.command()
-    def abort(
+    def close(
         yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
+        force: bool = typer.Option(False, "--force", "-f", help="Close even with open PRs"),
+        skip_pr_check: bool = typer.Option(False, "--skip-pr-check", help="Do not call gh; close regardless of PR state"),
     ):
-        """Discard worktrees and abandon the current task."""
+        """Close the current task: check PR state, tear down worktrees, clear state."""
         container = get_container()
         output = Output()
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
         if state.current_task is None:
-            output.error("No active task to abort. Run `mship spawn` to start one.")
+            output.error("No active task to close. Run `mship spawn` to start one.")
             raise typer.Exit(code=1)
 
         task_slug = state.current_task
+        task = state.tasks[task_slug]
+        pr_mgr = container.pr_manager()
+        log_mgr = container.log_manager()
+
+        # Determine the log message based on PR state.
+        pr_states: list[str] = []  # parallel to task.pr_urls values
+        if task.pr_urls and not skip_pr_check:
+            import shutil
+            if shutil.which("gh") is None and not force:
+                output.error(
+                    "gh CLI needed to check PR state. Install gh, or pass --skip-pr-check."
+                )
+                raise typer.Exit(code=1)
+            for url in task.pr_urls.values():
+                pr_states.append(pr_mgr.check_pr_state(url))
+
+        # Route on PR states
+        open_count = sum(1 for s in pr_states if s == "open")
+        merged_count = sum(1 for s in pr_states if s == "merged")
+        closed_count = sum(1 for s in pr_states if s == "closed")
+
+        if task.pr_urls and skip_pr_check:
+            log_msg = "closed: pr state unchecked"
+        elif not task.pr_urls:
+            if task.finished_at is not None:
+                log_msg = "closed: no PRs (pushed via --push-only)"
+            else:
+                log_msg = "closed: cancelled before finish"
+        elif open_count and not force:
+            output.error(
+                f"Task '{task_slug}' has {open_count} open PR(s). Merge or close them first, "
+                f"or pass --force to override."
+            )
+            raise typer.Exit(code=1)
+        elif open_count and force:
+            log_msg = f"closed: forced with open PRs ({open_count} open)"
+        elif merged_count and not closed_count:
+            log_msg = f"closed: completed ({merged_count} PRs merged)"
+        elif closed_count and not merged_count:
+            log_msg = "closed: cancelled on GitHub"
+        elif merged_count and closed_count:
+            log_msg = f"closed: mixed ({merged_count} merged, {closed_count} closed)"
+        else:
+            log_msg = "closed: pr state unknown"
 
         if not yes and output.is_tty:
             from InquirerPy import inquirer
-
             confirm = inquirer.confirm(
-                message=f"Abort task '{task_slug}'? This will remove all worktrees.",
+                message=f"Close task '{task_slug}'? This will remove all worktrees.",
                 default=False,
             ).execute()
             if not confirm:
-                output.print("Aborted")
+                output.print("Cancelled")
                 raise typer.Exit(code=0)
 
         wt_mgr = container.worktree_manager()
-        wt_mgr.abort(task_slug)
-        output.success(f"Aborted task: {task_slug}")
+        wt_mgr.abort(task_slug)  # core method retains the name; only CLI verb changed
+        log_mgr.append(task_slug, log_msg)
+        output.success(f"{log_msg.capitalize()}: {task_slug}")
 
     @app.command()
     def finish(

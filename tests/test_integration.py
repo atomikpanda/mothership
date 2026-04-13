@@ -1,4 +1,4 @@
-"""End-to-end smoke test: spawn → phase → test → abort."""
+"""End-to-end smoke test: spawn → phase → test → close."""
 import os
 import subprocess
 from pathlib import Path
@@ -83,8 +83,8 @@ def test_full_lifecycle(full_workspace: Path):
     assert result.exit_code == 0
     assert "shared" in result.output
 
-    # 8. Abort
-    result = runner.invoke(app, ["abort", "--yes"])
+    # 8. Close
+    result = runner.invoke(app, ["close", "--yes"])
     assert result.exit_code == 0
 
     # 9. Status shows no task
