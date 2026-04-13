@@ -213,3 +213,74 @@ def test_finish_fails_when_base_missing_on_remote(finish_workspace):
     assert result.exit_code != 0
     assert "nope" in result.output.lower() or "base" in result.output.lower()
     assert pushed == [], "no repo should be pushed when a base is missing"
+
+
+def test_finish_blocks_when_affected_repo_is_dirty(finish_workspace):
+    """Dirty affected repo blocks finish under default block_finish=true."""
+    workspace, mock_shell = finish_workspace
+
+    result = runner.invoke(app, ["spawn", "finish gate", "--repos", "shared", "--force-audit"])
+    assert result.exit_code == 0, result.output
+
+    def mock_run(cmd, cwd, env=None):
+        if "git status --porcelain" in cmd:
+            return ShellResult(returncode=0, stdout=" M foo.py\n", stderr="")
+        if "git fetch" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "symbolic-ref" in cmd:
+            return ShellResult(returncode=0, stdout="main\n", stderr="")
+        if "rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
+            return ShellResult(returncode=0, stdout="origin/main\n", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
+        if "worktree list" in cmd:
+            return ShellResult(returncode=0, stdout="worktree /tmp/shared\n", stderr="")
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    result = runner.invoke(app, ["finish"])
+    assert result.exit_code == 1
+    assert "dirty_worktree" in result.output
+
+
+def test_finish_unrelated_dirty_repo_does_not_block(finish_workspace):
+    """Drift in a repo not in task.affected_repos must not block finish."""
+    workspace, mock_shell = finish_workspace
+
+    result = runner.invoke(app, ["spawn", "unrelated test", "--repos", "shared", "--force-audit"])
+    assert result.exit_code == 0
+
+    dirty_repos = {"auth-service"}  # NOT in affected_repos
+
+    def mock_run(cmd, cwd, env=None):
+        if "git status --porcelain" in cmd and any(str(cwd).endswith(d) for d in dirty_repos):
+            return ShellResult(returncode=0, stdout=" M foo.py\n", stderr="")
+        if "git status --porcelain" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "git fetch" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "symbolic-ref" in cmd:
+            return ShellResult(returncode=0, stdout="main\n", stderr="")
+        if "rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
+            return ShellResult(returncode=0, stdout="origin/main\n", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
+        if "worktree list" in cmd:
+            return ShellResult(returncode=0, stdout="worktree /tmp/r\n", stderr="")
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "git ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc\trefs/heads/main\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://x/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    result = runner.invoke(app, ["finish"])
+    assert result.exit_code == 0, result.output

@@ -141,6 +141,7 @@ def register(app: typer.Typer, get_container):
         handoff: bool = typer.Option(False, "--handoff", help="Generate CI handoff manifest"),
         base: Optional[str] = typer.Option(None, "--base", help="Global override of PR base branch for all repos"),
         base_map: Optional[str] = typer.Option(None, "--base-map", help="Per-repo PR base overrides, e.g. 'cli=main,api=release/x'"),
+        force_audit: bool = typer.Option(False, "--force-audit", help="Bypass audit gate for this finish"),
     ):
         """Create PRs across repos in dependency order."""
         from pathlib import Path
@@ -158,6 +159,33 @@ def register(app: typer.Typer, get_container):
         graph = container.graph()
         config = container.config()
         ordered = graph.topo_sort(task.affected_repos)
+
+        # --- Audit gate ---
+        from mship.core.audit_gate import run_audit_gate, AuditGateBlocked
+        from mship.core.repo_state import audit_repos
+
+        shell = container.shell()
+        report = audit_repos(config, shell, names=task.affected_repos)
+
+        def _log_bypass(codes: list[str]) -> None:
+            container.log_manager().append(
+                task.slug, f"BYPASSED AUDIT: finish — {', '.join(codes)}"
+            )
+
+        try:
+            run_audit_gate(
+                report,
+                block=config.audit.block_finish,
+                force=force_audit,
+                command_name="finish",
+                on_bypass=_log_bypass,
+            )
+        except AuditGateBlocked as e:
+            output.error(str(e))
+            raise typer.Exit(code=1)
+
+        if report.has_errors and not config.audit.block_finish and not force_audit:
+            output.print("[yellow]warning:[/yellow] finish proceeding despite audit errors")
 
         if handoff:
             from mship.core.handoff import generate_handoff
