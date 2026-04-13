@@ -139,10 +139,14 @@ def register(app: typer.Typer, get_container):
         # Have background services — wait for them with signal forwarding
         output.success(f"Started {len(result.background_processes)} background service(s):")
         for repo_result in result.results:
-            if repo_result.background_pid is not None:
-                output.print(
-                    f"  [green]✓[/green] {repo_result.repo} → task {repo_result.task_name}  (pid {repo_result.background_pid})"
-                )
+            if repo_result.background_pid is None and repo_result.healthcheck is None:
+                continue
+            pid_part = f"(pid {repo_result.background_pid})" if repo_result.background_pid else ""
+            hc_part = f"  {repo_result.healthcheck.message}" if repo_result.healthcheck else ""
+            icon = "[green]✓[/green]" if repo_result.success else "[red]✗[/red]"
+            output.print(
+                f"  {icon} {repo_result.repo} → task {repo_result.task_name}  {pid_part}{hc_part}"
+            )
         output.print("")
         output.print("Press Ctrl-C to stop.")
 
