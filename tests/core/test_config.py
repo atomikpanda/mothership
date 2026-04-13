@@ -427,6 +427,107 @@ repos:
     assert hc.timeout == "60s"
 
 
+def _write_repo(tmp_path, name):
+    d = tmp_path / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+
+
+def test_repo_config_accepts_drift_fields(tmp_path):
+    import yaml
+    from mship.core.config import ConfigLoader
+
+    _write_repo(tmp_path, "cli")
+    cfg_path = tmp_path / "mothership.yaml"
+    cfg_path.write_text(yaml.safe_dump({
+        "workspace": "ws",
+        "repos": {
+            "cli": {
+                "path": "./cli", "type": "service",
+                "expected_branch": "main",
+                "allow_dirty": True,
+                "allow_extra_worktrees": True,
+            },
+        },
+    }))
+    cfg = ConfigLoader.load(cfg_path)
+    r = cfg.repos["cli"]
+    assert r.expected_branch == "main"
+    assert r.allow_dirty is True
+    assert r.allow_extra_worktrees is True
+
+
+def test_repo_config_drift_defaults(tmp_path):
+    import yaml
+    from mship.core.config import ConfigLoader
+
+    _write_repo(tmp_path, "cli")
+    cfg_path = tmp_path / "mothership.yaml"
+    cfg_path.write_text(yaml.safe_dump({
+        "workspace": "ws",
+        "repos": {"cli": {"path": "./cli", "type": "service"}},
+    }))
+    cfg = ConfigLoader.load(cfg_path)
+    r = cfg.repos["cli"]
+    assert r.expected_branch is None
+    assert r.allow_dirty is False
+    assert r.allow_extra_worktrees is False
+
+
+def test_audit_policy_defaults_to_blocking(tmp_path):
+    import yaml
+    from mship.core.config import ConfigLoader
+
+    _write_repo(tmp_path, "cli")
+    cfg_path = tmp_path / "mothership.yaml"
+    cfg_path.write_text(yaml.safe_dump({
+        "workspace": "ws",
+        "repos": {"cli": {"path": "./cli", "type": "service"}},
+    }))
+    cfg = ConfigLoader.load(cfg_path)
+    assert cfg.audit.block_spawn is True
+    assert cfg.audit.block_finish is True
+
+
+def test_audit_policy_opt_out(tmp_path):
+    import yaml
+    from mship.core.config import ConfigLoader
+
+    _write_repo(tmp_path, "cli")
+    cfg_path = tmp_path / "mothership.yaml"
+    cfg_path.write_text(yaml.safe_dump({
+        "workspace": "ws",
+        "audit": {"block_spawn": False, "block_finish": False},
+        "repos": {"cli": {"path": "./cli", "type": "service"}},
+    }))
+    cfg = ConfigLoader.load(cfg_path)
+    assert cfg.audit.block_spawn is False
+    assert cfg.audit.block_finish is False
+
+
+def test_expected_branch_conflict_rejected(tmp_path):
+    import yaml
+    import pytest
+    from mship.core.config import ConfigLoader
+
+    _write_repo(tmp_path, "mono")
+    _write_repo(tmp_path, "mono/pkg-a")
+    _write_repo(tmp_path, "mono/pkg-b")
+    cfg_path = tmp_path / "mothership.yaml"
+    cfg_path.write_text(yaml.safe_dump({
+        "workspace": "ws",
+        "repos": {
+            "mono": {"path": "./mono", "type": "service"},
+            "pkg_a": {"path": "pkg-a", "type": "library", "git_root": "mono",
+                       "expected_branch": "main"},
+            "pkg_b": {"path": "pkg-b", "type": "library", "git_root": "mono",
+                       "expected_branch": "develop"},
+        },
+    }))
+    with pytest.raises(ValueError, match="expected_branch"):
+        ConfigLoader.load(cfg_path)
+
+
 def test_repo_config_accepts_base_branch(tmp_path):
     import yaml
     from mship.core.config import ConfigLoader

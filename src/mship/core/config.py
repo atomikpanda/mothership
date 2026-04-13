@@ -41,6 +41,9 @@ class RepoConfig(BaseModel):
     symlink_dirs: list[str] = []
     healthcheck: Healthcheck | None = None
     base_branch: str | None = None
+    expected_branch: str | None = None
+    allow_dirty: bool = False
+    allow_extra_worktrees: bool = False
 
     @model_validator(mode="before")
     @classmethod
@@ -57,10 +60,16 @@ class RepoConfig(BaseModel):
         return data
 
 
+class AuditPolicy(BaseModel):
+    block_spawn: bool = True
+    block_finish: bool = True
+
+
 class WorkspaceConfig(BaseModel):
     workspace: str
     env_runner: str | None = None
     branch_pattern: str = "feat/{slug}"
+    audit: AuditPolicy = AuditPolicy()
     repos: dict[str, RepoConfig]
 
     @model_validator(mode="after")
@@ -116,6 +125,22 @@ class WorkspaceConfig(BaseModel):
                 raise ValueError(
                     f"Repo '{name}' git_root '{repo.git_root}' is itself a subdirectory service. "
                     f"Cannot chain git_root references."
+                )
+        return self
+
+    @model_validator(mode="after")
+    def validate_expected_branch_consistency(self) -> "WorkspaceConfig":
+        groups: dict[str, list[tuple[str, str]]] = {}
+        for name, repo in self.repos.items():
+            if repo.git_root is None or repo.expected_branch is None:
+                continue
+            groups.setdefault(repo.git_root, []).append((name, repo.expected_branch))
+        for root, members in groups.items():
+            branches = {b for _, b in members}
+            if len(branches) > 1:
+                raise ValueError(
+                    f"Repos sharing git_root={root!r} declare conflicting expected_branch values: "
+                    + ", ".join(f"{n}={b!r}" for n, b in members)
                 )
         return self
 
