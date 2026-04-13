@@ -188,9 +188,9 @@ mship finish --base-map cli=main,api=release/7  # per-repo PR base overrides
 mship finish --handoff                  # write a CI handoff manifest instead
 mship finish --force-audit              # bypass the drift audit gate (logged to task log)
 mship finish --push-only               # push branches without opening PRs
-mship close --yes                       # remove worktrees and clean up state (best-effort cleanup on git failure)
-mship close --yes --force               # skip PR-state check and close unconditionally
-mship close --yes --skip-pr-check       # alias: same as --force
+mship close --yes                       # tear down worktrees; routes log entry by PR state
+mship close --yes --force               # close even if PRs are still open (logged as forced)
+mship close --yes --skip-pr-check       # skip the gh call entirely (offline / no-gh)
 ```
 
 `mship finish` requires the `gh` CLI installed and authenticated. It creates PRs in dependency order so reviewers see a coordination block in each PR pointing to the others.
