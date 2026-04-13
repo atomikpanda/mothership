@@ -11,19 +11,59 @@ def register(app: typer.Typer, get_container):
         description: str,
         repos: Optional[str] = typer.Option(None, help="Comma-separated repo names"),
         skip_setup: bool = typer.Option(False, "--skip-setup", help="Skip running `task setup` in new worktrees"),
+        force_audit: bool = typer.Option(False, "--force-audit", help="Bypass audit gate for this spawn"),
     ):
         """Create coordinated worktrees across repos for a new task."""
+        from mship.core.audit_gate import run_audit_gate, AuditGateBlocked
+        from mship.core.repo_state import audit_repos
+
         container = get_container()
         output = Output()
         wt_mgr = container.worktree_manager()
+        config = container.config()
+        shell = container.shell()
 
         repo_list = repos.split(",") if repos else None
+        audit_names = repo_list if repo_list else list(config.repos.keys())
+
+        report = audit_repos(config, shell, names=audit_names)
+
+        pending_bypass: list[list[str]] = []
+
+        def _log_bypass(codes: list[str]) -> None:
+            pending_bypass.append(codes)
+
+        try:
+            run_audit_gate(
+                report,
+                block=config.audit.block_spawn,
+                force=force_audit,
+                command_name="spawn",
+                on_bypass=_log_bypass,
+            )
+        except AuditGateBlocked as e:
+            output.error(str(e))
+            raise typer.Exit(code=1)
+
+        if report.has_errors and not config.audit.block_spawn and not force_audit:
+            error_summary = ", ".join(
+                f"{r.name}:{i.code}"
+                for r in report.repos
+                for i in r.issues
+                if i.severity == "error"
+            )
+            output.print(f"[yellow]warning:[/yellow] spawn proceeding despite audit errors ({error_summary})")
 
         if output.is_tty and not skip_setup:
             output.print("[dim]Running setup in each worktree (use --skip-setup to skip)...[/dim]")
 
         result = wt_mgr.spawn(description, repos=repo_list, skip_setup=skip_setup)
         task = result.task
+
+        if pending_bypass:
+            log_mgr = container.log_manager()
+            for codes in pending_bypass:
+                log_mgr.append(task.slug, f"BYPASSED AUDIT: spawn — {', '.join(codes)}")
 
         if output.is_tty:
             output.success(f"Spawned task: {task.slug}")

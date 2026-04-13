@@ -20,7 +20,23 @@ def full_workspace(workspace_with_git: Path):
     container.config_path.override(workspace_with_git / "mothership.yaml")
     container.state_dir.override(state_dir)
 
+    def _audit_ok_run(cmd, cwd, env=None):
+        if "symbolic-ref" in cmd:
+            return ShellResult(returncode=0, stdout="main\n", stderr="")
+        if "fetch" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
+            return ShellResult(returncode=0, stdout="origin/main\n", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
+        if "status --porcelain" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "worktree list" in cmd:
+            return ShellResult(returncode=0, stdout="worktree /tmp/fake\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
     mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = _audit_ok_run
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok\n", stderr="")
     container.shell.override(mock_shell)
 
