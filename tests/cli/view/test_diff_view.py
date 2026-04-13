@@ -1,57 +1,143 @@
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from mship.cli.view.diff import DiffView
+from mship.core.view.diff_sources import FileDiff, WorktreeDiff
 
 
-def _init_repo(path: Path, seed: str = "seed\n") -> None:
-    path.mkdir(parents=True, exist_ok=True)
-    for args in (
-        ["init", "-q", "-b", "main"],
-        ["config", "user.email", "t@t"],
-        ["config", "user.name", "t"],
-    ):
-        subprocess.run(["git", *args], cwd=path, check=True, capture_output=True)
-    (path / "seed.txt").write_text(seed)
-    subprocess.run(["git", "add", "."], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-qm", "seed"], cwd=path, check=True, capture_output=True)
+def _fd(path: str, body: str = "", additions: int = 1, deletions: int = 0) -> FileDiff:
+    return FileDiff(path=path, additions=additions, deletions=deletions, body=body)
 
 
-@pytest.mark.asyncio
-async def test_diff_view_shows_untracked_and_modified(tmp_path: Path):
-    _init_repo(tmp_path)
-    (tmp_path / "seed.txt").write_text("seed\nmore\n")
-    (tmp_path / "new.py").write_text("print('hi')\n")
+def _wd(root: Path, files: list[FileDiff]) -> WorktreeDiff:
+    return WorktreeDiff(root=root, files=tuple(files))
 
-    view = DiffView(worktree_paths=[tmp_path], watch=False, interval=1.0)
-    async with view.run_test() as pilot:
-        await pilot.pause()
-        text = view.rendered_text()
-        assert "+more" in text
-        assert "+print('hi')" in text
+
+def _seed(view: DiffView, mapping: dict[Path, list[FileDiff]]) -> None:
+    """Inject fake worktree diffs so tests don't shell out to git."""
+    view._test_override = {p: _wd(p, files) for p, files in mapping.items()}
 
 
 @pytest.mark.asyncio
-async def test_diff_view_clean_worktree_shows_clean_marker(tmp_path: Path):
-    _init_repo(tmp_path)
-    view = DiffView(worktree_paths=[tmp_path], watch=False, interval=1.0)
+async def test_tree_populated_from_worktrees(tmp_path):
+    wa = tmp_path / "a"
+    wb = tmp_path / "b"
+    view = DiffView(worktree_paths=[wa, wb], use_delta=False, watch=False, interval=1.0)
+    _seed(view, {
+        wa: [_fd("a.py", "diff --git a/a.py b/a.py\n+++ b/a.py\n+x\n"),
+              _fd("b.py", "diff --git a/b.py b/b.py\n+++ b/b.py\n+y\n")],
+        wb: [_fd("c.py", "diff --git a/c.py b/c.py\n+++ b/c.py\n+z\n")],
+    })
     async with view.run_test() as pilot:
         await pilot.pause()
-        assert "clean" in view.rendered_text().lower()
+        labels = view.tree_labels()
+        assert any(str(wa) in l for l in labels)
+        assert any(str(wb) in l for l in labels)
+        assert any("a.py" in l for l in labels)
+        assert any("c.py" in l for l in labels)
 
 
 @pytest.mark.asyncio
-async def test_diff_view_multiple_worktrees_show_headers(tmp_path: Path):
-    a = tmp_path / "a"
-    b = tmp_path / "b"
-    _init_repo(a)
-    _init_repo(b)
-    (a / "x.txt").write_text("x")
-    view = DiffView(worktree_paths=[a, b], watch=False, interval=1.0)
+async def test_first_file_selected_on_mount(tmp_path):
+    wa = tmp_path / "a"
+    view = DiffView(worktree_paths=[wa], use_delta=False, watch=False, interval=1.0)
+    _seed(view, {wa: [_fd("first.py", "diff --git a/first.py b/first.py\n+++ b/first.py\n+one\n")]})
     async with view.run_test() as pilot:
         await pilot.pause()
-        text = view.rendered_text()
-        assert str(a) in text
-        assert str(b) in text
+        assert "one" in view.diff_text()
+
+
+@pytest.mark.asyncio
+async def test_large_worktree_starts_collapsed(tmp_path):
+    wa = tmp_path / "a"
+    wb = tmp_path / "b"
+    view = DiffView(worktree_paths=[wa, wb], use_delta=False, watch=False, interval=1.0)
+    many = [_fd(f"f{i}.py", f"diff --git a/f{i}.py b/f{i}.py\n+++ b/f{i}.py\n+x\n") for i in range(25)]
+    few = [_fd("only.py", "diff --git a/only.py b/only.py\n+++ b/only.py\n+x\n")]
+    _seed(view, {wa: many, wb: few})
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        assert view.is_worktree_collapsed(wa) is True
+        assert view.is_worktree_collapsed(wb) is False
+
+
+@pytest.mark.asyncio
+async def test_lockfile_collapsed_by_default(tmp_path):
+    wa = tmp_path / "a"
+    view = DiffView(worktree_paths=[wa], use_delta=False, watch=False, interval=1.0)
+    lock_body = ("diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml\n"
+                 "+++ b/pnpm-lock.yaml\n"
+                 "+noisy noisy noisy\n")
+    _seed(view, {wa: [_fd("pnpm-lock.yaml", lock_body, additions=1)]})
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        assert "collapsed" in view.diff_text()
+        assert "noisy noisy noisy" not in view.diff_text()
+        await pilot.press("e")
+        await pilot.pause()
+        assert "noisy noisy noisy" in view.diff_text()
+        await pilot.press("e")
+        await pilot.pause()
+        assert "noisy noisy noisy" not in view.diff_text()
+
+
+@pytest.mark.asyncio
+async def test_selection_change_resets_scroll(tmp_path):
+    wa = tmp_path / "a"
+    view = DiffView(worktree_paths=[wa], use_delta=False, watch=False, interval=1.0)
+    long_body = "diff --git a/big.py b/big.py\n+++ b/big.py\n" + "".join(
+        f"+line {i}\n" for i in range(200)
+    )
+    _seed(view, {
+        wa: [
+            _fd("big.py", long_body, additions=200),
+            _fd("small.py", "diff --git a/small.py b/small.py\n+++ b/small.py\n+one\n"),
+        ],
+    })
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        # big.py is selected first; scroll the diff pane down
+        view.scroll_diff_to(20)
+        assert view.diff_scroll_y() > 0
+        view.select_file(wa, "small.py")
+        await pilot.pause()
+        assert view.diff_scroll_y() == 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_preserves_selection_when_possible(tmp_path):
+    wa = tmp_path / "a"
+    view = DiffView(worktree_paths=[wa], use_delta=False, watch=False, interval=0.05)
+    _seed(view, {
+        wa: [
+            _fd("a.py", "diff --git a/a.py b/a.py\n+++ b/a.py\n+one\n"),
+            _fd("b.py", "diff --git a/b.py b/b.py\n+++ b/b.py\n+two\n"),
+        ],
+    })
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        view.select_file(wa, "b.py")
+        await pilot.pause()
+        assert "two" in view.diff_text()
+        # Same files present on refresh — selection preserved.
+        view._refresh_content()
+        await pilot.pause()
+        assert "two" in view.diff_text()
+        # b.py removed — falls back to first available.
+        _seed(view, {wa: [_fd("a.py", "diff --git a/a.py b/a.py\n+++ b/a.py\n+one\n")]})
+        view._refresh_content()
+        await pilot.pause()
+        assert "one" in view.diff_text()
+
+
+@pytest.mark.asyncio
+async def test_empty_tree_shows_no_changes(tmp_path):
+    wa = tmp_path / "a"
+    view = DiffView(worktree_paths=[wa], use_delta=False, watch=False, interval=1.0)
+    _seed(view, {wa: []})
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        assert "No changes" in view.diff_text()
