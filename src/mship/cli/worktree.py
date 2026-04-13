@@ -99,6 +99,8 @@ def register(app: typer.Typer, get_container):
     @app.command()
     def finish(
         handoff: bool = typer.Option(False, "--handoff", help="Generate CI handoff manifest"),
+        base: Optional[str] = typer.Option(None, "--base", help="Global override of PR base branch for all repos"),
+        base_map: Optional[str] = typer.Option(None, "--base-map", help="Per-repo PR base overrides, e.g. 'cli=main,api=release/x'"),
     ):
         """Create PRs across repos in dependency order."""
         from pathlib import Path
@@ -149,6 +151,56 @@ def register(app: typer.Typer, get_container):
             output.error(str(e))
             raise typer.Exit(code=1)
 
+        # --- Resolve + verify PR base branches up front ---
+        from mship.core.base_resolver import (
+            parse_base_map,
+            resolve_base,
+            InvalidBaseMapError,
+            UnknownRepoInBaseMapError,
+        )
+
+        try:
+            parsed_map = parse_base_map(base_map or "")
+        except InvalidBaseMapError as e:
+            output.error(str(e))
+            raise typer.Exit(code=1)
+
+        try:
+            effective_bases = {
+                repo_name: resolve_base(
+                    repo_name,
+                    config.repos[repo_name],
+                    cli_base=base,
+                    base_map=parsed_map,
+                    known_repos=config.repos.keys(),
+                )
+                for repo_name in ordered
+            }
+        except UnknownRepoInBaseMapError as e:
+            output.error(str(e))
+            raise typer.Exit(code=1)
+
+        missing: list[tuple[str, str]] = []
+        for repo_name, eff_base in effective_bases.items():
+            if eff_base is None:
+                continue
+            if repo_name in task.pr_urls:
+                continue  # skip repos already done
+            repo_path = config.repos[repo_name].path
+            if repo_name in task.worktrees:
+                from pathlib import Path as _P
+                wt = _P(task.worktrees[repo_name])
+                if wt.exists():
+                    repo_path = wt
+            if not pr_mgr.verify_base_exists(repo_path, eff_base):
+                missing.append((repo_name, eff_base))
+
+        if missing:
+            output.error("Base branch not found on remote:")
+            for repo_name, eff_base in missing:
+                output.error(f"  {repo_name}: {eff_base}")
+            raise typer.Exit(code=1)
+
         pr_list: list[dict] = []
 
         for i, repo_name in enumerate(ordered, 1):
@@ -186,6 +238,7 @@ def register(app: typer.Typer, get_container):
                     branch=task.branch,
                     title=task.description,
                     body=task.description,
+                    base=effective_bases[repo_name],
                 )
             except RuntimeError as e:
                 output.error(f"{repo_name}: {e}")
@@ -197,8 +250,10 @@ def register(app: typer.Typer, get_container):
 
             pr_list.append({"repo": repo_name, "url": pr_url, "order": i})
 
+            base_label = effective_bases[repo_name] or "(default)"
             if output.is_tty:
-                output.success(f"  {repo_name}: {pr_url}")
+                output.print(f"  {repo_name}: {task.branch} → {base_label}  ✓ {pr_url}")
+            pr_list[-1]["base"] = effective_bases[repo_name]
 
         # Update PRs with coordination blocks (multi-repo only)
         if len(pr_list) > 1:

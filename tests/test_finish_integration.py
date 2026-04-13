@@ -137,3 +137,79 @@ def test_finish_idempotent_rerun(finish_workspace):
     # No gh pr create on second run
     create_calls = [c for c in call_log if "gh pr create" in c]
     assert len(create_calls) == 0
+
+
+def test_finish_passes_base_from_config(finish_workspace, tmp_path):
+    """Config base_branch flows into gh pr create --base."""
+    import yaml
+
+    workspace, mock_shell = finish_workspace
+
+    # Rewrite config to set base_branch on `shared`
+    cfg_path = workspace / "mothership.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["repos"]["shared"]["base_branch"] = "release/7"
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    container.config.reset()
+
+    result = runner.invoke(app, ["spawn", "base test", "--repos", "shared"])
+    assert result.exit_code == 0, result.output
+
+    call_log: list[str] = []
+
+    def mock_run(cmd, cwd, env=None):
+        call_log.append(cmd)
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "git ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc\trefs/heads/release/7\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://github.com/org/shared/pull/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    result = runner.invoke(app, ["finish"])
+    assert result.exit_code == 0, result.output
+
+    create_calls = [c for c in call_log if "gh pr create" in c]
+    assert len(create_calls) == 1
+    assert "--base" in create_calls[0]
+    assert "release/7" in create_calls[0]
+
+
+def test_finish_fails_when_base_missing_on_remote(finish_workspace):
+    import yaml
+
+    workspace, mock_shell = finish_workspace
+    cfg_path = workspace / "mothership.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["repos"]["shared"]["base_branch"] = "nope"
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    container.config.reset()
+
+    result = runner.invoke(app, ["spawn", "missing base", "--repos", "shared"])
+    assert result.exit_code == 0, result.output
+
+    pushed: list[str] = []
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "git ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")  # empty → missing
+        if "git push" in cmd:
+            pushed.append(cmd)
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://x/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    result = runner.invoke(app, ["finish"])
+    assert result.exit_code != 0
+    assert "nope" in result.output.lower() or "base" in result.output.lower()
+    assert pushed == [], "no repo should be pushed when a base is missing"
