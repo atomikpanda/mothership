@@ -137,6 +137,37 @@ If a service has a `healthcheck` that fails (e.g., Docker not running so the TCP
 mship logs api                          # streams `task logs` for a specific service
 ```
 
+### Live views (for tmux/zellij panes)
+
+Read-only TUIs designed to be composed into multiplexer layouts. All support `--watch` + `--interval N`, alt-screen, `j/k` scroll with no-yank auto-follow, `q` to quit.
+
+```bash
+mship view status [--watch]             # current task, phase, worktrees, tests
+mship view logs [task-slug] [--watch]   # tail of the task log
+mship view diff [--watch]               # per-worktree git diff; untracked files inline
+mship view spec [name] [--watch]        # newest spec in docs/superpowers/specs/
+mship view spec --web                   # serves rendered HTML on localhost
+```
+
+### Drift audit & sync
+
+`mship audit` and `mship sync` cover git-state drift — complementary to `mship doctor` (which covers tool/config health).
+
+```bash
+mship audit                             # reports drift; exit 1 on any error-severity issue
+mship audit --repos cli,api             # scope the check
+mship audit --json                      # machine-readable output
+
+mship sync                              # fast-forwards clean behind-only repos; skips the rest
+mship sync --repos cli,api              # scope the sync
+```
+
+**Issue codes** (errors unless noted): `path_missing`, `not_a_git_repo`, `fetch_failed`, `detached_head`, `unexpected_branch`, `dirty_worktree`, `no_upstream`, `behind_remote`, `diverged`, `extra_worktrees`; `ahead_remote` (info).
+
+**Automatic gating.** `mship spawn` and `mship finish` run `audit` scoped to the affected repos. By default, any error blocks the command. Override per-command with `--force-audit` (writes a `BYPASSED AUDIT` line to the task log). Opt out at the workspace level by setting `audit: {block_spawn: false, block_finish: false}` in `mothership.yaml`.
+
+**`mship sync` is strictly safe.** It only ever runs `git fetch --prune` + `git pull --ff-only`. It refuses to switch branches, reset, or touch dirty trees — if a repo isn't cleanly behind the expected branch, it's skipped with a reason.
+
 ### Blocked state
 
 ```bash
@@ -152,11 +183,16 @@ mship phase review                      # transition (warns if tests haven't pas
 mship test                              # confirm everything passes
 mship phase run                         # optional: deploy phase
 mship finish                            # creates coordinated PRs across repos in dependency order
+mship finish --base main                # global override of PR base branch
+mship finish --base-map cli=main,api=release/7  # per-repo PR base overrides
 mship finish --handoff                  # write a CI handoff manifest instead
+mship finish --force-audit              # bypass the drift audit gate (logged to task log)
 mship abort --yes                       # remove worktrees and clean up state (best-effort cleanup on git failure)
 ```
 
 `mship finish` requires the `gh` CLI installed and authenticated. It creates PRs in dependency order so reviewers see a coordination block in each PR pointing to the others.
+
+PR base branches come from (most-specific wins): `--base-map` entry > `--base` flag > `repo.base_branch` in config > gh default. Every resolved base is verified to exist on origin before any push; missing bases fail fast with no partial state.
 
 After PRs are merged externally, `mship abort --yes` cleans up the local worktrees.
 
@@ -264,6 +300,28 @@ repos:
     symlink_dirs: [node_modules]   # symlink from source so spawn doesn't reinstall
 ```
 
+### Drift policy (per repo)
+
+```yaml
+repos:
+  schemas:
+    path: ../schemas
+    expected_branch: marshal-refactor    # optional; enables unexpected_branch check
+    allow_dirty: false                   # default
+    allow_extra_worktrees: false         # default
+    base_branch: main                    # optional; default PR base for finish
+```
+
+### Workspace-level audit policy
+
+```yaml
+audit:
+  block_spawn: true     # default true — audit errors block mship spawn
+  block_finish: true    # default true — audit errors block mship finish
+```
+
+Set either to `false` to let the command proceed with a warning instead.
+
 ### Filter by tag
 
 ```yaml
@@ -286,6 +344,7 @@ Then `mship test --tag mobile` runs both.
 - **Don't run `mship finish` with failing tests** — run `mship test` first.
 - **Don't manually edit `.mothership/state.yaml`** — use the CLI commands instead.
 - **Don't assume `mship` knows what's running outside of it** — if you started services manually, mothership won't track them. Use `mship run` or accept that `mship status` won't reflect them.
+- **Don't `--force-audit` without reading the drift** — the gate is there to stop you from starting work on a dirty/wrong-branch repo. If you bypass, know why; the task log records the bypass.
 
 ## Integration with Other Tools
 
