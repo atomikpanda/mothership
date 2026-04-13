@@ -40,6 +40,7 @@ class RepoConfig(BaseModel):
     start_mode: Literal["foreground", "background"] = "foreground"
     symlink_dirs: list[str] = []
     healthcheck: Healthcheck | None = None
+    base_branch: str | None = None
 
     @model_validator(mode="before")
     @classmethod

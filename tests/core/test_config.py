@@ -425,3 +425,27 @@ repos:
     hc = config.repos["shared"].healthcheck
     assert hc.task == "wait-for-db"
     assert hc.timeout == "60s"
+
+
+def test_repo_config_accepts_base_branch(tmp_path):
+    import yaml
+    from mship.core.config import ConfigLoader
+
+    cli_dir = tmp_path / "cli"
+    cli_dir.mkdir()
+    (cli_dir / "Taskfile.yml").write_text("version: '3'")
+    api_dir = tmp_path / "api"
+    api_dir.mkdir()
+    (api_dir / "Taskfile.yml").write_text("version: '3'")
+
+    cfg_path = tmp_path / "mothership.yaml"
+    cfg_path.write_text(yaml.safe_dump({
+        "workspace": "ws",
+        "repos": {
+            "cli": {"path": "./cli", "type": "service", "base_branch": "main"},
+            "api": {"path": "./api", "type": "service"},
+        },
+    }))
+    cfg = ConfigLoader.load(cfg_path)
+    assert cfg.repos["cli"].base_branch == "main"
+    assert cfg.repos["api"].base_branch is None
