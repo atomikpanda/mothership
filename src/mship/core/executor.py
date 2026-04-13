@@ -5,6 +5,7 @@ from pathlib import Path
 
 from mship.core.config import WorkspaceConfig, Dependency
 from mship.core.graph import DependencyGraph
+from mship.core.healthcheck import HealthcheckResult
 from mship.core.state import StateManager, TestResult
 from mship.util.shell import ShellRunner, ShellResult
 
@@ -16,10 +17,17 @@ class RepoResult:
     shell_result: ShellResult
     skipped: bool = False
     background_pid: int | None = None
+    healthcheck: HealthcheckResult | None = None
 
     @property
     def success(self) -> bool:
-        return self.shell_result.returncode == 0 if not self.skipped else True
+        if self.skipped:
+            return True
+        if self.shell_result.returncode != 0:
+            return False
+        if self.healthcheck is not None and not self.healthcheck.ready:
+            return False
+        return True
 
 
 @dataclass
@@ -41,11 +49,13 @@ class RepoExecutor:
         graph: DependencyGraph,
         state_manager: StateManager,
         shell: ShellRunner,
+        healthcheck,  # HealthcheckRunner
     ) -> None:
         self._config = config
         self._graph = graph
         self._state_manager = state_manager
         self._shell = shell
+        self._healthcheck = healthcheck
 
     def resolve_task_name(self, repo_name: str, canonical: str) -> str:
         repo = self._config.repos[repo_name]
@@ -189,6 +199,29 @@ class RepoExecutor:
             tier_results.sort(key=lambda r: r.repo)
             result.results.extend(tier_results)
             result.background_processes.extend(tier_backgrounds)
+
+            # Run healthchecks for this tier (only for `run` canonical task)
+            if canonical_task == "run":
+                for repo_result in tier_results:
+                    repo_config = self._config.repos[repo_result.repo]
+                    if repo_config.healthcheck is None:
+                        continue
+                    if not repo_result.success:
+                        # Task launch failed — skip healthcheck
+                        continue
+                    cwd = self._resolve_cwd(repo_result.repo, task_slug)
+                    env_runner = self.resolve_env_runner(repo_result.repo)
+                    hc_result = self._healthcheck.wait(
+                        repo_config.healthcheck, cwd, env_runner
+                    )
+                    repo_result.healthcheck = hc_result
+                    if not hc_result.ready:
+                        # Overwrite shell_result to surface failure message
+                        repo_result.shell_result = ShellResult(
+                            returncode=1,
+                            stdout=repo_result.shell_result.stdout,
+                            stderr=hc_result.message,
+                        )
 
             # Batch-save test results for this tier
             if task_slug and canonical_task == "test":

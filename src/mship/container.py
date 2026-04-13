@@ -2,6 +2,7 @@ from dependency_injector import containers, providers
 
 from mship.core.config import ConfigLoader, WorkspaceConfig
 from mship.core.executor import RepoExecutor
+from mship.core.healthcheck import HealthcheckRunner
 from mship.core.graph import DependencyGraph
 from mship.core.log import LogManager
 from mship.core.phase import PhaseManager
@@ -31,6 +32,11 @@ class Container(containers.DeclarativeContainer):
 
     shell = providers.Singleton(ShellRunner)
 
+    healthcheck_runner = providers.Singleton(
+        HealthcheckRunner,
+        shell=shell,
+    )
+
     graph = providers.Factory(
         DependencyGraph,
         config=config,
@@ -42,6 +48,7 @@ class Container(containers.DeclarativeContainer):
         graph=graph,
         state_manager=state_manager,
         shell=shell,
+        healthcheck=healthcheck_runner,
     )
 
     log_manager = providers.Singleton(
