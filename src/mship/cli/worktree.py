@@ -188,8 +188,7 @@ def register(app: typer.Typer, get_container):
                 continue  # skip repos already done
             repo_path = config.repos[repo_name].path
             if repo_name in task.worktrees:
-                from pathlib import Path as _P
-                wt = _P(task.worktrees[repo_name])
+                wt = Path(task.worktrees[repo_name])
                 if wt.exists():
                     repo_path = wt
             if not pr_mgr.verify_base_exists(repo_path, eff_base):
@@ -212,6 +211,7 @@ def register(app: typer.Typer, get_container):
                     "repo": repo_name,
                     "url": task.pr_urls[repo_name],
                     "order": i,
+                    "base": effective_bases.get(repo_name),
                 })
                 continue
 
