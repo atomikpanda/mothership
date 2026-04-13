@@ -1,5 +1,6 @@
 import os
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -92,3 +93,61 @@ def audit_workspace(tmp_path: Path) -> Path:
         "  api:\n    path: ./api\n    type: service\n"
     )
     return tmp_path
+
+
+def _sh_switch(*args, cwd, env=None):
+    """Shell helper for switch_workspace fixture (sets git author env vars)."""
+    e = {**os.environ,
+         "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    if env is not None:
+        e.update(env)
+    subprocess.run(list(args), cwd=cwd, check=True, capture_output=True, env=e)
+
+
+@pytest.fixture
+def switch_workspace(audit_workspace, tmp_path):
+    """Extend audit_workspace so 'cli' depends on 'shared'. Both have worktrees for task 't'.
+
+    audit_workspace layout:
+        tmp_path/cli/   -- git clone (becomes 'shared' repo in config)
+        tmp_path/api/   -- git clone (becomes 'cli' repo in config)
+
+    Config: shared -> ./cli (library), cli -> ./api (service, depends_on shared)
+    """
+    from mship.core.state import StateManager, Task, WorkspaceState
+
+    # Rewrite config: shared uses ./cli dir, cli uses ./api dir
+    cfg_path = audit_workspace / "mothership.yaml"
+    cfg_path.write_text(yaml.safe_dump({
+        "workspace": "switch-test",
+        "repos": {
+            "shared": {"path": "./cli", "type": "library"},
+            "cli":    {"path": "./api", "type": "service", "depends_on": ["shared"]},
+        },
+    }))
+
+    # Create a worktree per repo
+    shared_wt = audit_workspace / "shared-wt"
+    cli_wt = audit_workspace / "cli-wt"
+    _sh_switch("git", "worktree", "add", str(shared_wt), "-b", "feat/t",
+               cwd=audit_workspace / "cli")
+    _sh_switch("git", "worktree", "add", str(cli_wt), "-b", "feat/t",
+               cwd=audit_workspace / "api")
+
+    # Seed state
+    state_dir = audit_workspace / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    sm = StateManager(state_dir)
+    state = WorkspaceState(
+        current_task="t",
+        tasks={"t": Task(
+            slug="t", description="d", phase="dev",
+            created_at=datetime.now(timezone.utc),
+            affected_repos=["shared", "cli"], branch="feat/t",
+            worktrees={"shared": shared_wt, "cli": cli_wt},
+        )},
+    )
+    sm.save(state)
+
+    return audit_workspace, shared_wt, cli_wt, sm

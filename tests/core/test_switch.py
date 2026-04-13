@@ -7,7 +7,7 @@ import pytest
 
 from mship.core.config import ConfigLoader
 from mship.core.log import LogManager
-from mship.core.state import StateManager, Task, WorkspaceState
+from mship.core.state import StateManager
 from mship.core.switch import build_handoff, DepChange, Handoff
 from mship.util.shell import ShellRunner
 
@@ -27,53 +27,6 @@ def _head_sha(path: Path) -> str:
     )
     return r.stdout.strip()
 
-
-@pytest.fixture
-def switch_workspace(audit_workspace, tmp_path):
-    """Extend audit_workspace so 'cli' depends on 'shared'. Both have worktrees for task 't'.
-
-    audit_workspace layout:
-        tmp_path/cli/   -- git clone (becomes 'shared' repo in config)
-        tmp_path/api/   -- git clone (becomes 'cli' repo in config)
-
-    Config: shared -> ./cli (library), cli -> ./api (service, depends_on shared)
-    """
-    import yaml
-
-    # Rewrite config: shared uses ./cli dir, cli uses ./api dir
-    cfg_path = audit_workspace / "mothership.yaml"
-    cfg_path.write_text(yaml.safe_dump({
-        "workspace": "switch-test",
-        "repos": {
-            "shared": {"path": "./cli", "type": "library"},
-            "cli":    {"path": "./api", "type": "service", "depends_on": ["shared"]},
-        },
-    }))
-
-    # Create a worktree per repo
-    shared_wt = audit_workspace / "shared-wt"
-    cli_wt = audit_workspace / "cli-wt"
-    _sh("git", "worktree", "add", str(shared_wt), "-b", "feat/t",
-        cwd=audit_workspace / "cli")
-    _sh("git", "worktree", "add", str(cli_wt), "-b", "feat/t",
-        cwd=audit_workspace / "api")
-
-    # Seed state
-    state_dir = audit_workspace / ".mothership"
-    state_dir.mkdir(exist_ok=True)
-    sm = StateManager(state_dir)
-    state = WorkspaceState(
-        current_task="t",
-        tasks={"t": Task(
-            slug="t", description="d", phase="dev",
-            created_at=datetime.now(timezone.utc),
-            affected_repos=["shared", "cli"], branch="feat/t",
-            worktrees={"shared": shared_wt, "cli": cli_wt},
-        )},
-    )
-    sm.save(state)
-
-    return audit_workspace, shared_wt, cli_wt, sm
 
 
 def test_handoff_first_switch_uses_merge_base_fallback(switch_workspace):
