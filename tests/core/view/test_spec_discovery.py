@@ -45,6 +45,11 @@ def test_find_by_absolute_path(tmp_path: Path):
     assert result == f
 
 
+def test_absolute_path_missing_raises(tmp_path: Path):
+    with pytest.raises(SpecNotFoundError):
+        find_spec(workspace_root=tmp_path, name_or_path=str(tmp_path / "nope.md"))
+
+
 def test_empty_specs_dir_raises(tmp_path: Path):
     (tmp_path / "docs" / "superpowers" / "specs").mkdir(parents=True)
     with pytest.raises(SpecNotFoundError):

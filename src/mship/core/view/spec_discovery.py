@@ -14,8 +14,10 @@ def find_spec(workspace_root: Path, name_or_path: str | None) -> Path:
         return _newest(workspace_root / SPEC_SUBDIR)
 
     candidate = Path(name_or_path)
-    if candidate.is_absolute() and candidate.is_file():
-        return candidate
+    if candidate.is_absolute():
+        if candidate.is_file():
+            return candidate
+        raise SpecNotFoundError(f"Spec not found: {name_or_path}")
 
     specs_dir = workspace_root / SPEC_SUBDIR
     for name in (name_or_path, f"{name_or_path}.md"):
