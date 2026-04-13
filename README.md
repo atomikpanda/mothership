@@ -190,6 +190,37 @@ Overrides (most-specific wins):
 
 `mship finish` verifies every resolved base exists on `origin` before any push. Repos with no configured or overridden base use the remote default branch.
 
+### Drift audit & sync
+
+`mship audit` reports git-state drift across all repos; `mship sync` fast-forwards the clean-behind ones. Both integrate as opt-out gates on `mship spawn` and `mship finish`.
+
+**Per-repo config:**
+
+```yaml
+repos:
+  schemas:
+    path: ../schemas
+    expected_branch: marshal-refactor   # optional
+    allow_dirty: false                  # default
+    allow_extra_worktrees: false        # default
+```
+
+**Workspace policy (defaults shown):**
+
+```yaml
+audit:
+  block_spawn: true
+  block_finish: true
+```
+
+**Commands:**
+
+- `mship audit [--repos r1,r2] [--json]` — exit 1 on any error-severity drift.
+- `mship sync [--repos r1,r2]` — fast-forwards behind-only clean repos; skips the rest with a reason.
+- `mship spawn --force-audit` / `mship finish --force-audit` — bypass with a line logged to the task log.
+
+**Issue codes:** `path_missing`, `not_a_git_repo`, `fetch_failed`, `detached_head`, `unexpected_branch`, `dirty_worktree`, `no_upstream`, `behind_remote`, `diverged`, `extra_worktrees` (errors); `ahead_remote` (info-only).
+
 ### Live views
 
 `mship view` provides read-only TUIs designed for tmux/zellij panes. All views support `--watch` and `--interval N`.
