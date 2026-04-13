@@ -60,6 +60,8 @@ def register(app: typer.Typer, get_container):
                 output.print(
                     f"[yellow]⚠ Finished:[/yellow] {format_relative(task.finished_at)} — run `mship close` after merge"
                 )
+            if task.active_repo is not None:
+                output.print(f"[bold]Active repo:[/bold] {task.active_repo}")
             phase_str = task.phase
             if task.phase_entered_at is not None:
                 rel = format_relative(task.phase_entered_at)
@@ -94,6 +96,7 @@ def register(app: typer.Typer, get_container):
                 output.print(f"[bold]Last log:[/bold] \"{last_log['message']}\" ({ts_rel})")
         else:
             data = task.model_dump(mode="json")
+            data["active_repo"] = task.active_repo
             if task.blocked_reason:
                 data["phase_display"] = f"{task.phase} (BLOCKED: {task.blocked_reason})"
             if task.finished_at is not None:

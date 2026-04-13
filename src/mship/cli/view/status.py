@@ -21,6 +21,8 @@ class StatusView(ViewApp):
             lines.append(
                 f"⚠ Finished: {format_relative(task.finished_at)} — run `mship close` after merge"
             )
+        if getattr(task, "active_repo", None) is not None:
+            lines.append(f"Active repo: {task.active_repo}")
         phase_line = task.phase
         if task.phase_entered_at is not None:
             phase_line = f"{task.phase} (entered {format_relative(task.phase_entered_at)})"

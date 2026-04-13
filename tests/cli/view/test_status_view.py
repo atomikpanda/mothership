@@ -85,3 +85,37 @@ async def test_status_view_shows_finished_warning():
         text = view.rendered_text()
         assert "Finished" in text or "finished" in text
         assert "mship close" in text
+
+
+@pytest.mark.asyncio
+async def test_status_view_shows_active_repo():
+    from datetime import datetime, timezone
+
+    class _Task:
+        slug = "t"
+        phase = "dev"
+        phase_entered_at = datetime.now(timezone.utc)
+        blocked_reason = None
+        blocked_at = None
+        branch = "feat/t"
+        affected_repos = ["a", "b"]
+        worktrees = {}
+        test_results = {}
+        pr_urls = {}
+        finished_at = None
+        active_repo = "a"
+
+    class _State:
+        current_task = "t"
+        tasks = {"t": _Task()}
+
+    class _Mgr:
+        def load(self):
+            return _State()
+
+    view = StatusView(state_manager=_Mgr(), watch=False, interval=1.0)
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        text = view.rendered_text()
+        assert "Active repo" in text
+        assert "a" in text

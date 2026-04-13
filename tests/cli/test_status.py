@@ -137,3 +137,31 @@ def test_status_shows_finished_warning(workspace_with_git):
         container.state_dir.reset_override()
         container.config.reset()
         container.state_manager.reset()
+
+
+def test_status_shows_active_repo(workspace_with_git):
+    task = Task(
+        slug="t", description="d", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        phase_entered_at=datetime.now(timezone.utc),
+        affected_repos=["shared", "auth-service"], branch="feat/t",
+        active_repo="shared",
+    )
+    _seed(workspace_with_git, task)
+    container.config_path.override(workspace_with_git / "mothership.yaml")
+    container.state_dir.override(workspace_with_git / ".mothership")
+    try:
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0, result.output
+        import json as _j
+        try:
+            payload = _j.loads(result.output)
+            assert payload["active_repo"] == "shared"
+        except _j.JSONDecodeError:
+            assert "Active repo" in result.output
+            assert "shared" in result.output
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
