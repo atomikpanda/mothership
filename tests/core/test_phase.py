@@ -1,11 +1,11 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from mship.core.log import LogManager
-from mship.core.phase import PhaseManager, PhaseTransition
+from mship.core.phase import FinishedTaskError, PhaseManager, PhaseTransition
 from mship.core.state import StateManager, Task, TestResult, WorkspaceState
 
 
@@ -128,3 +128,77 @@ def test_transition_while_blocked_with_force_unblocks(state_with_task: StateMana
     reloaded = state_with_task.load()
     assert reloaded.tasks["add-labels"].blocked_reason is None
     assert reloaded.tasks["add-labels"].blocked_at is None
+
+
+# ---------------------------------------------------------------------------
+# Task 2: phase_entered_at stamping + finished-task guardrail
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def phase_env(tmp_path):
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    sm = StateManager(state_dir=state_dir)
+
+    class _FakeLog:
+        def __init__(self):
+            self.entries: list[tuple[str, str]] = []
+
+        def append(self, slug, msg):
+            self.entries.append((slug, msg))
+
+    log = _FakeLog()
+    pm = PhaseManager(state_manager=sm, log=log)
+
+    state = WorkspaceState(
+        current_task="t",
+        tasks={
+            "t": Task(
+                slug="t", description="d", phase="plan",
+                created_at=datetime.now(timezone.utc),
+                affected_repos=["a"], branch="feat/t",
+            ),
+        },
+    )
+    sm.save(state)
+    return sm, pm, log
+
+
+def test_transition_stamps_phase_entered_at(phase_env):
+    sm, pm, _ = phase_env
+    before = datetime.now(timezone.utc)
+    pm.transition("t", "dev")
+    after = datetime.now(timezone.utc)
+    task = sm.load().tasks["t"]
+    assert task.phase_entered_at is not None
+    assert before <= task.phase_entered_at <= after
+
+
+def test_transition_on_finished_task_refused(phase_env):
+    sm, pm, _ = phase_env
+    state = sm.load()
+    state.tasks["t"].finished_at = datetime.now(timezone.utc) - timedelta(hours=2)
+    sm.save(state)
+    with pytest.raises(FinishedTaskError):
+        pm.transition("t", "dev")
+
+
+def test_transition_on_finished_task_allowed_with_force(phase_env):
+    sm, pm, _ = phase_env
+    state = sm.load()
+    state.tasks["t"].finished_at = datetime.now(timezone.utc) - timedelta(hours=2)
+    sm.save(state)
+    result = pm.transition("t", "dev", force_finished=True)
+    assert result.new_phase == "dev"
+    # Warning surfaced explaining the override
+    assert any("finished" in w.lower() for w in result.warnings)
+
+
+def test_transition_to_run_on_finished_task_allowed_without_force(phase_env):
+    sm, pm, _ = phase_env
+    state = sm.load()
+    state.tasks["t"].phase = "review"
+    state.tasks["t"].finished_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+    sm.save(state)
+    result = pm.transition("t", "run")
+    assert result.new_phase == "run"

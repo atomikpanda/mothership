@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Literal
 
 from mship.core.log import LogManager
@@ -6,6 +7,10 @@ from mship.core.state import StateManager
 
 Phase = Literal["plan", "dev", "review", "run"]
 PHASE_ORDER: list[Phase] = ["plan", "dev", "review", "run"]
+
+
+class FinishedTaskError(RuntimeError):
+    """Raised when transitioning a finished task to plan/dev/review without --force."""
 
 
 @dataclass
@@ -22,10 +27,23 @@ class PhaseManager:
         self._log = log
 
     def transition(
-        self, task_slug: str, target: Phase, force_unblock: bool = False
+        self,
+        task_slug: str,
+        target: Phase,
+        force_unblock: bool = False,
+        force_finished: bool = False,
     ) -> PhaseTransition:
         state = self._state_manager.load()
         task = state.tasks[task_slug]
+
+        # Finished-task guardrail: plan/dev/review refuse; run is always allowed.
+        if task.finished_at is not None and target != "run" and not force_finished:
+            raise FinishedTaskError(
+                f"Task '{task_slug}' is finished. Transitioning to {target} "
+                f"probably means you want `mship close` then `mship spawn` for "
+                f"the next task. Use --force to override."
+            )
+
         old_phase = task.phase
         warnings = self._check_gates(task_slug, task.phase, target)
 
@@ -41,7 +59,14 @@ class PhaseManager:
             task.blocked_reason = None
             task.blocked_at = None
 
+        if task.finished_at is not None and force_finished and target != "run":
+            warnings.append(
+                f"Task was finished (at {task.finished_at.isoformat()}) — "
+                f"forced transition to {target}"
+            )
+
         task.phase = target
+        task.phase_entered_at = datetime.now(timezone.utc)
         self._state_manager.save(state)
 
         self._log.append(task_slug, f"Phase transition: {old_phase} → {target}")

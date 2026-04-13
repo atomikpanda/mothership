@@ -1,14 +1,14 @@
 import typer
 
 from mship.cli.output import Output
-from mship.core.phase import PHASE_ORDER
+from mship.core.phase import PHASE_ORDER, FinishedTaskError
 
 
 def register(app: typer.Typer, get_container):
     @app.command()
     def phase(
         target: str,
-        force: bool = typer.Option(False, "--force", "-f", help="Force transition even if task is blocked"),
+        force: bool = typer.Option(False, "--force", "-f", help="Force transition even if task is blocked or finished"),
     ):
         """Transition the current task to a new phase."""
         container = get_container()
@@ -34,7 +34,16 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=1)
 
         phase_mgr = container.phase_manager()
-        result = phase_mgr.transition(state.current_task, target, force_unblock=force)
+        try:
+            result = phase_mgr.transition(
+                state.current_task,
+                target,
+                force_unblock=force,
+                force_finished=force,
+            )
+        except FinishedTaskError as e:
+            output.error(str(e))
+            raise typer.Exit(code=1)
 
         for w in result.warnings:
             output.warning(w)
