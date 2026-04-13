@@ -32,19 +32,36 @@ class PRManager:
             )
 
     def create_pr(
-        self, repo_path: Path, branch: str, title: str, body: str
+        self, repo_path: Path, branch: str, title: str, body: str,
+        base: str | None = None,
     ) -> str:
         safe_title = shlex.quote(title)
         safe_body = shlex.quote(body)
-        result = self._shell.run(
-            f"gh pr create --title {safe_title} --body {safe_body} --head {shlex.quote(branch)}",
-            cwd=repo_path,
+        cmd = (
+            f"gh pr create --title {safe_title} --body {safe_body} "
+            f"--head {shlex.quote(branch)}"
         )
+        if base is not None:
+            cmd += f" --base {shlex.quote(base)}"
+        result = self._shell.run(cmd, cwd=repo_path)
         if result.returncode != 0:
             raise RuntimeError(
                 f"Failed to create PR: {result.stderr.strip()}"
             )
         return result.stdout.strip()
+
+    def verify_base_exists(self, repo_path: Path, base: str) -> bool:
+        """Return True if `base` exists as a head on origin, else False.
+
+        Network/auth failures are treated as False (fail-closed).
+        """
+        result = self._shell.run(
+            f"git ls-remote --heads origin {shlex.quote(base)}",
+            cwd=repo_path,
+        )
+        if result.returncode != 0:
+            return False
+        return bool(result.stdout.strip())
 
     def get_pr_body(self, pr_url: str) -> str:
         result = self._shell.run(

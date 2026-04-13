@@ -104,3 +104,63 @@ def test_build_coordination_block_single_repo():
     ]
     block = mgr.build_coordination_block("add-labels", prs, current_repo="shared")
     assert block == ""
+
+
+def test_create_pr_with_base(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(
+        returncode=0,
+        stdout="https://github.com/org/repo/pull/42\n",
+        stderr="",
+    )
+    mgr = PRManager(mock_shell)
+    mgr.create_pr(
+        repo_path=Path("/tmp/repo"),
+        branch="feat/test",
+        title="t",
+        body="b",
+        base="release/7",
+    )
+    cmd = mock_shell.run.call_args.args[0]
+    assert "--base 'release/7'" in cmd or "--base release/7" in cmd
+
+
+def test_create_pr_without_base_omits_flag(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(
+        returncode=0,
+        stdout="https://github.com/org/repo/pull/42\n",
+        stderr="",
+    )
+    mgr = PRManager(mock_shell)
+    mgr.create_pr(
+        repo_path=Path("/tmp/repo"),
+        branch="feat/test",
+        title="t",
+        body="b",
+    )
+    cmd = mock_shell.run.call_args.args[0]
+    assert "--base" not in cmd
+
+
+def test_verify_base_exists_true(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(
+        returncode=0,
+        stdout="abc123\trefs/heads/main\n",
+        stderr="",
+    )
+    mgr = PRManager(mock_shell)
+    assert mgr.verify_base_exists(Path("/tmp/repo"), "main") is True
+    cmd = mock_shell.run.call_args.args[0]
+    assert "git ls-remote --heads origin" in cmd
+    assert "main" in cmd
+
+
+def test_verify_base_exists_empty_output_false(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    mgr = PRManager(mock_shell)
+    assert mgr.verify_base_exists(Path("/tmp/repo"), "nope") is False
+
+
+def test_verify_base_exists_nonzero_exit_false(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(returncode=128, stdout="", stderr="network err")
+    mgr = PRManager(mock_shell)
+    assert mgr.verify_base_exists(Path("/tmp/repo"), "main") is False
