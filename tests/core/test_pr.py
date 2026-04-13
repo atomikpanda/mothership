@@ -185,3 +185,36 @@ def test_verify_base_exists_nonzero_exit_false(mock_shell: MagicMock):
     mock_shell.run.return_value = ShellResult(returncode=128, stdout="", stderr="network err")
     mgr = PRManager(mock_shell)
     assert mgr.verify_base_exists(Path("/tmp/repo"), "main") is False
+
+
+def test_check_pr_state_merged(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="MERGED\n", stderr="")
+    mgr = PRManager(mock_shell)
+    assert mgr.check_pr_state("https://github.com/o/r/pull/1") == "merged"
+    cmd = mock_shell.run.call_args.args[0]
+    assert "gh pr view" in cmd
+    assert "--json state" in cmd
+
+
+def test_check_pr_state_closed(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="CLOSED\n", stderr="")
+    mgr = PRManager(mock_shell)
+    assert mgr.check_pr_state("https://x/1") == "closed"
+
+
+def test_check_pr_state_open(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="OPEN\n", stderr="")
+    mgr = PRManager(mock_shell)
+    assert mgr.check_pr_state("https://x/1") == "open"
+
+
+def test_check_pr_state_unknown_on_failure(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(returncode=1, stdout="", stderr="not found")
+    mgr = PRManager(mock_shell)
+    assert mgr.check_pr_state("https://x/1") == "unknown"
+
+
+def test_check_pr_state_unknown_on_unexpected_output(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="DRAFT\n", stderr="")
+    mgr = PRManager(mock_shell)
+    assert mgr.check_pr_state("https://x/1") == "unknown"

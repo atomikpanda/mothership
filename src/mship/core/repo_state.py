@@ -103,6 +103,7 @@ def _probe_git_wide(
     expected_branch: str | None,
     allow_extra_worktrees: bool,
     known_worktree_paths: frozenset[Path],
+    local_only: bool = False,
 ) -> tuple[str | None, list[Issue]]:
     """Run checks that operate on the git root. Returns (current_branch, issues)."""
     issues: list[Issue] = []
@@ -120,45 +121,46 @@ def _probe_git_wide(
                 f"on {current_branch!r}, expected {expected_branch!r}",
             ))
 
-    # Fetch (needed for ahead/behind)
-    rc, _, err = _sh_out(shell, "git fetch --prune origin", root_path)
-    fetch_ok = rc == 0
-    if not fetch_ok:
-        issues.append(Issue(
-            "fetch_failed", "error",
-            err.strip().splitlines()[-1] if err.strip() else "fetch failed",
-        ))
-
-    # Upstream tracking
-    if current_branch is not None and fetch_ok:
-        rc, _, _ = _sh_out(
-            shell, "git rev-parse --abbrev-ref --symbolic-full-name @{u}", root_path
-        )
-        if rc != 0:
+    if not local_only:
+        # Fetch (needed for ahead/behind)
+        rc, _, err = _sh_out(shell, "git fetch --prune origin", root_path)
+        fetch_ok = rc == 0
+        if not fetch_ok:
             issues.append(Issue(
-                "no_upstream", "error", "current branch has no tracking remote"
+                "fetch_failed", "error",
+                err.strip().splitlines()[-1] if err.strip() else "fetch failed",
             ))
-        else:
-            rc_ah, out_ah, _ = _sh_out(shell, "git rev-list --count @{u}..HEAD", root_path)
-            rc_be, out_be, _ = _sh_out(shell, "git rev-list --count HEAD..@{u}", root_path)
-            if rc_ah == 0 and rc_be == 0:
-                ahead = int(out_ah.strip() or "0")
-                behind = int(out_be.strip() or "0")
-                if ahead and behind:
-                    issues.append(Issue(
-                        "diverged", "error",
-                        f"{ahead} ahead, {behind} behind origin",
-                    ))
-                elif behind:
-                    issues.append(Issue(
-                        "behind_remote", "error",
-                        f"behind origin by {behind} commits",
-                    ))
-                elif ahead:
-                    issues.append(Issue(
-                        "ahead_remote", "info",
-                        f"ahead of origin by {ahead} commits",
-                    ))
+
+        # Upstream tracking
+        if current_branch is not None and fetch_ok:
+            rc, _, _ = _sh_out(
+                shell, "git rev-parse --abbrev-ref --symbolic-full-name @{u}", root_path
+            )
+            if rc != 0:
+                issues.append(Issue(
+                    "no_upstream", "error", "current branch has no tracking remote"
+                ))
+            else:
+                rc_ah, out_ah, _ = _sh_out(shell, "git rev-list --count @{u}..HEAD", root_path)
+                rc_be, out_be, _ = _sh_out(shell, "git rev-list --count HEAD..@{u}", root_path)
+                if rc_ah == 0 and rc_be == 0:
+                    ahead = int(out_ah.strip() or "0")
+                    behind = int(out_be.strip() or "0")
+                    if ahead and behind:
+                        issues.append(Issue(
+                            "diverged", "error",
+                            f"{ahead} ahead, {behind} behind origin",
+                        ))
+                    elif behind:
+                        issues.append(Issue(
+                            "behind_remote", "error",
+                            f"behind origin by {behind} commits",
+                        ))
+                    elif ahead:
+                        issues.append(Issue(
+                            "ahead_remote", "info",
+                            f"ahead of origin by {ahead} commits",
+                        ))
 
     # Extra worktrees — exclude ones mship knows about.
     if not allow_extra_worktrees:
@@ -206,6 +208,7 @@ def audit_repos(
     shell,
     names: Iterable[str] | None = None,
     known_worktree_paths: frozenset[Path] = frozenset(),
+    local_only: bool = False,
 ) -> AuditReport:
     """Run drift audit across repos, grouping by git root for git-wide checks."""
     target_names = list(names) if names is not None else list(config.repos.keys())
@@ -251,7 +254,7 @@ def audit_repos(
         )
 
         current_branch, wide_issues = _probe_git_wide(
-            shell, root_path, expected, allow_wt, known_worktree_paths,
+            shell, root_path, expected, allow_wt, known_worktree_paths, local_only,
         )
         for m in members:
             per_repo_branch[m] = current_branch

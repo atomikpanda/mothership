@@ -333,6 +333,68 @@ def test_audit_names_filter_unknown_repo(audit_workspace):
         audit_repos(cfg, shell, names=["cli", "nope"])
 
 
+def test_audit_local_only_skips_fetch(audit_workspace):
+    """local_only=True must not invoke git fetch."""
+    import os, subprocess
+    from mship.core.config import ConfigLoader
+    from mship.core.repo_state import audit_repos
+    from mship.util.shell import ShellRunner
+
+    cfg = ConfigLoader.load(audit_workspace / "mothership.yaml")
+    shell = ShellRunner()
+
+    calls: list[str] = []
+    real_run = shell.run
+
+    def counting(cmd, cwd, env=None):
+        calls.append(cmd)
+        return real_run(cmd, cwd, env=env)
+
+    shell.run = counting  # type: ignore[assignment]
+
+    audit_repos(cfg, shell, names=["cli"], local_only=True)
+    assert not any(c.startswith("git fetch") for c in calls)
+
+
+def test_audit_local_only_still_detects_dirty(audit_workspace):
+    """Cheap local checks still fire in local_only mode."""
+    from mship.core.config import ConfigLoader
+    from mship.core.repo_state import audit_repos
+    from mship.util.shell import ShellRunner
+
+    (audit_workspace / "cli" / "new.txt").write_text("x\n")
+
+    cfg = ConfigLoader.load(audit_workspace / "mothership.yaml")
+    shell = ShellRunner()
+    rep = audit_repos(cfg, shell, names=["cli"], local_only=True)
+    codes = {i.code for r in rep.repos if r.name == "cli" for i in r.issues}
+    assert "dirty_worktree" in codes
+
+
+def test_audit_local_only_does_not_emit_behind_or_fetch_failed(audit_workspace):
+    """Even if tracking is broken, local_only audit never emits fetch-family codes."""
+    import os, subprocess
+    from mship.core.config import ConfigLoader
+    from mship.core.repo_state import audit_repos
+    from mship.util.shell import ShellRunner
+
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    # Break the remote to make fetch fail
+    subprocess.run(
+        ["git", "-C", str(audit_workspace / "cli"), "remote", "set-url", "origin", "/no/such.git"],
+        check=True, capture_output=True, env=env,
+    )
+
+    cfg = ConfigLoader.load(audit_workspace / "mothership.yaml")
+    shell = ShellRunner()
+    rep = audit_repos(cfg, shell, names=["cli"], local_only=True)
+    codes = {i.code for r in rep.repos if r.name == "cli" for i in r.issues}
+    fetch_family = {"fetch_failed", "behind_remote", "ahead_remote", "diverged", "no_upstream"}
+    assert not (codes & fetch_family), f"unexpected fetch-family codes: {codes & fetch_family}"
+
+
 def test_audit_monorepo_one_fetch_per_root(tmp_path):
     """Two repos sharing a git_root should trigger one fetch and share git-wide issues."""
     env = {**os.environ,

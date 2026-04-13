@@ -83,6 +83,21 @@ class PRManager:
             return False
         return bool(result.stdout.strip())
 
+    def check_pr_state(self, pr_url: str) -> str:
+        """Return 'merged', 'closed', 'open', or 'unknown' for a PR URL.
+
+        Uses `gh pr view --json state`. Any failure returns 'unknown'.
+        """
+        result = self._shell.run(
+            f"gh pr view {shlex.quote(pr_url)} --json state -q .state",
+            cwd=Path("."),
+        )
+        if result.returncode != 0:
+            return "unknown"
+        raw = result.stdout.strip().upper()
+        mapping = {"MERGED": "merged", "CLOSED": "closed", "OPEN": "open"}
+        return mapping.get(raw, "unknown")
+
     def get_pr_body(self, pr_url: str) -> str:
         result = self._shell.run(
             f"gh pr view {shlex.quote(pr_url)} --json body -q .body",
