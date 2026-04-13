@@ -148,23 +148,40 @@ With mothership, `mship test` runs `shared` first (dependency order) and stops i
 
 ```bash
 # Workspace awareness
-mship status                    # current phase, task, worktrees, test results
-mship graph                     # show repo dependency graph
+mship status                          # current phase, task, worktrees, test results
+mship graph                           # show repo dependency graph
+mship doctor                          # validate config & tools (gh, env_runner, Taskfiles)
 
 # Phase management
-mship phase plan|dev|review|run # transition with soft gate warnings
+mship phase plan|dev|review|run       # transition with soft gate warnings
+mship block "reason" / mship unblock  # park/resume task
 
 # Worktree management
-mship spawn "description"      # create worktrees for a new task
-mship spawn "desc" --repos a,b # explicit repo list (multi-repo)
-mship worktrees                # list active worktrees
-mship abort [--yes]            # discard worktrees, abandon task
-mship finish                   # show merge order for PRs
+mship spawn "description"             # create worktrees for a new task
+mship spawn "desc" --repos a,b        # explicit repo list (multi-repo)
+mship worktrees                       # list active worktrees
+mship prune [--force]                 # remove orphaned worktrees
+mship abort [--yes]                   # discard worktrees, abandon task
+mship finish [--base <branch>]        # coordinated PRs across repos
+mship finish --base-map a=main,b=x    # per-repo PR base overrides
 
 # Execution (delegates to go-task per repo)
-mship test [--all]             # run tests (in dependency order for multi-repo)
-mship run                     # start services
-mship logs <service>           # tail logs for a service
+mship test [--all] [--tag t]          # run tests in dependency order
+mship run [--repos a,b]               # start services; foreground or background+healthcheck
+mship logs <service>                  # tail logs for a service
+
+# Drift & sync
+mship audit [--repos r1,r2] [--json]  # report git-state drift (gated on spawn/finish)
+mship sync [--repos r1,r2]            # fast-forward behind-only clean repos
+mship spawn|finish --force-audit      # bypass drift gate (logged to task log)
+
+# Live views (for tmux/zellij panes)
+mship view status|logs|diff|spec [--watch]   # read-only TUIs with no-yank scroll
+mship view spec --web                  # serve rendered spec on localhost
+
+# Context & logs
+mship log                             # read task log
+mship log "message"                   # append breadcrumb
 ```
 
 ### `mship finish`
