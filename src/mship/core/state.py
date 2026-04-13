@@ -26,6 +26,8 @@ class Task(BaseModel):
     pr_urls: dict[str, str] = {}
     finished_at: datetime | None = None
     phase_entered_at: datetime | None = None
+    active_repo: str | None = None
+    last_switched_at_sha: dict[str, dict[str, str]] = {}
 
 
 class WorkspaceState(BaseModel):

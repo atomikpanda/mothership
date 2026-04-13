@@ -196,3 +196,43 @@ def test_task_pr_urls_roundtrip(state_dir: Path):
     mgr.save(state)
     loaded = mgr.load()
     assert loaded.tasks["test"].pr_urls["shared"] == "https://github.com/org/shared/pull/18"
+
+
+def test_task_accepts_active_repo_and_switched_sha_map(tmp_path):
+    import yaml
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from mship.core.state import StateManager, Task, WorkspaceState
+
+    sm = StateManager(tmp_path)
+    state = WorkspaceState(
+        current_task="t",
+        tasks={"t": Task(
+            slug="t", description="d", phase="dev",
+            created_at=datetime.now(timezone.utc),
+            affected_repos=["a", "b"], branch="feat/t",
+            active_repo="a",
+            last_switched_at_sha={"a": {"b": "abc123"}},
+        )},
+    )
+    sm.save(state)
+
+    # Round-trip via the yaml file
+    loaded = sm.load()
+    task = loaded.tasks["t"]
+    assert task.active_repo == "a"
+    assert task.last_switched_at_sha == {"a": {"b": "abc123"}}
+
+
+def test_task_defaults_for_switch_fields():
+    from datetime import datetime, timezone
+    from mship.core.state import Task
+
+    task = Task(
+        slug="t", description="d", phase="plan",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["a"], branch="feat/t",
+    )
+    assert task.active_repo is None
+    assert task.last_switched_at_sha == {}
