@@ -24,7 +24,13 @@ def register(app: typer.Typer, get_container):
             names = [n.strip() for n in repos.split(",") if n.strip()]
 
         try:
-            report = audit_repos(config, shell, names=names)
+            from mship.core.audit_gate import collect_known_worktree_paths
+            known = collect_known_worktree_paths(container.state_manager())
+        except Exception:
+            known = frozenset()
+
+        try:
+            report = audit_repos(config, shell, names=names, known_worktree_paths=known)
         except ValueError as e:
             output.error(str(e))
             raise typer.Exit(code=1)

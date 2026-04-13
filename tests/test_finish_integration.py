@@ -139,6 +139,65 @@ def test_finish_idempotent_rerun(finish_workspace):
     assert len(create_calls) == 0
 
 
+def test_finish_not_blocked_by_own_worktree(finish_workspace):
+    """mship finish must not block on extra_worktrees from its own worktree."""
+    workspace, mock_shell = finish_workspace
+
+    # Spawn normally (with --force-audit since the mock shell doesn't actually
+    # make audits clean, the point of this test is what finish does).
+    result = runner.invoke(app, ["spawn", "own wt", "--repos", "shared", "--force-audit"])
+    assert result.exit_code == 0, result.output
+
+    # Simulate audit returning extra_worktrees iff the worktree is not known.
+    # Track the command and assert git worktree list is invoked; since
+    # finish_workspace uses a shell mock, we stub its responses for audit probes.
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "git fetch" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "symbolic-ref" in cmd:
+            return ShellResult(returncode=0, stdout="main\n", stderr="")
+        if "rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
+            return ShellResult(returncode=0, stdout="origin/main\n", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
+        if "git worktree list --porcelain" in cmd:
+            # Report TWO worktrees: the main checkout AND the task's worktree.
+            # The finish audit should exclude the task worktree.
+            return ShellResult(
+                returncode=0,
+                stdout="worktree /tmp/shared\nworktree /tmp/shared-wt\n",
+                stderr="",
+            )
+        if "git status --porcelain" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "git ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc\trefs/heads/main\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://x/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    # Point the state's worktree entry at /tmp/shared-wt so the exclusion matches
+    # what the mocked `git worktree list` reports.
+    state_path = workspace / ".mothership" / "state.yaml"
+    import yaml
+    data = yaml.safe_load(state_path.read_text())
+    slug = data["current_task"]
+    data["tasks"][slug]["worktrees"] = {"shared": "/tmp/shared-wt"}
+    state_path.write_text(yaml.safe_dump(data))
+    from mship.cli import container
+    container.state_manager.reset()
+
+    result = runner.invoke(app, ["finish"])
+    assert result.exit_code == 0, result.output
+    assert "extra_worktrees" not in result.output
+
+
 def test_finish_passes_base_from_config(finish_workspace, tmp_path):
     """Config base_branch flows into gh pr create --base."""
     import yaml

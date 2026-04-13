@@ -41,3 +41,47 @@ def test_gate_force_calls_on_bypass_and_proceeds():
 def test_gate_warns_but_does_not_block_when_block_false():
     run_audit_gate(_blocking_report(), block=False, force=False, command_name="spawn",
                    on_bypass=lambda codes: None)
+
+
+from mship.core.audit_gate import collect_known_worktree_paths
+
+
+class _FakeTask:
+    def __init__(self, worktrees: dict[str, str]):
+        self.worktrees = worktrees
+
+
+class _FakeState:
+    def __init__(self, tasks):
+        self.tasks = tasks
+
+
+class _FakeStateMgr:
+    def __init__(self, state):
+        self._state = state
+
+    def load(self):
+        return self._state
+
+
+def test_collect_known_worktree_paths_union_across_tasks(tmp_path: Path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "c").mkdir()
+    state = _FakeState({
+        "task1": _FakeTask({"cli": str(tmp_path / "a"), "api": str(tmp_path / "b")}),
+        "task2": _FakeTask({"cli": str(tmp_path / "c")}),
+    })
+    result = collect_known_worktree_paths(_FakeStateMgr(state))
+    expected = frozenset({
+        (tmp_path / "a").resolve(),
+        (tmp_path / "b").resolve(),
+        (tmp_path / "c").resolve(),
+    })
+    assert result == expected
+
+
+def test_collect_known_worktree_paths_no_tasks():
+    state = _FakeState({})
+    result = collect_known_worktree_paths(_FakeStateMgr(state))
+    assert result == frozenset()

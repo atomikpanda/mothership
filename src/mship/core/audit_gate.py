@@ -1,6 +1,7 @@
 """Shared audit-gate logic used by mship spawn and mship finish."""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Callable
 
 from mship.core.repo_state import AuditReport
@@ -44,3 +45,13 @@ def run_audit_gate(
             + ", ".join(error_codes)
         )
     # block=False, not forced: caller handles warning
+
+
+def collect_known_worktree_paths(state_manager) -> "frozenset[Path]":
+    """Return a resolved, absolute set of every worktree path in every task."""
+    state = state_manager.load()
+    paths: set[Path] = set()
+    for task in state.tasks.values():
+        for raw in task.worktrees.values():
+            paths.add(Path(raw).resolve())
+    return frozenset(paths)

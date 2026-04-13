@@ -26,7 +26,12 @@ def register(app: typer.Typer, get_container):
         repo_list = repos.split(",") if repos else None
         audit_names = repo_list if repo_list else list(config.repos.keys())
 
-        report = audit_repos(config, shell, names=audit_names)
+        from mship.core.audit_gate import collect_known_worktree_paths
+        try:
+            known = collect_known_worktree_paths(container.state_manager())
+        except Exception:
+            known = frozenset()
+        report = audit_repos(config, shell, names=audit_names, known_worktree_paths=known)
 
         pending_bypass: list[list[str]] = []
 
@@ -165,7 +170,12 @@ def register(app: typer.Typer, get_container):
         from mship.core.repo_state import audit_repos
 
         shell = container.shell()
-        report = audit_repos(config, shell, names=task.affected_repos)
+        from mship.core.audit_gate import collect_known_worktree_paths
+        try:
+            known = collect_known_worktree_paths(container.state_manager())
+        except Exception:
+            known = frozenset()
+        report = audit_repos(config, shell, names=task.affected_repos, known_worktree_paths=known)
 
         def _log_bypass(codes: list[str]) -> None:
             container.log_manager().append(
