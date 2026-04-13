@@ -205,6 +205,120 @@ def test_audit_extra_worktrees(audit_workspace):
     assert "extra_worktrees" in _issue_codes(rep, "cli")
 
 
+from pathlib import Path as _Path
+
+from mship.core.repo_state import _list_worktree_paths
+
+
+class _FakeShell:
+    def __init__(self, stdout: str, rc: int = 0):
+        self._stdout = stdout
+        self._rc = rc
+
+    def run(self, cmd: str, cwd, env=None):
+        from mship.util.shell import ShellResult
+        return ShellResult(returncode=self._rc, stdout=self._stdout, stderr="")
+
+
+def test_list_worktree_paths_parses_porcelain():
+    porcelain = (
+        "worktree /abs/main\n"
+        "HEAD abc\n"
+        "branch refs/heads/main\n"
+        "\n"
+        "worktree /abs/feat-x\n"
+        "HEAD def\n"
+        "branch refs/heads/feat/x\n"
+    )
+    shell = _FakeShell(porcelain)
+    paths = _list_worktree_paths(shell, _Path("/abs/main"))
+    assert [str(p) for p in paths] == ["/abs/main", "/abs/feat-x"]
+
+
+def test_list_worktree_paths_empty_output():
+    shell = _FakeShell("")
+    assert _list_worktree_paths(shell, _Path("/abs/main")) == []
+
+
+def test_list_worktree_paths_returns_resolved_paths(tmp_path):
+    # The real resolve call normalizes "." and ".." and symlinks. Simulate by
+    # emitting an absolute but unresolved path.
+    unresolved = str(tmp_path / "a" / ".." / "a")
+    shell = _FakeShell(f"worktree {unresolved}\nHEAD abc\n")
+    (tmp_path / "a").mkdir()
+    paths = _list_worktree_paths(shell, tmp_path)
+    assert paths == [(tmp_path / "a").resolve()]
+
+
+def test_audit_known_worktree_suppresses_extra_worktrees(audit_workspace):
+    """A worktree registered in known_worktree_paths is not counted as extra."""
+    import subprocess
+    import os
+    from mship.core.config import ConfigLoader
+    from mship.core.repo_state import audit_repos
+    from mship.util.shell import ShellRunner
+
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+
+    clone = audit_workspace / "cli"
+    wt = audit_workspace / "cli-wt"
+    subprocess.run(
+        ["git", "worktree", "add", str(wt), "-b", "scratch"],
+        cwd=clone, check=True, capture_output=True, env=env,
+    )
+
+    cfg = ConfigLoader.load(audit_workspace / "mothership.yaml")
+    shell = ShellRunner()
+
+    # Not excluded → extra_worktrees fires
+    rep_open = audit_repos(cfg, shell, names=["cli"])
+    codes_open = {i.code for r in rep_open.repos if r.name == "cli" for i in r.issues}
+    assert "extra_worktrees" in codes_open
+
+    # Excluded → no extra_worktrees
+    known = frozenset({wt.resolve()})
+    rep_known = audit_repos(cfg, shell, names=["cli"], known_worktree_paths=known)
+    codes_known = {i.code for r in rep_known.repos if r.name == "cli" for i in r.issues}
+    assert "extra_worktrees" not in codes_known
+
+
+def test_audit_foreign_worktree_still_fires(audit_workspace):
+    """A worktree NOT in known_worktree_paths still counts as extra."""
+    import subprocess
+    import os
+    from mship.core.config import ConfigLoader
+    from mship.core.repo_state import audit_repos
+    from mship.util.shell import ShellRunner
+
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+
+    clone = audit_workspace / "cli"
+    wt_known = audit_workspace / "cli-known"
+    wt_foreign = audit_workspace / "cli-foreign"
+    subprocess.run(
+        ["git", "worktree", "add", str(wt_known), "-b", "known-branch"],
+        cwd=clone, check=True, capture_output=True, env=env,
+    )
+    subprocess.run(
+        ["git", "worktree", "add", str(wt_foreign), "-b", "foreign-branch"],
+        cwd=clone, check=True, capture_output=True, env=env,
+    )
+
+    cfg = ConfigLoader.load(audit_workspace / "mothership.yaml")
+    shell = ShellRunner()
+    known = frozenset({wt_known.resolve()})
+    rep = audit_repos(cfg, shell, names=["cli"], known_worktree_paths=known)
+
+    cli_issues = next(r for r in rep.repos if r.name == "cli").issues
+    extra = [i for i in cli_issues if i.code == "extra_worktrees"]
+    assert len(extra) == 1
+    assert "mship prune" in extra[0].message
+
+
 def test_audit_fetch_failed(audit_workspace):
     cfg, shell = _load(audit_workspace)
     clone = audit_workspace / "cli"

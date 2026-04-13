@@ -85,11 +85,24 @@ def _sh_out(shell, cmd: str, cwd: Path) -> tuple[int, str, str]:
     return r.returncode, r.stdout, r.stderr
 
 
+def _list_worktree_paths(shell, root_path: Path) -> list[Path]:
+    """Parse `git worktree list --porcelain` into resolved absolute Paths."""
+    rc, out, _ = _sh_out(shell, "git worktree list --porcelain", root_path)
+    if rc != 0:
+        return []
+    paths: list[Path] = []
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            paths.append(Path(line[len("worktree "):]).resolve())
+    return paths
+
+
 def _probe_git_wide(
     shell,
     root_path: Path,
     expected_branch: str | None,
     allow_extra_worktrees: bool,
+    known_worktree_paths: frozenset[Path],
 ) -> tuple[str | None, list[Issue]]:
     """Run checks that operate on the git root. Returns (current_branch, issues)."""
     issues: list[Issue] = []
@@ -147,16 +160,16 @@ def _probe_git_wide(
                         f"ahead of origin by {ahead} commits",
                     ))
 
-    # Extra worktrees
+    # Extra worktrees — exclude ones mship knows about.
     if not allow_extra_worktrees:
-        rc, out, _ = _sh_out(shell, "git worktree list --porcelain", root_path)
-        if rc == 0:
-            count = sum(1 for line in out.splitlines() if line.startswith("worktree "))
-            if count > 1:
-                issues.append(Issue(
-                    "extra_worktrees", "error",
-                    f"{count} worktrees exist; expected 1",
-                ))
+        wt_paths = _list_worktree_paths(shell, root_path)
+        unknown = [p for p in wt_paths if p not in known_worktree_paths]
+        if len(unknown) > 1:
+            issues.append(Issue(
+                "extra_worktrees", "error",
+                f"{len(unknown) - 1} worktree(s) at paths mship doesn't track "
+                "(run `mship prune` to list/clean orphans, or check for foreign worktrees)",
+            ))
 
     return current_branch, issues
 
@@ -192,6 +205,7 @@ def audit_repos(
     config,
     shell,
     names: Iterable[str] | None = None,
+    known_worktree_paths: frozenset[Path] = frozenset(),
 ) -> AuditReport:
     """Run drift audit across repos, grouping by git root for git-wide checks."""
     target_names = list(names) if names is not None else list(config.repos.keys())
@@ -236,7 +250,9 @@ def audit_repos(
             root_cfg.allow_extra_worktrees if root_cfg is not None else False
         )
 
-        current_branch, wide_issues = _probe_git_wide(shell, root_path, expected, allow_wt)
+        current_branch, wide_issues = _probe_git_wide(
+            shell, root_path, expected, allow_wt, known_worktree_paths,
+        )
         for m in members:
             per_repo_branch[m] = current_branch
             per_repo_issues[m].extend(wide_issues)
