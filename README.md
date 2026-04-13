@@ -1,148 +1,101 @@
 # Mothership (`mship`)
 
-Phase-based workflow engine for agentic development.
+**A control plane for AI coding agents.** Gives agents the workflow structure they lack on their own: phase tracking, isolated worktrees, dependency-ordered execution, drift detection, and coordinated multi-repo PRs.
 
-> ⚠️ **Status: pre-1.0, under heavy development.** Mothership is being actively built and dogfooded. Expect breaking changes to config schema, CLI flags, and state file format between commits. Pin to a specific commit if you need stability. Bug reports and feedback are welcome.
+> ⚠️ **Status: pre-1.0, under heavy development.** Expect breaking changes to config, flags, and state format between commits. Pin a commit if you need stability. Feedback welcome.
 
-## The Problem
+## Why you want this
 
-AI coding agents (Claude Code, Codex, Gemini CLI) are fast and capable, but they lack workflow structure. An agent can write code, run tests, and commit — but it doesn't know what *phase* of work it's in, whether it should be planning or coding, whether tests should pass before it moves to review, or how to coordinate worktrees for isolated feature work.
+AI agents (Claude Code, Codex, Gemini CLI) can write code, run tests, and commit — but they don't know **what phase they're in**, whether they should be planning or implementing, if tests should pass before review, or how to coordinate isolated branches across repos. They'll happily skip the spec, forget to run tests, create PRs in the wrong merge order, and work on a worktree that's already drifted from origin.
 
-For single-repo projects, agents need:
+Mothership fixes that without prescribing how the agent works inside each step:
 
-- **Phase tracking** — know whether you're planning, developing, reviewing, or running
-- **Soft gates** — warnings when you skip steps (no spec before coding, no tests before review)
-- **Worktree management** — isolated branches for each task, clean setup and teardown
-- **Structured task execution** — run tests, start services, tail logs through a consistent interface
+| Without mship | With mship |
+|---|---|
+| Agent jumps straight to coding, no spec, no plan | `mship spawn "add avatars"` → isolated worktree, `plan → dev → review → run` phases with soft gates |
+| "Tests pass in repo A but fail in repo B — why?" | `mship test` runs dependency-ordered, fail-fast |
+| "Which PR do I merge first?" | `mship finish` creates coordinated PRs with merge-order hints |
+| Agent works on a stale branch without noticing | `mship audit` blocks `spawn`/`finish` on drift (wrong branch, dirty, behind remote) |
+| Worktrees pile up, state leaks | `mship prune` + state-anchored to the main repo's `.git` |
 
-For multi-repo projects, agents also need:
+Works for a single repo *and* multi-repo workspaces. Start small; scale when your system grows.
 
-- **Dependency awareness** — which repos depend on which, what order to build/test/merge
-- **Coordinated worktrees** — matching branches across multiple repos for a single task
-- **Cross-repo execution** — run tests across repos in dependency order, fail-fast or run all
-- **Merge ordering** — know which PR to merge first so CI doesn't break on main
-
-Mothership handles both. Start with one repo, expand to many when your system grows.
-
-## How It Works
-
-Mothership is a CLI tool that agents call via bash. It's not an agent itself — it's infrastructure that agents use.
-
-```
-Agent (Claude Code, Codex, etc.)
-    ↓ calls
-Mothership (workflow orchestration)
-    ↓ delegates to
-go-task (per-repo execution)
-```
-
-### 1. Declare your workspace
-
-A workspace can be a single repo or many:
-
-```yaml
-# mothership.yaml — single repo
-workspace: my-app
-
-repos:
-  my-app:
-    path: .
-    type: service
-```
-
-```yaml
-# mothership.yaml — multi-repo
-workspace: my-platform
-
-repos:
-  shared:
-    path: ./shared
-    type: library
-  auth-service:
-    path: ./auth-service
-    type: service
-    depends_on: [shared]
-  api-gateway:
-    path: ./api-gateway
-    type: service
-    depends_on: [shared, auth-service]
-```
-
-Each repo has its own `Taskfile.yml` with standard task names (`test`, `run`, `lint`, `logs`, `setup`). Mothership calls `task` in the right directory, in the right order.
-
-### 2. Spawn coordinated worktrees
+## mship in 60 seconds
 
 ```bash
-$ mship spawn "add labels to tasks" --repos shared,auth-service
+$ mship init --detect                           # scaffold mothership.yaml from the current directory
+$ mship spawn "add labels to tasks"             # worktrees + branch + plan phase
 Spawned task: add-labels-to-tasks
   Branch: feat/add-labels-to-tasks
   Phase: plan
-  Repos: shared, auth-service
-  shared: /home/user/dev/shared/.worktrees/feat/add-labels-to-tasks
-  auth-service: /home/user/dev/auth-service/.worktrees/feat/add-labels-to-tasks
-```
+  shared: /home/me/dev/shared/.worktrees/feat/add-labels-to-tasks
 
-One command creates worktrees with matching branch names across every affected repo. The agent works in these worktrees, and cleanup is one command away.
-
-### 3. Track phases
-
-```bash
-$ mship phase dev
+$ mship phase dev                                # transition with a soft warning if no spec
 WARNING: No spec found — consider writing one before developing
 Phase: dev
 
-$ mship phase review
-WARNING: Tests not run in: auth-service — consider running tests before review
-Phase: review
-```
-
-Four phases — `plan`, `dev`, `review`, `run` — with soft gates that warn (but don't block) when preconditions aren't met. The agent knows what phase it's in and gets contextual guidance.
-
-### 4. Execute across repos
-
-```bash
-$ mship test
+$ mship test                                    # run tests across repos in dependency order
 shared: pass
 auth-service: pass
 
-$ mship test --all    # run everything even if one fails
-shared: fail
-auth-service: pass    # ran anyway, might have its own issues
+$ mship phase review && mship finish            # coordinated PRs, correct merge order
+auth-service: feat/add-labels-to-tasks → main  ✓ https://github.com/you/auth/pull/42
+shared:       feat/add-labels-to-tasks → main  ✓ https://github.com/you/shared/pull/41
 ```
 
-Tests run in dependency order. If `shared` fails, downstream repos are skipped by default (they'd fail anyway). Pass `--all` to get the full picture.
+That's the whole loop. Everything else below is reference.
 
-### 5. See where things stand
+## How it fits
+
+Mothership is not an agent and not a task runner. It's the layer between them:
+
+```
+Agent (Claude Code, Codex, Gemini CLI)
+    ↓ calls
+Mothership (phases, worktrees, state, coordination)
+    ↓ delegates to
+go-task  (per-repo test/run/lint/setup commands)
+```
+
+Each repo owns a `Taskfile.yml` with the commands `task test`, `task run`, etc. Mothership calls them in the right directory, in the right order, with your secret manager wrapping them (`dotenvx`, `op`, `doppler`…).
+
+## Quick start
 
 ```bash
-$ mship status
-Task: add-labels-to-tasks
-Phase: dev
-Branch: feat/add-labels-to-tasks
-Repos: shared, auth-service
-Tests:
-  shared: pass
-  auth-service: fail
+# 1. Install
+uv tool install git+https://github.com/atomikpanda/mothership.git
 
-$ mship graph
-  shared (library)
-  auth-service (service) -> [shared]
-  api-gateway (service) -> [shared, auth-service]
+# 2. Initialize your workspace
+cd ~/my-project
+mship init                   # interactive wizard
+# or:
+mship init --detect          # auto-detect repos in current dir
+# or (non-interactive):
+mship init --name platform --repo ./shared:library --repo ./api:service:shared
+
+# 3. Verify and start working
+mship doctor                 # config + tools check
+mship spawn "my first task"
+mship phase dev
+# ... do work ...
+mship log "implemented X"    # breadcrumb for the next session
+mship test
+mship phase review && mship finish
 ```
 
-## Why Agents Need This
+Requires Python 3.14+ and [uv](https://docs.astral.sh/uv/). Optional: [go-task](https://taskfile.dev), [gh](https://cli.github.com) (for `mship finish`), [git-delta](https://github.com/dandavison/delta) (for nicer `mship view diff`).
 
-### Single repo: discipline without overhead
+## For AI agents
 
-Without mothership, the agent jumps straight to coding. There's no spec, no plan, no phase awareness. It writes code, maybe runs tests, commits — and you end up reviewing a diff with no structure behind it.
+Mothership ships a skill (compatible with [superpowers](https://github.com/obra/superpowers) and any agent framework that can call bash):
 
-With mothership, `mship spawn "add user avatars"` creates an isolated worktree. `mship phase dev` warns if there's no spec. `mship phase review` warns if tests haven't been run. The agent gets guardrails that keep it on track without slowing it down.
+```bash
+mship skill install working-with-mothership
+```
 
-### Multi-repo: coordination without chaos
+The skill teaches the session-start protocol (`mship status` → `mship log`), phase workflow, command reference, and context recovery. Installs to `~/.agents/skills/` by default; use `--dest` to override.
 
-Without mothership, the agent changes `shared`, runs its tests (pass), moves to `auth-service`, changes it, runs tests (fail). It has no idea if the failure is because of the `shared` change or a bug in `auth-service`. It creates PRs in random order and CI breaks on main.
-
-With mothership, `mship test` runs `shared` first (dependency order) and stops if it fails. `mship finish` tells you the merge order. The agent doesn't need to understand the repo graph — mothership does.
+JSON output is auto-emitted when stdout isn't a TTY — agents get structured state without any flag, humans get Rich-formatted output.
 
 ## CLI Reference
 
@@ -411,100 +364,7 @@ Each repo needs a `Taskfile.yml` with standard task names. Mothership calls `tas
 
 Default tasks: `test`, `run`, `lint`, `logs`, `setup`. Missing tasks are skipped gracefully.
 
-## Output
-
-Mothership auto-detects whether it's talking to a human or an agent:
-
-- **Terminal (TTY):** Rich-formatted tables, colored warnings, interactive prompts
-- **Piped/agent (not TTY):** JSON output, no interactive prompts
-
-Agents get structured JSON they can parse. Humans get readable output. Same command, no flags needed.
-
-## Installation
-
-```bash
-uv tool install git+https://github.com/atomikpanda/mothership.git
-```
-
-Requires Python 3.14+ and [uv](https://docs.astral.sh/uv/).
-
-Optional: install [go-task](https://taskfile.dev) (for task execution) and [gh](https://cli.github.com) (for PR creation).
-
-## Getting Started
-
-### 1. Install mothership
-
-```bash
-uv tool install git+https://github.com/atomikpanda/mothership.git
-```
-
-### 2. Initialize your workspace
-
-**Interactive (for humans):**
-```bash
-cd ~/my-project
-mship init
-```
-
-The wizard walks you through repo detection, types, dependencies, and optional Taskfile scaffolding.
-
-**Non-interactive (for agents):**
-```bash
-# Single repo
-mship init --name my-app --repo ./.:service
-
-# Multi-repo
-mship init --name my-platform \
-  --repo ./shared:library \
-  --repo ./auth-service:service:shared \
-  --repo ./api-gateway:service:shared,auth-service
-```
-
-### 3. Verify your setup
-
-```bash
-mship doctor    # Check everything is configured correctly
-mship status    # Should show "No active task"
-mship graph     # Shows your repo dependency graph
-```
-
-### 4. Start working
-
-```bash
-mship spawn "add user avatars"     # Create worktrees
-mship phase dev                     # Enter development phase
-# ... do your work ...
-mship log "implemented avatar upload endpoint"
-mship test                          # Run tests
-mship phase review                  # Enter review phase
-mship finish                        # Create coordinated PRs
-```
-
-### 5. Clean up
-
-```bash
-mship abort --yes                   # Remove worktrees after PRs are merged
-```
-
-### For AI agents
-
-Mothership is a control plane that any AI coding agent can call via bash. JSON output is auto-detected when piped, so agents get structured state without extra flags.
-
-**Mothership assumes a disciplined workflow:** plan before you code, test before you review, review before you ship. The phase model (plan → dev → review → run) and soft gates enforce this structure. What mothership does *not* prescribe is how you work within each phase — that's up to your per-repo tools.
-
-We recommend [superpowers](https://github.com/obra/superpowers) for per-repo methodology (TDD, brainstorming, code review). But any agent framework that calls shell commands integrates with mothership — the phases, state, and execution commands are tool-agnostic.
-
-**Installing the superpowers skill:**
-
-```bash
-mship skill install working-with-mothership
-```
-
-This fetches the latest skill from GitHub and installs to `~/.agents/skills/working-with-mothership/` (the shared cross-agent skills directory). Use `--dest` for a custom location. Run `mship skill list` to see all available skills.
-
-The skill teaches agents the session start protocol (`mship status` → `mship log`), phase workflow, command reference, and context recovery.
-
-## What Mothership Is Not
+## What Mothership is not
 
 - **Not a per-repo methodology** — mothership owns the workflow stages; your per-repo tools (superpowers, custom prompts, CI checks) own the discipline within each stage
 - **Not a task runner** — delegates to go-task
