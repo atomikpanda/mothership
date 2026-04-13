@@ -254,6 +254,55 @@ With `start_mode: background`, `mship run` launches the service in a thread (via
 
 `start_mode` only affects `mship run`. Tests and logs always run foreground.
 
+### Healthchecks
+
+For services that need time to become ready (databases, dev servers binding to ports), declare a `healthcheck`. `mship run` waits for the healthcheck to pass before starting dependent services.
+
+```yaml
+repos:
+  infra:
+    path: ./infra
+    type: service
+    start_mode: background
+    healthcheck:
+      tcp: "127.0.0.1:8001"          # wait for port to accept connections
+      timeout: 30s                    # optional, default 30s
+      retry_interval: 500ms           # optional, default 500ms
+
+  backend:
+    path: ./backend
+    type: service
+    start_mode: background
+    depends_on: [infra]
+    healthcheck:
+      http: "http://localhost:8000/health"   # wait for 2xx response
+
+  web:
+    path: ./web
+    type: service
+    start_mode: background
+    depends_on: [backend]
+    healthcheck:
+      sleep: 3s                        # unconditional wait
+
+  custom:
+    path: ./custom
+    type: service
+    start_mode: background
+    healthcheck:
+      task: wait-for-custom            # invokes `task wait-for-custom`, 0 exit = ready
+```
+
+**Probe types:**
+- `tcp: host:port` — succeeds when a TCP connection is accepted
+- `http: url` — succeeds on a 2xx response
+- `sleep: duration` — waits unconditionally (for things you can't probe)
+- `task: task-name` — runs a Taskfile task; 0 exit = ready
+
+Exactly one probe per healthcheck. If the probe doesn't succeed within `timeout`, the service is treated as failed, background processes are terminated, and `mship run` exits non-zero.
+
+Healthchecks apply to `mship run` only — `mship test` ignores them.
+
 ### Task Name Aliasing
 
 If your Taskfile uses different task names than mothership's defaults (`test`, `run`, `lint`, `setup`), add a `tasks:` mapping:
