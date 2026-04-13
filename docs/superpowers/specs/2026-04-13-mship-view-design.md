@@ -62,13 +62,14 @@ Data source: `core/state.py`, `core/phase.py`, `core/healthcheck.py`. Refresh: p
 
 ### `mship view logs`
 
-Tail of `mship` exec logs.
+Tail of the current task log (same source as `mship log`) — the human/agent message stream written by `LogManager`.
 
-- `mship view logs` — tails the most recent exec (newest by mtime in `.mothership/logs/`).
-- `mship view logs <exec-id>` — tails a specific exec.
-- `mship view logs --all` — multiplexes all active execs, prefixing each line with `[exec-id]` in a stable color.
+- `mship view logs` — tails the current task's log.
+- `mship view logs <task-slug>` — tails a specific task's log.
 
-Refresh: file-tail strategy (stat for size change on `--interval`, seek and read delta). Handles file rotation/deletion by reopening on next poll.
+Refresh: poll the log store at `--interval`, render new entries as they arrive. When new entries appear and the user is pinned to the bottom, auto-follow; otherwise stay put.
+
+**Out of scope for v1:** tailing background-process stdout. The executor does not currently persist per-exec stdout to files; adding that capture is tracked separately and will land before `view logs` gains an exec-log mode.
 
 ### `mship view diff`
 
@@ -112,7 +113,7 @@ Views must degrade, never crash the pane:
 - **Unit tests** (pure functions, no TUI):
   - Untracked-file diff synthesis (text, empty, binary, respects `.gitignore`).
   - Spec discovery (newest-by-mtime, name resolution with/without extension, missing dir).
-  - Log tailer (initial read, growth, rotation, deletion-and-recreate).
+  - Log tailer (initial read, delta reads as new entries appear, handles missing task gracefully).
   - Web port scan (skips blocklist, respects `--port`, fails cleanly when exhausted).
 - **TUI tests** using Textual's `App.run_test()` / `Pilot`:
   - Mount each view with fake data, step the refresh loop, assert rendered text.
