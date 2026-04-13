@@ -2,6 +2,8 @@
 
 Phase-based workflow engine for agentic development.
 
+> ⚠️ **Status: pre-1.0, under heavy development.** Mothership is being actively built and dogfooded. Expect breaking changes to config schema, CLI flags, and state file format between commits. Pin to a specific commit if you need stability. Bug reports and feedback are welcome.
+
 ## The Problem
 
 AI coding agents (Claude Code, Codex, Gemini CLI) are fast and capable, but they lack workflow structure. An agent can write code, run tests, and commit — but it doesn't know what *phase* of work it's in, whether it should be planning or coding, whether tests should pass before it moves to review, or how to coordinate worktrees for isolated feature work.
