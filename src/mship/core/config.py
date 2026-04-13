@@ -10,6 +10,25 @@ class Dependency(BaseModel):
     type: Literal["compile", "runtime"] = "compile"
 
 
+class Healthcheck(BaseModel):
+    tcp: str | None = None
+    http: str | None = None
+    sleep: str | None = None
+    task: str | None = None
+    timeout: str = "30s"
+    retry_interval: str = "500ms"
+
+    @model_validator(mode="after")
+    def exactly_one_probe(self) -> "Healthcheck":
+        probes = [self.tcp, self.http, self.sleep, self.task]
+        set_count = sum(1 for p in probes if p is not None)
+        if set_count != 1:
+            raise ValueError(
+                "healthcheck must specify exactly one of: tcp, http, sleep, task"
+            )
+        return self
+
+
 class RepoConfig(BaseModel):
     path: Path
     type: Literal["library", "service"]
@@ -20,6 +39,7 @@ class RepoConfig(BaseModel):
     git_root: str | None = None
     start_mode: Literal["foreground", "background"] = "foreground"
     symlink_dirs: list[str] = []
+    healthcheck: Healthcheck | None = None
 
     @model_validator(mode="before")
     @classmethod

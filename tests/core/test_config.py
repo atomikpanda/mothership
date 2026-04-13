@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from mship.core.config import WorkspaceConfig, ConfigLoader, Dependency
+from mship.core.config import WorkspaceConfig, ConfigLoader, Dependency, Healthcheck
 
 
 def test_load_minimal_config(workspace: Path):
@@ -341,3 +341,87 @@ repos:
     )
     config = ConfigLoader.load(cfg)
     assert config.repos["shared"].symlink_dirs == ["node_modules", ".venv"]
+
+
+def test_healthcheck_tcp_probe():
+    hc = Healthcheck(tcp="127.0.0.1:8001")
+    assert hc.tcp == "127.0.0.1:8001"
+    assert hc.http is None
+    assert hc.timeout == "30s"
+    assert hc.retry_interval == "500ms"
+
+
+def test_healthcheck_requires_exactly_one_probe():
+    with pytest.raises(ValueError, match="exactly one"):
+        Healthcheck()
+    with pytest.raises(ValueError, match="exactly one"):
+        Healthcheck(tcp="127.0.0.1:8001", http="http://localhost/health")
+
+
+def test_healthcheck_custom_timeout_and_interval():
+    hc = Healthcheck(tcp="127.0.0.1:8001", timeout="60s", retry_interval="1s")
+    assert hc.timeout == "60s"
+    assert hc.retry_interval == "1s"
+
+
+def test_repo_healthcheck_default_none(workspace):
+    config = ConfigLoader.load(workspace / "mothership.yaml")
+    assert config.repos["shared"].healthcheck is None
+
+
+def test_repo_healthcheck_loaded(workspace):
+    cfg = workspace / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: test
+repos:
+  shared:
+    path: ./shared
+    type: service
+    healthcheck:
+      tcp: "127.0.0.1:8001"
+      timeout: 45s
+"""
+    )
+    config = ConfigLoader.load(cfg)
+    hc = config.repos["shared"].healthcheck
+    assert hc is not None
+    assert hc.tcp == "127.0.0.1:8001"
+    assert hc.timeout == "45s"
+
+
+def test_repo_healthcheck_http(workspace):
+    cfg = workspace / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: test
+repos:
+  shared:
+    path: ./shared
+    type: service
+    healthcheck:
+      http: "http://localhost:8000/health"
+"""
+    )
+    config = ConfigLoader.load(cfg)
+    assert config.repos["shared"].healthcheck.http == "http://localhost:8000/health"
+
+
+def test_repo_healthcheck_task(workspace):
+    cfg = workspace / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: test
+repos:
+  shared:
+    path: ./shared
+    type: service
+    healthcheck:
+      task: wait-for-db
+      timeout: 60s
+"""
+    )
+    config = ConfigLoader.load(cfg)
+    hc = config.repos["shared"].healthcheck
+    assert hc.task == "wait-for-db"
+    assert hc.timeout == "60s"
