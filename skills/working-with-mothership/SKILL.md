@@ -153,8 +153,7 @@ mship test                              # confirm everything passes
 mship phase run                         # optional: deploy phase
 mship finish                            # creates coordinated PRs across repos in dependency order
 mship finish --handoff                  # write a CI handoff manifest instead
-mship abort --yes                       # remove worktrees and clean up state
-mship abort --yes --hard                # aggressive cleanup if normal abort fails
+mship abort --yes                       # remove worktrees and clean up state (best-effort cleanup on git failure)
 ```
 
 `mship finish` requires the `gh` CLI installed and authenticated. It creates PRs in dependency order so reviewers see a coordination block in each PR pointing to the others.

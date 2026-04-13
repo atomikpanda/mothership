@@ -40,27 +40,35 @@ class DoctorChecker:
         report = DoctorReport()
 
         for name, repo in self._config.repos.items():
+            # Resolve effective path (handles git_root subdir repos)
+            if repo.git_root is not None:
+                parent = self._config.repos[repo.git_root]
+                effective_path = (parent.path / repo.path).resolve()
+            else:
+                effective_path = repo.path
+
             # Path exists
-            if repo.path.is_dir():
+            if effective_path.is_dir():
                 report.checks.append(CheckResult(name=f"{name}/path", status="pass", message="path exists"))
             else:
-                report.checks.append(CheckResult(name=f"{name}/path", status="fail", message=f"path not found: {repo.path}"))
+                report.checks.append(CheckResult(name=f"{name}/path", status="fail", message=f"path not found: {effective_path}"))
                 continue  # skip further checks for this repo
 
             # Taskfile.yml
-            if (repo.path / "Taskfile.yml").exists():
+            if (effective_path / "Taskfile.yml").exists():
                 report.checks.append(CheckResult(name=f"{name}/taskfile", status="pass", message="Taskfile.yml found"))
             else:
                 report.checks.append(CheckResult(name=f"{name}/taskfile", status="fail", message="Taskfile.yml not found"))
 
-            # Git
-            if (repo.path / ".git").exists():
+            # Git — for git_root subdir repos, git lives at the parent's path, not the subdir
+            git_check_path = self._config.repos[repo.git_root].path if repo.git_root else effective_path
+            if (git_check_path / ".git").exists():
                 report.checks.append(CheckResult(name=f"{name}/git", status="pass", message="git initialized"))
             else:
                 report.checks.append(CheckResult(name=f"{name}/git", status="warn", message="not a git repository"))
 
             # Standard tasks (resolved through tasks mapping)
-            result = self._shell.run("task --list", cwd=repo.path)
+            result = self._shell.run("task --list", cwd=effective_path)
             if result.returncode != 0:
                 err_summary = (
                     result.stderr.strip()[:200]

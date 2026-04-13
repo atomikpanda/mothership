@@ -178,3 +178,45 @@ def test_doctor_report_properties():
     assert report.warnings == 1
     assert report.errors == 1
     assert report.ok is False
+
+
+def test_doctor_resolves_git_root_subdir_paths(tmp_path: Path):
+    """Doctor must use effective path for git_root subdir repos."""
+    root = tmp_path / "monorepo"
+    root.mkdir()
+    (root / "Taskfile.yml").write_text("version: '3'")
+    (root / ".git").mkdir()
+    web = root / "web"
+    web.mkdir()
+    (web / "Taskfile.yml").write_text("version: '3'")
+
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: mono
+repos:
+  root:
+    path: ./monorepo
+    type: service
+  web:
+    path: web
+    type: service
+    git_root: root
+"""
+    )
+    config = ConfigLoader.load(cfg)
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="test\nrun\nlint\nsetup\n", stderr="")
+
+    checker = DoctorChecker(config, mock_shell)
+    report = checker.run()
+
+    # web's path check should pass (resolved via git_root)
+    web_path = next(c for c in report.checks if c.name == "web/path")
+    assert web_path.status == "pass"
+    web_taskfile = next(c for c in report.checks if c.name == "web/taskfile")
+    assert web_taskfile.status == "pass"
+    # web's git check should pass — git lives at parent's path
+    web_git = next(c for c in report.checks if c.name == "web/git")
+    assert web_git.status == "pass"
