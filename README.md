@@ -167,6 +167,29 @@ mship run                     # start services
 mship logs <service>           # tail logs for a service
 ```
 
+### `mship finish`
+
+#### PR base branch
+
+Each repo's PR can target a non-default base:
+
+```yaml
+repos:
+  cli:
+    path: ../cli
+    base_branch: main
+  api:
+    path: ../api
+    base_branch: cli-refactor
+```
+
+Overrides (most-specific wins):
+
+- `--base <branch>` — global override for all repos.
+- `--base-map cli=main,api=release/x` — per-repo overrides.
+
+`mship finish` verifies every resolved base exists on `origin` before any push. Repos with no configured or overridden base use the remote default branch.
+
 ### Live views
 
 `mship view` provides read-only TUIs designed for tmux/zellij panes. All views support `--watch` and `--interval N`.
