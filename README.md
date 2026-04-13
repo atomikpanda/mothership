@@ -1,49 +1,73 @@
 # Mothership (`mship`)
 
-**A control plane for AI coding agents.** Gives agents the workflow structure they lack on their own: phase tracking, isolated worktrees, dependency-ordered execution, drift detection, and coordinated multi-repo PRs.
+**State safety for one AI agent working across repo boundaries.** Makes it structurally impossible for the agent to commit to the wrong branch, modify files in the main worktree, forget what it changed in one repo while working in another, or run tests against a stale version of a dependency.
 
 > ⚠️ **Status: pre-1.0, under heavy development.** Expect breaking changes to config, flags, and state format between commits. Pin a commit if you need stability. Feedback welcome.
 
-## Why you want this
+## The problem: state hell
 
-AI agents (Claude Code, Codex, Gemini CLI) can write code, run tests, and commit — but they don't know **what phase they're in**, whether they should be planning or implementing, if tests should pass before review, or how to coordinate isolated branches across repos. They'll happily skip the spec, forget to run tests, create PRs in the wrong merge order, and work on a worktree that's already drifted from origin.
+Give an AI agent write access across a few repos and you'll see some or all of this within the first week:
 
-Mothership fixes that without prescribing how the agent works inside each step:
+- It **commits to main** because it forgot to `git checkout -b` in repo B.
+- It **modifies files in the main worktree** instead of the feature branch, because the working directory looked fine and it didn't notice the checkout was stale.
+- It **forgets what it changed in repo A** the moment it starts working in repo B — the context window doesn't have repo A's code anymore.
+- It **runs tests in repo B against the old version of repo A's code**, because nothing wired the task's repo-A worktree into repo B's dependency resolution.
+- It **merges PRs in the wrong order**, breaking `main` on the next CI run.
+- It **keeps editing a branch after opening the PR**, updating the PR with accidental changes — or pushing work nobody will ever review.
 
-| Without mship | With mship |
+These aren't agent skill issues. They're state-management issues. One agent, one context window, multiple repos, multiple working trees — the failure modes are structural.
+
+## How mship prevents them
+
+**Worktree isolation is the load-bearing feature.** `mship spawn <description>` creates a git worktree per affected repo at `.worktrees/feat/<slug>/`, each on a matching feature branch. The main checkouts stay pristine. Every subsequent command (`test`, `run`, `logs`, `finish`) operates on those worktrees, not main. The agent literally cannot accidentally modify main because its working tree isn't main.
+
+| Failure | How mship makes it impossible |
 |---|---|
-| Agent jumps straight to coding, no spec, no plan | `mship spawn "add avatars"` → isolated worktree, `plan → dev → review → run` phases with soft gates |
-| "Tests pass in repo A but fail in repo B — why?" | `mship test` runs dependency-ordered, fail-fast |
-| "Which PR do I merge first?" | `mship finish` creates coordinated PRs with merge-order hints |
-| Agent works on a stale branch without noticing | `mship audit` blocks `spawn`/`finish` on drift (wrong branch, dirty, behind remote) |
-| Worktrees pile up, state leaks | `mship prune` + state-anchored to the main repo's `.git` |
+| Commits to main | `spawn` creates a feature-branch worktree; every mship command resolves to worktree paths, not repo.path |
+| Wrong worktree / stale checkout | `audit` blocks `spawn`/`finish` on drift (wrong branch, dirty, behind remote, foreign worktrees) — gated on every lifecycle boundary |
+| Forgets cross-repo state | `mship log` + `mship status` + `mship view *` give the agent structured state it can re-inject into context |
+| Tests against stale dep version | `mship test` runs repos in dependency order; `mship doctor` verifies the worktree-to-worktree linking your package manager needs (`symlink_dirs`, npm workspaces, etc.) |
+| PRs merged out of order | `mship finish` creates coordinated PRs in dependency order with a cross-repo coordination block in each PR description |
+| Agent keeps editing after PR | `mship finish` stamps `finished_at`; `phase dev`/`plan`/`review` refuse transitions on finished tasks; `mship close` tears down once merged |
 
-Works for a single repo *and* multi-repo workspaces. Start small; scale when your system grows.
+Works for **a single repo** (the isolation + phase + audit story still applies) *and* multi-repo workspaces (the coordination story layers on top). Start with one; add repos when the system grows.
 
 ## mship in 60 seconds
 
 ```bash
 $ mship init --detect                           # scaffold mothership.yaml from the current directory
-$ mship spawn "add labels to tasks"             # worktrees + branch + plan phase
+$ mship spawn "add labels to tasks"             # one worktree per repo, matched feature branches, main untouched
 Spawned task: add-labels-to-tasks
   Branch: feat/add-labels-to-tasks
   Phase: plan
-  shared: /home/me/dev/shared/.worktrees/feat/add-labels-to-tasks
+  shared:       /home/me/dev/shared/.worktrees/feat/add-labels-to-tasks       ← agent edits here
+  auth-service: /home/me/dev/auth-service/.worktrees/feat/add-labels-to-tasks ← and here
+                                                                              (main checkouts untouched)
 
-$ mship phase dev                                # transition with a soft warning if no spec
+$ mship phase dev                                # soft gate warns if no spec exists
 WARNING: No spec found — consider writing one before developing
 Phase: dev
 
-$ mship test                                    # run tests across repos in dependency order
+$ mship test                                    # tests run in dependency order, inside the worktrees
 shared: pass
 auth-service: pass
 
-$ mship phase review && mship finish            # coordinated PRs, correct merge order
+$ mship audit                                   # git-state check: clean worktrees? right branch? not behind?
+workspace: my-platform
+shared:       ✓ clean
+auth-service: ✓ clean
+0 error(s), 0 info across 2 repos
+
+$ mship phase review && mship finish            # coordinated PRs in correct merge order
 auth-service: feat/add-labels-to-tasks → main  ✓ https://github.com/you/auth/pull/42
 shared:       feat/add-labels-to-tasks → main  ✓ https://github.com/you/shared/pull/41
+Task finished. After merge, run `mship close` to clean up.
+
+$ # ...PRs merged externally...
+$ mship close                                   # tears down worktrees, clears state, logs completion
 ```
 
-That's the whole loop. Everything else below is reference.
+That's the whole loop. The worktrees the agent was editing in are gone; `main` is unchanged; nothing leaked; `mship status` is empty and ready for the next `spawn`. Everything below is reference.
 
 ## How it fits
 
