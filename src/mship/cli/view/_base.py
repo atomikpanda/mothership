@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
@@ -96,9 +98,11 @@ class ViewApp(App):
         self._body.scroll_end(animate=False)
 
     # --- test helpers ---
+    _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[mKHFABCDJsu]")
+
     def rendered_text(self) -> str:
         assert self._static is not None
-        return str(self._static.content)
+        return self._ANSI_ESCAPE.sub("", str(self._static.content))
 
     def body_scroll_y(self) -> float:
         assert self._body is not None
