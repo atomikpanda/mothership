@@ -1,8 +1,51 @@
+from typing import Optional
+
 import typer
+
+from mship.cli.view._base import ViewApp
+
+
+class LogsView(ViewApp):
+    def __init__(self, state_manager, log_manager, task_slug: Optional[str], **kw):
+        super().__init__(**kw)
+        self._state_manager = state_manager
+        self._log_manager = log_manager
+        self._task_slug = task_slug
+
+    def _resolve_slug(self) -> Optional[str]:
+        if self._task_slug is not None:
+            return self._task_slug
+        state = self._state_manager.load()
+        return state.current_task
+
+    def gather(self) -> str:
+        slug = self._resolve_slug()
+        if slug is None:
+            return "No active task (and no slug provided)"
+        entries = self._log_manager.read(slug)
+        if not entries:
+            return f"Log for {slug} is empty"
+        lines = []
+        for entry in entries:
+            ts = entry.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+            lines.append(f"{ts}  {entry.message}")
+        return "\n".join(lines)
 
 
 def register(app: typer.Typer, get_container):
     @app.command()
-    def logs():
-        """Placeholder; replaced in later task."""
-        raise NotImplementedError
+    def logs(
+        task_slug: Optional[str] = typer.Argument(None, help="Task slug (default: current)"),
+        watch: bool = typer.Option(False, "--watch"),
+        interval: float = typer.Option(2.0, "--interval"),
+    ):
+        """Live tail of a task's log."""
+        container = get_container()
+        view = LogsView(
+            state_manager=container.state_manager(),
+            log_manager=container.log_manager(),
+            task_slug=task_slug,
+            watch=watch,
+            interval=interval,
+        )
+        view.run()
