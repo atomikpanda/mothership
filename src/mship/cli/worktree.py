@@ -259,9 +259,8 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=1)
 
         missing: list[tuple[str, str]] = []
+        empty_branches: list[tuple[str, str, str]] = []
         for repo_name, eff_base in effective_bases.items():
-            if eff_base is None:
-                continue
             if repo_name in task.pr_urls:
                 continue  # skip repos already done
             repo_path = config.repos[repo_name].path
@@ -269,13 +268,24 @@ def register(app: typer.Typer, get_container):
                 wt = Path(task.worktrees[repo_name])
                 if wt.exists():
                     repo_path = wt
-            if not pr_mgr.verify_base_exists(repo_path, eff_base):
-                missing.append((repo_name, eff_base))
+            if eff_base is not None:
+                if not pr_mgr.verify_base_exists(repo_path, eff_base):
+                    missing.append((repo_name, eff_base))
+                    continue
+                if pr_mgr.count_commits_ahead(repo_path, eff_base, task.branch) == 0:
+                    empty_branches.append((repo_name, task.branch, eff_base))
 
         if missing:
             output.error("Base branch not found on remote:")
             for repo_name, eff_base in missing:
                 output.error(f"  {repo_name}: {eff_base}")
+            raise typer.Exit(code=1)
+
+        if empty_branches:
+            output.error("No commits to push — nothing to PR:")
+            for repo_name, branch, eff_base in empty_branches:
+                output.error(f"  {repo_name}: {branch} has no commits past {eff_base}")
+            output.error("Commit your changes in each worktree, or run `mship abort --yes`.")
             raise typer.Exit(code=1)
 
         pr_list: list[dict] = []

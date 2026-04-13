@@ -50,6 +50,26 @@ class PRManager:
             )
         return result.stdout.strip()
 
+    def count_commits_ahead(self, repo_path: Path, base: str, branch: str) -> int:
+        """Return the number of commits on `branch` not on `base`.
+
+        Uses `origin/<base>` so the comparison is against the remote (same
+        reference gh will use). Returns 0 on any git failure (fail-closed: a
+        caller treating 0 as "empty" will surface a clear error instead of
+        attempting a doomed push).
+        """
+        spec = f"origin/{base}..{branch}"
+        result = self._shell.run(
+            f"git rev-list --count {shlex.quote(spec)}",
+            cwd=repo_path,
+        )
+        if result.returncode != 0:
+            return 0
+        try:
+            return int(result.stdout.strip() or "0")
+        except ValueError:
+            return 0
+
     def verify_base_exists(self, repo_path: Path, base: str) -> bool:
         """Return True if `base` exists as a head on origin, else False.
 

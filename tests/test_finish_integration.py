@@ -222,6 +222,10 @@ def test_finish_passes_base_from_config(finish_workspace, tmp_path):
             return ShellResult(returncode=0, stdout="Logged in", stderr="")
         if "git ls-remote" in cmd:
             return ShellResult(returncode=0, stdout="abc\trefs/heads/release/7\n", stderr="")
+        if "git rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "git rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
         if "git push" in cmd:
             return ShellResult(returncode=0, stdout="", stderr="")
         if "gh pr create" in cmd:
@@ -343,3 +347,43 @@ def test_finish_unrelated_dirty_repo_does_not_block(finish_workspace):
 
     result = runner.invoke(app, ["finish"])
     assert result.exit_code == 0, result.output
+
+
+def test_finish_fails_when_branch_has_no_commits(finish_workspace):
+    """Empty feature branch (no commits past base) must be caught pre-push."""
+    import yaml
+
+    workspace, mock_shell = finish_workspace
+    cfg_path = workspace / "mothership.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["repos"]["shared"]["base_branch"] = "main"
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    from mship.cli import container
+    container.config.reset()
+
+    result = runner.invoke(app, ["spawn", "empty branch", "--repos", "shared", "--force-audit"])
+    assert result.exit_code == 0, result.output
+
+    pushed: list[str] = []
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "git ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc\trefs/heads/main\n", stderr="")
+        if "git rev-list --count" in cmd:
+            # Empty — feature branch has no commits past origin/main.
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
+        if "git push" in cmd:
+            pushed.append(cmd)
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://x/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    result = runner.invoke(app, ["finish"])
+    assert result.exit_code != 0
+    assert "no commits" in result.output.lower() or "No commits to push" in result.output
+    assert pushed == [], "no repo should be pushed when a branch is empty"

@@ -68,6 +68,27 @@ def test_create_pr_failure(mock_shell: MagicMock):
         mgr.create_pr(Path("/tmp/repo"), "feat/test", "title", "body")
 
 
+def test_count_commits_ahead_parses_integer(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="3\n", stderr="")
+    mgr = PRManager(mock_shell)
+    assert mgr.count_commits_ahead(Path("/tmp/r"), "main", "feat/x") == 3
+    cmd = mock_shell.run.call_args.args[0]
+    assert "git rev-list --count" in cmd
+    assert "origin/main..feat/x" in cmd
+
+
+def test_count_commits_ahead_zero_for_empty_output(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="0\n", stderr="")
+    mgr = PRManager(mock_shell)
+    assert mgr.count_commits_ahead(Path("/tmp/r"), "main", "feat/x") == 0
+
+
+def test_count_commits_ahead_zero_on_git_failure(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(returncode=128, stdout="", stderr="bad ref")
+    mgr = PRManager(mock_shell)
+    assert mgr.count_commits_ahead(Path("/tmp/r"), "main", "feat/x") == 0
+
+
 def test_update_pr_body(mock_shell: MagicMock):
     mock_shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
     mgr = PRManager(mock_shell)
