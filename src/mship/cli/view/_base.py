@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
@@ -59,7 +60,7 @@ class ViewApp(App):
             text = self.gather()
         except Exception as e:
             text = f"[error gathering content] {e!r}"
-        self._static.update(text)
+        self._static.update(Text.from_ansi(text))
         self.call_after_refresh(self._restore_scroll, prev_y, was_at_end)
 
     def _restore_scroll(self, prev_y: float, was_at_end: bool) -> None:
