@@ -1,6 +1,13 @@
+import os
+import subprocess
 from pathlib import Path
 
-from mship.core.repo_state import Issue, RepoAudit, AuditReport
+import pytest
+import yaml
+
+from mship.core.config import ConfigLoader
+from mship.core.repo_state import Issue, RepoAudit, AuditReport, audit_repos
+from mship.util.shell import ShellRunner
 
 
 def test_issue_is_immutable():
@@ -59,3 +66,206 @@ def test_audit_report_to_json_shape():
         "current_branch": "main",
         "issues": [{"code": "dirty_worktree", "severity": "error", "message": "3 files"}],
     }]
+
+
+# ---------------------------------------------------------------------------
+# Task 3: audit_repos detection tests (require audit_workspace fixture)
+# ---------------------------------------------------------------------------
+
+
+def _load(ws: Path):
+    return ConfigLoader.load(ws / "mothership.yaml"), ShellRunner()
+
+
+def _sh(*args, cwd):
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(list(args), cwd=cwd, check=True, capture_output=True, env=env)
+
+
+def _issue_codes(report, name):
+    (repo,) = [r for r in report.repos if r.name == name]
+    return {i.code for i in repo.issues}
+
+
+def test_audit_clean_repos_have_no_issues(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    rep = audit_repos(cfg, shell)
+    assert rep.has_errors is False
+    for r in rep.repos:
+        assert r.issues == ()
+
+
+def test_audit_path_missing(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    (audit_workspace / "cli").rename(audit_workspace / "cli.moved")
+    rep = audit_repos(cfg, shell, names=["cli"])
+    assert "path_missing" in _issue_codes(rep, "cli")
+
+
+def test_audit_not_a_git_repo(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    import shutil
+    shutil.rmtree(audit_workspace / "cli" / ".git")
+    rep = audit_repos(cfg, shell, names=["cli"])
+    assert "not_a_git_repo" in _issue_codes(rep, "cli")
+
+
+def test_audit_detached_head(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    clone = audit_workspace / "cli"
+    _sh("git", "checkout", "--detach", "HEAD", cwd=clone)
+    rep = audit_repos(cfg, shell, names=["cli"])
+    assert "detached_head" in _issue_codes(rep, "cli")
+
+
+def test_audit_unexpected_branch(audit_workspace):
+    cfg_path = audit_workspace / "mothership.yaml"
+    data = yaml.safe_load(cfg_path.read_text())
+    data["repos"]["cli"]["expected_branch"] = "marshal-refactor"
+    cfg_path.write_text(yaml.safe_dump(data))
+    cfg, shell = _load(audit_workspace)
+    rep = audit_repos(cfg, shell, names=["cli"])
+    assert "unexpected_branch" in _issue_codes(rep, "cli")
+
+
+def test_audit_dirty_worktree(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    (audit_workspace / "cli" / "new.txt").write_text("hi\n")
+    rep = audit_repos(cfg, shell, names=["cli"])
+    assert "dirty_worktree" in _issue_codes(rep, "cli")
+
+
+def test_audit_allow_dirty_suppresses(audit_workspace):
+    cfg_path = audit_workspace / "mothership.yaml"
+    data = yaml.safe_load(cfg_path.read_text())
+    data["repos"]["cli"]["allow_dirty"] = True
+    cfg_path.write_text(yaml.safe_dump(data))
+    cfg, shell = _load(audit_workspace)
+    (audit_workspace / "cli" / "new.txt").write_text("hi\n")
+    rep = audit_repos(cfg, shell, names=["cli"])
+    assert "dirty_worktree" not in _issue_codes(rep, "cli")
+
+
+def test_audit_ahead_remote_is_info(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    clone = audit_workspace / "cli"
+    (clone / "x.txt").write_text("x")
+    _sh("git", "add", "x.txt", cwd=clone)
+    _sh("git", "commit", "-qm", "ahead", cwd=clone)
+    rep = audit_repos(cfg, shell, names=["cli"])
+    (repo,) = [r for r in rep.repos if r.name == "cli"]
+    codes = {(i.code, i.severity) for i in repo.issues}
+    assert ("ahead_remote", "info") in codes
+    assert repo.has_errors is False
+
+
+def test_audit_behind_remote(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    clone = audit_workspace / "cli"
+    (clone / "y.txt").write_text("y")
+    _sh("git", "add", "y.txt", cwd=clone)
+    _sh("git", "commit", "-qm", "later", cwd=clone)
+    _sh("git", "push", "-q", "origin", "main", cwd=clone)
+    _sh("git", "reset", "--hard", "HEAD^", cwd=clone)
+    rep = audit_repos(cfg, shell, names=["cli"])
+    assert "behind_remote" in _issue_codes(rep, "cli")
+
+
+def test_audit_diverged(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    clone = audit_workspace / "cli"
+    (clone / "a.txt").write_text("a")
+    _sh("git", "add", "a.txt", cwd=clone)
+    _sh("git", "commit", "-qm", "a", cwd=clone)
+    _sh("git", "push", "-q", "origin", "main", cwd=clone)
+    _sh("git", "reset", "--hard", "HEAD^", cwd=clone)
+    (clone / "b.txt").write_text("b")
+    _sh("git", "add", "b.txt", cwd=clone)
+    _sh("git", "commit", "-qm", "b", cwd=clone)
+    rep = audit_repos(cfg, shell, names=["cli"])
+    assert "diverged" in _issue_codes(rep, "cli")
+
+
+def test_audit_no_upstream(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    clone = audit_workspace / "cli"
+    _sh("git", "checkout", "-qb", "scratch", cwd=clone)
+    rep = audit_repos(cfg, shell, names=["cli"])
+    assert "no_upstream" in _issue_codes(rep, "cli")
+
+
+def test_audit_extra_worktrees(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    clone = audit_workspace / "cli"
+    wt = audit_workspace / "cli-wt"
+    _sh("git", "worktree", "add", str(wt), "-b", "scratch", cwd=clone)
+    rep = audit_repos(cfg, shell, names=["cli"])
+    assert "extra_worktrees" in _issue_codes(rep, "cli")
+
+
+def test_audit_fetch_failed(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    clone = audit_workspace / "cli"
+    _sh("git", "remote", "set-url", "origin", "/no/such/path.git", cwd=clone)
+    rep = audit_repos(cfg, shell, names=["cli"])
+    assert "fetch_failed" in _issue_codes(rep, "cli")
+
+
+def test_audit_names_filter_unknown_repo(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    with pytest.raises(ValueError, match="unknown"):
+        audit_repos(cfg, shell, names=["cli", "nope"])
+
+
+def test_audit_monorepo_one_fetch_per_root(tmp_path):
+    """Two repos sharing a git_root should trigger one fetch and share git-wide issues."""
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(bare)], check=True, capture_output=True)
+    mono = tmp_path / "mono"
+    subprocess.run(["git", "clone", str(bare), str(mono)], check=True, capture_output=True)
+    for k in ("user.email", "t@t"), ("user.name", "t"):
+        subprocess.run(["git", "config", *k], cwd=mono, check=True, capture_output=True)
+    (mono / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    (mono / "pkg-a").mkdir()
+    (mono / "pkg-b").mkdir()
+    (mono / "pkg-a" / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    (mono / "pkg-b" / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    subprocess.run(["git", "add", "."], cwd=mono, check=True, capture_output=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=mono, check=True, capture_output=True, env=env)
+    subprocess.run(["git", "push", "-q", "origin", "main"], cwd=mono, check=True, capture_output=True)
+
+    (tmp_path / "mothership.yaml").write_text(yaml.safe_dump({
+        "workspace": "m",
+        "repos": {
+            "mono": {"path": "./mono", "type": "service"},
+            "pkg_a": {"path": "pkg-a", "type": "library", "git_root": "mono"},
+            "pkg_b": {"path": "pkg-b", "type": "library", "git_root": "mono"},
+        },
+    }))
+
+    # Dirty pkg-a only — branch/fetch state is clean
+    (mono / "pkg-a" / "dirty.txt").write_text("x")
+
+    cfg, shell = _load(tmp_path)
+    # Wrap shell to count fetch calls
+    calls: list[str] = []
+    real_run = shell.run
+    def counting(cmd, cwd, env=None):
+        calls.append(cmd)
+        return real_run(cmd, cwd, env=env)
+    shell.run = counting  # type: ignore[assignment]
+
+    rep = audit_repos(cfg, shell)
+    fetch_calls = [c for c in calls if c.startswith("git fetch")]
+    assert len(fetch_calls) == 1, f"expected one fetch, got {fetch_calls}"
+
+    pkg_a_codes = _issue_codes(rep, "pkg_a")
+    pkg_b_codes = _issue_codes(rep, "pkg_b")
+    assert "dirty_worktree" in pkg_a_codes
+    assert "dirty_worktree" not in pkg_b_codes

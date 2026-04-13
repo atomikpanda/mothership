@@ -3,6 +3,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 @pytest.fixture
@@ -50,3 +51,44 @@ def workspace_with_git(workspace: Path) -> Path:
                  "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t.com"},
         )
     return workspace
+
+
+@pytest.fixture
+def audit_workspace(tmp_path: Path) -> Path:
+    """Workspace with a bare 'origin' and working clone for each of two repos.
+
+    Layout:
+        tmp_path/
+            origin/{cli,api}.git   # bare
+            cli/, api/              # working clones + Taskfile.yml
+            mothership.yaml
+    """
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+
+    def _sh(*args, cwd):
+        subprocess.run(list(args), cwd=cwd, check=True, capture_output=True, env=env)
+
+    (tmp_path / "origin").mkdir()
+    for name in ("cli", "api"):
+        bare = tmp_path / "origin" / f"{name}.git"
+        subprocess.run(["git", "init", "--bare", "-b", "main", str(bare)], check=True, capture_output=True)
+
+        clone = tmp_path / name
+        subprocess.run(["git", "clone", str(bare), str(clone)], check=True, capture_output=True)
+        _sh("git", "config", "user.email", "t@t", cwd=clone)
+        _sh("git", "config", "user.name", "t", cwd=clone)
+        (clone / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+        (clone / "README.md").write_text(f"{name}\n")
+        _sh("git", "add", ".", cwd=clone)
+        _sh("git", "commit", "-qm", "init", cwd=clone)
+        _sh("git", "push", "-q", "origin", "main", cwd=clone)
+
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: audit-test\n"
+        "repos:\n"
+        "  cli:\n    path: ./cli\n    type: service\n"
+        "  api:\n    path: ./api\n    type: service\n"
+    )
+    return tmp_path
