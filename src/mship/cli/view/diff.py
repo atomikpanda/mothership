@@ -13,13 +13,21 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Static, Tree
 
 from mship.cli.view._base import ViewApp
-from mship.core.view.diff_sources import FileDiff, WorktreeDiff, collect_worktree_diff
+from mship.core.view.diff_sources import WorktreeDiff, collect_worktree_diff
 
 
 _LARGE_WORKTREE_THRESHOLD = 20
 
 
 class DiffView(ViewApp):
+    CSS = """
+    Tree#diff-tree {
+        width: 30%;
+        min-width: 24;
+        border-right: tall $accent;
+    }
+    """
+
     BINDINGS = ViewApp.BINDINGS + [
         Binding("e", "toggle_lockfile", "Expand lockfile", show=True),
         Binding("z", "toggle_worktree", "Toggle worktree", show=True),
