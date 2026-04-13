@@ -24,6 +24,8 @@ class Task(BaseModel):
     blocked_reason: str | None = None
     blocked_at: datetime | None = None
     pr_urls: dict[str, str] = {}
+    finished_at: datetime | None = None
+    phase_entered_at: datetime | None = None
 
 
 class WorkspaceState(BaseModel):
