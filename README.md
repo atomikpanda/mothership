@@ -32,6 +32,8 @@ These aren't agent skill issues. They're state-management issues. One agent, one
 
 Works for **a single repo** (the isolation + phase + audit story still applies) *and* multi-repo workspaces (the coordination story layers on top). Start with one; add repos when the system grows.
 
+**Cross-repo context switches.** When the agent moves between repos within a task, `mship switch <repo>` records the checkpoint and emits a structured handoff: what changed in dependency repos since the agent was last here, what it logged in this repo, whether the worktree is clean. The agent re-injects the handoff into its context and continues work grounded in current state — no re-reading every file, no stale mental models, no running tests against the wrong version of a dependency.
+
 ## mship in 60 seconds
 
 ```bash
@@ -132,6 +134,10 @@ mship doctor                          # validate config & tools (gh, env_runner,
 # Phase management
 mship phase plan|dev|review|run       # transition with soft gate warnings
 mship block "reason" / mship unblock  # park/resume task
+
+# Context switches
+mship switch <repo>                   # cross-repo context switch: handoff + record active repo
+mship switch                          # re-render handoff for the currently active repo
 
 # Worktree management
 mship spawn "description"             # create worktrees for a new task

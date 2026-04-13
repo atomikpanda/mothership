@@ -24,8 +24,10 @@ Works for single repos, monorepos, and metarepos (multiple separate repos in one
 **Every session, before doing anything else:**
 
 ```bash
-mship status    # current task, phase, blocked state, test results
-mship log       # narrative of what was happening last session
+mship status    # current task, phase, active repo, worktrees, drift, last log
+mship log       # full narrative of what was happening last session
+mship switch <repo>   # if you're about to work in a specific repo, call this first
+                       # (snapshots dep SHAs + shows what changed since you were last here)
 ```
 
 If `mship status` errors with "No mothership.yaml found", you're not in a mothership workspace — skip this skill. If there's no active task, ask the user what to work on, then `mship spawn`.
@@ -103,6 +105,8 @@ mship test --repos shared,api           # only specific repos
 mship test --tag apple                  # repos tagged 'apple' (any number of --tag flags)
 mship log "implemented avatar upload, tests passing"  # leave breadcrumbs
 mship status                            # check current state
+mship switch <repo>                     # set active repo + emit handoff (deps changed, last log, drift, tests)
+mship switch                            # re-render handoff for the currently active repo
 ```
 
 **Always log progress** after a significant step. The log is what you'll read in your next session if context is wiped.
@@ -349,6 +353,7 @@ Then `mship test --tag mobile` runs both.
 - **Don't manually edit `.mothership/state.yaml`** — use the CLI commands instead.
 - **Don't assume `mship` knows what's running outside of it** — if you started services manually, mothership won't track them. Use `mship run` or accept that `mship status` won't reflect them.
 - **Don't `--force-audit` without reading the drift** — the gate is there to stop you from starting work on a dirty/wrong-branch repo. If you bypass, know why; the task log records the bypass.
+- **Don't `cd` between worktrees without `mship switch`** — you'll miss cross-repo changes and lose the "since your last switch" anchor. Always call `mship switch <repo>` before starting work in a different repo.
 
 ## Integration with Other Tools
 
