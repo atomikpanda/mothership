@@ -17,10 +17,10 @@ layout {
 
     tab name="Plan" focus=true {
         pane split_direction="vertical" {
-            pane size="60%" name="shell"
-            pane split_direction="horizontal" size="40%" {
-                pane name="mship spec" command="mship" { args "view" "spec" "--watch"; }
-                pane name="mship status" command="mship" { args "view" "status"; }
+            pane size="50%" name="shell"
+            pane split_direction="horizontal" size="50%" {
+                pane name="specs" command="mship" { args "view" "spec" "--watch"; }
+                pane name="status" command="mship" { args "view" "status"; }
             }
         }
     }
@@ -31,15 +31,15 @@ layout {
                 args "-lc" "${EDITOR:-$(command -v nvim || command -v vim || command -v vi)} ."
             }
             pane split_direction="horizontal" size="40%" {
-                pane name="mship logs" command="mship" { args "view" "logs" "--watch"; }
-                pane name="mship status" command="mship" { args "view" "status" "--watch"; }
+                pane name="logs" command="mship" { args "view" "logs" "--watch"; }
+                pane name="status" command="mship" { args "view" "status" "--watch"; }
             }
         }
     }
 
     tab name="Review" {
         pane split_direction="vertical" {
-            pane size="70%" name="mship diff" command="mship" { args "view" "diff" "--watch"; }
+            pane size="70%" name="diff" command="mship" { args "view" "diff" "--watch"; }
             pane size="30%" name="shell"
         }
     }
@@ -48,8 +48,8 @@ layout {
         pane split_direction="vertical" {
             pane size="60%" name="shell"
             pane split_direction="horizontal" size="40%" {
-                pane name="mship logs" command="mship" { args "view" "logs" "--watch"; }
-                pane name="mship status" command="mship" { args "view" "status" "--watch"; }
+                pane name="logs" command="mship" { args "view" "logs" "--watch"; }
+                pane name="status" command="mship" { args "view" "status" "--watch"; }
             }
         }
     }
