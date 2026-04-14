@@ -148,3 +148,31 @@ def test_handoff_drift_count_nonzero_when_dirty(switch_workspace):
     log_mgr = LogManager(workspace / ".mothership" / "logs")
     handoff = build_handoff(cfg, sm.load(), shell, log_mgr, repo="cli")
     assert handoff.drift_error_count >= 1
+
+
+def test_handoff_prefers_repo_tagged_log_entry(switch_workspace):
+    workspace, shared_wt, cli_wt, sm = switch_workspace
+
+    log_mgr = LogManager(workspace / ".mothership" / "logs")
+    log_mgr.append("t", "generic older entry")
+    log_mgr.append("t", "older shared entry", repo="shared")
+    log_mgr.append("t", "most recent untagged")
+
+    cfg = ConfigLoader.load(workspace / "mothership.yaml")
+    shell = ShellRunner()
+    handoff = build_handoff(cfg, sm.load(), shell, log_mgr, repo="shared")
+    assert handoff.last_log_in_repo is not None
+    assert handoff.last_log_in_repo.message == "older shared entry"
+
+
+def test_handoff_falls_back_to_latest_when_no_repo_tag(switch_workspace):
+    workspace, shared_wt, cli_wt, sm = switch_workspace
+
+    log_mgr = LogManager(workspace / ".mothership" / "logs")
+    log_mgr.append("t", "untagged only")
+
+    cfg = ConfigLoader.load(workspace / "mothership.yaml")
+    shell = ShellRunner()
+    handoff = build_handoff(cfg, sm.load(), shell, log_mgr, repo="shared")
+    assert handoff.last_log_in_repo is not None
+    assert handoff.last_log_in_repo.message == "untagged only"

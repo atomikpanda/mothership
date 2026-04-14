@@ -197,11 +197,14 @@ def build_handoff(
         if change is not None:
             dep_changes.append(change)
 
-    # Last log
+    # Last log — prefer entries tagged with this repo; fall back to latest overall.
     last_log = None
     try:
-        entries = log_manager.read(task.slug, last=1)
-        if entries:
+        entries = log_manager.read(task.slug)
+        tagged = [e for e in entries if e.repo == repo]
+        if tagged:
+            last_log = tagged[-1]
+        elif entries:
             last_log = entries[-1]
     except Exception:
         last_log = None
