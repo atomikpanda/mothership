@@ -64,6 +64,7 @@ from mship.cli import view as _view_mod
 from mship.cli import audit as _audit_mod
 from mship.cli import sync as _sync_mod
 from mship.cli import switch as _switch_mod
+from mship.cli import layout as _layout_mod
 
 _status_mod.register(app, get_container)
 _phase_mod.register(app, get_container)
@@ -79,3 +80,4 @@ _view_mod.register(app, get_container)
 _audit_mod.register(app, get_container)
 _sync_mod.register(app, get_container)
 _switch_mod.register(app, get_container)
+_layout_mod.register(app, get_container)

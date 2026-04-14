@@ -1,0 +1,78 @@
+import os
+from pathlib import Path
+
+import typer
+
+_TEMPLATE = """\
+layout {
+    tab name="Plan" {
+        pane split_direction="vertical" {
+            pane size="60%"
+            pane split_direction="horizontal" size="40%" {
+                pane command="mship" { args "view" "spec" "--watch"; }
+                pane command="mship" { args "view" "status"; }
+            }
+        }
+    }
+
+    tab name="Dev" focus=true {
+        pane split_direction="vertical" {
+            pane size="60%" command="bash" {
+                args "-lc" "${EDITOR:-$(command -v nvim || command -v vim || command -v vi)} ."
+            }
+            pane split_direction="horizontal" size="40%" {
+                pane command="mship" { args "view" "logs" "--watch"; }
+                pane command="mship" { args "view" "status" "--watch"; }
+            }
+        }
+    }
+
+    tab name="Review" {
+        pane split_direction="vertical" {
+            pane size="70%" command="mship" { args "view" "diff" "--watch"; }
+            pane size="30%"
+        }
+    }
+
+    tab name="Run" {
+        pane split_direction="vertical" {
+            pane size="60%"
+            pane split_direction="horizontal" size="40%" {
+                pane command="mship" { args "view" "logs" "--watch"; }
+                pane command="mship" { args "view" "status" "--watch"; }
+            }
+        }
+    }
+}
+"""
+
+
+def _target_path() -> Path:
+    return Path.home() / ".config" / "zellij" / "layouts" / "mothership.kdl"
+
+
+def register(app: typer.Typer, get_container):
+    layout_app = typer.Typer(name="layout", help="Manage the zellij layout for mothership.", no_args_is_help=True)
+
+    @layout_app.command()
+    def init(
+        force: bool = typer.Option(False, "--force", help="Overwrite existing layout file."),
+    ):
+        """Write the mothership zellij layout to ~/.config/zellij/layouts/mothership.kdl."""
+        target = _target_path()
+        if target.exists() and not force:
+            typer.echo(
+                f"Error: {target} already exists. Use --force to overwrite.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_TEMPLATE)
+        typer.echo(f"Written: {target}")
+
+    @layout_app.command()
+    def launch():
+        """Launch zellij with the mothership layout (replaces current process)."""
+        os.execvp("zellij", ["zellij", "--layout", "mothership"])
+
+    app.add_typer(layout_app)
