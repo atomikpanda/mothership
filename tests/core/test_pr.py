@@ -218,3 +218,56 @@ def test_check_pr_state_unknown_on_unexpected_output(mock_shell: MagicMock):
     mock_shell.run.return_value = ShellResult(returncode=0, stdout="DRAFT\n", stderr="")
     mgr = PRManager(mock_shell)
     assert mgr.check_pr_state("https://x/1") == "unknown"
+
+
+def test_check_merged_into_base_true(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    mgr = PRManager(mock_shell)
+    assert mgr.check_merged_into_base(Path("/tmp/repo"), "feat/x", "main") is True
+    cmd = mock_shell.run.call_args.args[0]
+    assert "git merge-base --is-ancestor" in cmd
+    assert "feat/x" in cmd
+    assert "main" in cmd
+
+
+def test_check_merged_into_base_false_on_nonzero(mock_shell: MagicMock):
+    # git merge-base --is-ancestor returns 1 when NOT an ancestor
+    mock_shell.run.return_value = ShellResult(returncode=1, stdout="", stderr="")
+    mgr = PRManager(mock_shell)
+    assert mgr.check_merged_into_base(Path("/tmp/repo"), "feat/x", "main") is False
+
+
+def test_check_pushed_to_origin_true_when_sha_matches(mock_shell: MagicMock):
+    def side_effect(cmd, cwd, env=None):
+        if "git ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/feat/x\n", stderr="")
+        if "git rev-parse" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+    mock_shell.run.side_effect = side_effect
+    mgr = PRManager(mock_shell)
+    assert mgr.check_pushed_to_origin(Path("/tmp/repo"), "feat/x") is True
+
+
+def test_check_pushed_to_origin_false_when_sha_differs(mock_shell: MagicMock):
+    def side_effect(cmd, cwd, env=None):
+        if "git ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/feat/x\n", stderr="")
+        if "git rev-parse" in cmd:
+            return ShellResult(returncode=0, stdout="def456\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+    mock_shell.run.side_effect = side_effect
+    mgr = PRManager(mock_shell)
+    assert mgr.check_pushed_to_origin(Path("/tmp/repo"), "feat/x") is False
+
+
+def test_check_pushed_to_origin_false_when_branch_not_on_origin(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    mgr = PRManager(mock_shell)
+    assert mgr.check_pushed_to_origin(Path("/tmp/repo"), "feat/x") is False
+
+
+def test_check_pushed_to_origin_false_on_ls_remote_failure(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(returncode=128, stdout="", stderr="network err")
+    mgr = PRManager(mock_shell)
+    assert mgr.check_pushed_to_origin(Path("/tmp/repo"), "feat/x") is False

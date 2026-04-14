@@ -70,6 +70,44 @@ class PRManager:
         except ValueError:
             return 0
 
+    def check_merged_into_base(self, repo_path: Path, branch: str, base: str) -> bool:
+        """True if `branch` is an ancestor of `base` (i.e. already merged).
+
+        Uses `git merge-base --is-ancestor`: exit 0 = ancestor, 1 = not, >1 = error.
+        Any error → False (conservative).
+        """
+        result = self._shell.run(
+            f"git merge-base --is-ancestor {shlex.quote(branch)} {shlex.quote(base)}",
+            cwd=repo_path,
+        )
+        return result.returncode == 0
+
+    def check_pushed_to_origin(self, repo_path: Path, branch: str) -> bool:
+        """True if `branch` exists on origin at the exact same SHA as local HEAD.
+
+        Any error or mismatch → False (conservative).
+        """
+        local = self._shell.run(
+            f"git rev-parse {shlex.quote(branch)}",
+            cwd=repo_path,
+        )
+        if local.returncode != 0:
+            return False
+        local_sha = local.stdout.strip()
+
+        remote = self._shell.run(
+            f"git ls-remote origin {shlex.quote(branch)}",
+            cwd=repo_path,
+        )
+        if remote.returncode != 0:
+            return False
+        # Output: "<sha>\trefs/heads/<branch>\n"
+        for line in remote.stdout.splitlines():
+            parts = line.split("\t", 1)
+            if len(parts) == 2 and parts[0].strip() == local_sha:
+                return True
+        return False
+
     def verify_base_exists(self, repo_path: Path, base: str) -> bool:
         """Return True if `base` exists as a head on origin, else False.
 
