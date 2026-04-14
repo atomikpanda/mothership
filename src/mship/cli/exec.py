@@ -60,6 +60,14 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=1)
 
         task = state.tasks[state.current_task]
+
+        from pathlib import Path as _P
+        from mship.cli._cwd_check import format_cwd_warning
+        if task.active_repo is not None and task.active_repo in task.worktrees:
+            warn = format_cwd_warning(_P.cwd(), _P(task.worktrees[task.active_repo]))
+            if warn is not None:
+                output.print(f"[yellow]{warn}[/yellow]")
+
         config = container.config()
 
         try:

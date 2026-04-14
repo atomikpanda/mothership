@@ -157,3 +157,58 @@ def test_log_show_open_empty_exits_zero(workspace_with_git):
         assert result.exit_code == 0
     finally:
         _teardown()
+
+
+def test_log_warns_when_cwd_outside_active_worktree(workspace_with_git, tmp_path, monkeypatch):
+    from mship.cli import app, container
+    from typer.testing import CliRunner
+    _runner = CliRunner()
+
+    container.config_path.override(workspace_with_git / "mothership.yaml")
+    container.state_dir.override(workspace_with_git / ".mothership")
+    try:
+        _runner.invoke(app, ["spawn", "cwd test", "--repos", "shared", "--force-audit"])
+        _runner.invoke(app, ["switch", "shared"])
+
+        # Run mship log from a dir that is NOT inside the active worktree
+        monkeypatch.chdir(tmp_path)  # a fresh, unrelated tmp dir
+        result = _runner.invoke(app, ["log", "something"])
+        # Log still writes (non-blocking), but output mentions the wrong cwd
+        assert result.exit_code == 0
+        assert "⚠" in result.output or "not the active" in result.output.lower() or "running from" in result.output.lower()
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+        container.log_manager.reset()
+
+
+def test_log_silent_when_cwd_inside_active_worktree(workspace_with_git, monkeypatch):
+    from mship.cli import app, container
+    from typer.testing import CliRunner
+    _runner = CliRunner()
+
+    container.config_path.override(workspace_with_git / "mothership.yaml")
+    container.state_dir.override(workspace_with_git / ".mothership")
+    try:
+        _runner.invoke(app, ["spawn", "cwd test2", "--repos", "shared", "--force-audit"])
+        _runner.invoke(app, ["switch", "shared"])
+
+        # cd into the actual worktree
+        from mship.core.state import StateManager
+        state = StateManager(workspace_with_git / ".mothership").load()
+        wt = state.tasks["cwd-test2"].worktrees["shared"]
+        monkeypatch.chdir(wt)
+
+        result = _runner.invoke(app, ["log", "something inside"])
+        assert result.exit_code == 0
+        # No cwd warning when we're in the right place
+        assert "⚠" not in result.output
+        assert "not the active" not in result.output.lower()
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+        container.log_manager.reset()
