@@ -64,158 +64,86 @@ The `--force` flag is for cases where you intentionally want to override the blo
 
 ## Command Reference
 
-### Workspace setup
+The README has the full one-line cheat sheet. This section adds the agent-specific operational notes — the things you wouldn't guess from `--help`.
+
+### Setup
 
 ```bash
-mship init                              # interactive wizard (humans)
-mship init .                            # init in current directory
-mship init --name app --repo ./.:service  # non-interactive (single repo)
-mship init --name platform --repo ./shared:library --repo ./api:service:shared  # multi-repo
-mship init --detect                     # auto-detect repos in current dir
-
-mship doctor                            # validate config, check tools (gh, env_runner, Taskfile parse)
+mship init [--detect | --name N --repo PATH:TYPE[:DEPS]]
+mship doctor                          # always run after init
 ```
 
-Run `mship doctor` after `init` to confirm everything is configured correctly.
-
-### Starting work
+### Working on a task
 
 ```bash
-mship spawn "add user avatars"          # creates worktrees + branch, runs setup, enters plan phase
-mship spawn "fix auth" --repos shared,auth-service   # only specific repos
-mship spawn "quick fix" --skip-setup    # skip the per-repo `task setup` step
+mship spawn "description" [--repos a,b] [--skip-setup]
+mship switch <repo>                   # before starting work in a different repo
+mship phase plan|dev|review|run [-f]  # `-f` overrides blocked or finished-task guardrail
+mship block "reason" | mship unblock
+mship test [--all] [--repos|--tag] [--no-diff]
+mship log "msg" [--action X] [--open Y] [--repo R] [--test-state pass|fail|mixed]
+mship log --show-open                 # what am I blocked on across this task?
+mship finish [--base B] [--base-map ...] [--push-only] [--handoff] [--force-audit]
+mship close [--yes] [--force] [--skip-pr-check]
 ```
 
-`mship spawn` does this in order:
-1. Slugifies the description into a branch name (`feat/add-user-avatars`)
-2. Creates a git worktree per affected repo
-3. Symlinks any `symlink_dirs` (e.g., `node_modules`) from the source repo
-4. Runs `task setup` in each worktree (unless `--skip-setup`)
-5. Saves the task to state, sets it as the current task, enters `plan` phase
+**`spawn` order:** slugify → worktree per repo → symlink `symlink_dirs` → `task setup` (unless `--skip-setup`) → save state → enter `plan`. If a repo's setup fails, the task still spawns; fix and re-run setup manually.
 
-If setup fails in any repo, you'll see warnings but the task still spawns — fix the failing repo's setup task and re-run setup manually.
+**`switch` is required when crossing repos.** It snapshots each dep's HEAD SHA so the next `switch` back can show "what changed in dependencies since you were last here." Without it, you lose the cross-repo orientation anchor.
 
-### During work
+**`test` writes a numbered iteration file** under `.mothership/test-runs/<task>/`. The next run shows tags per repo (`new failure`, `fix`, `regression`, `still passing`, `still failing`). Auto-appends a structured log entry with `iteration`, `test_state`, `action="ran tests"`. Iterate until clean before transitioning to `review`.
+
+**Always log structured.** `--action` makes session resume actually work. `--open` flags blockers you'll come back to. `--show-open` lists them. The `repo` field is auto-inferred from `mship switch`'s active repo.
+
+**`finish`:** PR base resolves as `--base-map` entry > `--base` > `repo.base_branch` in config > gh default. Every base is verified on origin before any push; empty branches and missing bases fail fast with no partial state.
+
+**`close`:** queries each PR's GitHub state via `gh pr view --json state`. All merged → `closed: completed`. All closed unmerged → `closed: cancelled on GitHub`. Any open → refuses unless `--force`. No PRs (e.g. you used `--push-only` or never finished) → `closed: cancelled before finish` or `closed: no PRs (pushed via --push-only)`.
+
+### Inspection
 
 ```bash
-mship phase dev                         # transition phase
-mship test                              # run tests across affected repos in dependency order (fail-fast)
-                                        # shows diff vs previous iteration (new failure / fix / regression tags)
-mship test --no-diff                    # skip the diff (plain pass/fail output)
-mship test --all                        # run all repos even if one fails
-mship test --repos shared,api           # only specific repos
-mship test --tag apple                  # repos tagged 'apple' (any number of --tag flags)
-mship log "implemented avatar upload, tests passing"  # leave breadcrumbs
-mship log "msg" --action "<what I'm doing>"     # structured: records action for session resume
-mship log "msg" --open "<blocking question>"    # flag a blocker; re-read with mship log --show-open
-mship log --show-open                           # list open questions for the current task
-mship status                            # check current state
-mship switch <repo>                     # set active repo + emit handoff (deps changed, last log, drift, tests)
-mship switch                            # re-render handoff for the currently active repo
+mship status                          # task, phase, branch, drift, last log, finished warning
+mship audit [--repos r] [--json]
+mship view status|logs|diff|spec [--watch]
+mship view spec --web                 # serves HTML on localhost
+mship graph
+mship worktrees
 ```
 
-**Always log progress** after a significant step. The log is what you'll read in your next session if context is wiped.
+**`audit` issue codes** (errors unless noted): `path_missing`, `not_a_git_repo`, `fetch_failed`, `detached_head`, `unexpected_branch`, `dirty_worktree`, `no_upstream`, `behind_remote`, `diverged`, `extra_worktrees`; `ahead_remote` (info-only).
+
+**`audit` is automatically gated on `spawn` and `finish`** — any error blocks unless `--force-audit` (which writes a `BYPASSED AUDIT` entry to the task log). Opt out at the workspace level via `audit: {block_spawn: false, block_finish: false}` in `mothership.yaml`.
+
+**Live views** support `--watch` + `--interval N`, alt-screen, `j/k` scroll with no-yank auto-follow, `q` to quit. Designed for tmux/zellij panes; one process per pane.
+
+### Maintenance
+
+```bash
+mship sync [--repos r]                # fast-forward behind-only clean repos
+mship prune [--force]                 # remove orphaned worktrees
+```
+
+**`sync` is strictly safe.** `git fetch --prune` + `git pull --ff-only` only. It never switches branches, never resets, never touches dirty trees — if a repo isn't cleanly behind the expected branch, it's skipped with a reason.
 
 ### Long-running services
 
 ```bash
-mship run                               # starts services per dependency tier
-                                        # foreground services run sequentially
-                                        # background services launch in parallel and stay running
-mship run --repos backend               # only start specific services
-mship run --tag mobile                  # services tagged 'mobile'
+mship run [--repos a,b] [--tag t]
+mship logs <service>
 ```
 
-When `mship run` has any `start_mode: background` services, it blocks the terminal showing a startup summary like:
+When `mship run` has any `start_mode: background` services, it blocks the terminal showing a startup summary:
 
 ```
 Started 2 background service(s):
   ✓ infra → task dev  (pid 12345)  ready after 1.8s (tcp 127.0.0.1:8001)
   ✓ api   → task dev  (pid 12346)  ready after 0.3s (http :8000/health)
-
 Press Ctrl-C to stop.
 ```
 
-**Ctrl-C cleanly terminates** all backgrounded services and their child processes via process groups. If a service exits prematurely, mothership reaps any surviving grandchildren (e.g., uvicorn forked in a script).
+**Ctrl-C cleanly terminates** all backgrounded services and their child processes via process groups. mothership reaps surviving grandchildren (e.g., uvicorn forked in a script) on shutdown.
 
-If a service has a `healthcheck` that fails (e.g., Docker not running so the TCP port never opens), `mship run` exits non-zero with the failure reason and kills any other services that started.
-
-### Tail logs
-
-```bash
-mship logs api                          # streams `task logs` for a specific service
-```
-
-### Live views (for tmux/zellij panes)
-
-Read-only TUIs designed to be composed into multiplexer layouts. All support `--watch` + `--interval N`, alt-screen, `j/k` scroll with no-yank auto-follow, `q` to quit.
-
-```bash
-mship view status [--watch]             # current task, phase, worktrees, tests
-mship view logs [task-slug] [--watch]   # tail of the task log
-mship view diff [--watch]               # per-worktree git diff; untracked files inline
-mship view spec [name] [--watch]        # newest spec in docs/superpowers/specs/
-mship view spec --web                   # serves rendered HTML on localhost
-```
-
-### Drift audit & sync
-
-`mship audit` and `mship sync` cover git-state drift — complementary to `mship doctor` (which covers tool/config health).
-
-```bash
-mship audit                             # reports drift; exit 1 on any error-severity issue
-mship audit --repos cli,api             # scope the check
-mship audit --json                      # machine-readable output
-
-mship sync                              # fast-forwards clean behind-only repos; skips the rest
-mship sync --repos cli,api              # scope the sync
-```
-
-**Issue codes** (errors unless noted): `path_missing`, `not_a_git_repo`, `fetch_failed`, `detached_head`, `unexpected_branch`, `dirty_worktree`, `no_upstream`, `behind_remote`, `diverged`, `extra_worktrees`; `ahead_remote` (info).
-
-**Automatic gating.** `mship spawn` and `mship finish` run `audit` scoped to the affected repos. By default, any error blocks the command. Override per-command with `--force-audit` (writes a `BYPASSED AUDIT` line to the task log). Opt out at the workspace level by setting `audit: {block_spawn: false, block_finish: false}` in `mothership.yaml`.
-
-**`mship sync` is strictly safe.** It only ever runs `git fetch --prune` + `git pull --ff-only`. It refuses to switch branches, reset, or touch dirty trees — if a repo isn't cleanly behind the expected branch, it's skipped with a reason.
-
-### Blocked state
-
-```bash
-mship block "needs design review"       # marks current task blocked
-mship unblock                           # clear the block
-mship status                            # shows blocked state in output
-```
-
-### Finishing work
-
-```bash
-mship phase review                      # transition (warns if tests haven't passed)
-mship test                              # confirm everything passes
-mship phase run                         # optional: deploy phase
-mship finish                            # creates coordinated PRs across repos in dependency order
-mship finish --base main                # global override of PR base branch
-mship finish --base-map cli=main,api=release/7  # per-repo PR base overrides
-mship finish --handoff                  # write a CI handoff manifest instead
-mship finish --force-audit              # bypass the drift audit gate (logged to task log)
-mship finish --push-only               # push branches without opening PRs
-mship close --yes                       # tear down worktrees; routes log entry by PR state
-mship close --yes --force               # close even if PRs are still open (logged as forced)
-mship close --yes --skip-pr-check       # skip the gh call entirely (offline / no-gh)
-```
-
-`mship finish` requires the `gh` CLI installed and authenticated. It creates PRs in dependency order so reviewers see a coordination block in each PR pointing to the others.
-
-PR base branches come from (most-specific wins): `--base-map` entry > `--base` flag > `repo.base_branch` in config > gh default. Every resolved base is verified to exist on origin before any push; missing bases fail fast with no partial state.
-
-After PRs are merged externally, `mship close --yes` cleans up the local worktrees.
-
-### Workspace awareness
-
-```bash
-mship graph                             # shows the repo dependency graph and topo order
-mship worktrees                         # lists all active worktrees
-mship prune                             # dry-run: list orphaned worktrees
-mship prune --force                     # clean up orphaned worktrees
-```
+**Healthcheck failure** (e.g., Docker not running, port never opens) → `mship run` exits non-zero with the reason and kills any other services that already started.
 
 ## Context Recovery
 

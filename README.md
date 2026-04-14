@@ -128,48 +128,35 @@ JSON output is auto-emitted when stdout isn't a TTY — agents get structured st
 ## CLI Reference
 
 ```bash
-# Workspace awareness
-mship status                          # current phase, task, worktrees, test results; also shows drift, phase duration, last log entry, and a warning if the task is already finished
-mship graph                           # show repo dependency graph
-mship doctor                          # validate config & tools (gh, env_runner, Taskfiles)
-
-# Phase management
-mship phase plan|dev|review|run       # transition with soft gate warnings
-mship block "reason" / mship unblock  # park/resume task
-
-# Context switches
+# Lifecycle (the iteration loop)
+mship init [--detect | --name N --repo PATH:TYPE]   # scaffold mothership.yaml
+mship spawn "description" [--repos a,b] [--skip-setup]   # worktrees + branch + plan phase
 mship switch <repo>                   # cross-repo context switch: handoff + record active repo
-mship switch                          # re-render handoff for the currently active repo
+mship phase plan|dev|review|run [-f] # transition with soft gate warnings
+mship block "reason" | mship unblock # park/resume the current task
+mship test [--all] [--repos|--tag] [--no-diff]   # dep order; shows diff vs previous iteration
+mship log [-]                         # read task log; pass message to append
+mship log "msg" [--action X] [--open Y] [--repo R] [--test-state pass|fail|mixed]
+mship log --show-open                 # list open questions
+mship finish [--base B] [--base-map a=B,b=B] [--push-only] [--handoff] [--force-audit]
+mship close [--yes] [--force] [--skip-pr-check]   # tear down worktrees after merge
 
-# Worktree management
-mship spawn "description"             # create worktrees for a new task
-mship spawn "desc" --repos a,b        # explicit repo list (multi-repo)
+# Inspection
+mship status                          # task, phase, branch, drift, last log, finished warning
+mship audit [--repos r] [--json]      # git-state drift (gated on spawn/finish)
+mship view status|logs|diff|spec [--watch]   # read-only TUIs for tmux/zellij panes
+mship view spec --web                 # serve rendered spec on localhost
+mship graph                           # repo dependency graph
 mship worktrees                       # list active worktrees
+mship doctor                          # validate config + tools (gh, env_runner, Taskfiles)
+
+# Maintenance
+mship sync [--repos r]                # fast-forward behind-only clean repos
 mship prune [--force]                 # remove orphaned worktrees
-mship close [--yes] [--force] [--skip-pr-check]  # discard worktrees, abandon/close task
-mship finish [--base <branch>]        # coordinated PRs across repos
-mship finish --base-map a=main,b=x    # per-repo PR base overrides
-mship finish --push-only              # push branches without opening PRs
 
-# Execution (delegates to go-task per repo)
-mship test [--all] [--tag t] [--no-diff]  # runs in dep order; default shows diff vs previous iteration
-mship run [--repos a,b]               # start services; foreground or background+healthcheck
+# Long-running services
+mship run [--repos a,b] [--tag t]     # start services per dependency tier
 mship logs <service>                  # tail logs for a service
-
-# Drift & sync
-mship audit [--repos r1,r2] [--json]  # report git-state drift (gated on spawn/finish)
-mship sync [--repos r1,r2]            # fast-forward behind-only clean repos
-mship spawn|finish --force-audit      # bypass drift gate (logged to task log)
-
-# Live views (for tmux/zellij panes)
-mship view status|logs|diff|spec [--watch]   # read-only TUIs with no-yank scroll
-mship view spec --web                  # serve rendered spec on localhost
-
-# Context & logs
-mship log                             # read task log
-mship log "msg"                       # append breadcrumb (repo/iteration inferred from current state)
-mship log "msg" --action X --open Y   # structured fields for cross-session recovery
-mship log --show-open                 # list open questions for the current task
 ```
 
 ### `mship finish`
