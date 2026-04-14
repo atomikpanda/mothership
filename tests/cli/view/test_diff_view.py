@@ -163,3 +163,48 @@ async def test_empty_tree_shows_no_changes(tmp_path):
     async with view.run_test() as pilot:
         await pilot.pause()
         assert "No changes" in view.diff_text()
+
+
+@pytest.mark.asyncio
+async def test_diff_scope_to_active_repo_filters_paths(tmp_path):
+    wa = tmp_path / "a"
+    wb = tmp_path / "b"
+    # When scope_to_active_path is set, only that worktree is tracked
+    view = DiffView(
+        worktree_paths=[wa, wb],
+        use_delta=False,
+        watch=False,
+        interval=1.0,
+        scope_to_active_path=wa,
+    )
+    _seed(view, {
+        wa: [_fd("a.py", "diff --git a/a.py b/a.py\n+++ b/a.py\n+x\n")],
+        wb: [_fd("b.py", "diff --git a/b.py b/b.py\n+++ b/b.py\n+y\n")],
+    })
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        labels = view.tree_labels()
+        assert any(str(wa) in l for l in labels)
+        assert not any(str(wb) in l for l in labels)
+
+
+@pytest.mark.asyncio
+async def test_diff_scope_none_shows_all(tmp_path):
+    wa = tmp_path / "a"
+    wb = tmp_path / "b"
+    view = DiffView(
+        worktree_paths=[wa, wb],
+        use_delta=False,
+        watch=False,
+        interval=1.0,
+        scope_to_active_path=None,  # --all equivalent
+    )
+    _seed(view, {
+        wa: [_fd("a.py", "diff --git a/a.py b/a.py\n+++ b/a.py\n+x\n")],
+        wb: [_fd("b.py", "diff --git a/b.py b/b.py\n+++ b/b.py\n+y\n")],
+    })
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        labels = view.tree_labels()
+        assert any(str(wa) in l for l in labels)
+        assert any(str(wb) in l for l in labels)

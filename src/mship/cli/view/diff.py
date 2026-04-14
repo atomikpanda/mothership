@@ -39,10 +39,18 @@ class DiffView(ViewApp):
         self,
         worktree_paths: Iterable[Path],
         use_delta: bool | None = None,
+        scope_to_active_path: Path | None = None,
         **kw,
     ):
         super().__init__(**kw)
-        self._paths = list(worktree_paths)
+        all_paths = list(worktree_paths)
+        if scope_to_active_path is not None:
+            resolved = Path(scope_to_active_path).resolve()
+            filtered = [p for p in all_paths if Path(p).resolve() == resolved]
+            # If the active path isn't in the list, fall back to showing everything.
+            self._paths = filtered if filtered else all_paths
+        else:
+            self._paths = all_paths
         if use_delta is None:
             use_delta = shutil.which("delta") is not None
         self._use_delta = use_delta
@@ -303,11 +311,23 @@ def register(app: typer.Typer, get_container):
     def diff(
         watch: bool = typer.Option(False, "--watch"),
         interval: float = typer.Option(2.0, "--interval"),
+        all_: bool = typer.Option(False, "--all", help="Show all worktrees, ignore active_repo"),
     ):
         """Live per-worktree git diff, browsable by file."""
         container = get_container()
+        worktree_paths = _collect_workspace_worktrees(container)
+
+        scope_path: Path | None = None
+        if not all_:
+            state = container.state_manager().load()
+            if state.current_task is not None:
+                task = state.tasks[state.current_task]
+                if task.active_repo is not None and task.active_repo in task.worktrees:
+                    scope_path = Path(task.worktrees[task.active_repo])
+
         view = DiffView(
-            worktree_paths=_collect_workspace_worktrees(container),
+            worktree_paths=worktree_paths,
+            scope_to_active_path=scope_path,
             watch=watch,
             interval=interval,
         )

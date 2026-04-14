@@ -9,6 +9,7 @@ from mship.cli.view.logs import LogsView
 class _Entry:
     timestamp: datetime
     message: str
+    repo: str | None = None
 
 
 class _FakeLogMgr:
@@ -80,3 +81,52 @@ async def test_logs_view_explicit_slug():
     async with view.run_test() as pilot:
         await pilot.pause()
         assert "specific" in view.rendered_text()
+
+
+@pytest.mark.asyncio
+async def test_logs_view_scopes_to_active_repo():
+    from datetime import datetime, timezone
+
+    entries = [
+        _Entry(datetime(2026, 4, 14, 10, 0, tzinfo=timezone.utc), "shared thing", repo="shared"),
+        _Entry(datetime(2026, 4, 14, 10, 5, tzinfo=timezone.utc), "cli thing", repo="cli"),
+        _Entry(datetime(2026, 4, 14, 10, 6, tzinfo=timezone.utc), "untagged thing", repo=None),
+    ]
+    view = LogsView(
+        state_manager=_FakeStateMgr(),
+        log_manager=_FakeLogMgr(entries),
+        task_slug=None,
+        scope_to_repo="cli",
+        watch=False,
+        interval=1.0,
+    )
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        text = view.rendered_text()
+        assert "cli thing" in text
+        assert "shared thing" not in text
+        # Untagged entries are kept (no repo tag to filter by)
+        assert "untagged thing" in text
+
+
+@pytest.mark.asyncio
+async def test_logs_view_scope_none_shows_all():
+    from datetime import datetime, timezone
+
+    entries = [
+        _Entry(datetime(2026, 4, 14, 10, 0, tzinfo=timezone.utc), "shared thing", repo="shared"),
+        _Entry(datetime(2026, 4, 14, 10, 5, tzinfo=timezone.utc), "cli thing", repo="cli"),
+    ]
+    view = LogsView(
+        state_manager=_FakeStateMgr(),
+        log_manager=_FakeLogMgr(entries),
+        task_slug=None,
+        scope_to_repo=None,
+        watch=False,
+        interval=1.0,
+    )
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        text = view.rendered_text()
+        assert "cli thing" in text
+        assert "shared thing" in text
