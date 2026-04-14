@@ -89,6 +89,8 @@ mship close [--yes] [--abandon] [--force] [--skip-pr-check]
 
 **`spawn` order:** slugify → worktree per repo → symlink `symlink_dirs` → `task setup` (unless `--skip-setup`) → save state → enter `plan`. If a repo's setup fails, the task still spawns; fix and re-run setup manually.
 
+**MANDATORY after `spawn` (or `switch`): `cd` into the worktree BEFORE editing ANY files.** The spawn output prints the worktree path for each repo. Do not start editing, committing, or running anything task-related until your shell's cwd is inside the worktree. If you start editing from the main checkout, every change lands on the wrong branch and the task's feature branch stays empty. Common signs you're in the wrong place: `git status` shows unrelated changes, `git branch` shows `main` instead of `feat/<slug>`, `mship log` prints the "running from … not the active repo's worktree" warning.
+
 **`switch` is required when crossing repos.** It snapshots each dep's HEAD SHA so the next `switch` back can show "what changed in dependencies since you were last here." Without it, you lose the cross-repo orientation anchor.
 
 **After `mship switch <repo>`, `cd` to the worktree shown at the top of the handoff.**
@@ -297,6 +299,19 @@ Then `mship test --tag mobile` runs both.
 - **Don't assume `mship` knows what's running outside of it** — if you started services manually, mothership won't track them. Use `mship run` or accept that `mship status` won't reflect them.
 - **Don't `--force-audit` without reading the drift** — the gate is there to stop you from starting work on a dirty/wrong-branch repo. If you bypass, know why; the task log records the bypass.
 - **Don't `cd` between worktrees without `mship switch`** — you'll miss cross-repo changes and lose the "since your last switch" anchor. Always call `mship switch <repo>` before starting work in a different repo.
+- **Don't edit from the main checkout after `mship spawn`** — always `cd` into the worktree first. If `git branch` shows `main` during task work, you are in the wrong place. Stop, move commits onto the feature branch (`git reset --soft`, checkout the task branch, recommit), and continue from the worktree.
+- **Don't use `close --abandon` to paper over state mistakes** — `--abandon` is for "I intentionally chose not to ship this work." If the task state is broken (no branch, no worktree, commits on main instead of the feature branch), **stop and fix the root cause**. Move the commits onto the proper branch, re-run `mship spawn` if the worktree never got created, *then* decide to finish or abandon. The "it ended up on main anyway" reasoning hides the mistake from future reviewers — don't.
+
+## Recovering when you find yourself on `main` mid-task
+
+If you realize you've been editing or committing from the main checkout instead of the worktree:
+
+1. **Stop editing.** Don't commit more.
+2. Identify what needs to move: `git log --oneline <base>..HEAD` from main shows the commits that belong on the task branch.
+3. If the commits exist on main only (not yet pushed): `git reset --soft <base>` in main, then `cd` into the task worktree, `git checkout <task-branch>`, and recommit there.
+4. If the commits are already pushed to main: they're in origin history. Cherry-pick them onto the task branch in the worktree (`git cherry-pick <sha>..<sha>`), then decide separately whether to revert the main-branch commits (usually yes — they shouldn't have been pushed to main directly).
+5. Re-run `mship status` and `mship audit` to verify state is clean.
+6. **Never** run `mship close --abandon` as a "reset button." Fix the commits first.
 
 ## Integration with Other Tools
 
