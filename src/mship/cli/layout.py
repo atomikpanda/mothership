@@ -17,7 +17,7 @@ layout {
 
     tab name="Plan" focus=true {
         pane split_direction="vertical" {
-            pane size="50%" name="shell"
+            pane size="50%" name="agent"
             pane split_direction="horizontal" size="50%" {
                 pane name="specs" command="mship" { args "view" "spec" "--watch"; }
                 pane name="status" command="mship" { args "view" "status"; }
