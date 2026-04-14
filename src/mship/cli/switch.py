@@ -69,6 +69,24 @@ def register(app: typer.Typer, get_container):
         # TTY rendering
         verb = "Switched to" if is_switch else "Currently at"
         lines: list[str] = []
+
+        # Prepend the cd hint when cwd is not inside the worktree.
+        from pathlib import Path as _P
+        try:
+            cwd_r = _P.cwd().resolve()
+            wt_r = handoff.worktree_path.resolve()
+            cwd_inside = False
+            try:
+                cwd_r.relative_to(wt_r)
+                cwd_inside = True
+            except ValueError:
+                cwd_inside = False
+        except (OSError, RuntimeError):
+            cwd_inside = True  # can't determine → don't nag
+        if not cwd_inside and not handoff.worktree_missing:
+            lines.append(f"[bold red]\u26a0 cd {handoff.worktree_path}[/bold red]")
+            lines.append("")
+
         if handoff.worktree_missing:
             lines.append(
                 f"[red]\u26a0 worktree missing:[/red] {handoff.worktree_path} "

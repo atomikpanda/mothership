@@ -91,6 +91,10 @@ mship close [--yes] [--force] [--skip-pr-check]
 
 **`switch` is required when crossing repos.** It snapshots each dep's HEAD SHA so the next `switch` back can show "what changed in dependencies since you were last here." Without it, you lose the cross-repo orientation anchor.
 
+**After `mship switch <repo>`, `cd` to the worktree shown at the top of the handoff.**
+If you don't, your edits in the shell affect the main checkout, not the feature branch.
+`mship log` and `mship test` will warn when run from outside the active worktree.
+
 **`test` writes a numbered iteration file** under `.mothership/test-runs/<task>/`. The next run shows tags per repo (`new failure`, `fix`, `regression`, `still passing`, `still failing`). Auto-appends a structured log entry with `iteration`, `test_state`, `action="ran tests"`. Iterate until clean before transitioning to `review`.
 
 **Always log structured.** `--action` makes session resume actually work. `--open` flags blockers you'll come back to. `--show-open` lists them. The `repo` field is auto-inferred from `mship switch`'s active repo.
