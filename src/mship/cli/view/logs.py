@@ -41,6 +41,17 @@ def register(app: typer.Typer, get_container):
     ):
         """Live tail of a task's log."""
         container = get_container()
+        state = container.state_manager().load()
+
+        if task_slug is not None:
+            if not state.tasks:
+                typer.echo("No tasks in state.", err=True)
+                raise typer.Exit(code=1)
+            if task_slug not in state.tasks:
+                known = ", ".join(sorted(state.tasks.keys()))
+                typer.echo(f"Unknown task '{task_slug}'. Known tasks: {known}.", err=True)
+                raise typer.Exit(code=1)
+
         view = LogsView(
             state_manager=container.state_manager(),
             log_manager=container.log_manager(),

@@ -1,6 +1,6 @@
 import typer
 
-app = typer.Typer(name="view", help="Read-only live views for tmux/zellij panes")
+app = typer.Typer(name="view", help="Read-only live views for tmux/zellij panes", no_args_is_help=True)
 
 
 def register(parent: typer.Typer, get_container):

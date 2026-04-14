@@ -25,8 +25,16 @@ def find_spec(workspace_root: Path, name_or_path: str | None) -> Path:
         if p.is_file():
             return p
 
+    available_msg = ""
+    if specs_dir.is_dir():
+        all_specs = sorted(p.name for p in specs_dir.iterdir() if p.is_file() and p.suffix == ".md")
+        if all_specs:
+            shown = all_specs[:5]
+            rest = len(all_specs) - len(shown)
+            suffix = f" ({rest} more)" if rest > 0 else ""
+            available_msg = f" Available: {', '.join(shown)}{suffix}."
     raise SpecNotFoundError(
-        f"Spec not found: {name_or_path!r} (checked {specs_dir})"
+        f"Spec not found: {name_or_path!r} (checked {specs_dir}).{available_msg}"
     )
 
 

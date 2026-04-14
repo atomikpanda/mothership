@@ -2,7 +2,7 @@ import typer
 
 from mship.container import Container
 
-app = typer.Typer(name="mship", help="Cross-repo workflow engine")
+app = typer.Typer(name="mship", help="Cross-repo workflow engine", no_args_is_help=True)
 
 container = Container()
 

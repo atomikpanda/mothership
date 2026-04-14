@@ -17,7 +17,9 @@ def _resolve_repos(
         candidates = set(repos_filter.split(","))
         for name in candidates:
             if name not in config.repos:
-                raise ValueError(f"Unknown repo: {name}")
+                raise ValueError(
+                    f"Unknown repo '{name}'. Available: {', '.join(sorted(config.repos.keys()))}."
+                )
 
     if tag_filter:
         tagged = set()
@@ -287,7 +289,8 @@ def register(app: typer.Typer, get_container):
         config = container.config()
 
         if service not in config.repos:
-            output.error(f"Unknown service: {service}")
+            available = ", ".join(sorted(config.repos.keys()))
+            output.error(f"Unknown service '{service}'. Available services: {available}.")
             raise typer.Exit(code=1)
 
         repo = config.repos[service]
