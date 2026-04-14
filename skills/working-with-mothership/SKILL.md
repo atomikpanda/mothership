@@ -84,7 +84,7 @@ mship test [--all] [--repos|--tag] [--no-diff]
 mship log "msg" [--action X] [--open Y] [--repo R] [--test-state pass|fail|mixed]
 mship log --show-open                 # what am I blocked on across this task?
 mship finish [--base B] [--base-map ...] [--push-only] [--handoff] [--force-audit]
-mship close [--yes] [--force] [--skip-pr-check]
+mship close [--yes] [--abandon] [--force] [--skip-pr-check]
 ```
 
 **`spawn` order:** slugify → worktree per repo → symlink `symlink_dirs` → `task setup` (unless `--skip-setup`) → save state → enter `plan`. If a repo's setup fails, the task still spawns; fix and re-run setup manually.
@@ -101,7 +101,12 @@ If you don't, your edits in the shell affect the main checkout, not the feature 
 
 **`finish`:** PR base resolves as `--base-map` entry > `--base` > `repo.base_branch` in config > gh default. Every base is verified on origin before any push; empty branches and missing bases fail fast with no partial state.
 
-**`close`:** queries each PR's GitHub state via `gh pr view --json state`. All merged → `closed: completed`. All closed unmerged → `closed: cancelled on GitHub`. Any open → refuses unless `--force`. No PRs (e.g. you used `--push-only` or never finished) → `closed: cancelled before finish` or `closed: no PRs (pushed via --push-only)`.
+**`close` gates (in order):**
+1. **Requires `finish` first.** Refuses if `task.finished_at is None` unless `--abandon` is passed.
+2. **Recovery-path check.** For each repo with commits past its base, verifies at least one of: merged into base locally, pushed to origin at same SHA, has a PR URL. Refuses if any repo has unrecoverable commits.
+3. **PR state routing** (via `gh pr view --json state`): all merged → `closed: completed`. All closed unmerged → `closed: cancelled on GitHub`. Any open → refuses unless `--force`. No PRs → `closed: cancelled before finish (abandoned)` when `--abandon`, or `closed: no PRs (pushed via --push-only)` after `finish --push-only`.
+
+`--force` bypasses **every** gate and is destructive — it will delete unrecoverable commits. `--abandon` bypasses only the finish-required gate; recovery-path check still runs.
 
 ### Inspection
 
