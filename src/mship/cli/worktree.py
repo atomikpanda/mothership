@@ -59,6 +59,30 @@ def register(app: typer.Typer, get_container):
             )
             output.print(f"[yellow]warning:[/yellow] spawn proceeding despite audit errors ({error_summary})")
 
+        # --- git_root validation: every repo that has a git_root must have
+        #     that root included in the target set, otherwise worktree isolation
+        #     will silently operate on the main checkout instead.
+        target_repos = repo_list if repo_list else list(config.repos.keys())
+        gitroot_violations: list[tuple[str, str]] = []
+        for r in target_repos:
+            root = config.repos[r].git_root
+            if root is not None and root not in target_repos:
+                gitroot_violations.append((r, root))
+        if gitroot_violations:
+            output.error("Cannot spawn: some repos share a git_root with repos not in this task.")
+            output.error("Worktree isolation will not work because they share one git checkout.")
+            for r, root in gitroot_violations:
+                output.error(f"  {r} shares git_root with {root!r} (missing from --repos)")
+            missing = sorted({root for _, root in gitroot_violations})
+            if repo_list:
+                suggestion = ",".join(sorted(set(repo_list) | set(missing)))
+                output.error(f"")
+                output.error(f"Add missing repos: --repos {suggestion}")
+            else:
+                output.error(f"")
+                output.error(f"Add missing repos to the spawn: --repos {','.join(sorted(missing))}")
+            raise typer.Exit(code=1)
+
         if output.is_tty and not skip_setup:
             output.print("[dim]Running setup in each worktree (use --skip-setup to skip)...[/dim]")
 

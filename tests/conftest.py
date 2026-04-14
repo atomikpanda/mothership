@@ -95,6 +95,102 @@ def audit_workspace(tmp_path: Path) -> Path:
     return tmp_path
 
 
+@pytest.fixture
+def workspace_monorepo_app(tmp_path: Path):
+    """Workspace with a monorepo layout: mono (root), pkg_a and pkg_b (subdirs).
+
+    pkg_a and pkg_b both declare git_root: mono, mimicking a workspace-style
+    monorepo where a single git checkout contains multiple packages.
+    """
+    import os
+    import subprocess
+    from unittest.mock import MagicMock
+    from mship.cli import container
+    from mship.util.shell import ShellRunner, ShellResult
+
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+
+    # Create a bare remote and a working clone (mono)
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(bare)],
+                   check=True, capture_output=True)
+    mono = tmp_path / "mono"
+    subprocess.run(["git", "clone", str(bare), str(mono)],
+                   check=True, capture_output=True)
+    for k, v in [("user.email", "t@t"), ("user.name", "t")]:
+        subprocess.run(["git", "config", k, v], cwd=mono, check=True, capture_output=True)
+    (mono / "Taskfile.yml").write_text("version: '3'\ntasks:\n  setup:\n    cmds:\n      - echo ok\n")
+    (mono / "pkg-a").mkdir()
+    (mono / "pkg-b").mkdir()
+    for sub in ["pkg-a", "pkg-b"]:
+        (mono / sub / "Taskfile.yml").write_text(
+            f"version: '3'\ntasks:\n  setup:\n    cmds:\n      - echo {sub}\n"
+        )
+    subprocess.run(["git", "add", "."], cwd=mono, check=True, capture_output=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=mono, check=True, capture_output=True, env=env)
+    subprocess.run(["git", "push", "-q", "origin", "main"], cwd=mono, check=True, capture_output=True)
+
+    # Write mothership config
+    cfg_path = tmp_path / "mothership.yaml"
+    cfg_path.write_text(
+        "workspace: monorepo-test\n"
+        "repos:\n"
+        "  mono:\n"
+        "    path: ./mono\n"
+        "    type: service\n"
+        "  pkg_a:\n"
+        "    path: ./pkg-a\n"
+        "    type: library\n"
+        "    git_root: mono\n"
+        "  pkg_b:\n"
+        "    path: ./pkg-b\n"
+        "    type: library\n"
+        "    git_root: mono\n"
+    )
+
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+
+    container.config.reset()
+    container.state_manager.reset()
+    container.log_manager.reset()
+    container.config_path.override(cfg_path)
+    container.state_dir.override(state_dir)
+
+    def _audit_ok_run(cmd, cwd, env=None):
+        if "symbolic-ref" in cmd:
+            return ShellResult(returncode=0, stdout="main\n", stderr="")
+        if "fetch" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
+            return ShellResult(returncode=0, stdout="origin/main\n", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
+        if "status --porcelain" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "worktree list" in cmd:
+            return ShellResult(returncode=0, stdout=f"worktree {mono}\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = _audit_ok_run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok\n", stderr="")
+    container.shell.override(mock_shell)
+
+    yield tmp_path
+
+    container.config_path.reset_override()
+    container.state_dir.reset_override()
+    container.config.reset_override()
+    container.config.reset()
+    container.state_manager.reset_override()
+    container.state_manager.reset()
+    container.log_manager.reset()
+    container.shell.reset_override()
+
+
 def _sh_switch(*args, cwd, env=None):
     """Shell helper for switch_workspace fixture (sets git author env vars)."""
     e = {**os.environ,

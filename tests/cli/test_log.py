@@ -117,11 +117,16 @@ def test_log_with_action_and_open_flags(workspace_with_git):
         _teardown()
 
 
-def test_log_infers_repo_from_active_repo(workspace_with_git):
+def test_log_infers_repo_from_active_repo(workspace_with_git, monkeypatch):
     _setup(workspace_with_git)
     try:
         runner.invoke(app, ["spawn", "infer test", "--repos", "shared", "--force-audit"])
         runner.invoke(app, ["switch", "shared"])
+        # cd into the worktree so the cwd check passes
+        from mship.core.state import StateManager
+        state = StateManager(workspace_with_git / ".mothership").load()
+        wt = state.tasks["infer-test"].worktrees["shared"]
+        monkeypatch.chdir(wt)
         runner.invoke(app, ["log", "did a thing"])
         log_mgr = LogManager(workspace_with_git / ".mothership" / "logs")
         entries = log_mgr.read("infer-test")
@@ -159,23 +164,45 @@ def test_log_show_open_empty_exits_zero(workspace_with_git):
         _teardown()
 
 
-def test_log_warns_when_cwd_outside_active_worktree(workspace_with_git, tmp_path, monkeypatch):
+def test_log_refuses_when_cwd_outside_active_worktree(workspace_with_git, tmp_path, monkeypatch):
+    """Default: log refuses (not just warns) when cwd is wrong."""
     from mship.cli import app, container
     from typer.testing import CliRunner
-    _runner = CliRunner()
-
+    r = CliRunner()
     container.config_path.override(workspace_with_git / "mothership.yaml")
     container.state_dir.override(workspace_with_git / ".mothership")
     try:
-        _runner.invoke(app, ["spawn", "cwd test", "--repos", "shared", "--force-audit"])
-        _runner.invoke(app, ["switch", "shared"])
+        r.invoke(app, ["spawn", "refuse test", "--repos", "shared", "--force-audit"])
+        r.invoke(app, ["switch", "shared"])
+        monkeypatch.chdir(tmp_path)
+        result = r.invoke(app, ["log", "should fail"])
+        assert result.exit_code != 0
+        assert "--force" in result.output or "override" in result.output.lower()
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+        container.log_manager.reset()
 
-        # Run mship log from a dir that is NOT inside the active worktree
-        monkeypatch.chdir(tmp_path)  # a fresh, unrelated tmp dir
-        result = _runner.invoke(app, ["log", "something"])
-        # Log still writes (non-blocking), but output mentions the wrong cwd
-        assert result.exit_code == 0
-        assert "⚠" in result.output or "not the active" in result.output.lower() or "running from" in result.output.lower()
+
+def test_log_force_writes_entry_with_bypass_tag(workspace_with_git, tmp_path, monkeypatch):
+    from mship.cli import app, container
+    from mship.core.log import LogManager
+    from typer.testing import CliRunner
+    r = CliRunner()
+    container.config_path.override(workspace_with_git / "mothership.yaml")
+    container.state_dir.override(workspace_with_git / ".mothership")
+    try:
+        r.invoke(app, ["spawn", "bypass test", "--repos", "shared", "--force-audit"])
+        r.invoke(app, ["switch", "shared"])
+        monkeypatch.chdir(tmp_path)
+        result = r.invoke(app, ["log", "force msg", "--force"])
+        assert result.exit_code == 0, result.output
+        entries = LogManager(workspace_with_git / ".mothership" / "logs").read("bypass-test")
+        forced = [e for e in entries if e.message == "force msg"]
+        assert forced
+        assert forced[0].action is not None and "cwd-bypass" in forced[0].action
     finally:
         container.config_path.reset_override()
         container.state_dir.reset_override()

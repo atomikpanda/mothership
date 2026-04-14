@@ -17,6 +17,7 @@ def register(app: typer.Typer, get_container):
         iteration: Optional[int] = typer.Option(None, "--iteration", help="Structured: iteration number"),
         no_repo: bool = typer.Option(False, "--no-repo", help="Suppress active-repo inference"),
         show_open: bool = typer.Option(False, "--show-open", help="List open questions from this task's log"),
+        force: bool = typer.Option(False, "--force", "-f", help="Bypass cwd-outside-worktree check"),
     ):
         """Append to or read the current task's log."""
         from mship.util.duration import format_relative
@@ -35,10 +36,9 @@ def register(app: typer.Typer, get_container):
 
         from pathlib import Path as _P
         from mship.cli._cwd_check import format_cwd_warning
+        cwd_warn: str | None = None
         if task.active_repo is not None and task.active_repo in task.worktrees:
-            warn = format_cwd_warning(_P.cwd(), _P(task.worktrees[task.active_repo]))
-            if warn is not None:
-                output.print(f"[yellow]{warn}[/yellow]")
+            cwd_warn = format_cwd_warning(_P.cwd(), _P(task.worktrees[task.active_repo]))
 
         if show_open:
             entries = log_mgr.read(state.current_task)
@@ -67,6 +67,16 @@ def register(app: typer.Typer, get_container):
             return
 
         if message is not None:
+            # cwd hard-error: writing path only
+            if cwd_warn is not None:
+                if not force:
+                    output.error(cwd_warn)
+                    output.error('Run from the worktree, or `mship log --force "msg"` to override.')
+                    raise typer.Exit(code=1)
+                else:
+                    # bypass: tag the entry so the bypass is discoverable
+                    action = f"cwd-bypass,{action}" if action else "cwd-bypass"
+
             # Infer repo + iteration when not explicitly provided
             inferred_repo = repo
             if inferred_repo is None and not no_repo:

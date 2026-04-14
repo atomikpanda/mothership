@@ -496,6 +496,36 @@ def test_close_abandon_proceeds_when_merged(configured_git_app):
         container.shell.reset_override()
 
 
+# ---------------------------------------------------------------------------
+# git_root validation tests
+# ---------------------------------------------------------------------------
+
+def test_spawn_refuses_when_git_root_missing_from_repos(workspace_monorepo_app):
+    """spawn --repos pkg_a where pkg_a.git_root=mono must refuse if mono not included."""
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+    r = CliRunner().invoke(_app, ["spawn", "validate test", "--repos", "pkg_a", "--force-audit"])
+    assert r.exit_code != 0
+    assert "pkg_a" in r.output
+    assert "mono" in r.output
+    assert "--repos" in r.output
+
+
+def test_spawn_succeeds_when_git_root_present(workspace_monorepo_app):
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+    r = CliRunner().invoke(_app, ["spawn", "validate good", "--repos", "mono,pkg_a", "--force-audit"])
+    assert r.exit_code == 0, r.output
+
+
+def test_spawn_plain_repo_unaffected(configured_git_app):
+    """spawn with a repo that has no git_root still works without changes."""
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+    r = CliRunner().invoke(_app, ["spawn", "plain", "--repos", "shared", "--force-audit"])
+    assert r.exit_code == 0, r.output
+
+
 def test_close_abandon_proceeds_when_pushed(configured_git_app):
     """Commits past base and pushed to origin → recoverable."""
     from unittest.mock import MagicMock
