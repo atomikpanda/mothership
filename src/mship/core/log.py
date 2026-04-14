@@ -1,5 +1,4 @@
 import re
-import shlex
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,7 +45,11 @@ def _format_kv(entry: LogEntry) -> str:
     if entry.test_state is not None:
         parts.append(f"test={entry.test_state}")
     if entry.action is not None:
-        parts.append(f"action={shlex.quote(entry.action) if ' ' in entry.action else entry.action}")
+        if ' ' in entry.action:
+            a = entry.action.replace('"', '\\"')
+            parts.append(f'action="{a}"')
+        else:
+            parts.append(f"action={entry.action}")
     if entry.open_question is not None:
         q = entry.open_question.replace('"', '\\"')
         parts.append(f'open="{q}"')

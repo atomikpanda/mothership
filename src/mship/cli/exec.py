@@ -40,8 +40,14 @@ def register(app: typer.Typer, get_container):
         run_all: bool = typer.Option(False, "--all", help="Run all repos even on failure"),
         repos: Optional[str] = typer.Option(None, "--repos", help="Comma-separated repo names to filter"),
         tag: Optional[list[str]] = typer.Option(None, "--tag", help="Filter repos by tag"),
+        no_diff: bool = typer.Option(False, "--no-diff", help="Skip cross-run diff output"),
     ):
-        """Run tests across affected repos in dependency order."""
+        """Run tests across affected repos; show diff vs. previous iteration."""
+        from datetime import datetime, timezone
+        from mship.core.test_history import (
+            write_run, read_run, latest_iteration, compute_diff, prune,
+        )
+
         container = get_container()
         output = Output()
         state_mgr = container.state_manager()
@@ -60,21 +66,111 @@ def register(app: typer.Typer, get_container):
             output.error(str(e))
             raise typer.Exit(code=1)
 
+        state_dir = container.state_dir()
+        prev_iter = latest_iteration(state_dir, task.slug)
+        prev_run = read_run(state_dir, task.slug, prev_iter) if prev_iter else None
+        pre_prev_run = (
+            read_run(state_dir, task.slug, prev_iter - 1)
+            if prev_iter and prev_iter > 1 else None
+        )
+
+        started_at = datetime.now(timezone.utc)
+
         executor = container.executor()
         result = executor.execute(
-            "test",
-            repos=target_repos,
-            run_all=run_all,
+            "test", repos=target_repos, run_all=run_all,
             task_slug=state.current_task,
         )
 
-        for repo_result in result.results:
-            if repo_result.success:
-                output.success(f"{repo_result.repo}: pass")
-            else:
-                output.error(f"{repo_result.repo}: fail")
-                if repo_result.shell_result.stderr:
-                    output.print(repo_result.shell_result.stderr.strip())
+        run_duration_ms = int(
+            (datetime.now(timezone.utc) - started_at).total_seconds() * 1000
+        )
+
+        # Build per-repo results for the iteration file
+        per_repo: dict[str, dict] = {}
+        for r in result.results:
+            status = "pass" if r.success else "fail"
+            stderr_tail = None
+            if status == "fail":
+                stderr = (r.shell_result.stderr or "").splitlines()
+                stderr_tail = "\n".join(stderr[-40:]) if stderr else None
+            per_repo[r.repo] = {
+                "status": status,
+                "duration_ms": r.duration_ms,
+                "exit_code": r.shell_result.returncode,
+                "stderr_tail": stderr_tail,
+            }
+
+        new_iter = (prev_iter or 0) + 1
+        write_run(
+            state_dir, task.slug, iteration=new_iter,
+            started_at=started_at, duration_ms=run_duration_ms,
+            results=per_repo,
+        )
+
+        # Persist iteration on task
+        task.test_iteration = new_iter
+        state_mgr.save(state)
+
+        prune(state_dir, task.slug, keep=20)
+
+        # Summary for log entry
+        pass_count = sum(1 for v in per_repo.values() if v["status"] == "pass")
+        total = len(per_repo)
+        if pass_count == total:
+            test_state = "pass"
+        elif pass_count == 0:
+            test_state = "fail"
+        else:
+            test_state = "mixed"
+        container.log_manager().append(
+            task.slug,
+            f"iter {new_iter}: {pass_count}/{total} passing",
+            iteration=new_iter,
+            test_state=test_state,
+            action="ran tests",
+        )
+
+        # Render
+        current_run = {
+            "iteration": new_iter,
+            "started_at": started_at.isoformat().replace("+00:00", "Z"),
+            "duration_ms": run_duration_ms,
+            "repos": per_repo,
+        }
+        diff = None if no_diff else compute_diff(current_run, prev_run, pre_prev_run)
+
+        if output.is_tty:
+            output.print(f"[bold]Test run #{new_iter}[/bold]  ({run_duration_ms / 1000:.1f}s)")
+            for repo_name, info in per_repo.items():
+                status = info["status"]
+                color = "green" if status == "pass" else "red"
+                dur_s = info["duration_ms"] / 1000
+                line = f"  {repo_name}: [{color}]{status}[/{color}]  ({dur_s:.1f}s)"
+                if diff and repo_name in diff["tags"]:
+                    repo_tag = diff["tags"][repo_name]
+                    if repo_tag in {"new failure", "regression", "fix"}:
+                        line += f"  ← {repo_tag}"
+                output.print(line)
+                if status == "fail" and info["stderr_tail"]:
+                    for tline in info["stderr_tail"].splitlines()[-20:]:
+                        output.print(f"    {tline}")
+            if diff:
+                prev_id = diff["previous_iteration"]
+                new_fail = diff["summary"]["new_failures"]
+                fixes = diff["summary"]["fixes"]
+                parts = [f"{pass_count}/{total} repos passing"]
+                if prev_id is not None and new_fail:
+                    parts.append(f"{len(new_fail)} new failure(s) since iter #{prev_id}")
+                if fixes:
+                    parts.append(f"{len(fixes)} fix(es)")
+                output.print("")
+                output.print("  " + ". ".join(parts) + ".")
+        else:
+            payload = dict(current_run)
+            if diff is not None:
+                payload["diff"] = diff
+            output.json(payload)
 
         if not result.success:
             raise typer.Exit(code=1)
