@@ -83,8 +83,8 @@ def test_full_lifecycle(full_workspace: Path):
     assert result.exit_code == 0
     assert "shared" in result.output
 
-    # 8. Close
-    result = runner.invoke(app, ["close", "--yes"])
+    # 8. Close (task was never finished, --abandon to discard without PRs)
+    result = runner.invoke(app, ["close", "--yes", "--abandon"])
     assert result.exit_code == 0
 
     # 9. Status shows no task

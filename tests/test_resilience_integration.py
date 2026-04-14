@@ -94,6 +94,6 @@ def test_agent_resilience_lifecycle(full_workspace: Path):
     assert data["task"] == "resilience-test"
     assert len(data["merge_order"]) == 2
 
-    # 10. Close (cleanup)
-    result = runner.invoke(app, ["close", "--yes"])
+    # 10. Close (cleanup; finish --handoff doesn't set finished_at, so --abandon is needed)
+    result = runner.invoke(app, ["close", "--yes", "--abandon"])
     assert result.exit_code == 0

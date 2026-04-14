@@ -121,7 +121,7 @@ def test_monorepo_close_cleans_up(monorepo_workspace):
     state = mgr.load()
     root_wt = Path(state.tasks["cleanup-test"].worktrees["tailrd"])
 
-    result = runner.invoke(app, ["close", "--yes"])
+    result = runner.invoke(app, ["close", "--yes", "--abandon"])
     assert result.exit_code == 0
 
     # The parent worktree is removed

@@ -99,7 +99,8 @@ def test_close_with_no_prs_cancelled_before_finish(configured_git_app):
     from typer.testing import CliRunner
     from mship.cli import app as _app
     r = CliRunner()
-    result = r.invoke(_app, ["close", "--yes"])
+    # Task was never finished → must use --abandon to close without PRs
+    result = r.invoke(_app, ["close", "--yes", "--abandon"])
     assert result.exit_code == 0, result.output
     assert sm.load().current_task is None
 
@@ -317,3 +318,217 @@ def test_spawn_shows_setup_warnings(configured_git_app: Path):
     assert "setup failed" in result.output.lower() or "pnpm install failed" in result.output
 
     cli_container.shell.reset_override()
+
+
+# ---------------------------------------------------------------------------
+# Task 2: close finish-required + recovery-path gate tests
+# ---------------------------------------------------------------------------
+
+def _build_close_task(slug="t", finished=False, pr_urls=None, worktrees=None, branch="feat/t"):
+    from datetime import datetime, timezone
+    from mship.core.state import Task
+    return Task(
+        slug=slug, description="d", phase="review",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=list((worktrees or {}).keys()),
+        branch=branch,
+        worktrees=worktrees or {},
+        pr_urls=pr_urls or {},
+        finished_at=datetime.now(timezone.utc) if finished else None,
+    )
+
+
+def test_close_refuses_when_not_finished_without_abandon(configured_git_app):
+    from mship.cli import container
+    from mship.core.state import StateManager, WorkspaceState
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+
+    sm = StateManager(configured_git_app / ".mothership")
+    task = _build_close_task(finished=False)
+    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+
+    r = CliRunner().invoke(_app, ["close", "--yes"])
+    assert r.exit_code != 0
+    assert "hasn't been finished" in r.output.lower() or "run `mship finish`" in r.output
+    # State unchanged
+    assert sm.load().current_task == "t"
+
+
+def test_close_abandon_proceeds_when_no_commits(configured_git_app):
+    """No commits past base → recoverable trivially; --abandon closes cleanly."""
+    from unittest.mock import MagicMock
+    from mship.cli import container
+    from mship.core.state import StateManager, WorkspaceState
+    from mship.util.shell import ShellRunner, ShellResult
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+
+    sm = StateManager(configured_git_app / ".mothership")
+    task = _build_close_task(finished=False)
+    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    # count_commits_ahead returns 0 → no commits past base → recovery check passes trivially
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="0\n", stderr="")
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        r = CliRunner().invoke(_app, ["close", "--yes", "--abandon"])
+        assert r.exit_code == 0, r.output
+        assert sm.load().current_task is None
+    finally:
+        container.shell.reset_override()
+
+
+def test_close_abandon_refuses_when_unrecoverable(configured_git_app):
+    """Commits past base, not merged, not pushed, no PR → refuses without --force."""
+    from unittest.mock import MagicMock
+    from mship.cli import container
+    from mship.core.state import StateManager, WorkspaceState
+    from mship.util.shell import ShellRunner, ShellResult
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+
+    sm = StateManager(configured_git_app / ".mothership")
+    # worktrees dict must map repo → path; use a dummy path that need not exist,
+    # since the recovery check guards on path existence before calling git.
+    task = _build_close_task(
+        finished=False,
+        worktrees={"shared": configured_git_app / "shared"},
+    )
+    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+
+    def mock_run(cmd, cwd, env=None):
+        if "git rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="3\n", stderr="")  # 3 commits past base
+        if "git merge-base --is-ancestor" in cmd:
+            return ShellResult(returncode=1, stdout="", stderr="")  # not merged
+        if "git ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")  # not pushed
+        if "git rev-parse" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        r = CliRunner().invoke(_app, ["close", "--yes", "--abandon"])
+        assert r.exit_code != 0
+        assert "unrecoverable" in r.output.lower() or "permanently lost" in r.output.lower()
+        assert sm.load().current_task == "t"  # unchanged
+    finally:
+        container.shell.reset_override()
+
+
+def test_close_force_bypasses_recovery_check(configured_git_app):
+    """--force destroys unrecoverable work on purpose."""
+    from unittest.mock import MagicMock
+    from mship.cli import container
+    from mship.core.state import StateManager, WorkspaceState
+    from mship.util.shell import ShellRunner, ShellResult
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+
+    sm = StateManager(configured_git_app / ".mothership")
+    task = _build_close_task(
+        finished=False,
+        worktrees={"shared": configured_git_app / "shared"},
+    )
+    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+
+    def mock_run(cmd, cwd, env=None):
+        if "git rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="3\n", stderr="")
+        if "git merge-base --is-ancestor" in cmd:
+            return ShellResult(returncode=1, stdout="", stderr="")
+        if "git ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "git rev-parse" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        r = CliRunner().invoke(_app, ["close", "--yes", "--force"])
+        assert r.exit_code == 0, r.output
+        assert sm.load().current_task is None
+    finally:
+        container.shell.reset_override()
+
+
+def test_close_abandon_proceeds_when_merged(configured_git_app):
+    """Commits past base but merged into base → recoverable."""
+    from unittest.mock import MagicMock
+    from mship.cli import container
+    from mship.core.state import StateManager, WorkspaceState
+    from mship.util.shell import ShellRunner, ShellResult
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+
+    sm = StateManager(configured_git_app / ".mothership")
+    task = _build_close_task(
+        finished=False,
+        worktrees={"shared": configured_git_app / "shared"},
+    )
+    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+
+    def mock_run(cmd, cwd, env=None):
+        if "git rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="3\n", stderr="")
+        if "git merge-base --is-ancestor" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")  # is ancestor → merged
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        r = CliRunner().invoke(_app, ["close", "--yes", "--abandon"])
+        assert r.exit_code == 0, r.output
+    finally:
+        container.shell.reset_override()
+
+
+def test_close_abandon_proceeds_when_pushed(configured_git_app):
+    """Commits past base and pushed to origin → recoverable."""
+    from unittest.mock import MagicMock
+    from mship.cli import container
+    from mship.core.state import StateManager, WorkspaceState
+    from mship.util.shell import ShellRunner, ShellResult
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+
+    sm = StateManager(configured_git_app / ".mothership")
+    task = _build_close_task(
+        finished=False,
+        worktrees={"shared": configured_git_app / "shared"},
+    )
+    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+
+    def mock_run(cmd, cwd, env=None):
+        if "git rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="3\n", stderr="")
+        if "git merge-base --is-ancestor" in cmd:
+            return ShellResult(returncode=1, stdout="", stderr="")  # not merged
+        if "git ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/feat/t\n", stderr="")
+        if "git rev-parse" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        r = CliRunner().invoke(_app, ["close", "--yes", "--abandon"])
+        assert r.exit_code == 0, r.output
+    finally:
+        container.shell.reset_override()

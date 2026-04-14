@@ -113,10 +113,13 @@ def register(app: typer.Typer, get_container):
     @app.command()
     def close(
         yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
-        force: bool = typer.Option(False, "--force", "-f", help="Close even with open PRs"),
+        force: bool = typer.Option(False, "--force", "-f", help="Bypass ALL safety checks (destructive)"),
+        abandon: bool = typer.Option(False, "--abandon", help="Close without finishing (discard PR flow)"),
         skip_pr_check: bool = typer.Option(False, "--skip-pr-check", help="Do not call gh; close regardless of PR state"),
     ):
         """Close the current task: check PR state, tear down worktrees, clear state."""
+        from pathlib import Path
+
         container = get_container()
         output = Output()
         state_mgr = container.state_manager()
@@ -129,7 +132,60 @@ def register(app: typer.Typer, get_container):
         task_slug = state.current_task
         task = state.tasks[task_slug]
         pr_mgr = container.pr_manager()
+        config = container.config()
         log_mgr = container.log_manager()
+
+        # --- Finish-required check ---
+        if task.finished_at is None and not abandon and not force:
+            output.error(
+                "Cannot close: task hasn't been finished.\n"
+                "  Run `mship finish` to create PRs, or `mship close --abandon` to discard without PRs."
+            )
+            raise typer.Exit(code=1)
+
+        # --- Recovery-path check ---
+        had_unrecoverable = False
+        if not force:
+            from mship.core.base_resolver import resolve_base
+            unrecoverable: list[tuple[str, int, str, str]] = []  # (repo, commits, branch, base)
+            for repo_name in task.affected_repos:
+                wt = task.worktrees.get(repo_name)
+                if wt is None:
+                    continue
+                wt_path = Path(wt)
+                if not wt_path.exists():
+                    continue
+                eff_base = resolve_base(
+                    repo_name, config.repos[repo_name],
+                    cli_base=None, base_map={}, known_repos=config.repos.keys(),
+                )
+                if eff_base is None:
+                    eff_base = "main"  # fall back to main when no base_branch configured
+                commits = pr_mgr.count_commits_ahead(wt_path, eff_base, task.branch)
+                if commits == 0:
+                    continue
+                # Recovery checks
+                merged = pr_mgr.check_merged_into_base(wt_path, task.branch, eff_base)
+                has_pr = repo_name in task.pr_urls
+                pushed = pr_mgr.check_pushed_to_origin(wt_path, task.branch)
+                if merged or has_pr or pushed:
+                    continue
+                unrecoverable.append((repo_name, commits, task.branch, eff_base))
+
+            if unrecoverable:
+                had_unrecoverable = True
+                output.error("Cannot close: unrecoverable commits in these repos:")
+                for repo_name, commits, branch, eff_base in unrecoverable:
+                    output.error(
+                        f"  {repo_name}: {branch} ({commits} commits, "
+                        f"not merged to {eff_base}, not pushed, no PR)"
+                    )
+                output.error("")
+                output.error("These will be permanently lost. Options:")
+                output.error("  - `mship finish` to create PRs")
+                output.error("  - push from each worktree to save work")
+                output.error("  - `mship close --force` to delete anyway (destructive)")
+                raise typer.Exit(code=1)
 
         # Determine the log message based on PR state.
         pr_states: list[str] = []  # parallel to task.pr_urls values
@@ -153,6 +209,8 @@ def register(app: typer.Typer, get_container):
         elif not task.pr_urls:
             if task.finished_at is not None:
                 log_msg = "closed: no PRs (pushed via --push-only)"
+            elif abandon:
+                log_msg = "closed: cancelled before finish (abandoned)"
             else:
                 log_msg = "closed: cancelled before finish"
         elif open_count and not force:
@@ -171,6 +229,11 @@ def register(app: typer.Typer, get_container):
             log_msg = f"closed: mixed ({merged_count} merged, {closed_count} closed)"
         else:
             log_msg = "closed: pr state unknown"
+
+        # Append (forced) marker when --force bypassed finish/recovery gates.
+        if force and (task.finished_at is None or had_unrecoverable):
+            if "(forced)" not in log_msg:
+                log_msg = log_msg + " (forced)"
 
         if not yes and output.is_tty:
             from InquirerPy import inquirer
