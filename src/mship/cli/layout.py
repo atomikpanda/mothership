@@ -5,6 +5,16 @@ import typer
 
 _TEMPLATE = """\
 layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        children
+        pane size=2 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+
     tab name="Plan" {
         pane split_direction="vertical" {
             pane size="60%"
