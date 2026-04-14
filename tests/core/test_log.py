@@ -85,3 +85,75 @@ def test_log_message_containing_hash_headers(logs_dir: Path):
     assert len(entries) == 2
     assert "## preventing commits" in entries[0].message
     assert entries[1].message == "Second entry after hash"
+
+
+def test_log_entry_defaults_to_none_for_new_fields():
+    e = LogEntry(timestamp=datetime.now(timezone.utc), message="m")
+    assert e.repo is None
+    assert e.iteration is None
+    assert e.test_state is None
+    assert e.action is None
+    assert e.open_question is None
+
+
+def test_parse_old_format_entry(tmp_path):
+    path = tmp_path / "old.md"
+    path.write_text(
+        "# Task Log: old\n\n"
+        "## 2026-04-14T12:00:00Z\nlegacy message\n"
+    )
+    log_mgr = LogManager(tmp_path)
+    # Create the matching task file name
+    (tmp_path / "old.md").write_text(
+        "# Task Log: old\n\n"
+        "## 2026-04-14T12:00:00Z\nlegacy message\n"
+    )
+    entries = log_mgr.read("old")
+    assert len(entries) == 1
+    assert entries[0].message == "legacy message"
+    assert entries[0].repo is None
+    assert entries[0].iteration is None
+
+
+def test_parse_new_format_entry(tmp_path):
+    (tmp_path / "t.md").write_text(
+        "# Task Log: t\n\n"
+        "## 2026-04-14T12:00:00Z  repo=shared  iter=3  test=pass  action=implementing\n"
+        "Implemented Label type\n"
+    )
+    log_mgr = LogManager(tmp_path)
+    entries = log_mgr.read("t")
+    assert len(entries) == 1
+    e = entries[0]
+    assert e.message == "Implemented Label type"
+    assert e.repo == "shared"
+    assert e.iteration == 3
+    assert e.test_state == "pass"
+    assert e.action == "implementing"
+
+
+def test_parse_quoted_value_with_spaces(tmp_path):
+    (tmp_path / "t.md").write_text(
+        "# Task Log: t\n\n"
+        '## 2026-04-14T12:00:00Z  open="how to handle null workspace"  repo=auth\n'
+        "Stuck\n"
+    )
+    log_mgr = LogManager(tmp_path)
+    (entry,) = log_mgr.read("t")
+    assert entry.open_question == "how to handle null workspace"
+    assert entry.repo == "auth"
+
+
+def test_parse_mixed_old_and_new_entries(tmp_path):
+    (tmp_path / "t.md").write_text(
+        "# Task Log: t\n\n"
+        "## 2026-04-14T12:00:00Z\nlegacy\n\n"
+        "## 2026-04-14T12:05:00Z  repo=shared\nstructured\n"
+    )
+    log_mgr = LogManager(tmp_path)
+    entries = log_mgr.read("t")
+    assert len(entries) == 2
+    assert entries[0].message == "legacy"
+    assert entries[0].repo is None
+    assert entries[1].message == "structured"
+    assert entries[1].repo == "shared"
