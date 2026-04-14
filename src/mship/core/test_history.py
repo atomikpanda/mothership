@@ -26,10 +26,29 @@ def write_run(
     started_at: datetime,
     duration_ms: int,
     results: dict[str, dict[str, Any]],
+    streams: "dict[str, tuple[str, str]] | None" = None,
 ) -> Path:
-    """Write iteration JSON + update latest pointer. Returns the iteration file path."""
+    """Write iteration JSON + update latest pointer. Returns the iteration file path.
+
+    streams: optional dict mapping repo name -> (stdout, stderr) strings. When
+    provided, writes <iteration>.<repo>.stdout and <iteration>.<repo>.stderr
+    files alongside the iteration JSON and sets stdout_path/stderr_path on each
+    repo entry in the results dict in-place before serialising.
+    """
     run_dir = _run_dir(state_dir, task_slug)
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    if streams:
+        for repo, (stdout_str, stderr_str) in streams.items():
+            if repo not in results:
+                continue
+            stdout_file = run_dir / f"{iteration}.{repo}.stdout"
+            stderr_file = run_dir / f"{iteration}.{repo}.stderr"
+            stdout_file.write_text(stdout_str or "")
+            stderr_file.write_text(stderr_str or "")
+            results[repo]["stdout_path"] = str(stdout_file.resolve())
+            results[repo]["stderr_path"] = str(stderr_file.resolve())
+
     payload = {
         "iteration": iteration,
         "started_at": started_at.isoformat().replace("+00:00", "Z"),
@@ -113,5 +132,10 @@ def prune(state_dir: Path, task_slug: str, keep: int = 20) -> None:
     )
     if len(numbered) <= keep:
         return
-    for _, path in numbered[:-keep]:
+    for iter_num, path in numbered[:-keep]:
         path.unlink(missing_ok=True)
+        # Remove any stdout/stderr artifact files for this iteration.
+        for artifact in d.glob(f"{iter_num}.*.stdout"):
+            artifact.unlink(missing_ok=True)
+        for artifact in d.glob(f"{iter_num}.*.stderr"):
+            artifact.unlink(missing_ok=True)

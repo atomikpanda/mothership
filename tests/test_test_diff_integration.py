@@ -79,3 +79,37 @@ def test_no_diff_flag_suppresses_diff(test_workspace):
     except json.JSONDecodeError:
         for label in ("still passing", "still failing", "new failure", "fix", "regression"):
             assert label not in result.output
+
+
+def test_mship_test_writes_stdout_stderr_artifacts(test_workspace):
+    """mship test must write <iter>.<repo>.stdout and .stderr artifact files."""
+    _spawn("artifacts")
+    runner.invoke(app, ["test"])
+    task_slug = "artifacts"
+    run_dir = test_workspace / ".mothership" / "test-runs" / task_slug
+    assert run_dir.exists(), "test-runs dir missing"
+
+    stdout_files = list(run_dir.glob("1.*.stdout"))
+    stderr_files = list(run_dir.glob("1.*.stderr"))
+    assert stdout_files, f"No stdout artifact in {run_dir}"
+    assert stderr_files, f"No stderr artifact in {run_dir}"
+
+
+def test_mship_test_json_includes_stdout_stderr_paths(test_workspace):
+    """Non-TTY JSON output must include stdout_path and stderr_path per repo."""
+    _spawn("pathtest")
+    result = runner.invoke(app, ["test"])
+    try:
+        payload = json.loads(result.output)
+    except json.JSONDecodeError:
+        pytest.skip("Output was not JSON (likely TTY mode)")
+
+    for repo_name, repo_data in payload["repos"].items():
+        assert "stdout_path" in repo_data, f"stdout_path missing for {repo_name}"
+        assert "stderr_path" in repo_data, f"stderr_path missing for {repo_name}"
+        assert Path(repo_data["stdout_path"]).exists(), (
+            f"stdout artifact file missing for {repo_name}: {repo_data['stdout_path']}"
+        )
+        assert Path(repo_data["stderr_path"]).exists(), (
+            f"stderr artifact file missing for {repo_name}: {repo_data['stderr_path']}"
+        )

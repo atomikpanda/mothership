@@ -131,3 +131,65 @@ def test_prune_keeps_newest_n(state_dir):
     assert remaining == list(range(6, 26))
     # latest.json preserved
     assert (state_dir / "test-runs" / "t" / "latest.json").exists()
+
+
+def test_write_run_writes_stdout_stderr_artifacts(state_dir):
+    results = _results(api=("fail", 500, 1, "boom"))
+    streams = {"api": ("hello stdout", "hello stderr")}
+    path = write_run(
+        state_dir, "t", iteration=3,
+        started_at=datetime(2026, 4, 14, 12, tzinfo=timezone.utc),
+        duration_ms=500, results=results, streams=streams,
+    )
+    run_dir = state_dir / "test-runs" / "t"
+
+    stdout_file = run_dir / "3.api.stdout"
+    stderr_file = run_dir / "3.api.stderr"
+    assert stdout_file.exists(), "stdout artifact not written"
+    assert stderr_file.exists(), "stderr artifact not written"
+    assert stdout_file.read_text() == "hello stdout"
+    assert stderr_file.read_text() == "hello stderr"
+
+    data = json.loads(path.read_text())
+    assert data["repos"]["api"]["stdout_path"] == str(stdout_file.resolve())
+    assert data["repos"]["api"]["stderr_path"] == str(stderr_file.resolve())
+
+
+def test_write_run_no_streams_backward_compatible(state_dir):
+    """write_run without streams must not add stdout_path/stderr_path."""
+    results = _results(api=("pass", 100, 0, None))
+    path = write_run(
+        state_dir, "t", iteration=1,
+        started_at=datetime(2026, 4, 14, 12, tzinfo=timezone.utc),
+        duration_ms=100, results=results,
+    )
+    data = json.loads(path.read_text())
+    assert "stdout_path" not in data["repos"]["api"]
+    assert "stderr_path" not in data["repos"]["api"]
+
+
+def test_prune_deletes_artifacts_alongside_iteration_files(state_dir):
+    """Seed 25 iterations with artifacts; after prune(keep=20), first 5 gone."""
+    for i in range(1, 26):
+        results = _results(svc=("pass", 100, 0, None))
+        write_run(
+            state_dir, "t", iteration=i,
+            started_at=datetime.now(timezone.utc),
+            duration_ms=0, results=results,
+            streams={"svc": (f"stdout-{i}", f"stderr-{i}")},
+        )
+
+    prune(state_dir, "t", keep=20)
+
+    run_dir = state_dir / "test-runs" / "t"
+    # Iterations 1-5 and their artifacts must be gone
+    for i in range(1, 6):
+        assert not (run_dir / f"{i}.json").exists(), f"{i}.json should be pruned"
+        assert not (run_dir / f"{i}.svc.stdout").exists(), f"{i}.svc.stdout should be pruned"
+        assert not (run_dir / f"{i}.svc.stderr").exists(), f"{i}.svc.stderr should be pruned"
+
+    # Iterations 6-25 must remain
+    for i in range(6, 26):
+        assert (run_dir / f"{i}.json").exists(), f"{i}.json should remain"
+        assert (run_dir / f"{i}.svc.stdout").exists(), f"{i}.svc.stdout should remain"
+        assert (run_dir / f"{i}.svc.stderr").exists(), f"{i}.svc.stderr should remain"

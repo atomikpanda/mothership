@@ -90,6 +90,7 @@ def register(app: typer.Typer, get_container):
 
         # Build per-repo results for the iteration file
         per_repo: dict[str, dict] = {}
+        streams: dict[str, tuple[str, str]] = {}
         for r in result.results:
             status = "pass" if r.success else "fail"
             stderr_tail = None
@@ -102,12 +103,16 @@ def register(app: typer.Typer, get_container):
                 "exit_code": r.shell_result.returncode,
                 "stderr_tail": stderr_tail,
             }
+            streams[r.repo] = (
+                r.shell_result.stdout or "",
+                r.shell_result.stderr or "",
+            )
 
         new_iter = (prev_iter or 0) + 1
         write_run(
             state_dir, task.slug, iteration=new_iter,
             started_at=started_at, duration_ms=run_duration_ms,
-            results=per_repo,
+            results=per_repo, streams=streams,
         )
 
         # Persist iteration on task
