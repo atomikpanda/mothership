@@ -100,10 +100,15 @@ If setup fails in any repo, you'll see warnings but the task still spawns — fi
 ```bash
 mship phase dev                         # transition phase
 mship test                              # run tests across affected repos in dependency order (fail-fast)
+                                        # shows diff vs previous iteration (new failure / fix / regression tags)
+mship test --no-diff                    # skip the diff (plain pass/fail output)
 mship test --all                        # run all repos even if one fails
 mship test --repos shared,api           # only specific repos
 mship test --tag apple                  # repos tagged 'apple' (any number of --tag flags)
 mship log "implemented avatar upload, tests passing"  # leave breadcrumbs
+mship log "msg" --action "<what I'm doing>"     # structured: records action for session resume
+mship log "msg" --open "<blocking question>"    # flag a blocker; re-read with mship log --show-open
+mship log --show-open                           # list open questions for the current task
 mship status                            # check current state
 mship switch <repo>                     # set active repo + emit handoff (deps changed, last log, drift, tests)
 mship switch                            # re-render handoff for the currently active repo
@@ -349,6 +354,7 @@ Then `mship test --tag mobile` runs both.
 - **Don't merge PRs out of order** — the coordination block in each PR description shows the correct order.
 - **Don't ignore healthcheck failures** — if `mship run` reports a service didn't become ready, the dependent services won't work either.
 - **Don't run `mship finish` with failing tests** — run `mship test` first.
+- **Don't paste test output into `mship log`** — after every `mship test`, mship auto-logs a structured entry with iteration, test_state, and action. The iteration file under `.mothership/test-runs/` has stderr for failures.
 - **Don't keep editing a worktree after `mship finish`** — once `finish` stamps the task as done, phase transitions are blocked (except `run`). If you need to make changes, open a new task with `mship spawn`.
 - **Don't manually edit `.mothership/state.yaml`** — use the CLI commands instead.
 - **Don't assume `mship` knows what's running outside of it** — if you started services manually, mothership won't track them. Use `mship run` or accept that `mship status` won't reflect them.

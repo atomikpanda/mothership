@@ -34,6 +34,8 @@ Works for **a single repo** (the isolation + phase + audit story still applies) 
 
 **Cross-repo context switches.** When the agent moves between repos within a task, `mship switch <repo>` records the checkpoint and emits a structured handoff: what changed in dependency repos since the agent was last here, what it logged in this repo, whether the worktree is clean. The agent re-injects the handoff into its context and continues work grounded in current state — no re-reading every file, no stale mental models, no running tests against the wrong version of a dependency.
 
+**Iteration awareness.** Every `mship test` run gets a numbered iteration file with per-repo status, duration, exit code, and stderr tail. The next run shows the diff: new failures, fixes, regressions. Agents iterating on a test failure get a running log of what changed between attempts instead of re-reading stdout.
+
 ## mship in 60 seconds
 
 ```bash
@@ -150,7 +152,7 @@ mship finish --base-map a=main,b=x    # per-repo PR base overrides
 mship finish --push-only              # push branches without opening PRs
 
 # Execution (delegates to go-task per repo)
-mship test [--all] [--tag t]          # run tests in dependency order
+mship test [--all] [--tag t] [--no-diff]  # runs in dep order; default shows diff vs previous iteration
 mship run [--repos a,b]               # start services; foreground or background+healthcheck
 mship logs <service>                  # tail logs for a service
 
@@ -165,7 +167,9 @@ mship view spec --web                  # serve rendered spec on localhost
 
 # Context & logs
 mship log                             # read task log
-mship log "message"                   # append breadcrumb
+mship log "msg"                       # append breadcrumb (repo/iteration inferred from current state)
+mship log "msg" --action X --open Y   # structured fields for cross-session recovery
+mship log --show-open                 # list open questions for the current task
 ```
 
 ### `mship finish`
