@@ -17,39 +17,39 @@ layout {
 
     tab name="Plan" focus=true {
         pane split_direction="vertical" {
-            pane size="50%" name="agent"
+            pane size="50%" name="Agent"
             pane split_direction="horizontal" size="50%" {
-                pane name="specs" command="mship" { args "view" "spec" "--watch"; }
-                pane name="status" command="mship" { args "view" "status"; }
+                pane name="Specs" command="mship" { args "view" "spec" "--watch"; }
+                pane name="Status" command="mship" { args "view" "status"; }
             }
         }
     }
 
     tab name="Dev" {
         pane split_direction="vertical" {
-            pane size="60%" name="editor" command="bash" {
+            pane size="60%" name="Editor" command="bash" {
                 args "-lc" "${EDITOR:-$(command -v nvim || command -v vim || command -v vi)} ."
             }
             pane split_direction="horizontal" size="40%" {
-                pane name="logs" command="mship" { args "view" "logs" "--watch"; }
-                pane name="status" command="mship" { args "view" "status" "--watch"; }
+                pane name="Logs" command="mship" { args "view" "logs" "--watch"; }
+                pane name="Status" command="mship" { args "view" "status" "--watch"; }
             }
         }
     }
 
     tab name="Review" {
         pane split_direction="vertical" {
-            pane size="70%" name="diff" command="mship" { args "view" "diff" "--watch"; }
-            pane size="30%" name="shell"
+            pane size="70%" name="Diff" command="mship" { args "view" "diff" "--watch"; }
+            pane size="30%" name="Shell"
         }
     }
 
     tab name="Run" {
         pane split_direction="vertical" {
-            pane size="60%" name="shell"
+            pane size="60%" name="Shell"
             pane split_direction="horizontal" size="40%" {
-                pane name="logs" command="mship" { args "view" "logs" "--watch"; }
-                pane name="status" command="mship" { args "view" "status" "--watch"; }
+                pane name="Logs" command="mship" { args "view" "logs" "--watch"; }
+                pane name="Status" command="mship" { args "view" "status" "--watch"; }
             }
         }
     }
