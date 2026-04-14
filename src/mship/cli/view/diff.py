@@ -144,7 +144,7 @@ class DiffView(ViewApp):
                     self._selected = (p, wd.files[0].path)
                     break
 
-    def _render_selected(self) -> None:
+    def _render_selected(self, reset_scroll: bool = False) -> None:
         assert self._diff_static is not None and self._diff_scroll is not None
         if self._selected is None:
             self._diff_static.update(Text("No changes.", justify="center"))
@@ -169,7 +169,8 @@ class DiffView(ViewApp):
         else:
             rendered = self._render_body(file.body)
             self._diff_static.update(Text.from_ansi(rendered))
-        self._diff_scroll.scroll_to(y=0, animate=False)
+        if reset_scroll:
+            self._diff_scroll.scroll_to(y=0, animate=False)
 
     def _render_body(self, body: str) -> str:
         if not self._use_delta or not body:
@@ -195,7 +196,7 @@ class DiffView(ViewApp):
         if data[0] == "file":
             _, worktree, path = data
             self._selected = (worktree, path)
-            self._render_selected()
+            self._render_selected(reset_scroll=True)
         elif data[0] == "wt":
             _, worktree = data
             if event.node.is_expanded:
@@ -276,7 +277,7 @@ class DiffView(ViewApp):
 
     def select_file(self, worktree: Path, file_path: str) -> None:
         self._selected = (worktree, file_path)
-        self._render_selected()
+        self._render_selected(reset_scroll=True)
 
     def scroll_diff_to(self, y: float) -> None:
         assert self._diff_scroll is not None

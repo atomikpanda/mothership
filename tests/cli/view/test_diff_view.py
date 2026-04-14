@@ -108,6 +108,28 @@ async def test_selection_change_resets_scroll(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_refresh_preserves_scroll_when_selection_unchanged(tmp_path):
+    """A watch-tick refresh with the same selection must not yank scroll to top."""
+    wa = tmp_path / "a"
+    view = DiffView(worktree_paths=[wa], use_delta=False, watch=False, interval=1.0)
+    long_body = "diff --git a/big.py b/big.py\n+++ b/big.py\n" + "".join(
+        f"+line {i}\n" for i in range(200)
+    )
+    _seed(view, {wa: [_fd("big.py", long_body, additions=200)]})
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        view.scroll_diff_to(30)
+        y_before = view.diff_scroll_y()
+        assert y_before > 0
+        # Simulate a watch-tick refresh (same selection, same content)
+        view._refresh_content()
+        await pilot.pause()
+        assert view.diff_scroll_y() == y_before, (
+            f"scroll yanked on refresh: was {y_before}, now {view.diff_scroll_y()}"
+        )
+
+
+@pytest.mark.asyncio
 async def test_refresh_preserves_selection_when_possible(tmp_path):
     wa = tmp_path / "a"
     view = DiffView(worktree_paths=[wa], use_delta=False, watch=False, interval=0.05)
