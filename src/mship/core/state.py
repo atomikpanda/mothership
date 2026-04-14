@@ -28,6 +28,7 @@ class Task(BaseModel):
     phase_entered_at: datetime | None = None
     active_repo: str | None = None
     last_switched_at_sha: dict[str, dict[str, str]] = {}
+    test_iteration: int = 0
 
 
 class WorkspaceState(BaseModel):

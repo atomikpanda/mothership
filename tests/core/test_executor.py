@@ -693,3 +693,31 @@ repos:
     result = executor.execute("test", repos=["shared"])
     assert result.success
     assert result.results[0].healthcheck is None
+
+
+def test_repo_result_has_duration_ms_default():
+    from mship.core.executor import RepoResult
+    from mship.util.shell import ShellResult
+    r = RepoResult(
+        repo="x", task_name="test",
+        shell_result=ShellResult(returncode=0, stdout="", stderr=""),
+    )
+    assert r.duration_ms == 0
+
+
+def test_executor_records_duration_ms_on_test_run(workspace_with_git, monkeypatch):
+    """Each repo result should carry a non-zero duration_ms after a test run."""
+    from mship.container import Container
+
+    container = Container()
+    container.config_path.override(workspace_with_git / "mothership.yaml")
+    container.state_dir.override(workspace_with_git / ".mothership")
+    try:
+        executor = container.executor()
+        result = executor.execute("test", repos=["shared"], run_all=False)
+        assert result.results
+        assert all(r.duration_ms >= 0 for r in result.results)
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()

@@ -236,3 +236,14 @@ def test_task_defaults_for_switch_fields():
     )
     assert task.active_repo is None
     assert task.last_switched_at_sha == {}
+
+
+def test_task_defaults_test_iteration_to_zero():
+    from datetime import datetime, timezone
+    from mship.core.state import Task
+    task = Task(
+        slug="t", description="d", phase="plan",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["a"], branch="feat/t",
+    )
+    assert task.test_iteration == 0

@@ -1,3 +1,4 @@
+import time as _time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -18,6 +19,7 @@ class RepoResult:
     skipped: bool = False
     background_pid: int | None = None
     healthcheck: HealthcheckResult | None = None
+    duration_ms: int = 0
 
     @property
     def success(self) -> bool:
@@ -145,6 +147,7 @@ class RepoExecutor:
                 popen,
             )
 
+        _start = _time.monotonic()
         shell_result = self._shell.run_task(
             task_name=canonical_task,
             actual_task_name=actual_name,
@@ -152,12 +155,14 @@ class RepoExecutor:
             env_runner=env_runner,
             env=upstream_env or None,
         )
+        _elapsed_ms = int((_time.monotonic() - _start) * 1000)
 
         return (
             RepoResult(
                 repo=repo_name,
                 task_name=actual_name,
                 shell_result=shell_result,
+                duration_ms=_elapsed_ms,
             ),
             None,
         )
