@@ -101,3 +101,56 @@ def test_install_when_git_dir_missing_raises(tmp_path):
     # No `.git` at all — hook path's parent doesn't exist and we can't install blindly
     with pytest.raises((FileNotFoundError, OSError)):
         install_hook(tmp_path)
+
+
+def test_install_creates_all_three_hook_files(tmp_path):
+    import subprocess
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    install_hook(tmp_path)
+    hooks = tmp_path / ".git" / "hooks"
+    assert (hooks / "pre-commit").exists()
+    assert (hooks / "post-checkout").exists()
+    assert (hooks / "post-commit").exists()
+    for name in ("pre-commit", "post-checkout", "post-commit"):
+        content = (hooks / name).read_text()
+        assert HOOK_MARKER_BEGIN in content
+        assert HOOK_MARKER_END in content
+
+
+def test_each_hook_has_distinct_body(tmp_path):
+    import subprocess
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    install_hook(tmp_path)
+    hooks = tmp_path / ".git" / "hooks"
+    pre = (hooks / "pre-commit").read_text()
+    post_co = (hooks / "post-checkout").read_text()
+    post_ci = (hooks / "post-commit").read_text()
+    assert "mship _check-commit" in pre
+    assert "mship _post-checkout" in post_co
+    assert "mship _log-commit" in post_ci
+
+
+def test_is_installed_requires_all_three(tmp_path):
+    import subprocess
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    install_hook(tmp_path)
+    assert is_installed(tmp_path) is True
+
+    # Remove post-checkout — is_installed should now be False
+    (tmp_path / ".git" / "hooks" / "post-checkout").unlink()
+    assert is_installed(tmp_path) is False
+
+
+def test_uninstall_strips_all_three(tmp_path):
+    import subprocess
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    hooks = tmp_path / ".git" / "hooks"
+    # Seed each hook file with user content first
+    for name in ("pre-commit", "post-checkout", "post-commit"):
+        (hooks / name).write_text(f"#!/bin/sh\n# user {name}\n")
+    install_hook(tmp_path)
+    uninstall_hook(tmp_path)
+    for name in ("pre-commit", "post-checkout", "post-commit"):
+        content = (hooks / name).read_text()
+        assert f"user {name}" in content
+        assert HOOK_MARKER_BEGIN not in content
