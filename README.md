@@ -248,10 +248,10 @@ audit:
 
 `mship view` provides read-only TUIs designed for tmux/zellij panes. All views support `--watch` and `--interval N`.
 
-- `mship view status [--watch]` — current task, phase, worktrees, tests, drift, phase duration, and last log entry
-- `mship view logs [task-slug] [--watch]` — tail of the task log
-- `mship view diff [--watch]` — per-worktree git diff with untracked files inline
-- `mship view spec [name-or-path] [--watch] [--web]` — render newest spec; `--web` serves HTML on localhost
+- `mship view status [--task <slug>] [--watch]` — all tasks stacked by default (the "God view"); `--task` narrows to one
+- `mship view logs [--task <slug>] [--watch]` — tail the task's log; opens a task picker when no task is active
+- `mship view diff [--task <slug>] [--watch]` — per-worktree git diff; task picker fallback as above
+- `mship view spec [name-or-path] [--task <slug>] [--watch] [--web]` — cross-task spec index picker by default; `--task` narrows, explicit name renders directly, `--web` serves HTML on localhost
 
 Keys: `q` quit, `j/k` or arrows to scroll, `PgUp/PgDn`, `Home/End`, `r` force refresh.
 
