@@ -22,14 +22,21 @@ class SpecView(ViewApp):
         self,
         workspace_root: Path,
         name_or_path: Optional[str],
+        *,
+        task: Optional[str] = None,
+        state=None,
         **kw,
     ):
         # Strip SpecView-specific kwargs before passing to super
         kw.pop("workspace_root", None)
         kw.pop("name_or_path", None)
+        kw.pop("task", None)
+        kw.pop("state", None)
         super().__init__(**kw)
         self._workspace_root = workspace_root
         self._name_or_path = name_or_path
+        self._task_filter = task
+        self._state = state
         self._markdown: Markdown | None = None
         self._error_static: Static | None = None
         self._body: VerticalScroll | None = None
@@ -52,7 +59,7 @@ class SpecView(ViewApp):
         was_at_end = self._body.scroll_y >= (self._body.max_scroll_y - 1)
         prev_y = self._body.scroll_y
         try:
-            path = find_spec(self._workspace_root, self._name_or_path)
+            path = find_spec(self._workspace_root, self._name_or_path, task=self._task_filter, state=self._state)
             source = path.read_text()
             self._last_source = source
             self._last_error = ""
@@ -114,6 +121,26 @@ def serve_spec_web(
     return server, port, thread
 
 
+def _serve_web(path: Path, port: int | None) -> None:
+    try:
+        server, chosen, _t = serve_spec_web(path, explicit_port=port)
+    except NoFreePortError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(code=1)
+    url = f"http://127.0.0.1:{chosen}/"
+    typer.echo(f"Serving {path.name} at {url} (Ctrl-C to stop)")
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass
+    try:
+        import time as _t2
+        while True:
+            _t2.sleep(1)
+    except KeyboardInterrupt:
+        server.shutdown()
+
+
 def register(app: typer.Typer, get_container):
     @app.command()
     def spec(
@@ -122,41 +149,46 @@ def register(app: typer.Typer, get_container):
         interval: float = typer.Option(2.0, "--interval"),
         web: bool = typer.Option(False, "--web", help="Serve rendered HTML on localhost"),
         port: Optional[int] = typer.Option(None, "--port", help="Explicit port for --web"),
+        task: Optional[str] = typer.Option(None, "--task", help="Narrow to one task's worktrees"),
     ):
         """Render a spec file (newest by default)."""
         from pathlib import Path as _P
         container = get_container()
         workspace_root = _P(container.config_path()).parent
+        state = container.state_manager().load()
 
-        if web:
-            try:
-                path = find_spec(workspace_root, name_or_path)
-            except SpecNotFoundError as e:
-                typer.echo(f"Error: {e}", err=True)
-                raise typer.Exit(code=1)
-            try:
-                server, chosen, _t = serve_spec_web(path, explicit_port=port)
-            except NoFreePortError as e:
-                typer.echo(f"Error: {e}", err=True)
-                raise typer.Exit(code=1)
-            url = f"http://127.0.0.1:{chosen}/"
-            typer.echo(f"Serving {path.name} at {url} (Ctrl-C to stop)")
-            try:
-                webbrowser.open(url)
-            except Exception:
-                pass
-            try:
-                import time as _t2
-                while True:
-                    _t2.sleep(1)
-            except KeyboardInterrupt:
-                server.shutdown()
+        if task is not None and name_or_path is not None:
+            typer.echo("Error: --task and an explicit spec name are mutually exclusive.", err=True)
+            raise typer.Exit(code=1)
+        if task is not None and task not in state.tasks:
+            known = ", ".join(sorted(state.tasks.keys())) or "(none)"
+            typer.echo(f"Unknown task '{task}'. Known: {known}.", err=True)
+            raise typer.Exit(code=1)
+
+        # Direct render when caller specified a target.
+        if name_or_path is not None or task is not None:
+            if web:
+                try:
+                    path = find_spec(workspace_root, name_or_path, task=task, state=state)
+                except SpecNotFoundError as e:
+                    typer.echo(f"Error: {e}", err=True)
+                    raise typer.Exit(code=1)
+                _serve_web(path, port)
+                return
+            view = SpecView(
+                workspace_root=workspace_root,
+                name_or_path=name_or_path,
+                task=task,
+                state=state,
+                watch=watch,
+                interval=interval,
+            )
+            view.run()
             return
 
-        view = SpecView(
-            workspace_root=workspace_root,
-            name_or_path=name_or_path,
-            watch=watch,
-            interval=interval,
+        # No target: open the cross-task spec index picker.
+        from mship.cli.view._spec_index import SpecIndexApp
+        app_ = SpecIndexApp(
+            workspace_root=workspace_root, state=state, watch=watch, interval=interval,
         )
-        view.run()
+        app_.run()
