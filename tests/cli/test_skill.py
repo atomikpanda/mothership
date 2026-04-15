@@ -70,7 +70,7 @@ def test_install_one_skill_writes_files_preserving_subdirs(tmp_path, monkeypatch
     )
     assert result.exit_code == 0, result.output
 
-    root = tmp_path / "brainstorming"
+    root = tmp_path / "mothership" / "brainstorming"
     assert (root / "SKILL.md").read_text() == "# content of skills/brainstorming/SKILL.md\n"
     assert (root / "visual-companion.md").exists()
     assert (root / "references" / "themes.md").exists()  # subdir preserved
@@ -84,7 +84,7 @@ def test_install_all_installs_every_discovered_skill(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
 
     for name in ("working-with-mothership", "brainstorming", "systematic-debugging"):
-        assert (tmp_path / name / "SKILL.md").exists(), name
+        assert (tmp_path / "mothership" / name / "SKILL.md").exists(), name
 
 
 def test_install_rejects_both_name_and_all(tmp_path, monkeypatch):

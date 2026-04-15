@@ -1,0 +1,6 @@
+{
+  "name": "mothership",
+  "description": "State safety for one AI agent across repo boundaries: worktree isolation, phase workflow, structured logs, coordinated PRs.",
+  "version": "0.1.0",
+  "contextFileName": "GEMINI.md"
+}
