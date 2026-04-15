@@ -1,0 +1,22 @@
+version: '3'
+
+tasks:
+  setup:
+    desc: Install Python dependencies
+    cmds:
+      - uv sync
+
+  test:
+    desc: Run the test suite
+    cmds:
+      - uv run pytest -q
+
+  lint:
+    desc: Static checks (no linter wired yet)
+    cmds:
+      - echo "no linter configured"
+
+  run:
+    desc: Not applicable for this repo
+    cmds:
+      - echo "mship is a CLI tool; use `uv run mship ...` directly"
