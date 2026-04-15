@@ -203,15 +203,18 @@ def register(app: typer.Typer, get_container):
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
-        if state.current_task is None:
-            output.error("No active task. Run `mship spawn \"description\"` to start one.")
-            raise typer.Exit(code=1)
-
-        task = state.tasks[state.current_task]
         config = container.config()
 
+        # Services are workspace-scoped, not task-scoped. If a task is active, fall back
+        # to its affected_repos (keeps task-scoped dev environments working); otherwise
+        # operate over every repo in the workspace.
+        if state.current_task is not None:
+            fallback_repos = state.tasks[state.current_task].affected_repos
+        else:
+            fallback_repos = list(config.repos.keys())
+
         try:
-            target_repos = _resolve_repos(config, task.affected_repos, repos, tag)
+            target_repos = _resolve_repos(config, fallback_repos, repos, tag)
         except ValueError as e:
             output.error(str(e))
             raise typer.Exit(code=1)

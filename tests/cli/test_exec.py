@@ -79,6 +79,36 @@ def test_mship_run(configured_exec_app):
     assert result.exit_code == 0
 
 
+def test_mship_run_works_without_active_task(workspace: Path):
+    """mship run should work even when no task is active — services are workspace-scoped."""
+    from unittest.mock import MagicMock
+    from mship.util.shell import ShellRunner, ShellResult
+
+    state_dir = workspace / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(workspace / "mothership.yaml")
+    container.state_dir.override(state_dir)
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok\n", stderr="")
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+
+    try:
+        result = runner.invoke(app, ["run", "--repos", "shared"])
+        assert result.exit_code == 0, result.output
+        # Executor invoked for the filtered repo
+        assert mock_shell.run_task.called
+    finally:
+        container.shell.reset_override()
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+
 def test_mship_test_no_active_task(workspace: Path):
     state_dir = workspace / ".mothership"
     state_dir.mkdir(exist_ok=True)
