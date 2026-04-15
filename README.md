@@ -117,13 +117,15 @@ Requires Python 3.14+ and [uv](https://docs.astral.sh/uv/). Optional: [go-task](
 
 ## For AI agents
 
-Mothership ships a skill (compatible with [superpowers](https://github.com/obra/superpowers) and any agent framework that can call bash):
+Mothership ships a bundle of skills (the mship skill plus vendored superpowers skills — brainstorming, writing-plans, subagent-driven-development, etc.) compatible with any agent framework that can call bash:
 
 ```bash
-mship skill install working-with-mothership
+mship skill list                    # see what's available on remote
+mship skill install --all           # install the whole bundle
+mship skill install working-with-mothership   # or just one
 ```
 
-The skill teaches the session-start protocol (`mship status` → `mship log`), phase workflow, command reference, and context recovery. Installs to `~/.agents/skills/` by default; use `--dest` to override.
+The mship skill teaches the session-start protocol (`mship status` → `mship log`), phase workflow, command reference, and context recovery. The vendored superpowers skills are mship-aware (they require an active task and point subagents at task worktrees, not `main`). Installs to `~/.agents/skills/` by default; use `--dest` to override.
 
 JSON output is auto-emitted when stdout isn't a TTY — agents get structured state without any flag, humans get Rich-formatted output.
 
