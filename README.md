@@ -32,6 +32,8 @@ These aren't agent skill issues. They're state-management issues. One agent, one
 
 Works for **a single repo** (the isolation + phase + audit story still applies) *and* multi-repo workspaces (the coordination story layers on top). Start with one; add repos when the system grows.
 
+**Pre-commit guard.** `mship init` installs a pre-commit hook on every git root. While a task is active, the hook refuses commits anywhere except the task's worktrees — making "committed to main instead of the worktree" structurally impossible without explicit bypass (`git commit --no-verify`). Removed cleanly by editing `.git/hooks/pre-commit`; `mship doctor` warns when the hook is missing.
+
 **Cross-repo context switches.** When the agent moves between repos within a task, `mship switch <repo>` records the checkpoint and emits a structured handoff: what changed in dependency repos since the agent was last here, what it logged in this repo, whether the worktree is clean. The agent re-injects the handoff into its context and continues work grounded in current state — no re-reading every file, no stale mental models, no running tests against the wrong version of a dependency.
 
 **Iteration awareness.** Every `mship test` run gets a numbered iteration file with per-repo status, duration, exit code, and stderr tail. The next run shows the diff: new failures, fixes, regressions. Agents iterating on a test failure get a running log of what changed between attempts instead of re-reading stdout.
@@ -130,6 +132,7 @@ JSON output is auto-emitted when stdout isn't a TTY — agents get structured st
 ```bash
 # Lifecycle (the iteration loop)
 mship init [--detect | --name N --repo PATH:TYPE]   # scaffold mothership.yaml
+mship init --install-hooks            # (re)install pre-commit guard on every git root
 mship spawn "description" [--repos a,b] [--skip-setup]   # worktrees + branch + plan phase
 mship switch <repo>                   # cross-repo context switch: handoff + record active repo
 mship phase plan|dev|review|run [-f] # transition with soft gate warnings
