@@ -125,13 +125,14 @@ class DoctorChecker:
             if is_installed(root):
                 report.checks.append(CheckResult(
                     name=hook_name, status="pass",
-                    message=f"pre-commit hook installed at {root}/.git/hooks/pre-commit",
+                    message=f"mship git hooks installed at {root}/.git/hooks/",
                 ))
             else:
                 report.checks.append(CheckResult(
                     name=hook_name, status="warn",
                     message=(
-                        f"pre-commit hook missing at {root}/.git/hooks/pre-commit. "
+                        f"git hooks missing or incomplete at {root}/.git/hooks/. "
+                        f"Expected mship blocks in pre-commit, post-checkout, post-commit. "
                         f"Run `mship init --install-hooks` to install."
                     ),
                 ))

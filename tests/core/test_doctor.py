@@ -271,6 +271,31 @@ def test_doctor_passes_when_hook_installed(tmp_path):
     assert not any(c.status == "warn" for c in hook_checks)
 
 
+def test_doctor_warns_when_only_some_hooks_installed(tmp_path):
+    """If pre-commit is installed but post-checkout is missing, doctor should warn."""
+    import subprocess
+    from mship.core.config import ConfigLoader
+    from mship.core.doctor import DoctorChecker
+    from mship.core.hooks import install_hook
+    from mship.util.shell import ShellRunner
+
+    repo = tmp_path / "cli"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    (repo / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    install_hook(repo)
+    # Now delete one of the three to simulate partial state
+    (repo / ".git" / "hooks" / "post-checkout").unlink()
+
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\nrepos:\n  cli:\n    path: ./cli\n    type: service\n"
+    )
+    cfg = ConfigLoader.load(tmp_path / "mothership.yaml")
+    report = DoctorChecker(cfg, ShellRunner()).run()
+    hook_checks = [c for c in report.checks if "hook" in c.name.lower()]
+    assert any(c.status == "warn" for c in hook_checks)
+
+
 def test_doctor_dedupes_hook_checks_in_monorepo(tmp_path):
     """Three repos sharing one git_root → one hook check, not three."""
     import subprocess
