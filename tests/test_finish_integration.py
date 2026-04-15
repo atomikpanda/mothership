@@ -549,3 +549,91 @@ def test_finish_still_blocks_other_audit_errors(finish_workspace):
     result = runner.invoke(app, ["finish"])
     assert result.exit_code != 0
     assert "dirty_worktree" in result.output
+
+
+def test_finish_auto_links_issue_refs_in_description(finish_workspace):
+    """Regression for #8: task description containing `#N` should produce PR body with `Closes #N`."""
+    workspace, mock_shell = finish_workspace
+
+    result = runner.invoke(app, ["spawn", "fix #42 something important", "--repos", "shared", "--force-audit"])
+    assert result.exit_code == 0, result.output
+
+    captured_body: list[str] = []
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "git status --porcelain" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "symbolic-ref --short HEAD" in cmd:
+            return ShellResult(returncode=0, stdout="feat/fix-42-something-important\n", stderr="")
+        if "git fetch" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
+            return ShellResult(returncode=0, stdout="origin/feat/fix-42-something-important\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
+        if "git worktree list" in cmd:
+            return ShellResult(returncode=0, stdout="worktree /tmp/shared\n", stderr="")
+        if "git ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc\trefs/heads/main\n", stderr="")
+        if "git log --format=%s" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            # Extract --body from the command
+            import shlex as _shlex
+            tokens = _shlex.split(cmd)
+            if "--body" in tokens:
+                idx = tokens.index("--body")
+                captured_body.append(tokens[idx + 1])
+            return ShellResult(returncode=0, stdout="https://x/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    result = runner.invoke(app, ["finish"])
+    assert result.exit_code == 0, result.output
+    assert captured_body, "expected gh pr create to be invoked"
+    assert "Closes #42" in captured_body[0]
+
+
+def test_finish_pr_body_unchanged_when_no_issue_refs(finish_workspace):
+    """Task description without `#N` → PR body is just the description."""
+    workspace, mock_shell = finish_workspace
+
+    result = runner.invoke(app, ["spawn", "ordinary task description", "--repos", "shared", "--force-audit"])
+    assert result.exit_code == 0, result.output
+
+    captured_body: list[str] = []
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
+        if "git log --format=%s" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            import shlex as _shlex
+            tokens = _shlex.split(cmd)
+            if "--body" in tokens:
+                idx = tokens.index("--body")
+                captured_body.append(tokens[idx + 1])
+            return ShellResult(returncode=0, stdout="https://x/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    result = runner.invoke(app, ["finish", "--force-audit"])
+    assert result.exit_code == 0, result.output
+    assert captured_body
+    assert "Closes" not in captured_body[0]
+    assert captured_body[0] == "ordinary task description"
