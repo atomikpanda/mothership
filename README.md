@@ -117,15 +117,31 @@ Requires Python 3.14+ and [uv](https://docs.astral.sh/uv/). Optional: [go-task](
 
 ## For AI agents
 
-Mothership ships a bundle of skills (the mship skill plus vendored superpowers skills — brainstorming, writing-plans, subagent-driven-development, etc.) compatible with any agent framework that can call bash:
+Mothership ships a bundle of skills — the mship skill plus vendored mship-aware superpowers skills (brainstorming, writing-plans, subagent-driven-development, executing-plans, systematic-debugging, TDD, …). Skills install under a single `mothership:` namespace so they don't collide with other plugins.
 
-```bash
-mship skill list                    # see what's available on remote
-mship skill install --all           # install the whole bundle
-mship skill install working-with-mothership   # or just one
+**Claude Code** (via plugin marketplace):
+
+```
+/plugin marketplace add atomikpanda/mothership
+/plugin install mothership@mothership-marketplace
 ```
 
-The mship skill teaches the session-start protocol (`mship status` → `mship log`), phase workflow, command reference, and context recovery. The vendored superpowers skills are mship-aware (they require an active task and point subagents at task worktrees, not `main`). Installs to `~/.agents/skills/` by default; use `--dest` to override.
+**Gemini CLI**:
+
+```bash
+gemini extensions install https://github.com/atomikpanda/mothership
+```
+
+**Codex** — follow [`.codex/INSTALL.md`](./.codex/INSTALL.md) (clone + symlink).
+
+**Other agents (universal fallback)** — use the CLI:
+
+```bash
+mship skill list                    # see what's in the bundle
+mship skill install --all           # install the whole bundle to ~/.agents/skills/mothership/
+```
+
+The mship skill teaches the session-start protocol (`mship status` → `mship log`), phase workflow, command reference, and context recovery. The vendored superpowers skills are mship-aware — they require an active task and point subagents at task worktrees, not `main`.
 
 JSON output is auto-emitted when stdout isn't a TTY — agents get structured state without any flag, humans get Rich-formatted output.
 

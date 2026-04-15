@@ -1,0 +1,21 @@
+{
+  "name": "mothership",
+  "description": "State safety for one AI agent across repo boundaries: worktree isolation, phase workflow, structured logs, coordinated PRs. Bundles mship-aware superpowers skills.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Bailey Seymour",
+    "email": "bailey@baileyseymour.com"
+  },
+  "homepage": "https://github.com/atomikpanda/mothership",
+  "repository": "https://github.com/atomikpanda/mothership",
+  "license": "MIT",
+  "keywords": [
+    "mothership",
+    "mship",
+    "worktree",
+    "agent",
+    "workflow",
+    "skills",
+    "superpowers"
+  ]
+}

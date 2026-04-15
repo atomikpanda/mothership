@@ -1,12 +1,21 @@
-"""`mship skill` — discover and install vendored skill bundles from GitHub.
+"""`mship skill` — discover and install the mothership skill bundle from GitHub.
 
 Each installable skill lives under `skills/<name>/` in the repo and may contain
 SKILL.md plus auxiliary files (references, prompt templates, examples). The
-installer fetches the full subtree, preserving layout, to
-`~/.agents/skills/<name>/` by default.
+installer fetches the full subtree, preserving layout, and places every skill
+under a single `mothership/` namespace:
+
+    ~/.agents/skills/mothership/<skill-name>/
+
+This way the agent sees them as a bundle (e.g. `mothership:brainstorming`)
+rather than flat at the top level where names would clash with other plugins.
+
+For Claude Code, Gemini CLI, and Codex, prefer the platform-native install
+(plugin marketplace, `gemini extensions install`, or the `.codex/INSTALL.md`
+symlink recipe). This CLI is the universal fallback.
 
 `list` reads the live remote tree — no hardcoded list to drift.
-`install --all` installs every discovered skill in one shot.
+`install --all` installs every discovered skill in one shot (the whole bundle).
 """
 from __future__ import annotations
 
@@ -195,10 +204,11 @@ def _install(
         targets = [name]
 
     base_dest = Path(dest) if dest else (Path.home() / ".agents" / "skills")
+    bundle_root = base_dest / "mothership"
     installed: list[dict] = []
     for skill_name in targets:
         files = _skill_files(tree, skill_name)
-        skill_dest = base_dest / skill_name
+        skill_dest = bundle_root / skill_name
         for repo_path in files:
             # repo_path looks like "skills/<name>/<subpath>"
             subpath = Path(repo_path).relative_to(Path("skills") / skill_name)

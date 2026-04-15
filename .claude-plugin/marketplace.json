@@ -1,0 +1,20 @@
+{
+  "name": "mothership-marketplace",
+  "description": "Marketplace for the mothership skills bundle",
+  "owner": {
+    "name": "Bailey Seymour",
+    "email": "bailey@baileyseymour.com"
+  },
+  "plugins": [
+    {
+      "name": "mothership",
+      "description": "mship CLI workflow skills plus vendored mship-aware superpowers skills",
+      "version": "0.1.0",
+      "source": "./",
+      "author": {
+        "name": "Bailey Seymour",
+        "email": "bailey@baileyseymour.com"
+      }
+    }
+  ]
+}
