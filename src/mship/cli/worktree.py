@@ -315,6 +315,14 @@ def register(app: typer.Typer, get_container):
             known = frozenset()
         report = audit_repos(config, shell, names=task.affected_repos, known_worktree_paths=known)
 
+        # finish is what creates the upstream via `git push -u` — so while the
+        # task is still unfinished, `no_upstream` on the task's own branch is a
+        # false positive that would block every first-time finish. Filter it
+        # out of the gate's report; standalone `mship audit` still reports it.
+        if task.finished_at is None:
+            from mship.core.repo_state import without_no_upstream_on_task_branch
+            report = without_no_upstream_on_task_branch(report, task.branch)
+
         def _log_bypass(codes: list[str]) -> None:
             container.log_manager().append(
                 task.slug, f"BYPASSED AUDIT: finish — {', '.join(codes)}"

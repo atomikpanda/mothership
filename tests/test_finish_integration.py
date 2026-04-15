@@ -468,3 +468,84 @@ def test_finish_push_only_rejects_base_flags(finish_workspace):
     result = runner.invoke(app, ["finish", "--push-only", "--base", "main"])
     assert result.exit_code != 0
     assert "push-only" in result.output.lower()
+
+
+def test_finish_suppresses_no_upstream_for_task_branch(finish_workspace):
+    """Regression for #6: finish must succeed when the only audit error is
+    `no_upstream` on the task's own branch — finish itself creates the upstream."""
+    workspace, mock_shell = finish_workspace
+
+    # Spawn without audit gate interference (the repo has no origin configured
+    # in the fixture, so audit would fire no_upstream at spawn time too).
+    result = runner.invoke(app, ["spawn", "noupstream fix", "--repos", "shared", "--force-audit"])
+    assert result.exit_code == 0, result.output
+
+    # Mock shell to simulate a clean worktree on the task branch with no
+    # upstream configured. The key: when finish audits, `no_upstream` fires on
+    # feat/noupstream-fix. The fix under test removes it from the gate.
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "git status --porcelain" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "git fetch" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "symbolic-ref --short HEAD" in cmd:
+            return ShellResult(returncode=0, stdout="feat/noupstream-fix\n", stderr="")
+        if "git rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
+            # No upstream -> non-zero -> audit emits no_upstream
+            return ShellResult(returncode=128, stdout="", stderr="no upstream")
+        if "git rev-parse --git-common-dir" in cmd:
+            return ShellResult(returncode=0, stdout=".git\n", stderr="")
+        if "git worktree list" in cmd:
+            return ShellResult(returncode=0, stdout="worktree /tmp/shared\n", stderr="")
+        if "git rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "git rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
+        if "git ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc\trefs/heads/main\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://x/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    # NO --force-audit — this is the whole point of the fix.
+    result = runner.invoke(app, ["finish"])
+    assert result.exit_code == 0, result.output
+    assert "BYPASSED AUDIT" not in result.output
+
+
+def test_finish_still_blocks_other_audit_errors(finish_workspace):
+    """The fix must only suppress no_upstream; dirty_worktree etc. still block."""
+    workspace, mock_shell = finish_workspace
+
+    result = runner.invoke(app, ["spawn", "still blocks", "--repos", "shared", "--force-audit"])
+    assert result.exit_code == 0
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "git status --porcelain" in cmd:
+            # Dirty worktree → still blocks
+            return ShellResult(returncode=0, stdout=" M foo.py\n", stderr="")
+        if "git fetch" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "symbolic-ref --short HEAD" in cmd:
+            return ShellResult(returncode=0, stdout="feat/still-blocks\n", stderr="")
+        if "git rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
+            return ShellResult(returncode=128, stdout="", stderr="")
+        if "git rev-parse --git-common-dir" in cmd:
+            return ShellResult(returncode=0, stdout=".git\n", stderr="")
+        if "git worktree list" in cmd:
+            return ShellResult(returncode=0, stdout="worktree /tmp/shared\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    result = runner.invoke(app, ["finish"])
+    assert result.exit_code != 0
+    assert "dirty_worktree" in result.output
