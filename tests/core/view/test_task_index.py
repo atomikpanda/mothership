@@ -74,3 +74,43 @@ def test_build_task_index_orders_active_by_created_desc(tmp_path: Path):
     newer = _task("newer", created_at=now - timedelta(minutes=5))
     state = WorkspaceState(tasks={"older": older, "newer": newer})
     assert [s.slug for s in build_task_index(state, tmp_path)] == ["newer", "older"]
+
+
+from mship.core.view.task_index import SpecEntry, find_all_specs
+
+
+def _write_spec(path: Path, body: str = "# Title\n") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+
+
+def test_find_all_specs_scans_each_worktree(tmp_path: Path):
+    wt_a = tmp_path / "wt-a"
+    wt_b = tmp_path / "wt-b"
+    _write_spec(wt_a / "docs" / "superpowers" / "specs" / "a.md", "# Alpha\n")
+    _write_spec(wt_b / "docs" / "superpowers" / "specs" / "b.md", "# Beta\n")
+    state = WorkspaceState(tasks={
+        "a": _task("a", worktrees={"mothership": wt_a}),
+        "b": _task("b", worktrees={"mothership": wt_b}),
+    })
+    specs = find_all_specs(state, tmp_path)
+    titles = {(s.task_slug, s.path.name, s.title) for s in specs}
+    assert ("a", "a.md", "Alpha") in titles
+    assert ("b", "b.md", "Beta") in titles
+
+
+def test_find_all_specs_includes_main_checkout_with_none_slug(tmp_path: Path):
+    _write_spec(tmp_path / "docs" / "superpowers" / "specs" / "legacy.md", "# Legacy\n")
+    state = WorkspaceState()
+    specs = find_all_specs(state, tmp_path)
+    assert [(s.task_slug, s.path.name) for s in specs] == [(None, "legacy.md")]
+
+
+def test_find_all_specs_title_falls_back_to_stem(tmp_path: Path):
+    _write_spec(tmp_path / "docs" / "superpowers" / "specs" / "untitled.md", "no heading here\n")
+    [entry] = find_all_specs(WorkspaceState(), tmp_path)
+    assert entry.title == "untitled"
+
+
+def test_find_all_specs_empty(tmp_path: Path):
+    assert find_all_specs(WorkspaceState(), tmp_path) == []

@@ -65,3 +65,46 @@ def test_missing_named_spec_raises(tmp_path: Path):
     (tmp_path / "docs" / "superpowers" / "specs").mkdir(parents=True)
     with pytest.raises(SpecNotFoundError):
         find_spec(workspace_root=tmp_path, name_or_path="does-not-exist")
+
+
+from mship.core.state import WorkspaceState, Task
+from datetime import datetime, timezone
+
+
+def _make_task(slug: str, worktree: Path) -> Task:
+    return Task(
+        slug=slug, description=slug, phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["mothership"],
+        worktrees={"mothership": worktree},
+        branch=f"feat/{slug}",
+    )
+
+
+def test_find_spec_with_task_returns_newest_in_task_worktree(tmp_path: Path):
+    wt = tmp_path / "wt-a"
+    specs = wt / "docs" / "superpowers" / "specs"
+    specs.mkdir(parents=True)
+    _touch(specs / "old.md", time.time() - 100)
+    _touch(specs / "new.md", time.time() - 5)
+    state = WorkspaceState(tasks={"a": _make_task("a", wt)})
+
+    result = find_spec(workspace_root=tmp_path, name_or_path=None, task="a", state=state)
+    assert result.name == "new.md"
+
+
+def test_find_spec_unknown_task_raises(tmp_path: Path):
+    state = WorkspaceState()
+    with pytest.raises(SpecNotFoundError):
+        find_spec(workspace_root=tmp_path, name_or_path=None, task="nope", state=state)
+
+
+def test_find_spec_by_name_searches_all_worktrees_when_no_task(tmp_path: Path):
+    wt = tmp_path / "wt-a"
+    specs = wt / "docs" / "superpowers" / "specs"
+    specs.mkdir(parents=True)
+    (specs / "found.md").write_text("# found\n")
+    state = WorkspaceState(tasks={"a": _make_task("a", wt)})
+
+    result = find_spec(workspace_root=tmp_path, name_or_path="found", state=state)
+    assert result == specs / "found.md"
