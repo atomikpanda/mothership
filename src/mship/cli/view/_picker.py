@@ -113,6 +113,7 @@ class TaskPicker(ViewApp):
             return
         slug = self._rows[self._table.cursor_row].slug
         self._on_select(slug)
+        self.exit()
 
     # Test helpers
     def row_slugs(self) -> list[str]:
