@@ -56,6 +56,41 @@ class AuditReport:
 
 
 # ---------------------------------------------------------------------------
+# Report filters
+# ---------------------------------------------------------------------------
+
+
+def without_no_upstream_on_task_branch(
+    report: AuditReport, task_branch: str
+) -> AuditReport:
+    """Return a copy of `report` with `no_upstream` issues stripped from repos
+    currently on `task_branch`.
+
+    Used by `mship finish` before invoking its audit gate: a first-time finish
+    on a feature branch always has no upstream yet — finish itself is what
+    creates it via `git push -u`. Letting that false positive block finish
+    would force every user to pass `--force-audit` on every task.
+
+    Other audit errors (dirty, diverged, unexpected_branch, etc.) are
+    unchanged. `mship audit` run standalone still reports `no_upstream`.
+    """
+    new_repos: list[RepoAudit] = []
+    for r in report.repos:
+        if r.current_branch == task_branch:
+            filtered = tuple(i for i in r.issues if i.code != "no_upstream")
+            if len(filtered) != len(r.issues):
+                new_repos.append(RepoAudit(
+                    name=r.name,
+                    path=r.path,
+                    current_branch=r.current_branch,
+                    issues=filtered,
+                ))
+                continue
+        new_repos.append(r)
+    return AuditReport(repos=tuple(new_repos))
+
+
+# ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
 

@@ -232,6 +232,43 @@ def test_audit_no_upstream(audit_workspace):
     assert "no_upstream" in _issue_codes(rep, "cli")
 
 
+def test_without_no_upstream_strips_from_matching_branch():
+    from pathlib import Path as _P
+    from mship.core.repo_state import (
+        AuditReport, Issue, RepoAudit, without_no_upstream_on_task_branch,
+    )
+
+    r = RepoAudit(
+        name="cli", path=_P("/abs/cli"), current_branch="feat/t",
+        issues=(
+            Issue("no_upstream", "error", "no upstream"),
+            Issue("dirty_worktree", "error", "1 file"),
+        ),
+    )
+    report = AuditReport(repos=(r,))
+    filtered = without_no_upstream_on_task_branch(report, "feat/t")
+    (only,) = filtered.repos
+    codes = {i.code for i in only.issues}
+    assert "no_upstream" not in codes
+    assert "dirty_worktree" in codes  # other issues untouched
+
+
+def test_without_no_upstream_ignores_other_branches():
+    from pathlib import Path as _P
+    from mship.core.repo_state import (
+        AuditReport, Issue, RepoAudit, without_no_upstream_on_task_branch,
+    )
+
+    r = RepoAudit(
+        name="cli", path=_P("/abs/cli"), current_branch="main",
+        issues=(Issue("no_upstream", "error", "no upstream"),),
+    )
+    report = AuditReport(repos=(r,))
+    filtered = without_no_upstream_on_task_branch(report, "feat/t")
+    (only,) = filtered.repos
+    assert any(i.code == "no_upstream" for i in only.issues)
+
+
 def test_audit_extra_worktrees(audit_workspace):
     cfg, shell = _load(audit_workspace)
     clone = audit_workspace / "cli"
