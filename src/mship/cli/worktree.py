@@ -498,13 +498,43 @@ def register(app: typer.Typer, get_container):
                 output.error(f"{repo_name}: {e}")
                 raise typer.Exit(code=1)
 
+            # Build the PR body — appends `Closes #N` for any GitHub issue
+            # references in the task description, log entries, or commit subjects.
+            from mship.core.issue_refs import append_closes_footer, extract_issue_refs
+            texts: list[str] = [task.description]
+            try:
+                entries = container.log_manager().read(task.slug)
+                for e in entries:
+                    if e.message:
+                        texts.append(e.message)
+                    if e.action:
+                        texts.append(e.action)
+                    if e.open_question:
+                        texts.append(e.open_question)
+            except Exception:
+                pass
+            try:
+                eff_base = effective_bases[repo_name] or "HEAD"
+                import shlex as _shlex
+                subjects_res = shell.run(
+                    f"git log --format=%s origin/{_shlex.quote(eff_base)}..{_shlex.quote(task.branch)}",
+                    cwd=repo_path,
+                )
+                if subjects_res.returncode == 0:
+                    for line in subjects_res.stdout.splitlines():
+                        if line.strip():
+                            texts.append(line)
+            except Exception:
+                pass
+            pr_body = append_closes_footer(task.description, extract_issue_refs(texts))
+
             # Create PR
             try:
                 pr_url = pr_mgr.create_pr(
                     repo_path=repo_path,
                     branch=task.branch,
                     title=task.description,
-                    body=task.description,
+                    body=pr_body,
                     base=effective_bases[repo_name],
                 )
             except RuntimeError as e:
