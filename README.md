@@ -134,6 +134,16 @@ gemini extensions install https://github.com/atomikpanda/mothership
 
 **Codex** — follow [`.codex/INSTALL.md`](./.codex/INSTALL.md) (clone + symlink).
 
+**All of the above, detected automatically** — one command:
+
+```bash
+mship skill install                 # detects claude/gemini/codex, installs via each tool's native method
+mship skill install --only gemini   # filter to specific agents
+mship skill install --yes           # skip the confirmation prompt
+```
+
+Claude Code still needs two slash commands inside the REPL (printed by the installer); Gemini and Codex install fully automatically and update cleanly.
+
 **Other agents (universal fallback)** — use the CLI:
 
 ```bash

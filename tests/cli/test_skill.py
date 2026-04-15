@@ -106,6 +106,70 @@ def test_install_rejects_unknown_skill(tmp_path, monkeypatch):
     assert "Available" in result.output
 
 
+def test_agent_install_no_agents_detected_errors(monkeypatch):
+    monkeypatch.setattr(skill_mod, "_detect_agents", lambda: {"claude": False, "gemini": False, "codex": False})
+    result = runner.invoke(app, ["skill", "install", "--yes"])
+    assert result.exit_code != 0
+    assert "No supported AI agent tools detected" in result.output
+
+
+def test_agent_install_only_filter_validates_names(monkeypatch):
+    monkeypatch.setattr(skill_mod, "_detect_agents", lambda: {"claude": True, "gemini": True, "codex": True})
+    result = runner.invoke(app, ["skill", "install", "--only", "bogus", "--yes"])
+    assert result.exit_code != 0
+    assert "bogus" in result.output
+
+
+def test_agent_install_runs_detected_installers(monkeypatch):
+    monkeypatch.setattr(skill_mod, "_detect_agents", lambda: {"claude": False, "gemini": True, "codex": True})
+    calls: list[str] = []
+
+    def fake(name):
+        def inner():
+            calls.append(name)
+            return {"agent": name, "ok": True, "method": "fake"}
+        return inner
+
+    monkeypatch.setitem(skill_mod._INSTALLERS, "gemini", fake("gemini"))
+    monkeypatch.setitem(skill_mod._INSTALLERS, "codex", fake("codex"))
+    monkeypatch.setitem(skill_mod._INSTALLERS, "claude", fake("claude"))
+
+    result = runner.invoke(app, ["skill", "install", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert calls == ["gemini", "codex"]
+
+
+def test_agent_install_only_overrides_detection(monkeypatch):
+    monkeypatch.setattr(skill_mod, "_detect_agents", lambda: {"claude": False, "gemini": False, "codex": False})
+    calls: list[str] = []
+    monkeypatch.setitem(
+        skill_mod._INSTALLERS, "gemini",
+        lambda: (calls.append("gemini") or {"agent": "gemini", "ok": True, "method": "fake"}),
+    )
+    result = runner.invoke(app, ["skill", "install", "--only", "gemini", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert calls == ["gemini"]
+
+
+def test_agent_install_exits_nonzero_when_any_fails(monkeypatch):
+    monkeypatch.setattr(skill_mod, "_detect_agents", lambda: {"claude": False, "gemini": True, "codex": False})
+    monkeypatch.setitem(
+        skill_mod._INSTALLERS, "gemini",
+        lambda: {"agent": "gemini", "ok": False, "error": "boom"},
+    )
+    result = runner.invoke(app, ["skill", "install", "--yes"])
+    assert result.exit_code != 0
+
+
+def test_only_flag_rejected_with_explicit_skill_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(skill_mod, "_fetch_tree", lambda output: _FAKE_TREE)
+    result = runner.invoke(
+        app, ["skill", "install", "brainstorming", "--only", "gemini", "--dest", str(tmp_path)],
+    )
+    assert result.exit_code != 0
+    assert "--only" in result.output
+
+
 def test_list_reads_remote_tree(monkeypatch):
     monkeypatch.setattr(skill_mod, "_fetch_tree", lambda output: _FAKE_TREE)
     result = runner.invoke(app, ["skill", "list"])
