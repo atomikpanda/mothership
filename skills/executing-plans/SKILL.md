@@ -61,6 +61,12 @@ After all tasks complete and verified:
 - Reference skills when plan says to
 - Stop when blocked, don't guess
 - Never start implementation on main/master branch without explicit user consent
+- **If this is a mothership workspace** (`mothership.yaml` at any ancestor): verify
+  `mship status` shows an active task BEFORE starting. No active task → stop and
+  tell the user to `mship spawn "<description>"` first. Then `cd` into
+  `task.worktrees.<repo>` and do all work and commits there. The mship pre-commit
+  hook refuses commits from outside the worktree, so "just commit on main" is
+  both wrong and blocked.
 
 ## Integration
 

@@ -11,6 +11,15 @@ Execute plan by dispatching fresh subagent per task, with two-stage review after
 
 **Core principle:** Fresh subagent per task + two-stage review (spec then quality) = high quality, fast iteration
 
+**If this is a mothership workspace** (i.e. there's a `mothership.yaml` at the
+repo root or any ancestor): before dispatching ANY implementer subagent, verify
+there is an active mship task with a worktree. Run `mship status`. If
+`current_task` is null, stop — tell the user to `mship spawn "<description>"`
+first, then pass the worktree path (from `task.worktrees.<repo>`) as `Work from:`
+in every implementer prompt. Subagents work and commit inside that worktree,
+never on `main`. This is what keeps worktree isolation intact across the whole
+plan execution. See `./implementer-prompt.md` for the full pre-dispatch checklist.
+
 ## When to Use
 
 ```dot
