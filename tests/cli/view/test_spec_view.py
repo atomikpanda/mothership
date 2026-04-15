@@ -39,3 +39,43 @@ def test_serve_spec_web_serves_rendered_html(tmp_path: Path):
     finally:
         server.shutdown()
         thread.join(timeout=2)
+
+
+# --- Task 5 additions ---
+
+from typer.testing import CliRunner
+
+from mship.cli import app, container
+from mship.core.state import StateManager, WorkspaceState
+
+
+def test_spec_cli_rejects_task_with_name():
+    runner = CliRunner()
+    result = runner.invoke(app, ["view", "spec", "--task", "a", "some-name"])
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output.lower()
+
+
+def test_spec_cli_rejects_unknown_task(tmp_path, monkeypatch):
+    runner = CliRunner()
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text("workspace: t\nrepos: {}\n")
+    StateManager(state_dir).save(WorkspaceState(tasks={}, current_task=None))
+
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(cfg)
+    container.state_dir.override(state_dir)
+    try:
+        result = runner.invoke(app, ["view", "spec", "--task", "nope"])
+        assert result.exit_code != 0
+        assert "nope" in result.output
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset_override()
+        container.config.reset()
+        container.state_manager.reset_override()
+        container.state_manager.reset()

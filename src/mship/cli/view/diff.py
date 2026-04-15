@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Optional
 
 import typer
 from rich.text import Text
@@ -325,27 +325,57 @@ def _collect_workspace_worktrees(container) -> list[Path]:
 def register(app: typer.Typer, get_container):
     @app.command()
     def diff(
+        task: Optional[str] = typer.Option(None, "--task", help="Task slug (default: picker / current)"),
         watch: bool = typer.Option(False, "--watch"),
         interval: float = typer.Option(2.0, "--interval"),
         all_: bool = typer.Option(False, "--all", help="Show all worktrees, ignore active_repo"),
     ):
-        """Live per-worktree git diff, browsable by file."""
+        """Live per-worktree git diff (picker when no task specified)."""
+        from pathlib import Path as _P
         container = get_container()
+        state = container.state_manager().load()
+
+        target_task = task if task is not None else state.current_task
+        if task is not None and task not in state.tasks:
+            known = ", ".join(sorted(state.tasks.keys())) or "(none)"
+            typer.echo(f"Unknown task '{task}'. Known: {known}.", err=True)
+            raise typer.Exit(code=1)
 
         def _resolver() -> tuple[list[Path], Path | None]:
-            all_paths = _collect_workspace_worktrees(container)
-            scope: Path | None = None
-            if not all_:
-                state = container.state_manager().load()
-                if state.current_task is not None:
-                    task = state.tasks[state.current_task]
-                    if task.active_repo is not None and task.active_repo in task.worktrees:
-                        scope = Path(task.worktrees[task.active_repo])
-            return all_paths, scope
+            if target_task is not None and target_task in state.tasks:
+                t = state.tasks[target_task]
+                all_paths = [Path(p) for p in t.worktrees.values()]
+                scope: Path | None = None
+                if not all_ and t.active_repo is not None and t.active_repo in t.worktrees:
+                    scope = Path(t.worktrees[t.active_repo])
+                return all_paths, scope
+            return [Path(repo.path) for repo in container.config().repos.values()], None
 
-        view = DiffView(
-            resolve_paths=_resolver,
-            watch=watch,
-            interval=interval,
-        )
+        if target_task is not None:
+            view = DiffView(resolve_paths=_resolver, watch=watch, interval=interval)
+            view.run()
+            return
+
+        # Picker flow.
+        from mship.cli.view._picker import TaskPicker, picker_rows
+        from mship.core.view.task_index import build_task_index
+
+        workspace_root = _P(container.config_path()).parent
+        index = build_task_index(state, workspace_root)
+        selected: dict[str, str] = {}
+        def _on_select(slug: str) -> None:
+            selected["slug"] = slug
+        picker = TaskPicker(rows=picker_rows(index), on_select=_on_select, watch=False, interval=interval)
+        picker.run()
+        chosen = selected.get("slug")
+        if chosen is None:
+            return
+
+        def _resolver_for(slug: str):
+            def inner() -> tuple[list[Path], Path | None]:
+                t = state.tasks[slug]
+                return [Path(p) for p in t.worktrees.values()], None
+            return inner
+
+        view = DiffView(resolve_paths=_resolver_for(chosen), watch=watch, interval=interval)
         view.run()
