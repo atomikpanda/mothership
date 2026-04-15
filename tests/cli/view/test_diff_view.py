@@ -189,6 +189,42 @@ async def test_diff_scope_to_active_repo_filters_paths(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_diff_reresolves_paths_on_refresh(tmp_path):
+    """DiffView with resolve_paths re-resolves on each refresh tick."""
+    wa = tmp_path / "a"
+    wb = tmp_path / "b"
+
+    # use_first[0] controls which path set the resolver returns; start with wa.
+    use_first = [True]
+
+    def _resolver():
+        if use_first[0]:
+            return [wa], None
+        return [wb], None
+
+    view = DiffView(resolve_paths=_resolver, use_delta=False, watch=False, interval=1.0)
+    # Seed both path sets so no real git calls are made in either resolver state.
+    _seed(view, {
+        wa: [_fd("a.py", "diff --git a/a.py b/a.py\n+++ b/a.py\n+from_a\n")],
+        wb: [_fd("b.py", "diff --git a/b.py b/b.py\n+++ b/b.py\n+from_b\n")],
+    })
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        # After mount (resolver returns wa), tree should show wa only.
+        labels = view.tree_labels()
+        assert any(str(wa) in l for l in labels), f"wa missing in {labels}"
+        assert not any(str(wb) in l for l in labels), f"wb unexpectedly in {labels}"
+
+        # Switch resolver to return wb, then simulate a watch tick.
+        use_first[0] = False
+        view._refresh_content()
+        await pilot.pause()
+        labels = view.tree_labels()
+        assert any(str(wb) in l for l in labels), f"wb missing after refresh in {labels}"
+        assert not any(str(wa) in l for l in labels), f"wa still present after refresh in {labels}"
+
+
+@pytest.mark.asyncio
 async def test_diff_scope_none_shows_all(tmp_path):
     wa = tmp_path / "a"
     wb = tmp_path / "b"

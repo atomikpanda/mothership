@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 import typer
 from rich.text import Text
@@ -35,22 +35,34 @@ class DiffView(ViewApp):
         Binding("l", "focus_diff", "Focus diff", show=False),
     ]
 
+    @staticmethod
+    def _apply_scope(all_paths: list[Path], scope_path: Path | None) -> list[Path]:
+        """Return all_paths filtered to scope_path, or all_paths if scope is None/not found."""
+        if scope_path is not None:
+            resolved = Path(scope_path).resolve()
+            filtered = [p for p in all_paths if Path(p).resolve() == resolved]
+            return filtered if filtered else all_paths
+        return all_paths
+
     def __init__(
         self,
-        worktree_paths: Iterable[Path],
+        worktree_paths: Iterable[Path] = (),
         use_delta: bool | None = None,
         scope_to_active_path: Path | None = None,
+        resolve_paths: Callable[[], tuple[list[Path], Path | None]] | None = None,
         **kw,
     ):
         super().__init__(**kw)
-        all_paths = list(worktree_paths)
-        if scope_to_active_path is not None:
-            resolved = Path(scope_to_active_path).resolve()
-            filtered = [p for p in all_paths if Path(p).resolve() == resolved]
-            # If the active path isn't in the list, fall back to showing everything.
-            self._paths = filtered if filtered else all_paths
+        self._resolve_paths = resolve_paths
+        if resolve_paths is None:
+            # Static mode: capture paths at construction time.
+            all_paths = list(worktree_paths)
+            self._paths = self._apply_scope(all_paths, scope_to_active_path)
+            self._scope_to_active_path = scope_to_active_path
         else:
-            self._paths = all_paths
+            # Deferred mode: paths will be resolved on each refresh.
+            self._paths: list[Path] = []
+            self._scope_to_active_path: Path | None = None
         if use_delta is None:
             use_delta = shutil.which("delta") is not None
         self._use_delta = use_delta
@@ -88,7 +100,8 @@ class DiffView(ViewApp):
     # --- Data loading ---
     def _load_worktrees(self) -> dict[Path, WorktreeDiff | Exception]:
         if self._test_override is not None:
-            return dict(self._test_override)
+            # Honour self._paths so resolver-based filtering is respected in tests.
+            return {p: v for p, v in self._test_override.items() if p in self._paths}
         out: dict[Path, WorktreeDiff | Exception] = {}
         for p in self._paths:
             try:
@@ -99,6 +112,9 @@ class DiffView(ViewApp):
 
     # --- Refresh ---
     def _refresh_content(self) -> None:
+        if self._resolve_paths is not None:
+            all_paths, scope_path = self._resolve_paths()
+            self._paths = self._apply_scope(all_paths, scope_path)
         self._worktrees = self._load_worktrees()
         self._rebuild_tree()
         self._render_selected()
@@ -315,19 +331,20 @@ def register(app: typer.Typer, get_container):
     ):
         """Live per-worktree git diff, browsable by file."""
         container = get_container()
-        worktree_paths = _collect_workspace_worktrees(container)
 
-        scope_path: Path | None = None
-        if not all_:
-            state = container.state_manager().load()
-            if state.current_task is not None:
-                task = state.tasks[state.current_task]
-                if task.active_repo is not None and task.active_repo in task.worktrees:
-                    scope_path = Path(task.worktrees[task.active_repo])
+        def _resolver() -> tuple[list[Path], Path | None]:
+            all_paths = _collect_workspace_worktrees(container)
+            scope: Path | None = None
+            if not all_:
+                state = container.state_manager().load()
+                if state.current_task is not None:
+                    task = state.tasks[state.current_task]
+                    if task.active_repo is not None and task.active_repo in task.worktrees:
+                        scope = Path(task.worktrees[task.active_repo])
+            return all_paths, scope
 
         view = DiffView(
-            worktree_paths=worktree_paths,
-            scope_to_active_path=scope_path,
+            resolve_paths=_resolver,
             watch=watch,
             interval=interval,
         )
