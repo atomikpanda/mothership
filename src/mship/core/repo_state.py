@@ -97,6 +97,29 @@ def _list_worktree_paths(shell, root_path: Path) -> list[Path]:
     return paths
 
 
+def _main_checkout_branch(shell, root_path: Path) -> str | None:
+    """Resolve the branch checked out in the *main* working tree, not the cwd's worktree.
+
+    `expected_branch` is a workspace-level invariant about the main checkout. If the
+    user runs mship from a feature-branch worktree, comparing the worktree's HEAD
+    against `expected_branch` always fails. Instead, walk to the git common dir
+    (the main `.git`), take its parent (the main checkout), and read HEAD there.
+
+    Returns None on detached HEAD or any subprocess failure.
+    """
+    rc, out, _ = _sh_out(shell, "git rev-parse --git-common-dir", root_path)
+    if rc != 0 or not out.strip():
+        return None
+    common = Path(out.strip())
+    if not common.is_absolute():
+        common = (root_path / common).resolve()
+    main_checkout = common.parent
+    rc, out, _ = _sh_out(shell, "git symbolic-ref --short HEAD", main_checkout)
+    if rc != 0:
+        return None
+    return out.strip()
+
+
 def _probe_git_wide(
     shell,
     root_path: Path,
@@ -115,11 +138,15 @@ def _probe_git_wide(
         current_branch = None
     else:
         current_branch = out.strip()
-        if expected_branch is not None and current_branch != expected_branch:
-            issues.append(Issue(
-                "unexpected_branch", "error",
-                f"on {current_branch!r}, expected {expected_branch!r}",
-            ))
+        if expected_branch is not None:
+            # Compare against the main checkout's branch, not the (possibly worktree)
+            # cwd. expected_branch is a workspace invariant about the main checkout.
+            main_branch = _main_checkout_branch(shell, root_path)
+            if main_branch is not None and main_branch != expected_branch:
+                issues.append(Issue(
+                    "unexpected_branch", "error",
+                    f"main checkout on {main_branch!r}, expected {expected_branch!r}",
+                ))
 
     if not local_only:
         # Fetch (needed for ahead/behind)

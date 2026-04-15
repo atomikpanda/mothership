@@ -130,6 +130,42 @@ def test_audit_unexpected_branch(audit_workspace):
     assert "unexpected_branch" in _issue_codes(rep, "cli")
 
 
+def test_audit_unexpected_branch_main_checkout_message(audit_workspace):
+    """The unexpected_branch error should reference the main checkout, not cwd."""
+    cfg_path = audit_workspace / "mothership.yaml"
+    data = yaml.safe_load(cfg_path.read_text())
+    data["repos"]["cli"]["expected_branch"] = "marshal-refactor"
+    cfg_path.write_text(yaml.safe_dump(data))
+    cfg, shell = _load(audit_workspace)
+    rep = audit_repos(cfg, shell, names=["cli"])
+    cli = next(r for r in rep.repos if r.name == "cli")
+    msgs = [i.message for i in cli.issues if i.code == "unexpected_branch"]
+    assert msgs and "main checkout" in msgs[0]
+
+
+def test_audit_expected_branch_passes_when_root_path_is_a_worktree(audit_workspace):
+    """Issue #3: audit from a worktree path must still see the main checkout's branch."""
+    import yaml as _yaml
+    clone = audit_workspace / "cli"
+    wt = audit_workspace / "cli-feat-wt"
+    _sh("git", "worktree", "add", str(wt), "-b", "feat/x", cwd=clone)
+
+    # Point the config's cli.path at the worktree, simulating the user's cwd-based
+    # invocation from inside a feature-branch worktree.
+    cfg_path = audit_workspace / "mothership.yaml"
+    data = _yaml.safe_load(cfg_path.read_text())
+    data["repos"]["cli"]["path"] = str(wt)
+    data["repos"]["cli"]["expected_branch"] = "main"   # main checkout IS on main
+    cfg_path.write_text(_yaml.safe_dump(data))
+
+    cfg, shell = _load(audit_workspace)
+    rep = audit_repos(cfg, shell, names=["cli"])
+    cli = next(r for r in rep.repos if r.name == "cli")
+    codes = {i.code for i in cli.issues}
+    # main checkout is on `main`, expected_branch is `main` → must NOT fire
+    assert "unexpected_branch" not in codes
+
+
 def test_audit_dirty_worktree(audit_workspace):
     cfg, shell = _load(audit_workspace)
     (audit_workspace / "cli" / "new.txt").write_text("hi\n")
