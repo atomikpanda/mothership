@@ -117,3 +117,66 @@ def register(app: typer.Typer, get_container):
             f"  cd there — don't edit in main.\n"
         )
         raise typer.Exit(code=0)
+
+    @app.command(name="_log-commit", hidden=True)
+    def log_commit():
+        """Auto-append a structured log entry for the just-made commit.
+
+        Silent no-op when no active task, no mship workspace, or cwd isn't inside
+        any known worktree (e.g. `--no-verify` committed somewhere unexpected).
+        """
+        import subprocess
+        from pathlib import Path
+
+        try:
+            container = get_container()
+            state = container.state_manager().load()
+        except Exception:
+            raise typer.Exit(code=0)
+
+        if state.current_task is None:
+            raise typer.Exit(code=0)
+
+        task = state.tasks.get(state.current_task)
+        if task is None or not task.worktrees:
+            raise typer.Exit(code=0)
+
+        cwd = Path.cwd().resolve()
+        matched_repo: str | None = None
+        for repo_name, wt_path in task.worktrees.items():
+            wt_resolved = Path(wt_path).resolve()
+            if cwd == wt_resolved or (
+                cwd.is_relative_to(wt_resolved) if hasattr(Path, "is_relative_to") else False
+            ):
+                matched_repo = repo_name
+                break
+        if matched_repo is None:
+            raise typer.Exit(code=0)
+
+        try:
+            result = subprocess.run(
+                ["git", "log", "-1", "--format=%H%n%s"],
+                cwd=cwd, capture_output=True, text=True, check=False,
+            )
+        except Exception:
+            raise typer.Exit(code=0)
+        if result.returncode != 0:
+            raise typer.Exit(code=0)
+
+        lines = result.stdout.splitlines()
+        if not lines:
+            raise typer.Exit(code=0)
+        sha = lines[0].strip()
+        subject = lines[1].strip() if len(lines) > 1 else ""
+
+        try:
+            container.log_manager().append(
+                task.slug,
+                f"commit {sha[:10]}: {subject}",
+                repo=matched_repo,
+                iteration=task.test_iteration if task.test_iteration else None,
+                action="committed",
+            )
+        except Exception:
+            pass
+        raise typer.Exit(code=0)

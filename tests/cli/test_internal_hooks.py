@@ -153,3 +153,85 @@ def test_post_checkout_warns_when_on_task_branch_but_not_in_worktree(tmp_path, m
         assert "cd" in result.output.lower()
     finally:
         _reset()
+
+
+def test_log_commit_appends_entry_when_in_task_worktree(tmp_path, monkeypatch):
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    _init_repo_on_branch(tmp_path, "main")
+    wt = tmp_path / ".worktrees" / "feat-t"
+    subprocess.run(["git", "worktree", "add", "-b", "feat/t", str(wt)],
+                   cwd=tmp_path, check=True, capture_output=True, env=env)
+    # Make a commit in the worktree so `git log -1` has something to read
+    (wt / "file.txt").write_text("x\n")
+    subprocess.run(["git", "add", "."], cwd=wt, check=True, capture_output=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "test commit subject"],
+                   cwd=wt, check=True, capture_output=True, env=env)
+
+    (tmp_path / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    sm = StateManager(tmp_path / ".mothership")
+    task = Task(
+        slug="t", description="d", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["r"], branch="feat/t",
+        worktrees={"r": wt},
+    )
+    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+
+    _override(tmp_path)
+    try:
+        monkeypatch.chdir(wt)
+        result = runner.invoke(app, ["_log-commit"])
+        assert result.exit_code == 0, result.output
+
+        from mship.core.log import LogManager
+        entries = LogManager(tmp_path / ".mothership" / "logs").read("t")
+        auto = [e for e in entries if e.action == "committed"]
+        assert auto, [e.message for e in entries]
+        assert "test commit subject" in auto[-1].message
+        assert auto[-1].repo == "r"
+    finally:
+        _reset()
+
+
+def test_log_commit_silent_when_no_active_task(tmp_path, monkeypatch):
+    _init_repo_on_branch(tmp_path, "main")
+    (tmp_path / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    _override(tmp_path)
+    try:
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(app, ["_log-commit"])
+        assert result.exit_code == 0, result.output
+    finally:
+        _reset()
+
+
+def test_log_commit_silent_when_cwd_not_in_worktree(tmp_path, monkeypatch):
+    """--no-verify case: commit happens outside any worktree; don't log."""
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    _init_repo_on_branch(tmp_path, "main")
+    (tmp_path / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    sm = StateManager(tmp_path / ".mothership")
+    task = Task(
+        slug="t", description="d", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["r"], branch="feat/t",
+        worktrees={"r": tmp_path / ".worktrees" / "feat-t"},
+    )
+    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+
+    _override(tmp_path)
+    try:
+        # cwd = main checkout, not the worktree
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(app, ["_log-commit"])
+        assert result.exit_code == 0, result.output
+
+        from mship.core.log import LogManager
+        entries = LogManager(tmp_path / ".mothership" / "logs").read("t")
+        assert not any(e.action == "committed" for e in entries)
+    finally:
+        _reset()
