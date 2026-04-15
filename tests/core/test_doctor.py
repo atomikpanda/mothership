@@ -325,3 +325,51 @@ def test_doctor_dedupes_hook_checks_in_monorepo(tmp_path):
     report = checker.run()
     hook_checks = [c for c in report.checks if "hook" in c.name.lower()]
     assert len(hook_checks) == 1
+
+
+def test_doctor_warns_in_mship_dev_workspace(tmp_path: Path):
+    """If a repo's pyproject declares name='mothership', doctor warns about the
+    stale-binary trap (#7)."""
+    import subprocess
+
+    repo = tmp_path / "mship_src"
+    repo.mkdir()
+    (repo / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "mothership"\n'
+        'version = "0.1.0"\n'
+    )
+    (repo / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: dev\n"
+        "repos:\n"
+        "  mship_src:\n"
+        "    path: ./mship_src\n"
+        "    type: service\n"
+    )
+    cfg = ConfigLoader.load(tmp_path / "mothership.yaml")
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = lambda cmd, cwd, env=None: ShellResult(
+        returncode=0, stdout="test\nrun\nlint\nsetup\n", stderr=""
+    )
+    report = DoctorChecker(cfg, mock_shell).run()
+
+    dev_checks = [c for c in report.checks if c.name == "dev_mode"]
+    assert dev_checks
+    assert dev_checks[0].status == "warn"
+    assert "uv run mship" in dev_checks[0].message
+    assert report.ok  # warnings don't fail doctor
+
+
+def test_doctor_silent_when_not_mship_dev_workspace(workspace: Path):
+    """Regular workspaces (pyproject missing or name != mothership) get no dev warning."""
+    config = ConfigLoader.load(workspace / "mothership.yaml")
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = lambda cmd, cwd, env=None: ShellResult(
+        returncode=0, stdout="test\nrun\nlint\nsetup\n", stderr=""
+    )
+    report = DoctorChecker(config, mock_shell).run()
+    dev_checks = [c for c in report.checks if c.name == "dev_mode"]
+    assert dev_checks == []
