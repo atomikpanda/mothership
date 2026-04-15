@@ -124,3 +124,63 @@ def test_no_verify_bypasses_hook(workspace_for_hooks):
         cwd=repo, capture_output=True, text=True, env=env,
     )
     assert result.returncode == 0, (result.stdout, result.stderr)
+
+
+def test_init_installs_all_three_hooks(workspace_for_hooks):
+    tmp_path, repo = workspace_for_hooks
+    result = runner.invoke(app, ["init", "--install-hooks"])
+    assert result.exit_code == 0, result.output
+    hooks = repo / ".git" / "hooks"
+    assert (hooks / "pre-commit").exists()
+    assert (hooks / "post-checkout").exists()
+    assert (hooks / "post-commit").exists()
+
+
+def test_post_checkout_warns_on_rogue_branch(workspace_for_hooks):
+    """git checkout -b outside mship spawn fires a stderr warning."""
+    tmp_path, repo = workspace_for_hooks
+    runner.invoke(app, ["init", "--install-hooks"])
+
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    result = subprocess.run(
+        ["git", "checkout", "-b", "feat/rogue"],
+        cwd=repo, capture_output=True, text=True, env=env,
+    )
+    # Checkout itself succeeds — post-checkout only warns
+    assert result.returncode == 0
+    assert "mship spawn" in result.stderr
+
+
+def test_post_commit_auto_logs_in_worktree(workspace_for_hooks):
+    """A commit inside a task worktree triggers an auto-log entry."""
+    tmp_path, repo = workspace_for_hooks
+    runner.invoke(app, ["init", "--install-hooks"])
+    spawn_result = runner.invoke(
+        app, ["spawn", "auto log test", "--repos", "cli", "--force-audit", "--skip-setup"],
+    )
+    assert spawn_result.exit_code == 0, spawn_result.output
+
+    from mship.core.state import StateManager
+    state = StateManager(tmp_path / ".mothership").load()
+    wt = Path(state.tasks["auto-log-test"].worktrees["cli"])
+    assert wt.exists()
+
+    (wt / "file.txt").write_text("hello\n")
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "add", "."], cwd=wt, check=True, capture_output=True, env=env)
+    result = subprocess.run(
+        ["git", "commit", "-m", "auto logged"],
+        cwd=wt, capture_output=True, text=True, env=env,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+
+    from mship.core.log import LogManager
+    entries = LogManager(tmp_path / ".mothership" / "logs").read("auto-log-test")
+    auto = [e for e in entries if e.action == "committed"]
+    assert auto
+    assert "auto logged" in auto[-1].message
+    assert auto[-1].repo == "cli"

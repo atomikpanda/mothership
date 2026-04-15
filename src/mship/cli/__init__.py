@@ -9,17 +9,23 @@ container = Container()
 
 def _resolve_state_dir(config_path):
     """Get the workspace state dir, anchored to main repo if in a git worktree."""
+    import os
     import subprocess
     from pathlib import Path
 
     config_path = Path(config_path)
     try:
+        # Strip GIT_DIR / GIT_COMMON_DIR so git re-discovers from cwd rather than
+        # inheriting a worktree-specific git dir set by a parent git hook process.
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE")}
         result = subprocess.run(
             ["git", "rev-parse", "--git-common-dir"],
             cwd=config_path.parent,
             capture_output=True,
             text=True,
             check=True,
+            env=env,
         )
         git_common_dir = Path(result.stdout.strip())
         if not git_common_dir.is_absolute():
