@@ -106,6 +106,11 @@ class TaskPicker(ViewApp):
         # TaskPicker does not use ViewApp's Static/VerticalScroll body.
         return
 
+    def on_data_table_row_selected(self, event) -> None:
+        # DataTable consumes the Enter keypress, so we drive selection via its
+        # RowSelected message instead of the app-level binding.
+        self.action_select_cursor()
+
     def action_select_cursor(self) -> None:
         if self._table is None or self._on_select is None:
             return

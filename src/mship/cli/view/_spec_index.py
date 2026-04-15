@@ -83,6 +83,11 @@ class SpecIndexApp(ViewApp):
         if self._entries:
             self._table.move_cursor(row=new_cursor)
 
+    def on_data_table_row_selected(self, event) -> None:
+        # DataTable consumes the Enter keypress before app-level bindings run,
+        # so we drive the drill-down from its RowSelected message instead.
+        self.action_open_cursor()
+
     def action_open_cursor(self) -> None:
         if self._table is None or self._markdown is None or self._body is None:
             return
