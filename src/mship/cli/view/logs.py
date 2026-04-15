@@ -39,34 +39,61 @@ class LogsView(ViewApp):
 def register(app: typer.Typer, get_container):
     @app.command()
     def logs(
-        task_slug: Optional[str] = typer.Argument(None, help="Task slug (default: current)"),
+        task: Optional[str] = typer.Option(None, "--task", help="Task slug (default: picker / current)"),
         watch: bool = typer.Option(False, "--watch"),
         interval: float = typer.Option(2.0, "--interval"),
         all_: bool = typer.Option(False, "--all", help="Show all log entries, ignore active_repo"),
     ):
-        """Live tail of a task's log."""
+        """Live tail of a task's log (picker when no task specified)."""
+        from pathlib import Path as _P
+
         container = get_container()
         state = container.state_manager().load()
 
+        task_slug = task
+        if task_slug is None and state.current_task is not None:
+            task_slug = state.current_task
+
         if task_slug is not None:
-            if not state.tasks:
-                typer.echo("No tasks in state.", err=True)
-                raise typer.Exit(code=1)
             if task_slug not in state.tasks:
-                known = ", ".join(sorted(state.tasks.keys()))
-                typer.echo(f"Unknown task '{task_slug}'. Known tasks: {known}.", err=True)
+                known = ", ".join(sorted(state.tasks.keys())) or "(none)"
+                typer.echo(f"Unknown task '{task_slug}'. Known: {known}.", err=True)
                 raise typer.Exit(code=1)
+            scope: Optional[str] = None
+            if not all_ and state.current_task == task_slug:
+                scope = state.tasks[task_slug].active_repo
+            view = LogsView(
+                state_manager=container.state_manager(),
+                log_manager=container.log_manager(),
+                task_slug=task_slug,
+                scope_to_repo=scope,
+                watch=watch,
+                interval=interval,
+            )
+            view.run()
+            return
 
-        scope: Optional[str] = None
-        if not all_:
-            if state.current_task is not None:
-                scope = state.tasks[state.current_task].active_repo
+        # No task + no current: show picker.
+        from mship.cli.view._picker import TaskPicker, picker_rows
+        from mship.core.view.task_index import build_task_index
 
+        workspace_root = _P(container.config_path()).parent
+        index = build_task_index(state, workspace_root)
+        selected: dict[str, str] = {}
+        def _on_select(slug: str) -> None:
+            selected["slug"] = slug
+        picker = TaskPicker(
+            rows=picker_rows(index), on_select=_on_select, watch=False, interval=interval,
+        )
+        picker.run()
+        chosen = selected.get("slug")
+        if chosen is None:
+            return
         view = LogsView(
             state_manager=container.state_manager(),
             log_manager=container.log_manager(),
-            task_slug=task_slug,
-            scope_to_repo=scope,
+            task_slug=chosen,
+            scope_to_repo=None,
             watch=watch,
             interval=interval,
         )

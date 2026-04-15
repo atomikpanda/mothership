@@ -130,3 +130,36 @@ async def test_logs_view_scope_none_shows_all():
         text = view.rendered_text()
         assert "cli thing" in text
         assert "shared thing" in text
+
+
+# --- Task 6 additions ---
+
+from typer.testing import CliRunner
+
+from mship.cli import app, container
+from mship.core.state import StateManager, WorkspaceState
+
+
+def test_logs_cli_rejects_unknown_task(tmp_path):
+    runner = CliRunner()
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text("workspace: t\nrepos: {}\n")
+    StateManager(state_dir).save(WorkspaceState(tasks={}, current_task=None))
+
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(cfg)
+    container.state_dir.override(state_dir)
+    try:
+        result = runner.invoke(app, ["view", "logs", "--task", "nope"])
+        assert result.exit_code != 0
+        assert "nope" in result.output
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset_override()
+        container.config.reset()
+        container.state_manager.reset_override()
+        container.state_manager.reset()
