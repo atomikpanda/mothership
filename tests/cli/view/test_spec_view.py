@@ -53,7 +53,7 @@ def test_spec_cli_rejects_task_with_name():
     runner = CliRunner()
     result = runner.invoke(app, ["view", "spec", "--task", "a", "some-name"])
     assert result.exit_code != 0
-    assert "mutually exclusive" in result.output.lower() or "--task" in result.output
+    assert "mutually exclusive" in result.output.lower()
 
 
 def test_spec_cli_rejects_unknown_task(tmp_path, monkeypatch):

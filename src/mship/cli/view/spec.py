@@ -153,13 +153,14 @@ def register(app: typer.Typer, get_container):
     ):
         """Render a spec file (newest by default)."""
         from pathlib import Path as _P
+        if task is not None and name_or_path is not None:
+            typer.echo("Error: --task and an explicit spec name are mutually exclusive.", err=True)
+            raise typer.Exit(code=1)
+
         container = get_container()
         workspace_root = _P(container.config_path()).parent
         state = container.state_manager().load()
 
-        if task is not None and name_or_path is not None:
-            typer.echo("Error: --task and an explicit spec name are mutually exclusive.", err=True)
-            raise typer.Exit(code=1)
         if task is not None and task not in state.tasks:
             known = ", ".join(sorted(state.tasks.keys())) or "(none)"
             typer.echo(f"Unknown task '{task}'. Known: {known}.", err=True)
@@ -189,6 +190,10 @@ def register(app: typer.Typer, get_container):
         # No target: open the cross-task spec index picker.
         from mship.cli.view._spec_index import SpecIndexApp
         app_ = SpecIndexApp(
-            workspace_root=workspace_root, state=state, watch=watch, interval=interval,
+            workspace_root=workspace_root,
+            state=state,
+            state_loader=container.state_manager().load,
+            watch=watch,
+            interval=interval,
         )
         app_.run()

@@ -24,10 +24,11 @@ class SpecIndexApp(ViewApp):
         Binding("escape", "back_to_index", "Back", show=True),
     ]
 
-    def __init__(self, workspace_root: Path, state, **kw):
+    def __init__(self, workspace_root: Path, state, *, state_loader=None, **kw):
         super().__init__(**kw)
         self._workspace_root = workspace_root
         self._state = state
+        self._state_loader = state_loader
         self._entries: list[SpecEntry] = []
         self._table: DataTable | None = None
         self._markdown: Markdown | None = None
@@ -66,6 +67,8 @@ class SpecIndexApp(ViewApp):
     def _refresh_index(self) -> None:
         if self._mode != "index" or self._table is None:
             return
+        if self._state_loader is not None:
+            self._state = self._state_loader()
         selected_key = None
         if self._table.cursor_row is not None and self._table.cursor_row < len(self._entries):
             selected_key = str(self._entries[self._table.cursor_row].path)
@@ -88,7 +91,7 @@ class SpecIndexApp(ViewApp):
         entry = self._entries[self._table.cursor_row]
         try:
             self._markdown.update(entry.path.read_text())
-        except OSError as e:
+        except (OSError, UnicodeDecodeError) as e:
             self._markdown.update(f"Error reading spec: {e!r}")
         self._table.display = False
         self._body.display = True
