@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import shutil
 import subprocess
 import urllib.error
@@ -35,15 +36,19 @@ from mship.cli.output import Output
 
 GITHUB_REPO = "atomikpanda/mothership"
 GITHUB_BRANCH = "main"
+GITHUB_URL = f"https://github.com/{GITHUB_REPO}"
+SUPPORTED_AGENTS = ("claude", "gemini", "codex")
 
 
 def register(app: typer.Typer, get_container):
     @app.command(name="skill")
     def skill_cmd(
         action: str = typer.Argument(help="Action: install, list"),
-        name: Optional[str] = typer.Argument(None, help="Skill name (omit with --all)"),
+        name: Optional[str] = typer.Argument(None, help="Skill name (omit with --all or for agent auto-install)"),
         dest: Optional[str] = typer.Option(None, "--dest", help="Destination dir (default: ~/.agents/skills/)"),
-        install_all: bool = typer.Option(False, "--all", help="Install every available skill"),
+        install_all: bool = typer.Option(False, "--all", help="Install every available skill (CLI fallback)"),
+        only: Optional[str] = typer.Option(None, "--only", help="Comma-separated agents for auto-install: claude,gemini,codex"),
+        yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
     ):
         """Manage mothership skills."""
         output = Output()
@@ -52,6 +57,12 @@ def register(app: typer.Typer, get_container):
             _list_skills(output)
             return
         if action == "install":
+            if name is None and not install_all:
+                _install_for_agents(output, only, yes)
+                return
+            if only:
+                output.error("--only is only valid with the agent auto-install form (no <name>, no --all).")
+                raise typer.Exit(code=1)
             _install(output, name, dest, install_all)
             return
         output.error(f"Unknown action: {action}. Use 'install' or 'list'.")
@@ -221,3 +232,153 @@ def _install(
 
     if not output.is_tty:
         output.json({"installed": installed})
+
+
+# --- Agent auto-install ----------------------------------------------------
+
+
+def _detect_agents() -> dict[str, bool]:
+    """Best-effort detection: CLI on PATH or config dir in $HOME."""
+    home = Path.home()
+    return {
+        "claude": shutil.which("claude") is not None or (home / ".claude").exists(),
+        "gemini": shutil.which("gemini") is not None or (home / ".gemini").exists(),
+        "codex": shutil.which("codex") is not None or (home / ".codex").exists(),
+    }
+
+
+def _install_claude() -> dict:
+    """Claude Code has no shell-level plugin install. Emit the REPL slash commands."""
+    return {
+        "agent": "claude",
+        "ok": True,
+        "method": "manual",
+        "instructions": [
+            "/plugin marketplace add atomikpanda/mothership",
+            "/plugin install mothership@mothership-marketplace",
+        ],
+    }
+
+
+def _install_gemini() -> dict:
+    if not shutil.which("gemini"):
+        return {"agent": "gemini", "ok": False, "error": "`gemini` CLI not on PATH"}
+    try:
+        r = subprocess.run(
+            ["gemini", "extensions", "install", GITHUB_URL],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        return {"agent": "gemini", "ok": False, "error": str(e)}
+    if r.returncode != 0:
+        return {"agent": "gemini", "ok": False, "error": (r.stderr or r.stdout).strip()}
+    return {"agent": "gemini", "ok": True, "method": "gemini extensions install"}
+
+
+def _install_codex() -> dict:
+    """Clone repo to ~/.codex/mothership and symlink its skills/ dir under ~/.agents/skills/mothership."""
+    clone_dir = Path.home() / ".codex" / "mothership"
+    if clone_dir.exists():
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(clone_dir), "pull", "--ff-only"],
+                capture_output=True, text=True, timeout=120,
+            )
+        except (subprocess.SubprocessError, OSError) as e:
+            return {"agent": "codex", "ok": False, "error": str(e)}
+        if r.returncode != 0:
+            return {"agent": "codex", "ok": False, "error": (r.stderr or r.stdout).strip()}
+        method = "git pull + symlink"
+    else:
+        clone_dir.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            r = subprocess.run(
+                ["git", "clone", GITHUB_URL, str(clone_dir)],
+                capture_output=True, text=True, timeout=300,
+            )
+        except (subprocess.SubprocessError, OSError) as e:
+            return {"agent": "codex", "ok": False, "error": str(e)}
+        if r.returncode != 0:
+            return {"agent": "codex", "ok": False, "error": (r.stderr or r.stdout).strip()}
+        method = "git clone + symlink"
+
+    target = clone_dir / "skills"
+    link = Path.home() / ".agents" / "skills" / "mothership"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if link.is_symlink():
+        if Path(os.readlink(link)) == target:
+            return {"agent": "codex", "ok": True, "method": method, "path": str(link)}
+        link.unlink()
+    elif link.exists():
+        return {
+            "agent": "codex", "ok": False,
+            "error": f"{link} exists and is not a symlink; remove it and retry",
+        }
+    link.symlink_to(target)
+    return {"agent": "codex", "ok": True, "method": method, "path": str(link)}
+
+
+_INSTALLERS = {
+    "claude": _install_claude,
+    "gemini": _install_gemini,
+    "codex": _install_codex,
+}
+
+_PLAN_DESCRIPTIONS = {
+    "claude": "Claude Code: add marketplace + install plugin (manual slash commands in REPL)",
+    "gemini": "Gemini CLI: gemini extensions install",
+    "codex": "Codex: git clone to ~/.codex/mothership + symlink to ~/.agents/skills/mothership",
+}
+
+
+def _install_for_agents(output: Output, only: str | None, yes: bool) -> None:
+    detected = _detect_agents()
+
+    if only:
+        wanted = [a.strip() for a in only.split(",") if a.strip()]
+        unknown = [a for a in wanted if a not in SUPPORTED_AGENTS]
+        if unknown:
+            output.error(
+                f"Unknown agents: {', '.join(unknown)}. Supported: {', '.join(SUPPORTED_AGENTS)}."
+            )
+            raise typer.Exit(code=1)
+        targets = wanted
+    else:
+        targets = [a for a in SUPPORTED_AGENTS if detected[a]]
+
+    if not targets:
+        output.error(
+            "No supported AI agent tools detected on this system. "
+            "Install Claude Code, Gemini CLI, or Codex — or use `mship skill install --all` as a fallback."
+        )
+        raise typer.Exit(code=1)
+
+    if output.is_tty:
+        output.print("[bold]Installing mothership for detected agents:[/bold]")
+        for a in targets:
+            output.print(f"  • {_PLAN_DESCRIPTIONS[a]}")
+        if not yes and not typer.confirm("Proceed?", default=True):
+            output.print("Aborted.")
+            raise typer.Exit(code=0)
+
+    results = [_INSTALLERS[a]() for a in targets]
+
+    for r in results:
+        if not output.is_tty:
+            continue
+        if not r["ok"]:
+            output.error(f"{r['agent']}: {r.get('error', 'failed')}")
+            continue
+        if r.get("method") == "manual":
+            output.print(f"[yellow]{r['agent']}:[/yellow] run these inside the Claude Code REPL:")
+            for cmd in r.get("instructions", []):
+                output.print(f"    {cmd}")
+        else:
+            extra = f" → {r['path']}" if r.get("path") else ""
+            output.success(f"{r['agent']}: installed via {r['method']}{extra}")
+
+    if not output.is_tty:
+        output.json({"results": results})
+
+    if any(not r["ok"] for r in results):
+        raise typer.Exit(code=1)
