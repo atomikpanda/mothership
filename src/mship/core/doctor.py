@@ -146,6 +146,21 @@ class DoctorChecker:
         else:
             report.checks.append(CheckResult(name="gh", status="warn", message="gh CLI not authenticated (run gh auth login)"))
 
+        # Dev-mode trap: installed mship may lag workspace source
+        mship_source = self._detect_mship_dev_workspace()
+        if mship_source is not None:
+            report.checks.append(CheckResult(
+                name="dev_mode",
+                status="warn",
+                message=(
+                    f"mship dev workspace detected at {mship_source}. "
+                    f"The installed `mship` binary may lag your in-progress source. "
+                    f"For commands that should run against your local changes "
+                    f"(especially audit/finish), invoke `uv run mship <cmd>` from "
+                    f"the workspace root instead of `mship <cmd>`."
+                ),
+            ))
+
         # env_runner
         env_runner = self._config.env_runner
         if env_runner:
@@ -157,3 +172,29 @@ class DoctorChecker:
                 report.checks.append(CheckResult(name="env_runner", status="warn", message=f"{binary} not found in PATH"))
 
         return report
+
+    def _detect_mship_dev_workspace(self) -> Path | None:
+        """Return the path of a configured repo whose pyproject declares mothership,
+        or None. Used to warn users developing mship-on-mship that the installed
+        binary may lag their in-progress source.
+        """
+        try:
+            import tomllib
+        except ImportError:  # Python <3.11 — unsupported, but fail safe
+            return None
+        for name, repo in self._config.repos.items():
+            if repo.git_root is not None:
+                parent = self._config.repos[repo.git_root]
+                effective_path = (parent.path / repo.path).resolve()
+            else:
+                effective_path = Path(repo.path).resolve()
+            pyproject = effective_path / "pyproject.toml"
+            if not pyproject.exists():
+                continue
+            try:
+                data = tomllib.loads(pyproject.read_text())
+            except Exception:
+                continue
+            if data.get("project", {}).get("name") == "mothership":
+                return effective_path
+        return None
