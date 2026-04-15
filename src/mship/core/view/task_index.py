@@ -74,7 +74,7 @@ _SPEC_SUBDIR = Path("docs") / "superpowers" / "specs"
 
 def _extract_title(path: Path) -> str:
     try:
-        with path.open("r", encoding="utf-8") as fh:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
             head = fh.read(2048)
     except OSError:
         return path.stem
