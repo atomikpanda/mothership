@@ -220,3 +220,83 @@ repos:
     # web's git check should pass — git lives at parent's path
     web_git = next(c for c in report.checks if c.name == "web/git")
     assert web_git.status == "pass"
+
+
+def test_doctor_warns_when_hook_missing(tmp_path):
+    """Fresh workspace with a git repo but no hook installed → warn."""
+    import subprocess
+    from mship.core.config import ConfigLoader
+    from mship.core.doctor import DoctorChecker
+    from mship.util.shell import ShellRunner
+
+    repo = tmp_path / "cli"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    (repo / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\nrepos:\n  cli:\n    path: ./cli\n    type: service\n"
+    )
+    cfg = ConfigLoader.load(tmp_path / "mothership.yaml")
+    checker = DoctorChecker(cfg, ShellRunner())
+    report = checker.run()
+    hook_checks = [c for c in report.checks if "hook" in c.name.lower()]
+    assert hook_checks, "expected a hook-related check"
+    missing = [c for c in hook_checks if c.status == "warn"]
+    assert missing
+    assert any("install-hooks" in c.message or "pre-commit" in c.message.lower() for c in missing)
+
+
+def test_doctor_passes_when_hook_installed(tmp_path):
+    import subprocess
+    from mship.core.config import ConfigLoader
+    from mship.core.doctor import DoctorChecker
+    from mship.core.hooks import install_hook
+    from mship.util.shell import ShellRunner
+
+    repo = tmp_path / "cli"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    (repo / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    install_hook(repo)
+
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\nrepos:\n  cli:\n    path: ./cli\n    type: service\n"
+    )
+    cfg = ConfigLoader.load(tmp_path / "mothership.yaml")
+    checker = DoctorChecker(cfg, ShellRunner())
+    report = checker.run()
+    hook_checks = [c for c in report.checks if "hook" in c.name.lower()]
+    assert any(c.status == "pass" for c in hook_checks)
+    # Must not have a warn-level hook check
+    assert not any(c.status == "warn" for c in hook_checks)
+
+
+def test_doctor_dedupes_hook_checks_in_monorepo(tmp_path):
+    """Three repos sharing one git_root → one hook check, not three."""
+    import subprocess
+    import yaml
+    from mship.core.config import ConfigLoader
+    from mship.core.doctor import DoctorChecker
+    from mship.util.shell import ShellRunner
+
+    mono = tmp_path / "mono"
+    mono.mkdir()
+    (mono / "pkg-a").mkdir()
+    (mono / "pkg-b").mkdir()
+    subprocess.run(["git", "init", "-q", str(mono)], check=True, capture_output=True)
+    for p in (mono, mono / "pkg-a", mono / "pkg-b"):
+        (p / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+
+    (tmp_path / "mothership.yaml").write_text(yaml.safe_dump({
+        "workspace": "m",
+        "repos": {
+            "mono":  {"path": "./mono", "type": "service"},
+            "pkg_a": {"path": "pkg-a", "type": "library", "git_root": "mono"},
+            "pkg_b": {"path": "pkg-b", "type": "library", "git_root": "mono"},
+        },
+    }))
+    cfg = ConfigLoader.load(tmp_path / "mothership.yaml")
+    checker = DoctorChecker(cfg, ShellRunner())
+    report = checker.run()
+    hook_checks = [c for c in report.checks if "hook" in c.name.lower()]
+    assert len(hook_checks) == 1

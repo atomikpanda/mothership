@@ -107,6 +107,35 @@ class DoctorChecker:
                         message=msg,
                     ))
 
+        # Pre-commit hook presence per unique git root
+        from mship.core.hooks import is_installed
+        from pathlib import Path as _P
+        seen_roots: set[_P] = set()
+        for name, repo in self._config.repos.items():
+            if repo.git_root is not None and repo.git_root in self._config.repos:
+                root = _P(self._config.repos[repo.git_root].path).resolve()
+            else:
+                root = _P(repo.path).resolve()
+            if root in seen_roots:
+                continue
+            seen_roots.add(root)
+            if not (root / ".git").exists():
+                continue  # doctor already warned about this above
+            hook_name = f"hooks/{root.name}"
+            if is_installed(root):
+                report.checks.append(CheckResult(
+                    name=hook_name, status="pass",
+                    message=f"pre-commit hook installed at {root}/.git/hooks/pre-commit",
+                ))
+            else:
+                report.checks.append(CheckResult(
+                    name=hook_name, status="warn",
+                    message=(
+                        f"pre-commit hook missing at {root}/.git/hooks/pre-commit. "
+                        f"Run `mship init --install-hooks` to install."
+                    ),
+                ))
+
         # gh CLI
         gh_result = self._shell.run("gh auth status", cwd=Path("."))
         if gh_result.returncode == 0:
