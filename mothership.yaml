@@ -5,4 +5,3 @@ repos:
     path: .
     type: service
     base_branch: main
-    expected_branch: main
