@@ -7,6 +7,17 @@ from mship.cli.output import Output
 from mship.core.init import WorkspaceInitializer, DetectedRepo
 
 
+def _unique_git_roots(config) -> list[Path]:
+    """Return deduplicated effective git roots for all repos in config."""
+    roots: set[Path] = set()
+    for name, repo in config.repos.items():
+        if repo.git_root is not None and repo.git_root in config.repos:
+            roots.add(Path(config.repos[repo.git_root].path).resolve())
+        else:
+            roots.add(Path(repo.path).resolve())
+    return sorted(roots)
+
+
 def register(app: typer.Typer, get_container):
     @app.command()
     def init(
@@ -17,12 +28,35 @@ def register(app: typer.Typer, get_container):
         env_runner: Optional[str] = typer.Option(None, "--env-runner", help="Secret management command prefix"),
         scaffold_taskfiles: bool = typer.Option(False, "--scaffold-taskfiles", help="Create starter Taskfile.yml for repos without one"),
         force: bool = typer.Option(False, "--force", help="Overwrite existing mothership.yaml"),
+        install_hooks_only: bool = typer.Option(
+            False, "--install-hooks",
+            help="Only install git hooks on every known git root (skip the rest of init).",
+        ),
     ):
         """Initialize a new mothership workspace."""
         output = Output()
         cwd = Path(path).resolve() if path else Path.cwd()
         config_path = cwd / "mothership.yaml"
         initializer = WorkspaceInitializer()
+
+        # --install-hooks: short-circuit — just install hooks on each known git root
+        if install_hooks_only:
+            from mship.core.hooks import install_hook
+            container = get_container()
+            config = container.config()
+            installed: list[Path] = []
+            failed: list[tuple[Path, str]] = []
+            for root in _unique_git_roots(config):
+                try:
+                    install_hook(root)
+                    installed.append(root)
+                except Exception as e:
+                    failed.append((root, str(e)))
+            for r in installed:
+                output.success(f"hook installed: {r}/.git/hooks/pre-commit")
+            for r, err in failed:
+                output.error(f"hook install failed: {r}: {err}")
+            raise typer.Exit(code=1 if failed else 0)
 
         # Check for existing config
         if config_path.exists() and not force:
@@ -81,6 +115,14 @@ def register(app: typer.Typer, get_container):
                 if not (repo_path / "Taskfile.yml").exists():
                     initializer.write_taskfile(repo_path)
                     created_taskfiles.append(str(repo_path))
+
+        # Install pre-commit hooks on each effective git root
+        from mship.core.hooks import install_hook
+        for root in _unique_git_roots(config):
+            try:
+                install_hook(root)
+            except Exception as e:
+                output.print(f"[yellow]warning: could not install hook at {root}: {e}[/yellow]")
 
         if output.is_tty:
             output.success(f"Created: {config_path}")
@@ -241,6 +283,14 @@ def _run_interactive(
         raise typer.Exit(code=1)
 
     initializer.write_config(config_path, config)
+
+    # Install pre-commit hooks on each effective git root
+    from mship.core.hooks import install_hook
+    for root in _unique_git_roots(config):
+        try:
+            install_hook(root)
+        except Exception as e:
+            output.print(f"[yellow]warning: could not install hook at {root}: {e}[/yellow]")
 
     output.print("")
     output.success(f"Created: {config_path}")
