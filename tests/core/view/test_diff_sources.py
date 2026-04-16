@@ -241,3 +241,80 @@ def test_collect_base_branch_none_matches_legacy_behavior(tmp_path: Path):
     legacy = collect_worktree_diff(tmp_path)
     with_none = collect_worktree_diff(tmp_path, base_branch=None)
     assert legacy.combined == with_none.combined
+
+
+def test_status_new_file():
+    chunk = (
+        "diff --git a/new.py b/new.py\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        "+++ b/new.py\n"
+        "@@ -0,0 +1,1 @@\n"
+        "+print('hi')\n"
+    )
+    (f,) = split_diff_by_file(chunk)
+    assert f.status == "N"
+    assert f.old_path is None
+    assert f.path == "new.py"
+
+
+def test_status_deleted_file():
+    chunk = (
+        "diff --git a/gone.py b/gone.py\n"
+        "deleted file mode 100644\n"
+        "--- a/gone.py\n"
+        "+++ /dev/null\n"
+        "@@ -1,1 +0,0 @@\n"
+        "-print('bye')\n"
+    )
+    (f,) = split_diff_by_file(chunk)
+    assert f.status == "D"
+    assert f.old_path is None
+    assert f.path == "gone.py"
+
+
+def test_status_modified_file():
+    chunk = (
+        "diff --git a/mod.py b/mod.py\n"
+        "index abc..def 100644\n"
+        "--- a/mod.py\n"
+        "+++ b/mod.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " keep\n"
+        "+add\n"
+    )
+    (f,) = split_diff_by_file(chunk)
+    assert f.status == "M"
+    assert f.old_path is None
+
+
+def test_status_rename_without_changes():
+    chunk = (
+        "diff --git a/old.py b/new.py\n"
+        "similarity index 100%\n"
+        "rename from old.py\n"
+        "rename to new.py\n"
+    )
+    (f,) = split_diff_by_file(chunk)
+    assert f.status == "R"
+    assert f.path == "new.py"
+    assert f.old_path == "old.py"
+
+
+def test_status_rename_with_changes():
+    chunk = (
+        "diff --git a/old.py b/new.py\n"
+        "similarity index 90%\n"
+        "rename from old.py\n"
+        "rename to new.py\n"
+        "--- a/old.py\n"
+        "+++ b/new.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " keep\n"
+        "+add\n"
+    )
+    (f,) = split_diff_by_file(chunk)
+    assert f.status == "R"
+    assert f.path == "new.py"
+    assert f.old_path == "old.py"
+    assert f.additions == 1
