@@ -86,6 +86,11 @@ class WorktreeManager:
         slug = slugify(description)
         branch = self._config.branch_pattern.replace("{slug}", slug)
 
+        # Early-exit preflight: avoid doing expensive worktree creation when
+        # the slug is already registered. This is an OPTIMIZATION ONLY — the
+        # authoritative check-and-set happens inside the mutate() below so
+        # two concurrent spawns with the same slug cannot both race past this
+        # check and both register the task.
         state = self._state_manager.load()
         if slug in state.tasks:
             raise ValueError(
@@ -176,6 +181,14 @@ class WorktreeManager:
         )
 
         def _apply(s: WorkspaceState) -> None:
+            # Atomic check-and-set: re-check under the exclusive lock so two
+            # concurrent spawns with the same slug cannot both register. The
+            # caller-facing error matches the preflight message.
+            if slug in s.tasks:
+                raise ValueError(
+                    f"Task '{slug}' already exists. "
+                    f"Run `mship abort --yes` to remove it first, or use a different description."
+                )
             s.tasks[slug] = task
         self._state_manager.mutate(_apply)
 
@@ -216,8 +229,9 @@ class WorktreeManager:
                 pass
 
         # Only update state after all cleanup attempts
-        del state.tasks[task_slug]
-        self._state_manager.save(state)
+        def _abort(s):
+            s.tasks.pop(task_slug, None)
+        self._state_manager.mutate(_abort)
 
     def list_worktrees(self) -> dict[str, dict[str, Path]]:
         state = self._state_manager.load()
