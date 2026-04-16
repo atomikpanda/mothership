@@ -2,6 +2,7 @@ from typing import Optional
 
 import typer
 
+from mship.cli._resolve import resolve_or_exit
 from mship.cli.output import Output
 
 
@@ -18,6 +19,7 @@ def register(app: typer.Typer, get_container):
         no_repo: bool = typer.Option(False, "--no-repo", help="Suppress active-repo inference"),
         show_open: bool = typer.Option(False, "--show-open", help="List open questions from this task's journal"),
         force: bool = typer.Option(False, "--force", "-f", help="Bypass cwd-outside-worktree check"),
+        task_opt: Optional[str] = typer.Option(None, "--task", help="Target task (default: cwd/env)"),
     ):
         """Append to or read the current task's journal."""
         from mship.util.duration import format_relative
@@ -27,21 +29,18 @@ def register(app: typer.Typer, get_container):
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
-        if state.current_task is None:
-            output.error("No active task. Run `mship spawn \"description\"` to start one.")
-            raise typer.Exit(code=1)
+        t = resolve_or_exit(state, task_opt)
 
         log_mgr = container.log_manager()
-        task = state.tasks[state.current_task]
 
         from pathlib import Path as _P
         from mship.cli._cwd_check import format_cwd_warning
         cwd_warn: str | None = None
-        if task.active_repo is not None and task.active_repo in task.worktrees:
-            cwd_warn = format_cwd_warning(_P.cwd(), _P(task.worktrees[task.active_repo]))
+        if t.active_repo is not None and t.active_repo in t.worktrees:
+            cwd_warn = format_cwd_warning(_P.cwd(), _P(t.worktrees[t.active_repo]))
 
         if show_open:
-            entries = log_mgr.read(state.current_task)
+            entries = log_mgr.read(t.slug)
             opens = [e for e in entries if e.open_question]
             if not opens:
                 if output.is_tty:
@@ -80,12 +79,12 @@ def register(app: typer.Typer, get_container):
             # Infer repo + iteration when not explicitly provided
             inferred_repo = repo
             if inferred_repo is None and not no_repo:
-                inferred_repo = task.active_repo
+                inferred_repo = t.active_repo
             inferred_iter = iteration if iteration is not None else (
-                task.test_iteration if task.test_iteration > 0 else None
+                t.test_iteration if t.test_iteration > 0 else None
             )
             log_mgr.append(
-                state.current_task, message,
+                t.slug, message,
                 repo=inferred_repo,
                 iteration=inferred_iter,
                 test_state=test_state,
@@ -95,11 +94,11 @@ def register(app: typer.Typer, get_container):
             if output.is_tty:
                 output.success("Logged")
             else:
-                output.json({"task": state.current_task, "logged": message})
+                output.json({"task": t.slug, "logged": message})
             return
 
         # Read path (no message argument)
-        entries = log_mgr.read(state.current_task, last=last)
+        entries = log_mgr.read(t.slug, last=last)
         if not entries:
             output.print("No journal entries")
             return
@@ -122,7 +121,7 @@ def register(app: typer.Typer, get_container):
                     output.print(f"  [yellow]open:[/yellow] {entry.open_question}")
         else:
             output.json({
-                "task": state.current_task,
+                "task": t.slug,
                 "entries": [
                     {
                         "timestamp": e.timestamp.isoformat(),
