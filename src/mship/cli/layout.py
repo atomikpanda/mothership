@@ -20,7 +20,7 @@ layout {
             pane size="50%" name="Agent"
             pane split_direction="horizontal" size="50%" {
                 pane name="Specs" command="mship" close_on_exit=false { args "view" "spec" "--watch"; }
-                pane name="Status" command="mship" close_on_exit=false { args "view" "status"; }
+                pane name="Status" command="mship" close_on_exit=false { args "view" "status" "--watch"; }
             }
         }
     }
