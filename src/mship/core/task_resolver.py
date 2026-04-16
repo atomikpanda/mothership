@@ -1,8 +1,11 @@
 """Resolve which task a CLI invocation targets.
 
 Priority: --task flag > MSHIP_TASK env > cwd → worktree → task.
-Strict: no implicit fallback to "the only active task" — if nothing
-resolves, raise AmbiguousTaskError (2+ active) or NoActiveTaskError (0).
+
+Fallbacks when no anchor resolves:
+  - 0 tasks       → NoActiveTaskError
+  - exactly 1     → return that task (zero-ambiguity UX win)
+  - 2+ tasks      → AmbiguousTaskError
 """
 from __future__ import annotations
 
@@ -66,4 +69,7 @@ def resolve_task(
         raise NoActiveTaskError(
             "no active task; run `mship spawn \"description\"` to start one"
         )
+    # Exactly one active task → no ambiguity; just use it.
+    if len(state.tasks) == 1:
+        return next(iter(state.tasks.values()))
     raise AmbiguousTaskError(sorted(state.tasks.keys()))

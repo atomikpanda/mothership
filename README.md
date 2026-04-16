@@ -123,7 +123,7 @@ Mothership supports N active tasks at once — one worktree per task per repo. T
 2. **`MSHIP_TASK` env var** — scope a whole shell session to one task: `export MSHIP_TASK=<slug>`.
 3. **cwd** — if your shell is inside a task's worktree, that task is the default.
 
-With 0 active tasks the command errors with "no active task". With 2+ active tasks and no anchor (no `--task`, no `MSHIP_TASK`, cwd outside every worktree) you'll get an "Ambiguous" error listing the active slugs. Fix by anchoring via any of the three mechanisms above.
+With 0 active tasks the command errors with "no active task". With exactly 1 active task and no anchor, the command targets that task (no ambiguity to disambiguate). With 2+ active tasks and no anchor you'll get an "Ambiguous" error listing the active slugs — fix by anchoring via any of the three mechanisms above.
 
 Typical flows:
 
@@ -279,7 +279,7 @@ audit:
 - `mship view diff [--task <slug>] [--watch]` — per-worktree git diff
 - `mship view spec [name-or-path] [--task <slug>] [--watch] [--web]` — cross-task spec index picker by default; `--task` narrows, explicit name renders directly, `--web` serves HTML on localhost
 
-`mship view logs`, `mship view diff`, and the single-task form of `mship view status` resolve their target task via cwd → `MSHIP_TASK` env → `--task <slug>` flag. With 0 active tasks you'll get a "no active task" error; with 2+ active tasks and no anchor you'll get an "ambiguous" error listing the active slugs. See [Multi-task workflows](#multi-task-workflows) for the resolution rules.
+`mship view logs`, `mship view diff`, and the single-task form of `mship view status` resolve their target task via cwd → `MSHIP_TASK` env → `--task <slug>` flag. With 0 active tasks you'll get a "no active task" error; with exactly 1 active task and no anchor the view targets it automatically; with 2+ active tasks and no anchor you'll get an "ambiguous" error listing the active slugs. See [Multi-task workflows](#multi-task-workflows) for the resolution rules.
 
 Keys: `q` quit, `j/k` or arrows to scroll, `PgUp/PgDn`, `Home/End`, `r` force refresh.
 
