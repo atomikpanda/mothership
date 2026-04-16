@@ -28,7 +28,7 @@ def configured_app_with_task(workspace: Path):
         affected_repos=["shared"],
         branch="feat/add-labels",
     )
-    mgr.save(WorkspaceState(current_task="add-labels", tasks={"add-labels": task}))
+    mgr.save(WorkspaceState(tasks={"add-labels": task}))
     yield
     container.config_path.reset_override()
     container.state_dir.reset_override()
@@ -39,7 +39,7 @@ def configured_app_with_task(workspace: Path):
 
 
 def test_phase_transition(configured_app_with_task, workspace: Path):
-    result = runner.invoke(app, ["phase", "dev"])
+    result = runner.invoke(app, ["phase", "dev", "--task", "add-labels"])
     assert result.exit_code == 0
     mgr = StateManager(workspace / ".mothership")
     state = mgr.load()
@@ -47,7 +47,7 @@ def test_phase_transition(configured_app_with_task, workspace: Path):
 
 
 def test_phase_shows_warnings(configured_app_with_task):
-    result = runner.invoke(app, ["phase", "dev"])
+    result = runner.invoke(app, ["phase", "dev", "--task", "add-labels"])
     assert "WARNING" in result.output or "spec" in result.output.lower()
 
 
@@ -60,7 +60,7 @@ def test_phase_no_task(workspace: Path):
     container.state_dir.override(state_dir)
 
     result = runner.invoke(app, ["phase", "dev"])
-    assert result.exit_code != 0 or "No active task" in result.output
+    assert result.exit_code != 0 or "no active task" in result.output.lower()
     container.config_path.reset_override()
     container.state_dir.reset_override()
     container.config.reset_override()
@@ -76,7 +76,7 @@ def test_phase_blocked_without_force_errors(configured_app_with_task, workspace:
     state.tasks["add-labels"].blocked_at = datetime(2026, 4, 10, 15, 0, 0, tzinfo=timezone.utc)
     mgr.save(state)
 
-    result = runner.invoke(app, ["phase", "dev"])
+    result = runner.invoke(app, ["phase", "dev", "--task", "add-labels"])
     assert result.exit_code != 0
     assert "blocked" in result.output.lower()
     assert "waiting on API key" in result.output
@@ -89,7 +89,7 @@ def test_phase_blocked_with_force_transitions(configured_app_with_task, workspac
     state.tasks["add-labels"].blocked_at = datetime(2026, 4, 10, 15, 0, 0, tzinfo=timezone.utc)
     mgr.save(state)
 
-    result = runner.invoke(app, ["phase", "dev", "--force"])
+    result = runner.invoke(app, ["phase", "dev", "--force", "--task", "add-labels"])
     assert result.exit_code == 0
 
     state = mgr.load()

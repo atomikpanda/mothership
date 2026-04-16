@@ -36,7 +36,7 @@ def test_spawn_creates_worktrees(worktree_deps):
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
     mgr.spawn("add labels to tasks", repos=["shared", "auth-service"])
     state = state_mgr.load()
-    assert state.current_task == "add-labels-to-tasks"
+    assert "add-labels-to-tasks" in state.tasks
     task = state.tasks["add-labels-to-tasks"]
     assert task.phase == "plan"
     assert set(task.affected_repos) == {"shared", "auth-service"}
@@ -106,7 +106,6 @@ def test_abort_removes_worktrees(worktree_deps):
     assert not Path(wt_path).exists()
     state = state_mgr.load()
     assert "to-abort" not in state.tasks
-    assert state.current_task is None
 
 
 def test_spawn_runs_setup_task(worktree_deps):
@@ -138,7 +137,6 @@ def test_abort_succeeds_even_if_branch_delete_fails(worktree_deps):
     # State should still be cleaned up
     state = state_mgr.load()
     assert "abort-fail-test" not in state.tasks
-    assert state.current_task is None
 
 
 def test_spawn_skips_git_root_repos(tmp_path: Path):

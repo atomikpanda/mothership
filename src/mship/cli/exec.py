@@ -43,9 +43,11 @@ def register(app: typer.Typer, get_container):
         repos: Optional[str] = typer.Option(None, "--repos", help="Comma-separated repo names to filter"),
         tag: Optional[list[str]] = typer.Option(None, "--tag", help="Filter repos by tag"),
         no_diff: bool = typer.Option(False, "--no-diff", help="Skip cross-run diff output"),
+        task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
     ):
         """Run tests across affected repos; show diff vs. previous iteration."""
         from datetime import datetime, timezone
+        from mship.cli._resolve import resolve_or_exit
         from mship.core.test_history import (
             write_run, read_run, latest_iteration, compute_diff, prune,
         )
@@ -55,32 +57,28 @@ def register(app: typer.Typer, get_container):
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
-        if state.current_task is None:
-            output.error("No active task. Run `mship spawn \"description\"` to start one.")
-            raise typer.Exit(code=1)
-
-        task = state.tasks[state.current_task]
+        t = resolve_or_exit(state, task)
 
         from pathlib import Path as _P
         from mship.cli._cwd_check import format_cwd_warning
-        if task.active_repo is not None and task.active_repo in task.worktrees:
-            warn = format_cwd_warning(_P.cwd(), _P(task.worktrees[task.active_repo]))
+        if t.active_repo is not None and t.active_repo in t.worktrees:
+            warn = format_cwd_warning(_P.cwd(), _P(t.worktrees[t.active_repo]))
             if warn is not None:
                 output.print(f"[yellow]{warn}[/yellow]")
 
         config = container.config()
 
         try:
-            target_repos = _resolve_repos(config, task.affected_repos, repos, tag)
+            target_repos = _resolve_repos(config, t.affected_repos, repos, tag)
         except ValueError as e:
             output.error(str(e))
             raise typer.Exit(code=1)
 
         state_dir = container.state_dir()
-        prev_iter = latest_iteration(state_dir, task.slug)
-        prev_run = read_run(state_dir, task.slug, prev_iter) if prev_iter else None
+        prev_iter = latest_iteration(state_dir, t.slug)
+        prev_run = read_run(state_dir, t.slug, prev_iter) if prev_iter else None
         pre_prev_run = (
-            read_run(state_dir, task.slug, prev_iter - 1)
+            read_run(state_dir, t.slug, prev_iter - 1)
             if prev_iter and prev_iter > 1 else None
         )
 
@@ -89,7 +87,7 @@ def register(app: typer.Typer, get_container):
         executor = container.executor()
         result = executor.execute(
             "test", repos=target_repos, run_all=run_all,
-            task_slug=state.current_task,
+            task_slug=t.slug,
         )
 
         run_duration_ms = int(
@@ -118,16 +116,17 @@ def register(app: typer.Typer, get_container):
 
         new_iter = (prev_iter or 0) + 1
         write_run(
-            state_dir, task.slug, iteration=new_iter,
+            state_dir, t.slug, iteration=new_iter,
             started_at=started_at, duration_ms=run_duration_ms,
             results=per_repo, streams=streams,
         )
 
-        # Persist iteration on task
-        task.test_iteration = new_iter
-        state_mgr.save(state)
+        # Persist iteration on task (read-modify-write under the lock).
+        def _record(s):
+            s.tasks[t.slug].test_iteration = new_iter
+        state_mgr.mutate(_record)
 
-        prune(state_dir, task.slug, keep=20)
+        prune(state_dir, t.slug, keep=20)
 
         # Summary for log entry
         pass_count = sum(1 for v in per_repo.values() if v["status"] == "pass")
@@ -139,7 +138,7 @@ def register(app: typer.Typer, get_container):
         else:
             test_state = "mixed"
         container.log_manager().append(
-            task.slug,
+            t.slug,
             f"iter {new_iter}: {pass_count}/{total} passing",
             iteration=new_iter,
             test_state=test_state,
@@ -194,9 +193,18 @@ def register(app: typer.Typer, get_container):
     def run_cmd(
         repos: Optional[str] = typer.Option(None, "--repos", help="Comma-separated repo names to filter"),
         tag: Optional[list[str]] = typer.Option(None, "--tag", help="Filter repos by tag"),
+        task: Optional[str] = typer.Option(None, "--task", help="Narrow to one task's affected repos"),
     ):
         """Start services across repos in dependency order."""
+        import os as _os
         import signal
+        from pathlib import Path as _P
+        from mship.core.task_resolver import (
+            AmbiguousTaskError,
+            NoActiveTaskError,
+            UnknownTaskError,
+            resolve_task,
+        )
 
         container = get_container()
         output = Output()
@@ -205,12 +213,27 @@ def register(app: typer.Typer, get_container):
 
         config = container.config()
 
-        # Services are workspace-scoped, not task-scoped. If a task is active, fall back
-        # to its affected_repos (keeps task-scoped dev environments working); otherwise
-        # operate over every repo in the workspace.
-        if state.current_task is not None:
-            fallback_repos = state.tasks[state.current_task].affected_repos
-        else:
+        # Services are workspace-scoped, not task-scoped. If a task can be
+        # resolved (via --task / MSHIP_TASK / cwd), fall back to its affected
+        # repos; otherwise operate over every repo in the workspace. We use
+        # resolve_task directly (not resolve_or_exit) so the "no anchor,
+        # multiple tasks" case degrades gracefully to "all repos" instead of
+        # hard-erroring. An explicit --task or env that points at an unknown
+        # slug is still an error.
+        fallback_repos: list[str]
+        try:
+            t = resolve_task(
+                state,
+                cli_task=task,
+                env_task=_os.environ.get("MSHIP_TASK"),
+                cwd=_P.cwd(),
+            )
+            fallback_repos = t.affected_repos
+        except UnknownTaskError as e:
+            known = ", ".join(sorted(state.tasks.keys())) or "(none)"
+            output.error(f"Unknown task: {e.slug}. Known: {known}.")
+            raise typer.Exit(1)
+        except (NoActiveTaskError, AmbiguousTaskError):
             fallback_repos = list(config.repos.keys())
 
         try:
@@ -299,8 +322,17 @@ def register(app: typer.Typer, get_container):
     def logs(
         service: Optional[str] = typer.Argument(None, help="Service name (omit with --all)"),
         all_services: bool = typer.Option(False, "--all", help="Tail logs for every service"),
+        task: Optional[str] = typer.Option(None, "--task", help="Prefer this task's worktrees for cwd"),
     ):
         """Tail logs for a specific service."""
+        import os as _os
+        from mship.core.task_resolver import (
+            AmbiguousTaskError,
+            NoActiveTaskError,
+            UnknownTaskError,
+            resolve_task,
+        )
+
         container = get_container()
         output = Output()
         config = container.config()
@@ -325,18 +357,34 @@ def register(app: typer.Typer, get_container):
         state = state_mgr.load()
         shell = container.shell()
 
+        # Try to resolve a task so we can prefer its worktree cwds. If no
+        # anchor or multiple active tasks, silently fall back to repo paths;
+        # an explicit --task / MSHIP_TASK pointing at an unknown slug errors.
+        resolved_task = None
+        try:
+            resolved_task = resolve_task(
+                state,
+                cli_task=task,
+                env_task=_os.environ.get("MSHIP_TASK"),
+                cwd=Path.cwd(),
+            )
+        except UnknownTaskError as e:
+            known = ", ".join(sorted(state.tasks.keys())) or "(none)"
+            output.error(f"Unknown task: {e.slug}. Known: {known}.")
+            raise typer.Exit(1)
+        except (NoActiveTaskError, AmbiguousTaskError):
+            resolved_task = None
+
         for name in targets:
             repo = config.repos[name]
             actual_task = repo.tasks.get("logs", "logs")
             env_runner = repo.env_runner or config.env_runner
 
             cwd = repo.path
-            if state.current_task:
-                task = state.tasks.get(state.current_task)
-                if task and name in task.worktrees:
-                    wt_path = Path(task.worktrees[name])
-                    if wt_path.exists():
-                        cwd = wt_path
+            if resolved_task is not None and name in resolved_task.worktrees:
+                wt_path = Path(resolved_task.worktrees[name])
+                if wt_path.exists():
+                    cwd = wt_path
 
             if all_services:
                 output.print(f"[bold]── {name} ──[/bold]")

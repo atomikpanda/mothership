@@ -2,7 +2,14 @@ import typer
 
 from mship.container import Container
 
-app = typer.Typer(name="mship", help="Cross-repo workflow engine", no_args_is_help=True)
+app = typer.Typer(
+    name="mship",
+    help=(
+        "Cross-repo workflow engine. "
+        "Task-scoped commands resolve their target via --task flag -> MSHIP_TASK env -> cwd."
+    ),
+    no_args_is_help=True,
+)
 
 container = Container()
 

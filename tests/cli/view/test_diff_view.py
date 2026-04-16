@@ -295,7 +295,7 @@ def test_diff_cli_rejects_unknown_task(tmp_path: Path):
     state_dir.mkdir()
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text("workspace: t\nrepos: {}\n")
-    StateManager(state_dir).save(WorkspaceState(tasks={}, current_task=None))
+    StateManager(state_dir).save(WorkspaceState(tasks={}))
 
     container.config.reset()
     container.state_manager.reset()

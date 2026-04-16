@@ -30,7 +30,7 @@ def configured_exec_app(workspace: Path):
         affected_repos=["shared", "auth-service"],
         branch="feat/test-task",
     )
-    mgr.save(WorkspaceState(current_task="test-task", tasks={"test-task": task}))
+    mgr.save(WorkspaceState(tasks={"test-task": task}))
 
     mock_shell = MagicMock(spec=ShellRunner)
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok\n", stderr="")
@@ -48,7 +48,7 @@ def configured_exec_app(workspace: Path):
 
 def test_mship_test(configured_exec_app):
     workspace, mock_shell = configured_exec_app
-    result = runner.invoke(app, ["test"])
+    result = runner.invoke(app, ["test", "--task", "test-task"])
     assert result.exit_code == 0
     assert mock_shell.run_task.call_count == 2
 
@@ -59,7 +59,7 @@ def test_mship_test_all_flag(configured_exec_app):
         ShellResult(returncode=1, stdout="", stderr="fail"),
         ShellResult(returncode=0, stdout="ok", stderr=""),
     ]
-    result = runner.invoke(app, ["test", "--all"])
+    result = runner.invoke(app, ["test", "--all", "--task", "test-task"])
     assert mock_shell.run_task.call_count == 2
 
 
@@ -69,13 +69,13 @@ def test_mship_test_fail_fast(configured_exec_app):
         ShellResult(returncode=1, stdout="", stderr="fail"),
         ShellResult(returncode=0, stdout="ok", stderr=""),
     ]
-    result = runner.invoke(app, ["test"])
+    result = runner.invoke(app, ["test", "--task", "test-task"])
     assert mock_shell.run_task.call_count == 1
 
 
 def test_mship_run(configured_exec_app):
     workspace, mock_shell = configured_exec_app
-    result = runner.invoke(app, ["run"])
+    result = runner.invoke(app, ["run", "--task", "test-task"])
     assert result.exit_code == 0
 
 
@@ -118,7 +118,7 @@ def test_mship_test_no_active_task(workspace: Path):
     container.state_dir.override(state_dir)
 
     result = runner.invoke(app, ["test"])
-    assert result.exit_code != 0 or "No active task" in result.output
+    assert result.exit_code != 0
     container.config_path.reset_override()
     container.state_dir.reset_override()
     container.config.reset_override()
@@ -129,14 +129,14 @@ def test_mship_test_no_active_task(workspace: Path):
 
 def test_mship_test_repos_filter(configured_exec_app):
     workspace, mock_shell = configured_exec_app
-    result = runner.invoke(app, ["test", "--repos", "shared"])
+    result = runner.invoke(app, ["test", "--repos", "shared", "--task", "test-task"])
     assert result.exit_code == 0
     assert mock_shell.run_task.call_count == 1
 
 
 def test_mship_test_unknown_repo_errors(configured_exec_app):
     workspace, mock_shell = configured_exec_app
-    result = runner.invoke(app, ["test", "--repos", "nonexistent"])
+    result = runner.invoke(app, ["test", "--repos", "nonexistent", "--task", "test-task"])
     assert result.exit_code != 0 or "unknown" in result.output.lower()
 
 
@@ -175,13 +175,13 @@ repos:
         affected_repos=["shared", "auth-service", "api-gateway"],
         branch="feat/tag-test",
     )
-    mgr.save(WorkspaceState(current_task="tag-test", tasks={"tag-test": task}))
+    mgr.save(WorkspaceState(tasks={"tag-test": task}))
 
     mock_shell = MagicMock(spec=ShellRunner)
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok\n", stderr="")
     container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["test", "--tag", "apple"])
+    result = runner.invoke(app, ["test", "--tag", "apple", "--task", "tag-test"])
     assert result.exit_code == 0
     assert mock_shell.run_task.call_count == 2
 
@@ -222,7 +222,7 @@ repos:
         affected_repos=["shared"],
         branch="feat/bg-test",
     )
-    mgr.save(WorkspaceState(current_task="bg-test", tasks={"bg-test": task}))
+    mgr.save(WorkspaceState(tasks={"bg-test": task}))
 
     # Mock shell: run_streaming returns a Popen-like object that exits immediately
     mock_shell = MagicMock(spec=ShellRunner)
@@ -281,7 +281,7 @@ repos:
         affected_repos=["shared", "auth-service"],
         branch="feat/grp-test",
     )
-    mgr.save(WorkspaceState(current_task="grp-test", tasks={"grp-test": task}))
+    mgr.save(WorkspaceState(tasks={"grp-test": task}))
 
     # Mock shell: run_streaming succeeds, run_task fails on auth-service
     mock_shell = MagicMock(spec=ShellRunner)
@@ -342,7 +342,7 @@ repos:
         affected_repos=["shared", "auth-service"],
         branch="feat/summary-test",
     )
-    mgr.save(WorkspaceState(current_task="summary-test", tasks={"summary-test": task}))
+    mgr.save(WorkspaceState(tasks={"summary-test": task}))
 
     mock_shell = MagicMock(spec=ShellRunner)
     pids = [11111, 22222]
@@ -406,7 +406,7 @@ repos:
         affected_repos=["shared"],
         branch="feat/hc-summary-test",
     )
-    mgr.save(WorkspaceState(current_task="hc-summary-test", tasks={"hc-summary-test": task}))
+    mgr.save(WorkspaceState(tasks={"hc-summary-test": task}))
 
     mock_shell = MagicMock(spec=ShellRunner)
     popen_mock = MagicMock()
@@ -460,7 +460,7 @@ repos:
         affected_repos=["shared"],
         branch="feat/cleanup-test",
     )
-    mgr.save(WorkspaceState(current_task="cleanup-test", tasks={"cleanup-test": task}))
+    mgr.save(WorkspaceState(tasks={"cleanup-test": task}))
 
     mock_shell = MagicMock(spec=ShellRunner)
     popen_mock = MagicMock()

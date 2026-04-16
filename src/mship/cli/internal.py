@@ -7,9 +7,14 @@ import typer
 def register(app: typer.Typer, get_container):
     @app.command(name="_check-commit", hidden=True)
     def check_commit(toplevel: str = typer.Argument(..., help="git rev-parse --show-toplevel value")):
-        """Exit 0 if committing at `toplevel` is allowed under the active task.
+        """Exit 0 if committing at `toplevel` is allowed under the active tasks.
 
-        Fail-open on any exception: corrupt state, missing config, etc. -> exit 0.
+        Rules:
+        - No active tasks -> allow (exit 0).
+        - Active tasks but toplevel not in any registered worktree -> reject (exit 1).
+        - toplevel matches an active task's worktree -> allow (after reconcile gate).
+
+        Fail-open on any exception (corrupt state, missing config, etc.) -> exit 0.
         """
         try:
             container = get_container()
@@ -17,21 +22,27 @@ def register(app: typer.Typer, get_container):
         except Exception:
             raise typer.Exit(code=0)
 
-        if state.current_task is None:
-            raise typer.Exit(code=0)
-
-        task = state.tasks.get(state.current_task)
-        if task is None or not task.worktrees:
+        if not state.tasks:
             raise typer.Exit(code=0)
 
         try:
             tl = Path(toplevel).resolve()
-            allowed = {Path(p).resolve() for p in task.worktrees.values()}
+            registered = [
+                (slug, Path(wt).resolve())
+                for slug, task in state.tasks.items()
+                for wt in task.worktrees.values()
+            ]
         except (OSError, RuntimeError):
             raise typer.Exit(code=0)
 
-        if tl in allowed:
-            # Upstream-drift gate. Fail-open on any error (network, missing gh, etc.).
+        matched_task = None
+        for slug, wt in registered:
+            if tl == wt:
+                matched_task = state.tasks[slug]
+                break
+
+        if matched_task is not None:
+            # Reconcile gate (per-task, unchanged behavior)
             try:
                 from mship.core.reconcile.cache import ReconcileCache
                 from mship.core.reconcile.fetch import (
@@ -53,13 +64,13 @@ def register(app: typer.Typer, get_container):
                 raise typer.Exit(code=0)
 
             ignored = cache.read_ignores()
-            d = decisions.get(task.slug)
+            d = decisions.get(matched_task.slug)
             if d is not None:
                 action = should_block(d, command="precommit", ignored=ignored)
                 if action is GateAction.block:
                     import sys
                     sys.stderr.write(
-                        f"\u26d4 mship: refusing commit — task '{task.slug}' has "
+                        f"\u26d4 mship: refusing commit — task '{matched_task.slug}' has "
                         f"{d.state.value} drift"
                         + (f" (PR #{d.pr_number}).\n" if d.pr_number else ".\n")
                         + "   Run `mship reconcile` for details, or `git commit --no-verify` to override.\n"
@@ -67,27 +78,27 @@ def register(app: typer.Typer, get_container):
                     raise typer.Exit(code=1)
             raise typer.Exit(code=0)
 
+        # No match — reject with list of active worktrees.
         import sys
         sys.stderr.write(
-            f"\u26d4 mship: refusing commit — this is not a worktree for the active task '{task.slug}'.\n"
-            f"   Expected one of:\n"
+            f"\u26d4 mship: refusing commit — {tl} is not a registered worktree.\n"
+            f"   Active task worktrees:\n"
         )
-        for repo_name in sorted(task.worktrees.keys()):
-            wt = Path(task.worktrees[repo_name]).resolve()
-            sys.stderr.write(f"     {wt} ({repo_name})\n")
+        for slug, wt in registered:
+            sys.stderr.write(f"     {wt} ({slug})\n")
         sys.stderr.write(
-            f"   Current: {tl}\n"
-            f"   cd into the correct worktree, or use `git commit --no-verify` to override.\n"
+            f"   cd into one of those, or use `git commit --no-verify` to override.\n"
         )
         raise typer.Exit(code=1)
 
     @app.command(name="_post-checkout", hidden=True)
     def post_checkout(
-        prev_head: str = typer.Argument(..., help="git $1 — previous HEAD"),
-        new_head: str = typer.Argument(..., help="git $2 — new HEAD"),
+        prev_head: str = typer.Argument(...),
+        new_head: str = typer.Argument(...),
     ):
-        """Warn loudly when the agent checks out a branch outside mship's expected flow."""
+        """Warn loudly when the checkout doesn't match any active task's worktree."""
         import subprocess
+        import sys
         from pathlib import Path
 
         try:
@@ -96,7 +107,6 @@ def register(app: typer.Typer, get_container):
         except Exception:
             raise typer.Exit(code=0)
 
-        # Current branch (after checkout)
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -111,54 +121,45 @@ def register(app: typer.Typer, get_container):
         if current_branch in {"main", "master", "develop"}:
             raise typer.Exit(code=0)
 
-        import sys
-        if state.current_task is None:
+        if not state.tasks:
             sys.stderr.write(
                 f"\u26a0 mship: checked out '{current_branch}' but no active mship task.\n"
-                f"  If you're starting feature work, run `mship spawn \"<description>\"` — "
-                f"it'll give you a proper worktree and state.\n"
+                f"  If you're starting feature work, run `mship spawn \"<description>\"`.\n"
             )
-            raise typer.Exit(code=0)
-
-        task = state.tasks.get(state.current_task)
-        if task is None:
             raise typer.Exit(code=0)
 
         cwd = Path.cwd().resolve()
-        in_worktree = any(
-            cwd == Path(p).resolve() or cwd.is_relative_to(Path(p).resolve())
-            for p in task.worktrees.values()
-        )
+        matched_task = None
+        for task in state.tasks.values():
+            for wt in task.worktrees.values():
+                try:
+                    cwd.relative_to(Path(wt).resolve())
+                    matched_task = task
+                    break
+                except ValueError:
+                    continue
+            if matched_task is not None:
+                break
 
-        if current_branch == task.branch and in_worktree:
-            raise typer.Exit(code=0)
-
-        if current_branch != task.branch:
+        if matched_task is None:
+            active = ", ".join(sorted(state.tasks.keys()))
             sys.stderr.write(
-                f"\u26a0 mship: checked out '{current_branch}' but active task "
-                f"'{task.slug}' is on '{task.branch}'.\n"
-                f"  If this was a mistake, `git checkout {task.branch}` in the worktree.\n"
-                f"  If you're switching tasks, run `mship close --abandon` first.\n"
+                f"\u26a0 mship: you checked out '{current_branch}' outside any active worktree.\n"
+                f"  Active tasks: {active}\n"
+                f"  cd into one of the registered worktrees before editing.\n"
             )
             raise typer.Exit(code=0)
 
-        # current_branch == task.branch but cwd isn't in a worktree
-        worktree_paths = [str(Path(p).resolve()) for p in task.worktrees.values()]
-        primary = worktree_paths[0] if worktree_paths else ""
-        sys.stderr.write(
-            f"\u26a0 mship: you checked out '{current_branch}' here, but the task's worktree is\n"
-            f"  {primary}\n"
-            f"  cd there — don't edit in main.\n"
-        )
+        if current_branch != matched_task.branch:
+            sys.stderr.write(
+                f"\u26a0 mship: checked out '{current_branch}' but the matched worktree\n"
+                f"  belongs to task '{matched_task.slug}' on '{matched_task.branch}'.\n"
+            )
         raise typer.Exit(code=0)
 
     @app.command(name="_journal-commit", hidden=True)
     def journal_commit():
-        """Auto-append a structured log entry for the just-made commit.
-
-        Silent no-op when no active task, no mship workspace, or cwd isn't inside
-        any known worktree (e.g. `--no-verify` committed somewhere unexpected).
-        """
+        """Auto-append a commit record to the task whose worktree contains cwd."""
         import subprocess
         from pathlib import Path
 
@@ -168,23 +169,26 @@ def register(app: typer.Typer, get_container):
         except Exception:
             raise typer.Exit(code=0)
 
-        if state.current_task is None:
-            raise typer.Exit(code=0)
-
-        task = state.tasks.get(state.current_task)
-        if task is None or not task.worktrees:
+        if not state.tasks:
             raise typer.Exit(code=0)
 
         cwd = Path.cwd().resolve()
+        matched_task = None
         matched_repo: str | None = None
-        for repo_name, wt_path in task.worktrees.items():
-            wt_resolved = Path(wt_path).resolve()
-            if cwd == wt_resolved or (
-                cwd.is_relative_to(wt_resolved) if hasattr(Path, "is_relative_to") else False
-            ):
-                matched_repo = repo_name
+        for task in state.tasks.values():
+            for repo_name, wt_path in task.worktrees.items():
+                wt_resolved = Path(wt_path).resolve()
+                try:
+                    cwd.relative_to(wt_resolved)
+                    matched_task = task
+                    matched_repo = repo_name
+                    break
+                except ValueError:
+                    continue
+            if matched_task is not None:
                 break
-        if matched_repo is None:
+
+        if matched_task is None:
             raise typer.Exit(code=0)
 
         try:
@@ -205,10 +209,10 @@ def register(app: typer.Typer, get_container):
 
         try:
             container.log_manager().append(
-                task.slug,
+                matched_task.slug,
                 f"commit {sha[:10]}: {subject}",
                 repo=matched_repo,
-                iteration=task.test_iteration if task.test_iteration else None,
+                iteration=matched_task.test_iteration if matched_task.test_iteration else None,
                 action="committed",
             )
         except Exception:

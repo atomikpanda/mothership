@@ -1,5 +1,8 @@
+from typing import Optional
+
 import typer
 
+from mship.cli._resolve import resolve_or_exit
 from mship.cli.output import Output
 from mship.core.phase import PHASE_ORDER, FinishedTaskError
 
@@ -9,8 +12,9 @@ def register(app: typer.Typer, get_container):
     def phase(
         target: str,
         force: bool = typer.Option(False, "--force", "-f", help="Force transition even if task is blocked or finished"),
+        task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
     ):
-        """Transition the current task to a new phase."""
+        """Transition a task to a new phase."""
         container = get_container()
         output = Output()
 
@@ -21,14 +25,11 @@ def register(app: typer.Typer, get_container):
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
-        if state.current_task is None:
-            output.error("No active task. Run `mship spawn \"description\"` to start one.")
-            raise typer.Exit(code=1)
+        t = resolve_or_exit(state, task)
 
-        task = state.tasks[state.current_task]
-        if task.blocked_reason and not force:
+        if t.blocked_reason and not force:
             output.error(
-                f"Task is blocked: {task.blocked_reason}. "
+                f"Task is blocked: {t.blocked_reason}. "
                 f"Run `mship unblock` first, or `mship phase {target} --force` to unblock and transition."
             )
             raise typer.Exit(code=1)
@@ -36,7 +37,7 @@ def register(app: typer.Typer, get_container):
         phase_mgr = container.phase_manager()
         try:
             result = phase_mgr.transition(
-                state.current_task,
+                t.slug,
                 target,
                 force_unblock=force,
                 force_finished=force,
@@ -52,7 +53,7 @@ def register(app: typer.Typer, get_container):
             output.success(f"Phase: {result.new_phase}")
         else:
             output.json({
-                "task": state.current_task,
+                "task": t.slug,
                 "phase": result.new_phase,
                 "warnings": result.warnings,
             })

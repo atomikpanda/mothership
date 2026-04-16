@@ -2,6 +2,7 @@ from typing import Optional
 
 import typer
 
+from mship.cli._resolve import resolve_or_exit
 from mship.cli.output import Output
 
 
@@ -9,6 +10,7 @@ def register(app: typer.Typer, get_container):
     @app.command()
     def switch(
         repo: Optional[str] = typer.Argument(None, help="Repo to switch to. Omit to re-render current."),
+        task_opt: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
     ):
         """Switch active repo within the current task; emit an orientation handoff."""
         from pathlib import Path
@@ -24,21 +26,17 @@ def register(app: typer.Typer, get_container):
         shell = container.shell()
         log_mgr = container.log_manager()
 
-        if state.current_task is None:
-            output.error("No active task. Run `mship spawn` to start one.")
-            raise typer.Exit(code=1)
-
-        task = state.tasks[state.current_task]
+        t = resolve_or_exit(state, task_opt)
 
         if repo is None:
-            if task.active_repo is None:
+            if t.active_repo is None:
                 output.error("No active repo. Run `mship switch <repo>` first.")
                 raise typer.Exit(code=1)
-            target = task.active_repo
+            target = t.active_repo
             is_switch = False
         else:
-            if repo not in task.affected_repos:
-                valid = ", ".join(task.affected_repos)
+            if repo not in t.affected_repos:
+                valid = ", ".join(t.affected_repos)
                 output.error(f"Unknown repo '{repo}'. Valid: {valid}.")
                 raise typer.Exit(code=1)
             target = repo
@@ -49,18 +47,20 @@ def register(app: typer.Typer, get_container):
             repo_cfg = config.repos[target]
             for dep in repo_cfg.depends_on:
                 dep_name = dep.repo
-                dep_wt = task.worktrees.get(dep_name)
+                dep_wt = t.worktrees.get(dep_name)
                 if dep_wt is None or not Path(dep_wt).exists():
                     continue
                 result = shell.run("git rev-parse HEAD", cwd=Path(dep_wt))
                 if result.returncode == 0 and result.stdout.strip():
                     snapshot[dep_name] = result.stdout.strip()
 
-            task.active_repo = target
-            task.last_switched_at_sha[target] = snapshot
-            state_mgr.save(state)
+            def _apply(s):
+                s.tasks[t.slug].active_repo = target
+                s.tasks[t.slug].last_switched_at_sha[target] = snapshot
 
-        handoff = build_handoff(config, state_mgr.load(), shell, log_mgr, repo=target)
+            state_mgr.mutate(_apply)
+
+        handoff = build_handoff(config, state_mgr.load(), shell, log_mgr, repo=target, task_slug=t.slug)
 
         if not output.is_tty:
             output.json(handoff.to_json())

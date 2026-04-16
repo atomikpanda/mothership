@@ -65,9 +65,8 @@ class PruneManager:
 
     def prune(self, orphans: list[OrphanedWorktree]) -> int:
         pruned = 0
-        state = self._state_manager.load()
-        state_changed = False
 
+        # Phase 1: remove on-disk orphans (not in state)
         for orphan in orphans:
             if orphan.reason == "not_in_state":
                 repo_config = self._config.repos.get(orphan.repo)
@@ -81,24 +80,25 @@ class PruneManager:
                         shutil.rmtree(orphan.path, ignore_errors=True)
                 pruned += 1
 
-            elif orphan.reason == "not_on_disk":
+        # Phase 2: clean up state entries pointing to nonexistent worktrees
+        def _cleanup(state):
+            nonlocal pruned
+            for orphan in orphans:
+                if orphan.reason != "not_on_disk":
+                    continue
                 for task_slug, task in list(state.tasks.items()):
                     if orphan.repo in task.worktrees:
                         wt_path = task.worktrees[orphan.repo]
                         if not Path(wt_path).exists():
                             # Remove just the worktree entry, not the entire task
                             del task.worktrees[orphan.repo]
-                            state_changed = True
                             pruned += 1
                             # If task has no worktrees left, remove the task
                             if not task.worktrees:
                                 del state.tasks[task_slug]
-                                if state.current_task == task_slug:
-                                    state.current_task = None
                             break
 
-        if state_changed:
-            self._state_manager.save(state)
+        self._state_manager.mutate(_cleanup)
 
         # Run git worktree prune per repo
         for repo_config in self._config.repos.values():

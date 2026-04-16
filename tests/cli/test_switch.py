@@ -40,7 +40,7 @@ def test_switch_records_active_repo_and_exits_zero(switch_workspace):
     workspace, shared_wt, cli_wt, sm = _seed_switchable(switch_workspace)
     _override(workspace)
     try:
-        result = runner.invoke(app, ["switch", "cli"])
+        result = runner.invoke(app, ["switch", "cli", "--task", "t"])
         assert result.exit_code == 0, result.output
         sm = StateManager(workspace / ".mothership")
         state = sm.load()
@@ -56,7 +56,7 @@ def test_switch_bogus_repo_errors(switch_workspace):
     workspace, shared_wt, cli_wt, sm = _seed_switchable(switch_workspace)
     _override(workspace)
     try:
-        result = runner.invoke(app, ["switch", "nope"])
+        result = runner.invoke(app, ["switch", "nope", "--task", "t"])
         assert result.exit_code != 0
         assert "nope" in result.output.lower()
     finally:
@@ -80,10 +80,10 @@ def test_switch_bare_rerenders_active(switch_workspace):
     workspace, shared_wt, cli_wt, sm = _seed_switchable(switch_workspace)
     _override(workspace)
     try:
-        result = runner.invoke(app, ["switch", "cli"])
+        result = runner.invoke(app, ["switch", "cli", "--task", "t"])
         assert result.exit_code == 0, result.output
 
-        result2 = runner.invoke(app, ["switch"])
+        result2 = runner.invoke(app, ["switch", "--task", "t"])
         assert result2.exit_code == 0, result2.output
         # Either "Switched to" (non-TTY JSON won't contain this; be permissive)
         # or the JSON payload with repo=cli.
@@ -100,7 +100,7 @@ def test_switch_bare_no_active_repo_errors(switch_workspace):
     workspace, shared_wt, cli_wt, sm = _seed_switchable(switch_workspace)
     _override(workspace)
     try:
-        result = runner.invoke(app, ["switch"])
+        result = runner.invoke(app, ["switch", "--task", "t"])
         assert result.exit_code != 0
         assert "no active repo" in result.output.lower() or "switch <repo>" in result.output
     finally:
@@ -111,7 +111,7 @@ def test_switch_json_shape(switch_workspace):
     workspace, shared_wt, cli_wt, sm = _seed_switchable(switch_workspace)
     _override(workspace)
     try:
-        result = runner.invoke(app, ["switch", "cli"])
+        result = runner.invoke(app, ["switch", "cli", "--task", "t"])
         assert result.exit_code == 0, result.output
         # CliRunner is non-TTY → JSON output
         payload = json.loads(result.output)
@@ -129,7 +129,7 @@ def test_switch_prepends_cd_hint_when_cwd_differs(switch_workspace, monkeypatch)
     try:
         # CliRunner uses subprocess cwd = test's cwd, which is NOT the worktree
         monkeypatch.chdir(workspace)  # workspace root ≠ cli_wt
-        result = runner.invoke(app, ["switch", "cli"])
+        result = runner.invoke(app, ["switch", "cli", "--task", "t"])
         assert result.exit_code == 0, result.output
         # TTY output; CliRunner's output is non-TTY though, so this may not show.
         # Instead assert the JSON path still does NOT contain the cd hint
@@ -144,7 +144,7 @@ def test_switch_includes_worktree_path_in_output(switch_workspace, monkeypatch):
     _override(workspace)
     try:
         monkeypatch.chdir(workspace)
-        result = runner.invoke(app, ["switch", "cli"])
+        result = runner.invoke(app, ["switch", "cli", "--task", "t"])
         assert result.exit_code == 0, result.output
         # Non-TTY → JSON; worktree_path in payload
         try:

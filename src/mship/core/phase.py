@@ -33,6 +33,11 @@ class PhaseManager:
         force_unblock: bool = False,
         force_finished: bool = False,
     ) -> PhaseTransition:
+        # Read-only preflight: compute soft-gate warnings from current state.
+        # These read repo state (specs, tests, uncommitted files) and mship
+        # state; we recompute them outside the mutate lock so file I/O doesn't
+        # happen under the exclusive state lock. The mutate() call below
+        # re-reads the task to apply its mutations atomically.
         state = self._state_manager.load()
         task = state.tasks[task_slug]
 
@@ -47,28 +52,38 @@ class PhaseManager:
         old_phase = task.phase
         warnings = self._check_gates(task_slug, task.phase, target)
 
-        # Clear blocked state only if force_unblock is set
-        if task.blocked_reason is not None and force_unblock:
-            warnings.append(
-                f"Task was blocked: {task.blocked_reason} — force-unblocked by phase transition"
-            )
-            self._log.append(
-                task_slug,
-                f"Unblocked (forced phase transition to {target})",
-            )
-            task.blocked_reason = None
-            task.blocked_at = None
-
-        if task.finished_at is not None and force_finished and target != "run":
+        finished_override = (
+            task.finished_at is not None and force_finished and target != "run"
+        )
+        if finished_override:
             warnings.append(
                 f"Task was finished (at {task.finished_at.isoformat()}) — "
                 f"forced transition to {target}"
             )
 
-        task.phase = target
-        task.phase_entered_at = datetime.now(timezone.utc)
-        self._state_manager.save(state)
+        blocked_force_unblock = task.blocked_reason is not None and force_unblock
+        if blocked_force_unblock:
+            warnings.append(
+                f"Task was blocked: {task.blocked_reason} — force-unblocked by phase transition"
+            )
 
+        def _apply(s):
+            t = s.tasks[task_slug]
+            if blocked_force_unblock:
+                t.blocked_reason = None
+                t.blocked_at = None
+            t.phase = target
+            t.phase_entered_at = datetime.now(timezone.utc)
+
+        self._state_manager.mutate(_apply)
+
+        # Journal entries happen outside the mutate — LogManager writes a
+        # separate file, not mship state.
+        if blocked_force_unblock:
+            self._log.append(
+                task_slug,
+                f"Unblocked (forced phase transition to {target})",
+            )
         self._log.append(task_slug, f"Phase transition: {old_phase} → {target}")
 
         return PhaseTransition(new_phase=target, warnings=warnings)

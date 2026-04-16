@@ -175,9 +175,9 @@ def build_handoff(
     shell: ShellRunner,
     log_manager: LogManager,
     repo: str,
+    task_slug: str,
 ) -> Handoff:
-    assert state.current_task is not None
-    task = state.tasks[state.current_task]
+    task = state.tasks[task_slug]
 
     worktree_path = Path(task.worktrees.get(repo, config.repos[repo].path))
     worktree_missing = not worktree_path.exists()

@@ -55,22 +55,22 @@ def test_full_lifecycle(full_workspace: Path):
     assert result.exit_code == 0, result.output
     assert "add-labels" in result.output
 
-    # 2. Check status
-    result = runner.invoke(app, ["status"])
+    # 2. Check status with explicit task
+    result = runner.invoke(app, ["status", "--task", "add-labels"])
     assert result.exit_code == 0
     assert "add-labels" in result.output
     assert "plan" in result.output
 
     # 3. Transition to dev
-    result = runner.invoke(app, ["phase", "dev"])
+    result = runner.invoke(app, ["phase", "dev", "--task", "add-labels"])
     assert result.exit_code == 0
 
     # 4. Check status shows dev
-    result = runner.invoke(app, ["status"])
+    result = runner.invoke(app, ["status", "--task", "add-labels"])
     assert "dev" in result.output
 
     # 5. Run tests
-    result = runner.invoke(app, ["test"])
+    result = runner.invoke(app, ["test", "--task", "add-labels"])
     assert result.exit_code == 0
 
     # 6. List worktrees
@@ -84,12 +84,15 @@ def test_full_lifecycle(full_workspace: Path):
     assert "shared" in result.output
 
     # 8. Close (task was never finished, --abandon to discard without PRs)
-    result = runner.invoke(app, ["close", "--yes", "--abandon"])
+    result = runner.invoke(app, ["close", "--yes", "--abandon", "--task", "add-labels"])
     assert result.exit_code == 0
 
-    # 9. Status shows no task
+    # 9. Status shows no task (no explicit filter; list mode reports empty)
+    import json as _json
     result = runner.invoke(app, ["status"])
-    assert "No active task" in result.output
+    assert result.exit_code == 0
+    payload = _json.loads(result.output)
+    assert payload == {"active_tasks": []}
 
 
 # ---------------------------------------------------------------------------

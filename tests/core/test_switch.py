@@ -42,7 +42,7 @@ def test_handoff_first_switch_uses_merge_base_fallback(switch_workspace):
     log_mgr = LogManager(workspace / ".mothership" / "logs")
     state = sm.load()
 
-    handoff = build_handoff(cfg, state, shell, log_mgr, repo="cli")
+    handoff = build_handoff(cfg, state, shell, log_mgr, repo="cli", task_slug="t")
 
     assert isinstance(handoff, Handoff)
     assert handoff.repo == "cli"
@@ -73,7 +73,7 @@ def test_handoff_subsequent_switch_uses_stored_sha(switch_workspace):
     cfg = ConfigLoader.load(workspace / "mothership.yaml")
     shell = ShellRunner()
     log_mgr = LogManager(workspace / ".mothership" / "logs")
-    handoff = build_handoff(cfg, sm.load(), shell, log_mgr, repo="cli")
+    handoff = build_handoff(cfg, sm.load(), shell, log_mgr, repo="cli", task_slug="t")
 
     shared_change = handoff.dep_changes[0]
     assert shared_change.commit_count == 1
@@ -86,7 +86,7 @@ def test_handoff_clean_deps_omitted(switch_workspace):
     cfg = ConfigLoader.load(workspace / "mothership.yaml")
     shell = ShellRunner()
     log_mgr = LogManager(workspace / ".mothership" / "logs")
-    handoff = build_handoff(cfg, sm.load(), shell, log_mgr, repo="cli")
+    handoff = build_handoff(cfg, sm.load(), shell, log_mgr, repo="cli", task_slug="t")
     assert handoff.dep_changes == ()
 
 
@@ -97,7 +97,7 @@ def test_handoff_missing_dep_worktree(switch_workspace):
     cfg = ConfigLoader.load(workspace / "mothership.yaml")
     shell = ShellRunner()
     log_mgr = LogManager(workspace / ".mothership" / "logs")
-    handoff = build_handoff(cfg, sm.load(), shell, log_mgr, repo="cli")
+    handoff = build_handoff(cfg, sm.load(), shell, log_mgr, repo="cli", task_slug="t")
     assert len(handoff.dep_changes) == 1
     assert handoff.dep_changes[0].repo == "shared"
     assert handoff.dep_changes[0].error is not None
@@ -111,7 +111,7 @@ def test_handoff_missing_switched_to_worktree(switch_workspace):
     cfg = ConfigLoader.load(workspace / "mothership.yaml")
     shell = ShellRunner()
     log_mgr = LogManager(workspace / ".mothership" / "logs")
-    handoff = build_handoff(cfg, sm.load(), shell, log_mgr, repo="cli")
+    handoff = build_handoff(cfg, sm.load(), shell, log_mgr, repo="cli", task_slug="t")
     assert handoff.worktree_missing is True
 
 
@@ -123,7 +123,7 @@ def test_handoff_includes_finished_at(switch_workspace):
     cfg = ConfigLoader.load(workspace / "mothership.yaml")
     shell = ShellRunner()
     log_mgr = LogManager(workspace / ".mothership" / "logs")
-    handoff = build_handoff(cfg, sm.load(), shell, log_mgr, repo="cli")
+    handoff = build_handoff(cfg, sm.load(), shell, log_mgr, repo="cli", task_slug="t")
     assert handoff.finished_at is not None
 
 
@@ -134,7 +134,7 @@ def test_handoff_last_log_entry(switch_workspace):
 
     cfg = ConfigLoader.load(workspace / "mothership.yaml")
     shell = ShellRunner()
-    handoff = build_handoff(cfg, sm.load(), shell, log_mgr, repo="cli")
+    handoff = build_handoff(cfg, sm.load(), shell, log_mgr, repo="cli", task_slug="t")
     assert handoff.last_log_in_repo is not None
     assert "Label" in handoff.last_log_in_repo.message
 
@@ -146,7 +146,7 @@ def test_handoff_drift_count_nonzero_when_dirty(switch_workspace):
     cfg = ConfigLoader.load(workspace / "mothership.yaml")
     shell = ShellRunner()
     log_mgr = LogManager(workspace / ".mothership" / "logs")
-    handoff = build_handoff(cfg, sm.load(), shell, log_mgr, repo="cli")
+    handoff = build_handoff(cfg, sm.load(), shell, log_mgr, repo="cli", task_slug="t")
     assert handoff.drift_error_count >= 1
 
 
@@ -160,7 +160,7 @@ def test_handoff_prefers_repo_tagged_log_entry(switch_workspace):
 
     cfg = ConfigLoader.load(workspace / "mothership.yaml")
     shell = ShellRunner()
-    handoff = build_handoff(cfg, sm.load(), shell, log_mgr, repo="shared")
+    handoff = build_handoff(cfg, sm.load(), shell, log_mgr, repo="shared", task_slug="t")
     assert handoff.last_log_in_repo is not None
     assert handoff.last_log_in_repo.message == "older shared entry"
 
@@ -173,6 +173,6 @@ def test_handoff_falls_back_to_latest_when_no_repo_tag(switch_workspace):
 
     cfg = ConfigLoader.load(workspace / "mothership.yaml")
     shell = ShellRunner()
-    handoff = build_handoff(cfg, sm.load(), shell, log_mgr, repo="shared")
+    handoff = build_handoff(cfg, sm.load(), shell, log_mgr, repo="shared", task_slug="t")
     assert handoff.last_log_in_repo is not None
     assert handoff.last_log_in_repo.message == "untagged only"

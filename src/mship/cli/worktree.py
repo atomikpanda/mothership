@@ -179,18 +179,17 @@ def register(app: typer.Typer, get_container):
             return
 
         if output.is_tty:
-            for slug, task in state.tasks.items():
-                active = " (active)" if slug == state.current_task else ""
-                output.print(f"[bold]{slug}[/bold]{active} [{task.phase}]")
+            for slug, task in sorted(state.tasks.items()):
+                output.print(f"[bold]{slug}[/bold] [{task.phase}]")
                 output.print(f"  Branch: {task.branch}")
                 for repo, path in task.worktrees.items():
                     output.print(f"  {repo}: {path}")
         else:
             data = {
                 slug: task.model_dump(mode="json")
-                for slug, task in state.tasks.items()
+                for slug, task in sorted(state.tasks.items())
             }
-            output.json({"current_task": state.current_task, "tasks": data})
+            output.json({"tasks": data})
 
     @app.command()
     def close(
@@ -199,9 +198,12 @@ def register(app: typer.Typer, get_container):
         abandon: bool = typer.Option(False, "--abandon", help="Close without finishing (discard PR flow)"),
         skip_pr_check: bool = typer.Option(False, "--skip-pr-check", help="Do not call gh; close regardless of PR state"),
         bypass_reconcile: bool = typer.Option(False, "--bypass-reconcile", help="Skip upstream PR drift check"),
+        task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
     ):
-        """Close the current task: check PR state, tear down worktrees, clear state."""
+        """Close a task: check PR state, tear down worktrees, clear state."""
         from pathlib import Path
+
+        from mship.cli._resolve import resolve_or_exit
 
         container = get_container()
         output = Output()
@@ -209,12 +211,9 @@ def register(app: typer.Typer, get_container):
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
-        if state.current_task is None:
-            output.error("No active task to close. Run `mship spawn` to start one.")
-            raise typer.Exit(code=1)
-
-        task_slug = state.current_task
-        task = state.tasks[task_slug]
+        t = resolve_or_exit(state, task)
+        task_slug = t.slug
+        task = t
         pr_mgr = container.pr_manager()
         config = container.config()
         log_mgr = container.log_manager()
@@ -347,9 +346,12 @@ def register(app: typer.Typer, get_container):
         force_audit: bool = typer.Option(False, "--force-audit", help="Bypass audit gate for this finish"),
         push_only: bool = typer.Option(False, "--push-only", help="Push branches only; skip gh pr create"),
         bypass_reconcile: bool = typer.Option(False, "--bypass-reconcile", help="Skip upstream PR drift check for this finish"),
+        task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
     ):
         """Create PRs across repos in dependency order."""
         from pathlib import Path
+
+        from mship.cli._resolve import resolve_or_exit
 
         container = get_container()
         output = Output()
@@ -361,11 +363,8 @@ def register(app: typer.Typer, get_container):
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
-        if state.current_task is None:
-            output.error("No active task to finish. Run `mship spawn` to start one.")
-            raise typer.Exit(code=1)
-
-        task = state.tasks[state.current_task]
+        t = resolve_or_exit(state, task)
+        task = t
         graph = container.graph()
         config = container.config()
         ordered = graph.topo_sort(task.affected_repos)
@@ -459,8 +458,13 @@ def register(app: typer.Typer, get_container):
 
             from datetime import datetime as _dt, timezone as _tz
             if task.finished_at is None:
-                task.finished_at = _dt.now(_tz.utc)
-                state_mgr.save(state)
+                now = _dt.now(_tz.utc)
+
+                def _stamp_push_only(s):
+                    s.tasks[t.slug].finished_at = now
+
+                state_mgr.mutate(_stamp_push_only)
+                task.finished_at = now
 
             if output.is_tty:
                 output.print("[green]Branch pushed.[/green] After merge/review, run `mship close` to clean up.")
@@ -531,7 +535,7 @@ def register(app: typer.Typer, get_container):
             output.error("No commits to push — nothing to PR:")
             for repo_name, branch, eff_base in empty_branches:
                 output.error(f"  {repo_name}: {branch} has no commits past {eff_base}")
-            output.error("Commit your changes in each worktree, or run `mship abort --yes`.")
+            output.error("Commit your changes in each worktree, or run `mship close --yes --abandon`.")
             raise typer.Exit(code=1)
 
         pr_list: list[dict] = []
@@ -609,8 +613,11 @@ def register(app: typer.Typer, get_container):
                 raise typer.Exit(code=1)
 
             # Store in state (crash-safe: save after each PR)
+            def _record_pr(s, _repo=repo_name, _url=pr_url):
+                s.tasks[t.slug].pr_urls[_repo] = _url
+
+            state_mgr.mutate(_record_pr)
             task.pr_urls[repo_name] = pr_url
-            state_mgr.save(state)
 
             pr_list.append({"repo": repo_name, "url": pr_url, "order": i})
 
@@ -634,15 +641,20 @@ def register(app: typer.Typer, get_container):
         log_mgr = container.log_manager()
         for pr_info in pr_list:
             log_mgr.append(
-                state.current_task,
+                t.slug,
                 f"PR created for {pr_info['repo']}: {pr_info['url']}",
             )
 
         # Stamp finished_at on successful PR creation.
         from datetime import datetime as _dt, timezone as _tz
         if task.finished_at is None:
-            task.finished_at = _dt.now(_tz.utc)
-            state_mgr.save(state)
+            now = _dt.now(_tz.utc)
+
+            def _stamp_finished(s):
+                s.tasks[t.slug].finished_at = now
+
+            state_mgr.mutate(_stamp_finished)
+            task.finished_at = now
 
         if output.is_tty:
             output.print("")

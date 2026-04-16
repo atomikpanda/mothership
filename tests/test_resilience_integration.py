@@ -49,43 +49,44 @@ def full_workspace(workspace_with_git: Path):
 
 
 def test_agent_resilience_lifecycle(full_workspace: Path):
+    slug = "resilience-test"
     # 1. Spawn task
     result = runner.invoke(app, ["spawn", "resilience test", "--repos", "shared,auth-service"])
     assert result.exit_code == 0, result.output
 
     # 2. Log context
-    result = runner.invoke(app, ["journal", "Starting work on auth controller"])
+    result = runner.invoke(app, ["journal", "Starting work on auth controller", "--task", slug])
     assert result.exit_code == 0
 
     # 3. Phase to dev
-    result = runner.invoke(app, ["phase", "dev"])
+    result = runner.invoke(app, ["phase", "dev", "--task", slug])
     assert result.exit_code == 0
 
     # 4. Block
-    result = runner.invoke(app, ["block", "waiting on API key"])
+    result = runner.invoke(app, ["block", "waiting on API key", "--task", slug])
     assert result.exit_code == 0
 
     # 5. Status shows blocked
-    result = runner.invoke(app, ["status"])
+    result = runner.invoke(app, ["status", "--task", slug])
     assert "BLOCKED" in result.output
     assert "waiting on API key" in result.output
 
     # 6. Read log — should show spawn, phase, block events
-    result = runner.invoke(app, ["journal"])
+    result = runner.invoke(app, ["journal", "--task", slug])
     assert "Task spawned" in result.output
     assert "Phase transition" in result.output
     assert "Blocked: waiting on API key" in result.output
 
     # 7. Unblock
-    result = runner.invoke(app, ["unblock"])
+    result = runner.invoke(app, ["unblock", "--task", slug])
     assert result.exit_code == 0
 
     # 8. Status no longer blocked
-    result = runner.invoke(app, ["status"])
+    result = runner.invoke(app, ["status", "--task", slug])
     assert "BLOCKED" not in result.output
 
     # 9. Generate handoff
-    result = runner.invoke(app, ["finish", "--handoff"])
+    result = runner.invoke(app, ["finish", "--handoff", "--task", slug])
     assert result.exit_code == 0
     handoff_file = full_workspace / ".mothership" / "handoffs" / "resilience-test.yaml"
     assert handoff_file.exists()
@@ -95,5 +96,5 @@ def test_agent_resilience_lifecycle(full_workspace: Path):
     assert len(data["merge_order"]) == 2
 
     # 10. Close (cleanup; finish --handoff doesn't set finished_at, so --abandon is needed)
-    result = runner.invoke(app, ["close", "--yes", "--abandon"])
+    result = runner.invoke(app, ["close", "--yes", "--abandon", "--task", slug])
     assert result.exit_code == 0

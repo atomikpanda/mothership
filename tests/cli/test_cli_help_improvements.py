@@ -70,14 +70,14 @@ def test_resolve_repos_unknown_lists_available(workspace: Path):
         affected_repos=["shared", "auth-service"],
         branch="feat/test-task",
     )
-    mgr.save(WorkspaceState(current_task="test-task", tasks={"test-task": task}))
+    mgr.save(WorkspaceState(tasks={"test-task": task}))
 
     mock_shell = MagicMock(spec=ShellRunner)
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok\n", stderr="")
     container.shell.override(mock_shell)
 
     try:
-        result = runner.invoke(app, ["test", "--repos", "bogus"])
+        result = runner.invoke(app, ["test", "--repos", "bogus", "--task", "test-task"])
         assert result.exit_code == 1
         assert "Available:" in result.output
         # At least one real repo name should appear
@@ -114,7 +114,7 @@ def test_logs_invalid_service_lists_available(workspace: Path):
         affected_repos=["shared"],
         branch="feat/test-task",
     )
-    mgr.save(WorkspaceState(current_task="test-task", tasks={"test-task": task}))
+    mgr.save(WorkspaceState(tasks={"test-task": task}))
 
     try:
         result = runner.invoke(app, ["logs", "unknown-svc"])
@@ -176,7 +176,7 @@ def test_view_logs_unknown_slug_lists_known(workspace: Path):
         affected_repos=["shared"],
         branch="feat/real-task",
     )
-    mgr.save(WorkspaceState(current_task="real-task", tasks={"real-task": task}))
+    mgr.save(WorkspaceState(tasks={"real-task": task}))
 
     try:
         result = runner.invoke(app, ["view", "journal", "--task", "bogus-slug"])

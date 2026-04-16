@@ -83,7 +83,7 @@ def test_post_checkout_silent_when_on_task_branch_and_cwd_in_worktree(tmp_path, 
         affected_repos=["r"], branch="feat/t",
         worktrees={"r": wt},
     )
-    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+    sm.save(WorkspaceState(tasks={"t": task}))
 
     _override(tmp_path)
     try:
@@ -95,7 +95,7 @@ def test_post_checkout_silent_when_on_task_branch_and_cwd_in_worktree(tmp_path, 
         _reset()
 
 
-def test_post_checkout_warns_when_branch_mismatches_task(tmp_path, monkeypatch):
+def test_post_checkout_warns_when_cwd_outside_any_active_worktree(tmp_path, monkeypatch):
     env = {**os.environ,
            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
@@ -111,7 +111,7 @@ def test_post_checkout_warns_when_branch_mismatches_task(tmp_path, monkeypatch):
         affected_repos=["r"], branch="feat/add-labels",
         worktrees={"r": tmp_path / "fake-wt"},
     )
-    sm.save(WorkspaceState(current_task="add-labels", tasks={"add-labels": task}))
+    sm.save(WorkspaceState(tasks={"add-labels": task}))
 
     _override(tmp_path)
     try:
@@ -119,8 +119,8 @@ def test_post_checkout_warns_when_branch_mismatches_task(tmp_path, monkeypatch):
         result = runner.invoke(app, ["_post-checkout", "HEAD", "HEAD"])
         assert result.exit_code == 0, result.output
         assert "add-labels" in result.output
-        assert "feat/add-labels" in result.output
         assert "feat/wrong" in result.output
+        assert "outside any active worktree" in result.output
     finally:
         _reset()
 
@@ -142,14 +142,16 @@ def test_post_checkout_warns_when_on_task_branch_but_not_in_worktree(tmp_path, m
         affected_repos=["r"], branch="feat/t",
         worktrees={"r": expected_wt},
     )
-    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+    sm.save(WorkspaceState(tasks={"t": task}))
 
     _override(tmp_path)
     try:
         monkeypatch.chdir(tmp_path)  # NOT the worktree
         result = runner.invoke(app, ["_post-checkout", "HEAD", "HEAD"])
         assert result.exit_code == 0, result.output
-        assert str(expected_wt) in result.output
+        # cwd isn't in any registered worktree -> the "outside" warning fires
+        assert "outside any active worktree" in result.output
+        assert "t" in result.output  # task slug listed
         assert "cd" in result.output.lower()
     finally:
         _reset()
@@ -177,7 +179,7 @@ def test_log_commit_appends_entry_when_in_task_worktree(tmp_path, monkeypatch):
         affected_repos=["r"], branch="feat/t",
         worktrees={"r": wt},
     )
-    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+    sm.save(WorkspaceState(tasks={"t": task}))
 
     _override(tmp_path)
     try:
@@ -221,7 +223,7 @@ def test_log_commit_silent_when_cwd_not_in_worktree(tmp_path, monkeypatch):
         affected_repos=["r"], branch="feat/t",
         worktrees={"r": tmp_path / ".worktrees" / "feat-t"},
     )
-    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+    sm.save(WorkspaceState(tasks={"t": task}))
 
     _override(tmp_path)
     try:

@@ -62,7 +62,6 @@ def test_spawn(configured_git_app: Path):
     mgr = StateManager(configured_git_app / ".mothership")
     state = mgr.load()
     assert "add-labels-to-tasks" in state.tasks
-    assert state.current_task == "add-labels-to-tasks"
 
 
 def test_spawn_all_repos(configured_git_app: Path):
@@ -95,7 +94,6 @@ def test_close_with_no_prs_cancelled_before_finish(configured_git_app):
 
     sm = StateManager(configured_git_app / ".mothership")
     state = WorkspaceState(
-        current_task="t",
         tasks={"t": Task(
             slug="t", description="d", phase="dev",
             created_at=datetime.now(timezone.utc),
@@ -108,9 +106,9 @@ def test_close_with_no_prs_cancelled_before_finish(configured_git_app):
     from mship.cli import app as _app
     r = CliRunner()
     # Task was never finished → must use --abandon to close without PRs
-    result = r.invoke(_app, ["close", "--yes", "--abandon"])
+    result = r.invoke(_app, ["close", "--yes", "--abandon", "--task", "t"])
     assert result.exit_code == 0, result.output
-    assert sm.load().current_task is None
+    assert "t" not in sm.load().tasks
 
 
 def test_close_no_active_task_errors():
@@ -129,7 +127,6 @@ def test_close_with_all_merged_prs(configured_git_app):
 
     sm = StateManager(configured_git_app / ".mothership")
     state = WorkspaceState(
-        current_task="t",
         tasks={"t": Task(
             slug="t", description="d", phase="review",
             created_at=datetime.now(timezone.utc),
@@ -150,10 +147,10 @@ def test_close_with_all_merged_prs(configured_git_app):
         from typer.testing import CliRunner
         from mship.cli import app as _app
         r = CliRunner()
-        result = r.invoke(_app, ["close", "--yes"])
+        result = r.invoke(_app, ["close", "--yes", "--task", "t"])
         assert result.exit_code == 0, result.output
         assert "completed" in result.output.lower() or "merged" in result.output.lower()
-        assert sm.load().current_task is None
+        assert "t" not in sm.load().tasks
     finally:
         container.shell.reset_override()
 
@@ -165,7 +162,6 @@ def test_close_with_open_pr_refuses_without_force(configured_git_app):
 
     sm = StateManager(configured_git_app / ".mothership")
     state = WorkspaceState(
-        current_task="t",
         tasks={"t": Task(
             slug="t", description="d", phase="review",
             created_at=datetime.now(timezone.utc),
@@ -186,11 +182,11 @@ def test_close_with_open_pr_refuses_without_force(configured_git_app):
         from typer.testing import CliRunner
         from mship.cli import app as _app
         r = CliRunner()
-        result = r.invoke(_app, ["close", "--yes"])
+        result = r.invoke(_app, ["close", "--yes", "--task", "t"])
         assert result.exit_code != 0
         assert "open" in result.output.lower()
         # State unchanged
-        assert sm.load().current_task == "t"
+        assert "t" in sm.load().tasks
     finally:
         container.shell.reset_override()
 
@@ -202,7 +198,6 @@ def test_close_with_open_pr_proceeds_under_force(configured_git_app):
 
     sm = StateManager(configured_git_app / ".mothership")
     state = WorkspaceState(
-        current_task="t",
         tasks={"t": Task(
             slug="t", description="d", phase="review",
             created_at=datetime.now(timezone.utc),
@@ -223,16 +218,16 @@ def test_close_with_open_pr_proceeds_under_force(configured_git_app):
         from typer.testing import CliRunner
         from mship.cli import app as _app
         r = CliRunner()
-        result = r.invoke(_app, ["close", "--yes", "--force"])
+        result = r.invoke(_app, ["close", "--yes", "--force", "--task", "t"])
         assert result.exit_code == 0, result.output
-        assert sm.load().current_task is None
+        assert "t" not in sm.load().tasks
     finally:
         container.shell.reset_override()
 
 
 def test_finish_handoff(configured_git_app: Path):
     runner.invoke(app, ["spawn", "handoff test", "--repos", "shared,auth-service"])
-    result = runner.invoke(app, ["finish", "--handoff"])
+    result = runner.invoke(app, ["finish", "--handoff", "--task", "handoff-test"])
     assert result.exit_code == 0
     handoff_file = configured_git_app / ".mothership" / "handoffs" / "handoff-test.yaml"
     assert handoff_file.exists()
@@ -263,7 +258,7 @@ def test_finish_creates_prs(configured_git_app: Path):
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["finish"])
+    result = runner.invoke(app, ["finish", "--task", "test-prs"])
     assert result.exit_code == 0, result.output
 
     # Verify PR URL stored in state
@@ -286,7 +281,7 @@ def test_finish_gh_not_available(configured_git_app: Path):
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["finish"])
+    result = runner.invoke(app, ["finish", "--task", "test-no-gh"])
     assert result.exit_code != 0 or "gh" in result.output.lower()
 
     cli_container.shell.reset_override()
@@ -354,13 +349,13 @@ def test_close_refuses_when_not_finished_without_abandon(configured_git_app):
 
     sm = StateManager(configured_git_app / ".mothership")
     task = _build_close_task(finished=False)
-    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+    sm.save(WorkspaceState(tasks={"t": task}))
 
-    r = CliRunner().invoke(_app, ["close", "--yes"])
+    r = CliRunner().invoke(_app, ["close", "--yes", "--task", "t"])
     assert r.exit_code != 0
     assert "hasn't been finished" in r.output.lower() or "run `mship finish`" in r.output
     # State unchanged
-    assert sm.load().current_task == "t"
+    assert "t" in sm.load().tasks
 
 
 def test_close_abandon_proceeds_when_no_commits(configured_git_app):
@@ -374,7 +369,7 @@ def test_close_abandon_proceeds_when_no_commits(configured_git_app):
 
     sm = StateManager(configured_git_app / ".mothership")
     task = _build_close_task(finished=False)
-    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+    sm.save(WorkspaceState(tasks={"t": task}))
 
     mock_shell = MagicMock(spec=ShellRunner)
     # count_commits_ahead returns 0 → no commits past base → recovery check passes trivially
@@ -382,9 +377,9 @@ def test_close_abandon_proceeds_when_no_commits(configured_git_app):
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
     container.shell.override(mock_shell)
     try:
-        r = CliRunner().invoke(_app, ["close", "--yes", "--abandon"])
+        r = CliRunner().invoke(_app, ["close", "--yes", "--abandon", "--task", "t"])
         assert r.exit_code == 0, r.output
-        assert sm.load().current_task is None
+        assert "t" not in sm.load().tasks
     finally:
         container.shell.reset_override()
 
@@ -405,7 +400,7 @@ def test_close_abandon_refuses_when_unrecoverable(configured_git_app):
         finished=False,
         worktrees={"shared": configured_git_app / "shared"},
     )
-    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+    sm.save(WorkspaceState(tasks={"t": task}))
 
     def mock_run(cmd, cwd, env=None):
         if "git rev-list --count" in cmd:
@@ -423,10 +418,10 @@ def test_close_abandon_refuses_when_unrecoverable(configured_git_app):
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
     container.shell.override(mock_shell)
     try:
-        r = CliRunner().invoke(_app, ["close", "--yes", "--abandon"])
+        r = CliRunner().invoke(_app, ["close", "--yes", "--abandon", "--task", "t"])
         assert r.exit_code != 0
         assert "unrecoverable" in r.output.lower() or "permanently lost" in r.output.lower()
-        assert sm.load().current_task == "t"  # unchanged
+        assert "t" in sm.load().tasks  # unchanged
     finally:
         container.shell.reset_override()
 
@@ -445,7 +440,7 @@ def test_close_force_bypasses_recovery_check(configured_git_app):
         finished=False,
         worktrees={"shared": configured_git_app / "shared"},
     )
-    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+    sm.save(WorkspaceState(tasks={"t": task}))
 
     def mock_run(cmd, cwd, env=None):
         if "git rev-list --count" in cmd:
@@ -463,9 +458,9 @@ def test_close_force_bypasses_recovery_check(configured_git_app):
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
     container.shell.override(mock_shell)
     try:
-        r = CliRunner().invoke(_app, ["close", "--yes", "--force"])
+        r = CliRunner().invoke(_app, ["close", "--yes", "--force", "--task", "t"])
         assert r.exit_code == 0, r.output
-        assert sm.load().current_task is None
+        assert "t" not in sm.load().tasks
     finally:
         container.shell.reset_override()
 
@@ -484,7 +479,7 @@ def test_close_abandon_proceeds_when_merged(configured_git_app):
         finished=False,
         worktrees={"shared": configured_git_app / "shared"},
     )
-    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+    sm.save(WorkspaceState(tasks={"t": task}))
 
     def mock_run(cmd, cwd, env=None):
         if "git rev-list --count" in cmd:
@@ -498,7 +493,7 @@ def test_close_abandon_proceeds_when_merged(configured_git_app):
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
     container.shell.override(mock_shell)
     try:
-        r = CliRunner().invoke(_app, ["close", "--yes", "--abandon"])
+        r = CliRunner().invoke(_app, ["close", "--yes", "--abandon", "--task", "t"])
         assert r.exit_code == 0, r.output
     finally:
         container.shell.reset_override()
@@ -548,7 +543,7 @@ def test_close_abandon_proceeds_when_pushed(configured_git_app):
         finished=False,
         worktrees={"shared": configured_git_app / "shared"},
     )
-    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+    sm.save(WorkspaceState(tasks={"t": task}))
 
     def mock_run(cmd, cwd, env=None):
         if "git rev-list --count" in cmd:
@@ -566,7 +561,7 @@ def test_close_abandon_proceeds_when_pushed(configured_git_app):
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
     container.shell.override(mock_shell)
     try:
-        r = CliRunner().invoke(_app, ["close", "--yes", "--abandon"])
+        r = CliRunner().invoke(_app, ["close", "--yes", "--abandon", "--task", "t"])
         assert r.exit_code == 0, r.output
     finally:
         container.shell.reset_override()

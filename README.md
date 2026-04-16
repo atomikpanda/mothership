@@ -115,6 +115,31 @@ mship phase review && mship finish
 
 Requires Python 3.14+ and [uv](https://docs.astral.sh/uv/). Optional: [go-task](https://taskfile.dev), [gh](https://cli.github.com) (for `mship finish`), [git-delta](https://github.com/dandavison/delta) (for nicer `mship view diff`).
 
+## Multi-task workflows
+
+Mothership supports N active tasks at once — one worktree per task per repo. Task-scoped commands (`status`, `phase`, `test`, `journal`, `view …`, …) resolve their target task in this priority order:
+
+1. **`--task <slug>` flag** — explicit, highest priority.
+2. **`MSHIP_TASK` env var** — scope a whole shell session to one task: `export MSHIP_TASK=<slug>`.
+3. **cwd** — if your shell is inside a task's worktree, that task is the default.
+
+With 0 active tasks the command errors with "no active task". With 2+ active tasks and no anchor (no `--task`, no `MSHIP_TASK`, cwd outside every worktree) you'll get an "Ambiguous" error listing the active slugs. Fix by anchoring via any of the three mechanisms above.
+
+Typical flows:
+
+```bash
+# Single-task work: cd into the worktree after spawn, and everything resolves.
+mship spawn "add labels"              # prints the worktree path
+cd .worktrees/feat/add-labels/…       # now `mship status`, `mship test`, … all target this task
+
+# Multi-task work: export MSHIP_TASK once per shell to scope the session.
+export MSHIP_TASK=add-labels
+mship journal "picked back up"        # no flag needed; env anchors the shell
+
+# One-off cross-task command:
+mship status --task other-task
+```
+
 ## For AI agents
 
 Mothership ships a bundle of skills — the mship skill plus vendored mship-aware superpowers skills (brainstorming, writing-plans, subagent-driven-development, executing-plans, systematic-debugging, TDD, …). Skills install under a single `mothership:` namespace so they don't collide with other plugins.
@@ -250,9 +275,11 @@ audit:
 `mship view` provides read-only TUIs designed for tmux/zellij panes. All views support `--watch` and `--interval N`.
 
 - `mship view status [--task <slug>] [--watch]` — all tasks stacked by default (the "God view"); `--task` narrows to one
-- `mship view logs [--task <slug>] [--watch]` — tail the task's log; opens a task picker when no task is active
-- `mship view diff [--task <slug>] [--watch]` — per-worktree git diff; task picker fallback as above
+- `mship view logs [--task <slug>] [--watch]` — tail the task's log
+- `mship view diff [--task <slug>] [--watch]` — per-worktree git diff
 - `mship view spec [name-or-path] [--task <slug>] [--watch] [--web]` — cross-task spec index picker by default; `--task` narrows, explicit name renders directly, `--web` serves HTML on localhost
+
+`mship view logs`, `mship view diff`, and the single-task form of `mship view status` resolve their target task via cwd → `MSHIP_TASK` env → `--task <slug>` flag. With 0 active tasks you'll get a "no active task" error; with 2+ active tasks and no anchor you'll get an "ambiguous" error listing the active slugs. See [Multi-task workflows](#multi-task-workflows) for the resolution rules.
 
 Keys: `q` quit, `j/k` or arrows to scroll, `PgUp/PgDn`, `Home/End`, `r` force refresh.
 

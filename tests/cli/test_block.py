@@ -26,7 +26,7 @@ def configured_app_with_task(workspace: Path):
         affected_repos=["shared"],
         branch="feat/add-labels",
     )
-    mgr.save(WorkspaceState(current_task="add-labels", tasks={"add-labels": task}))
+    mgr.save(WorkspaceState(tasks={"add-labels": task}))
     yield workspace
     container.config_path.reset_override()
     container.state_dir.reset_override()
@@ -35,7 +35,7 @@ def configured_app_with_task(workspace: Path):
 
 
 def test_block(configured_app_with_task: Path):
-    result = runner.invoke(app, ["block", "waiting on API key"])
+    result = runner.invoke(app, ["block", "waiting on API key", "--task", "add-labels"])
     assert result.exit_code == 0
     mgr = StateManager(configured_app_with_task / ".mothership")
     state = mgr.load()
@@ -44,8 +44,8 @@ def test_block(configured_app_with_task: Path):
 
 
 def test_unblock(configured_app_with_task: Path):
-    runner.invoke(app, ["block", "waiting"])
-    result = runner.invoke(app, ["unblock"])
+    runner.invoke(app, ["block", "waiting", "--task", "add-labels"])
+    result = runner.invoke(app, ["unblock", "--task", "add-labels"])
     assert result.exit_code == 0
     mgr = StateManager(configured_app_with_task / ".mothership")
     state = mgr.load()
@@ -54,7 +54,7 @@ def test_unblock(configured_app_with_task: Path):
 
 
 def test_unblock_when_not_blocked(configured_app_with_task: Path):
-    result = runner.invoke(app, ["unblock"])
+    result = runner.invoke(app, ["unblock", "--task", "add-labels"])
     assert result.exit_code != 0 or "not blocked" in result.output.lower()
 
 
@@ -65,7 +65,7 @@ def test_block_no_task(workspace: Path):
     container.state_dir.override(state_dir)
 
     result = runner.invoke(app, ["block", "reason"])
-    assert result.exit_code != 0 or "No active task" in result.output
+    assert result.exit_code != 0 or "no active task" in result.output.lower()
     container.config_path.reset_override()
     container.state_dir.reset_override()
     container.config.reset()
@@ -73,7 +73,7 @@ def test_block_no_task(workspace: Path):
 
 
 def test_status_shows_blocked(configured_app_with_task: Path):
-    runner.invoke(app, ["block", "waiting on API key"])
-    result = runner.invoke(app, ["status"])
+    runner.invoke(app, ["block", "waiting on API key", "--task", "add-labels"])
+    result = runner.invoke(app, ["status", "--task", "add-labels"])
     assert "BLOCKED" in result.output
     assert "waiting on API key" in result.output

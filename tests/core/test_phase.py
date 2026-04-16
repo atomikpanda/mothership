@@ -26,7 +26,7 @@ def state_with_task(tmp_path: Path) -> StateManager:
             "auth-service": tmp_path / "auth-service",
         },
     )
-    state = WorkspaceState(current_task="add-labels", tasks={"add-labels": task})
+    state = WorkspaceState(tasks={"add-labels": task})
     mgr.save(state)
     return mgr
 
@@ -151,7 +151,6 @@ def phase_env(tmp_path):
     pm = PhaseManager(state_manager=sm, log=log)
 
     state = WorkspaceState(
-        current_task="t",
         tasks={
             "t": Task(
                 slug="t", description="d", phase="plan",

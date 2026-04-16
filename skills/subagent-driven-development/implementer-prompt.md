@@ -5,12 +5,19 @@ Use this template when dispatching an implementer subagent.
 **IMPORTANT — before dispatching:** Check whether this is a mothership workspace
 (a `mothership.yaml` exists at the repo root or any ancestor). If yes:
 
-1. There MUST be an active mship task before you dispatch implementer subagents.
-   Run `mship status` — if `current_task` is null, refuse to dispatch and tell
-   the user to `mship spawn "<description>"` first.
+1. There MUST be a single, anchored mship task before you dispatch implementer
+   subagents. Run `mship status`:
+   - If the output is `{"active_tasks": []}`, refuse to dispatch and tell the
+     user to `mship spawn "<description>"` first.
+   - If the output is `{"active_tasks": [...]}` with a non-empty list, two or
+     more tasks are active with no anchor — refuse to dispatch, pick one with
+     the user, then set `MSHIP_TASK=<slug>` (or pass `--task <slug>`) and
+     re-run `mship status` to confirm it resolves.
+   - Otherwise the output is the resolved task's detail (keys like `slug`,
+     `phase`, `worktrees`). Use that shape for step 2.
 2. The subagent MUST work in the task's worktree, not the main checkout. Set
-   `Work from:` below to the worktree path from `mship status`
-   (`tasks.<slug>.worktrees.<repo>`). Never point it at the main repo root.
+   `Work from:` below to `worktrees.<repo>` from the resolved `mship status`
+   output. Never point it at the main repo root.
 3. The subagent MUST commit on the task's feature branch (inside the worktree).
    The mship pre-commit hook will refuse commits from the main checkout, but
    the prompt should say this explicitly so the subagent doesn't waste a cycle.
