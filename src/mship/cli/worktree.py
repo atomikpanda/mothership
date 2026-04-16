@@ -416,6 +416,16 @@ def register(app: typer.Typer, get_container):
         force_audit: bool = typer.Option(False, "--force-audit", help="Bypass audit gate for this finish"),
         push_only: bool = typer.Option(False, "--push-only", help="Push branches only; skip gh pr create"),
         bypass_reconcile: bool = typer.Option(False, "--bypass-reconcile", help="Skip upstream PR drift check for this finish"),
+        body: Optional[str] = typer.Option(
+            None, "--body",
+            help="Inline PR body. Use '-' to read from stdin. Mutually exclusive with --body-file.",
+        ),
+        body_file: Optional[str] = typer.Option(
+            None, "--body-file",
+            help="Read PR body from this file. Mutually exclusive with --body. "
+                 "Recommended for agents: write a Summary + Test plan rather than "
+                 "letting finish fall back to the task description.",
+        ),
         task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
     ):
         """Create PRs across repos in dependency order."""
@@ -429,6 +439,33 @@ def register(app: typer.Typer, get_container):
 
         if push_only and (handoff or base is not None or base_map is not None):
             output.error("--push-only is incompatible with --handoff/--base/--base-map")
+            raise typer.Exit(code=1)
+
+        # --- Resolve PR body source ---
+        if body is not None and body_file is not None:
+            output.error("--body and --body-file are mutually exclusive")
+            raise typer.Exit(code=1)
+        if (body is not None or body_file is not None) and (push_only or handoff):
+            output.error("--body/--body-file has no effect with --push-only or --handoff")
+            raise typer.Exit(code=1)
+        custom_body: Optional[str] = None
+        if body is not None:
+            if body == "-":
+                import sys as _sys
+                custom_body = _sys.stdin.read()
+            else:
+                custom_body = body
+        elif body_file is not None:
+            try:
+                custom_body = Path(body_file).read_text()
+            except OSError as e:
+                output.error(f"Could not read --body-file {body_file!r}: {e}")
+                raise typer.Exit(code=1)
+        if custom_body is not None and not custom_body.strip():
+            output.error(
+                "PR body is empty. Write a Summary + Test plan, or omit --body/--body-file "
+                "to fall back to the task description."
+            )
             raise typer.Exit(code=1)
         state_mgr = container.state_manager()
         state = state_mgr.load()
@@ -667,7 +704,8 @@ def register(app: typer.Typer, get_container):
                             texts.append(line)
             except Exception:
                 pass
-            pr_body = append_closes_footer(task.description, extract_issue_refs(texts))
+            pr_body_base = custom_body if custom_body is not None else task.description
+            pr_body = append_closes_footer(pr_body_base, extract_issue_refs(texts))
 
             # Create PR
             try:

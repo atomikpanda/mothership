@@ -392,6 +392,77 @@ def test_finish_creates_prs(configured_git_app: Path):
     cli_container.shell.reset_override()
 
 
+def test_finish_body_file_passed_to_gh_pr_create(configured_git_app: Path):
+    """--body-file contents must land in the gh pr create invocation."""
+    from mship.cli import container as cli_container
+
+    runner.invoke(app, ["spawn", "body test", "--repos", "shared"])
+
+    body_path = configured_git_app / "body.md"
+    body_path.write_text(
+        "## Summary\n- added thing\n\n## Test plan\n- [ ] verify thing\n"
+    )
+
+    captured: dict[str, str] = {}
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            captured["create_cmd"] = cmd
+            return ShellResult(returncode=0, stdout="https://x/pr/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    cli_container.shell.override(mock_shell)
+    try:
+        result = runner.invoke(
+            app, ["finish", "--task", "body-test", "--body-file", str(body_path)]
+        )
+        assert result.exit_code == 0, result.output
+        assert "create_cmd" in captured
+        # The body ends up shlex-quoted; check the content leaked through verbatim.
+        assert "## Summary" in captured["create_cmd"]
+        assert "- added thing" in captured["create_cmd"]
+        assert "## Test plan" in captured["create_cmd"]
+    finally:
+        cli_container.shell.reset_override()
+
+
+def test_finish_body_and_body_file_mutually_exclusive(configured_git_app: Path):
+    runner.invoke(app, ["spawn", "mutex test", "--repos", "shared"])
+    result = runner.invoke(
+        app, ["finish", "--task", "mutex-test", "--body", "x", "--body-file", "/tmp/y"]
+    )
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output
+
+
+def test_finish_rejects_empty_body_file(configured_git_app: Path, tmp_path: Path):
+    runner.invoke(app, ["spawn", "empty body test", "--repos", "shared"])
+    empty = tmp_path / "empty.md"
+    empty.write_text("   \n\n")
+    result = runner.invoke(
+        app, ["finish", "--task", "empty-body-test", "--body-file", str(empty)]
+    )
+    assert result.exit_code != 0
+    assert "empty" in result.output.lower()
+
+
+def test_finish_body_incompatible_with_push_only(configured_git_app: Path):
+    runner.invoke(app, ["spawn", "po mutex test", "--repos", "shared"])
+    result = runner.invoke(
+        app,
+        ["finish", "--task", "po-mutex-test", "--push-only", "--body", "x"],
+    )
+    assert result.exit_code != 0
+    assert "no effect" in result.output.lower() or "push-only" in result.output.lower()
+
+
 def test_finish_gh_not_available(configured_git_app: Path):
     from mship.cli import container as cli_container
 

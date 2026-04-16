@@ -84,7 +84,7 @@ mship block "reason" | mship unblock
 mship test [--all] [--repos|--tag] [--no-diff]
 mship journal "msg" [--action X] [--open Y] [--repo R] [--test-state pass|fail|mixed]
 mship journal --show-open                 # what am I blocked on across this task?
-mship finish [--base B] [--base-map ...] [--push-only] [--handoff] [--force-audit]
+mship finish [--base B] [--base-map ...] [--push-only] [--handoff] [--force-audit] [--body-file F | --body TEXT]
 mship close [--yes] [--abandon] [--force] [--skip-pr-check]
 ```
 
@@ -105,6 +105,8 @@ If you don't, your edits in the shell affect the main checkout, not the feature 
 **Always log structured.** `--action` makes session resume actually work. `--open` flags blockers you'll come back to. `--show-open` lists them. The `repo` field is auto-inferred from `mship switch`'s active repo.
 
 **`finish`:** PR base resolves as `--base-map` entry > `--base` > `repo.base_branch` in config > gh default. Every base is verified on origin before any push; empty branches and missing bases fail fast with no partial state.
+
+**`finish` PR body — write a real one.** By default the PR body is just the task description plus a `Closes #N` footer for any issue refs found in the description, journal, and commit subjects. That's a placeholder, not a body. For agent-driven finishes, pass `--body-file <path>` (or `--body '<inline>'`, or `--body -` for stdin) with a real Summary and Test plan. Empty bodies are rejected — that's deliberate. If you forgot at finish time, follow up immediately with `gh pr edit <url> --body-file <path>`. A bare task-description PR is treated as incomplete.
 
 **`close` gates (in order):**
 1. **Requires `finish` first.** Refuses if `task.finished_at is None` unless `--abandon` is passed.
@@ -296,6 +298,7 @@ Then `mship test --tag mobile` runs both.
 - **Don't merge PRs out of order** — the coordination block in each PR description shows the correct order.
 - **Don't ignore healthcheck failures** — if `mship run` reports a service didn't become ready, the dependent services won't work either.
 - **Don't run `mship finish` with failing tests** — run `mship test` first.
+- **Don't ship a PR with a placeholder body.** If you didn't pass `--body-file`/`--body` to `mship finish`, the PR body is just the task description — not a Summary + Test plan. Follow up with `gh pr edit <url> --body-file <path>` before declaring done. Reviewers (human or agent) need to know what changed and how it was verified.
 - **Don't paste test output into `mship journal`** — after every `mship test`, mship auto-logs a structured entry with iteration, test_state, and action. The iteration file under `.mothership/test-runs/` has stderr for failures.
 - **Don't keep editing a worktree after `mship finish`** — once `finish` stamps the task as done, phase transitions are blocked (except `run`). If you need to make changes, open a new task with `mship spawn`.
 - **Don't manually edit `.mothership/state.yaml`** — use the CLI commands instead.
