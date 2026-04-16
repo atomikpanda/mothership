@@ -10,6 +10,10 @@ class _Entry:
     timestamp: datetime
     message: str
     repo: str | None = None
+    iteration: int | None = None
+    test_state: str | None = None
+    action: str | None = None
+    open_question: str | None = None
 
 
 class _FakeLogMgr:

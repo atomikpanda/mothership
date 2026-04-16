@@ -32,7 +32,21 @@ class LogsView(ViewApp):
         lines = []
         for entry in entries:
             ts = entry.timestamp.strftime("%Y-%m-%d %H:%M:%S")
-            lines.append(f"{ts}  {entry.message}")
+            # Structured metadata line (dim, below timestamp)
+            meta_parts: list[str] = []
+            if entry.repo:
+                meta_parts.append(f"repo={entry.repo}")
+            if entry.iteration is not None:
+                meta_parts.append(f"iter={entry.iteration}")
+            if entry.test_state:
+                meta_parts.append(f"test={entry.test_state}")
+            if entry.action:
+                meta_parts.append(f"action={entry.action}")
+            meta = f"  [{' '.join(meta_parts)}]" if meta_parts else ""
+            lines.append(f"{ts}{meta}")
+            lines.append(f"  {entry.message}")
+            if entry.open_question:
+                lines.append(f"  ⚠ open: {entry.open_question}")
         return "\n".join(lines)
 
 

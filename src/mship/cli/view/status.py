@@ -8,7 +8,7 @@ from mship.core.state import Task, WorkspaceState
 from mship.core.view.task_index import build_task_index
 
 
-def _render_task(task: Task) -> str:
+def _render_task(task: Task, open_questions: list[str] | None = None) -> str:
     from mship.util.duration import format_relative
 
     lines = [f"Task:   {task.slug}"]
@@ -31,18 +31,38 @@ def _render_task(task: Task) -> str:
         for repo, path in task.worktrees.items():
             lines.append(f"  {repo}: {path}")
     if task.test_results:
-        lines.append("Tests:")
+        iter_suffix = f"  (iteration {task.test_iteration})" if getattr(task, "test_iteration", 0) else ""
+        lines.append(f"Tests:{iter_suffix}")
         for repo, result in task.test_results.items():
             lines.append(f"  {repo}: {result.status}")
+    elif getattr(task, "test_iteration", 0):
+        lines.append(f"Tests: (iteration {task.test_iteration}, no results stored)")
+    if open_questions:
+        lines.append(f"Open questions: {len(open_questions)}")
+        for q in open_questions[:3]:  # show at most 3 in the summary
+            lines.append(f"  ⚠ {q}")
+        if len(open_questions) > 3:
+            lines.append(f"  … and {len(open_questions) - 3} more")
     return "\n".join(lines)
 
 
 class StatusView(ViewApp):
-    def __init__(self, state_manager, workspace_root: Path, task_filter: Optional[str], **kw):
+    def __init__(self, state_manager, workspace_root: Path, task_filter: Optional[str],
+                 log_manager=None, **kw):
         super().__init__(**kw)
         self._state_manager = state_manager
         self._workspace_root = workspace_root
         self._task_filter = task_filter
+        self._log_manager = log_manager
+
+    def _open_questions(self, slug: str) -> list[str]:
+        if self._log_manager is None:
+            return []
+        try:
+            entries = self._log_manager.read(slug)
+            return [e.open_question for e in entries if e.open_question]
+        except Exception:
+            return []
 
     def gather(self) -> str:
         state: WorkspaceState = self._state_manager.load()
@@ -50,11 +70,11 @@ class StatusView(ViewApp):
             task = state.tasks.get(self._task_filter)
             if task is None:
                 return f"Unknown task: {self._task_filter}"
-            return _render_task(task)
+            return _render_task(task, self._open_questions(task.slug))
         index = build_task_index(state, self._workspace_root)
         if not index:
             return "No tasks. Run `mship spawn \"…\"` to start one."
-        blocks = [_render_task(state.tasks[s.slug]) for s in index]
+        blocks = [_render_task(state.tasks[s.slug], self._open_questions(s.slug)) for s in index]
         return "\n\n─────────────\n\n".join(blocks)
 
 
@@ -79,6 +99,7 @@ def register(app: typer.Typer, get_container):
             state_manager=container.state_manager(),
             workspace_root=workspace_root,
             task_filter=task,
+            log_manager=container.log_manager(),
             watch=watch,
             interval=interval,
         )
