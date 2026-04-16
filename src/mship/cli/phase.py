@@ -12,7 +12,7 @@ def register(app: typer.Typer, get_container):
     def phase(
         target: str,
         force: bool = typer.Option(False, "--force", "-f", help="Force transition even if task is blocked or finished"),
-        task: Optional[str] = typer.Option(None, "--task", help="Target task (default: cwd/env)"),
+        task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
     ):
         """Transition a task to a new phase."""
         container = get_container()

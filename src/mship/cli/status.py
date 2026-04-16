@@ -9,7 +9,7 @@ def register(app: typer.Typer, get_container):
     @app.command()
     def status(
         task: Optional[str] = typer.Option(
-            None, "--task", help="Target task (default: cwd/env)"
+            None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."
         ),
     ):
         """Show status of a task (resolved from cwd/env/flag) or workspace summary."""

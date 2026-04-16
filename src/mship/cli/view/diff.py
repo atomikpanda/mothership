@@ -338,7 +338,7 @@ class DiffView(ViewApp):
 def register(app: typer.Typer, get_container):
     @app.command()
     def diff(
-        task: Optional[str] = typer.Option(None, "--task", help="Target task (default: cwd/env)"),
+        task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
         watch: bool = typer.Option(False, "--watch"),
         interval: float = typer.Option(2.0, "--interval"),
         all_: bool = typer.Option(False, "--all", help="Show all worktrees, ignore active_repo"),

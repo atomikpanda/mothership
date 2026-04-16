@@ -10,7 +10,7 @@ def register(app: typer.Typer, get_container):
     @app.command()
     def switch(
         repo: Optional[str] = typer.Argument(None, help="Repo to switch to. Omit to re-render current."),
-        task_opt: Optional[str] = typer.Option(None, "--task", help="Target task (default: cwd/env)"),
+        task_opt: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
     ):
         """Switch active repo within the current task; emit an orientation handoff."""
         from pathlib import Path

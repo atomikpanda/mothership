@@ -19,7 +19,7 @@ def register(app: typer.Typer, get_container):
         no_repo: bool = typer.Option(False, "--no-repo", help="Suppress active-repo inference"),
         show_open: bool = typer.Option(False, "--show-open", help="List open questions from this task's journal"),
         force: bool = typer.Option(False, "--force", "-f", help="Bypass cwd-outside-worktree check"),
-        task_opt: Optional[str] = typer.Option(None, "--task", help="Target task (default: cwd/env)"),
+        task_opt: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
     ):
         """Append to or read the current task's journal."""
         from mship.util.duration import format_relative

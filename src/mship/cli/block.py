@@ -11,7 +11,7 @@ def register(app: typer.Typer, get_container):
     @app.command()
     def block(
         reason: str,
-        task: Optional[str] = typer.Option(None, "--task", help="Target task (default: cwd/env)"),
+        task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
     ):
         """Mark a task as blocked."""
         container = get_container()
@@ -44,7 +44,7 @@ def register(app: typer.Typer, get_container):
 
     @app.command()
     def unblock(
-        task: Optional[str] = typer.Option(None, "--task", help="Target task (default: cwd/env)"),
+        task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
     ):
         """Clear the blocked state on a task."""
         container = get_container()

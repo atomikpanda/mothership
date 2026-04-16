@@ -43,7 +43,7 @@ def register(app: typer.Typer, get_container):
         repos: Optional[str] = typer.Option(None, "--repos", help="Comma-separated repo names to filter"),
         tag: Optional[list[str]] = typer.Option(None, "--tag", help="Filter repos by tag"),
         no_diff: bool = typer.Option(False, "--no-diff", help="Skip cross-run diff output"),
-        task: Optional[str] = typer.Option(None, "--task", help="Target task (default: cwd/env)"),
+        task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
     ):
         """Run tests across affected repos; show diff vs. previous iteration."""
         from datetime import datetime, timezone

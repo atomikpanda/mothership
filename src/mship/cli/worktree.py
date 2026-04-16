@@ -198,7 +198,7 @@ def register(app: typer.Typer, get_container):
         abandon: bool = typer.Option(False, "--abandon", help="Close without finishing (discard PR flow)"),
         skip_pr_check: bool = typer.Option(False, "--skip-pr-check", help="Do not call gh; close regardless of PR state"),
         bypass_reconcile: bool = typer.Option(False, "--bypass-reconcile", help="Skip upstream PR drift check"),
-        task: Optional[str] = typer.Option(None, "--task", help="Target task (default: cwd/env)"),
+        task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
     ):
         """Close a task: check PR state, tear down worktrees, clear state."""
         from pathlib import Path
@@ -346,7 +346,7 @@ def register(app: typer.Typer, get_container):
         force_audit: bool = typer.Option(False, "--force-audit", help="Bypass audit gate for this finish"),
         push_only: bool = typer.Option(False, "--push-only", help="Push branches only; skip gh pr create"),
         bypass_reconcile: bool = typer.Option(False, "--bypass-reconcile", help="Skip upstream PR drift check for this finish"),
-        task: Optional[str] = typer.Option(None, "--task", help="Target task (default: cwd/env)"),
+        task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
     ):
         """Create PRs across repos in dependency order."""
         from pathlib import Path
