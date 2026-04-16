@@ -33,7 +33,6 @@ def finish_workspace(workspace_with_git: Path):
 
 
 def test_finish_single_repo_no_coordination_block(finish_workspace):
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     workspace, mock_shell = finish_workspace
 
     result = runner.invoke(app, ["spawn", "single repo test", "--repos", "shared"])
@@ -54,7 +53,7 @@ def test_finish_single_repo_no_coordination_block(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish"])
+    result = runner.invoke(app, ["finish", "--task", "single-repo-test"])
     assert result.exit_code == 0, result.output
 
     mgr = StateManager(workspace / ".mothership")
@@ -67,7 +66,6 @@ def test_finish_single_repo_no_coordination_block(finish_workspace):
 
 
 def test_finish_multi_repo_adds_coordination(finish_workspace):
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     workspace, mock_shell = finish_workspace
 
     result = runner.invoke(app, ["spawn", "multi repo test", "--repos", "shared,auth-service"])
@@ -93,7 +91,7 @@ def test_finish_multi_repo_adds_coordination(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish"])
+    result = runner.invoke(app, ["finish", "--task", "multi-repo-test"])
     assert result.exit_code == 0, result.output
 
     # Verify 2 PRs created
@@ -106,7 +104,6 @@ def test_finish_multi_repo_adds_coordination(finish_workspace):
 
 
 def test_finish_idempotent_rerun(finish_workspace):
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     workspace, mock_shell = finish_workspace
 
     result = runner.invoke(app, ["spawn", "idempotent test", "--repos", "shared"])
@@ -120,7 +117,7 @@ def test_finish_idempotent_rerun(finish_workspace):
         else ShellResult(returncode=0, stdout="", stderr="")
     )
 
-    result = runner.invoke(app, ["finish"])
+    result = runner.invoke(app, ["finish", "--task", "idempotent-test"])
     assert result.exit_code == 0, result.output
 
     # Second finish — should skip existing PR
@@ -134,7 +131,7 @@ def test_finish_idempotent_rerun(finish_workspace):
 
     mock_shell.run.side_effect = tracking_run
 
-    result = runner.invoke(app, ["finish"])
+    result = runner.invoke(app, ["finish", "--task", "idempotent-test"])
     assert result.exit_code == 0, result.output
 
     # No gh pr create on second run
@@ -144,7 +141,6 @@ def test_finish_idempotent_rerun(finish_workspace):
 
 def test_finish_not_blocked_by_own_worktree(finish_workspace):
     """mship finish must not block on extra_worktrees from its own worktree."""
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     workspace, mock_shell = finish_workspace
 
     # Spawn normally (with --force-audit since the mock shell doesn't actually
@@ -191,20 +187,19 @@ def test_finish_not_blocked_by_own_worktree(finish_workspace):
     state_path = workspace / ".mothership" / "state.yaml"
     import yaml
     data = yaml.safe_load(state_path.read_text())
-    slug = data["current_task"]
+    slug = "own-wt"
     data["tasks"][slug]["worktrees"] = {"shared": "/tmp/shared-wt"}
     state_path.write_text(yaml.safe_dump(data))
     from mship.cli import container
     container.state_manager.reset()
 
-    result = runner.invoke(app, ["finish"])
+    result = runner.invoke(app, ["finish", "--task", slug])
     assert result.exit_code == 0, result.output
     assert "extra_worktrees" not in result.output
 
 
 def test_finish_passes_base_from_config(finish_workspace, tmp_path):
     """Config base_branch flows into gh pr create --base."""
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     import yaml
 
     workspace, mock_shell = finish_workspace
@@ -239,7 +234,7 @@ def test_finish_passes_base_from_config(finish_workspace, tmp_path):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish"])
+    result = runner.invoke(app, ["finish", "--task", "base-test"])
     assert result.exit_code == 0, result.output
 
     create_calls = [c for c in call_log if "gh pr create" in c]
@@ -249,7 +244,6 @@ def test_finish_passes_base_from_config(finish_workspace, tmp_path):
 
 
 def test_finish_fails_when_base_missing_on_remote(finish_workspace):
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     import yaml
 
     workspace, mock_shell = finish_workspace
@@ -278,7 +272,7 @@ def test_finish_fails_when_base_missing_on_remote(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish"])
+    result = runner.invoke(app, ["finish", "--task", "missing-base"])
     assert result.exit_code != 0
     assert "nope" in result.output.lower() or "base" in result.output.lower()
     assert pushed == [], "no repo should be pushed when a base is missing"
@@ -286,7 +280,6 @@ def test_finish_fails_when_base_missing_on_remote(finish_workspace):
 
 def test_finish_blocks_when_affected_repo_is_dirty(finish_workspace):
     """Dirty affected repo blocks finish under default block_finish=true."""
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     workspace, mock_shell = finish_workspace
 
     result = runner.invoke(app, ["spawn", "finish gate", "--repos", "shared", "--force-audit"])
@@ -311,14 +304,13 @@ def test_finish_blocks_when_affected_repo_is_dirty(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish"])
+    result = runner.invoke(app, ["finish", "--task", "finish-gate"])
     assert result.exit_code == 1
     assert "dirty_worktree" in result.output
 
 
 def test_finish_unrelated_dirty_repo_does_not_block(finish_workspace):
     """Drift in a repo not in task.affected_repos must not block finish."""
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     workspace, mock_shell = finish_workspace
 
     result = runner.invoke(app, ["spawn", "unrelated test", "--repos", "shared", "--force-audit"])
@@ -353,13 +345,12 @@ def test_finish_unrelated_dirty_repo_does_not_block(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish"])
+    result = runner.invoke(app, ["finish", "--task", "unrelated-test"])
     assert result.exit_code == 0, result.output
 
 
 def test_finish_fails_when_branch_has_no_commits(finish_workspace):
     """Empty feature branch (no commits past base) must be caught pre-push."""
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     import yaml
 
     workspace, mock_shell = finish_workspace
@@ -392,14 +383,13 @@ def test_finish_fails_when_branch_has_no_commits(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish"])
+    result = runner.invoke(app, ["finish", "--task", "empty-branch"])
     assert result.exit_code != 0
     assert "no commits" in result.output.lower() or "No commits to push" in result.output
     assert pushed == [], "no repo should be pushed when a branch is empty"
 
 
 def test_finish_stamps_finished_at(finish_workspace):
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     workspace, mock_shell = finish_workspace
 
     def mock_run(cmd, cwd, env=None):
@@ -422,7 +412,7 @@ def test_finish_stamps_finished_at(finish_workspace):
     result = runner.invoke(app, ["spawn", "stamp test", "--repos", "shared", "--force-audit"])
     assert result.exit_code == 0, result.output
 
-    result = runner.invoke(app, ["finish"])
+    result = runner.invoke(app, ["finish", "--task", "stamp-test"])
     assert result.exit_code == 0, result.output
     assert "mship close" in result.output
 
@@ -431,7 +421,6 @@ def test_finish_stamps_finished_at(finish_workspace):
 
 
 def test_finish_push_only_skips_gh_pr_create(finish_workspace):
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     workspace, mock_shell = finish_workspace
     push_calls: list[str] = []
     pr_calls: list[str] = []
@@ -456,7 +445,7 @@ def test_finish_push_only_skips_gh_pr_create(finish_workspace):
     result = runner.invoke(app, ["spawn", "push only", "--repos", "shared", "--force-audit"])
     assert result.exit_code == 0, result.output
 
-    result = runner.invoke(app, ["finish", "--push-only"])
+    result = runner.invoke(app, ["finish", "--push-only", "--task", "push-only"])
     assert result.exit_code == 0, result.output
     assert len(push_calls) == 1
     assert pr_calls == []
@@ -484,7 +473,6 @@ def test_finish_push_only_rejects_base_flags(finish_workspace):
 def test_finish_suppresses_no_upstream_for_task_branch(finish_workspace):
     """Regression for #6: finish must succeed when the only audit error is
     `no_upstream` on the task's own branch — finish itself creates the upstream."""
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     workspace, mock_shell = finish_workspace
 
     # Spawn without audit gate interference (the repo has no origin configured
@@ -526,14 +514,13 @@ def test_finish_suppresses_no_upstream_for_task_branch(finish_workspace):
     mock_shell.run.side_effect = mock_run
 
     # NO --force-audit — this is the whole point of the fix.
-    result = runner.invoke(app, ["finish"])
+    result = runner.invoke(app, ["finish", "--task", "noupstream-fix"])
     assert result.exit_code == 0, result.output
     assert "BYPASSED AUDIT" not in result.output
 
 
 def test_finish_still_blocks_other_audit_errors(finish_workspace):
     """The fix must only suppress no_upstream; dirty_worktree etc. still block."""
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     workspace, mock_shell = finish_workspace
 
     result = runner.invoke(app, ["spawn", "still blocks", "--repos", "shared", "--force-audit"])
@@ -559,14 +546,13 @@ def test_finish_still_blocks_other_audit_errors(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish"])
+    result = runner.invoke(app, ["finish", "--task", "still-blocks"])
     assert result.exit_code != 0
     assert "dirty_worktree" in result.output
 
 
 def test_finish_auto_links_issue_refs_in_description(finish_workspace):
     """Regression for #8: task description containing `#N` should produce PR body with `Closes #N`."""
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     workspace, mock_shell = finish_workspace
 
     result = runner.invoke(app, ["spawn", "fix #42 something important", "--repos", "shared", "--force-audit"])
@@ -609,7 +595,7 @@ def test_finish_auto_links_issue_refs_in_description(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish"])
+    result = runner.invoke(app, ["finish", "--task", "fix-42-something-important"])
     assert result.exit_code == 0, result.output
     assert captured_body, "expected gh pr create to be invoked"
     assert "Closes #42" in captured_body[0]
@@ -617,7 +603,6 @@ def test_finish_auto_links_issue_refs_in_description(finish_workspace):
 
 def test_finish_pr_body_unchanged_when_no_issue_refs(finish_workspace):
     """Task description without `#N` → PR body is just the description."""
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     workspace, mock_shell = finish_workspace
 
     result = runner.invoke(app, ["spawn", "ordinary task description", "--repos", "shared", "--force-audit"])
@@ -647,7 +632,7 @@ def test_finish_pr_body_unchanged_when_no_issue_refs(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish", "--force-audit"])
+    result = runner.invoke(app, ["finish", "--force-audit", "--task", "ordinary-task-description"])
     assert result.exit_code == 0, result.output
     assert captured_body
     assert "Closes" not in captured_body[0]
