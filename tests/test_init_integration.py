@@ -41,7 +41,9 @@ def test_init_then_status(tmp_path: Path, monkeypatch):
 
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0
-    assert "No active task" in result.output
+    # Bimodal status: non-TTY emits JSON workspace summary with empty active list.
+    import json as _json
+    assert _json.loads(result.output) == {"active_tasks": []}
 
     result = runner.invoke(app, ["graph"])
     assert result.exit_code == 0

@@ -74,6 +74,6 @@ def test_block_no_task(workspace: Path):
 
 def test_status_shows_blocked(configured_app_with_task: Path):
     runner.invoke(app, ["block", "waiting on API key"])
-    result = runner.invoke(app, ["status"])
+    result = runner.invoke(app, ["status", "--task", "add-labels"])
     assert "BLOCKED" in result.output
     assert "waiting on API key" in result.output

@@ -1,3 +1,5 @@
+from typing import Optional
+
 import typer
 
 from mship.cli.output import Output
@@ -5,23 +7,78 @@ from mship.cli.output import Output
 
 def register(app: typer.Typer, get_container):
     @app.command()
-    def status():
-        """Show current phase, active task, worktrees, test results, drift, and recent activity."""
+    def status(
+        task: Optional[str] = typer.Option(
+            None, "--task", help="Target task (default: cwd/env)"
+        ),
+    ):
+        """Show status of a task (resolved from cwd/env/flag) or workspace summary."""
         from datetime import datetime, timezone
         from mship.util.duration import format_relative
+        from mship.cli._resolve import resolve_or_exit
+        from mship.core.task_resolver import (
+            AmbiguousTaskError, NoActiveTaskError, resolve_task,
+        )
+        import os
+        from pathlib import Path
 
         container = get_container()
         output = Output()
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
-        if state.current_task is None:
-            output.print("No active task")
-            if not output.is_tty:
-                output.json({"current_task": None, "tasks": {}})
+        t = None
+        if task is not None or os.environ.get("MSHIP_TASK"):
+            # Explicit target — resolve_or_exit shows friendly error on miss.
+            t = resolve_or_exit(state, task)
+        else:
+            try:
+                t = resolve_task(
+                    state, cli_task=None, env_task=None, cwd=Path.cwd(),
+                )
+            except (NoActiveTaskError, AmbiguousTaskError):
+                t = None
+
+        if t is None:
+            active = sorted(
+                state.tasks.values(),
+                key=lambda tt: (tt.phase_entered_at or tt.created_at),
+                reverse=True,
+            )
+            if output.is_tty:
+                if not active:
+                    output.print("No active tasks. Run `mship spawn \"description\"`.")
+                else:
+                    output.print(f"[bold]Active tasks ({len(active)}):[/bold]")
+                    for tt in active:
+                        phase_rel = (
+                            format_relative(tt.phase_entered_at)
+                            if tt.phase_entered_at else "—"
+                        )
+                        output.print(
+                            f"  {tt.slug}  "
+                            f"phase={tt.phase} (entered {phase_rel})  "
+                            f"branch={tt.branch}"
+                        )
+            else:
+                output.json({
+                    "active_tasks": [
+                        {
+                            "slug": tt.slug,
+                            "phase": tt.phase,
+                            "branch": tt.branch,
+                            "phase_entered_at": (
+                                tt.phase_entered_at.isoformat()
+                                if tt.phase_entered_at else None
+                            ),
+                        }
+                        for tt in active
+                    ],
+                })
             return
 
-        task = state.tasks[state.current_task]
+        # Single-task detail — use `t` in place of state.tasks[state.current_task].
+        task_obj = t
 
         # Drift (local-only)
         drift_summary: dict = {"has_errors": False, "error_count": 0}
@@ -35,18 +92,17 @@ def register(app: typer.Typer, get_container):
             except Exception:
                 known = frozenset()
             report = audit_repos(
-                config, shell, names=task.affected_repos,
+                config, shell, names=task_obj.affected_repos,
                 known_worktree_paths=known, local_only=True,
             )
             errors = [i for r in report.repos for i in r.issues if i.severity == "error"]
             drift_summary = {"has_errors": bool(errors), "error_count": len(errors)}
         except Exception:
-            pass  # drift line simply omitted on failure
+            pass
 
-        # Last log
         last_log: dict | None = None
         try:
-            entries = container.log_manager().read(task.slug, last=1)
+            entries = container.log_manager().read(task_obj.slug, last=1)
             if entries:
                 e = entries[-1]
                 first_line = e.message.splitlines()[0] if e.message else ""
@@ -55,31 +111,31 @@ def register(app: typer.Typer, get_container):
             last_log = None
 
         if output.is_tty:
-            output.print(f"[bold]Task:[/bold] {task.slug}")
-            if task.finished_at is not None:
+            output.print(f"[bold]Task:[/bold] {task_obj.slug}")
+            if task_obj.finished_at is not None:
                 output.print(
-                    f"[yellow]⚠ Finished:[/yellow] {format_relative(task.finished_at)} — run `mship close` after merge"
+                    f"[yellow]⚠ Finished:[/yellow] {format_relative(task_obj.finished_at)} — run `mship close` after merge"
                 )
-            if task.active_repo is not None:
-                output.print(f"[bold]Active repo:[/bold] {task.active_repo}")
-            phase_str = task.phase
-            if task.phase_entered_at is not None:
-                rel = format_relative(task.phase_entered_at)
-                phase_str = f"{task.phase} (entered {rel})"
-            if task.blocked_reason:
-                phase_str = f"{phase_str}  [red]BLOCKED:[/red] {task.blocked_reason}"
+            if task_obj.active_repo is not None:
+                output.print(f"[bold]Active repo:[/bold] {task_obj.active_repo}")
+            phase_str = task_obj.phase
+            if task_obj.phase_entered_at is not None:
+                rel = format_relative(task_obj.phase_entered_at)
+                phase_str = f"{task_obj.phase} (entered {rel})"
+            if task_obj.blocked_reason:
+                phase_str = f"{phase_str}  [red]BLOCKED:[/red] {task_obj.blocked_reason}"
             output.print(f"[bold]Phase:[/bold] {phase_str}")
-            if task.blocked_at:
-                output.print(f"[bold]Blocked since:[/bold] {task.blocked_at}")
-            output.print(f"[bold]Branch:[/bold] {task.branch}")
-            output.print(f"[bold]Repos:[/bold] {', '.join(task.affected_repos)}")
-            if task.worktrees:
+            if task_obj.blocked_at:
+                output.print(f"[bold]Blocked since:[/bold] {task_obj.blocked_at}")
+            output.print(f"[bold]Branch:[/bold] {task_obj.branch}")
+            output.print(f"[bold]Repos:[/bold] {', '.join(task_obj.affected_repos)}")
+            if task_obj.worktrees:
                 output.print("[bold]Worktrees:[/bold]")
-                for repo, path in task.worktrees.items():
+                for repo, path in task_obj.worktrees.items():
                     output.print(f"  {repo}: {path}")
-            if task.test_results:
+            if task_obj.test_results:
                 output.print("[bold]Tests:[/bold]")
-                for repo, result in task.test_results.items():
+                for repo, result in task_obj.test_results.items():
                     status_str = (
                         "[green]pass[/green]" if result.status == "pass"
                         else "[red]fail[/red]"
@@ -95,11 +151,11 @@ def register(app: typer.Typer, get_container):
                 ts_rel = format_relative(last_log["timestamp"])
                 output.print(f"[bold]Last log:[/bold] \"{last_log['message']}\" ({ts_rel})")
         else:
-            data = task.model_dump(mode="json")
-            data["active_repo"] = task.active_repo
-            if task.blocked_reason:
-                data["phase_display"] = f"{task.phase} (BLOCKED: {task.blocked_reason})"
-            if task.finished_at is not None:
+            data = task_obj.model_dump(mode="json")
+            data["active_repo"] = task_obj.active_repo
+            if task_obj.blocked_reason:
+                data["phase_display"] = f"{task_obj.phase} (BLOCKED: {task_obj.blocked_reason})"
+            if task_obj.finished_at is not None:
                 data["close_hint"] = "mship close"
             data["drift"] = drift_summary
             data["last_log"] = (
