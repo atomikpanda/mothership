@@ -41,8 +41,7 @@ def register(app: typer.Typer, get_container):
         output = Output()
         container = get_container()
         state = container.state_manager().load()
-        state_dir = Path(container.config_path()).parent / ".mothership"
-        cache = ReconcileCache(state_dir)
+        cache = ReconcileCache(container.state_dir())
 
         if clear_ignores:
             cache.clear_ignores()
