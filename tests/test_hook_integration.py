@@ -64,7 +64,6 @@ def test_install_hooks_is_idempotent(workspace_for_hooks):
 
 def test_commit_outside_task_worktree_refused(workspace_for_hooks):
     """End-to-end: spawn creates a worktree; a commit in the main checkout is refused."""
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     tmp_path, repo = workspace_for_hooks
     runner.invoke(app, ["init", "--install-hooks"])
     r = runner.invoke(app, ["spawn", "add avatars", "--repos", "cli", "--force-audit", "--skip-setup"])
@@ -156,7 +155,6 @@ def test_post_checkout_warns_on_rogue_branch(workspace_for_hooks):
 
 def test_post_commit_auto_logs_in_worktree(workspace_for_hooks):
     """A commit inside a task worktree triggers an auto-log entry."""
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     tmp_path, repo = workspace_for_hooks
     runner.invoke(app, ["init", "--install-hooks"])
     spawn_result = runner.invoke(
@@ -186,3 +184,99 @@ def test_post_commit_auto_logs_in_worktree(workspace_for_hooks):
     assert auto
     assert "auto logged" in auto[-1].message
     assert auto[-1].repo == "cli"
+
+
+# ---------- Multi-task commit scenarios ----------
+
+def _spawn_two_tasks(tmp_path: Path, repo: Path):
+    """Helper: spawn two active tasks (task-a, task-b); return their worktrees."""
+    from mship.core.state import StateManager
+
+    runner.invoke(app, ["init", "--install-hooks"])
+    r1 = runner.invoke(
+        app, ["spawn", "task a", "--repos", "cli", "--force-audit", "--skip-setup"],
+    )
+    assert r1.exit_code == 0, r1.output
+    r2 = runner.invoke(
+        app, ["spawn", "task b", "--repos", "cli", "--force-audit", "--skip-setup"],
+    )
+    assert r2.exit_code == 0, r2.output
+
+    state = StateManager(tmp_path / ".mothership").load()
+    assert "task-a" in state.tasks
+    assert "task-b" in state.tasks
+    wt_a = Path(state.tasks["task-a"].worktrees["cli"])
+    wt_b = Path(state.tasks["task-b"].worktrees["cli"])
+    assert wt_a.exists()
+    assert wt_b.exists()
+    return wt_a, wt_b
+
+
+def test_commit_in_task_a_worktree_allowed_with_two_tasks(workspace_for_hooks):
+    tmp_path, repo = workspace_for_hooks
+    wt_a, _wt_b = _spawn_two_tasks(tmp_path, repo)
+
+    (wt_a / "a.py").write_text("a\n")
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "add", "a.py"], cwd=wt_a, check=True, capture_output=True, env=env)
+    result = subprocess.run(
+        ["git", "commit", "-m", "from task a"],
+        cwd=wt_a, capture_output=True, text=True, env=env,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+
+
+def test_commit_in_task_b_worktree_allowed_with_two_tasks(workspace_for_hooks):
+    tmp_path, repo = workspace_for_hooks
+    _wt_a, wt_b = _spawn_two_tasks(tmp_path, repo)
+
+    (wt_b / "b.py").write_text("b\n")
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "add", "b.py"], cwd=wt_b, check=True, capture_output=True, env=env)
+    result = subprocess.run(
+        ["git", "commit", "-m", "from task b"],
+        cwd=wt_b, capture_output=True, text=True, env=env,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+
+
+def test_commit_in_main_checkout_rejected_with_two_tasks(workspace_for_hooks):
+    tmp_path, repo = workspace_for_hooks
+    wt_a, wt_b = _spawn_two_tasks(tmp_path, repo)
+
+    (repo / "rogue.py").write_text("x\n")
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    _git(repo, "add", "rogue.py")
+    result = subprocess.run(
+        ["git", "commit", "-m", "should refuse"],
+        cwd=repo, capture_output=True, text=True, env=env,
+    )
+    assert result.returncode != 0, (result.stdout, result.stderr)
+    # Stderr should mention both worktrees + both task slugs
+    assert str(wt_a.resolve()) in result.stderr
+    assert str(wt_b.resolve()) in result.stderr
+    assert "task-a" in result.stderr
+    assert "task-b" in result.stderr
+
+
+def test_commit_in_main_checkout_allowed_with_zero_tasks(workspace_for_hooks):
+    tmp_path, repo = workspace_for_hooks
+    runner.invoke(app, ["init", "--install-hooks"])
+    # No spawn calls — state has no active tasks.
+
+    (repo / "free.py").write_text("x\n")
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    _git(repo, "add", "free.py")
+    result = subprocess.run(
+        ["git", "commit", "-m", "should allow (no tasks)"],
+        cwd=repo, capture_output=True, text=True, env=env,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)

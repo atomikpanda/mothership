@@ -15,7 +15,7 @@ def _seed(state_dir: Path, task: Task | None = None):
     if task is None:
         sm.save(WorkspaceState())
     else:
-        sm.save(WorkspaceState(current_task=task.slug, tasks={task.slug: task}))
+        sm.save(WorkspaceState(tasks={task.slug: task}))
 
 
 def test_check_commit_no_state_file_exits_zero(tmp_path):
@@ -32,7 +32,7 @@ def test_check_commit_no_state_file_exits_zero(tmp_path):
         container.state_manager.reset()
 
 
-def test_check_commit_no_active_task_exits_zero(tmp_path):
+def test_check_commit_no_active_tasks_exits_zero(tmp_path):
     container.config_path.override(tmp_path / "mothership.yaml")
     container.state_dir.override(tmp_path / ".mothership")
     (tmp_path / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
