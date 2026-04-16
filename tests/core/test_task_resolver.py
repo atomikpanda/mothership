@@ -81,6 +81,25 @@ def test_two_tasks_no_anchor_raises_ambiguous(tmp_path: Path):
     assert exc.value.active == ["A", "B"]
 
 
+def test_one_task_no_anchor_auto_resolves(tmp_path: Path):
+    """With exactly one active task and no anchor, use it — no ambiguity."""
+    state = WorkspaceState(tasks={"only": _task("only", {})})
+    t = resolve_task(state, cli_task=None, env_task=None, cwd=tmp_path)
+    assert t.slug == "only"
+
+
+def test_three_tasks_no_anchor_still_raises_ambiguous(tmp_path: Path):
+    """Auto-resolve is ONLY for exactly one task."""
+    state = WorkspaceState(tasks={
+        "A": _task("A", {}),
+        "B": _task("B", {}),
+        "C": _task("C", {}),
+    })
+    with pytest.raises(AmbiguousTaskError) as exc:
+        resolve_task(state, cli_task=None, env_task=None, cwd=tmp_path)
+    assert exc.value.active == ["A", "B", "C"]
+
+
 def test_flag_beats_env_beats_cwd(tmp_path: Path):
     wtA = tmp_path / "A_wt"; wtA.mkdir()
     state = WorkspaceState(tasks={
