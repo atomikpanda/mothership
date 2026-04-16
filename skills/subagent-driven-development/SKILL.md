@@ -13,12 +13,21 @@ Execute plan by dispatching fresh subagent per task, with two-stage review after
 
 **If this is a mothership workspace** (i.e. there's a `mothership.yaml` at the
 repo root or any ancestor): before dispatching ANY implementer subagent, verify
-there is an active mship task with a worktree. Run `mship status`. If
-`current_task` is null, stop — tell the user to `mship spawn "<description>"`
-first, then pass the worktree path (from `task.worktrees.<repo>`) as `Work from:`
-in every implementer prompt. Subagents work and commit inside that worktree,
-never on `main`. This is what keeps worktree isolation intact across the whole
-plan execution. See `./implementer-prompt.md` for the full pre-dispatch checklist.
+there is an active mship task with a worktree. Run `mship status`.
+
+- If the output is `{"active_tasks": []}`, no tasks exist — stop and tell the
+  user to `mship spawn "<description>"` first.
+- If the output is `{"active_tasks": [...]}` with a non-empty list, multiple
+  tasks are active and no single one is anchored. Pick one with the user and
+  pass `--task <slug>` (or set `MSHIP_TASK=<slug>`) on every subsequent mship
+  command, then `cd` into that task's worktree before dispatching.
+- Otherwise `mship status` returns the resolved task's detail directly (keys
+  like `slug`, `phase`, `branch`, `worktrees`, …). Use `worktrees.<repo>` as
+  `Work from:` in every implementer prompt.
+
+Subagents work and commit inside that worktree, never on `main`. This is what
+keeps worktree isolation intact across the whole plan execution. See
+`./implementer-prompt.md` for the full pre-dispatch checklist.
 
 ## When to Use
 

@@ -328,7 +328,14 @@ Mothership pairs well with:
 Mothership outputs JSON automatically when stdout isn't a TTY:
 
 ```bash
-mship status | jq .phase
+# If you're inside a task's worktree or have MSHIP_TASK set,
+# `mship status` returns the resolved task's detail:
+mship status | jq -r .phase
+
+# With 0 or 2+ active tasks and no anchor, `mship status` returns a
+# workspace summary instead; use this to list active task slugs:
+mship status | jq '.active_tasks[].slug'
+
 mship journal | jq '.entries[].message'
 mship graph | jq '.order'
 ```
