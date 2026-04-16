@@ -181,6 +181,36 @@ async def test_status_view_stacks_all_tasks(monkeypatch, tmp_path: Path):
     assert "Task:   b" in text
 
 
+def test_status_view_gather_reflects_state_changes(tmp_path):
+    """Ensure StatusView.gather() reads fresh state each call (post-close refresh)."""
+    from mship.cli.view.status import StatusView
+    from mship.core.state import StateManager, WorkspaceState, Task
+    from datetime import datetime, timezone
+
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    sm = StateManager(state_dir)
+
+    # Save: one active task.
+    task = Task(
+        slug="a", description="a", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["r"], worktrees={}, branch="feat/a", base_branch="main",
+    )
+    sm.save(WorkspaceState(tasks={"a": task}, current_task="a"))
+
+    view = StatusView(state_manager=sm, workspace_root=tmp_path, task_filter=None)
+    before = view.gather()
+    assert "Task:   a" in before
+
+    # Simulate close — remove task, clear current_task.
+    sm.save(WorkspaceState(tasks={}, current_task=None))
+
+    after = view.gather()
+    assert "No tasks" in after
+    assert "Task:   a" not in after
+
+
 def test_status_cli_rejects_unknown_task(tmp_path: Path):
     runner = CliRunner()
     state_dir = tmp_path / ".mothership"
