@@ -121,6 +121,30 @@ class PRManager:
             return False
         return bool(result.stdout.strip())
 
+    def get_merge_commit(self, pr_url: str) -> str | None:
+        """Return the integration-side commit SHA for a merged PR, or None.
+
+        Works for merge / squash / rebase styles — gh stores the resulting
+        commit on the base branch in `mergeCommit.oid` regardless of style.
+        Returns None on any failure (PR not merged, gh down, parse error).
+        """
+        result = self._shell.run(
+            f"gh pr view {shlex.quote(pr_url)} --json mergeCommit -q .mergeCommit.oid",
+            cwd=Path("."),
+        )
+        if result.returncode != 0:
+            return None
+        sha = result.stdout.strip()
+        return sha or None
+
+    def fetch_remote_branch(self, repo_path: Path, base: str) -> bool:
+        """Refresh `origin/<base>` from the remote. False on network/auth failure."""
+        result = self._shell.run(
+            f"git fetch origin {shlex.quote(base)}",
+            cwd=repo_path,
+        )
+        return result.returncode == 0
+
     def check_pr_state(self, pr_url: str) -> str:
         """Return 'merged', 'closed', 'open', or 'unknown' for a PR URL.
 

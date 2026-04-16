@@ -198,6 +198,10 @@ def register(app: typer.Typer, get_container):
         abandon: bool = typer.Option(False, "--abandon", help="Close without finishing (discard PR flow)"),
         skip_pr_check: bool = typer.Option(False, "--skip-pr-check", help="Do not call gh; close regardless of PR state"),
         bypass_reconcile: bool = typer.Option(False, "--bypass-reconcile", help="Skip upstream PR drift check"),
+        bypass_base_ancestry: bool = typer.Option(
+            False, "--bypass-base-ancestry",
+            help="Skip the check that merged PR commits actually reached the base branch",
+        ),
         task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
     ):
         """Close a task: check PR state, tear down worktrees, clear state."""
@@ -313,10 +317,76 @@ def register(app: typer.Typer, get_container):
         else:
             log_msg = "closed: pr state unknown"
 
+        # --- Base-ancestry check (issue #33) ---
+        # Catches stacked-PR footgun: PR shows MERGED but its merge commit
+        # was actually integrated into another feat branch that later closed
+        # without merging — so the work never reached the configured base.
+        bypassed_base_ancestry = False
+        if merged_count and not skip_pr_check and not force and not bypass_base_ancestry:
+            from mship.core.base_resolver import resolve_base
+            not_reachable: list[tuple[str, str, str, str]] = []  # (repo, url, sha, base)
+            unverified: list[tuple[str, str]] = []  # (repo, url)
+            for (repo_name, url), state_val in zip(task.pr_urls.items(), pr_states):
+                if state_val != "merged":
+                    continue
+                wt = task.worktrees.get(repo_name)
+                if wt is None:
+                    continue
+                wt_path = Path(wt)
+                if not wt_path.exists():
+                    continue
+                eff_base = resolve_base(
+                    repo_name, config.repos[repo_name],
+                    cli_base=None, base_map={}, known_repos=config.repos.keys(),
+                )
+                if eff_base is None:
+                    eff_base = "main"
+                merge_sha = pr_mgr.get_merge_commit(url)
+                if merge_sha is None:
+                    unverified.append((repo_name, url))
+                    continue
+                if not pr_mgr.fetch_remote_branch(wt_path, eff_base):
+                    output.warning(
+                        f"could not fetch origin/{eff_base} for {repo_name}; "
+                        f"ancestry check uses possibly-stale ref"
+                    )
+                if not pr_mgr.check_merged_into_base(
+                    wt_path, merge_sha, f"origin/{eff_base}"
+                ):
+                    not_reachable.append((repo_name, url, merge_sha, eff_base))
+
+            if not_reachable:
+                output.error("Cannot close: merged PR commits are NOT in the base branch.")
+                for repo_name, url, sha, base in not_reachable:
+                    output.error(f"  {repo_name}: {url}")
+                    output.error(f"    merge commit {sha[:8]} not reachable from origin/{base}")
+                    output.error(
+                        "    PR may have merged into a stacked base that was later closed."
+                    )
+                output.error("")
+                output.error("Options:")
+                output.error("  - run `mship reconcile` for full upstream state")
+                output.error("  - rebase/cherry-pick the missing commits onto the base manually")
+                output.error(
+                    "  - `mship close --bypass-base-ancestry` to close anyway "
+                    "(the commits will not be tracked)"
+                )
+                raise typer.Exit(code=1)
+
+            for repo_name, url in unverified:
+                output.warning(
+                    f"could not verify base ancestry for {repo_name} ({url}): "
+                    f"gh did not return a merge commit; proceeding"
+                )
+        elif merged_count and bypass_base_ancestry:
+            bypassed_base_ancestry = True
+
         # Append (forced) marker when --force bypassed finish/recovery gates.
         if force and (task.finished_at is None or had_unrecoverable):
             if "(forced)" not in log_msg:
                 log_msg = log_msg + " (forced)"
+        if bypassed_base_ancestry and "(forced base-ancestry bypass)" not in log_msg:
+            log_msg = log_msg + " (forced base-ancestry bypass)"
 
         if not yes and output.is_tty:
             from InquirerPy import inquirer
