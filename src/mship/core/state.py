@@ -6,6 +6,10 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel
 
+import fcntl
+from contextlib import contextmanager
+from typing import Callable
+
 
 class TestResult(BaseModel):
     status: Literal["pass", "fail", "skip"]
@@ -37,14 +41,32 @@ class WorkspaceState(BaseModel):
     tasks: dict[str, Task] = {}
 
 
+@contextmanager
+def _locked(state_dir: Path, mode: int):
+    """Advisory lock on `<state_dir>/state.lock`.
+
+    mode: fcntl.LOCK_SH (shared read) or fcntl.LOCK_EX (exclusive write).
+    Released when the context exits.
+    """
+    lock_path = state_dir / "state.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.touch(exist_ok=True)
+    with open(lock_path, "r+") as lf:
+        fcntl.flock(lf, mode)
+        try:
+            yield
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+
+
 class StateManager:
-    """Read/write .mothership/state.yaml with atomic writes."""
+    """Read/write .mothership/state.yaml with atomic writes + flock."""
 
     def __init__(self, state_dir: Path) -> None:
         self._state_dir = state_dir
         self._state_file = state_dir / "state.yaml"
 
-    def load(self) -> WorkspaceState:
+    def _load_nolock(self) -> WorkspaceState:
         if not self._state_file.exists():
             return WorkspaceState()
         with open(self._state_file) as f:
@@ -53,15 +75,13 @@ class StateManager:
             return WorkspaceState()
         return WorkspaceState(**raw)
 
-    def save(self, state: WorkspaceState) -> None:
+    def _save_nolock(self, state: WorkspaceState) -> None:
         self._state_dir.mkdir(parents=True, exist_ok=True)
         data = state.model_dump(mode="json")
-        # Convert Path objects to strings for YAML
         for task in data.get("tasks", {}).values():
             task["worktrees"] = {
                 k: str(v) for k, v in task.get("worktrees", {}).items()
             }
-        # Atomic write: write to temp, rename
         fd, tmp_path = tempfile.mkstemp(
             dir=self._state_dir, suffix=".yaml.tmp"
         )
@@ -73,7 +93,24 @@ class StateManager:
             Path(tmp_path).unlink(missing_ok=True)
             raise
 
+    def load(self) -> WorkspaceState:
+        with _locked(self._state_dir, fcntl.LOCK_SH):
+            return self._load_nolock()
+
+    def save(self, state: WorkspaceState) -> None:
+        with _locked(self._state_dir, fcntl.LOCK_EX):
+            self._save_nolock(state)
+
+    def mutate(self, fn: "Callable[[WorkspaceState], None]") -> WorkspaceState:
+        """Read-modify-write under one exclusive lock. No lost updates."""
+        with _locked(self._state_dir, fcntl.LOCK_EX):
+            state = self._load_nolock()
+            fn(state)
+            self._save_nolock(state)
+            return state
+
     def get_current_task(self) -> Task | None:
+        """Legacy accessor — kept transitionally; callers migrate to resolve_task."""
         state = self.load()
         if state.current_task is None:
             return None
