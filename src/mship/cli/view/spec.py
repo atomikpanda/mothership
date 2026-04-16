@@ -97,9 +97,9 @@ class SpecView(ViewApp):
             return f"# {default_error}\n"
 
         task = self._state.tasks[slug]
-        phase = getattr(task, "phase", "?")
-        branch = getattr(task, "branch", "?")
-        description = getattr(task, "description", "") or "_(no description)_"
+        phase = task.phase
+        branch = task.branch
+        description = task.description or "_(no description)_"
 
         lines: list[str] = [
             f"# No spec yet for task `{slug}`",
