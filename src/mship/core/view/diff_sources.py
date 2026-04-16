@@ -133,10 +133,58 @@ def split_diff_by_file(combined: str) -> list[FileDiff]:
     return [_parse_one_chunk(c) for c in chunks if c.strip()]
 
 
-def collect_worktree_diff(worktree: Path) -> WorktreeDiff:
+def _committed_diff(worktree: Path, base_branch: str) -> str:
+    """`git diff <merge-base>...HEAD` — commits on HEAD not in base_branch."""
+    try:
+        mb = subprocess.run(
+            ["git", "merge-base", base_branch, "HEAD"],
+            cwd=worktree, check=True, capture_output=True,
+        ).stdout.decode("utf-8", errors="replace").strip()
+    except subprocess.CalledProcessError:
+        return ""
+    if not mb:
+        return ""
+    result = subprocess.run(
+        ["git", "diff", f"{mb}..HEAD"],
+        cwd=worktree, check=True, capture_output=True,
+    )
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+def _merge_file_diffs(
+    committed: list[FileDiff], uncommitted: list[FileDiff]
+) -> list[FileDiff]:
+    """Merge per-file diffs. Files in both get additions/deletions summed and
+    bodies concatenated with a `-- uncommitted --` separator."""
+    by_path: dict[str, FileDiff] = {f.path: f for f in committed}
+    for u in uncommitted:
+        if u.path in by_path:
+            c = by_path[u.path]
+            body = c.body.rstrip("\n") + "\n-- uncommitted --\n" + u.body
+            by_path[u.path] = FileDiff(
+                path=u.path,
+                additions=c.additions + u.additions,
+                deletions=c.deletions + u.deletions,
+                body=body,
+            )
+        else:
+            by_path[u.path] = u
+    return list(by_path.values())
+
+
+def collect_worktree_diff(
+    worktree: Path, base_branch: str | None = None
+) -> WorktreeDiff:
     tracked = _tracked_diff(worktree)
     untracked_paths = _list_untracked(worktree)
     synthesized = "".join(synthesize_untracked_diff(worktree, p) for p in untracked_paths)
-    combined = tracked + synthesized
-    files = tuple(split_diff_by_file(combined))
-    return WorktreeDiff(root=worktree, files=files)
+    uncommitted_combined = tracked + synthesized
+    uncommitted_files = split_diff_by_file(uncommitted_combined)
+
+    if base_branch is None:
+        return WorktreeDiff(root=worktree, files=tuple(uncommitted_files))
+
+    committed_combined = _committed_diff(worktree, base_branch)
+    committed_files = split_diff_by_file(committed_combined)
+    merged = _merge_file_diffs(committed_files, uncommitted_files)
+    return WorktreeDiff(root=worktree, files=tuple(merged))
