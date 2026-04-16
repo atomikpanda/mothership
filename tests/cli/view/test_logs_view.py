@@ -26,7 +26,6 @@ class _FakeLogMgr:
 
 class _FakeState:
     def __init__(self, slug):
-        self.current_task = slug
         self.tasks = {slug: None} if slug else {}
 
 
@@ -47,7 +46,7 @@ async def test_logs_view_renders_entries():
     view = LogsView(
         state_manager=_FakeStateMgr(),
         log_manager=_FakeLogMgr(entries),
-        task_slug=None,
+        task_slug="t1",
         watch=False,
         interval=1.0,
     )
@@ -99,7 +98,7 @@ async def test_logs_view_scopes_to_active_repo():
     view = LogsView(
         state_manager=_FakeStateMgr(),
         log_manager=_FakeLogMgr(entries),
-        task_slug=None,
+        task_slug="t1",
         scope_to_repo="cli",
         watch=False,
         interval=1.0,
@@ -124,7 +123,7 @@ async def test_logs_view_scope_none_shows_all():
     view = LogsView(
         state_manager=_FakeStateMgr(),
         log_manager=_FakeLogMgr(entries),
-        task_slug=None,
+        task_slug="t1",
         scope_to_repo=None,
         watch=False,
         interval=1.0,
@@ -150,7 +149,7 @@ def test_logs_cli_rejects_unknown_task(tmp_path):
     state_dir.mkdir()
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text("workspace: t\nrepos: {}\n")
-    StateManager(state_dir).save(WorkspaceState(tasks={}, current_task=None))
+    StateManager(state_dir).save(WorkspaceState(tasks={}))
 
     container.config.reset()
     container.state_manager.reset()

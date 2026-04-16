@@ -177,7 +177,6 @@ class WorktreeManager:
 
         def _apply(s: WorkspaceState) -> None:
             s.tasks[slug] = task
-            # DO NOT set s.current_task — task resolution now uses cwd/env/flag
         self._state_manager.mutate(_apply)
 
         self._log.create(slug)
@@ -218,8 +217,6 @@ class WorktreeManager:
 
         # Only update state after all cleanup attempts
         del state.tasks[task_slug]
-        if state.current_task == task_slug:
-            state.current_task = None
         self._state_manager.save(state)
 
     def list_worktrees(self) -> dict[str, dict[str, Path]]:

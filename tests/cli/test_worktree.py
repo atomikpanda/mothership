@@ -57,13 +57,11 @@ def configured_git_app(workspace_with_git: Path):
 
 
 def test_spawn(configured_git_app: Path):
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     result = runner.invoke(app, ["spawn", "add labels to tasks", "--repos", "shared"])
     assert result.exit_code == 0, result.output
     mgr = StateManager(configured_git_app / ".mothership")
     state = mgr.load()
     assert "add-labels-to-tasks" in state.tasks
-    assert state.current_task == "add-labels-to-tasks"
 
 
 def test_spawn_all_repos(configured_git_app: Path):
@@ -96,7 +94,6 @@ def test_close_with_no_prs_cancelled_before_finish(configured_git_app):
 
     sm = StateManager(configured_git_app / ".mothership")
     state = WorkspaceState(
-        current_task="t",
         tasks={"t": Task(
             slug="t", description="d", phase="dev",
             created_at=datetime.now(timezone.utc),
@@ -130,7 +127,6 @@ def test_close_with_all_merged_prs(configured_git_app):
 
     sm = StateManager(configured_git_app / ".mothership")
     state = WorkspaceState(
-        current_task="t",
         tasks={"t": Task(
             slug="t", description="d", phase="review",
             created_at=datetime.now(timezone.utc),
@@ -166,7 +162,6 @@ def test_close_with_open_pr_refuses_without_force(configured_git_app):
 
     sm = StateManager(configured_git_app / ".mothership")
     state = WorkspaceState(
-        current_task="t",
         tasks={"t": Task(
             slug="t", description="d", phase="review",
             created_at=datetime.now(timezone.utc),
@@ -203,7 +198,6 @@ def test_close_with_open_pr_proceeds_under_force(configured_git_app):
 
     sm = StateManager(configured_git_app / ".mothership")
     state = WorkspaceState(
-        current_task="t",
         tasks={"t": Task(
             slug="t", description="d", phase="review",
             created_at=datetime.now(timezone.utc),
@@ -355,7 +349,7 @@ def test_close_refuses_when_not_finished_without_abandon(configured_git_app):
 
     sm = StateManager(configured_git_app / ".mothership")
     task = _build_close_task(finished=False)
-    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+    sm.save(WorkspaceState(tasks={"t": task}))
 
     r = CliRunner().invoke(_app, ["close", "--yes", "--task", "t"])
     assert r.exit_code != 0
@@ -375,7 +369,7 @@ def test_close_abandon_proceeds_when_no_commits(configured_git_app):
 
     sm = StateManager(configured_git_app / ".mothership")
     task = _build_close_task(finished=False)
-    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+    sm.save(WorkspaceState(tasks={"t": task}))
 
     mock_shell = MagicMock(spec=ShellRunner)
     # count_commits_ahead returns 0 → no commits past base → recovery check passes trivially
@@ -406,7 +400,7 @@ def test_close_abandon_refuses_when_unrecoverable(configured_git_app):
         finished=False,
         worktrees={"shared": configured_git_app / "shared"},
     )
-    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+    sm.save(WorkspaceState(tasks={"t": task}))
 
     def mock_run(cmd, cwd, env=None):
         if "git rev-list --count" in cmd:
@@ -446,7 +440,7 @@ def test_close_force_bypasses_recovery_check(configured_git_app):
         finished=False,
         worktrees={"shared": configured_git_app / "shared"},
     )
-    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+    sm.save(WorkspaceState(tasks={"t": task}))
 
     def mock_run(cmd, cwd, env=None):
         if "git rev-list --count" in cmd:
@@ -485,7 +479,7 @@ def test_close_abandon_proceeds_when_merged(configured_git_app):
         finished=False,
         worktrees={"shared": configured_git_app / "shared"},
     )
-    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+    sm.save(WorkspaceState(tasks={"t": task}))
 
     def mock_run(cmd, cwd, env=None):
         if "git rev-list --count" in cmd:
@@ -549,7 +543,7 @@ def test_close_abandon_proceeds_when_pushed(configured_git_app):
         finished=False,
         worktrees={"shared": configured_git_app / "shared"},
     )
-    sm.save(WorkspaceState(current_task="t", tasks={"t": task}))
+    sm.save(WorkspaceState(tasks={"t": task}))
 
     def mock_run(cmd, cwd, env=None):
         if "git rev-list --count" in cmd:

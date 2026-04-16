@@ -13,7 +13,7 @@ runner = CliRunner()
 
 def _seed(path, task: Task):
     sm = StateManager(path / ".mothership")
-    sm.save(WorkspaceState(current_task=task.slug, tasks={task.slug: task}))
+    sm.save(WorkspaceState(tasks={task.slug: task}))
 
 
 @pytest.fixture
@@ -51,7 +51,7 @@ def test_status_with_task(configured_app, workspace: Path):
         affected_repos=["shared", "auth-service"],
         branch="feat/add-labels",
     )
-    mgr.save(WorkspaceState(current_task="add-labels", tasks={"add-labels": task}))
+    mgr.save(WorkspaceState(tasks={"add-labels": task}))
 
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0

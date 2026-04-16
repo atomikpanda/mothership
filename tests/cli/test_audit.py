@@ -87,7 +87,6 @@ def test_audit_ignores_task_worktree(audit_workspace, tmp_path):
     state_dir = audit_workspace / ".mothership"
     state_dir.mkdir(exist_ok=True)
     state_data = {
-        "current_task": "t1",
         "tasks": {
             "t1": {
                 "slug": "t1",

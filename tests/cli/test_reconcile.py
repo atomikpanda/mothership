@@ -33,7 +33,7 @@ def _bootstrap(tmp_path: Path, slugs: list[str]) -> tuple[Path, Path]:
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text("workspace: t\nrepos: {}\n")
     tasks = {s: _task(s) for s in slugs}
-    StateManager(state_dir).save(WorkspaceState(tasks=tasks, current_task=None))
+    StateManager(state_dir).save(WorkspaceState(tasks=tasks))
     return cfg, state_dir
 
 
@@ -141,7 +141,7 @@ def _bootstrap_with_current(tmp_path: Path, slug: str) -> tuple[Path, Path]:
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text("workspace: t\nrepos: {}\n")
     task = _task(slug)
-    StateManager(state_dir).save(WorkspaceState(tasks={slug: task}, current_task=slug))
+    StateManager(state_dir).save(WorkspaceState(tasks={slug: task}))
     return cfg, state_dir
 
 

@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 import fcntl
 from contextlib import contextmanager
@@ -37,7 +37,9 @@ class Task(BaseModel):
 
 
 class WorkspaceState(BaseModel):
-    current_task: str | None = None
+    # extra="ignore" lets legacy state.yaml with `current_task:` load cleanly
+    # (the field is silently dropped during the multi-task migration).
+    model_config = ConfigDict(extra="ignore")
     tasks: dict[str, Task] = {}
 
 
@@ -108,10 +110,3 @@ class StateManager:
             fn(state)
             self._save_nolock(state)
             return state
-
-    def get_current_task(self) -> Task | None:
-        """Legacy accessor — kept transitionally; callers migrate to resolve_task."""
-        state = self.load()
-        if state.current_task is None:
-            return None
-        return state.tasks.get(state.current_task)

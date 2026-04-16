@@ -86,13 +86,10 @@ class SpecView(ViewApp):
     def _render_task_fallback(self, default_error: str) -> str:
         """Build a markdown document for the 'no spec yet' case.
 
-        Uses the active task slug (from `task` filter or `state.current_task`)
-        to pull the task description and most recent journal entries.
-        Returns `None`-equivalent fallback (just the error) when no task can
-        be resolved — the caller decides what to do then."""
+        Uses the `task` filter (set by the CLI via `resolve_or_exit`) to pull
+        the task description and most recent journal entries. Returns just the
+        error when no task filter is set or no such task exists."""
         slug = self._task_filter
-        if slug is None and self._state is not None:
-            slug = getattr(self._state, "current_task", None)
         if slug is None or self._state is None or slug not in self._state.tasks:
             return f"# {default_error}\n"
 

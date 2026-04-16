@@ -30,7 +30,7 @@ def configured_exec_app(workspace: Path):
         affected_repos=["shared", "auth-service"],
         branch="feat/test-task",
     )
-    mgr.save(WorkspaceState(current_task="test-task", tasks={"test-task": task}))
+    mgr.save(WorkspaceState(tasks={"test-task": task}))
 
     mock_shell = MagicMock(spec=ShellRunner)
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok\n", stderr="")
@@ -175,7 +175,7 @@ repos:
         affected_repos=["shared", "auth-service", "api-gateway"],
         branch="feat/tag-test",
     )
-    mgr.save(WorkspaceState(current_task="tag-test", tasks={"tag-test": task}))
+    mgr.save(WorkspaceState(tasks={"tag-test": task}))
 
     mock_shell = MagicMock(spec=ShellRunner)
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok\n", stderr="")
@@ -222,7 +222,7 @@ repos:
         affected_repos=["shared"],
         branch="feat/bg-test",
     )
-    mgr.save(WorkspaceState(current_task="bg-test", tasks={"bg-test": task}))
+    mgr.save(WorkspaceState(tasks={"bg-test": task}))
 
     # Mock shell: run_streaming returns a Popen-like object that exits immediately
     mock_shell = MagicMock(spec=ShellRunner)
@@ -281,7 +281,7 @@ repos:
         affected_repos=["shared", "auth-service"],
         branch="feat/grp-test",
     )
-    mgr.save(WorkspaceState(current_task="grp-test", tasks={"grp-test": task}))
+    mgr.save(WorkspaceState(tasks={"grp-test": task}))
 
     # Mock shell: run_streaming succeeds, run_task fails on auth-service
     mock_shell = MagicMock(spec=ShellRunner)
@@ -342,7 +342,7 @@ repos:
         affected_repos=["shared", "auth-service"],
         branch="feat/summary-test",
     )
-    mgr.save(WorkspaceState(current_task="summary-test", tasks={"summary-test": task}))
+    mgr.save(WorkspaceState(tasks={"summary-test": task}))
 
     mock_shell = MagicMock(spec=ShellRunner)
     pids = [11111, 22222]
@@ -406,7 +406,7 @@ repos:
         affected_repos=["shared"],
         branch="feat/hc-summary-test",
     )
-    mgr.save(WorkspaceState(current_task="hc-summary-test", tasks={"hc-summary-test": task}))
+    mgr.save(WorkspaceState(tasks={"hc-summary-test": task}))
 
     mock_shell = MagicMock(spec=ShellRunner)
     popen_mock = MagicMock()
@@ -460,7 +460,7 @@ repos:
         affected_repos=["shared"],
         branch="feat/cleanup-test",
     )
-    mgr.save(WorkspaceState(current_task="cleanup-test", tasks={"cleanup-test": task}))
+    mgr.save(WorkspaceState(tasks={"cleanup-test": task}))
 
     mock_shell = MagicMock(spec=ShellRunner)
     popen_mock = MagicMock()

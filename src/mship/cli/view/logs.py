@@ -14,10 +14,10 @@ class LogsView(ViewApp):
         self._scope_to_repo = scope_to_repo
 
     def _resolve_slug(self) -> Optional[str]:
-        if self._task_slug is not None:
-            return self._task_slug
-        state = self._state_manager.load()
-        return state.current_task
+        # The CLI entry point always resolves the task via resolve_or_exit before
+        # constructing this view, so task_slug is expected to be set. Callers
+        # that omit it will see the empty-journal path below.
+        return self._task_slug
 
     def gather(self) -> str:
         slug = self._resolve_slug()

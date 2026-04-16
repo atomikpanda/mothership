@@ -77,7 +77,7 @@ def register(app: typer.Typer, get_container):
                 })
             return
 
-        # Single-task detail — use `t` in place of state.tasks[state.current_task].
+        # Single-task detail — `t` is the resolved task from resolve_or_exit.
         task_obj = t
 
         # Drift (local-only)

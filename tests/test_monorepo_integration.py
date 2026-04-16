@@ -114,7 +114,6 @@ def test_monorepo_spawn_shares_worktree(monorepo_workspace):
 
 
 def test_monorepo_close_cleans_up(monorepo_workspace):
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     tmp_path, mock_shell = monorepo_workspace
 
     runner.invoke(app, ["spawn", "cleanup test"])
@@ -122,14 +121,13 @@ def test_monorepo_close_cleans_up(monorepo_workspace):
     state = mgr.load()
     root_wt = Path(state.tasks["cleanup-test"].worktrees["tailrd"])
 
-    result = runner.invoke(app, ["close", "--yes", "--abandon"])
+    result = runner.invoke(app, ["close", "--yes", "--abandon", "--task", "cleanup-test"])
     assert result.exit_code == 0
 
     # The parent worktree is removed
     assert not root_wt.exists()
 
     state = mgr.load()
-    assert state.current_task is None
     assert "cleanup-test" not in state.tasks
 
 

@@ -27,7 +27,7 @@ def configured_app_with_task(workspace: Path):
         affected_repos=["shared"],
         branch="feat/add-labels",
     )
-    mgr.save(WorkspaceState(current_task="add-labels", tasks={"add-labels": task}))
+    mgr.save(WorkspaceState(tasks={"add-labels": task}))
 
     # Create the log file
     log_mgr = LogManager(state_dir / "logs")

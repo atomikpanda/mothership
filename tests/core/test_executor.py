@@ -34,7 +34,7 @@ def executor_deps(workspace: Path, mock_shell: MagicMock):
         affected_repos=["shared", "auth-service", "api-gateway"],
         branch="feat/test-task",
     )
-    state = WorkspaceState(current_task="test-task", tasks={"test-task": task})
+    state = WorkspaceState(tasks={"test-task": task})
     state_mgr.save(state)
 
     return config, graph, state_mgr, mock_shell
@@ -276,7 +276,7 @@ def test_execute_uses_worktree_path_when_available(workspace: Path):
         branch="feat/test-wt",
         worktrees={"shared": wt_dir},
     )
-    state = WorkspaceState(current_task="wt-test", tasks={"wt-test": task})
+    state = WorkspaceState(tasks={"wt-test": task})
     state_mgr.save(state)
 
     mock_shell = MagicMock(spec=ShellRunner)
@@ -339,7 +339,7 @@ repos:
             "backend": Path("/tmp/backend-wt"),
         },
     )
-    state = WorkspaceState(current_task="type-test", tasks={"type-test": task})
+    state = WorkspaceState(tasks={"type-test": task})
     state_mgr.save(state)
 
     mock_shell = MagicMock(spec=ShellRunner)

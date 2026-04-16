@@ -236,7 +236,6 @@ def switch_workspace(audit_workspace, tmp_path):
     state_dir.mkdir(exist_ok=True)
     sm = StateManager(state_dir)
     state = WorkspaceState(
-        current_task="t",
         tasks={"t": Task(
             slug="t", description="d", phase="dev",
             created_at=datetime.now(timezone.utc),

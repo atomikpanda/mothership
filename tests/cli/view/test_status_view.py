@@ -18,7 +18,6 @@ class _FakeTask:
 
 
 class _FakeState:
-    current_task = "t1"
     tasks = {"t1": _FakeTask()}
 
 
@@ -47,7 +46,6 @@ async def test_status_view_renders_task(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_status_view_no_active_task(tmp_path: Path):
     class _Empty:
-        current_task = None
         tasks = {}
 
     class _Mgr:
@@ -84,7 +82,6 @@ async def test_status_view_shows_finished_warning(tmp_path: Path):
         finished_at = datetime.now(timezone.utc) - timedelta(hours=2)
 
     class _State:
-        current_task = "t"
         tasks = {"t": _Task()}
 
     class _Mgr:
@@ -124,7 +121,6 @@ async def test_status_view_shows_active_repo(tmp_path: Path):
         active_repo = "a"
 
     class _State:
-        current_task = "t"
         tasks = {"t": _Task()}
 
     class _Mgr:
@@ -171,7 +167,7 @@ async def test_status_view_stacks_all_tasks(monkeypatch, tmp_path: Path):
 
     class FakeSM:
         def load(self):
-            return WorkspaceState(tasks={"a": _task("a"), "b": _task("b")}, current_task=None)
+            return WorkspaceState(tasks={"a": _task("a"), "b": _task("b")})
 
     view = StatusView(state_manager=FakeSM(), workspace_root=tmp_path, task_filter=None)
     async with view.run_test() as pilot:
@@ -197,14 +193,14 @@ def test_status_view_gather_reflects_state_changes(tmp_path):
         created_at=datetime.now(timezone.utc),
         affected_repos=["r"], worktrees={}, branch="feat/a", base_branch="main",
     )
-    sm.save(WorkspaceState(tasks={"a": task}, current_task="a"))
+    sm.save(WorkspaceState(tasks={"a": task}))
 
     view = StatusView(state_manager=sm, workspace_root=tmp_path, task_filter=None)
     before = view.gather()
     assert "Task:   a" in before
 
-    # Simulate close — remove task, clear current_task.
-    sm.save(WorkspaceState(tasks={}, current_task=None))
+    # Simulate close — remove task.
+    sm.save(WorkspaceState(tasks={}))
 
     after = view.gather()
     assert "No tasks" in after
@@ -217,7 +213,7 @@ def test_status_cli_rejects_unknown_task(tmp_path: Path):
     state_dir.mkdir()
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text("workspace: t\nrepos: {}\n")
-    StateManager(state_dir).save(WorkspaceState(tasks={}, current_task=None))
+    StateManager(state_dir).save(WorkspaceState(tasks={}))
 
     container.config.reset()
     container.state_manager.reset()

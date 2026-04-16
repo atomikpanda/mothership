@@ -62,7 +62,7 @@ def test_spec_cli_rejects_unknown_task(tmp_path, monkeypatch):
     state_dir.mkdir()
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text("workspace: t\nrepos: {}\n")
-    StateManager(state_dir).save(WorkspaceState(tasks={}, current_task=None))
+    StateManager(state_dir).save(WorkspaceState(tasks={}))
 
     container.config.reset()
     container.state_manager.reset()
@@ -110,7 +110,7 @@ def _stub_state_with_task(slug: str, description: str, phase: str, branch: str):
         base_branch="main",
         active_repo=None,
     )
-    state = WorkspaceState(tasks={slug: task}, current_task=slug)
+    state = WorkspaceState(tasks={slug: task})
     return state
 
 
@@ -203,8 +203,8 @@ async def test_spec_fallback_handles_missing_log_manager(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_spec_fallback_falls_back_to_error_when_no_task_resolvable(tmp_path: Path):
-    """With no name, no task filter, and no current_task, show the original error."""
-    empty_state = WorkspaceState(tasks={}, current_task=None)
+    """With no name, no task filter, and no task in state, show the original error."""
+    empty_state = WorkspaceState(tasks={})
     view = SpecView(
         workspace_root=tmp_path,
         name_or_path=None,
