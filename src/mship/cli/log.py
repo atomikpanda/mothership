@@ -6,9 +6,9 @@ from mship.cli.output import Output
 
 
 def register(app: typer.Typer, get_container):
-    @app.command(name="log")
+    @app.command(name="journal")
     def log_cmd(
-        message: Optional[str] = typer.Argument(None, help="Message to append to task log"),
+        message: Optional[str] = typer.Argument(None, help="Message to append to task journal"),
         last: Optional[int] = typer.Option(None, "--last", help="Show only last N entries"),
         action: Optional[str] = typer.Option(None, "--action", help="Structured: what you were doing"),
         open_question: Optional[str] = typer.Option(None, "--open", help="Structured: blocking question"),
@@ -16,10 +16,10 @@ def register(app: typer.Typer, get_container):
         repo: Optional[str] = typer.Option(None, "--repo", help="Structured: which repo this entry is about"),
         iteration: Optional[int] = typer.Option(None, "--iteration", help="Structured: iteration number"),
         no_repo: bool = typer.Option(False, "--no-repo", help="Suppress active-repo inference"),
-        show_open: bool = typer.Option(False, "--show-open", help="List open questions from this task's log"),
+        show_open: bool = typer.Option(False, "--show-open", help="List open questions from this task's journal"),
         force: bool = typer.Option(False, "--force", "-f", help="Bypass cwd-outside-worktree check"),
     ):
-        """Append to or read the current task's log."""
+        """Append to or read the current task's journal."""
         from mship.util.duration import format_relative
 
         container = get_container()
@@ -71,7 +71,7 @@ def register(app: typer.Typer, get_container):
             if cwd_warn is not None:
                 if not force:
                     output.error(cwd_warn)
-                    output.error('Run from the worktree, or `mship log --force "msg"` to override.')
+                    output.error('Run from the worktree, or `mship journal --force "msg"` to override.')
                     raise typer.Exit(code=1)
                 else:
                     # bypass: tag the entry so the bypass is discoverable
@@ -101,7 +101,7 @@ def register(app: typer.Typer, get_container):
         # Read path (no message argument)
         entries = log_mgr.read(state.current_task, last=last)
         if not entries:
-            output.print("No log entries")
+            output.print("No journal entries")
             return
         if output.is_tty:
             for entry in entries:

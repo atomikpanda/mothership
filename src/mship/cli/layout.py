@@ -31,7 +31,7 @@ layout {
                 args "-c" "${EDITOR:-$(command -v nvim || command -v vim || command -v vi)} ."
             }
             pane split_direction="horizontal" size="40%" {
-                pane name="Logs" command="mship" close_on_exit=false { args "view" "logs" "--watch"; }
+                pane name="Journal" command="mship" close_on_exit=false { args "view" "journal" "--watch"; }
                 pane name="Status" command="mship" close_on_exit=false { args "view" "status" "--watch"; }
             }
         }
@@ -48,7 +48,7 @@ layout {
         pane split_direction="vertical" {
             pane size="60%" name="Shell"
             pane split_direction="horizontal" size="40%" {
-                pane name="Logs" command="mship" close_on_exit=false { args "view" "logs" "--watch"; }
+                pane name="Journal" command="mship" close_on_exit=false { args "view" "journal" "--watch"; }
                 pane name="Status" command="mship" close_on_exit=false { args "view" "status" "--watch"; }
             }
         }

@@ -39,7 +39,7 @@ fi
 """
 
 _POST_COMMIT_BODY = """if command -v mship >/dev/null 2>&1; then
-    mship _log-commit || true
+    mship _journal-commit || true
 fi
 """
 

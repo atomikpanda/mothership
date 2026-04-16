@@ -182,7 +182,7 @@ def test_log_commit_appends_entry_when_in_task_worktree(tmp_path, monkeypatch):
     _override(tmp_path)
     try:
         monkeypatch.chdir(wt)
-        result = runner.invoke(app, ["_log-commit"])
+        result = runner.invoke(app, ["_journal-commit"])
         assert result.exit_code == 0, result.output
 
         from mship.core.log import LogManager
@@ -201,7 +201,7 @@ def test_log_commit_silent_when_no_active_task(tmp_path, monkeypatch):
     _override(tmp_path)
     try:
         monkeypatch.chdir(tmp_path)
-        result = runner.invoke(app, ["_log-commit"])
+        result = runner.invoke(app, ["_journal-commit"])
         assert result.exit_code == 0, result.output
     finally:
         _reset()
@@ -227,7 +227,7 @@ def test_log_commit_silent_when_cwd_not_in_worktree(tmp_path, monkeypatch):
     try:
         # cwd = main checkout, not the worktree
         monkeypatch.chdir(tmp_path)
-        result = runner.invoke(app, ["_log-commit"])
+        result = runner.invoke(app, ["_journal-commit"])
         assert result.exit_code == 0, result.output
 
         from mship.core.log import LogManager

@@ -152,8 +152,8 @@ def register(app: typer.Typer, get_container):
         )
         raise typer.Exit(code=0)
 
-    @app.command(name="_log-commit", hidden=True)
-    def log_commit():
+    @app.command(name="_journal-commit", hidden=True)
+    def journal_commit():
         """Auto-append a structured log entry for the just-made commit.
 
         Silent no-op when no active task, no mship workspace, or cwd isn't inside

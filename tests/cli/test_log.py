@@ -42,24 +42,24 @@ def configured_app_with_task(workspace: Path):
 
 
 def test_log_append(configured_app_with_task: Path):
-    result = runner.invoke(app, ["log", "Refactored auth controller"])
+    result = runner.invoke(app, ["journal", "Refactored auth controller"])
     assert result.exit_code == 0
 
 
 def test_log_read(configured_app_with_task: Path):
-    runner.invoke(app, ["log", "First entry"])
-    runner.invoke(app, ["log", "Second entry"])
-    result = runner.invoke(app, ["log"])
+    runner.invoke(app, ["journal", "First entry"])
+    runner.invoke(app, ["journal", "Second entry"])
+    result = runner.invoke(app, ["journal"])
     assert result.exit_code == 0
     assert "First entry" in result.output
     assert "Second entry" in result.output
 
 
 def test_log_last_n(configured_app_with_task: Path):
-    runner.invoke(app, ["log", "First"])
-    runner.invoke(app, ["log", "Second"])
-    runner.invoke(app, ["log", "Third"])
-    result = runner.invoke(app, ["log", "--last", "1"])
+    runner.invoke(app, ["journal", "First"])
+    runner.invoke(app, ["journal", "Second"])
+    runner.invoke(app, ["journal", "Third"])
+    result = runner.invoke(app, ["journal", "--last", "1"])
     assert result.exit_code == 0
     assert "Third" in result.output
     assert "First" not in result.output
@@ -71,7 +71,7 @@ def test_log_no_task(workspace: Path):
     container.config_path.override(workspace / "mothership.yaml")
     container.state_dir.override(state_dir)
 
-    result = runner.invoke(app, ["log"])
+    result = runner.invoke(app, ["journal"])
     assert result.exit_code != 0 or "No active task" in result.output
     container.config_path.reset_override()
     container.state_dir.reset_override()
@@ -97,7 +97,7 @@ def test_log_with_action_and_open_flags(workspace_with_git):
     try:
         runner.invoke(app, ["spawn", "flags test", "--repos", "shared", "--force-audit"])
         result = runner.invoke(
-            app, ["log", "stuck",
+            app, ["journal", "stuck",
                     "--action", "debugging middleware",
                     "--open", "how to handle null workspace",
                     "--repo", "shared",
@@ -127,7 +127,7 @@ def test_log_infers_repo_from_active_repo(workspace_with_git, monkeypatch):
         state = StateManager(workspace_with_git / ".mothership").load()
         wt = state.tasks["infer-test"].worktrees["shared"]
         monkeypatch.chdir(wt)
-        runner.invoke(app, ["log", "did a thing"])
+        runner.invoke(app, ["journal", "did a thing"])
         log_mgr = LogManager(workspace_with_git / ".mothership" / "logs")
         entries = log_mgr.read("infer-test")
         did = next(e for e in entries if e.message == "did a thing")
@@ -141,12 +141,12 @@ def test_log_show_open_lists_open_questions(workspace_with_git):
     try:
         runner.invoke(app, ["spawn", "open test", "--repos", "shared", "--force-audit"])
         runner.invoke(
-            app, ["log", "stuck", "--open", "how to handle nulls", "--repo", "shared"],
+            app, ["journal", "stuck", "--open", "how to handle nulls", "--repo", "shared"],
         )
         runner.invoke(
-            app, ["log", "also stuck", "--open", "timeout logic unclear", "--repo", "shared"],
+            app, ["journal", "also stuck", "--open", "timeout logic unclear", "--repo", "shared"],
         )
-        result = runner.invoke(app, ["log", "--show-open"])
+        result = runner.invoke(app, ["journal", "--show-open"])
         assert result.exit_code == 0
         assert "how to handle nulls" in result.output
         assert "timeout logic unclear" in result.output
@@ -158,7 +158,7 @@ def test_log_show_open_empty_exits_zero(workspace_with_git):
     _setup(workspace_with_git)
     try:
         runner.invoke(app, ["spawn", "nothing open", "--repos", "shared", "--force-audit"])
-        result = runner.invoke(app, ["log", "--show-open"])
+        result = runner.invoke(app, ["journal", "--show-open"])
         assert result.exit_code == 0
     finally:
         _teardown()
@@ -175,7 +175,7 @@ def test_log_refuses_when_cwd_outside_active_worktree(workspace_with_git, tmp_pa
         r.invoke(app, ["spawn", "refuse test", "--repos", "shared", "--force-audit"])
         r.invoke(app, ["switch", "shared"])
         monkeypatch.chdir(tmp_path)
-        result = r.invoke(app, ["log", "should fail"])
+        result = r.invoke(app, ["journal", "should fail"])
         assert result.exit_code != 0
         assert "--force" in result.output or "override" in result.output.lower()
     finally:
@@ -197,7 +197,7 @@ def test_log_force_writes_entry_with_bypass_tag(workspace_with_git, tmp_path, mo
         r.invoke(app, ["spawn", "bypass test", "--repos", "shared", "--force-audit"])
         r.invoke(app, ["switch", "shared"])
         monkeypatch.chdir(tmp_path)
-        result = r.invoke(app, ["log", "force msg", "--force"])
+        result = r.invoke(app, ["journal", "force msg", "--force"])
         assert result.exit_code == 0, result.output
         entries = LogManager(workspace_with_git / ".mothership" / "logs").read("bypass-test")
         forced = [e for e in entries if e.message == "force msg"]
@@ -228,7 +228,7 @@ def test_log_silent_when_cwd_inside_active_worktree(workspace_with_git, monkeypa
         wt = state.tasks["cwd-test2"].worktrees["shared"]
         monkeypatch.chdir(wt)
 
-        result = _runner.invoke(app, ["log", "something inside"])
+        result = _runner.invoke(app, ["journal", "something inside"])
         assert result.exit_code == 0
         # No cwd warning when we're in the right place
         assert "⚠" not in result.output

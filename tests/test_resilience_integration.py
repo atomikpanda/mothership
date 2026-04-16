@@ -54,7 +54,7 @@ def test_agent_resilience_lifecycle(full_workspace: Path):
     assert result.exit_code == 0, result.output
 
     # 2. Log context
-    result = runner.invoke(app, ["log", "Starting work on auth controller"])
+    result = runner.invoke(app, ["journal", "Starting work on auth controller"])
     assert result.exit_code == 0
 
     # 3. Phase to dev
@@ -71,7 +71,7 @@ def test_agent_resilience_lifecycle(full_workspace: Path):
     assert "waiting on API key" in result.output
 
     # 6. Read log — should show spawn, phase, block events
-    result = runner.invoke(app, ["log"])
+    result = runner.invoke(app, ["journal"])
     assert "Task spawned" in result.output
     assert "Phase transition" in result.output
     assert "Blocked: waiting on API key" in result.output
