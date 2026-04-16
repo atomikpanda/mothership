@@ -170,6 +170,7 @@ class WorktreeManager:
             affected_repos=ordered,
             worktrees=worktrees,
             branch=branch,
+            base_branch="main",
         )
 
         state = self._state_manager.load()
