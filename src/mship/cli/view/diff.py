@@ -19,6 +19,14 @@ from mship.core.view.diff_sources import WorktreeDiff, collect_worktree_diff
 _LARGE_WORKTREE_THRESHOLD = 20
 
 
+_STATUS_STYLES: dict[str, str] = {
+    "N": "green",
+    "M": "yellow",
+    "D": "red",
+    "R": "blue",
+}
+
+
 class DiffView(ViewApp):
     CSS = """
     Tree#diff-tree {
@@ -142,7 +150,19 @@ class DiffView(ViewApp):
             node = root.add(label, data=("wt", p))
             for f in wd.files:
                 suffix = "(binary)" if "new binary file" in f.body else f"+{f.additions} -{f.deletions}"
-                node.add_leaf(f"{f.path}  {suffix}", data=("file", p, f.path))
+                display_path = (
+                    f"{f.path} ← {f.old_path}"
+                    if f.status == "R" and f.old_path
+                    else f.path
+                )
+                label = Text.assemble(
+                    (f.status, _STATUS_STYLES.get(f.status, "")),
+                    "  ",
+                    display_path,
+                    "  ",
+                    suffix,
+                )
+                node.add_leaf(label, data=("file", p, f.path))
 
             # First-time auto-collapse when large; honour user's toggle afterward.
             if p not in self._ever_mounted:

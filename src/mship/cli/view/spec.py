@@ -25,6 +25,7 @@ class SpecView(ViewApp):
         *,
         task: Optional[str] = None,
         state=None,
+        log_manager=None,
         **kw,
     ):
         # Strip SpecView-specific kwargs before passing to super
@@ -32,11 +33,13 @@ class SpecView(ViewApp):
         kw.pop("name_or_path", None)
         kw.pop("task", None)
         kw.pop("state", None)
+        kw.pop("log_manager", None)
         super().__init__(**kw)
         self._workspace_root = workspace_root
         self._name_or_path = name_or_path
         self._task_filter = task
         self._state = state
+        self._log_manager = log_manager
         self._markdown: Markdown | None = None
         self._error_static: Static | None = None
         self._body: VerticalScroll | None = None
@@ -66,12 +69,67 @@ class SpecView(ViewApp):
             self._markdown.update(source)
             self._error_static.update("")
         except SpecNotFoundError as e:
-            error_msg = f"Spec not found: {e}"
-            self._last_source = ""
-            self._last_error = error_msg
-            self._markdown.update("")
-            self._error_static.update(error_msg)
+            if self._name_or_path is None:
+                body = self._render_task_fallback(default_error=str(e))
+                self._last_source = body
+                self._last_error = ""
+                self._markdown.update(body)
+                self._error_static.update("")
+            else:
+                error_msg = f"Spec not found: {e}"
+                self._last_source = ""
+                self._last_error = error_msg
+                self._markdown.update("")
+                self._error_static.update(error_msg)
         self.call_after_refresh(self._restore_scroll, prev_y, was_at_end)
+
+    def _render_task_fallback(self, default_error: str) -> str:
+        """Build a markdown document for the 'no spec yet' case.
+
+        Uses the active task slug (from `task` filter or `state.current_task`)
+        to pull the task description and most recent journal entries.
+        Returns `None`-equivalent fallback (just the error) when no task can
+        be resolved — the caller decides what to do then."""
+        slug = self._task_filter
+        if slug is None and self._state is not None:
+            slug = getattr(self._state, "current_task", None)
+        if slug is None or self._state is None or slug not in self._state.tasks:
+            return f"# {default_error}\n"
+
+        task = self._state.tasks[slug]
+        phase = task.phase
+        branch = task.branch
+        description = task.description or "_(no description)_"
+
+        lines: list[str] = [
+            f"# No spec yet for task `{slug}`",
+            "",
+            f"**Phase:** `{phase}`  ·  **Branch:** `{branch}`",
+            "",
+            "## Task description",
+            description,
+            "",
+            "## Recent journal",
+        ]
+
+        entries = []
+        if self._log_manager is not None:
+            try:
+                entries = self._log_manager.read(slug, last=10)
+            except TypeError:
+                # Older stub/log managers without `last=` kwarg.
+                entries = self._log_manager.read(slug)[-10:]
+
+        if not entries:
+            lines.append("_No journal entries yet._")
+        else:
+            for e in entries:
+                ts = e.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+                lines.append(f"- **{ts}** — {e.message}")
+
+        lines.append("")
+        lines.append("_Write a spec with your preferred flow and save it to `docs/superpowers/specs/`._")
+        return "\n".join(lines) + "\n"
 
     def rendered_text(self) -> str:
         """Test helper — returns last markdown source plus any error text."""
@@ -181,6 +239,7 @@ def register(app: typer.Typer, get_container):
                 name_or_path=name_or_path,
                 task=task,
                 state=state,
+                log_manager=container.log_manager(),
                 watch=watch,
                 interval=interval,
             )

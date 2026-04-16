@@ -24,6 +24,8 @@ class FileDiff:
     additions: int
     deletions: int
     body: str
+    status: str = "M"  # "N" | "M" | "D" | "R"
+    old_path: str | None = None  # set only when status == "R"
 
     @property
     def is_lockfile(self) -> bool:
@@ -87,18 +89,48 @@ _PATH_FROM_PLUS = re.compile(r"^\+\+\+ b/(.+)$", re.MULTILINE)
 _PATH_FROM_MINUS = re.compile(r"^--- a/(.+)$", re.MULTILINE)
 _PATH_FROM_HEADER = re.compile(r"^diff --git a/(\S+) b/\S+", re.MULTILINE)
 
+_RENAME_FROM = re.compile(r"^rename from (.+)$", re.MULTILINE)
+_RENAME_TO = re.compile(r"^rename to (.+)$", re.MULTILINE)
+
+
+def _detect_status(header: str) -> tuple[str, str | None]:
+    """Return (status, old_path) from a diff chunk's header region.
+
+    `header` is the slice of the chunk before the first `@@` line (or the
+    whole chunk when there are no hunks, e.g. pure renames)."""
+    m_from = _RENAME_FROM.search(header)
+    m_to = _RENAME_TO.search(header)
+    if m_from and m_to:
+        return "R", m_from.group(1)
+    if "\nnew file mode " in "\n" + header or header.startswith("new file mode "):
+        return "N", None
+    if "\ndeleted file mode " in "\n" + header or header.startswith("deleted file mode "):
+        return "D", None
+    return "M", None
+
 
 def _parse_one_chunk(chunk: str) -> FileDiff:
-    m = _PATH_FROM_PLUS.search(chunk)
-    if m and m.group(1) != "/dev/null":
-        path = m.group(1)
+    # Header region: everything up to the first `@@` hunk (if any).
+    hunk_idx = chunk.find("\n@@")
+    header = chunk if hunk_idx == -1 else chunk[:hunk_idx]
+
+    status, old_path = _detect_status(header)
+
+    if status == "R":
+        # Path is the rename target; extracted from `rename to <new>`.
+        m = _RENAME_TO.search(header)
+        path = m.group(1) if m else "<unknown>"
     else:
-        m = _PATH_FROM_MINUS.search(chunk)
+        m = _PATH_FROM_PLUS.search(chunk)
         if m and m.group(1) != "/dev/null":
             path = m.group(1)
         else:
-            m = _PATH_FROM_HEADER.search(chunk)
-            path = m.group(1) if m else "<unknown>"
+            m = _PATH_FROM_MINUS.search(chunk)
+            if m and m.group(1) != "/dev/null":
+                path = m.group(1)
+            else:
+                m = _PATH_FROM_HEADER.search(chunk)
+                path = m.group(1) if m else "<unknown>"
 
     additions = 0
     deletions = 0
@@ -109,7 +141,14 @@ def _parse_one_chunk(chunk: str) -> FileDiff:
             additions += 1
         elif line.startswith("-"):
             deletions += 1
-    return FileDiff(path=path, additions=additions, deletions=deletions, body=chunk)
+    return FileDiff(
+        path=path,
+        additions=additions,
+        deletions=deletions,
+        body=chunk,
+        status=status,
+        old_path=old_path,
+    )
 
 
 def split_diff_by_file(combined: str) -> list[FileDiff]:
@@ -155,7 +194,9 @@ def _merge_file_diffs(
     committed: list[FileDiff], uncommitted: list[FileDiff]
 ) -> list[FileDiff]:
     """Merge per-file diffs. Files in both get additions/deletions summed and
-    bodies concatenated with a `-- uncommitted --` separator."""
+    bodies concatenated with a `-- uncommitted --` separator. Status is
+    inherited from the committed side when both sides exist (the review
+    lens is 'what's new on this branch vs. base')."""
     by_path: dict[str, FileDiff] = {f.path: f for f in committed}
     for u in uncommitted:
         if u.path in by_path:
@@ -166,6 +207,8 @@ def _merge_file_diffs(
                 additions=c.additions + u.additions,
                 deletions=c.deletions + u.deletions,
                 body=body,
+                status=c.status,
+                old_path=c.old_path,
             )
         else:
             by_path[u.path] = u
