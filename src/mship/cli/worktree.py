@@ -5,6 +5,62 @@ import typer
 from mship.cli.output import Output
 
 
+def _run_gate(
+    get_container,
+    *,
+    command: str,  # "spawn" | "finish" | "close" | "precommit"
+    bypass: bool,
+    output,
+) -> None:
+    """Run the upstream reconciler; exit(1) on block, print warnings on warn."""
+    if bypass:
+        return
+    from mship.core.reconcile.cache import ReconcileCache
+    from mship.core.reconcile.fetch import (
+        collect_git_snapshots, fetch_pr_snapshots,
+    )
+    from mship.core.reconcile.gate import GateAction, reconcile_now, should_block
+
+    container = get_container()
+    state = container.state_manager().load()
+    cache = ReconcileCache(container.state_dir())
+
+    def _fetcher(branches, worktrees_by_branch):
+        return (
+            fetch_pr_snapshots(branches),
+            collect_git_snapshots(worktrees_by_branch),
+        )
+
+    try:
+        decisions = reconcile_now(state, cache=cache, fetcher=_fetcher)
+    except Exception as e:  # noqa: BLE001 — never fail closed
+        output.warning(f"reconcile unavailable: {e}; proceeding")
+        return
+
+    ignored = cache.read_ignores()
+    blockers: list[str] = []
+    for slug, d in decisions.items():
+        action = should_block(d, command=command, ignored=ignored)
+        if action is GateAction.block:
+            blockers.append(
+                f"  - {slug}: {d.state.value}"
+                + (f" (PR #{d.pr_number})" if d.pr_number else "")
+            )
+        elif action is GateAction.warn:
+            output.warning(
+                f"task '{slug}' has {d.state.value} drift "
+                + (f"(PR #{d.pr_number}); " if d.pr_number else "; ")
+                + "see `mship reconcile`"
+            )
+    if blockers:
+        output.error(
+            f"`mship {command}` refused — upstream drift on:\n"
+            + "\n".join(blockers)
+            + "\nRun `mship reconcile` for details, then fix or pass --bypass-reconcile."
+        )
+        raise typer.Exit(code=1)
+
+
 def register(app: typer.Typer, get_container):
     @app.command()
     def spawn(
@@ -12,6 +68,7 @@ def register(app: typer.Typer, get_container):
         repos: Optional[str] = typer.Option(None, help="Comma-separated repo names"),
         skip_setup: bool = typer.Option(False, "--skip-setup", help="Skip running `task setup` in new worktrees"),
         force_audit: bool = typer.Option(False, "--force-audit", help="Bypass audit gate for this spawn"),
+        bypass_reconcile: bool = typer.Option(False, "--bypass-reconcile", help="Skip upstream PR drift check for this spawn"),
     ):
         """Create coordinated worktrees across repos for a new task."""
         from mship.core.audit_gate import run_audit_gate, AuditGateBlocked
@@ -19,6 +76,7 @@ def register(app: typer.Typer, get_container):
 
         container = get_container()
         output = Output()
+        _run_gate(get_container, command="spawn", bypass=bypass_reconcile, output=output)
         wt_mgr = container.worktree_manager()
         config = container.config()
         shell = container.shell()
@@ -140,12 +198,14 @@ def register(app: typer.Typer, get_container):
         force: bool = typer.Option(False, "--force", "-f", help="Bypass ALL safety checks (destructive)"),
         abandon: bool = typer.Option(False, "--abandon", help="Close without finishing (discard PR flow)"),
         skip_pr_check: bool = typer.Option(False, "--skip-pr-check", help="Do not call gh; close regardless of PR state"),
+        bypass_reconcile: bool = typer.Option(False, "--bypass-reconcile", help="Skip upstream PR drift check"),
     ):
         """Close the current task: check PR state, tear down worktrees, clear state."""
         from pathlib import Path
 
         container = get_container()
         output = Output()
+        _run_gate(get_container, command="close", bypass=bypass_reconcile, output=output)
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
@@ -272,6 +332,11 @@ def register(app: typer.Typer, get_container):
         wt_mgr = container.worktree_manager()
         wt_mgr.abort(task_slug)  # core method retains the name; only CLI verb changed
         log_mgr.append(task_slug, log_msg)
+        try:
+            from mship.core.reconcile.cache import ReconcileCache
+            ReconcileCache(container.state_dir()).remove_ignore(task_slug)
+        except Exception:
+            pass
         output.success(f"{log_msg.capitalize()}: {task_slug}")
 
     @app.command()
@@ -281,12 +346,14 @@ def register(app: typer.Typer, get_container):
         base_map: Optional[str] = typer.Option(None, "--base-map", help="Per-repo PR base overrides, e.g. 'cli=main,api=release/x'"),
         force_audit: bool = typer.Option(False, "--force-audit", help="Bypass audit gate for this finish"),
         push_only: bool = typer.Option(False, "--push-only", help="Push branches only; skip gh pr create"),
+        bypass_reconcile: bool = typer.Option(False, "--bypass-reconcile", help="Skip upstream PR drift check for this finish"),
     ):
         """Create PRs across repos in dependency order."""
         from pathlib import Path
 
         container = get_container()
         output = Output()
+        _run_gate(get_container, command="finish", bypass=bypass_reconcile, output=output)
 
         if push_only and (handoff or base is not None or base_map is not None):
             output.error("--push-only is incompatible with --handoff/--base/--base-map")

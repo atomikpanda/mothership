@@ -31,6 +31,40 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=0)
 
         if tl in allowed:
+            # Upstream-drift gate. Fail-open on any error (network, missing gh, etc.).
+            try:
+                from mship.core.reconcile.cache import ReconcileCache
+                from mship.core.reconcile.fetch import (
+                    collect_git_snapshots, fetch_pr_snapshots,
+                )
+                from mship.core.reconcile.gate import (
+                    GateAction, reconcile_now, should_block,
+                )
+                cache = ReconcileCache(container.state_dir())
+
+                def _fetcher(branches, worktrees_by_branch):
+                    return (
+                        fetch_pr_snapshots(branches),
+                        collect_git_snapshots(worktrees_by_branch),
+                    )
+
+                decisions = reconcile_now(state, cache=cache, fetcher=_fetcher)
+            except Exception:
+                raise typer.Exit(code=0)
+
+            ignored = cache.read_ignores()
+            d = decisions.get(task.slug)
+            if d is not None:
+                action = should_block(d, command="precommit", ignored=ignored)
+                if action is GateAction.block:
+                    import sys
+                    sys.stderr.write(
+                        f"\u26d4 mship: refusing commit — task '{task.slug}' has "
+                        f"{d.state.value} drift"
+                        + (f" (PR #{d.pr_number}).\n" if d.pr_number else ".\n")
+                        + "   Run `mship reconcile` for details, or `git commit --no-verify` to override.\n"
+                    )
+                    raise typer.Exit(code=1)
             raise typer.Exit(code=0)
 
         import sys

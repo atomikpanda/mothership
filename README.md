@@ -161,7 +161,7 @@ JSON output is auto-emitted when stdout isn't a TTY — agents get structured st
 # Lifecycle (the iteration loop)
 mship init [--detect | --name N --repo PATH:TYPE]   # scaffold mothership.yaml
 mship init --install-hooks            # (re)install pre-commit guard on every git root
-mship spawn "description" [--repos a,b] [--skip-setup]   # worktrees + branch + plan phase
+mship spawn "description" [--repos a,b] [--skip-setup] [--bypass-reconcile]   # worktrees + branch + plan phase
 mship switch <repo>                   # cross-repo context switch: handoff + record active repo
 mship phase plan|dev|review|run [-f] # transition with soft gate warnings
 mship block "reason" | mship unblock # park/resume the current task
@@ -169,12 +169,13 @@ mship test [--all] [--repos|--tag] [--no-diff]   # dep order; shows diff vs prev
 mship log [-]                         # read task log; pass message to append
 mship log "msg" [--action X] [--open Y] [--repo R] [--test-state pass|fail|mixed]
 mship log --show-open                 # list open questions
-mship finish [--base B] [--base-map a=B,b=B] [--push-only] [--handoff] [--force-audit]
-mship close [--yes] [--force] [--skip-pr-check]   # tear down worktrees after merge
+mship finish [--base B] [--base-map a=B,b=B] [--push-only] [--handoff] [--force-audit] [--bypass-reconcile]
+mship close [--yes] [--force] [--skip-pr-check] [--bypass-reconcile]   # tear down worktrees after merge
 
 # Inspection
 mship status                          # task, phase, branch, drift, last log, finished warning
 mship audit [--repos r] [--json]      # git-state drift (gated on spawn/finish)
+mship reconcile [--json] [--ignore SLUG] [--clear-ignores] [--refresh]   # upstream PR drift (merged/closed/diverged/base_changed)
 mship view status|logs|diff|spec [--watch]   # read-only TUIs for tmux/zellij panes
 mship view spec --web                 # serve rendered spec on localhost
 mship graph                           # repo dependency graph

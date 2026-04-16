@@ -5,6 +5,7 @@ from pathlib import Path
 from mship.core.config import WorkspaceConfig
 from mship.core.graph import DependencyGraph
 from mship.core.log import LogManager
+from mship.core.reconcile.fetch import workspace_default_branch_from_config
 from mship.core.state import StateManager, Task, WorkspaceState
 from mship.util.git import GitRunner
 from mship.util.shell import ShellRunner
@@ -162,6 +163,7 @@ class WorktreeManager:
                         f"{setup_result.stderr.strip()[:200]}"
                     )
 
+        base_branch = workspace_default_branch_from_config(self._config) or "main"
         task = Task(
             slug=slug,
             description=description,
@@ -170,6 +172,7 @@ class WorktreeManager:
             affected_repos=ordered,
             worktrees=worktrees,
             branch=branch,
+            base_branch=base_branch,
         )
 
         state = self._state_manager.load()

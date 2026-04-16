@@ -72,6 +72,7 @@ from mship.cli import sync as _sync_mod
 from mship.cli import switch as _switch_mod
 from mship.cli import layout as _layout_mod
 from mship.cli import internal as _internal_mod
+from mship.cli import reconcile as _reconcile_mod
 
 _status_mod.register(app, get_container)
 _phase_mod.register(app, get_container)
@@ -89,3 +90,4 @@ _sync_mod.register(app, get_container)
 _switch_mod.register(app, get_container)
 _layout_mod.register(app, get_container)
 _internal_mod.register(app, get_container)
+_reconcile_mod.register(app, get_container)

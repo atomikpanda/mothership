@@ -74,6 +74,14 @@ def test_spawn_all_repos(configured_git_app: Path):
     assert set(task.affected_repos) == {"shared", "auth-service", "api-gateway"}
 
 
+def test_spawn_records_base_branch_main(configured_git_app: Path):
+    result = runner.invoke(app, ["spawn", "record base", "--repos", "shared"])
+    assert result.exit_code == 0, result.output
+    mgr = StateManager(configured_git_app / ".mothership")
+    state = mgr.load()
+    assert state.tasks["record-base"].base_branch == "main"
+
+
 def test_worktrees_list(configured_git_app: Path):
     runner.invoke(app, ["spawn", "test list", "--repos", "shared"])
     result = runner.invoke(app, ["worktrees"])

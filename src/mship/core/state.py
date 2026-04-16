@@ -29,6 +29,7 @@ class Task(BaseModel):
     active_repo: str | None = None
     last_switched_at_sha: dict[str, dict[str, str]] = {}
     test_iteration: int = 0
+    base_branch: str | None = None
 
 
 class WorkspaceState(BaseModel):

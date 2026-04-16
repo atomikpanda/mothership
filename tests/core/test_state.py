@@ -247,3 +247,26 @@ def test_task_defaults_test_iteration_to_zero():
         affected_repos=["a"], branch="feat/t",
     )
     assert task.test_iteration == 0
+
+
+def test_task_base_branch_defaults_none():
+    from mship.core.state import Task
+    from datetime import datetime, timezone
+    t = Task(
+        slug="x", description="x", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["a"], branch="feat/x",
+    )
+    assert t.base_branch is None
+
+
+def test_task_base_branch_set_via_kwarg():
+    from mship.core.state import Task
+    from datetime import datetime, timezone
+    t = Task(
+        slug="x", description="x", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["a"], branch="feat/x",
+        base_branch="main",
+    )
+    assert t.base_branch == "main"
