@@ -87,18 +87,19 @@ def register(app: typer.Typer, get_container):
     ):
         """Live workspace status view (all tasks by default)."""
         from pathlib import Path as _P
+        from mship.cli._resolve import resolve_or_exit
+
         container = get_container()
+        task_slug: Optional[str] = None
         if task is not None:
             state = container.state_manager().load()
-            if task not in state.tasks:
-                known = ", ".join(sorted(state.tasks.keys())) or "(none)"
-                typer.echo(f"Unknown task '{task}'. Known: {known}.", err=True)
-                raise typer.Exit(code=1)
+            t = resolve_or_exit(state, task)
+            task_slug = t.slug
         workspace_root = _P(container.config_path()).parent
         view = StatusView(
             state_manager=container.state_manager(),
             workspace_root=workspace_root,
-            task_filter=task,
+            task_filter=task_slug,
             log_manager=container.log_manager(),
             watch=watch,
             interval=interval,

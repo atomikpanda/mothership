@@ -219,40 +219,33 @@ def register(app: typer.Typer, get_container):
         workspace_root = _P(container.config_path()).parent
         state = container.state_manager().load()
 
-        if task is not None and task not in state.tasks:
-            known = ", ".join(sorted(state.tasks.keys())) or "(none)"
-            typer.echo(f"Unknown task '{task}'. Known: {known}.", err=True)
-            raise typer.Exit(code=1)
+        # Resolve target task. If the user specified an explicit spec name,
+        # skip task resolution entirely (rendering is name-driven). Otherwise
+        # require an anchor via resolve_or_exit.
+        resolved_task_slug: Optional[str] = None
+        if name_or_path is None:
+            from mship.cli._resolve import resolve_or_exit
+            t = resolve_or_exit(state, task)
+            resolved_task_slug = t.slug
 
-        # Direct render when caller specified a target.
-        if name_or_path is not None or task is not None:
-            if web:
-                try:
-                    path = find_spec(workspace_root, name_or_path, task=task, state=state)
-                except SpecNotFoundError as e:
-                    typer.echo(f"Error: {e}", err=True)
-                    raise typer.Exit(code=1)
-                _serve_web(path, port)
-                return
-            view = SpecView(
-                workspace_root=workspace_root,
-                name_or_path=name_or_path,
-                task=task,
-                state=state,
-                log_manager=container.log_manager(),
-                watch=watch,
-                interval=interval,
-            )
-            view.run()
+        # Direct render: either name_or_path or a resolved task slug.
+        if web:
+            try:
+                path = find_spec(
+                    workspace_root, name_or_path, task=resolved_task_slug, state=state,
+                )
+            except SpecNotFoundError as e:
+                typer.echo(f"Error: {e}", err=True)
+                raise typer.Exit(code=1)
+            _serve_web(path, port)
             return
-
-        # No target: open the cross-task spec index picker.
-        from mship.cli.view._spec_index import SpecIndexApp
-        app_ = SpecIndexApp(
+        view = SpecView(
             workspace_root=workspace_root,
+            name_or_path=name_or_path,
+            task=resolved_task_slug,
             state=state,
-            state_loader=container.state_manager().load,
+            log_manager=container.log_manager(),
             watch=watch,
             interval=interval,
         )
-        app_.run()
+        view.run()
