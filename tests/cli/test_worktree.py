@@ -225,6 +225,127 @@ def test_close_with_open_pr_proceeds_under_force(configured_git_app):
         container.shell.reset_override()
 
 
+def _make_merged_pr_state(configured_git_app: Path):
+    """Helper: persist a finished, merged-PR task with a real worktree path."""
+    from mship.core.state import StateManager, Task, WorkspaceState
+    from datetime import datetime, timezone
+
+    sm = StateManager(configured_git_app / ".mothership")
+    state = WorkspaceState(
+        tasks={"t": Task(
+            slug="t", description="d", phase="review",
+            created_at=datetime.now(timezone.utc),
+            affected_repos=["shared"], branch="feat/t",
+            worktrees={"shared": configured_git_app / "shared"},
+            pr_urls={"shared": "https://github.com/o/r/pull/17"},
+            finished_at=datetime.now(timezone.utc),
+        )},
+    )
+    sm.save(state)
+    return sm
+
+
+def _ancestry_shell_factory(*, ancestor_returncode: int, merge_oid: str = "abc123def\n"):
+    """Build a shell.run side_effect for the ancestry-check tests."""
+    from mship.util.shell import ShellResult
+
+    def fake_run(cmd, cwd, env=None):
+        if "gh pr view" in cmd and "mergeCommit" in cmd:
+            return ShellResult(returncode=0, stdout=merge_oid, stderr="")
+        if "gh pr view" in cmd and "state" in cmd:
+            return ShellResult(returncode=0, stdout="MERGED\n", stderr="")
+        if "git fetch" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "git merge-base --is-ancestor" in cmd:
+            return ShellResult(returncode=ancestor_returncode, stdout="", stderr="")
+        # Recovery-path probes (count_commits_ahead / pushed / merged) — return safe defaults
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    return fake_run
+
+
+def test_close_merged_pr_with_unreachable_commits_refuses(configured_git_app):
+    from mship.cli import container
+    from mship.util.shell import ShellRunner, ShellResult
+
+    sm = _make_merged_pr_state(configured_git_app)
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = _ancestry_shell_factory(ancestor_returncode=1)
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        result = runner.invoke(app, ["close", "--yes", "--task", "t"])
+        assert result.exit_code != 0, result.output
+        assert "NOT in the base branch" in result.output
+        assert "abc123de" in result.output  # truncated merge sha shown
+        assert "t" in sm.load().tasks  # state unchanged
+    finally:
+        container.shell.reset_override()
+
+
+def test_close_merged_pr_with_reachable_commits_succeeds(configured_git_app):
+    from mship.cli import container
+    from mship.util.shell import ShellRunner, ShellResult
+
+    sm = _make_merged_pr_state(configured_git_app)
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = _ancestry_shell_factory(ancestor_returncode=0)
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        result = runner.invoke(app, ["close", "--yes", "--task", "t"])
+        assert result.exit_code == 0, result.output
+        assert "t" not in sm.load().tasks
+    finally:
+        container.shell.reset_override()
+
+
+def test_close_unreachable_commits_proceeds_with_bypass_flag(configured_git_app):
+    from mship.cli import container
+    from mship.util.shell import ShellRunner, ShellResult
+
+    sm = _make_merged_pr_state(configured_git_app)
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = _ancestry_shell_factory(ancestor_returncode=1)
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        result = runner.invoke(
+            app, ["close", "--yes", "--bypass-base-ancestry", "--task", "t"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "t" not in sm.load().tasks
+    finally:
+        container.shell.reset_override()
+
+
+def test_close_merged_pr_with_unverified_merge_commit_warns_but_proceeds(configured_git_app):
+    from mship.cli import container
+    from mship.util.shell import ShellRunner, ShellResult
+
+    sm = _make_merged_pr_state(configured_git_app)
+
+    # Empty mergeCommit oid → unverified path; should warn, not refuse.
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = _ancestry_shell_factory(
+        ancestor_returncode=0, merge_oid="\n"
+    )
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        result = runner.invoke(app, ["close", "--yes", "--task", "t"])
+        assert result.exit_code == 0, result.output
+        assert "could not verify base ancestry" in result.output
+        assert "t" not in sm.load().tasks
+    finally:
+        container.shell.reset_override()
+
+
 def test_finish_handoff(configured_git_app: Path):
     runner.invoke(app, ["spawn", "handoff test", "--repos", "shared,auth-service"])
     result = runner.invoke(app, ["finish", "--handoff", "--task", "handoff-test"])
