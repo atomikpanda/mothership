@@ -246,6 +246,43 @@ async def test_diff_scope_none_shows_all(tmp_path):
         assert any(str(wb) in l for l in labels)
 
 
+def _fd_s(path: str, status: str = "M", body: str = "", additions: int = 1,
+          deletions: int = 0, old_path: str | None = None) -> FileDiff:
+    return FileDiff(
+        path=path, additions=additions, deletions=deletions, body=body,
+        status=status, old_path=old_path,
+    )
+
+
+@pytest.mark.asyncio
+async def test_tree_labels_carry_status_letters(tmp_path):
+    wa = tmp_path / "a"
+    view = DiffView(worktree_paths=[wa], use_delta=False, watch=False, interval=1.0)
+    _seed(view, {
+        wa: [
+            _fd_s("added.py", status="N", body="diff --git a/added.py b/added.py\nnew file mode 100644\n"),
+            _fd_s("mod.py", status="M", body="diff --git a/mod.py b/mod.py\n+++ b/mod.py\n+x\n"),
+            _fd_s("del.py", status="D", body="diff --git a/del.py b/del.py\ndeleted file mode 100644\n"),
+            _fd_s("new.py", status="R", old_path="old.py",
+                  body="diff --git a/old.py b/new.py\nrename from old.py\nrename to new.py\n"),
+        ],
+    })
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        labels = view.tree_labels()
+        # Each file's leaf label should start with its status letter.
+        added_label = next(l for l in labels if "added.py" in l)
+        assert added_label.lstrip().startswith("N"), added_label
+        mod_label = next(l for l in labels if "mod.py" in l)
+        assert mod_label.lstrip().startswith("M"), mod_label
+        del_label = next(l for l in labels if "del.py" in l)
+        assert del_label.lstrip().startswith("D"), del_label
+        # Rename label displays "new.py ← old.py" with an R prefix.
+        rename_label = next(l for l in labels if "new.py" in l and "old.py" in l)
+        assert rename_label.lstrip().startswith("R"), rename_label
+        assert "←" in rename_label, rename_label
+
+
 from typer.testing import CliRunner
 
 from mship.cli import app, container
