@@ -194,3 +194,50 @@ def test_collect_clean_worktree_is_empty(tmp_path: Path):
     result = collect_worktree_diff(tmp_path)
     assert result.combined == ""
     assert result.files_changed == 0
+
+
+def test_collect_includes_committed_and_uncommitted_when_base_given(tmp_path: Path):
+    _init_repo(tmp_path)
+    # Branch off main; commit changes to a file; also make an uncommitted change.
+    _git(tmp_path, "checkout", "-q", "-b", "feat/x")
+    (tmp_path / "committed.txt").write_text("committed-body\n")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-q", "-m", "add committed.txt")
+
+    # Uncommitted change to a different file.
+    (tmp_path / "seed.txt").write_text("seed\nuncommitted-change\n")
+
+    result = collect_worktree_diff(tmp_path, base_branch="main")
+    paths = {f.path for f in result.files}
+    assert "committed.txt" in paths  # committed portion
+    assert "seed.txt" in paths       # uncommitted portion
+    combined = result.combined
+    assert "committed-body" in combined
+    assert "uncommitted-change" in combined
+
+
+def test_collect_merges_committed_and_uncommitted_on_same_file(tmp_path: Path):
+    _init_repo(tmp_path)
+    _git(tmp_path, "checkout", "-q", "-b", "feat/y")
+    # Commit a modification to seed.txt on the branch.
+    (tmp_path / "seed.txt").write_text("seed\ncommitted-line\n")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-q", "-m", "modify seed.txt")
+    # Further uncommitted modification to the same file.
+    (tmp_path / "seed.txt").write_text("seed\ncommitted-line\nuncommitted-line\n")
+
+    result = collect_worktree_diff(tmp_path, base_branch="main")
+    files = [f for f in result.files if f.path == "seed.txt"]
+    assert len(files) == 1
+    body = files[0].body
+    assert "committed-line" in body
+    assert "uncommitted-line" in body
+    assert "-- uncommitted --" in body
+
+
+def test_collect_base_branch_none_matches_legacy_behavior(tmp_path: Path):
+    _init_repo(tmp_path)
+    (tmp_path / "seed.txt").write_text("seed\nchanged\n")
+    legacy = collect_worktree_diff(tmp_path)
+    with_none = collect_worktree_diff(tmp_path, base_branch=None)
+    assert legacy.combined == with_none.combined

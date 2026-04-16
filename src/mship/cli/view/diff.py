@@ -50,10 +50,12 @@ class DiffView(ViewApp):
         use_delta: bool | None = None,
         scope_to_active_path: Path | None = None,
         resolve_paths: Callable[[], tuple[list[Path], Path | None]] | None = None,
+        base_branch_by_path: dict[Path, str | None] | None = None,
         **kw,
     ):
         super().__init__(**kw)
         self._resolve_paths = resolve_paths
+        self._base_branch_by_path: dict[Path, str | None] = dict(base_branch_by_path or {})
         if resolve_paths is None:
             # Static mode: capture paths at construction time.
             all_paths = list(worktree_paths)
@@ -105,7 +107,8 @@ class DiffView(ViewApp):
         out: dict[Path, WorktreeDiff | Exception] = {}
         for p in self._paths:
             try:
-                out[p] = collect_worktree_diff(p)
+                base = self._base_branch_by_path.get(p)
+                out[p] = collect_worktree_diff(p, base_branch=base)
             except Exception as e:  # noqa: BLE001 — view must stay alive
                 out[p] = e
         return out
@@ -352,7 +355,17 @@ def register(app: typer.Typer, get_container):
             return [Path(repo.path) for repo in container.config().repos.values()], None
 
         if target_task is not None:
-            view = DiffView(resolve_paths=_resolver, watch=watch, interval=interval)
+            base_by_path: dict[Path, str | None] = {}
+            if target_task in state.tasks:
+                t = state.tasks[target_task]
+                for p in t.worktrees.values():
+                    base_by_path[Path(p)] = t.base_branch
+            view = DiffView(
+                resolve_paths=_resolver,
+                base_branch_by_path=base_by_path,
+                watch=watch,
+                interval=interval,
+            )
             view.run()
             return
 
@@ -377,5 +390,12 @@ def register(app: typer.Typer, get_container):
                 return [Path(p) for p in t.worktrees.values()], None
             return inner
 
-        view = DiffView(resolve_paths=_resolver_for(chosen), watch=watch, interval=interval)
+        chosen_task = state.tasks[chosen]
+        base_by_path = {Path(p): chosen_task.base_branch for p in chosen_task.worktrees.values()}
+        view = DiffView(
+            resolve_paths=_resolver_for(chosen),
+            base_branch_by_path=base_by_path,
+            watch=watch,
+            interval=interval,
+        )
         view.run()

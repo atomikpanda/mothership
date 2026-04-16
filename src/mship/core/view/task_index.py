@@ -101,32 +101,20 @@ def _scan_specs_dir(specs_dir: Path, task_slug: str | None) -> list[SpecEntry]:
 
 
 def find_all_specs(state: WorkspaceState, workspace_root: Path) -> list[SpecEntry]:
-    """All specs across every task's worktrees + the main checkout.
-
-    Grouped by task (active first, finished last, None/main first within the
-    None group); within each group, newest mtime first.
-    """
-    index = build_task_index(state, workspace_root)
+    """All specs across every task's worktrees + the main checkout, flat-sorted by mtime desc."""
     entries: list[SpecEntry] = []
     seen_paths: set[Path] = set()
 
-    # Main-checkout specs get task_slug=None.
-    main_entries = sorted(
-        _scan_specs_dir(workspace_root / _SPEC_SUBDIR, None),
-        key=lambda e: e.mtime, reverse=True,
-    )
-    for e in main_entries:
-        if e.path not in seen_paths:
-            entries.append(e)
-            seen_paths.add(e.path)
-
-    for summary in index:
-        per_task: list[SpecEntry] = []
-        for wt in summary.worktrees.values():
-            per_task.extend(_scan_specs_dir(wt / _SPEC_SUBDIR, summary.slug))
-        per_task.sort(key=lambda e: e.mtime, reverse=True)
-        for e in per_task:
+    def _add(scanned: list[SpecEntry]) -> None:
+        for e in scanned:
             if e.path not in seen_paths:
                 entries.append(e)
                 seen_paths.add(e.path)
+
+    _add(_scan_specs_dir(workspace_root / _SPEC_SUBDIR, None))
+    for summary in build_task_index(state, workspace_root):
+        for wt in summary.worktrees.values():
+            _add(_scan_specs_dir(wt / _SPEC_SUBDIR, summary.slug))
+
+    entries.sort(key=lambda e: e.mtime, reverse=True)
     return entries

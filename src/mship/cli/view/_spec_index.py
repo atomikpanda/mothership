@@ -37,6 +37,8 @@ class SpecIndexApp(ViewApp):
         self._mode: str = "index"  # "index" | "spec"
 
     def compose(self) -> ComposeResult:
+        if self._state_loader is not None:
+            self._state = self._state_loader()
         self._entries = find_all_specs(self._state, self._workspace_root)
         if not self._entries:
             self._empty = Static("No specs found in any task or main checkout.", expand=True)
@@ -73,6 +75,7 @@ class SpecIndexApp(ViewApp):
         if self._table.cursor_row is not None and self._table.cursor_row < len(self._entries):
             selected_key = str(self._entries[self._table.cursor_row].path)
         self._entries = find_all_specs(self._state, self._workspace_root)
+        scroll_x, scroll_y = self._table.scroll_x, self._table.scroll_y
         self._table.clear()
         new_cursor = 0
         for i, e in enumerate(self._entries):
@@ -81,7 +84,8 @@ class SpecIndexApp(ViewApp):
             if str(e.path) == selected_key:
                 new_cursor = i
         if self._entries:
-            self._table.move_cursor(row=new_cursor)
+            self._table.move_cursor(row=new_cursor, scroll=False)
+            self._table.set_scroll(x=scroll_x, y=scroll_y)
 
     def on_data_table_row_selected(self, event) -> None:
         # DataTable consumes the Enter keypress before app-level bindings run,
