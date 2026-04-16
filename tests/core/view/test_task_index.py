@@ -114,3 +114,31 @@ def test_find_all_specs_title_falls_back_to_stem(tmp_path: Path):
 
 def test_find_all_specs_empty(tmp_path: Path):
     assert find_all_specs(WorkspaceState(), tmp_path) == []
+
+
+def test_find_all_specs_sorted_flat_by_mtime_desc_across_tasks(tmp_path: Path):
+    """Newer spec from a finished task must appear before an older spec from an active task."""
+    import os
+    now = datetime.now(timezone.utc)
+
+    wt_active = tmp_path / "wt-active"
+    wt_finished = tmp_path / "wt-finished"
+    old_spec = wt_active / "docs" / "superpowers" / "specs" / "older.md"
+    new_spec = wt_finished / "docs" / "superpowers" / "specs" / "newer.md"
+    _write_spec(old_spec, "# Older\n")
+    _write_spec(new_spec, "# Newer\n")
+
+    # Force mtimes: new_spec newer than old_spec.
+    os.utime(old_spec, (1_000_000_000, 1_000_000_000))
+    os.utime(new_spec, (2_000_000_000, 2_000_000_000))
+
+    state = WorkspaceState(tasks={
+        "active": _task("active", created_at=now, worktrees={"mothership": wt_active}),
+        "finished": _task(
+            "finished", created_at=now - timedelta(hours=2),
+            finished_at=now, worktrees={"mothership": wt_finished},
+        ),
+    })
+    specs = find_all_specs(state, tmp_path)
+    names = [s.path.name for s in specs]
+    assert names.index("newer.md") < names.index("older.md")
