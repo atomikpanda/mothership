@@ -53,7 +53,7 @@ def test_scan_finds_state_orphan(prune_deps):
         branch="feat/ghost",
         worktrees={"shared": Path("/tmp/nonexistent/worktree")},
     )
-    state = WorkspaceState(current_task="ghost", tasks={"ghost": task})
+    state = WorkspaceState(tasks={"ghost": task})
     state_mgr.save(state)
 
     mgr = PruneManager(config, state_mgr, git)
@@ -85,7 +85,7 @@ def test_prune_removes_state_orphan(prune_deps):
         branch="feat/ghost",
         worktrees={"shared": Path("/tmp/nonexistent/worktree")},
     )
-    state = WorkspaceState(current_task="ghost", tasks={"ghost": task})
+    state = WorkspaceState(tasks={"ghost": task})
     state_mgr.save(state)
 
     mgr = PruneManager(config, state_mgr, git)
@@ -94,7 +94,7 @@ def test_prune_removes_state_orphan(prune_deps):
     assert count >= 1
     state = state_mgr.load()
     assert "ghost" not in state.tasks
-    assert state.current_task is None
+    assert state.tasks == {}
 
 
 def test_prune_partial_missing_keeps_task(prune_deps):
@@ -117,7 +117,7 @@ def test_prune_partial_missing_keeps_task(prune_deps):
             "auth-service": wt_path,  # exists
         },
     )
-    state = WorkspaceState(current_task="partial", tasks={"partial": task})
+    state = WorkspaceState(tasks={"partial": task})
     state_mgr.save(state)
 
     mgr = PruneManager(config, state_mgr, git)
