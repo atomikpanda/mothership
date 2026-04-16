@@ -77,7 +77,7 @@ def test_resolve_repos_unknown_lists_available(workspace: Path):
     container.shell.override(mock_shell)
 
     try:
-        result = runner.invoke(app, ["test", "--repos", "bogus"])
+        result = runner.invoke(app, ["test", "--repos", "bogus", "--task", "test-task"])
         assert result.exit_code == 1
         assert "Available:" in result.output
         # At least one real repo name should appear

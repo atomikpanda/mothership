@@ -33,12 +33,11 @@ def _spawn(description="first"):
 
 
 def test_first_test_run_writes_iteration_file_and_log_entry(test_workspace):
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     _spawn()
-    result = runner.invoke(app, ["test"])
+    task_slug = "first"
+    result = runner.invoke(app, ["test", "--task", task_slug])
     # Test may pass or fail depending on Taskfile stub; either exit code accepted.
     # The important thing: iteration file and log entry exist.
-    task_slug = "first"
     iter_path = test_workspace / ".mothership" / "test-runs" / task_slug / "1.json"
     assert iter_path.exists(), result.output
     data = json.loads(iter_path.read_text())
@@ -56,10 +55,9 @@ def test_first_test_run_writes_iteration_file_and_log_entry(test_workspace):
 
 
 def test_second_test_run_shows_still_passing_or_still_failing(test_workspace):
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     _spawn("second")
-    r1 = runner.invoke(app, ["test"])
-    r2 = runner.invoke(app, ["test"])
+    r1 = runner.invoke(app, ["test", "--task", "second"])
+    r2 = runner.invoke(app, ["test", "--task", "second"])
     # One of the labels must appear in r2 output (TTY or not; CliRunner is non-TTY so JSON).
     try:
         payload = json.loads(r2.output)
@@ -72,8 +70,8 @@ def test_second_test_run_shows_still_passing_or_still_failing(test_workspace):
 
 def test_no_diff_flag_suppresses_diff(test_workspace):
     _spawn("nodiff")
-    runner.invoke(app, ["test"])
-    result = runner.invoke(app, ["test", "--no-diff"])
+    runner.invoke(app, ["test", "--task", "nodiff"])
+    result = runner.invoke(app, ["test", "--no-diff", "--task", "nodiff"])
     # No tags section, no "still passing" / "new failure" / etc. in either plain or JSON mode.
     try:
         payload = json.loads(result.output)
@@ -85,10 +83,9 @@ def test_no_diff_flag_suppresses_diff(test_workspace):
 
 def test_mship_test_writes_stdout_stderr_artifacts(test_workspace):
     """mship test must write <iter>.<repo>.stdout and .stderr artifact files."""
-    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     _spawn("artifacts")
-    runner.invoke(app, ["test"])
     task_slug = "artifacts"
+    runner.invoke(app, ["test", "--task", task_slug])
     run_dir = test_workspace / ".mothership" / "test-runs" / task_slug
     assert run_dir.exists(), "test-runs dir missing"
 
@@ -101,7 +98,7 @@ def test_mship_test_writes_stdout_stderr_artifacts(test_workspace):
 def test_mship_test_json_includes_stdout_stderr_paths(test_workspace):
     """Non-TTY JSON output must include stdout_path and stderr_path per repo."""
     _spawn("pathtest")
-    result = runner.invoke(app, ["test"])
+    result = runner.invoke(app, ["test", "--task", "pathtest"])
     try:
         payload = json.loads(result.output)
     except json.JSONDecodeError:

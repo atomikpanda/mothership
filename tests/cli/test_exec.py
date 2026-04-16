@@ -48,7 +48,7 @@ def configured_exec_app(workspace: Path):
 
 def test_mship_test(configured_exec_app):
     workspace, mock_shell = configured_exec_app
-    result = runner.invoke(app, ["test"])
+    result = runner.invoke(app, ["test", "--task", "test-task"])
     assert result.exit_code == 0
     assert mock_shell.run_task.call_count == 2
 
@@ -59,7 +59,7 @@ def test_mship_test_all_flag(configured_exec_app):
         ShellResult(returncode=1, stdout="", stderr="fail"),
         ShellResult(returncode=0, stdout="ok", stderr=""),
     ]
-    result = runner.invoke(app, ["test", "--all"])
+    result = runner.invoke(app, ["test", "--all", "--task", "test-task"])
     assert mock_shell.run_task.call_count == 2
 
 
@@ -69,13 +69,13 @@ def test_mship_test_fail_fast(configured_exec_app):
         ShellResult(returncode=1, stdout="", stderr="fail"),
         ShellResult(returncode=0, stdout="ok", stderr=""),
     ]
-    result = runner.invoke(app, ["test"])
+    result = runner.invoke(app, ["test", "--task", "test-task"])
     assert mock_shell.run_task.call_count == 1
 
 
 def test_mship_run(configured_exec_app):
     workspace, mock_shell = configured_exec_app
-    result = runner.invoke(app, ["run"])
+    result = runner.invoke(app, ["run", "--task", "test-task"])
     assert result.exit_code == 0
 
 
@@ -118,7 +118,7 @@ def test_mship_test_no_active_task(workspace: Path):
     container.state_dir.override(state_dir)
 
     result = runner.invoke(app, ["test"])
-    assert result.exit_code != 0 or "No active task" in result.output
+    assert result.exit_code != 0
     container.config_path.reset_override()
     container.state_dir.reset_override()
     container.config.reset_override()
@@ -129,14 +129,14 @@ def test_mship_test_no_active_task(workspace: Path):
 
 def test_mship_test_repos_filter(configured_exec_app):
     workspace, mock_shell = configured_exec_app
-    result = runner.invoke(app, ["test", "--repos", "shared"])
+    result = runner.invoke(app, ["test", "--repos", "shared", "--task", "test-task"])
     assert result.exit_code == 0
     assert mock_shell.run_task.call_count == 1
 
 
 def test_mship_test_unknown_repo_errors(configured_exec_app):
     workspace, mock_shell = configured_exec_app
-    result = runner.invoke(app, ["test", "--repos", "nonexistent"])
+    result = runner.invoke(app, ["test", "--repos", "nonexistent", "--task", "test-task"])
     assert result.exit_code != 0 or "unknown" in result.output.lower()
 
 
@@ -181,7 +181,7 @@ repos:
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok\n", stderr="")
     container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["test", "--tag", "apple"])
+    result = runner.invoke(app, ["test", "--tag", "apple", "--task", "tag-test"])
     assert result.exit_code == 0
     assert mock_shell.run_task.call_count == 2
 
