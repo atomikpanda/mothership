@@ -318,3 +318,54 @@ def test_status_rename_with_changes():
     assert f.path == "new.py"
     assert f.old_path == "old.py"
     assert f.additions == 1
+
+
+def test_merge_keeps_committed_side_status():
+    """A file newly added in a commit and further edited uncommitted stays N."""
+    from mship.core.view.diff_sources import _merge_file_diffs
+
+    committed = [FileDiff(
+        path="new.py", additions=5, deletions=0,
+        body="diff --git a/new.py b/new.py\nnew file mode 100644\n",
+        status="N", old_path=None,
+    )]
+    uncommitted = [FileDiff(
+        path="new.py", additions=2, deletions=1,
+        body="diff --git a/new.py b/new.py\n--- a/new.py\n+++ b/new.py\n",
+        status="M", old_path=None,
+    )]
+    merged = _merge_file_diffs(committed, uncommitted)
+    (f,) = merged
+    assert f.status == "N"
+    assert f.additions == 7
+    assert f.deletions == 1
+
+
+def test_merge_uncommitted_only_keeps_its_status():
+    from mship.core.view.diff_sources import _merge_file_diffs
+
+    merged = _merge_file_diffs([], [FileDiff(
+        path="only.py", additions=1, deletions=0, body="...",
+        status="N", old_path=None,
+    )])
+    (f,) = merged
+    assert f.status == "N"
+
+
+def test_merge_rename_preserved():
+    from mship.core.view.diff_sources import _merge_file_diffs
+
+    committed = [FileDiff(
+        path="new.py", additions=0, deletions=0,
+        body="rename from old.py\nrename to new.py\n",
+        status="R", old_path="old.py",
+    )]
+    uncommitted = [FileDiff(
+        path="new.py", additions=1, deletions=0,
+        body="--- a/new.py\n+++ b/new.py\n+tweak\n",
+        status="M", old_path=None,
+    )]
+    merged = _merge_file_diffs(committed, uncommitted)
+    (f,) = merged
+    assert f.status == "R"
+    assert f.old_path == "old.py"

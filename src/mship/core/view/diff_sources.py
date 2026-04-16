@@ -194,7 +194,9 @@ def _merge_file_diffs(
     committed: list[FileDiff], uncommitted: list[FileDiff]
 ) -> list[FileDiff]:
     """Merge per-file diffs. Files in both get additions/deletions summed and
-    bodies concatenated with a `-- uncommitted --` separator."""
+    bodies concatenated with a `-- uncommitted --` separator. Status is
+    inherited from the committed side when both sides exist (the review
+    lens is 'what's new on this branch vs. base')."""
     by_path: dict[str, FileDiff] = {f.path: f for f in committed}
     for u in uncommitted:
         if u.path in by_path:
@@ -205,6 +207,8 @@ def _merge_file_diffs(
                 additions=c.additions + u.additions,
                 deletions=c.deletions + u.deletions,
                 body=body,
+                status=c.status,
+                old_path=c.old_path,
             )
         else:
             by_path[u.path] = u
