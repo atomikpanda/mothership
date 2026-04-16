@@ -37,14 +37,14 @@ class LogsView(ViewApp):
 
 
 def register(app: typer.Typer, get_container):
-    @app.command()
-    def logs(
+    @app.command(name="journal")
+    def journal(
         task: Optional[str] = typer.Option(None, "--task", help="Task slug (default: picker / current)"),
         watch: bool = typer.Option(False, "--watch"),
         interval: float = typer.Option(2.0, "--interval"),
         all_: bool = typer.Option(False, "--all", help="Show all log entries, ignore active_repo"),
     ):
-        """Live tail of a task's log (picker when no task specified)."""
+        """Live tail of a task's journal (picker when no task specified)."""
         from pathlib import Path as _P
 
         container = get_container()

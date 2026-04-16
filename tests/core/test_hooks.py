@@ -127,7 +127,7 @@ def test_each_hook_has_distinct_body(tmp_path):
     post_ci = (hooks / "post-commit").read_text()
     assert "mship _check-commit" in pre
     assert "mship _post-checkout" in post_co
-    assert "mship _log-commit" in post_ci
+    assert "mship _journal-commit" in post_ci
 
 
 def test_is_installed_requires_all_three(tmp_path):

@@ -179,7 +179,7 @@ def test_view_logs_unknown_slug_lists_known(workspace: Path):
     mgr.save(WorkspaceState(current_task="real-task", tasks={"real-task": task}))
 
     try:
-        result = runner.invoke(app, ["view", "logs", "--task", "bogus-slug"])
+        result = runner.invoke(app, ["view", "journal", "--task", "bogus-slug"])
         assert result.exit_code == 1
         assert "real-task" in result.output
     finally:

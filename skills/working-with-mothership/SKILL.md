@@ -25,14 +25,14 @@ Works for single repos, monorepos, and metarepos (multiple separate repos in one
 
 ```bash
 mship status    # current task, phase, active repo, worktrees, drift, last log
-mship log       # full narrative of what was happening last session
+mship journal       # full narrative of what was happening last session
 mship switch <repo>   # if you're about to work in a specific repo, call this first
                        # (snapshots dep SHAs + shows what changed since you were last here)
 ```
 
 If `mship status` errors with "No mothership.yaml found", you're not in a mothership workspace — skip this skill. If there's no active task, ask the user what to work on, then `mship spawn`.
 
-If you see a previous task is still active and `mship log` shows recent work, **continue that task** rather than starting fresh. Don't spawn a new task that overlaps with an existing one — mothership will reject duplicate slugs.
+If you see a previous task is still active and `mship journal` shows recent work, **continue that task** rather than starting fresh. Don't spawn a new task that overlaps with an existing one — mothership will reject duplicate slugs.
 
 ## Phase Workflow
 
@@ -82,15 +82,15 @@ mship switch <repo>                   # before starting work in a different repo
 mship phase plan|dev|review|run [-f]  # `-f` overrides blocked or finished-task guardrail
 mship block "reason" | mship unblock
 mship test [--all] [--repos|--tag] [--no-diff]
-mship log "msg" [--action X] [--open Y] [--repo R] [--test-state pass|fail|mixed]
-mship log --show-open                 # what am I blocked on across this task?
+mship journal "msg" [--action X] [--open Y] [--repo R] [--test-state pass|fail|mixed]
+mship journal --show-open                 # what am I blocked on across this task?
 mship finish [--base B] [--base-map ...] [--push-only] [--handoff] [--force-audit]
 mship close [--yes] [--abandon] [--force] [--skip-pr-check]
 ```
 
 **`spawn` order:** slugify → worktree per repo → symlink `symlink_dirs` → `task setup` (unless `--skip-setup`) → save state → enter `plan`. If a repo's setup fails, the task still spawns; fix and re-run setup manually.
 
-**MANDATORY after `spawn` (or `switch`): `cd` into the worktree BEFORE editing ANY files.** The spawn output prints the worktree path for each repo. Do not start editing, committing, or running anything task-related until your shell's cwd is inside the worktree. If you start editing from the main checkout, every change lands on the wrong branch and the task's feature branch stays empty. Common signs you're in the wrong place: `git status` shows unrelated changes, `git branch` shows `main` instead of `feat/<slug>`, `mship log` prints the "running from … not the active repo's worktree" warning.
+**MANDATORY after `spawn` (or `switch`): `cd` into the worktree BEFORE editing ANY files.** The spawn output prints the worktree path for each repo. Do not start editing, committing, or running anything task-related until your shell's cwd is inside the worktree. If you start editing from the main checkout, every change lands on the wrong branch and the task's feature branch stays empty. Common signs you're in the wrong place: `git status` shows unrelated changes, `git branch` shows `main` instead of `feat/<slug>`, `mship journal` prints the "running from … not the active repo's worktree" warning.
 
 The pre-commit hook enforces this at the git level: if you try `git commit` anywhere except the task's assigned worktree while a task is active, the commit is refused. Use `git commit --no-verify` to bypass for exceptional cases.
 
@@ -98,7 +98,7 @@ The pre-commit hook enforces this at the git level: if you try `git commit` anyw
 
 **After `mship switch <repo>`, `cd` to the worktree shown at the top of the handoff.**
 If you don't, your edits in the shell affect the main checkout, not the feature branch.
-`mship log` and `mship test` will warn when run from outside the active worktree.
+`mship journal` and `mship test` will warn when run from outside the active worktree.
 
 **`test` writes a numbered iteration file** under `.mothership/test-runs/<task>/`. The next run shows tags per repo (`new failure`, `fix`, `regression`, `still passing`, `still failing`). Auto-appends a structured log entry with `iteration`, `test_state`, `action="ran tests"`. Iterate until clean before transitioning to `review`.
 
@@ -165,8 +165,8 @@ When a session ends or context is wiped:
 
 ```bash
 mship status        # task slug, phase, branch, repos, test results, blocked reason
-mship log           # full narrative of what was done
-mship log --last 5  # only the recent entries
+mship journal           # full narrative of what was done
+mship journal --last 5  # only the recent entries
 ```
 
 The state file lives in `<git-main-repo>/.mothership/state.yaml` (anchored to the main repo's `.git`, so it works correctly when you `cd` into a worktree).
@@ -178,9 +178,9 @@ The state file lives in `<git-main-repo>/.mothership/state.yaml` (anchored to th
 - Hitting a blocker
 
 Examples of useful log entries:
-- `mship log "implemented JWT validation in auth/middleware.py, all unit tests passing"`
-- `mship log "stuck on CORS issue with the dev server, need to revisit tomorrow"`
-- `mship log "decided to use sqlc for query generation, see ADR-003"`
+- `mship journal "implemented JWT validation in auth/middleware.py, all unit tests passing"`
+- `mship journal "stuck on CORS issue with the dev server, need to revisit tomorrow"`
+- `mship journal "decided to use sqlc for query generation, see ADR-003"`
 
 ## Configuration Concepts
 
@@ -292,11 +292,11 @@ Then `mship test --tag mobile` runs both.
 
 - **Don't skip phases** — follow `plan → dev → review → run`. Use `--force` only when you mean to.
 - **Don't create worktrees manually** — always use `mship spawn`. Manual worktrees won't have state, won't link, won't get cleanup.
-- **Don't forget to `mship log`** — your future self (or another agent) reads it on session start.
+- **Don't forget to `mship journal`** — your future self (or another agent) reads it on session start.
 - **Don't merge PRs out of order** — the coordination block in each PR description shows the correct order.
 - **Don't ignore healthcheck failures** — if `mship run` reports a service didn't become ready, the dependent services won't work either.
 - **Don't run `mship finish` with failing tests** — run `mship test` first.
-- **Don't paste test output into `mship log`** — after every `mship test`, mship auto-logs a structured entry with iteration, test_state, and action. The iteration file under `.mothership/test-runs/` has stderr for failures.
+- **Don't paste test output into `mship journal`** — after every `mship test`, mship auto-logs a structured entry with iteration, test_state, and action. The iteration file under `.mothership/test-runs/` has stderr for failures.
 - **Don't keep editing a worktree after `mship finish`** — once `finish` stamps the task as done, phase transitions are blocked (except `run`). If you need to make changes, open a new task with `mship spawn`.
 - **Don't manually edit `.mothership/state.yaml`** — use the CLI commands instead.
 - **Don't assume `mship` knows what's running outside of it** — if you started services manually, mothership won't track them. Use `mship run` or accept that `mship status` won't reflect them.
@@ -329,7 +329,7 @@ Mothership outputs JSON automatically when stdout isn't a TTY:
 
 ```bash
 mship status | jq .phase
-mship log | jq '.entries[].message'
+mship journal | jq '.entries[].message'
 mship graph | jq '.order'
 ```
 

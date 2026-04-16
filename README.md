@@ -25,7 +25,7 @@ These aren't agent skill issues. They're state-management issues. One agent, one
 |---|---|
 | Commits to main | `spawn` creates a feature-branch worktree; every mship command resolves to worktree paths, not repo.path |
 | Wrong worktree / stale checkout | `audit` blocks `spawn`/`finish` on drift (wrong branch, dirty, behind remote, foreign worktrees) — gated on every lifecycle boundary |
-| Forgets cross-repo state | `mship log` + `mship status` + `mship view *` give the agent structured state it can re-inject into context |
+| Forgets cross-repo state | `mship journal` + `mship status` + `mship view *` give the agent structured state it can re-inject into context |
 | Tests against stale dep version | `mship test` runs repos in dependency order; `mship doctor` verifies the worktree-to-worktree linking your package manager needs (`symlink_dirs`, npm workspaces, etc.) |
 | PRs merged out of order | `mship finish` creates coordinated PRs in dependency order with a cross-repo coordination block in each PR description |
 | Agent keeps editing after PR | `mship finish` stamps `finished_at`; `phase dev`/`plan`/`review` refuse transitions on finished tasks; `mship close` tears down once merged |
@@ -108,7 +108,7 @@ mship doctor                 # config + tools check
 mship spawn "my first task"
 mship phase dev
 # ... do work ...
-mship log "implemented X"    # breadcrumb for the next session
+mship journal "implemented X"    # breadcrumb for the next session
 mship test
 mship phase review && mship finish
 ```
@@ -151,7 +151,7 @@ mship skill list                    # see what's in the bundle
 mship skill install --all           # install the whole bundle to ~/.agents/skills/mothership/
 ```
 
-The mship skill teaches the session-start protocol (`mship status` → `mship log`), phase workflow, command reference, and context recovery. The vendored superpowers skills are mship-aware — they require an active task and point subagents at task worktrees, not `main`.
+The mship skill teaches the session-start protocol (`mship status` → `mship journal`), phase workflow, command reference, and context recovery. The vendored superpowers skills are mship-aware — they require an active task and point subagents at task worktrees, not `main`.
 
 JSON output is auto-emitted when stdout isn't a TTY — agents get structured state without any flag, humans get Rich-formatted output.
 
@@ -166,9 +166,9 @@ mship switch <repo>                   # cross-repo context switch: handoff + rec
 mship phase plan|dev|review|run [-f] # transition with soft gate warnings
 mship block "reason" | mship unblock # park/resume the current task
 mship test [--all] [--repos|--tag] [--no-diff]   # dep order; shows diff vs previous iteration
-mship log [-]                         # read task log; pass message to append
-mship log "msg" [--action X] [--open Y] [--repo R] [--test-state pass|fail|mixed]
-mship log --show-open                 # list open questions
+mship journal [-]                         # read task log; pass message to append
+mship journal "msg" [--action X] [--open Y] [--repo R] [--test-state pass|fail|mixed]
+mship journal --show-open                 # list open questions
 mship finish [--base B] [--base-map a=B,b=B] [--push-only] [--handoff] [--force-audit] [--bypass-reconcile]
 mship close [--yes] [--force] [--skip-pr-check] [--bypass-reconcile]   # tear down worktrees after merge
 
@@ -188,7 +188,7 @@ mship prune [--force]                 # remove orphaned worktrees
 
 # Long-running services
 mship run [--repos a,b] [--tag t]     # start services per dependency tier
-mship logs <service>                  # tail logs for a service
+mship logs <service>                      # tail logs for a service
 ```
 
 ### `mship finish`

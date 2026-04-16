@@ -153,7 +153,7 @@ def test_logs_cli_rejects_unknown_task(tmp_path):
     container.config_path.override(cfg)
     container.state_dir.override(state_dir)
     try:
-        result = runner.invoke(app, ["view", "logs", "--task", "nope"])
+        result = runner.invoke(app, ["view", "journal", "--task", "nope"])
         assert result.exit_code != 0
         assert "nope" in result.output
     finally:

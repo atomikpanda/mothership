@@ -6,7 +6,7 @@ from mship.cli.output import Output
 
 
 def register(app: typer.Typer, get_container):
-    @app.command(name="log")
+    @app.command(name="journal")
     def log_cmd(
         message: Optional[str] = typer.Argument(None, help="Message to append to task log"),
         last: Optional[int] = typer.Option(None, "--last", help="Show only last N entries"),
