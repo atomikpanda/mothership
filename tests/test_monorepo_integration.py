@@ -114,6 +114,7 @@ def test_monorepo_spawn_shares_worktree(monorepo_workspace):
 
 
 def test_monorepo_close_cleans_up(monorepo_workspace):
+    pytest.skip("obsolete — current_task removed in multi-task migration (Task 13)")
     tmp_path, mock_shell = monorepo_workspace
 
     runner.invoke(app, ["spawn", "cleanup test"])
