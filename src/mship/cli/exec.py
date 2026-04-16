@@ -297,39 +297,53 @@ def register(app: typer.Typer, get_container):
 
     @app.command()
     def logs(
-        service: str,
+        service: Optional[str] = typer.Argument(None, help="Service name (omit with --all)"),
+        all_services: bool = typer.Option(False, "--all", help="Tail logs for every service"),
     ):
         """Tail logs for a specific service."""
         container = get_container()
         output = Output()
         config = container.config()
 
-        if service not in config.repos:
+        if all_services and service is not None:
+            output.error("Pass either <service> or --all, not both.")
+            raise typer.Exit(code=1)
+        if not all_services and service is None:
             available = ", ".join(sorted(config.repos.keys()))
-            output.error(f"Unknown service '{service}'. Available services: {available}.")
+            output.error(f"Service name required, or pass --all. Available: {available}.")
             raise typer.Exit(code=1)
 
-        repo = config.repos[service]
-        shell = container.shell()
-        actual_task = repo.tasks.get("logs", "logs")
-        env_runner = repo.env_runner or config.env_runner
+        targets = sorted(config.repos.keys()) if all_services else [service]
+        for name in targets:
+            if name not in config.repos:
+                available = ", ".join(sorted(config.repos.keys()))
+                output.error(f"Unknown service '{name}'. Available services: {available}.")
+                raise typer.Exit(code=1)
 
-        # Use worktree path if available
         from pathlib import Path
-        cwd = repo.path
         state_mgr = container.state_manager()
         state = state_mgr.load()
-        if state.current_task:
-            task = state.tasks.get(state.current_task)
-            if task and service in task.worktrees:
-                wt_path = Path(task.worktrees[service])
-                if wt_path.exists():
-                    cwd = wt_path
+        shell = container.shell()
 
-        result = shell.run_task(
-            task_name="logs",
-            actual_task_name=actual_task,
-            cwd=cwd,
-            env_runner=env_runner,
-        )
-        output.print(result.stdout)
+        for name in targets:
+            repo = config.repos[name]
+            actual_task = repo.tasks.get("logs", "logs")
+            env_runner = repo.env_runner or config.env_runner
+
+            cwd = repo.path
+            if state.current_task:
+                task = state.tasks.get(state.current_task)
+                if task and name in task.worktrees:
+                    wt_path = Path(task.worktrees[name])
+                    if wt_path.exists():
+                        cwd = wt_path
+
+            if all_services:
+                output.print(f"[bold]── {name} ──[/bold]")
+            result = shell.run_task(
+                task_name="logs",
+                actual_task_name=actual_task,
+                cwd=cwd,
+                env_runner=env_runner,
+            )
+            output.print(result.stdout)
