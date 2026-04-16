@@ -175,10 +175,10 @@ class WorktreeManager:
             base_branch=base_branch,
         )
 
-        state = self._state_manager.load()
-        state.tasks[slug] = task
-        state.current_task = slug
-        self._state_manager.save(state)
+        def _apply(s: WorkspaceState) -> None:
+            s.tasks[slug] = task
+            # DO NOT set s.current_task — task resolution now uses cwd/env/flag
+        self._state_manager.mutate(_apply)
 
         self._log.create(slug)
         log_msg = f"Task spawned. Repos: {', '.join(ordered)}. Branch: {branch}"
