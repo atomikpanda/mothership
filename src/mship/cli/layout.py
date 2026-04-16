@@ -40,7 +40,10 @@ layout {
     tab name="Review" {
         pane split_direction="vertical" {
             pane size="70%" name="Diff" command="mship" close_on_exit=false { args "view" "diff" "--watch"; }
-            pane size="30%" name="Shell"
+            pane size="30%" split_direction="horizontal" {
+                pane name="Shell"
+                pane name="Journal" command="mship" close_on_exit=false { args "view" "journal" "--watch"; }
+            }
         }
     }
 
