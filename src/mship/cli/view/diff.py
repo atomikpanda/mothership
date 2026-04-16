@@ -347,13 +347,16 @@ def register(app: typer.Typer, get_container):
         from mship.cli._resolve import resolve_or_exit
 
         container = get_container()
-        state = container.state_manager().load()
+        state_mgr = container.state_manager()
 
-        t = resolve_or_exit(state, task)
+        t = resolve_or_exit(state_mgr.load(), task)
         target_task = t.slug
 
         def _resolver() -> tuple[list[Path], Path | None]:
-            task_obj = state.tasks[target_task]
+            fresh_state = state_mgr.load()
+            task_obj = fresh_state.tasks.get(target_task)
+            if task_obj is None:
+                return [], None  # task was closed mid-watch
             all_paths = [Path(p) for p in task_obj.worktrees.values()]
             scope: Path | None = None
             if not all_ and task_obj.active_repo is not None and task_obj.active_repo in task_obj.worktrees:
