@@ -535,7 +535,7 @@ def register(app: typer.Typer, get_container):
             output.error("No commits to push — nothing to PR:")
             for repo_name, branch, eff_base in empty_branches:
                 output.error(f"  {repo_name}: {branch} has no commits past {eff_base}")
-            output.error("Commit your changes in each worktree, or run `mship abort --yes`.")
+            output.error("Commit your changes in each worktree, or run `mship close --yes --abandon`.")
             raise typer.Exit(code=1)
 
         pr_list: list[dict] = []

@@ -95,7 +95,7 @@ class WorktreeManager:
         if slug in state.tasks:
             raise ValueError(
                 f"Task '{slug}' already exists. "
-                f"Run `mship abort --yes` to remove it first, or use a different description."
+                f"Run `mship close --yes --abandon --task {slug}` to remove it first, or use a different description."
             )
 
         if repos is None:
@@ -187,7 +187,7 @@ class WorktreeManager:
             if slug in s.tasks:
                 raise ValueError(
                     f"Task '{slug}' already exists. "
-                    f"Run `mship abort --yes` to remove it first, or use a different description."
+                    f"Run `mship close --yes --abandon --task {slug}` to remove it first, or use a different description."
                 )
             s.tasks[slug] = task
         self._state_manager.mutate(_apply)

@@ -6,7 +6,7 @@ app = typer.Typer(
     name="mship",
     help=(
         "Cross-repo workflow engine. "
-        "Task-scoped commands resolve their target via cwd -> MSHIP_TASK env -> --task flag."
+        "Task-scoped commands resolve their target via --task flag -> MSHIP_TASK env -> cwd."
     ),
     no_args_is_help=True,
 )
