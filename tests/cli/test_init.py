@@ -4,7 +4,7 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
-from mship.cli import app
+from mship.cli import app, container
 
 runner = CliRunner()
 
@@ -111,3 +111,74 @@ def test_init_no_args_no_tty(init_workspace: Path, monkeypatch):
     monkeypatch.chdir(init_workspace)
     result = runner.invoke(app, ["init"])
     assert result.exit_code != 0
+
+
+def test_install_hooks_output_per_hook_per_root(tmp_path: Path, monkeypatch):
+    """Test that --install-hooks outputs per-hook per-root outcome lines."""
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  only:\n"
+        "    path: .\n"
+        "    type: service\n"
+    )
+    (tmp_path / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    (tmp_path / ".git" / "hooks").mkdir(parents=True)
+
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(cfg)
+    container.state_dir.override(tmp_path / ".mothership")
+    try:
+        result = runner.invoke(app, ["init", "--install-hooks"])
+        assert result.exit_code == 0, result.output
+        for hook_name in ("pre-commit", "post-commit", "post-checkout"):
+            assert hook_name in result.output
+        assert "installed" in result.output
+        assert str(tmp_path / ".git" / "hooks") in result.output
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+
+def test_install_hooks_refreshed_vs_up_to_date_labels(tmp_path: Path, monkeypatch):
+    """Test that second run shows 'refreshed' for modified hooks and 'up to date' for others."""
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  only:\n"
+        "    path: .\n"
+        "    type: service\n"
+    )
+    (tmp_path / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    (tmp_path / ".git" / "hooks").mkdir(parents=True)
+
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(cfg)
+    container.state_dir.override(tmp_path / ".mothership")
+    try:
+        # First run: fresh install
+        result1 = runner.invoke(app, ["init", "--install-hooks"])
+        assert result1.exit_code == 0, result1.output
+        # Stale-ify the post-commit hook
+        post_commit = tmp_path / ".git" / "hooks" / "post-commit"
+        assert post_commit.exists(), f"post-commit hook not created by first run. Output: {result1.output}"
+        post_commit.write_text(post_commit.read_text().replace("_journal-commit", "_log-commit"))
+        # Second run
+        result = runner.invoke(app, ["init", "--install-hooks"])
+        assert result.exit_code == 0, result.output
+        assert "post-commit" in result.output
+        assert "refreshed" in result.output
+        assert "up to date" in result.output
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()

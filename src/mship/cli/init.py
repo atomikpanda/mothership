@@ -41,19 +41,30 @@ def register(app: typer.Typer, get_container):
 
         # --install-hooks: short-circuit — just install hooks on each known git root
         if install_hooks_only:
-            from mship.core.hooks import install_hook
+            from mship.core.hooks import install_hook, InstallOutcome
             container = get_container()
             config = container.config()
-            installed: list[Path] = []
+            installed_results: list[tuple[Path, dict[str, InstallOutcome]]] = []
             failed: list[tuple[Path, str]] = []
             for root in _unique_git_roots(config):
                 try:
-                    install_hook(root)
-                    installed.append(root)
+                    outcomes = install_hook(root)
+                    installed_results.append((root, outcomes))
                 except Exception as e:
                     failed.append((root, str(e)))
-            for r in installed:
-                output.success(f"hook installed: {r}/.git/hooks/pre-commit")
+            for root, outcomes in installed_results:
+                hooks_dir = root / ".git" / "hooks"
+                for hook_name in ("pre-commit", "post-commit", "post-checkout"):
+                    outcome = outcomes.get(hook_name)
+                    if outcome is None:
+                        continue
+                    line = f"{hook_name} @ {hooks_dir}/: {outcome.value}"
+                    if outcome in (InstallOutcome.installed, InstallOutcome.refreshed):
+                        output.success(line)
+                    elif outcome is InstallOutcome.skipped_corrupt:
+                        output.warning(line)
+                    else:
+                        output.print(line)
             for r, err in failed:
                 output.error(f"hook install failed: {r}: {err}")
             raise typer.Exit(code=1 if failed else 0)
