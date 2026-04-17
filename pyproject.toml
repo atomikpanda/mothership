@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-mship = "mship.cli:app"
+mship = "mship.cli:run"
 
 [build-system]
 requires = ["hatchling"]

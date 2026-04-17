@@ -81,6 +81,32 @@ from mship.cli import layout as _layout_mod
 from mship.cli import internal as _internal_mod
 from mship.cli import reconcile as _reconcile_mod
 
+def _should_silent_exit(argv: list[str]) -> bool:
+    """True if argv is invoking an unknown `_`-prefixed internal command.
+
+    Stale git hooks from older mship versions invoke renamed internals like
+    `mship _log-commit`. They're wrapped in `|| true` in the hook body, so
+    the hook itself is fine with a nonzero exit — but typer prints a 6-line
+    usage error, which is noise on every single commit until the user runs
+    `mship init --install-hooks`. Swallow it.
+    """
+    if len(argv) < 2:
+        return False
+    cmd = argv[1]
+    if not cmd.startswith("_"):
+        return False
+    known = {c.name for c in app.registered_commands if c.name}
+    return cmd not in known
+
+
+def run() -> None:
+    """Entry point wrapper — see `_should_silent_exit`."""
+    import sys
+    if _should_silent_exit(sys.argv):
+        sys.exit(0)
+    app()
+
+
 _status_mod.register(app, get_container)
 _phase_mod.register(app, get_container)
 _worktree_mod.register(app, get_container)
