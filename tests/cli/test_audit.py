@@ -137,3 +137,15 @@ def test_audit_still_flags_foreign_worktree(audit_workspace):
         assert "mship prune" in result.output
     finally:
         _reset()
+
+
+def test_audit_warn_displays_yellow_lane(audit_workspace):
+    _override(audit_workspace)
+    try:
+        (audit_workspace / "cli" / "new.txt").write_text("hi\n")  # untracked → warn
+        result = runner.invoke(app, ["audit"])
+        assert result.exit_code == 0, result.output  # warn does NOT block
+        assert "dirty_untracked" in result.output
+        assert "warn(s)" in result.output  # footer counter includes warn
+    finally:
+        _reset()
