@@ -25,7 +25,7 @@ Fix all three papercuts in one coherent change. After the PR:
 
 - **No new flag surface.** No `--refresh-hooks`; compare-and-refresh is silent and idempotent.
 - **No change to hook template bodies.** The fix is the install-time refresh logic, not the templates themselves.
-- **No `-` sentinel for `--body` (the inline flag).** Only `--body-file` treats `-` specially; `--body "-"` is the literal string.
+- **No change to existing `--body -` behavior.** The `--body` flag already treats `-` as stdin (see `src/mship/cli/worktree.py:471` and its help text). This PR extends the same convention to `--body-file -` so the two flags are symmetric.
 - **No scope creep in `mship finish` beyond the body-file path.** Every other arg and behavior is unchanged.
 - **No backfill migration.** We rely on users running `mship init --install-hooks` to pick up the refresh; this is documented in the PR description and the `mship doctor` hooks check already nudges users toward it.
 - **No change to MSHIP block marker syntax or format.**
@@ -38,10 +38,16 @@ Three self-contained changes; each touches one production file plus its tests.
 
 **File:** `src/mship/cli/finish.py`.
 
-In the body-resolution block (after the mutex check between `--body` and `--body-file`, before the "reject empty" check), add a special case:
+Today the `finish` command in `src/mship/cli/worktree.py` (around line 467-482) resolves `custom_body` in three branches:
+
+- `body == "-"` → reads stdin (works today, no TTY check).
+- `body is not None` (any other string) → uses the string as-is.
+- `body_file is not None` → `Path(body_file).read_text()` — crashes on `-` with "No such file or directory".
+
+Fix: factor out a small helper `_read_stdin_body_or_exit(output)` that reads stdin with a TTY guard:
 
 ```python
-if body_file == "-":
+def _read_stdin_body_or_exit(output: Output) -> str:
     import sys
     if sys.stdin.isatty():
         output.error(
@@ -49,12 +55,16 @@ if body_file == "-":
             "pipe or redirect stdin, or use --body-file <path>"
         )
         raise typer.Exit(code=1)
-    body = sys.stdin.read()
-else:
-    body = Path(body_file).read_text()
+    return sys.stdin.read()
 ```
 
-Existing "empty body rejected" check runs after this branch unchanged; an empty stdin (EOF immediately) hits the same error as an empty `--body` or an empty file.
+Wire it in both branches:
+
+- `body == "-"` → `custom_body = _read_stdin_body_or_exit(output)` (replaces the bare `sys.stdin.read()`).
+- `body_file == "-"` → new branch: `custom_body = _read_stdin_body_or_exit(output)`.
+- `body_file` otherwise → existing `Path(body_file).read_text()`.
+
+This makes `--body -` and `--body-file -` semantically identical (both read stdin with a TTY guard). The existing "empty body rejected" check runs after this branch unchanged; an empty stdin (EOF immediately) hits the same rejection as an empty `--body` or empty file.
 
 ### Fix 2 — Stale MSHIP-block refresh in `_install_one`
 
@@ -140,8 +150,9 @@ For a multi-git-root workspace, each root gets its three lines; the `@ <path>` d
 ### CLI / finish (`tests/cli/test_finish.py`)
 
 - `CliRunner().invoke(app, [..., "--body-file", "-"], input="body\n")` — opens PR with body `body\n`.
-- Empty stdin (`input=""`) — existing empty-body rejection fires.
-- TTY error path — monkey-patch `sys.stdin.isatty` to return `True`; assert exit 1 and the verbatim error message.
+- `CliRunner().invoke(app, [..., "--body", "-"], input="body\n")` — same; symmetric.
+- Empty stdin (`input=""`) — existing empty-body rejection fires for BOTH `--body -` and `--body-file -`.
+- TTY error path — monkey-patch `sys.stdin.isatty` to return `True`; assert exit 1 and the verbatim error message. Run for both `--body -` and `--body-file -`.
 - Mutex still enforced: `--body "x" --body-file -` errors with the existing mutex message.
 
 ## Decisions log
@@ -150,7 +161,7 @@ For a multi-git-root workspace, each root gets its three lines; the `@ <path>` d
 |---|---|---|
 | 1 | Compare-and-refresh MSHIP blocks (no new flag) | Idempotent; silent when a no-op; fixes stale-hook case transparently. Rejected "always rewrite" (churns mtimes) and "`--refresh-hooks` opt-in flag" (users won't know to reach for it). |
 | 2 | TTY-detect + error on `--body-file -` | Block-until-EOF (standard Unix) hangs on accidental bare invocation. Erroring fast beats a mystery hang. Matches `gh` and other modern CLIs. |
-| 3 | `-` only special for `--body-file`, not `--body` | Unix convention: `-` substitutes for a file path, never for an inline string. `--body "-"` remains the literal string. |
+| 3 | Both `--body` and `--body-file` accept `-` as stdin (symmetric) | `--body -` already reads stdin per the existing help text and `cli/worktree.py:471`. Extending the same convention to `--body-file` makes the two flags interchangeable modulo inline-vs-file semantics. Users don't have to remember which one takes `-`. |
 | 4 | Per-hook per-root output lines with outcome suffixes | Users can tell whether each of the three hooks was installed fresh, refreshed from stale, or was already current. Closes issue #31. |
 | 5 | Preserve user content around MSHIP blocks | Hooks are documented as user-editable outside the MSHIP block. Refresh must be surgical. |
 | 6 | Corrupt hook → `skipped_corrupt` outcome, not a crash | Users with half-deleted blocks get a warning, not a traceback. No silent data loss. |
