@@ -1,6 +1,8 @@
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from mship.core import skill_install as _si
 from mship.core.config import WorkspaceConfig
 from mship.util.shell import ShellRunner
 
@@ -27,6 +29,83 @@ class DoctorReport:
     @property
     def ok(self) -> bool:
         return self.errors == 0
+
+
+def _claude_target(skill_name: str) -> Path:
+    return Path.home() / ".claude" / "skills" / skill_name
+
+
+def _codex_target() -> Path:
+    return Path.home() / ".agents" / "skills" / "mothership"
+
+
+def _intended_target(symlink: Path) -> Path:
+    """Read symlink without resolving — works for dangling links."""
+    raw = Path(os.readlink(symlink))
+    if not raw.is_absolute():
+        raw = (symlink.parent / raw).resolve(strict=False)
+    return raw
+
+
+def check_skill_availability() -> list[CheckResult]:
+    """One CheckResult per detected agent reporting installed/dangling/foreign."""
+    results: list[CheckResult] = []
+    pkg_src = _si.pkg_skills_source()
+    skill_dirs = _si._iter_skill_dirs(pkg_src)
+    total = len(skill_dirs)
+    detected = _si._detect_agents()
+
+    if detected.get("claude"):
+        installed = dangling = foreign = 0
+        for d in skill_dirs:
+            target = _claude_target(d.name)
+            if not target.exists() and not target.is_symlink():
+                continue
+            if target.is_symlink():
+                intended = _intended_target(target)
+                if target.exists() and intended.resolve() == d.resolve():
+                    installed += 1
+                elif _si.is_owned_target(intended):
+                    dangling += 1
+                else:
+                    foreign += 1
+            else:
+                foreign += 1
+        results.append(_format_skill_check("claude", installed, dangling, foreign, total))
+
+    if detected.get("codex"):
+        target = _codex_target()
+        installed = dangling = foreign = 0
+        if target.is_symlink():
+            intended = _intended_target(target)
+            if target.exists() and intended.resolve() == pkg_src.resolve():
+                installed = total
+            elif _si.is_owned_target(intended):
+                dangling = total
+            else:
+                foreign = total
+        elif target.exists():
+            foreign = total
+        results.append(_format_skill_check("codex", installed, dangling, foreign, total))
+
+    return results
+
+
+def _format_skill_check(agent: str, installed: int, dangling: int, foreign: int, total: int) -> CheckResult:
+    if installed == total and dangling == 0 and foreign == 0:
+        return CheckResult(
+            name=f"skills/{agent}", status="pass",
+            message=f"{installed}/{total} skills installed and current",
+        )
+    parts = [f"{installed}/{total} installed"]
+    if dangling:
+        parts.append(f"{dangling} dangling")
+    if foreign:
+        parts.append(f"{foreign} foreign (skipped)")
+    msg = ", ".join(parts) + " — run `mship skill install`"
+    if foreign:
+        msg += " (use --force to overwrite foreign entries)"
+    return CheckResult(name=f"skills/{agent}", status="warn", message=msg)
 
 
 class DoctorChecker:
@@ -170,6 +249,9 @@ class DoctorChecker:
                 report.checks.append(CheckResult(name="env_runner", status="pass", message=f"{env_runner} — found"))
             else:
                 report.checks.append(CheckResult(name="env_runner", status="warn", message=f"{binary} not found in PATH"))
+
+        # Append skill-availability checks (workspace-independent)
+        report.checks.extend(check_skill_availability())
 
         return report
 
