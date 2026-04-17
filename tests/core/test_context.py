@@ -1,6 +1,7 @@
 """Tests for the pure `build_context` builder (no CLI, no real git)."""
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -10,7 +11,9 @@ import pytest
 from mship.core.config import WorkspaceConfig, RepoConfig
 from mship.core.context import SCHEMA_VERSION, build_context
 from mship.core.log import LogManager
+from mship.core.reconcile.cache import CachePayload, ReconcileCache
 from mship.core.state import Task, TestResult, WorkspaceState
+from mship.core.workspace_meta import write_last_sync_at
 
 
 def _config(tmp_path: Path) -> WorkspaceConfig:
@@ -50,10 +53,15 @@ def _no_binary_check() -> Optional[bool]:
     return None
 
 
-def _build(state, config, log_manager, cwd, **kw):
+def _build(state, config, log_manager, cwd, state_dir=None, **kw):
     kw.setdefault("git_count", lambda *_: None)
     kw.setdefault("binary_check", _no_binary_check)
-    return build_context(state, config, log_manager, cwd, **kw)
+    kw.setdefault("dirty_check", lambda _p: None)
+    return build_context(
+        state, config, log_manager, cwd,
+        state_dir=state_dir if state_dir is not None else cwd,
+        **kw,
+    )
 
 
 def test_empty_state_returns_no_active_tasks(tmp_path: Path):
@@ -191,3 +199,131 @@ def test_most_recent_test_result_wins(tmp_path: Path):
     )})
     out = _build(state, _config(tmp_path), log_mgr, tmp_path)
     assert out["active_tasks"][0]["last_test_state"] == "fail"
+
+
+# --- Tier 2: drift, main_checkout_clean, fetch/drift timestamps -----------
+
+
+def test_drift_unknown_when_no_cache(tmp_path: Path):
+    log_mgr = LogManager(tmp_path / "logs")
+    state = WorkspaceState(tasks={"u": _task("u")})
+    out = _build(state, _config(tmp_path), log_mgr, tmp_path)
+    assert out["active_tasks"][0]["drift"] == "unknown"
+    assert out["last_drift_check_at"] is None
+
+
+def test_drift_read_from_cache(tmp_path: Path):
+    log_mgr = LogManager(tmp_path / "logs")
+    state = WorkspaceState(tasks={"a": _task("a"), "b": _task("b")})
+
+    cache = ReconcileCache(tmp_path)
+    fetched = time.time()
+    cache.write(CachePayload(
+        fetched_at=fetched, ttl_seconds=300,
+        results={
+            "a": {"state": "merged", "pr_url": None, "pr_number": None,
+                  "base": None, "merge_commit": None, "updated_at": None},
+            # 'b' deliberately absent -> "unknown"
+        },
+        ignored=[],
+    ))
+
+    out = _build(state, _config(tmp_path), log_mgr, tmp_path,
+                 state_dir=tmp_path, cache=cache)
+    by_slug = {t["slug"]: t for t in out["active_tasks"]}
+    assert by_slug["a"]["drift"] == "merged"
+    assert by_slug["b"]["drift"] == "unknown"
+    assert out["last_drift_check_at"] is not None
+
+
+def test_drift_unknown_when_cache_entry_malformed(tmp_path: Path):
+    log_mgr = LogManager(tmp_path / "logs")
+    state = WorkspaceState(tasks={"x": _task("x")})
+
+    cache = ReconcileCache(tmp_path)
+    cache.write(CachePayload(
+        fetched_at=time.time(), ttl_seconds=300,
+        results={"x": {"not_a_state_field": "junk"}},
+        ignored=[],
+    ))
+
+    out = _build(state, _config(tmp_path), log_mgr, tmp_path,
+                 state_dir=tmp_path, cache=cache)
+    assert out["active_tasks"][0]["drift"] == "unknown"
+
+
+def test_main_checkout_clean_dispatches_per_repo(tmp_path: Path):
+    log_mgr = LogManager(tmp_path / "logs")
+    cfg = _config(tmp_path)
+    seen: list[Path] = []
+
+    def dirty(p: Path) -> Optional[bool]:
+        seen.append(p)
+        return False  # clean
+
+    out = _build(
+        WorkspaceState(), cfg, log_mgr, tmp_path,
+        dirty_check=dirty,
+    )
+    assert out["main_checkout_clean"] == {"repo": True}
+    assert seen == [cfg.repos["repo"].path]
+
+
+def test_main_checkout_clean_reports_dirty(tmp_path: Path):
+    log_mgr = LogManager(tmp_path / "logs")
+    out = _build(
+        WorkspaceState(), _config(tmp_path), log_mgr, tmp_path,
+        dirty_check=lambda _p: True,
+    )
+    assert out["main_checkout_clean"] == {"repo": False}
+
+
+def test_main_checkout_clean_unknown_on_error(tmp_path: Path):
+    log_mgr = LogManager(tmp_path / "logs")
+    out = _build(
+        WorkspaceState(), _config(tmp_path), log_mgr, tmp_path,
+        dirty_check=lambda _p: None,
+    )
+    assert out["main_checkout_clean"] == {"repo": None}
+
+
+def test_main_checkout_clean_skips_git_root_children(tmp_path: Path):
+    """Repos with `git_root` set share their parent's checkout — don't double-report."""
+    log_mgr = LogManager(tmp_path / "logs")
+
+    parent_dir = tmp_path / "mono"
+    parent_dir.mkdir()
+    (parent_dir / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    child_dir = parent_dir / "pkg"
+    child_dir.mkdir()
+    (child_dir / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+
+    cfg = WorkspaceConfig(
+        workspace="t",
+        repos={
+            "mono": RepoConfig(path=parent_dir, type="service"),
+            "pkg": RepoConfig(path=child_dir, type="library", git_root="mono"),
+        },
+    )
+
+    out = _build(
+        WorkspaceState(), cfg, log_mgr, tmp_path,
+        dirty_check=lambda _p: False,
+    )
+    assert out["main_checkout_clean"] == {"mono": True}
+    assert "pkg" not in out["main_checkout_clean"]
+
+
+def test_last_workspace_fetch_at_null_when_unset(tmp_path: Path):
+    log_mgr = LogManager(tmp_path / "logs")
+    out = _build(WorkspaceState(), _config(tmp_path), log_mgr, tmp_path)
+    assert out["last_workspace_fetch_at"] is None
+
+
+def test_last_workspace_fetch_at_round_trips(tmp_path: Path):
+    log_mgr = LogManager(tmp_path / "logs")
+    when = datetime(2026, 4, 17, 12, 0, tzinfo=timezone.utc)
+    write_last_sync_at(tmp_path, when)
+    out = _build(WorkspaceState(), _config(tmp_path), log_mgr, tmp_path,
+                 state_dir=tmp_path)
+    assert out["last_workspace_fetch_at"] == when.isoformat()

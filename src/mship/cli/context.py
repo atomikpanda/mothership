@@ -11,6 +11,7 @@ import typer
 
 from mship.cli.output import Output
 from mship.core.context import build_context
+from mship.core.reconcile.cache import ReconcileCache
 
 
 def register(app: typer.Typer, get_container):
@@ -18,10 +19,13 @@ def register(app: typer.Typer, get_container):
     def context():
         """Emit a JSON snapshot of workspace state for agent consumption."""
         container = get_container()
+        state_dir = container.state_dir()
         payload = build_context(
             state=container.state_manager().load(),
             config=container.config(),
             log_manager=container.log_manager(),
             cwd=Path.cwd(),
+            state_dir=state_dir,
+            cache=ReconcileCache(state_dir),
         )
         Output().json(payload)

@@ -60,6 +60,10 @@ def test_context_emits_valid_json(tmp_path: Path):
             assert task["base_branch"] == "main"
             assert task["phase"] == "dev"
             assert task["finished_at"] is None
+            assert task["drift"] == "unknown"  # no reconcile cache present
+        assert data["main_checkout_clean"] == {}  # config has no repos
+        assert data["last_workspace_fetch_at"] is None
+        assert data["last_drift_check_at"] is None
     finally:
         _reset_container()
 

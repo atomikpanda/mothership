@@ -13,6 +13,7 @@ def register(app: typer.Typer, get_container):
         """Fast-forward repos that audit cleanly and are behind origin."""
         from mship.core.repo_state import audit_repos
         from mship.core.repo_sync import sync_repos
+        from mship.core.workspace_meta import write_last_sync_at
 
         container = get_container()
         output = Output()
@@ -36,6 +37,7 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=1)
 
         out = sync_repos(report, config, shell)
+        write_last_sync_at(container.state_dir())
         for r in out.results:
             if r.status == "up_to_date":
                 output.print(f"  {r.name}: up to date")
