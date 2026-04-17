@@ -85,3 +85,13 @@ def test_collect_known_worktree_paths_no_tasks():
     state = _FakeState({})
     result = collect_known_worktree_paths(_FakeStateMgr(state))
     assert result == frozenset()
+
+
+def test_gate_does_not_block_when_only_warn_issues():
+    """A repo audit with only `dirty_untracked` (warn) must not trip the gate."""
+    audit = RepoAudit(
+        name="cli", path=Path("/abs"), current_branch="main",
+        issues=(Issue("dirty_untracked", "warn", "1 untracked file"),),
+    )
+    report = AuditReport(repos=(audit,))
+    assert report.has_errors is False

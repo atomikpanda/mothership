@@ -49,7 +49,7 @@ def test_sync_behind_repo_fast_forwards(audit_workspace):
 
 def test_sync_dirty_skipped(audit_workspace):
     cfg, shell = _load(audit_workspace)
-    (audit_workspace / "cli" / "x.txt").write_text("x")
+    (audit_workspace / "cli" / "README.md").write_text("modified\n")  # tracked-modified
     report = audit_repos(cfg, shell)
     out = sync_repos(report, cfg, shell)
     r = _result_for(out, "cli")

@@ -115,7 +115,7 @@ def test_spawn_blocks_when_affected_repo_is_dirty(audit_workspace):
     container.state_dir.override(state_dir)
     container.log_manager.reset()
     try:
-        (audit_workspace / "cli" / "x.txt").write_text("x")
+        (audit_workspace / "cli" / "README.md").write_text("modified\n")
         result = runner.invoke(app, ["spawn", "dirty test", "--repos", "cli"])
         assert result.exit_code == 1
         assert "dirty_worktree" in result.output
@@ -132,7 +132,7 @@ def test_spawn_force_audit_bypasses_and_logs(audit_workspace):
     container.state_dir.override(state_dir)
     container.log_manager.reset()
     try:
-        (audit_workspace / "cli" / "x.txt").write_text("x")
+        (audit_workspace / "cli" / "README.md").write_text("modified\n")
         result = runner.invoke(app, ["spawn", "force test", "--repos", "cli", "--force-audit"])
         assert result.exit_code == 0, result.output
 

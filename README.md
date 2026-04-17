@@ -268,7 +268,7 @@ audit:
 - `mship sync [--repos r1,r2]` — fast-forwards behind-only clean repos; skips the rest with a reason.
 - `mship spawn --force-audit` / `mship finish --force-audit` — bypass with a line logged to the task log.
 
-**Issue codes:** `path_missing`, `not_a_git_repo`, `fetch_failed`, `detached_head`, `unexpected_branch`, `dirty_worktree`, `no_upstream`, `behind_remote`, `diverged`, `extra_worktrees` (errors); `ahead_remote` (info-only).
+**Issue codes:** `path_missing`, `not_a_git_repo`, `fetch_failed`, `detached_head`, `unexpected_branch`, `dirty_worktree`, `no_upstream`, `behind_remote`, `diverged`, `extra_worktrees` (errors); `dirty_untracked` (warn — untracked files only, doesn't block); `ahead_remote` (info-only).
 
 ### Live views
 

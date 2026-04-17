@@ -28,10 +28,10 @@ def test_audit_clean_exits_zero(audit_workspace):
         _reset()
 
 
-def test_audit_dirty_exits_one(audit_workspace):
+def test_audit_modified_tracked_exits_one(audit_workspace):
     _override(audit_workspace)
     try:
-        (audit_workspace / "cli" / "x.txt").write_text("x")
+        (audit_workspace / "cli" / "README.md").write_text("modified\n")
         result = runner.invoke(app, ["audit"])
         assert result.exit_code == 1
         assert "dirty_worktree" in result.output
@@ -42,7 +42,7 @@ def test_audit_dirty_exits_one(audit_workspace):
 def test_audit_json_shape(audit_workspace):
     _override(audit_workspace)
     try:
-        (audit_workspace / "cli" / "x.txt").write_text("x")
+        (audit_workspace / "cli" / "README.md").write_text("modified\n")
         result = runner.invoke(app, ["audit", "--json"])
         assert result.exit_code == 1
         payload = json.loads(result.output)
@@ -135,5 +135,17 @@ def test_audit_still_flags_foreign_worktree(audit_workspace):
         assert result.exit_code == 1
         assert "extra_worktrees" in result.output
         assert "mship prune" in result.output
+    finally:
+        _reset()
+
+
+def test_audit_warn_displays_yellow_lane(audit_workspace):
+    _override(audit_workspace)
+    try:
+        (audit_workspace / "cli" / "new.txt").write_text("hi\n")  # untracked → warn
+        result = runner.invoke(app, ["audit"])
+        assert result.exit_code == 0, result.output  # warn does NOT block
+        assert "dirty_untracked" in result.output
+        assert "warn(s)" in result.output  # footer counter includes warn
     finally:
         _reset()

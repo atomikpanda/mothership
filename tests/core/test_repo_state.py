@@ -168,7 +168,7 @@ def test_audit_expected_branch_passes_when_root_path_is_a_worktree(audit_workspa
 
 def test_audit_dirty_worktree(audit_workspace):
     cfg, shell = _load(audit_workspace)
-    (audit_workspace / "cli" / "new.txt").write_text("hi\n")
+    (audit_workspace / "cli" / "README.md").write_text("modified\n")
     rep = audit_repos(cfg, shell, names=["cli"])
     assert "dirty_worktree" in _issue_codes(rep, "cli")
 
@@ -179,9 +179,12 @@ def test_audit_allow_dirty_suppresses(audit_workspace):
     data["repos"]["cli"]["allow_dirty"] = True
     cfg_path.write_text(yaml.safe_dump(data))
     cfg, shell = _load(audit_workspace)
-    (audit_workspace / "cli" / "new.txt").write_text("hi\n")
+    (audit_workspace / "cli" / "README.md").write_text("modified\n")  # tracked-modified
+    (audit_workspace / "cli" / "new.txt").write_text("hi\n")          # untracked
     rep = audit_repos(cfg, shell, names=["cli"])
-    assert "dirty_worktree" not in _issue_codes(rep, "cli")
+    codes = _issue_codes(rep, "cli")
+    assert "dirty_worktree" not in codes
+    assert "dirty_untracked" not in codes  # allow_dirty suppresses both tiers
 
 
 def test_audit_ahead_remote_is_info(audit_workspace):
@@ -435,7 +438,7 @@ def test_audit_local_only_still_detects_dirty(audit_workspace):
     from mship.core.repo_state import audit_repos
     from mship.util.shell import ShellRunner
 
-    (audit_workspace / "cli" / "new.txt").write_text("x\n")
+    (audit_workspace / "cli" / "README.md").write_text("modified\n")
 
     cfg = ConfigLoader.load(audit_workspace / "mothership.yaml")
     shell = ShellRunner()
@@ -499,7 +502,7 @@ def test_audit_monorepo_one_fetch_per_root(tmp_path):
     }))
 
     # Dirty pkg-a only — branch/fetch state is clean
-    (mono / "pkg-a" / "dirty.txt").write_text("x")
+    (mono / "pkg-a" / "Taskfile.yml").write_text("version: '3'\ntasks: {modified: true}\n")
 
     cfg, shell = _load(tmp_path)
     # Wrap shell to count fetch calls
@@ -518,3 +521,39 @@ def test_audit_monorepo_one_fetch_per_root(tmp_path):
     pkg_b_codes = _issue_codes(rep, "pkg_b")
     assert "dirty_worktree" in pkg_a_codes
     assert "dirty_worktree" not in pkg_b_codes
+
+
+# --- _probe_dirty classification (issue #35) ---
+
+def test_probe_dirty_untracked_only_emits_warn(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    (audit_workspace / "cli" / "new.txt").write_text("hi\n")  # untracked
+    rep = audit_repos(cfg, shell, names=["cli"])
+    cli = next(r for r in rep.repos if r.name == "cli")
+    codes = {(i.code, i.severity) for i in cli.issues}
+    assert ("dirty_untracked", "warn") in codes
+    assert not any(c == "dirty_worktree" for c, _ in codes)
+    assert cli.has_errors is False
+
+
+def test_probe_dirty_modified_tracked_emits_error(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    # README.md is a tracked file in the audit_workspace fixture
+    (audit_workspace / "cli" / "README.md").write_text("modified content\n")
+    rep = audit_repos(cfg, shell, names=["cli"])
+    cli = next(r for r in rep.repos if r.name == "cli")
+    codes = {(i.code, i.severity) for i in cli.issues}
+    assert ("dirty_worktree", "error") in codes
+    assert cli.has_errors is True
+
+
+def test_probe_dirty_mixed_emits_both(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    (audit_workspace / "cli" / "README.md").write_text("modified\n")  # tracked-modified
+    (audit_workspace / "cli" / "new.txt").write_text("hi\n")          # untracked
+    rep = audit_repos(cfg, shell, names=["cli"])
+    cli = next(r for r in rep.repos if r.name == "cli")
+    codes = {(i.code, i.severity) for i in cli.issues}
+    assert ("dirty_worktree", "error") in codes
+    assert ("dirty_untracked", "warn") in codes
+    assert cli.has_errors is True

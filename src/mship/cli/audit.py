@@ -43,6 +43,7 @@ def register(app: typer.Typer, get_container):
         output.print(f"[bold]workspace:[/bold] {config.workspace}")
         output.print("")
         err_count = 0
+        warn_count = 0
         info_count = 0
         for r in report.repos:
             branch_suffix = f" ({r.current_branch})" if r.current_branch else ""
@@ -54,9 +55,12 @@ def register(app: typer.Typer, get_container):
                     if i.severity == "error":
                         err_count += 1
                         output.print(f"  [red]✗[/red] {i.code}: {i.message}")
+                    elif i.severity == "warn":
+                        warn_count += 1
+                        output.print(f"  [yellow]⚠[/yellow] {i.code}: {i.message}")
                     else:
                         info_count += 1
                         output.print(f"  [blue]ⓘ[/blue] {i.code}: {i.message}")
             output.print("")
-        output.print(f"{err_count} error(s), {info_count} info across {len(report.repos)} repos")
+        output.print(f"{err_count} error(s), {warn_count} warn(s), {info_count} info across {len(report.repos)} repos")
         raise typer.Exit(code=1 if report.has_errors else 0)
