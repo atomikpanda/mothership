@@ -150,8 +150,7 @@ These are strictly enforced in this workspace:
 
 - **Use `mship finish --body-file <path>` to open the PR.** Empty bodies are rejected by design. Write a real Summary and Test plan.
 - **Don't edit from the main checkout.** Only the worktree path above. The pre-commit hook refuses otherwise.
-- **Prefer `--bypass-<check>` over `--force-<check>`** on any mship command that takes one (e.g., `--bypass-reconcile`, `--bypass-audit`). Different flag name if you see `--force-<something>` in older docs; the bypass form is canonical.
-"""
+- **Prefer `--bypass-<check>` over `--force-<check>`** on any mship command that takes one (e.g., `--bypass-reconcile`, `--bypass-audit`). Different flag name if you see `--force-<something>` in older docs; the bypass form is canonical."""
 
 
 _FINISH_CONTRACT = """\
