@@ -6,11 +6,13 @@ A structured interface between AI coding agents and a running multi-repo system.
 
 ## Problem
 
-An agent working on a real multi-service codebase needs to do two things well: coordinate with other agents (and its own past sessions) across repos, and observe the running system it's changing. Current tooling gives it neither.
+Consider a single feature that touches five repos: the shared schemas, two microservices that depend on those schemas, the api that sits in front of the microservices, and the api-client consumed by a web app. An agent (or team of them) working on this feature has to hold all five in its head simultaneously — make the schema change, propagate it to both microservices, update the api to match, regenerate the client, and verify the whole thing works end-to-end. Then open five PRs that need to land in the right order.
 
-For coordination, agents commit to `main` because they forgot `git checkout`, edit in the wrong worktree, lose track of what changed in repo A while working in repo B, and open cross-repo PRs in the wrong order. These are state failures that git alone doesn't model.
+Today, that coordination is almost entirely in the agent's head, and agents are bad at it. They commit to `main` in the wrong repo because they forgot `git checkout`. They edit the api in the main checkout while their feature branch for the api lives in a worktree they never cd'd into. They lose track of what changed in schemas while working in the microservice. They open the api-client PR before the schemas PR and reviewers can't evaluate either in isolation. They declare done on unit tests in one repo while the contract break with another repo goes unnoticed until integration.
 
-For observation, agents fall back to a grab bag of shell commands and guesswork. Which log file belongs to the service they just changed? Which port is the API on in *their* worktree, not the main checkout? Did Postgres come up before the migration ran? Are they looking at the right database? Without structured answers to these questions, an agent either guesses (and is wrong), pokes around with ad-hoc shell (and is slow), or declares done on unit tests that don't exercise the real system (and ships bugs that only surface in integration).
+And even when the coordination works, the *observation* fails. The agent has five services in five worktrees. Which log file belongs to the microservice it just changed? Which port is the api on in *this* task's worktree, not the main checkout? Did the schemas migration run before the microservice tried to read the new column? Without structured answers, the agent falls back to a grab bag of shell commands and guesswork — and when it guesses wrong, the failure mode is silent: tests pass in each repo, the feature "works" locally, and the bug surfaces in staging after five PRs have already merged.
+
+mship is built for this shape of problem: a feature that spans multiple repos, an agent that needs to coordinate changes across them and observe the running system as a single thing. It also works for simpler cases — a single repo, a monorepo, or two or three loosely-coupled services — but metarepo-scale coordination is the problem it was designed to solve.
 
 ## Quickstart
 
@@ -35,17 +37,21 @@ EOF
 
 Requires Python 3.14+ and [uv](https://docs.astral.sh/uv/). Optional: [go-task](https://taskfile.dev) for task execution, [gh](https://cli.github.com) for `mship finish`.
 
+The quickstart above is deliberately minimal — one repo, one file — to show the task lifecycle in isolation. For the multi-repo case mship was built for, see [`docs/configuration.md`](docs/configuration.md) for `mothership.yaml` examples with dependency graphs, healthchecks, and `env_runner` delegation, and [`docs/cli.md`](docs/cli.md) for the full command surface including `mship spawn --repos`, `mship switch`, and cross-repo `mship finish`.
+
 ## What mship gives agents
 
-**Isolation with coordination.** Every task gets its own worktree per affected repo on a shared feature branch. A pre-commit hook refuses commits from outside the active task's worktrees. Parallel tasks don't collide. Cross-repo PRs open in dependency order with coordination blocks linking them.
+**Cross-repo coordination as a first-class concept.** A task in mship is a single unit of work that can span many repos. `mship spawn "propagate user schema v2" --repos schemas,svc-users,svc-billing,api,api-client` creates one worktree per repo on a shared feature branch. `mship test` runs them in dependency order. `mship finish` opens five PRs in dependency order with coordination blocks in each body linking the others. Audits catch drift per repo. The agent operates on "the task" — mship tracks which files across which repos belong to it.
 
-**A running system to observe, not guess at.** `mship run` brings up the task's services in dependency order, waits on per-service healthchecks (`tcp`, `http`, `sleep`, or a custom task), and keeps background services alive so an agent can actually interact with them. Ports and URLs are task-scoped, so two agents working on two tasks don't fight over `localhost:3000`.
+**Isolation that makes coordination safe.** Every worktree is on its own feature branch, separate from main. A pre-commit hook refuses commits from outside the active task's worktrees. Parallel tasks on different features get their own worktree sets and don't collide.
 
-**Structured state instead of shell archaeology.** `mship status`, `mship context`, and `mship journal` emit JSON when stdout isn't a TTY. The agent asks for the active repo, the worktree path, the branch, the last test result, the open blockers — it gets structured answers, not text to parse. Combined with the runtime, this means an agent can know which log file belongs to which service, which URL to hit, and which test command to run, without a single `find` or `ps` or `lsof`.
+**A running system to observe, not guess at.** `mship run` brings up the task's services in dependency order, waits on per-service healthchecks (`tcp`, `http`, `sleep`, or a custom task), and keeps background services alive so the agent can interact with them. Ports and URLs are task-scoped — two tasks running in parallel don't fight over `localhost:3000`. This matters most for the metarepo case, where "the running system" means five services that have to talk to each other.
 
-**A phase lifecycle that keeps the agent honest.** `plan → dev → review → run` with soft gates on each transition — warns on moving to dev without a spec, to review with failing tests, to run with uncommitted changes. Blocked tasks (`mship block "waiting on API key"`) are parked explicitly. Phases are the scaffolding that makes the structured state consistent over time.
+**Structured state instead of shell archaeology.** `mship status`, `mship context`, and `mship journal` emit JSON when stdout isn't a TTY. The agent asks for the active repo, the worktree paths, the branches, the last test result per repo, the open blockers — it gets structured answers, not text to parse. Combined with the runtime, this means an agent can know which log file belongs to which service, which URL to hit, and which test command to run in each repo, without a single `find` or `ps` or `lsof`.
 
-**A dispatch primitive for session handoff.** `mship dispatch --task <slug> -i "<instruction>"` prints a self-contained subagent prompt — cd directive, branch state, recent journal entries, finish contract — so a fresh agent session can resume without parent-held context.
+**A phase lifecycle that keeps the whole feature honest.** `plan → dev → review → run` with soft gates on each transition — warns on moving to dev without a spec, to review with failing tests *in any affected repo*, to run with uncommitted changes *anywhere in the task*. The lifecycle is task-scoped, not repo-scoped, so a feature across five repos has one phase, not five.
+
+**A dispatch primitive for session handoff.** `mship dispatch --task <slug> -i "<instruction>"` prints a self-contained subagent prompt — cd directive, branch state, recent journal entries, finish contract — so a fresh agent session can pick up a multi-repo task without parent-held context.
 
 ## How it works
 
@@ -57,7 +63,7 @@ Agents plug into this through any MCP server or shell tool they already have. ms
 
 - **Does:** isolate worktrees per task, coordinate cross-repo work, sequence PRs, run dependency-ordered multi-service stacks with healthchecks, expose task-scoped state to agents as structured JSON, emit handoff prompts for subagents.
 - **Does not:** run the agent, generate code, manage secrets (delegates to `env_runner`), replace CI.
-- **Works for:** a single repo, a monorepo (via `git_root`), or multiple repos in one workspace.
+- **Works for:** multiple repos in one workspace (the primary case), a monorepo (via `git_root`), or a single repo.
 
 ## Reference
 
