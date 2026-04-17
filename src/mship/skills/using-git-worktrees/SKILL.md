@@ -13,6 +13,10 @@ Git worktrees create isolated workspaces sharing the same repository, allowing w
 
 **Announce at start:** "I'm using the using-git-worktrees skill to set up an isolated workspace."
 
+## In a mothership workspace
+
+If a `mothership.yaml` is present at any ancestor directory, use `mship spawn '<description>'` instead of the steps below. `mship spawn` creates the worktree, registers it in workspace state, runs per-repo `task setup`, and (where configured) symlinks heavy directories. The Directory Selection, Safety Verification, and Creation Steps sections below apply only when you're not spawning a mship task (e.g., quick read-only exploration or a non-mship repo).
+
 ## Directory Selection Process
 
 Follow this priority order:
@@ -81,6 +85,8 @@ project=$(basename "$(git rev-parse --show-toplevel)")
 ```
 
 ### 2. Create Worktree
+
+*For non-mship workflows, create the worktree directly:*
 
 ```bash
 # Determine full path
@@ -180,15 +186,14 @@ Ready to implement <feature-name>
 ```
 You: I'm using the using-git-worktrees skill to set up an isolated workspace.
 
-[Check .worktrees/ - exists]
-[Verify ignored - git check-ignore confirms .worktrees/ is ignored]
-[Create worktree: git worktree add .worktrees/auth -b feature/auth]
-[Run npm install]
-[Run npm test - 47 passing]
+[Detect: mothership.yaml found at /abs/workspace — routing through mship spawn]
+[Run: mship spawn "implement auth middleware" --repos auth-service]
+[mship creates worktree at .worktrees/feat/implement-auth-middleware, runs task setup]
+[Run: mship test (baseline check)]
 
-Worktree ready at /Users/jesse/myproject/.worktrees/auth
+Worktree ready at /abs/workspace/.worktrees/feat/implement-auth-middleware
 Tests passing (47 tests, 0 failures)
-Ready to implement auth feature
+Ready to implement auth middleware
 ```
 
 ## Red Flags
