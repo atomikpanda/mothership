@@ -54,7 +54,7 @@ Present exactly these 4 options:
 Implementation complete. What would you like to do?
 
 1. Merge back to <base-branch> locally
-2. Push and create a Pull Request
+2. Finish the task and open a Pull Request
 3. Keep the branch as-is (I'll handle it later)
 4. Discard this work
 
@@ -66,6 +66,8 @@ Which option?
 ### Step 4: Execute Choice
 
 #### Option 1: Merge Locally
+
+*In a mothership workspace, run `mship close` after this block. It records the merge in state and cleans up the worktree. Safe to run even after `git branch -d` — `mship close` tolerates an already-deleted branch.*
 
 ```bash
 # Switch to base branch
@@ -89,18 +91,17 @@ Then: Cleanup worktree (Step 5)
 #### Option 2: Push and Create PR
 
 ```bash
-# Push branch
-git push -u origin <feature-branch>
-
-# Create PR
-gh pr create --title "<title>" --body "$(cat <<'EOF'
+# Write the PR body to a file (or pass inline via --body "...")
+cat > /tmp/pr-body.md <<'EOF'
 ## Summary
 <2-3 bullets of what changed>
 
-## Test Plan
+## Test plan
 - [ ] <verification steps>
 EOF
-)"
+
+# Finish the task: pushes the branch, opens the PR, stamps state.
+mship finish --body-file /tmp/pr-body.md
 ```
 
 Then: Cleanup worktree (Step 5)
@@ -127,8 +128,7 @@ Wait for exact confirmation.
 
 If confirmed:
 ```bash
-git checkout <base-branch>
-git branch -D <feature-branch>
+mship close --abandon
 ```
 
 Then: Cleanup worktree (Step 5)
@@ -137,15 +137,7 @@ Then: Cleanup worktree (Step 5)
 
 **For Options 1, 2, 4:**
 
-Check if in worktree:
-```bash
-git worktree list | grep $(git branch --show-current)
-```
-
-If yes:
-```bash
-git worktree remove <worktree-path>
-```
+*In a mothership workspace, worktree cleanup is handled by `mship close`. Run it after the local merge (Option 1) or after the PR merges on GitHub (Option 2 — check via `mship reconcile` or `gh pr view`). No manual `git worktree remove` needed.*
 
 **For Option 3:** Keep worktree.
 
@@ -156,7 +148,7 @@ git worktree remove <worktree-path>
 | 1. Merge locally | ✓ | - | - | ✓ |
 | 2. Create PR | - | ✓ | ✓ | - |
 | 3. Keep as-is | - | - | ✓ | - |
-| 4. Discard | - | - | - | ✓ (force) |
+| 4. Discard | - | - | - | ✓ (via close --abandon) |
 
 ## Common Mistakes
 

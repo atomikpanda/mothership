@@ -95,12 +95,16 @@ def function(input):
 Run: `pytest tests/path/test.py::test_name -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit (pair with `mship journal` in a mothership workspace)**
 
 ```bash
 git add tests/path/test.py src/path/file.py
 git commit -m "feat: add specific feature"
+# In a mothership workspace, also record the step in the journal:
+mship journal "implemented specific feature; tests passing" --action committed
 ```
+
+Pair the commit with a `mship journal` entry so other sessions can reconstruct progress without reading every commit diff.
 ````
 
 ## No Placeholders
