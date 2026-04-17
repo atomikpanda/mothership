@@ -67,7 +67,7 @@ Which option?
 
 #### Option 1: Merge Locally
 
-*In a mothership workspace, run `mship close` after the local merge to update state and clean up the worktree.*
+*In a mothership workspace, run `mship close` after this block. It records the merge in state and cleans up the worktree. Safe to run even after `git branch -d` — `mship close` tolerates an already-deleted branch.*
 
 ```bash
 # Switch to base branch
@@ -137,7 +137,7 @@ Then: Cleanup worktree (Step 5)
 
 **For Options 1, 2, 4:**
 
-*In a mothership workspace, worktree cleanup is handled by `mship close` (run after merge for Option 1; run after merge notification for Option 2). No manual `git worktree remove` needed.*
+*In a mothership workspace, worktree cleanup is handled by `mship close`. Run it after the local merge (Option 1) or after the PR merges on GitHub (Option 2 — check via `mship reconcile` or `gh pr view`). No manual `git worktree remove` needed.*
 
 **For Option 3:** Keep worktree.
 
