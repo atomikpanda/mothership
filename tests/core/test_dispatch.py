@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from mship.core.dispatch import BaseShaInfo, SkillRef, canonical_skills, collect_base_sha_info, resolve_repo
+from mship.core.dispatch import BaseShaInfo, SkillRef, canonical_skills, collect_base_sha_info, resolve_repo, build_dispatch_prompt
+from mship.core.log import LogEntry
 from mship.core.state import Task
 
 
@@ -127,3 +128,160 @@ def test_base_sha_info_no_upstream(tmp_path: Path):
     assert info.has_upstream is False
     assert "no upstream" in info.summary
     assert info.origin_base_sha is None
+
+
+def _info_clean() -> BaseShaInfo:
+    return BaseShaInfo(
+        base_sha="abc1234", origin_base_sha="abc1234", head_sha="def5678",
+        ahead_of_base=3, base_behind_origin=0, has_upstream=True,
+        summary="base is in sync with origin; HEAD is 3 commits ahead of base",
+    )
+
+
+def test_build_prompt_contains_worktree_path_cd_directive(tmp_path: Path):
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    task = _task({"repo": worktree})
+    out = build_dispatch_prompt(
+        task=task, repo="repo", instruction="do X",
+        journal_entries=[], base_sha_info=_info_clean(),
+        agents_md_path=tmp_path / "AGENTS.md",
+        pkg_skills_source=tmp_path / "skills",
+    )
+    assert f"cd {worktree}" in out
+    assert "Work from" in out
+    assert "pre-commit hook will refuse" in out
+
+
+def test_build_prompt_embeds_instruction_verbatim(tmp_path: Path):
+    task = _task({"repo": tmp_path / "wt"})
+    out = build_dispatch_prompt(
+        task=task, repo="repo", instruction="implement the --title flag from #45",
+        journal_entries=[], base_sha_info=_info_clean(),
+        agents_md_path=None, pkg_skills_source=tmp_path / "skills",
+    )
+    assert "> implement the --title flag from #45" in out
+
+
+def test_build_prompt_contains_task_facts(tmp_path: Path):
+    task = Task(
+        slug="my-task", description="d", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["repo"],
+        worktrees={"repo": tmp_path / "wt"},
+        branch="feat/my-task", base_branch="main", active_repo="repo",
+    )
+    out = build_dispatch_prompt(
+        task=task, repo="repo", instruction="x",
+        journal_entries=[], base_sha_info=_info_clean(),
+        agents_md_path=None, pkg_skills_source=tmp_path / "skills",
+    )
+    assert "my-task" in out
+    assert "feat/my-task" in out
+    assert "main" in out  # base_branch
+    assert "active repo" in out.lower()
+
+
+def test_build_prompt_contains_base_sha_block(tmp_path: Path):
+    task = _task({"repo": tmp_path / "wt"})
+    out = build_dispatch_prompt(
+        task=task, repo="repo", instruction="x",
+        journal_entries=[], base_sha_info=_info_clean(),
+        agents_md_path=None, pkg_skills_source=tmp_path / "skills",
+    )
+    assert "abc1234" in out
+    assert "def5678" in out
+    assert "3 commits ahead" in out
+
+
+def test_build_prompt_journal_empty_state_when_no_entries(tmp_path: Path):
+    task = _task({"repo": tmp_path / "wt"})
+    out = build_dispatch_prompt(
+        task=task, repo="repo", instruction="x",
+        journal_entries=[], base_sha_info=_info_clean(),
+        agents_md_path=None, pkg_skills_source=tmp_path / "skills",
+    )
+    assert "No entries yet" in out
+
+
+def test_build_prompt_journal_renders_bulleted_list(tmp_path: Path):
+    task = _task({"repo": tmp_path / "wt"})
+    entries = [
+        LogEntry(
+            timestamp=datetime(2026, 4, 17, 18, 0, tzinfo=timezone.utc),
+            message="first commit done", action="committed",
+        ),
+        LogEntry(
+            timestamp=datetime(2026, 4, 17, 18, 10, tzinfo=timezone.utc),
+            message="tests green", action="ran tests", test_state="pass",
+        ),
+    ]
+    out = build_dispatch_prompt(
+        task=task, repo="repo", instruction="x",
+        journal_entries=entries, base_sha_info=_info_clean(),
+        agents_md_path=None, pkg_skills_source=tmp_path / "skills",
+    )
+    assert "first commit done" in out
+    assert "tests green" in out
+    assert "2026-04-17T18:00:00" in out
+
+
+def test_build_prompt_contains_three_convention_bullets(tmp_path: Path):
+    task = _task({"repo": tmp_path / "wt"})
+    out = build_dispatch_prompt(
+        task=task, repo="repo", instruction="x",
+        journal_entries=[], base_sha_info=_info_clean(),
+        agents_md_path=None, pkg_skills_source=tmp_path / "skills",
+    )
+    assert "mship finish --body-file" in out
+    assert "main checkout" in out
+    assert "--bypass-" in out
+
+
+def test_build_prompt_lists_canonical_skills_with_paths(tmp_path: Path):
+    task = _task({"repo": tmp_path / "wt"})
+    out = build_dispatch_prompt(
+        task=task, repo="repo", instruction="x",
+        journal_entries=[], base_sha_info=_info_clean(),
+        agents_md_path=None, pkg_skills_source=tmp_path / "skills",
+    )
+    for name in [
+        "working-with-mothership", "test-driven-development",
+        "finishing-a-development-branch", "verification-before-completion",
+    ]:
+        assert name in out
+        assert f"{tmp_path / 'skills' / name / 'SKILL.md'}" in out
+
+
+def test_build_prompt_includes_agents_md_path_when_present(tmp_path: Path):
+    task = _task({"repo": tmp_path / "wt"})
+    agents = tmp_path / "AGENTS.md"
+    out = build_dispatch_prompt(
+        task=task, repo="repo", instruction="x",
+        journal_entries=[], base_sha_info=_info_clean(),
+        agents_md_path=agents, pkg_skills_source=tmp_path / "skills",
+    )
+    assert str(agents) in out
+
+
+def test_build_prompt_omits_agents_md_line_when_absent(tmp_path: Path):
+    task = _task({"repo": tmp_path / "wt"})
+    out = build_dispatch_prompt(
+        task=task, repo="repo", instruction="x",
+        journal_entries=[], base_sha_info=_info_clean(),
+        agents_md_path=None, pkg_skills_source=tmp_path / "skills",
+    )
+    assert "Full doc:" not in out
+
+
+def test_build_prompt_contains_finish_contract(tmp_path: Path):
+    task = _task({"repo": tmp_path / "wt"})
+    out = build_dispatch_prompt(
+        task=task, repo="repo", instruction="x",
+        journal_entries=[], base_sha_info=_info_clean(),
+        agents_md_path=None, pkg_skills_source=tmp_path / "skills",
+    )
+    assert "How to finish" in out
+    assert "mship test" in out
+    assert "--body-file" in out
+    assert "PR URL" in out

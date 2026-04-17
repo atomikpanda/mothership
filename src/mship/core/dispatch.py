@@ -11,6 +11,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from mship.core.log import LogEntry
 from mship.core.state import Task
 
 
@@ -142,3 +143,121 @@ def _summarize_base_sha(
         else:
             parts.append(f"HEAD is {ahead_of_base} commit{plural} ahead of base")
     return "; ".join(parts) if parts else "unknown"
+
+
+_CONVENTIONS_RECAP = """\
+These are strictly enforced in this workspace:
+
+- **Use `mship finish --body-file <path>` to open the PR.** Empty bodies are rejected by design. Write a real Summary and Test plan.
+- **Don't edit from the main checkout.** Only the worktree path above. The pre-commit hook refuses otherwise.
+- **Prefer `--bypass-<check>` over `--force-<check>`** on any mship command that takes one (e.g., `--bypass-reconcile`, `--bypass-audit`). Different flag name if you see `--force-<something>` in older docs; the bypass form is canonical.
+"""
+
+
+_FINISH_CONTRACT = """\
+When the work is done:
+
+1. Run `mship test` until green (or confirm no test suite applies).
+2. Write a PR body as a file — Summary + Test plan.
+3. Run `mship finish --body-file <path>` in the worktree.
+4. Return the PR URL in your final message.
+
+If you get stuck or find the task is wrong-shaped, stop and report back with what you tried and where you're blocked. Don't guess.
+"""
+
+
+def _render_base_sha_block(info: BaseShaInfo, base_branch: str) -> str:
+    origin_val = info.origin_base_sha if info.has_upstream else "(no upstream)"
+    return (
+        "```\n"
+        f"base ({base_branch})  @ {info.base_sha or '?'}\n"
+        f"origin/{base_branch}  @ {origin_val}\n"
+        f"HEAD                 @ {info.head_sha}    ({info.summary})\n"
+        "```"
+    )
+
+
+def _render_journal(entries: list[LogEntry]) -> str:
+    if not entries:
+        return "*No entries yet — this task hasn't logged anything; your instruction above is the whole picture.*"
+    lines = []
+    for e in entries:
+        ts = e.timestamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+        meta_parts = []
+        if e.iteration is not None:
+            meta_parts.append(f"iter={e.iteration}")
+        if e.test_state:
+            meta_parts.append(f"test={e.test_state}")
+        if e.action:
+            meta_parts.append(f'action="{e.action}"')
+        meta = f" ({', '.join(meta_parts)})" if meta_parts else ""
+        msg = e.message.splitlines()[0] if e.message else ""
+        lines.append(f"- **{ts}**{meta} — {msg}")
+    return "\n".join(lines)
+
+
+def _render_skills(skills: list[SkillRef]) -> str:
+    return "\n".join(f"- `{s.name}` — `{s.path}`" for s in skills)
+
+
+def build_dispatch_prompt(
+    task: Task,
+    repo: str,
+    instruction: str,
+    *,
+    journal_entries: list[LogEntry],
+    base_sha_info: BaseShaInfo,
+    agents_md_path: Path | None,
+    pkg_skills_source: Path,
+) -> str:
+    """Return the full markdown dispatch prompt for a fresh subagent."""
+    worktree = task.worktrees[repo]
+    base_branch = task.base_branch or "main"
+    skills_block = _render_skills(canonical_skills(pkg_skills_source))
+    journal_block = _render_journal(journal_entries)
+    base_block = _render_base_sha_block(base_sha_info, base_branch)
+    agents_line = f"\nFull doc: `{agents_md_path}`." if agents_md_path else ""
+
+    return f"""\
+# Task: {task.slug}
+
+You are a subagent dispatched to work on an in-progress mothership task.
+
+## Work from (mandatory)
+
+Before editing anything: `cd {worktree}`
+
+This is a git worktree checked out on branch `{task.branch}`. Every edit, test run, and commit happens inside this directory. Do not edit from the main checkout — the mship pre-commit hook will refuse and you'll waste a cycle.
+
+## Your instruction
+
+> {instruction}
+
+## Task facts
+
+- **slug:** {task.slug}
+- **branch:** {task.branch}
+- **base branch:** {base_branch}
+- **active repo:** {repo}
+
+## Where the branch stands
+
+{base_block}
+
+## Recent journal (last 10 entries)
+
+{journal_block}
+
+## Conventions (recap)
+
+{_CONVENTIONS_RECAP}{agents_line}
+
+## Read these skills before starting
+
+Invoke via your platform's skill tool if it has one. Direct read paths (always valid; skills ship with mship):
+
+{skills_block}
+
+## How to finish
+
+{_FINISH_CONTRACT}"""
