@@ -59,3 +59,15 @@ def test_resolve_repo_errors_on_unknown_flag(tmp_path: Path):
     t = _task({"a": tmp_path / "a"})
     with pytest.raises(ValueError, match="unknown repo"):
         resolve_repo(t, repo_flag="nope")
+
+
+def test_resolve_repo_ignores_stale_active_repo(tmp_path: Path):
+    """`active_repo` pointing at a missing worktree should fall through, not crash."""
+    t = _task({"a": tmp_path / "a"}, active_repo="deleted")
+    assert resolve_repo(t, repo_flag=None) == "a"
+
+
+def test_resolve_repo_errors_on_empty_worktrees():
+    t = _task({})
+    with pytest.raises(ValueError, match="affects 0 repos"):
+        resolve_repo(t, repo_flag=None)
