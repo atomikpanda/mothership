@@ -14,9 +14,9 @@ AI agents given write access across repos routinely commit to `main` because the
 uv tool install git+https://github.com/atomikpanda/mothership.git
 
 cd my-project
-mship init --name my-project --repo .:service
+mship init --name my-project --detect
 mship spawn "add hello world"
-cd $(mship status | jq -r '.worktrees."my-project"')
+cd $(mship status | jq -r '.worktrees | to_entries[0].value')
 
 echo 'print("hello")' > hello.py
 git add hello.py
