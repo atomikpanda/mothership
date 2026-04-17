@@ -86,30 +86,21 @@ def _git_out(args: list[str], cwd: Path, timeout: int = 10) -> str | None:
 def collect_base_sha_info(worktree: Path, base_branch: str) -> BaseShaInfo:
     """Probe local `<base>`, `origin/<base>`, and HEAD. Graceful on missing upstream."""
     head_sha = _git_out(["rev-parse", "--short", "HEAD"], cwd=worktree) or "?"
-    local_base_sha = _git_out(["rev-parse", "--short", base_branch], cwd=worktree)
+    base_sha = _git_out(["rev-parse", "--short", base_branch], cwd=worktree)  # spec: always local
     origin_base_sha = _git_out(
         ["rev-parse", "--short", f"origin/{base_branch}"], cwd=worktree,
     )
     has_upstream = origin_base_sha is not None
 
-    # base_sha is the stable base we measure against (origin if available, else local)
-    base_sha = origin_base_sha if has_upstream else local_base_sha
-
     ahead_of_base: int | None = None
     base_behind_origin: int | None = None
-    if has_upstream and origin_base_sha:
-        out = _git_out(["rev-list", "--count", f"origin/{base_branch}..HEAD"], cwd=worktree)
-        try:
-            ahead_of_base = int(out) if out is not None else None
-        except ValueError:
-            ahead_of_base = None
-    elif local_base_sha:
+    if base_sha:
         out = _git_out(["rev-list", "--count", f"{base_branch}..HEAD"], cwd=worktree)
         try:
             ahead_of_base = int(out) if out is not None else None
         except ValueError:
             ahead_of_base = None
-    if local_base_sha and has_upstream:
+    if base_sha and has_upstream:
         out = _git_out(
             ["rev-list", "--count", f"{base_branch}..origin/{base_branch}"],
             cwd=worktree,

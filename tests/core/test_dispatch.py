@@ -110,6 +110,7 @@ def test_base_sha_info_clean_state(tmp_path: Path):
 
 def test_base_sha_info_ahead(tmp_path: Path):
     _, clone = _dispatch_git_fixture(tmp_path)
+    _git(["checkout", "-b", "feat/x"], cwd=clone)
     (clone / "x.txt").write_text("x\n")
     _git(["add", "."], cwd=clone)
     _git(["commit", "-qm", "x"], cwd=clone)
