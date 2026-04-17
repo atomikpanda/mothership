@@ -1,18 +1,16 @@
 # mship
 
-Phase-based workflow engine for AI agents working across one or more git repos.
+A structured interface between AI coding agents and a running multi-repo system.
 
 > Pre-1.0. API may change. Pin a commit if you need stability.
 
 ## Problem
 
-AI agents doing real engineering work fail in three predictable ways:
+An agent working on a real multi-service codebase needs to do two things well: coordinate with other agents (and its own past sessions) across repos, and observe the running system it's changing. Current tooling gives it neither.
 
-- **State drift.** They commit to `main` because they forgot `git checkout`, edit in the wrong worktree, or lose track of what they changed in repo A while working in repo B.
-- **Workflow drift.** They jump from "thinking about the problem" to "opening a PR" with no enforcement of a plan/implement/verify lifecycle, so review-phase checks get skipped.
-- **Context loss.** When a session ends or a subagent spawns, the next run starts from scratch — no record of what was decided, what's blocking, or what order to merge PRs in.
+For coordination, agents commit to `main` because they forgot `git checkout`, edit in the wrong worktree, lose track of what changed in repo A while working in repo B, and open cross-repo PRs in the wrong order. These are state failures that git alone doesn't model.
 
-These are coordination failures, not model-capability failures. Git doesn't model them. `mship` does.
+For observation, agents fall back to a grab bag of shell commands and guesswork. Which log file belongs to the service they just changed? Which port is the API on in *their* worktree, not the main checkout? Did Postgres come up before the migration ran? Are they looking at the right database? Without structured answers to these questions, an agent either guesses (and is wrong), pokes around with ad-hoc shell (and is slow), or declares done on unit tests that don't exercise the real system (and ships bugs that only surface in integration).
 
 ## Quickstart
 
@@ -37,36 +35,28 @@ EOF
 
 Requires Python 3.14+ and [uv](https://docs.astral.sh/uv/). Optional: [go-task](https://taskfile.dev) for task execution, [gh](https://cli.github.com) for `mship finish`.
 
+## What mship gives agents
+
+**Isolation with coordination.** Every task gets its own worktree per affected repo on a shared feature branch. A pre-commit hook refuses commits from outside the active task's worktrees. Parallel tasks don't collide. Cross-repo PRs open in dependency order with coordination blocks linking them.
+
+**A running system to observe, not guess at.** `mship run` brings up the task's services in dependency order, waits on per-service healthchecks (`tcp`, `http`, `sleep`, or a custom task), and keeps background services alive so an agent can actually interact with them. Ports and URLs are task-scoped, so two agents working on two tasks don't fight over `localhost:3000`.
+
+**Structured state instead of shell archaeology.** `mship status`, `mship context`, and `mship journal` emit JSON when stdout isn't a TTY. The agent asks for the active repo, the worktree path, the branch, the last test result, the open blockers — it gets structured answers, not text to parse. Combined with the runtime, this means an agent can know which log file belongs to which service, which URL to hit, and which test command to run, without a single `find` or `ps` or `lsof`.
+
+**A phase lifecycle that keeps the agent honest.** `plan → dev → review → run` with soft gates on each transition — warns on moving to dev without a spec, to review with failing tests, to run with uncommitted changes. Blocked tasks (`mship block "waiting on API key"`) are parked explicitly. Phases are the scaffolding that makes the structured state consistent over time.
+
+**A dispatch primitive for session handoff.** `mship dispatch --task <slug> -i "<instruction>"` prints a self-contained subagent prompt — cd directive, branch state, recent journal entries, finish contract — so a fresh agent session can resume without parent-held context.
+
 ## How it works
 
-A **task** is a unit of work with a slug, a feature branch, and one git worktree per affected repo. Each task moves through four phases:
+Tasks live in git worktrees managed by mship and tracked in `.mothership/state.yaml`. The runtime layer (`mship run`) reads a topology from `mothership.yaml` — services, dependencies, healthchecks, `env_runner` for secret delegation, `start_mode: background` for long-running services — and brings the stack up in dependency-ordered tiers. The interface layer (`mship status`, `context`, `journal`, `dispatch`) exposes that state to agents as structured output. The coordination layer (phases, audits, the pre-commit hook, `mship finish`) keeps state consistent across sessions and across repos.
 
-```
-plan ──► dev ──► review ──► run
-```
-
-Transitions are explicit (`mship phase dev`) and soft-gated: moving to `dev` without a spec, `review` with failing tests, or `run` with uncommitted changes all warn. A pre-commit hook refuses commits from outside the active task's worktrees. Drift audits (`mship audit`) block `spawn` and `finish` on dirty state, wrong branches, or unfetched remotes.
-
-State lives in `.mothership/state.yaml`. Agents read it via `mship status`, `mship journal`, and `mship context` — all of which emit JSON when stdout isn't a TTY, so they compose cleanly with `jq` and with agent tooling.
-
-## What mship does
-
-**Enforces a lifecycle.** `plan → dev → review → run` with soft gates on each transition. Blocked tasks (`mship block "waiting on API key"`) are parked explicitly and refuse phase changes until unblocked.
-
-**Isolates writes.** Every task gets its own worktree on its own feature branch. The pre-commit hook rejects commits from anywhere else while the task is active.
-
-**Coordinates across repos.** `mship spawn "refactor schema" --repos api,client` creates parallel worktrees on a shared feature branch. `mship test` runs them in dependency order. `mship finish` opens PRs in dependency order with cross-repo coordination notes in each body.
-
-**Runs multi-service topologies.** `mship run` starts background services tier by tier, waiting on per-service healthchecks (`tcp`, `http`, `sleep`, or a custom task) before moving to the next tier. Monorepo subdirectories are first-class via `git_root`.
-
-**Surfaces state to agents.** `mship context` emits a one-shot JSON snapshot of the workspace. `mship dispatch --task <slug> -i "<instruction>"` prints a self-contained subagent prompt — cd directive, branch state, recent journal entries, finish contract — so a fresh agent session can resume without parent-held context. Structured `mship journal` entries (`--action`, `--open`, `--test-state`) make session resume actually work.
-
-**Delegates what it shouldn't own.** Task execution is `go-task`. Secret management is whatever `env_runner` you configure (`dotenvx run --`, `op run --`, `doppler run --`, etc.). PR creation is `gh`. mship coordinates; it does not replace.
+Agents plug into this through any MCP server or shell tool they already have. mship doesn't replace `bash`, `playwright-mcp`, or `postgres-mcp`; it tells those tools where to point and what's real.
 
 ## Scope
 
-- **Does:** enforce lifecycle, isolate worktrees, sequence cross-repo work, gate on git-state audits, run dependency-ordered services with healthchecks, surface structured state to agents.
-- **Does not:** run the agent, generate code, manage secrets, replace CI.
+- **Does:** isolate worktrees per task, coordinate cross-repo work, sequence PRs, run dependency-ordered multi-service stacks with healthchecks, expose task-scoped state to agents as structured JSON, emit handoff prompts for subagents.
+- **Does not:** run the agent, generate code, manage secrets (delegates to `env_runner`), replace CI.
 - **Works for:** a single repo, a monorepo (via `git_root`), or multiple repos in one workspace.
 
 ## Reference
