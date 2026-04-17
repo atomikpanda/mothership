@@ -168,7 +168,7 @@ def test_audit_expected_branch_passes_when_root_path_is_a_worktree(audit_workspa
 
 def test_audit_dirty_worktree(audit_workspace):
     cfg, shell = _load(audit_workspace)
-    (audit_workspace / "cli" / "new.txt").write_text("hi\n")
+    (audit_workspace / "cli" / "README.md").write_text("modified\n")
     rep = audit_repos(cfg, shell, names=["cli"])
     assert "dirty_worktree" in _issue_codes(rep, "cli")
 
@@ -179,7 +179,7 @@ def test_audit_allow_dirty_suppresses(audit_workspace):
     data["repos"]["cli"]["allow_dirty"] = True
     cfg_path.write_text(yaml.safe_dump(data))
     cfg, shell = _load(audit_workspace)
-    (audit_workspace / "cli" / "new.txt").write_text("hi\n")
+    (audit_workspace / "cli" / "README.md").write_text("modified\n")
     rep = audit_repos(cfg, shell, names=["cli"])
     assert "dirty_worktree" not in _issue_codes(rep, "cli")
 
@@ -435,7 +435,7 @@ def test_audit_local_only_still_detects_dirty(audit_workspace):
     from mship.core.repo_state import audit_repos
     from mship.util.shell import ShellRunner
 
-    (audit_workspace / "cli" / "new.txt").write_text("x\n")
+    (audit_workspace / "cli" / "README.md").write_text("modified\n")
 
     cfg = ConfigLoader.load(audit_workspace / "mothership.yaml")
     shell = ShellRunner()
@@ -499,7 +499,7 @@ def test_audit_monorepo_one_fetch_per_root(tmp_path):
     }))
 
     # Dirty pkg-a only — branch/fetch state is clean
-    (mono / "pkg-a" / "dirty.txt").write_text("x")
+    (mono / "pkg-a" / "Taskfile.yml").write_text("version: '3'\ntasks: {modified: true}\n")
 
     cfg, shell = _load(tmp_path)
     # Wrap shell to count fetch calls

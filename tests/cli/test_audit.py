@@ -28,10 +28,10 @@ def test_audit_clean_exits_zero(audit_workspace):
         _reset()
 
 
-def test_audit_dirty_exits_one(audit_workspace):
+def test_audit_modified_tracked_exits_one(audit_workspace):
     _override(audit_workspace)
     try:
-        (audit_workspace / "cli" / "x.txt").write_text("x")
+        (audit_workspace / "cli" / "README.md").write_text("modified\n")
         result = runner.invoke(app, ["audit"])
         assert result.exit_code == 1
         assert "dirty_worktree" in result.output
@@ -42,7 +42,7 @@ def test_audit_dirty_exits_one(audit_workspace):
 def test_audit_json_shape(audit_workspace):
     _override(audit_workspace)
     try:
-        (audit_workspace / "cli" / "x.txt").write_text("x")
+        (audit_workspace / "cli" / "README.md").write_text("modified\n")
         result = runner.invoke(app, ["audit", "--json"])
         assert result.exit_code == 1
         payload = json.loads(result.output)

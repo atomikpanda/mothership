@@ -23,7 +23,7 @@ def test_sync_dirty_nonzero(audit_workspace):
     container.config_path.override(audit_workspace / "mothership.yaml")
     container.state_dir.override(audit_workspace / ".mothership")
     try:
-        (audit_workspace / "cli" / "x.txt").write_text("x")
+        (audit_workspace / "cli" / "README.md").write_text("modified\n")
         result = runner.invoke(app, ["sync"])
         assert result.exit_code == 1
         assert "dirty_worktree" in result.output
