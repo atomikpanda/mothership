@@ -5,6 +5,21 @@ import typer
 from mship.cli.output import Output
 
 
+def _read_stdin_body_or_exit(output: Output) -> str:
+    """Read PR body from stdin, erroring if stdin is a TTY.
+
+    Used by both `--body -` and `--body-file -` to give them identical semantics.
+    """
+    import sys
+    if sys.stdin.isatty():
+        output.error(
+            "refusing to read body from an interactive TTY; "
+            "pipe or redirect stdin, or use --body-file <path>"
+        )
+        raise typer.Exit(code=1)
+    return sys.stdin.read()
+
+
 def _run_gate(
     get_container,
     *,
@@ -422,7 +437,8 @@ def register(app: typer.Typer, get_container):
         ),
         body_file: Optional[str] = typer.Option(
             None, "--body-file",
-            help="Read PR body from this file. Mutually exclusive with --body. "
+            help="Read PR body from this file. Use '-' to read from stdin. "
+                 "Mutually exclusive with --body. "
                  "Recommended for agents: write a Summary + Test plan rather than "
                  "letting finish fall back to the task description.",
         ),
@@ -467,16 +483,18 @@ def register(app: typer.Typer, get_container):
         custom_body: Optional[str] = None
         if body is not None:
             if body == "-":
-                import sys as _sys
-                custom_body = _sys.stdin.read()
+                custom_body = _read_stdin_body_or_exit(output)
             else:
                 custom_body = body
         elif body_file is not None:
-            try:
-                custom_body = Path(body_file).read_text()
-            except OSError as e:
-                output.error(f"Could not read --body-file {body_file!r}: {e}")
-                raise typer.Exit(code=1)
+            if body_file == "-":
+                custom_body = _read_stdin_body_or_exit(output)
+            else:
+                try:
+                    custom_body = Path(body_file).read_text()
+                except OSError as e:
+                    output.error(f"Could not read --body-file {body_file!r}: {e}")
+                    raise typer.Exit(code=1)
         if custom_body is not None and not custom_body.strip():
             output.error(
                 "PR body is empty. Write a Summary + Test plan, or omit --body/--body-file "

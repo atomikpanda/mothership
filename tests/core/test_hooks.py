@@ -154,3 +154,100 @@ def test_uninstall_strips_all_three(tmp_path):
         content = (hooks / name).read_text()
         assert f"user {name}" in content
         assert HOOK_MARKER_BEGIN not in content
+
+
+# --- InstallOutcome + refresh behavior (issue-31 follow-up) ---
+
+from mship.core.hooks import InstallOutcome
+
+
+def _make_git_root(tmp_path: Path) -> Path:
+    root = tmp_path / "repo"
+    (root / ".git" / "hooks").mkdir(parents=True)
+    return root
+
+
+def test_install_hook_fresh_returns_installed_for_each(tmp_path: Path):
+    root = _make_git_root(tmp_path)
+    outcomes = install_hook(root)
+    assert outcomes == {
+        "pre-commit": InstallOutcome.installed,
+        "post-commit": InstallOutcome.installed,
+        "post-checkout": InstallOutcome.installed,
+    }
+
+
+def test_install_hook_second_run_is_up_to_date(tmp_path: Path):
+    root = _make_git_root(tmp_path)
+    install_hook(root)
+    hooks_dir = root / ".git" / "hooks"
+    mtimes_before = {n: (hooks_dir / n).stat().st_mtime_ns
+                     for n in ("pre-commit", "post-commit", "post-checkout")}
+    outcomes = install_hook(root)
+    assert outcomes == {
+        "pre-commit": InstallOutcome.up_to_date,
+        "post-commit": InstallOutcome.up_to_date,
+        "post-checkout": InstallOutcome.up_to_date,
+    }
+    mtimes_after = {n: (hooks_dir / n).stat().st_mtime_ns
+                    for n in ("pre-commit", "post-commit", "post-checkout")}
+    assert mtimes_before == mtimes_after, "up_to_date outcome must not touch file mtimes"
+
+
+def test_install_hook_refreshes_stale_block(tmp_path: Path):
+    root = _make_git_root(tmp_path)
+    post_commit = root / ".git" / "hooks" / "post-commit"
+    post_commit.write_text(
+        "#!/bin/sh\n"
+        "# git post-commit hook\n"
+        "# MSHIP-BEGIN — managed by mship; edit outside this block is fine\n"
+        "if command -v mship >/dev/null 2>&1; then\n"
+        "    mship _log-commit || true\n"   # stale
+        "fi\n"
+        "# MSHIP-END\n"
+    )
+    outcomes = install_hook(root)
+    assert outcomes["post-commit"] == InstallOutcome.refreshed
+    assert outcomes["pre-commit"] == InstallOutcome.installed
+    assert outcomes["post-checkout"] == InstallOutcome.installed
+    assert "_journal-commit" in post_commit.read_text()
+    assert "_log-commit" not in post_commit.read_text()
+
+
+def test_install_hook_preserves_user_content_around_block(tmp_path: Path):
+    root = _make_git_root(tmp_path)
+    post_commit = root / ".git" / "hooks" / "post-commit"
+    post_commit.write_text(
+        "#!/bin/sh\n"
+        "# user's own pre-existing logic\n"
+        "echo 'user before'\n"
+        "\n"
+        "# MSHIP-BEGIN — managed by mship; edit outside this block is fine\n"
+        "if command -v mship >/dev/null 2>&1; then\n"
+        "    mship _log-commit || true\n"
+        "fi\n"
+        "# MSHIP-END\n"
+        "echo 'user after'\n"
+    )
+    install_hook(root)
+    content = post_commit.read_text()
+    assert "echo 'user before'" in content
+    assert "echo 'user after'" in content
+    assert "_journal-commit" in content
+    assert "_log-commit" not in content
+
+
+def test_install_hook_skips_corrupt_hook_missing_end_marker(tmp_path: Path):
+    root = _make_git_root(tmp_path)
+    post_commit = root / ".git" / "hooks" / "post-commit"
+    post_commit.write_text(
+        "#!/bin/sh\n"
+        "# MSHIP-BEGIN — managed by mship; edit outside this block is fine\n"
+        "if command -v mship >/dev/null 2>&1; then\n"
+        "    mship _log-commit || true\n"
+        "# (end marker missing)\n"
+    )
+    before = post_commit.read_text()
+    outcomes = install_hook(root)
+    assert outcomes["post-commit"] == InstallOutcome.skipped_corrupt
+    assert post_commit.read_text() == before
