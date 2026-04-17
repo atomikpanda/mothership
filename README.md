@@ -22,25 +22,23 @@ echo 'print("hello")' > hello.py
 git add hello.py
 git commit -m "feat: hello world"
 
-cat > /tmp/body.md <<'EOF'
+mship finish --body-file - <<'EOF'
 ## Summary
 First mship task.
-
 ## Test plan
 - [x] Runs locally.
 EOF
-mship finish --body-file /tmp/body.md
 ```
 
 Requires Python 3.14+ and [uv](https://docs.astral.sh/uv/). Optional: [go-task](https://taskfile.dev), [gh](https://cli.github.com) (for `mship finish`).
 
 ## How it works
 
-Each task lives in a git worktree on its own feature branch, one per affected repo. mship manages the worktrees, tracks state in `.mothership/state.yaml`, and gates transitions (`spawn`, `finish`, `close`) on git-state audits. The agent reads structured state via `mship status`, `mship journal`, and `mship context`; it writes via mship commands that update state atomically. A pre-commit hook blocks commits from outside the active task's worktrees.
+Each task lives in a git worktree on its own feature branch, one per affected repo. mship manages the worktrees, tracks state in `.mothership/state.yaml`, and gates transitions (`spawn`, `finish`, `close`) on git-state audits. The agent reads structured state via `mship status`, `mship journal`, and `mship context`. A pre-commit hook blocks commits from outside the active task's worktrees.
 
 ## Common patterns
 
-**Multi-repo task.** `mship spawn "refactor schema" --repos api,client` creates one worktree per repo on the same feature branch. `mship test` runs them in dependency order, wiring each worktree in as the other's dependency. `mship finish` opens PRs in dependency order with cross-repo coordination blocks.
+**Multi-repo task.** `mship spawn "refactor schema" --repos api,client` creates one worktree per repo on the same feature branch. `mship test` runs them in dependency order. `mship finish` opens PRs in dependency order with cross-repo coordination blocks.
 
 **Agent session handoff.** `mship dispatch --task <slug> -i "<instruction>"` emits a self-contained prompt — cd directive, branch state, recent journal entries, finish contract — for a fresh subagent. No parent-held context required.
 
@@ -54,7 +52,7 @@ Each task lives in a git worktree on its own feature branch, one per affected re
 
 - [`docs/cli.md`](docs/cli.md) — full command surface.
 - [`docs/configuration.md`](docs/configuration.md) — `mothership.yaml` options, healthchecks, service start modes, monorepo rules, task aliasing.
-- `mship skill install` — installs a bundle of agent-side skills (including `working-with-mothership` — session-start protocol, phase workflow, recovery patterns).
+- `mship skill install` — installs the agent-side skill bundle (including `working-with-mothership`).
 
 ## License
 
