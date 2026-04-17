@@ -17,9 +17,10 @@ Load plan, review critically, execute all tasks, report when complete.
 
 ### Step 1: Load and Review Plan
 1. Read plan file
-2. Review critically - identify any questions or concerns about the plan
+2. Review critically — identify any questions or concerns about the plan
 3. If concerns: Raise them with your human partner before starting
-4. If no concerns: Create TodoWrite and proceed
+4. **If this is a mothership workspace** (`mothership.yaml` at any ancestor): verify `mship status` shows an active task BEFORE starting. No active task → stop and tell the user to `mship spawn "<description>"` first. Then `cd` into `task.worktrees.<repo>` and do all work and commits there. The mship pre-commit hook refuses commits from outside the worktree, so "just commit on main" is both wrong and blocked.
+5. If no concerns: Create TodoWrite and proceed
 
 ### Step 2: Execute Tasks
 
@@ -35,6 +36,8 @@ After all tasks complete and verified:
 - Announce: "I'm using the finishing-a-development-branch skill to complete this work."
 - **REQUIRED SUB-SKILL:** Use superpowers:finishing-a-development-branch
 - Follow that skill to verify tests, present options, execute choice
+
+*In a mothership workspace, `finishing-a-development-branch` routes through `mship finish --body-file <path>` (see that skill's Option 2).*
 
 ## When to Stop and Ask for Help
 
@@ -61,12 +64,6 @@ After all tasks complete and verified:
 - Reference skills when plan says to
 - Stop when blocked, don't guess
 - Never start implementation on main/master branch without explicit user consent
-- **If this is a mothership workspace** (`mothership.yaml` at any ancestor): verify
-  `mship status` shows an active task BEFORE starting. No active task → stop and
-  tell the user to `mship spawn "<description>"` first. Then `cd` into
-  `task.worktrees.<repo>` and do all work and commits there. The mship pre-commit
-  hook refuses commits from outside the worktree, so "just commit on main" is
-  both wrong and blocked.
 
 ## Integration
 
