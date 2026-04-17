@@ -22,6 +22,15 @@ from pathlib import Path
 import mship
 
 
+@dataclass
+class AgentInstallResult:
+    agent: str
+    dest: Path
+    count: int
+    skipped: list[str] = field(default_factory=list)
+    replaced: list[str] = field(default_factory=list)
+
+
 # Historical source paths recognized as "owned by mship" so old symlinks from
 # previous install layouts get transparently refreshed instead of safe-skipped.
 # Append (never remove) entries when the canonical source path changes.
@@ -92,3 +101,55 @@ def refresh_symlink(src: Path, dst: Path, *, force: bool) -> RefreshOutcome:
         dst.symlink_to(src)
         return RefreshOutcome.replaced
     return RefreshOutcome.skipped
+
+
+def _iter_skill_dirs(src: Path) -> list[Path]:
+    """All immediate subdirs of `src` containing a SKILL.md."""
+    if not src.is_dir():
+        return []
+    return sorted(p for p in src.iterdir() if p.is_dir() and (p / "SKILL.md").is_file())
+
+
+def install_for_claude(*, force: bool = False) -> AgentInstallResult:
+    """Symlink each skill into ~/.claude/skills/<name>/."""
+    src = pkg_skills_source()
+    dest = Path.home() / ".claude" / "skills"
+    skipped: list[str] = []
+    replaced: list[str] = []
+    skill_dirs = _iter_skill_dirs(src)
+    for skill_dir in skill_dirs:
+        target = dest / skill_dir.name
+        outcome = refresh_symlink(skill_dir, target, force=force)
+        if outcome == RefreshOutcome.replaced:
+            replaced.append(skill_dir.name)
+        elif outcome == RefreshOutcome.skipped:
+            skipped.append(skill_dir.name)
+    count = len(skill_dirs) - len(skipped)
+    return AgentInstallResult(
+        agent="claude", dest=dest, count=count,
+        skipped=skipped, replaced=replaced,
+    )
+
+
+def install_for_codex(*, force: bool = False) -> AgentInstallResult:
+    """One dir-level symlink at ~/.agents/skills/mothership → <pkg>/skills/."""
+    src = pkg_skills_source()
+    dest = Path.home() / ".agents" / "skills"
+    target = dest / "mothership"
+    outcome = refresh_symlink(src, target, force=force)
+    skipped = ["mothership"] if outcome == RefreshOutcome.skipped else []
+    replaced = ["mothership"] if outcome == RefreshOutcome.replaced else []
+    return AgentInstallResult(
+        agent="codex", dest=dest, count=0 if skipped else 1,
+        skipped=skipped, replaced=replaced,
+    )
+
+
+def _detect_agents() -> dict[str, bool]:
+    """Best-effort: agent CLI on PATH or its config dir in $HOME."""
+    home = Path.home()
+    return {
+        "claude": shutil.which("claude") is not None or (home / ".claude").exists(),
+        "codex":  shutil.which("codex")  is not None or (home / ".codex").exists(),
+        "gemini": shutil.which("gemini") is not None or (home / ".gemini").exists(),
+    }

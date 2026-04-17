@@ -6,7 +6,10 @@ from pathlib import Path
 import mship
 from mship.core.skill_install import (
     HISTORICAL_SOURCES,
+    AgentInstallResult,
     RefreshOutcome,
+    install_for_claude,
+    install_for_codex,
     is_owned_target,
     pkg_skills_source,
     refresh_symlink,
@@ -116,3 +119,46 @@ def test_refresh_force_replaces_real_dir(tmp_path: Path, monkeypatch):
     outcome = refresh_symlink(src, dst, force=True)
     assert outcome == RefreshOutcome.replaced
     assert dst.is_symlink()
+
+
+# --- per-agent installers --------------------------------------------------
+
+
+def _seed_fake_pkg_with_skills(tmp_path: Path, monkeypatch, names: list[str]) -> Path:
+    fake_pkg = tmp_path / "src_pkg" / "skills"
+    for name in names:
+        (fake_pkg / name).mkdir(parents=True)
+        (fake_pkg / name / "SKILL.md").write_text(f"# {name}\n")
+    monkeypatch.setattr("mship.core.skill_install.pkg_skills_source", lambda: fake_pkg)
+    return fake_pkg
+
+
+def test_install_for_claude_symlinks_each_skill(tmp_path: Path, monkeypatch):
+    fake_pkg = _seed_fake_pkg_with_skills(tmp_path, monkeypatch, ["alpha", "beta"])
+    home = tmp_path / "home"; home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    result = install_for_claude(force=False)
+    assert isinstance(result, AgentInstallResult)
+    assert result.agent == "claude"
+    assert result.dest == home / ".claude" / "skills"
+    assert result.count == 2
+    assert result.replaced == []
+    assert result.skipped == []
+    for name in ["alpha", "beta"]:
+        link = home / ".claude" / "skills" / name
+        assert link.is_symlink()
+        assert link.resolve() == (fake_pkg / name).resolve()
+
+
+def test_install_for_codex_creates_one_dir_level_symlink(tmp_path: Path, monkeypatch):
+    fake_pkg = _seed_fake_pkg_with_skills(tmp_path, monkeypatch, ["alpha"])
+    home = tmp_path / "home"; home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    result = install_for_codex(force=False)
+    assert result.agent == "codex"
+    link = home / ".agents" / "skills" / "mothership"
+    assert link.is_symlink()
+    assert link.resolve() == fake_pkg.resolve()
+    assert result.count == 1
