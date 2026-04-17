@@ -7,7 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 from mship.cli import app, container
-from mship.core.state import StateManager
+from mship.core.state import StateManager, Task, WorkspaceState
 from mship.util.shell import ShellResult, ShellRunner
 
 runner = CliRunner()
@@ -477,6 +477,142 @@ def test_finish_gh_not_available(configured_git_app: Path):
     assert result.exit_code != 0 or "gh" in result.output.lower()
 
     cli_container.shell.reset_override()
+
+
+def _make_finished_task_with_existing_pr(
+    configured_git_app: Path,
+    *,
+    slug: str = "t",
+    ahead_of_origin: int = 0,
+) -> StateManager:
+    """Seed a task that's already gone through `finish` once (has PR url + finished_at).
+
+    `ahead_of_origin` configures what the mocked git rev-list returns for
+    `origin/<branch>..<branch>` when this task's branch is queried — i.e. how
+    many post-finish commits the worktree has that haven't been pushed yet.
+    """
+    from datetime import datetime, timezone
+    sm = StateManager(configured_git_app / ".mothership")
+    state = WorkspaceState(
+        tasks={slug: Task(
+            slug=slug, description="d", phase="review",
+            created_at=datetime.now(timezone.utc),
+            affected_repos=["shared"], branch=f"feat/{slug}",
+            worktrees={"shared": configured_git_app / "shared"},
+            pr_urls={"shared": "https://github.com/o/r/pull/99"},
+            finished_at=datetime.now(timezone.utc),
+        )},
+    )
+    sm.save(state)
+    return sm
+
+
+def _finish_force_shell_factory(*, ahead_count: int):
+    """Shell side_effect for finish-force tests.
+
+    Captures any `git push` or `gh pr create` so tests can assert what ran.
+    `ahead_count` applies ONLY to `origin/<X>..<X>` queries (the unpushed-
+    commits probe); all other rev-list-count probes (audit: `@{u}..HEAD`,
+    finish's preflight) still return 0 to keep the audit gate happy.
+    """
+    import re
+    same_branch_ahead = re.compile(r"origin/([^.\s'\"]+)\.\.\1")
+
+    captured: dict[str, list[str]] = {"push": [], "pr_create": []}
+
+    def run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "symbolic-ref" in cmd:
+            return ShellResult(returncode=0, stdout="main\n", stderr="")
+        if "fetch" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
+            return ShellResult(returncode=0, stdout="origin/main\n", stderr="")
+        if "rev-list --count" in cmd:
+            if same_branch_ahead.search(cmd):
+                return ShellResult(returncode=0, stdout=f"{ahead_count}\n", stderr="")
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
+        if "status --porcelain" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "worktree list" in cmd:
+            return ShellResult(returncode=0, stdout="worktree /tmp/fake\n", stderr="")
+        if "ls-remote --heads" in cmd:
+            return ShellResult(returncode=0, stdout="abc refs/heads/main\n", stderr="")
+        if "git push" in cmd:
+            captured["push"].append(cmd)
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            captured["pr_create"].append(cmd)
+            return ShellResult(returncode=0, stdout="https://x/pr/new\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    return run, captured
+
+
+def test_finish_force_repushes_to_existing_pr(configured_git_app: Path):
+    """--force on an already-finished task with new commits: pushes, does NOT
+    create a new PR, updates finished_at, adds a re-finished journal entry."""
+    from mship.cli import container as cli_container
+
+    sm = _make_finished_task_with_existing_pr(configured_git_app, slug="rp", ahead_of_origin=2)
+    before = sm.load().tasks["rp"].finished_at
+
+    run, captured = _finish_force_shell_factory(ahead_count=2)
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    cli_container.shell.override(mock_shell)
+    try:
+        import time
+        time.sleep(0.01)  # ensure a new finished_at timestamp differs from `before`
+        result = runner.invoke(app, ["finish", "--force", "--task", "rp"])
+        assert result.exit_code == 0, result.output
+        assert len(captured["push"]) == 1, f"expected one push, got {captured['push']}"
+        assert captured["pr_create"] == [], "should NOT create a new PR under --force"
+
+        state = sm.load()
+        assert state.tasks["rp"].finished_at > before, "finished_at must be re-stamped"
+    finally:
+        cli_container.shell.reset_override()
+
+
+def test_finish_without_force_warns_about_unpushed_commits(configured_git_app: Path):
+    """Without --force on a finished task with local commits ahead of origin:
+    the user gets a warning pointing at --force, and no push happens."""
+    from mship.cli import container as cli_container
+
+    sm = _make_finished_task_with_existing_pr(configured_git_app, slug="warn")
+    run, captured = _finish_force_shell_factory(ahead_count=3)
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    cli_container.shell.override(mock_shell)
+    try:
+        result = runner.invoke(app, ["finish", "--task", "warn"])
+        assert result.exit_code == 0, result.output
+        assert "unpushed commits" in result.output
+        assert "--force" in result.output
+        assert "3 commits" in result.output
+        assert captured["push"] == [], "no push without --force"
+    finally:
+        cli_container.shell.reset_override()
+
+
+def test_finish_force_incompatible_with_body_file(configured_git_app: Path):
+    _make_finished_task_with_existing_pr(configured_git_app, slug="bf")
+    result = runner.invoke(
+        app, ["finish", "--force", "--task", "bf", "--body", "hi"]
+    )
+    assert result.exit_code != 0
+    assert "gh pr edit" in result.output
+
+
+def test_finish_force_incompatible_with_handoff(configured_git_app: Path):
+    _make_finished_task_with_existing_pr(configured_git_app, slug="ho")
+    result = runner.invoke(app, ["finish", "--force", "--task", "ho", "--handoff"])
+    assert result.exit_code != 0
+    assert "handoff" in result.output.lower()
 
 
 def test_spawn_skip_setup_flag(configured_git_app: Path):

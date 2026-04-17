@@ -426,6 +426,12 @@ def register(app: typer.Typer, get_container):
                  "Recommended for agents: write a Summary + Test plan rather than "
                  "letting finish fall back to the task description.",
         ),
+        force: bool = typer.Option(
+            False, "--force", "-f",
+            help="Push new commits to an already-finished task's existing PR(s). "
+                 "Updates finished_at and appends a `re-finished` journal entry. "
+                 "Does not touch the PR body — use `gh pr edit` for that.",
+        ),
         task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
     ):
         """Create PRs across repos in dependency order."""
@@ -439,6 +445,16 @@ def register(app: typer.Typer, get_container):
 
         if push_only and (handoff or base is not None or base_map is not None):
             output.error("--push-only is incompatible with --handoff/--base/--base-map")
+            raise typer.Exit(code=1)
+
+        if force and handoff:
+            output.error("--force is incompatible with --handoff")
+            raise typer.Exit(code=1)
+        if force and (body is not None or body_file is not None):
+            output.error(
+                "--force doesn't touch PR bodies — use `gh pr edit <url> --body-file <path>` "
+                "to update an existing PR body"
+            )
             raise typer.Exit(code=1)
 
         # --- Resolve PR body source ---
@@ -646,12 +662,63 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=1)
 
         pr_list: list[dict] = []
+        repushed_repos: list[str] = []  # repos where --force re-pushed commits
+
+        # --- Detect post-finish unpushed commits when NOT in --force mode ---
+        # Without this, `finish` on an already-finished task with new commits
+        # silently succeeds but pushes nothing, training users to reach for
+        # direct `git push`. Warn loudly and point at --force.
+        if not force and not push_only and not handoff:
+            stale_repos: list[tuple[str, int]] = []
+            for repo_name in task.pr_urls:
+                wt = task.worktrees.get(repo_name)
+                if wt is None:
+                    continue
+                wt_path = Path(wt)
+                if not wt_path.exists():
+                    continue
+                # count_commits_ahead(base=branch, branch=branch) counts commits
+                # on the local branch past origin's copy of that branch.
+                n = pr_mgr.count_commits_ahead(wt_path, task.branch, task.branch)
+                if n > 0:
+                    stale_repos.append((repo_name, n))
+            if stale_repos:
+                output.warning("Task has unpushed commits since last finish:")
+                for repo_name, n in stale_repos:
+                    output.warning(f"  {repo_name}: {n} commits past origin/{task.branch}")
+                output.warning("Pass `--force` to push them to the existing PR(s).")
 
         for i, repo_name in enumerate(ordered, 1):
-            # Skip if PR already created (idempotent re-run)
-            if repo_name in task.pr_urls:
+            # Skip if PR already created (idempotent re-run), unless --force.
+            if repo_name in task.pr_urls and not force:
                 if output.is_tty:
                     output.print(f"  {repo_name}: already has PR {task.pr_urls[repo_name]}")
+                pr_list.append({
+                    "repo": repo_name,
+                    "url": task.pr_urls[repo_name],
+                    "order": i,
+                    "base": effective_bases.get(repo_name),
+                })
+                continue
+            if repo_name in task.pr_urls and force:
+                # Re-push only: branch already exists on origin, new commits
+                # attach to the existing PR. Don't touch gh; don't rebuild body.
+                repo_config = config.repos[repo_name]
+                repo_path = repo_config.path
+                if repo_name in task.worktrees:
+                    wt_path = Path(task.worktrees[repo_name])
+                    if wt_path.exists():
+                        repo_path = wt_path
+                try:
+                    pr_mgr.push_branch(repo_path, task.branch)
+                except RuntimeError as e:
+                    output.error(f"{repo_name}: {e}")
+                    raise typer.Exit(code=1)
+                repushed_repos.append(repo_name)
+                if output.is_tty:
+                    output.print(
+                        f"  {repo_name}: {task.branch} re-pushed to {task.pr_urls[repo_name]}"
+                    )
                 pr_list.append({
                     "repo": repo_name,
                     "url": task.pr_urls[repo_name],
@@ -734,8 +801,9 @@ def register(app: typer.Typer, get_container):
                 output.print(f"  {repo_name}: {task.branch} → {base_label}  ✓ {pr_url}")
             pr_list[-1]["base"] = effective_bases[repo_name]
 
-        # Update PRs with coordination blocks (multi-repo only)
-        if len(pr_list) > 1:
+        # Update PRs with coordination blocks (multi-repo only). Skip under
+        # --force re-push so we don't clobber a user's manual PR-body edits.
+        if len(pr_list) > 1 and not force:
             for pr_info in pr_list:
                 block = pr_mgr.build_coordination_block(
                     task.slug, pr_list, current_repo=pr_info["repo"]
@@ -745,17 +813,26 @@ def register(app: typer.Typer, get_container):
                     new_body = existing_body + block
                     pr_mgr.update_pr_body(pr_info["url"], new_body)
 
-        # Log PR URLs
+        # Log PR URLs + re-finished entries
         log_mgr = container.log_manager()
         for pr_info in pr_list:
-            log_mgr.append(
-                t.slug,
-                f"PR created for {pr_info['repo']}: {pr_info['url']}",
-            )
+            if pr_info["repo"] in repushed_repos:
+                log_mgr.append(
+                    t.slug,
+                    f"re-finished: pushed new commits to {pr_info['repo']}/{task.branch}",
+                    repo=pr_info["repo"],
+                    action="re-finished",
+                )
+            elif pr_info["repo"] not in task.pr_urls or pr_info["url"] != task.pr_urls.get(pr_info["repo"]):
+                # Newly-created PR this run
+                log_mgr.append(
+                    t.slug,
+                    f"PR created for {pr_info['repo']}: {pr_info['url']}",
+                )
 
-        # Stamp finished_at on successful PR creation.
+        # Stamp finished_at on successful PR creation OR on --force re-push.
         from datetime import datetime as _dt, timezone as _tz
-        if task.finished_at is None:
+        if task.finished_at is None or force:
             now = _dt.now(_tz.utc)
 
             def _stamp_finished(s):
@@ -766,14 +843,20 @@ def register(app: typer.Typer, get_container):
 
         if output.is_tty:
             output.print("")
-            output.success(f"Created {len(pr_list)} PR(s) for task: {task.slug}")
-            if len(pr_list) > 1:
+            if repushed_repos:
+                output.success(
+                    f"Re-pushed {len(repushed_repos)} PR(s) for task: {task.slug}"
+                )
+            else:
+                output.success(f"Created {len(pr_list)} PR(s) for task: {task.slug}")
+            if len(pr_list) > 1 and not force:
                 output.print("Merge in dependency order as shown in each PR description.")
             output.print("[green]Task finished.[/green] After merge, run `mship close` to clean up.")
         else:
             output.json({
                 "task": task.slug,
                 "prs": pr_list,
+                "re_pushed": repushed_repos,
                 "finished_at": task.finished_at.isoformat(),
             })
             output.print("Task finished. After merge, run `mship close` to clean up.")

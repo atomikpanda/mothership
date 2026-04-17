@@ -84,7 +84,7 @@ mship block "reason" | mship unblock
 mship test [--all] [--repos|--tag] [--no-diff]
 mship journal "msg" [--action X] [--open Y] [--repo R] [--test-state pass|fail|mixed]
 mship journal --show-open                 # what am I blocked on across this task?
-mship finish [--base B] [--base-map ...] [--push-only] [--handoff] [--force-audit] [--body-file F | --body TEXT]
+mship finish [--base B] [--base-map ...] [--push-only] [--handoff] [--force-audit] [--body-file F | --body TEXT] [--force]
 mship close [--yes] [--abandon] [--force] [--skip-pr-check]
 ```
 
@@ -107,6 +107,8 @@ If you don't, your edits in the shell affect the main checkout, not the feature 
 **`finish`:** PR base resolves as `--base-map` entry > `--base` > `repo.base_branch` in config > gh default. Every base is verified on origin before any push; empty branches and missing bases fail fast with no partial state.
 
 **`finish` PR body — write a real one.** By default the PR body is just the task description plus a `Closes #N` footer for any issue refs found in the description, journal, and commit subjects. That's a placeholder, not a body. For agent-driven finishes, pass `--body-file <path>` (or `--body '<inline>'`, or `--body -` for stdin) with a real Summary and Test plan. Empty bodies are rejected — that's deliberate. If you forgot at finish time, follow up immediately with `gh pr edit <url> --body-file <path>`. A bare task-description PR is treated as incomplete.
+
+**`finish --force` — push post-finish commits to existing PRs.** After `finish` once, normal `finish` re-runs are idempotent no-ops. If reviewer feedback or on-device testing requires new commits, make them in the worktree, then run `mship finish --force` to push them to the existing PR(s). Updates `finished_at`, adds a `re-finished` journal entry, and does **not** create a new PR or touch the existing PR body. Without `--force`, finish warns when the worktree has commits past `origin/<branch>` so you don't silently lose work — but it won't push. To update a PR body after re-push, use `gh pr edit <url> --body-file <path>` separately (`--force` and `--body-file` are mutually exclusive).
 
 **`close` gates (in order):**
 1. **Requires `finish` first.** Refuses if `task.finished_at is None` unless `--abandon` is passed.
