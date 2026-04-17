@@ -4,26 +4,30 @@ A pure function `build_context()` aggregates state, log, and git probes into one
 JSON-shaped dict so an agent can recover its full top-of-turn picture in a
 single tool call. See GitHub issue #50.
 
-Tier-1 fields only (no network, no `gh` calls). Drift / main-checkout-clean /
-last-workspace-fetch are deferred to follow-ups.
+Drift is read from the existing reconcile cache only — `mship context` never
+fetches. Stale or absent → `"unknown"` for that task.
 """
 from __future__ import annotations
 
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from mship.core.config import WorkspaceConfig
 from mship.core.log import LogManager
+from mship.core.reconcile.cache import ReconcileCache
 from mship.core.state import Task, WorkspaceState
+from mship.core.workspace_meta import read_last_sync_at
 
 
 SCHEMA_VERSION = "1"
 
 
 GitCounter = Callable[[Path, str], Optional[int]]
+DirtyCheck = Callable[[Path], Optional[bool]]
 
 
 def _git_count_default(wt_path: Path, ref_spec: str) -> Optional[int]:
@@ -44,6 +48,29 @@ def _git_count_default(wt_path: Path, ref_spec: str) -> Optional[int]:
         return int(r.stdout.strip())
     except ValueError:
         return None
+
+
+def _dirty_check_default(repo_path: Path) -> Optional[bool]:
+    """True if `git status --porcelain` shows any output, False if clean.
+
+    Returns None when the path isn't a git checkout or git errors out — keeps
+    the field informative without lying about state we couldn't observe.
+    """
+    if not repo_path.is_dir():
+        return None
+    try:
+        r = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if r.returncode != 0:
+        return None
+    return bool(r.stdout.strip())
 
 
 def _last_test_summary(task: Task) -> tuple[Optional[str], int]:
@@ -110,10 +137,52 @@ def _binary_matches_editable_install() -> Optional[bool]:
         return False
 
 
+def _drift_for_task(slug: str, cache: Optional[ReconcileCache]) -> str:
+    if cache is None:
+        return "unknown"
+    payload = cache.read()
+    if payload is None:
+        return "unknown"
+    raw = payload.results.get(slug)
+    if not isinstance(raw, dict):
+        return "unknown"
+    state = raw.get("state")
+    return state if isinstance(state, str) else "unknown"
+
+
+def _last_drift_check_at(cache: Optional[ReconcileCache]) -> Optional[str]:
+    if cache is None:
+        return None
+    payload = cache.read()
+    if payload is None:
+        return None
+    return datetime.fromtimestamp(payload.fetched_at, tz=timezone.utc).isoformat()
+
+
+def _main_checkout_clean(
+    config: WorkspaceConfig,
+    dirty_check: DirtyCheck,
+) -> dict[str, Optional[bool]]:
+    """Per-repo cleanliness of the main checkout (the path declared in mothership.yaml).
+
+    Skips repos with `git_root` set — they share a checkout with their parent,
+    so checking the parent already covers them and a separate entry would
+    misleadingly report the parent's status under each child's key.
+    """
+    out: dict[str, Optional[bool]] = {}
+    for name, repo in config.repos.items():
+        if repo.git_root is not None:
+            continue
+        dirty = dirty_check(repo.path)
+        out[name] = (not dirty) if dirty is not None else None
+    return out
+
+
 def _task_payload(
     task: Task,
     log_manager: LogManager,
     git_count: GitCounter,
+    cache: Optional[ReconcileCache],
 ) -> dict[str, Any]:
     last_test_state, last_test_iteration = _last_test_summary(task)
 
@@ -141,6 +210,7 @@ def _task_payload(
         "last_test_state": last_test_state,
         "last_test_iteration": last_test_iteration,
         "last_log_entry_at": _last_log_at(log_manager, task.slug),
+        "drift": _drift_for_task(task.slug, cache),
     }
 
 
@@ -149,29 +219,36 @@ def build_context(
     config: WorkspaceConfig,
     log_manager: LogManager,
     cwd: Path,
+    state_dir: Path,
     *,
+    cache: Optional[ReconcileCache] = None,
     git_count: GitCounter = _git_count_default,
+    dirty_check: DirtyCheck = _dirty_check_default,
     binary_check: Callable[[], Optional[bool]] = _binary_matches_editable_install,
 ) -> dict[str, Any]:
     """Assemble the agent-readable workspace context payload.
 
-    `git_count` and `binary_check` are injection points for tests; production
-    callers leave them at the defaults.
+    `cache`, `git_count`, `dirty_check`, and `binary_check` are injection points
+    for tests; production callers leave them at the defaults (with the CLI
+    constructing a real `ReconcileCache(state_dir)`).
     """
-    del config  # reserved for Tier-2 fields (main_checkout_clean, etc.)
-
     active_tasks = [
-        _task_payload(task, log_manager, git_count)
+        _task_payload(task, log_manager, git_count, cache)
         for task in state.tasks.values()
         if task.finished_at is None
     ]
 
     cwd_task, cwd_repo = _cwd_match(state, cwd)
 
+    last_sync = read_last_sync_at(state_dir)
+
     return {
         "schema_version": SCHEMA_VERSION,
         "active_tasks": active_tasks,
         "cwd_matches_task": cwd_task,
         "cwd_matches_repo": cwd_repo,
+        "main_checkout_clean": _main_checkout_clean(config, dirty_check),
         "mship_binary_matches_editable_install": binary_check(),
+        "last_workspace_fetch_at": last_sync.isoformat() if last_sync else None,
+        "last_drift_check_at": _last_drift_check_at(cache),
     }
