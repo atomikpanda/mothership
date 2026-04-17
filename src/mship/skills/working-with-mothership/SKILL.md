@@ -128,7 +128,7 @@ mship graph
 mship worktrees
 ```
 
-**`audit` issue codes** (errors unless noted): `path_missing`, `not_a_git_repo`, `fetch_failed`, `detached_head`, `unexpected_branch`, `dirty_worktree`, `no_upstream`, `behind_remote`, `diverged`, `extra_worktrees`; `ahead_remote` (info-only).
+**`audit` issue codes** (errors unless noted): `path_missing`, `not_a_git_repo`, `fetch_failed`, `detached_head`, `unexpected_branch`, `dirty_worktree`, `no_upstream`, `behind_remote`, `diverged`, `extra_worktrees`; `dirty_untracked` (warn — untracked files only, doesn't block); `ahead_remote` (info-only).
 
 **`audit` is automatically gated on `spawn` and `finish`** — any error blocks unless `--force-audit` (which writes a `BYPASSED AUDIT` entry to the task log). Opt out at the workspace level via `audit: {block_spawn: false, block_finish: false}` in `mothership.yaml`.
 

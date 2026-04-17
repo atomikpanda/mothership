@@ -179,9 +179,12 @@ def test_audit_allow_dirty_suppresses(audit_workspace):
     data["repos"]["cli"]["allow_dirty"] = True
     cfg_path.write_text(yaml.safe_dump(data))
     cfg, shell = _load(audit_workspace)
-    (audit_workspace / "cli" / "README.md").write_text("modified\n")
+    (audit_workspace / "cli" / "README.md").write_text("modified\n")  # tracked-modified
+    (audit_workspace / "cli" / "new.txt").write_text("hi\n")          # untracked
     rep = audit_repos(cfg, shell, names=["cli"])
-    assert "dirty_worktree" not in _issue_codes(rep, "cli")
+    codes = _issue_codes(rep, "cli")
+    assert "dirty_worktree" not in codes
+    assert "dirty_untracked" not in codes  # allow_dirty suppresses both tiers
 
 
 def test_audit_ahead_remote_is_info(audit_workspace):
