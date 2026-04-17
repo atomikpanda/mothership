@@ -79,6 +79,8 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=0)
 
         # No match — reject with list of active worktrees.
+        import shlex
+        import subprocess
         import sys
         sys.stderr.write(
             f"\u26d4 mship: refusing commit — {tl} is not a registered worktree.\n"
@@ -86,8 +88,39 @@ def register(app: typer.Typer, get_container):
         )
         for slug, wt in registered:
             sys.stderr.write(f"     {wt} ({slug})\n")
+
+        # If the rejected toplevel has uncommitted changes, it's almost
+        # certainly a misrouted-edit situation (absolute paths in a tool call
+        # bypassed the user's cwd). Show exact recovery commands per worktree.
+        has_changes = False
+        try:
+            probe = subprocess.run(
+                ["git", "-C", str(tl), "status", "--porcelain"],
+                capture_output=True, text=True, check=False, timeout=5,
+            )
+            has_changes = probe.returncode == 0 and bool(probe.stdout.strip())
+        except (subprocess.SubprocessError, OSError):
+            pass
+
+        if has_changes:
+            q_tl = shlex.quote(str(tl))
+            sys.stderr.write(
+                f"\n   {tl} has uncommitted changes — looks like edits landed here\n"
+                f"   instead of the worktree. To move them:\n"
+            )
+            for slug, wt in registered:
+                q_wt = shlex.quote(str(wt))
+                sys.stderr.write(
+                    f"     git -C {q_tl} stash push -u -m {slug}-misrouted\n"
+                    f"     cd {q_wt} && git stash pop\n"
+                )
+            if len(registered) > 1:
+                sys.stderr.write(
+                    "   (pick the worktree the edits belong to — don't run both)\n"
+                )
+
         sys.stderr.write(
-            f"   cd into one of those, or use `git commit --no-verify` to override.\n"
+            "\n   cd into a worktree, or use `git commit --no-verify` to override.\n"
         )
         raise typer.Exit(code=1)
 
