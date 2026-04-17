@@ -220,4 +220,4 @@ Ready to implement auth middleware
 - Any skill needing isolated workspace
 
 **Pairs with:**
-- **finishing-a-development-branch** - REQUIRED for cleanup after work complete
+- **finishing-a-development-branch** - REQUIRED for cleanup after work complete (uses `mship close` in mothership workspaces; manual `git worktree remove` otherwise)
