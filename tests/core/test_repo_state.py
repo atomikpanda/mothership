@@ -518,3 +518,39 @@ def test_audit_monorepo_one_fetch_per_root(tmp_path):
     pkg_b_codes = _issue_codes(rep, "pkg_b")
     assert "dirty_worktree" in pkg_a_codes
     assert "dirty_worktree" not in pkg_b_codes
+
+
+# --- _probe_dirty classification (issue #35) ---
+
+def test_probe_dirty_untracked_only_emits_warn(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    (audit_workspace / "cli" / "new.txt").write_text("hi\n")  # untracked
+    rep = audit_repos(cfg, shell, names=["cli"])
+    cli = next(r for r in rep.repos if r.name == "cli")
+    codes = {(i.code, i.severity) for i in cli.issues}
+    assert ("dirty_untracked", "warn") in codes
+    assert not any(c == "dirty_worktree" for c, _ in codes)
+    assert cli.has_errors is False
+
+
+def test_probe_dirty_modified_tracked_emits_error(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    # README.md is a tracked file in the audit_workspace fixture
+    (audit_workspace / "cli" / "README.md").write_text("modified content\n")
+    rep = audit_repos(cfg, shell, names=["cli"])
+    cli = next(r for r in rep.repos if r.name == "cli")
+    codes = {(i.code, i.severity) for i in cli.issues}
+    assert ("dirty_worktree", "error") in codes
+    assert cli.has_errors is True
+
+
+def test_probe_dirty_mixed_emits_both(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    (audit_workspace / "cli" / "README.md").write_text("modified\n")  # tracked-modified
+    (audit_workspace / "cli" / "new.txt").write_text("hi\n")          # untracked
+    rep = audit_repos(cfg, shell, names=["cli"])
+    cli = next(r for r in rep.repos if r.name == "cli")
+    codes = {(i.code, i.severity) for i in cli.issues}
+    assert ("dirty_worktree", "error") in codes
+    assert ("dirty_untracked", "warn") in codes
+    assert cli.has_errors is True

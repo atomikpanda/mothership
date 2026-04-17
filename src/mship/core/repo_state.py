@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Literal
 
-Severity = Literal["error", "info"]
+Severity = Literal["error", "warn", "info"]
 
 
 @dataclass(frozen=True)
@@ -243,22 +243,39 @@ def _probe_dirty(
     root_path: Path,
     subdir: Path | None,
     allow_dirty: bool,
-) -> Issue | None:
+) -> tuple[Issue, ...]:
     if allow_dirty:
-        return None
+        return ()
     cmd = "git status --porcelain"
     if subdir is not None:
         cmd += f" -- {shlex.quote(str(subdir))}"
     rc, out, _ = _sh_out(shell, cmd, root_path)
     if rc != 0:
-        return None
-    lines = [ln for ln in out.splitlines() if ln.strip()]
-    if lines:
-        return Issue(
+        return ()
+    untracked = 0
+    modified = 0
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        # Porcelain v1: first 2 chars are the status code. "??" is untracked;
+        # anything else (M, A, D, R, C, U, plus staged/unstaged combos) is
+        # tracked-modified content.
+        if line.startswith("??"):
+            untracked += 1
+        else:
+            modified += 1
+    issues: list[Issue] = []
+    if modified:
+        issues.append(Issue(
             "dirty_worktree", "error",
-            f"{len(lines)} uncommitted change" + ("s" if len(lines) != 1 else ""),
-        )
-    return None
+            f"{modified} modified tracked file" + ("s" if modified != 1 else ""),
+        ))
+    if untracked:
+        issues.append(Issue(
+            "dirty_untracked", "warn",
+            f"{untracked} untracked file" + ("s" if untracked != 1 else ""),
+        ))
+    return tuple(issues)
 
 
 # ---------------------------------------------------------------------------
@@ -328,9 +345,7 @@ def audit_repos(
             subdir: Path | None = None
             if m_cfg.git_root is not None:
                 subdir = m_cfg.path  # relative path within the parent
-            di = _probe_dirty(shell, root_path, subdir, m_cfg.allow_dirty)
-            if di is not None:
-                per_repo_issues[m].append(di)
+            per_repo_issues[m].extend(_probe_dirty(shell, root_path, subdir, m_cfg.allow_dirty))
 
     repos = tuple(
         RepoAudit(
