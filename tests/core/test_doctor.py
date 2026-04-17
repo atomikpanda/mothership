@@ -373,3 +373,50 @@ def test_doctor_silent_when_not_mship_dev_workspace(workspace: Path):
     report = DoctorChecker(config, mock_shell).run()
     dev_checks = [c for c in report.checks if c.name == "dev_mode"]
     assert dev_checks == []
+
+
+
+# --- skill-availability check ---------------------------------------------
+
+
+def _seed_pkg_and_home(tmp_path: Path, monkeypatch, skill_names: list[str]) -> Path:
+    fake_pkg = tmp_path / "src_pkg" / "skills"
+    for n in skill_names:
+        (fake_pkg / n).mkdir(parents=True)
+        (fake_pkg / n / "SKILL.md").write_text(f"# {n}\n")
+    monkeypatch.setattr("mship.core.skill_install.pkg_skills_source", lambda: fake_pkg)
+    home = tmp_path / "home"; home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    return fake_pkg
+
+
+def test_skill_check_reports_full_install(tmp_path, monkeypatch):
+    from mship.core.doctor import check_skill_availability
+    from mship.core.skill_install import install_for_claude
+
+    _seed_pkg_and_home(tmp_path, monkeypatch, ["a", "b", "c"])
+    monkeypatch.setattr(
+        "mship.core.skill_install._detect_agents",
+        lambda: {"claude": True, "codex": False, "gemini": False},
+    )
+    install_for_claude(force=False)
+
+    results = check_skill_availability()
+    by_name = {r.name: r for r in results}
+    assert by_name["skills/claude"].status == "pass"
+    assert "3/3" in by_name["skills/claude"].message
+
+
+def test_skill_check_reports_missing_install(tmp_path, monkeypatch):
+    from mship.core.doctor import check_skill_availability
+
+    _seed_pkg_and_home(tmp_path, monkeypatch, ["a"])
+    monkeypatch.setattr(
+        "mship.core.skill_install._detect_agents",
+        lambda: {"claude": True, "codex": False, "gemini": False},
+    )
+    results = check_skill_availability()
+    by_name = {r.name: r for r in results}
+    assert by_name["skills/claude"].status == "warn"
+    assert "0/1" in by_name["skills/claude"].message
+    assert "mship skill install" in by_name["skills/claude"].message
