@@ -1,38 +1,82 @@
+import os
+from pathlib import Path
 from typing import Optional
 
 import typer
 
 from mship.cli.view._base import ViewApp
+from mship.cli.view._placeholders import placeholder_for
+from mship.core.task_resolver import (
+    AmbiguousTaskError,
+    NoActiveTaskError,
+    UnknownTaskError,
+    resolve_task,
+)
 
 
 class LogsView(ViewApp):
-    def __init__(self, state_manager, log_manager, task_slug: Optional[str], scope_to_repo: Optional[str] = None, **kw):
+    def __init__(
+        self,
+        state_manager,
+        log_manager,
+        task_slug: Optional[str],
+        scope_to_repo: Optional[str] = None,
+        *,
+        all_: bool = False,
+        cli_task: Optional[str] = None,
+        cwd: Optional[Path] = None,
+        **kw,
+    ):
         super().__init__(**kw)
         self._state_manager = state_manager
         self._log_manager = log_manager
         self._task_slug = task_slug
         self._scope_to_repo = scope_to_repo
+        self._all = all_
+        self._cli_task = cli_task
+        self._cwd = cwd if cwd is not None else Path.cwd()
 
-    def _resolve_slug(self) -> Optional[str]:
-        # The CLI entry point always resolves the task via resolve_or_exit before
-        # constructing this view, so task_slug is expected to be set. Callers
-        # that omit it will see the empty-journal path below.
-        return self._task_slug
+    def _resolve_slug(self) -> str:
+        """Return the task slug to render for this tick.
+
+        Non-watch: returns the pre-resolved `task_slug` passed in by the CLI.
+        Watch: re-runs `resolve_task()` each call; resolver errors propagate.
+        """
+        if self._task_slug is not None:
+            return self._task_slug
+        state = self._state_manager.load()
+        task = resolve_task(
+            state,
+            cli_task=self._cli_task,
+            env_task=os.environ.get("MSHIP_TASK"),
+            cwd=self._cwd,
+        )
+        return task.slug
 
     def gather(self) -> str:
-        slug = self._resolve_slug()
-        if slug is None:
-            return "No active task (and no slug provided)"
+        try:
+            slug = self._resolve_slug()
+        except (NoActiveTaskError, AmbiguousTaskError, UnknownTaskError) as err:
+            return placeholder_for(err)
+
+        scope = self._scope_to_repo
+        # Watch mode re-reads state per tick so scoping follows `mship switch`.
+        # Non-watch trusts the CLI-precomputed `scope_to_repo`. `--all` skips
+        # per-tick scoping regardless of mode.
+        if self._task_slug is None and not self._all:
+            state = self._state_manager.load()
+            task = state.tasks.get(slug)
+            if task is not None:
+                scope = getattr(task, "active_repo", None)
+
         entries = self._log_manager.read(slug)
-        if self._scope_to_repo is not None:
-            # Keep entries tagged with the target repo OR untagged
-            entries = [e for e in entries if e.repo is None or e.repo == self._scope_to_repo]
+        if scope is not None:
+            entries = [e for e in entries if e.repo is None or e.repo == scope]
         if not entries:
             return f"Log for {slug} is empty"
         lines = []
         for entry in entries:
             ts = entry.timestamp.strftime("%Y-%m-%d %H:%M:%S")
-            # Structured metadata line (dim, below timestamp)
             meta_parts: list[str] = []
             if entry.repo:
                 meta_parts.append(f"repo={entry.repo}")
@@ -59,22 +103,32 @@ def register(app: typer.Typer, get_container):
         all_: bool = typer.Option(False, "--all", help="Show all log entries, ignore active_repo"),
     ):
         """Live tail of a task's journal."""
-        from mship.cli._resolve import resolve_or_exit
-
         container = get_container()
-        state = container.state_manager().load()
 
-        t = resolve_or_exit(state, task)
-        task_slug = t.slug
+        if watch:
+            # Watch mode: defer task resolution into the view so resolver
+            # errors become placeholder text instead of exit-1.
+            task_slug: Optional[str] = None
+            cli_task = task
+            scope: Optional[str] = None
+        else:
+            from mship.cli._resolve import resolve_or_exit
+            state = container.state_manager().load()
+            t = resolve_or_exit(state, task)
+            task_slug = t.slug
+            cli_task = None
+            scope = None
+            if not all_ and t.active_repo is not None:
+                scope = t.active_repo
 
-        scope: Optional[str] = None
-        if not all_ and t.active_repo is not None:
-            scope = t.active_repo
         view = LogsView(
             state_manager=container.state_manager(),
             log_manager=container.log_manager(),
             task_slug=task_slug,
             scope_to_repo=scope,
+            all_=all_,
+            cli_task=cli_task,
+            cwd=Path.cwd(),
             watch=watch,
             interval=interval,
         )
