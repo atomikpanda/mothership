@@ -50,18 +50,27 @@ class ShellRunner:
         command = self.build_command(f"task {actual_task_name}", env_runner)
         return self.run(command, cwd, env=env)
 
-    def run_streaming(self, command: str, cwd: Path) -> subprocess.Popen:
+    def run_streaming(
+        self,
+        command: str,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.Popen:
         """Run a command with stdout/stderr streaming (for logs, run).
 
         Launches the subprocess in its own process group so signal delivery
         can reach the whole tree (including grandchildren) on termination.
         """
+        run_env = None
+        if env:
+            run_env = {**os.environ, **env}
         kwargs = dict(
             shell=True,
             cwd=cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=run_env,
         )
         if os.name == "nt":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP

@@ -9,6 +9,7 @@ from mship.core.graph import DependencyGraph
 from mship.core.healthcheck import HealthcheckResult
 from mship.core.state import StateManager, TestResult
 from mship.util.shell import ShellRunner, ShellResult
+from mship.util.stream_printer import StreamPrinter, drain_to_printer
 
 
 @dataclass
@@ -58,6 +59,7 @@ class RepoExecutor:
         self._state_manager = state_manager
         self._shell = shell
         self._healthcheck = healthcheck
+        self._printer: StreamPrinter | None = None
 
     def resolve_task_name(self, repo_name: str, canonical: str) -> str:
         repo = self._config.repos[repo_name]
@@ -135,8 +137,10 @@ class RepoExecutor:
                 f"task {actual_name}", env_runner
             )
             popen = self._shell.run_streaming(command, cwd=cwd)
-            # Mark as "success" — we launched it. If it crashes later, that's
-            # surfaced via Ctrl-C or process exit observation.
+            # Drain stdout/stderr to the shared printer. Threads are daemon
+            # and die naturally when the PIPEs close at process exit.
+            if self._printer is not None:
+                drain_to_printer(popen, repo_name, self._printer)
             return (
                 RepoResult(
                     repo=repo_name,
@@ -147,6 +151,35 @@ class RepoExecutor:
                 popen,
             )
 
+        if canonical_task == "run":
+            # Foreground `run` task: stream output live via Popen + drain
+            # threads, then wait for completion. This replaces the old
+            # capture-and-never-print behavior of run_task().
+            command = self._shell.build_command(
+                f"task {actual_name}", env_runner
+            )
+            _start = _time.monotonic()
+            popen = self._shell.run_streaming(command, cwd=cwd, env=upstream_env or None)
+            threads: list = []
+            if self._printer is not None:
+                threads = drain_to_printer(popen, repo_name, self._printer)
+            returncode = popen.wait()
+            for t in threads:
+                t.join(timeout=1.0)
+            _elapsed_ms = int((_time.monotonic() - _start) * 1000)
+            return (
+                RepoResult(
+                    repo=repo_name,
+                    task_name=actual_name,
+                    # Output already streamed to stdout; the ShellResult
+                    # carries only the returncode for downstream logic.
+                    shell_result=ShellResult(returncode=returncode, stdout="", stderr=""),
+                    duration_ms=_elapsed_ms,
+                ),
+                None,
+            )
+
+        # Non-run tasks (setup, test, ...) keep the capture-and-return path.
         _start = _time.monotonic()
         shell_result = self._shell.run_task(
             task_name=canonical_task,
@@ -176,6 +209,11 @@ class RepoExecutor:
     ) -> ExecutionResult:
         tiers = self._graph.topo_tiers(repos)
         result = ExecutionResult()
+
+        if canonical_task == "run":
+            self._printer = StreamPrinter(repos=sorted(set(repos)))
+        else:
+            self._printer = None
 
         for tier in tiers:
             tier_results: list[RepoResult] = []
