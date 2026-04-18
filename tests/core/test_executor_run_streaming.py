@@ -4,6 +4,7 @@ These spin up real subprocesses and assert on captured stdout. They
 use shell.run_streaming via the real executor — no mocks on the
 subprocess layer.
 """
+import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -14,11 +15,22 @@ from mship.core.executor import RepoExecutor
 from mship.core.graph import DependencyGraph
 from mship.util.shell import ShellRunner
 
+pytestmark = pytest.mark.skipif(
+    os.name == "nt",
+    reason="Integration tests use /bin/sh; skip on Windows.",
+)
 
-def _build_executor(tmp_path: Path, repo_commands: dict[str, str]) -> RepoExecutor:
-    """Build a real RepoExecutor over a minimal config. Each repo's `run`
-    task is set to an inline shell command — no Taskfile indirection.
-    repo_commands maps repo name to the shell command string to run."""
+
+def _build_executor(
+    tmp_path: Path,
+    repo_commands: dict[str, str],
+    *,
+    start_mode: str = "foreground",
+    task_key: str = "run",
+) -> RepoExecutor:
+    """Build a real RepoExecutor over a minimal config. Each repo's
+    task_key task is set to an inline shell command — no Taskfile
+    indirection. repo_commands maps repo name to the shell command string."""
     repos: dict[str, RepoConfig] = {}
     for name, cmd in repo_commands.items():
         repo_dir = tmp_path / name
@@ -26,8 +38,8 @@ def _build_executor(tmp_path: Path, repo_commands: dict[str, str]) -> RepoExecut
         repos[name] = RepoConfig(
             path=repo_dir,
             type="service",
-            tasks={"run": cmd},
-            start_mode="foreground",
+            tasks={task_key: cmd},
+            start_mode=start_mode,
         )
     config = WorkspaceConfig(workspace="t", repos=repos)
     graph = DependencyGraph(config)
@@ -92,33 +104,10 @@ def test_two_parallel_services_both_visible(capsys, tmp_path):
 
 def test_background_run_streams_output(capsys, tmp_path):
     """`start_mode: background` services also get their output relayed."""
-    repo_dir = tmp_path / "bg"
-    repo_dir.mkdir()
-    config = WorkspaceConfig(
-        workspace="t",
-        repos={
-            "bg": RepoConfig(
-                path=repo_dir,
-                type="service",
-                tasks={"run": "sh -c 'echo bg-hello; sleep 0.1'"},
-                start_mode="background",
-            ),
-        },
-    )
-    graph = DependencyGraph(config)
-    state_mgr = MagicMock()
-    state_mgr.load.return_value = MagicMock(tasks={})
-
-    class _Shell(ShellRunner):
-        def build_command(self, command: str, env_runner: str | None = None) -> str:
-            return command[len("task "):] if command.startswith("task ") else command
-
-    ex = RepoExecutor(
-        config=config,
-        graph=graph,
-        state_manager=state_mgr,
-        shell=_Shell(),
-        healthcheck=MagicMock(wait=lambda *a, **kw: MagicMock(ready=True, message="")),
+    ex = _build_executor(
+        tmp_path,
+        {"bg": "sh -c 'echo bg-hello; sleep 0.1'"},
+        start_mode="background",
     )
     result = ex.execute("run", repos=["bg"])
     # Background subprocess is still alive here; wait for it to finish so
@@ -135,33 +124,10 @@ def test_background_run_streams_output(capsys, tmp_path):
 def test_non_run_task_does_not_stream(capsys, tmp_path):
     """Setup/test/etc stay on the capture path — output should NOT appear
     on our stdout via the printer."""
-    repo_dir = tmp_path / "r"
-    repo_dir.mkdir()
-    config = WorkspaceConfig(
-        workspace="t",
-        repos={
-            "r": RepoConfig(
-                path=repo_dir,
-                type="service",
-                tasks={"setup": "echo setup-output"},
-                start_mode="foreground",
-            ),
-        },
-    )
-    graph = DependencyGraph(config)
-    state_mgr = MagicMock()
-    state_mgr.load.return_value = MagicMock(tasks={})
-
-    class _Shell(ShellRunner):
-        def build_command(self, command: str, env_runner: str | None = None) -> str:
-            return command[len("task "):] if command.startswith("task ") else command
-
-    ex = RepoExecutor(
-        config=config,
-        graph=graph,
-        state_manager=state_mgr,
-        shell=_Shell(),
-        healthcheck=MagicMock(wait=lambda *a, **kw: MagicMock(ready=True, message="")),
+    ex = _build_executor(
+        tmp_path,
+        {"r": "echo setup-output"},
+        task_key="setup",
     )
     ex.execute("setup", repos=["r"])
     out = capsys.readouterr().out
