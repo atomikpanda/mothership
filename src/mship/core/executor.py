@@ -218,6 +218,9 @@ class RepoExecutor:
         for tier in tiers:
             tier_results: list[RepoResult] = []
             tier_backgrounds: list = []
+            # Map each background repo to its Popen so the healthcheck loop
+            # (below) can poll the process and fast-fail on crash.
+            repo_to_proc: dict[str, object] = {}
 
             if len(tier) == 1:
                 # Single repo in tier — no threading overhead
@@ -225,6 +228,7 @@ class RepoExecutor:
                 tier_results.append(repo_result)
                 if bg is not None:
                     tier_backgrounds.append(bg)
+                    repo_to_proc[repo_result.repo] = bg
             else:
                 # Multiple repos — run in parallel
                 with ThreadPoolExecutor(max_workers=len(tier)) as pool:
@@ -237,6 +241,7 @@ class RepoExecutor:
                         tier_results.append(repo_result)
                         if bg is not None:
                             tier_backgrounds.append(bg)
+                            repo_to_proc[repo_result.repo] = bg
 
             # Sort tier results for deterministic output order
             tier_results.sort(key=lambda r: r.repo)
@@ -255,7 +260,10 @@ class RepoExecutor:
                     cwd = self._resolve_cwd(repo_result.repo, task_slug)
                     env_runner = self.resolve_env_runner(repo_result.repo)
                     hc_result = self._healthcheck.wait(
-                        repo_config.healthcheck, cwd, env_runner
+                        repo_config.healthcheck,
+                        cwd,
+                        env_runner,
+                        proc=repo_to_proc.get(repo_result.repo),
                     )
                     repo_result.healthcheck = hc_result
                     if not hc_result.ready:
