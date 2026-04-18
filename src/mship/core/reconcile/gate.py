@@ -65,6 +65,16 @@ _MATRIX: dict[str, dict[str, GateAction]] = {
 def should_block(decision: Decision, *, command: Command, ignored: list[str]) -> GateAction:
     if decision.slug in ignored:
         return GateAction.allow
+    # Settled: a task whose PR is merged/closed AND whose finished_at is set.
+    # The user has already run `mship finish`; only `mship close` remains.
+    # Don't block subsequent `spawn`/`finish` on these tasks — surface them
+    # via `mship reconcile` (existing output) instead. Issue #36.
+    if (
+        decision.finished_at is not None
+        and decision.state in (UpstreamState.merged, UpstreamState.closed)
+        and command in ("spawn", "finish")
+    ):
+        return GateAction.allow
     return _MATRIX[decision.state.value][command]
 
 
