@@ -760,3 +760,63 @@ def test_copy_bind_files_preserves_permissions(tmp_path: Path):
     src_mode = (repo / ".env").stat().st_mode
     dst_mode = (worktree / ".env").stat().st_mode
     assert stat.S_IMODE(src_mode) == stat.S_IMODE(dst_mode)
+
+
+def test_spawn_copies_bind_files_and_coexists_with_symlink_dirs(tmp_path: Path):
+    """Regression: bind_files and symlink_dirs run in the same spawn without interfering."""
+    import os, subprocess
+    from mship.core.config import ConfigLoader
+    from mship.core.worktree import WorktreeManager
+    from mship.core.graph import DependencyGraph
+    from mship.core.state import StateManager
+    from mship.core.log import LogManager
+    from mship.util.shell import ShellRunner
+    from mship.util.git import GitRunner
+
+    # Bare origin + working clone with .gitignore, .env, one tracked file, node_modules/ dir.
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True, capture_output=True)
+    clone = tmp_path / "repo"
+    subprocess.run(["git", "clone", str(origin), str(clone)], check=True, capture_output=True)
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    (clone / ".gitignore").write_text(".env\nnode_modules/\n")
+    (clone / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    (clone / ".env").write_text("secret=1\n")
+    (clone / "node_modules").mkdir()
+    (clone / "node_modules" / "pkg.txt").write_text("pkg\n")
+    subprocess.run(["git", "-C", str(clone), "add", "."], check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(clone), "commit", "-qm", "init"], check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(clone), "push", "-q", "origin", "main"], check=True, capture_output=True)
+
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  r:\n"
+        "    path: ./repo\n"
+        "    type: service\n"
+        "    symlink_dirs: [node_modules]\n"
+        "    bind_files: [.env]\n"
+    )
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    cfg = ConfigLoader.load(tmp_path / "mothership.yaml")
+    mgr = WorktreeManager(
+        config=cfg,
+        graph=DependencyGraph(config=cfg),
+        state_manager=StateManager(state_dir=state_dir),
+        git=GitRunner(),
+        shell=ShellRunner(),
+        log=LogManager(logs_dir=state_dir / "logs"),
+    )
+    result = mgr.spawn(description="add labels", skip_setup=True)
+    wt = result.task.worktrees["r"]
+
+    # bind_files: .env is copied byte-identical.
+    assert (wt / ".env").read_text() == "secret=1\n"
+    # symlink_dirs: node_modules is a symlink, not a copy.
+    assert (wt / "node_modules").is_symlink()
+    # Both succeeded with no warnings.
+    bind_warnings = [w for w in result.setup_warnings if "bind_files" in w]
+    assert bind_warnings == [], f"unexpected bind_files warnings: {bind_warnings}"

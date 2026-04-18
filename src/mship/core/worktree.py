@@ -216,6 +216,8 @@ class WorktreeManager:
                 # Create symlinks before setup so setup can use the linked dirs
                 symlink_warnings = self._create_symlinks(repo_name, repo_config, effective)
                 setup_warnings.extend(symlink_warnings)
+                bind_warnings = self._copy_bind_files(repo_name, repo_config, effective)
+                setup_warnings.extend(bind_warnings)
 
                 if not skip_setup:
                     actual_setup = repo_config.tasks.get("setup", "setup")
@@ -249,6 +251,8 @@ class WorktreeManager:
             # Create symlinks before setup so setup can use the linked dirs
             symlink_warnings = self._create_symlinks(repo_name, repo_config, wt_path)
             setup_warnings.extend(symlink_warnings)
+            bind_warnings = self._copy_bind_files(repo_name, repo_config, wt_path)
+            setup_warnings.extend(bind_warnings)
 
             if not skip_setup:
                 actual_setup = repo_config.tasks.get("setup", "setup")
