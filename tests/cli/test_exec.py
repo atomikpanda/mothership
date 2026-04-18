@@ -34,6 +34,16 @@ def configured_exec_app(workspace: Path):
 
     mock_shell = MagicMock(spec=ShellRunner)
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok\n", stderr="")
+    # Foreground `run` now goes through run_streaming + Popen.wait() (Task 3).
+    # Return a Popen-shaped mock with None PIPEs so drain threads exit
+    # immediately and wait() returns a real int returncode.
+    popen_mock = MagicMock()
+    popen_mock.pid = 12345
+    popen_mock.stdout = None
+    popen_mock.stderr = None
+    popen_mock.wait.return_value = 0
+    popen_mock.poll.return_value = 0
+    mock_shell.run_streaming.return_value = popen_mock
     container.shell.override(mock_shell)
 
     yield workspace, mock_shell
@@ -94,13 +104,22 @@ def test_mship_run_works_without_active_task(workspace: Path):
     mock_shell = MagicMock(spec=ShellRunner)
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok\n", stderr="")
     mock_shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    # Foreground `run` now goes through run_streaming + Popen.wait() (Task 3).
+    popen_mock = MagicMock()
+    popen_mock.pid = 54321
+    popen_mock.stdout = None
+    popen_mock.stderr = None
+    popen_mock.wait.return_value = 0
+    popen_mock.poll.return_value = 0
+    mock_shell.run_streaming.return_value = popen_mock
     container.shell.override(mock_shell)
 
     try:
         result = runner.invoke(app, ["run", "--repos", "shared"])
         assert result.exit_code == 0, result.output
-        # Executor invoked for the filtered repo
-        assert mock_shell.run_task.called
+        # Executor invoked for the filtered repo. Task 3 changed foreground
+        # `run` to go through run_streaming (was run_task).
+        assert mock_shell.run_streaming.called
     finally:
         container.shell.reset_override()
         container.config_path.reset_override()

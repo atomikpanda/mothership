@@ -73,7 +73,13 @@ def drain_to_printer(
         if stream is None:
             return
         try:
-            for line in iter(stream.readline, ""):
+            while True:
+                line = stream.readline()
+                # Real TextIO.readline returns str; "" signals EOF. A mock
+                # or broken stream may return a non-str — exit the loop so
+                # the thread can never infinite-spin on MagicMock returns.
+                if not isinstance(line, str) or line == "":
+                    break
                 printer.write(repo, line)
         except Exception:
             # Reading from a closed/broken stream: exit cleanly. The
