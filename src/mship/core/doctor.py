@@ -1,4 +1,5 @@
 import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -224,6 +225,23 @@ class DoctorChecker:
             report.checks.append(CheckResult(name="gh", status="warn", message="gh CLI not installed (optional — needed for mship finish)"))
         else:
             report.checks.append(CheckResult(name="gh", status="warn", message="gh CLI not authenticated (run gh auth login)"))
+
+        # go-task binary — signals whether spawn will run per-repo setup tasks
+        if shutil.which("task") is not None:
+            report.checks.append(CheckResult(
+                name="go-task",
+                status="pass",
+                message="go-task found",
+            ))
+        else:
+            report.checks.append(CheckResult(
+                name="go-task",
+                status="warn",
+                message=(
+                    "go-task not installed (https://taskfile.dev); "
+                    "mship will skip per-repo setup on spawn"
+                ),
+            ))
 
         # Dev-mode trap: installed mship may lag workspace source
         mship_source = self._detect_mship_dev_workspace()

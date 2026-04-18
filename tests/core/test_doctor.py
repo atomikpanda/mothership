@@ -420,3 +420,37 @@ def test_skill_check_reports_missing_install(tmp_path, monkeypatch):
     assert by_name["skills/claude"].status == "warn"
     assert "0/1" in by_name["skills/claude"].message
     assert "mship skill install" in by_name["skills/claude"].message
+
+
+def test_doctor_go_task_pass_when_binary_present(workspace: Path, monkeypatch):
+    monkeypatch.setattr(
+        "mship.core.doctor.shutil.which",
+        lambda name: "/usr/local/bin/task" if name == "task" else None,
+    )
+    config = ConfigLoader.load(workspace / "mothership.yaml")
+    from mship.core.doctor import DoctorChecker
+    shell = MagicMock(spec=ShellRunner)
+    shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    report = DoctorChecker(config, shell).run()
+    go_task_checks = [c for c in report.checks if c.name == "go-task"]
+    assert len(go_task_checks) == 1
+    assert go_task_checks[0].status == "pass"
+    assert "go-task found" in go_task_checks[0].message
+
+
+def test_doctor_go_task_warn_when_binary_missing(workspace: Path, monkeypatch):
+    monkeypatch.setattr(
+        "mship.core.doctor.shutil.which",
+        lambda name: None,
+    )
+    config = ConfigLoader.load(workspace / "mothership.yaml")
+    from mship.core.doctor import DoctorChecker
+    shell = MagicMock(spec=ShellRunner)
+    shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    report = DoctorChecker(config, shell).run()
+    go_task_checks = [c for c in report.checks if c.name == "go-task"]
+    assert len(go_task_checks) == 1
+    assert go_task_checks[0].status == "warn"
+    assert "not installed" in go_task_checks[0].message
+    assert "https://taskfile.dev" in go_task_checks[0].message
+    assert "skip per-repo setup on spawn" in go_task_checks[0].message
