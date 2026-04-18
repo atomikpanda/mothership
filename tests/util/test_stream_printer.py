@@ -37,7 +37,7 @@ def test_write_empty_repo_list(capsys):
     assert "x  | z\n" in out
 
 
-def test_write_strips_trailing_newlines_but_keeps_inner(capsys):
+def test_write_strips_trailing_newlines(capsys):
     p = StreamPrinter(repos=["api"], use_color=False)
     p.write("api", "line1\n")
     p.write("api", "line2")          # no trailing newline
