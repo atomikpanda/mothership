@@ -39,6 +39,7 @@ class RepoConfig(BaseModel):
     git_root: str | None = None
     start_mode: Literal["foreground", "background"] = "foreground"
     symlink_dirs: list[str] = []
+    bind_files: list[str] = []
     healthcheck: Healthcheck | None = None
     base_branch: str | None = None
     expected_branch: str | None = None
@@ -58,6 +59,20 @@ class RepoConfig(BaseModel):
                     normalized.append(dep)
             data["depends_on"] = normalized
         return data
+
+    @model_validator(mode="after")
+    def validate_bind_files(self) -> "RepoConfig":
+        for entry in self.bind_files:
+            p = Path(entry)
+            if p.is_absolute():
+                raise ValueError(
+                    f"bind_files entry {entry!r} is absolute; bind_files must be relative paths or globs"
+                )
+            if ".." in p.parts:
+                raise ValueError(
+                    f"bind_files entry {entry!r} contains '..'; bind_files must stay inside the repo"
+                )
+        return self
 
 
 class AuditPolicy(BaseModel):

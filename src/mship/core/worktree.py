@@ -1,6 +1,7 @@
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from mship.core.config import WorkspaceConfig
 from mship.core.graph import DependencyGraph
@@ -36,6 +37,101 @@ class WorktreeManager:
         self._git = git
         self._shell = shell
         self._log = log
+
+    def _git_ignored_files(self, source_root: Path) -> list[PurePosixPath]:
+        """Return gitignored leaf files in source_root, as relative PurePosixPath.
+
+        Uses `git ls-files --others --ignored --exclude-standard`, which:
+        - returns gitignored files at their relative paths,
+        - does NOT descend into ignored directories (so .venv/*, node_modules/*, etc. are NOT listed),
+        - returns ignored directories themselves as "dir/" entries, which we filter out.
+        """
+        result = self._shell.run(
+            "git ls-files --others --ignored --exclude-standard",
+            cwd=source_root,
+        )
+        if result.returncode != 0:
+            return []
+        out: list[PurePosixPath] = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.endswith("/"):
+                continue
+            out.append(PurePosixPath(line))
+        return out
+
+    def _match_bind_patterns(
+        self,
+        patterns: list[str],
+        candidates: list[PurePosixPath],
+    ) -> list[PurePosixPath]:
+        """Match patterns against candidate paths.
+
+        Supports `*`, `?`, and `**` via pathlib's glob semantics. Dedups across
+        patterns while preserving first-seen order.
+        """
+        seen: set[PurePosixPath] = set()
+        out: list[PurePosixPath] = []
+        for pattern in patterns:
+            for cand in candidates:
+                if cand in seen:
+                    continue
+                if cand.full_match(pattern):
+                    seen.add(cand)
+                    out.append(cand)
+        return out
+
+    def _copy_bind_files(
+        self,
+        repo_name: str,
+        repo_config,
+        worktree_path: Path,
+    ) -> list[str]:
+        """Copy bind_files matches from source repo into the worktree.
+
+        Returns warnings (non-fatal). Matches `symlink_dirs`'s warnings style
+        so spawn's existing warnings-surface handles display.
+        """
+        warnings: list[str] = []
+        if not repo_config.bind_files:
+            return warnings
+
+        # Resolve source root (mirror _create_symlinks logic for git_root repos).
+        if repo_config.git_root is not None:
+            parent = self._config.repos[repo_config.git_root]
+            source_root = parent.path / repo_config.path
+        else:
+            source_root = repo_config.path
+
+        # Warn on missing literals (no glob chars) before running the enum.
+        for entry in repo_config.bind_files:
+            if any(c in entry for c in "*?["):
+                continue   # it's a glob; zero-match handled silently below
+            if not (source_root / entry).exists():
+                warnings.append(
+                    f"{repo_name}: bind_files source missing: {entry} (will not be copied)"
+                )
+
+        candidates = self._git_ignored_files(source_root)
+        matches = self._match_bind_patterns(repo_config.bind_files, candidates)
+
+        for rel in matches:
+            src = source_root / rel
+            dst = worktree_path / rel
+
+            if not src.is_file():
+                # Glob matched a directory or a broken symlink. Skip + warn.
+                warnings.append(
+                    f"{repo_name}: bind_files match is not a regular file: {rel} (skipped)"
+                )
+                continue
+
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+
+        return warnings
 
     def _create_symlinks(
         self,
@@ -120,6 +216,8 @@ class WorktreeManager:
                 # Create symlinks before setup so setup can use the linked dirs
                 symlink_warnings = self._create_symlinks(repo_name, repo_config, effective)
                 setup_warnings.extend(symlink_warnings)
+                bind_warnings = self._copy_bind_files(repo_name, repo_config, effective)
+                setup_warnings.extend(bind_warnings)
 
                 if not skip_setup:
                     actual_setup = repo_config.tasks.get("setup", "setup")
@@ -153,6 +251,8 @@ class WorktreeManager:
             # Create symlinks before setup so setup can use the linked dirs
             symlink_warnings = self._create_symlinks(repo_name, repo_config, wt_path)
             setup_warnings.extend(symlink_warnings)
+            bind_warnings = self._copy_bind_files(repo_name, repo_config, wt_path)
+            setup_warnings.extend(bind_warnings)
 
             if not skip_setup:
                 actual_setup = repo_config.tasks.get("setup", "setup")

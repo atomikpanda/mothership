@@ -417,3 +417,406 @@ repos:
     assert warnings == []
     assert (wt / "node_modules").is_symlink()
     assert (wt / "node_modules").resolve() == (repo / "node_modules").resolve()
+
+
+# --- bind_files helpers (issue #39) ---
+
+from pathlib import PurePosixPath
+
+
+def _init_repo_with_ignored_files(tmp_path: Path) -> Path:
+    """Git-init a repo with a few tracked and ignored leaf files for bind_files testing."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    # Write .gitignore FIRST, before creating ignored files
+    (repo / ".gitignore").write_text(
+        ".env\n"
+        ".env.*\n"
+        ".venv/\n"
+        "node_modules/\n"
+        "apps/*/.env\n"
+    )
+    # Commit .gitignore so git knows which paths are ignored
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True, capture_output=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "gitignore"], cwd=repo, check=True, capture_output=True, env=env)
+
+    # Create tracked file
+    (repo / "tracked.txt").write_text("tracked\n")
+    # Create ignored leaf files (not inside ignored directories)
+    (repo / ".env").write_text("ENV=yes\n")
+    (repo / ".env.local").write_text("LOCAL=1\n")
+    (repo / "apps").mkdir()
+    (repo / "apps" / "foo").mkdir()
+    (repo / "apps" / "foo" / ".env").write_text("FOO=1\n")
+    (repo / "apps" / "bar").mkdir()
+    (repo / "apps" / "bar" / ".env").write_text("BAR=1\n")
+    # Create empty ignored directories to simulate presence but no enumeration
+    # (In a real scenario, these would have many files that we don't want to enumerate)
+    (repo / ".venv").mkdir()
+    (repo / "node_modules").mkdir()
+
+    # Add only tracked.txt
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True, capture_output=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "tracked"], cwd=repo, check=True, capture_output=True, env=env)
+    return repo
+
+
+def test_git_ignored_files_lists_ignored_leaf_files(tmp_path: Path):
+    from mship.core.config import ConfigLoader
+    from mship.core.worktree import WorktreeManager
+
+    repo = _init_repo_with_ignored_files(tmp_path)
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  r:\n"
+        "    path: ./repo\n"
+        "    type: service\n"
+    )
+    (repo / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "add", "Taskfile.yml"], cwd=repo, check=True, capture_output=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "taskfile"], cwd=repo, check=True, capture_output=True, env=env)
+
+    cfg = ConfigLoader.load(tmp_path / "mothership.yaml")
+    from mship.util.shell import ShellRunner
+    from mship.util.git import GitRunner
+    mgr = WorktreeManager(
+        config=cfg, graph=None, state_manager=None,
+        git=GitRunner(), shell=ShellRunner(), log=None,
+    )
+    files = mgr._git_ignored_files(repo)
+    names = {str(p) for p in files}
+
+    # Leaf ignored files are present
+    assert ".env" in names
+    assert ".env.local" in names
+    assert "apps/foo/.env" in names
+    assert "apps/bar/.env" in names
+
+    # Tracked files are NOT present
+    assert "tracked.txt" not in names
+    assert ".gitignore" not in names
+
+    # Contents of ignored directories are NOT present
+    # (Git does not enumerate .venv/*, node_modules/*, etc. when those dirs are gitignored)
+    assert not any(n.startswith(".venv/") for n in names), f"should not include .venv contents: {names}"
+    assert not any(n.startswith("node_modules/") for n in names), f"should not include node_modules contents: {names}"
+
+
+def _mgr_stub() -> "WorktreeManager":
+    """Minimal WorktreeManager just for calling pure methods; no real deps."""
+    from mship.core.worktree import WorktreeManager
+    from mship.util.shell import ShellRunner
+    from mship.util.git import GitRunner
+    from mship.core.config import WorkspaceConfig, RepoConfig
+    from pathlib import Path
+    cfg = WorkspaceConfig(
+        workspace="t",
+        repos={"r": RepoConfig(path=Path("/tmp/x"), type="service")},
+    )
+    return WorktreeManager(
+        config=cfg, graph=None, state_manager=None,
+        git=GitRunner(), shell=ShellRunner(), log=None,
+    )
+
+
+def test_match_bind_patterns_literal_match():
+    mgr = _mgr_stub()
+    candidates = [PurePosixPath(".env"), PurePosixPath(".env.local")]
+    out = mgr._match_bind_patterns([".env"], candidates)
+    assert out == [PurePosixPath(".env")]
+
+
+def test_match_bind_patterns_single_segment_glob():
+    mgr = _mgr_stub()
+    candidates = [PurePosixPath(".env"), PurePosixPath(".env.local"), PurePosixPath("local.env")]
+    out = mgr._match_bind_patterns([".env*"], candidates)
+    out_set = {str(p) for p in out}
+    assert out_set == {".env", ".env.local"}
+
+
+def test_match_bind_patterns_question_mark_glob():
+    mgr = _mgr_stub()
+    candidates = [
+        PurePosixPath(".env"),
+        PurePosixPath(".env.1"),
+        PurePosixPath(".env.10"),
+    ]
+    out = mgr._match_bind_patterns([".env.?"], candidates)
+    out_set = {str(p) for p in out}
+    assert out_set == {".env.1"}
+
+
+def test_match_bind_patterns_double_star_recursive():
+    mgr = _mgr_stub()
+    candidates = [
+        PurePosixPath(".env"),
+        PurePosixPath("apps/foo/.env"),
+        PurePosixPath("services/bar/.env"),
+    ]
+    out = mgr._match_bind_patterns(["**/.env"], candidates)
+    out_set = {str(p) for p in out}
+    assert out_set == {".env", "apps/foo/.env", "services/bar/.env"}
+
+
+def test_match_bind_patterns_single_level_vs_double_star():
+    mgr = _mgr_stub()
+    candidates = [
+        PurePosixPath("apps/foo/.env"),
+        PurePosixPath("apps/foo/bar/.env"),
+    ]
+    single = mgr._match_bind_patterns(["apps/*/.env"], candidates)
+    double = mgr._match_bind_patterns(["apps/**/.env"], candidates)
+    assert {str(p) for p in single} == {"apps/foo/.env"}
+    assert {str(p) for p in double} == {"apps/foo/.env", "apps/foo/bar/.env"}
+
+
+def test_match_bind_patterns_multi_pattern_dedup():
+    mgr = _mgr_stub()
+    candidates = [PurePosixPath(".env"), PurePosixPath(".env.local")]
+    out = mgr._match_bind_patterns([".env", ".env*"], candidates)
+    out_list = [str(p) for p in out]
+    assert out_list.count(".env") == 1
+    assert ".env.local" in out_list
+
+
+def test_match_bind_patterns_empty_patterns():
+    mgr = _mgr_stub()
+    assert mgr._match_bind_patterns([], [PurePosixPath(".env")]) == []
+
+
+def test_match_bind_patterns_zero_matches_silent():
+    mgr = _mgr_stub()
+    assert mgr._match_bind_patterns(["apps/**/.env"], [PurePosixPath(".env")]) == []
+
+
+import shutil
+
+
+def test_copy_bind_files_copies_matched_files(tmp_path: Path):
+    """End-to-end: given a git repo with ignored files, _copy_bind_files
+    copies the listed ones into a fake 'worktree' directory, preserving
+    relative paths."""
+    from mship.core.config import ConfigLoader
+    from mship.core.worktree import WorktreeManager
+    from mship.util.shell import ShellRunner
+    from mship.util.git import GitRunner
+
+    repo = _init_repo_with_ignored_files(tmp_path)
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  r:\n"
+        "    path: ./repo\n"
+        "    type: service\n"
+        "    bind_files:\n"
+        "      - .env\n"
+        "      - apps/**/.env\n"
+    )
+    (repo / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    import os, subprocess
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "add", "Taskfile.yml"], cwd=repo, check=True, capture_output=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "taskfile"], cwd=repo, check=True, capture_output=True, env=env)
+
+    cfg = ConfigLoader.load(tmp_path / "mothership.yaml")
+    mgr = WorktreeManager(
+        config=cfg, graph=None, state_manager=None,
+        git=GitRunner(), shell=ShellRunner(), log=None,
+    )
+    worktree = tmp_path / "fake-worktree"
+    worktree.mkdir()
+
+    warnings = mgr._copy_bind_files("r", cfg.repos["r"], worktree)
+    assert warnings == []
+
+    assert (worktree / ".env").read_text() == "ENV=yes\n"
+    assert (worktree / "apps" / "foo" / ".env").read_text() == "FOO=1\n"
+    # .env.local NOT copied (pattern was .env and apps/**/.env, not .env.local).
+    assert not (worktree / ".env.local").exists()
+    # .venv contents NEVER copied.
+    assert not (worktree / ".venv").exists()
+
+
+def test_copy_bind_files_warns_on_missing_literal(tmp_path: Path):
+    from mship.core.config import ConfigLoader
+    from mship.core.worktree import WorktreeManager
+    from mship.util.shell import ShellRunner
+    from mship.util.git import GitRunner
+
+    repo = _init_repo_with_ignored_files(tmp_path)
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  r:\n"
+        "    path: ./repo\n"
+        "    type: service\n"
+        "    bind_files:\n"
+        "      - .envv\n"  # typo — does not exist
+    )
+    (repo / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    import os, subprocess
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "add", "Taskfile.yml"], cwd=repo, check=True, capture_output=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "taskfile"], cwd=repo, check=True, capture_output=True, env=env)
+
+    cfg = ConfigLoader.load(tmp_path / "mothership.yaml")
+    mgr = WorktreeManager(
+        config=cfg, graph=None, state_manager=None,
+        git=GitRunner(), shell=ShellRunner(), log=None,
+    )
+    worktree = tmp_path / "fake-worktree"
+    worktree.mkdir()
+
+    warnings = mgr._copy_bind_files("r", cfg.repos["r"], worktree)
+    assert len(warnings) == 1
+    assert ".envv" in warnings[0]
+    assert "source missing" in warnings[0].lower() or "missing" in warnings[0].lower()
+
+
+def test_copy_bind_files_zero_glob_matches_silent(tmp_path: Path):
+    from mship.core.config import ConfigLoader
+    from mship.core.worktree import WorktreeManager
+    from mship.util.shell import ShellRunner
+    from mship.util.git import GitRunner
+
+    repo = _init_repo_with_ignored_files(tmp_path)
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  r:\n"
+        "    path: ./repo\n"
+        "    type: service\n"
+        "    bind_files:\n"
+        "      - nonexistent/**/.env\n"  # glob matches nothing — silent
+    )
+    (repo / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    import os, subprocess
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "add", "Taskfile.yml"], cwd=repo, check=True, capture_output=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "taskfile"], cwd=repo, check=True, capture_output=True, env=env)
+
+    cfg = ConfigLoader.load(tmp_path / "mothership.yaml")
+    mgr = WorktreeManager(
+        config=cfg, graph=None, state_manager=None,
+        git=GitRunner(), shell=ShellRunner(), log=None,
+    )
+    worktree = tmp_path / "fake-worktree"
+    worktree.mkdir()
+
+    warnings = mgr._copy_bind_files("r", cfg.repos["r"], worktree)
+    assert warnings == []  # No warning: globs that match nothing are silent.
+
+
+def test_copy_bind_files_preserves_permissions(tmp_path: Path):
+    import os, stat, subprocess
+    from mship.core.config import ConfigLoader
+    from mship.core.worktree import WorktreeManager
+    from mship.util.shell import ShellRunner
+    from mship.util.git import GitRunner
+
+    repo = _init_repo_with_ignored_files(tmp_path)
+    # Make .env executable (weird but tests permission preservation).
+    env_file = repo / ".env"
+    env_file.chmod(env_file.stat().st_mode | stat.S_IXUSR)
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  r:\n"
+        "    path: ./repo\n"
+        "    type: service\n"
+        "    bind_files:\n"
+        "      - .env\n"
+    )
+    (repo / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    genv = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "add", "Taskfile.yml"], cwd=repo, check=True, capture_output=True, env=genv)
+    subprocess.run(["git", "commit", "-qm", "taskfile"], cwd=repo, check=True, capture_output=True, env=genv)
+
+    cfg = ConfigLoader.load(tmp_path / "mothership.yaml")
+    mgr = WorktreeManager(
+        config=cfg, graph=None, state_manager=None,
+        git=GitRunner(), shell=ShellRunner(), log=None,
+    )
+    worktree = tmp_path / "fake-worktree"
+    worktree.mkdir()
+    mgr._copy_bind_files("r", cfg.repos["r"], worktree)
+
+    src_mode = (repo / ".env").stat().st_mode
+    dst_mode = (worktree / ".env").stat().st_mode
+    assert stat.S_IMODE(src_mode) == stat.S_IMODE(dst_mode)
+
+
+def test_spawn_copies_bind_files_and_coexists_with_symlink_dirs(tmp_path: Path):
+    """Regression: bind_files and symlink_dirs run in the same spawn without interfering."""
+    import os, subprocess
+    from mship.core.config import ConfigLoader
+    from mship.core.worktree import WorktreeManager
+    from mship.core.graph import DependencyGraph
+    from mship.core.state import StateManager
+    from mship.core.log import LogManager
+    from mship.util.shell import ShellRunner
+    from mship.util.git import GitRunner
+
+    # Bare origin + working clone with .gitignore, .env, one tracked file, node_modules/ dir.
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True, capture_output=True)
+    clone = tmp_path / "repo"
+    subprocess.run(["git", "clone", str(origin), str(clone)], check=True, capture_output=True)
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    (clone / ".gitignore").write_text(".env\nnode_modules/\n")
+    (clone / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    (clone / ".env").write_text("secret=1\n")
+    (clone / "node_modules").mkdir()
+    (clone / "node_modules" / "pkg.txt").write_text("pkg\n")
+    subprocess.run(["git", "-C", str(clone), "add", "."], check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(clone), "commit", "-qm", "init"], check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(clone), "push", "-q", "origin", "main"], check=True, capture_output=True)
+
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  r:\n"
+        "    path: ./repo\n"
+        "    type: service\n"
+        "    symlink_dirs: [node_modules]\n"
+        "    bind_files: [.env]\n"
+    )
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    cfg = ConfigLoader.load(tmp_path / "mothership.yaml")
+    mgr = WorktreeManager(
+        config=cfg,
+        graph=DependencyGraph(config=cfg),
+        state_manager=StateManager(state_dir=state_dir),
+        git=GitRunner(),
+        shell=ShellRunner(),
+        log=LogManager(logs_dir=state_dir / "logs"),
+    )
+    result = mgr.spawn(description="add labels", skip_setup=True)
+    wt = result.task.worktrees["r"]
+
+    # bind_files: .env is copied byte-identical.
+    assert (wt / ".env").read_text() == "secret=1\n"
+    # symlink_dirs: node_modules is a symlink, not a copy.
+    assert (wt / "node_modules").is_symlink()
+    # Both succeeded with no warnings.
+    bind_warnings = [w for w in result.setup_warnings if "bind_files" in w]
+    assert bind_warnings == [], f"unexpected bind_files warnings: {bind_warnings}"
