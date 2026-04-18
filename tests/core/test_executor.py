@@ -443,6 +443,8 @@ repos:
     # Mock streaming: returns a Popen-like object
     popen_mock = MagicMock()
     popen_mock.pid = 12345
+    popen_mock.stdout = None  # prevent drain threads from looping on mock data
+    popen_mock.stderr = None
     mock_shell.run_streaming.return_value = popen_mock
 
     executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
@@ -455,8 +457,8 @@ repos:
     mock_shell.run_streaming.assert_called_once()
 
 
-def test_foreground_start_mode_uses_run_task(workspace: Path):
-    """Default start_mode is foreground — uses run_task."""
+def test_foreground_start_mode_uses_run_streaming(workspace: Path):
+    """Default start_mode is foreground — foreground run uses run_streaming + wait."""
     config = ConfigLoader.load(workspace / "mothership.yaml")
     graph = DependencyGraph(config)
     state_dir = workspace / ".mothership"
@@ -464,12 +466,22 @@ def test_foreground_start_mode_uses_run_task(workspace: Path):
     state_mgr = StateManager(state_dir)
 
     mock_shell = MagicMock(spec=ShellRunner)
-    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    popen_mock = MagicMock()
+    popen_mock.pid = 9999
+    popen_mock.stdout = None  # disable drain threads
+    popen_mock.stderr = None
+    popen_mock.wait.return_value = 0
+    mock_shell.run_streaming.return_value = popen_mock
 
     executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
-    executor.execute("run", repos=["shared"])
-    mock_shell.run_task.assert_called_once()
-    mock_shell.run_streaming.assert_not_called()
+    result = executor.execute("run", repos=["shared"])
+    # run_task should NOT be called for foreground run
+    mock_shell.run_task.assert_not_called()
+    # run_streaming SHOULD have been called
+    mock_shell.run_streaming.assert_called_once()
+    # popen.wait() should have been called to block until completion
+    popen_mock.wait.assert_called_once()
+    assert result.success
 
 
 def test_background_returns_in_execution_result(workspace: Path):
@@ -494,6 +506,8 @@ repos:
     mock_shell = MagicMock(spec=ShellRunner)
     popen_mock = MagicMock()
     popen_mock.pid = 12345
+    popen_mock.stdout = None
+    popen_mock.stderr = None
     mock_shell.run_streaming.return_value = popen_mock
 
     executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
@@ -525,6 +539,8 @@ repos:
     mock_shell = MagicMock(spec=ShellRunner)
     popen_mock = MagicMock()
     popen_mock.pid = 55555
+    popen_mock.stdout = None
+    popen_mock.stderr = None
     mock_shell.run_streaming.return_value = popen_mock
 
     executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
@@ -600,6 +616,8 @@ repos:
     mock_shell = MagicMock(spec=ShellRunner)
     popen_mock = MagicMock()
     popen_mock.pid = 12345
+    popen_mock.stdout = None
+    popen_mock.stderr = None
     mock_shell.run_streaming.return_value = popen_mock
 
     from mship.core.healthcheck import HealthcheckRunner
@@ -643,6 +661,8 @@ repos:
     mock_shell = MagicMock(spec=ShellRunner)
     popen_mock = MagicMock()
     popen_mock.pid = 12345
+    popen_mock.stdout = None
+    popen_mock.stderr = None
     mock_shell.run_streaming.return_value = popen_mock
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
 
