@@ -550,3 +550,88 @@ def test_repo_config_accepts_base_branch(tmp_path):
     cfg = ConfigLoader.load(cfg_path)
     assert cfg.repos["cli"].base_branch == "main"
     assert cfg.repos["api"].base_branch is None
+
+
+# --- bind_files validation (issue #39) ---
+
+def test_bind_files_accepts_relative_paths(tmp_path):
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+
+    cfg_path = tmp_path / "mothership.yaml"
+    cfg_path.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  r:\n"
+        "    path: ./repo\n"
+        "    type: service\n"
+        "    bind_files:\n"
+        "      - .env\n"
+        "      - .vscode/settings.local.json\n"
+        "      - apps/**/.env\n"
+    )
+    cfg = ConfigLoader.load(cfg_path)
+    assert cfg.repos["r"].bind_files == [
+        ".env",
+        ".vscode/settings.local.json",
+        "apps/**/.env",
+    ]
+
+
+def test_bind_files_rejects_absolute_path(tmp_path):
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+
+    cfg_path = tmp_path / "mothership.yaml"
+    cfg_path.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  r:\n"
+        "    path: ./repo\n"
+        "    type: service\n"
+        "    bind_files:\n"
+        "      - /etc/secrets\n"
+    )
+    with pytest.raises(Exception) as exc:
+        ConfigLoader.load(cfg_path)
+    assert "/etc/secrets" in str(exc.value)
+    assert "absolute" in str(exc.value).lower()
+
+
+def test_bind_files_rejects_parent_escape(tmp_path):
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+
+    cfg_path = tmp_path / "mothership.yaml"
+    cfg_path.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  r:\n"
+        "    path: ./repo\n"
+        "    type: service\n"
+        "    bind_files:\n"
+        "      - ../other-repo/.env\n"
+    )
+    with pytest.raises(Exception) as exc:
+        ConfigLoader.load(cfg_path)
+    assert "../other-repo/.env" in str(exc.value) or ".." in str(exc.value)
+
+
+def test_bind_files_empty_list_is_default(tmp_path):
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+
+    cfg_path = tmp_path / "mothership.yaml"
+    cfg_path.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  r:\n"
+        "    path: ./repo\n"
+        "    type: service\n"
+    )
+    cfg = ConfigLoader.load(cfg_path)
+    assert cfg.repos["r"].bind_files == []
