@@ -508,3 +508,90 @@ def test_git_ignored_files_lists_ignored_leaf_files(tmp_path: Path):
     # (Git does not enumerate .venv/*, node_modules/*, etc. when those dirs are gitignored)
     assert not any(n.startswith(".venv/") for n in names), f"should not include .venv contents: {names}"
     assert not any(n.startswith("node_modules/") for n in names), f"should not include node_modules contents: {names}"
+
+
+def _mgr_stub() -> "WorktreeManager":
+    """Minimal WorktreeManager just for calling pure methods; no real deps."""
+    from mship.core.worktree import WorktreeManager
+    from mship.util.shell import ShellRunner
+    from mship.util.git import GitRunner
+    from mship.core.config import WorkspaceConfig, RepoConfig
+    from pathlib import Path
+    cfg = WorkspaceConfig(
+        workspace="t",
+        repos={"r": RepoConfig(path=Path("/tmp/x"), type="service")},
+    )
+    return WorktreeManager(
+        config=cfg, graph=None, state_manager=None,
+        git=GitRunner(), shell=ShellRunner(), log=None,
+    )
+
+
+def test_match_bind_patterns_literal_match():
+    mgr = _mgr_stub()
+    candidates = [PurePosixPath(".env"), PurePosixPath(".env.local")]
+    out = mgr._match_bind_patterns([".env"], candidates)
+    assert out == [PurePosixPath(".env")]
+
+
+def test_match_bind_patterns_single_segment_glob():
+    mgr = _mgr_stub()
+    candidates = [PurePosixPath(".env"), PurePosixPath(".env.local"), PurePosixPath("local.env")]
+    out = mgr._match_bind_patterns([".env*"], candidates)
+    out_set = {str(p) for p in out}
+    assert out_set == {".env", ".env.local"}
+
+
+def test_match_bind_patterns_question_mark_glob():
+    mgr = _mgr_stub()
+    candidates = [
+        PurePosixPath(".env"),
+        PurePosixPath(".env.1"),
+        PurePosixPath(".env.10"),
+    ]
+    out = mgr._match_bind_patterns([".env.?"], candidates)
+    out_set = {str(p) for p in out}
+    assert out_set == {".env.1"}
+
+
+def test_match_bind_patterns_double_star_recursive():
+    mgr = _mgr_stub()
+    candidates = [
+        PurePosixPath(".env"),
+        PurePosixPath("apps/foo/.env"),
+        PurePosixPath("services/bar/.env"),
+    ]
+    out = mgr._match_bind_patterns(["**/.env"], candidates)
+    out_set = {str(p) for p in out}
+    assert out_set == {".env", "apps/foo/.env", "services/bar/.env"}
+
+
+def test_match_bind_patterns_single_level_vs_double_star():
+    mgr = _mgr_stub()
+    candidates = [
+        PurePosixPath("apps/foo/.env"),
+        PurePosixPath("apps/foo/bar/.env"),
+    ]
+    single = mgr._match_bind_patterns(["apps/*/.env"], candidates)
+    double = mgr._match_bind_patterns(["apps/**/.env"], candidates)
+    assert {str(p) for p in single} == {"apps/foo/.env"}
+    assert {str(p) for p in double} == {"apps/foo/.env", "apps/foo/bar/.env"}
+
+
+def test_match_bind_patterns_multi_pattern_dedup():
+    mgr = _mgr_stub()
+    candidates = [PurePosixPath(".env"), PurePosixPath(".env.local")]
+    out = mgr._match_bind_patterns([".env", ".env*"], candidates)
+    out_list = [str(p) for p in out]
+    assert out_list.count(".env") == 1
+    assert ".env.local" in out_list
+
+
+def test_match_bind_patterns_empty_patterns():
+    mgr = _mgr_stub()
+    assert mgr._match_bind_patterns([], [PurePosixPath(".env")]) == []
+
+
+def test_match_bind_patterns_zero_matches_silent():
+    mgr = _mgr_stub()
+    assert mgr._match_bind_patterns(["apps/**/.env"], [PurePosixPath(".env")]) == []

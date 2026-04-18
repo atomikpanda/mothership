@@ -61,6 +61,27 @@ class WorktreeManager:
             out.append(PurePosixPath(line))
         return out
 
+    def _match_bind_patterns(
+        self,
+        patterns: list[str],
+        candidates: list[PurePosixPath],
+    ) -> list[PurePosixPath]:
+        """Match patterns against candidate paths.
+
+        Supports `*`, `?`, and `**` via pathlib's glob semantics. Dedups across
+        patterns while preserving first-seen order.
+        """
+        seen: set[PurePosixPath] = set()
+        out: list[PurePosixPath] = []
+        for pattern in patterns:
+            for cand in candidates:
+                if cand in seen:
+                    continue
+                if cand.full_match(pattern):
+                    seen.add(cand)
+                    out.append(cand)
+        return out
+
     def _create_symlinks(
         self,
         repo_name: str,
