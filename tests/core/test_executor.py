@@ -741,3 +741,70 @@ def test_executor_records_duration_ms_on_test_run(workspace_with_git, monkeypatc
         container.config_path.reset_override()
         container.state_dir.reset_override()
         container.config.reset()
+
+
+import os as _os
+
+
+@pytest.mark.skipif(_os.name == "nt", reason="Uses /bin/sh; Unix-only.")
+def test_run_fast_fails_when_background_crashes(tmp_path):
+    """A crashing background `run` task is caught during healthcheck
+    retry rather than waiting the full healthcheck timeout.
+
+    The service's `tasks.run` exits 127 immediately. Healthcheck timeout
+    is 60s, retry_interval 200ms. Expectation: total elapsed well under
+    2s, result marks the repo as failed, healthcheck message names the
+    exit code.
+    """
+    import time as _time
+    from pathlib import Path as _Path
+
+    repo_dir = tmp_path / "svc"
+    repo_dir.mkdir()
+    (repo_dir / "Taskfile.yml").write_text("version: '3'\n")
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: fastfail
+repos:
+  svc:
+    path: ./svc
+    type: service
+    tasks: {run: 'sh -c "exit 127"'}
+    start_mode: background
+    healthcheck:
+      tcp: "127.0.0.1:1"
+      timeout: 60s
+      retry_interval: 200ms
+"""
+    )
+    config = ConfigLoader.load(cfg)
+    graph = DependencyGraph(config)
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    state_mgr = StateManager(state_dir)
+
+    # Use a real ShellRunner so run_streaming actually spawns the subprocess,
+    # but override build_command to treat tasks["run"] as a literal shell cmd
+    # (no `task` binary needed).
+    from mship.util.shell import ShellRunner as _ShellRunner
+
+    class _Shell(_ShellRunner):
+        def build_command(self, command: str, env_runner: str | None = None) -> str:
+            return command[len("task "):] if command.startswith("task ") else command
+
+    from mship.core.healthcheck import HealthcheckRunner
+    shell = _Shell()
+    hc = HealthcheckRunner(shell)
+
+    executor = RepoExecutor(config, graph, state_mgr, shell, healthcheck=hc)
+
+    start = _time.monotonic()
+    result = executor.execute("run", repos=["svc"])
+    elapsed = _time.monotonic() - start
+
+    assert elapsed < 2.0, f"expected fast-fail in under 2s, took {elapsed:.2f}s"
+    assert not result.success
+    assert result.results[0].shell_result.returncode == 1
+    assert result.results[0].healthcheck is not None
+    assert "exited with code 127" in result.results[0].healthcheck.message
