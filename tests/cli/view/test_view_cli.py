@@ -34,12 +34,15 @@ def empty_workspace(tmp_path, monkeypatch):
     container.state_manager.reset()
     container.config_path.override(cfg)
     container.state_dir.override(state_dir)
-    yield tmp_path
-    container.config_path.reset_override()
-    container.state_dir.reset_override()
-    container.config.reset_override()
-    container.config.reset()
-    container.state_manager.reset_override()
+    try:
+        yield tmp_path
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset_override()
+        container.config.reset()
+        container.state_manager.reset_override()
+        container.state_manager.reset()
 
 
 def test_journal_non_watch_no_task_exits_1(empty_workspace):
