@@ -872,7 +872,7 @@ Expected: all green.
 
 - [ ] **Step 4.4: Run full test suite (excluding known-flaky)**
 
-Run: `pytest tests/ --ignore=tests/core/view/test_web_port.py 2>&1 | tail -20`
+Run: `pytest tests/ 2>&1 | tail -20`
 Expected: a passing summary. No regressions in existing tests.
 
 - [ ] **Step 4.5: Commit**
@@ -986,7 +986,7 @@ rm -rf /tmp/run-stream-smoke /tmp/run-stream-smoke.out
 
 ```bash
 cd /home/bailey/development/repos/mothership/.worktrees/feat/mship-run-shows-prefixed-live-stdout-and-stderr
-pytest tests/ --ignore=tests/core/view/test_web_port.py 2>&1 | tail -5
+pytest tests/ 2>&1 | tail -5
 ```
 
 Expected: green summary.
