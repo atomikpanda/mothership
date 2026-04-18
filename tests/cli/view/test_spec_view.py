@@ -218,3 +218,120 @@ async def test_spec_fallback_falls_back_to_error_when_no_task_resolvable(tmp_pat
         await pilot.pause()
         rendered = view.rendered_text()
         assert "No specs found" in rendered or "Spec not found" in rendered
+
+
+# --- watch-mode resolver tolerance ---
+
+from dataclasses import dataclass as _dataclass, field as _field
+
+
+@_dataclass
+class _FakeSpecTask:
+    slug: str
+    description: str = ""
+    phase: str = "plan"
+    branch: str = "feat/x"
+    worktrees: dict = _field(default_factory=dict)
+
+
+class _FakeStateTasks:
+    def __init__(self, tasks_dict):
+        self.tasks = tasks_dict
+
+
+class _MutableSpecStateMgr:
+    def __init__(self, tasks_dict=None):
+        self._tasks = tasks_dict or {}
+
+    def set_tasks(self, tasks_dict):
+        self._tasks = tasks_dict
+
+    def load(self):
+        return _FakeStateTasks(self._tasks)
+
+
+@pytest.mark.asyncio
+async def test_spec_view_watch_no_active_task_shows_placeholder(tmp_path):
+    view = SpecView(
+        workspace_root=tmp_path,
+        name_or_path=None,
+        state_manager=_MutableSpecStateMgr(tasks_dict={}),
+        cli_task=None,
+        cwd=tmp_path,
+        watch=True,
+        interval=0.5,
+    )
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        assert "No active task" in view.rendered_text()
+
+
+@pytest.mark.asyncio
+async def test_spec_view_watch_ambiguous_shows_placeholder(tmp_path):
+    mgr = _MutableSpecStateMgr(tasks_dict={
+        "alpha": _FakeSpecTask("alpha"),
+        "beta":  _FakeSpecTask("beta"),
+    })
+    view = SpecView(
+        workspace_root=tmp_path,
+        name_or_path=None,
+        state_manager=mgr,
+        cli_task=None,
+        cwd=tmp_path,
+        watch=True,
+        interval=0.5,
+    )
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        text = view.rendered_text()
+        assert "Multiple active tasks" in text
+        assert "alpha" in text and "beta" in text
+
+
+@pytest.mark.asyncio
+async def test_spec_view_watch_unknown_slug_shows_placeholder(tmp_path):
+    mgr = _MutableSpecStateMgr(tasks_dict={"other": _FakeSpecTask("other")})
+    view = SpecView(
+        workspace_root=tmp_path,
+        name_or_path=None,
+        state_manager=mgr,
+        cli_task="missing-one",
+        cwd=tmp_path,
+        watch=True,
+        interval=0.5,
+    )
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        assert "missing-one" in view.rendered_text()
+
+
+@pytest.mark.asyncio
+async def test_spec_view_watch_transitions_to_fallback_when_task_appears(tmp_path):
+    mgr = _MutableSpecStateMgr(tasks_dict={})
+    view = SpecView(
+        workspace_root=tmp_path,
+        name_or_path=None,
+        state_manager=mgr,
+        cli_task=None,
+        cwd=tmp_path,
+        watch=True,
+        interval=0.5,
+    )
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        assert "No active task" in view.rendered_text()
+        mgr.set_tasks({
+            "solo": _FakeSpecTask(
+                "solo",
+                description="My task description.",
+                phase="plan",
+                branch="feat/solo",
+            ),
+        })
+        view._refresh_content()
+        await pilot.pause()
+        text = view.rendered_text()
+        assert "No active task" not in text
+        # Either a spec was rendered (none in tmp_path/docs/superpowers/specs)
+        # or the task fallback with the description appears.
+        assert "My task description" in text or "No spec yet for task" in text

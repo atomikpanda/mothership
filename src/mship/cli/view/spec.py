@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import os
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -13,6 +14,13 @@ from textual.containers import VerticalScroll
 from textual.widgets import Markdown, Static
 
 from mship.cli.view._base import ViewApp
+from mship.cli.view._placeholders import placeholder_for
+from mship.core.task_resolver import (
+    AmbiguousTaskError,
+    NoActiveTaskError,
+    UnknownTaskError,
+    resolve_task,
+)
 from mship.core.view.spec_discovery import SpecNotFoundError, find_spec
 from mship.core.view.web_port import NoFreePortError, pick_port
 
@@ -67,6 +75,24 @@ class SpecView(ViewApp):
             return self._state_manager.load()
         return self._initial_state
 
+    def _resolve_task_slug(self, state) -> Optional[str]:
+        """Return the task slug to render for this tick, or raise a resolver
+        error. Returns None when `name_or_path` is set (resolution skipped).
+
+        Only called when state_manager is set (watch-mode with new API).
+        """
+        if self._name_or_path is not None:
+            return None
+        if self._task_filter is not None:
+            return self._task_filter
+        task = resolve_task(
+            state,
+            cli_task=self._cli_task,
+            env_task=os.environ.get("MSHIP_TASK"),
+            cwd=self._cwd,
+        )
+        return task.slug
+
     def _refresh_content(self) -> None:
         assert self._markdown is not None
         assert self._error_static is not None
@@ -75,8 +101,31 @@ class SpecView(ViewApp):
         prev_y = self._body.scroll_y
 
         state = self._current_state()
+
+        # Per-tick resolver: only active when state_manager is set (watch
+        # mode wired with the new API). Legacy callers that pass state= and
+        # task= directly bypass this path.
+        if self._state_manager is not None:
+            try:
+                slug_for_tick = self._resolve_task_slug(state)
+            except (NoActiveTaskError, AmbiguousTaskError, UnknownTaskError) as err:
+                text = placeholder_for(err)
+                self._last_source = text
+                self._last_error = ""
+                self._markdown.update(text)
+                self._error_static.update("")
+                self.call_after_refresh(self._restore_scroll, prev_y, was_at_end)
+                return
+        else:
+            slug_for_tick = self._task_filter
+
         try:
-            path = find_spec(self._workspace_root, self._name_or_path, task=self._task_filter, state=state)
+            path = find_spec(
+                self._workspace_root,
+                self._name_or_path,
+                task=slug_for_tick,
+                state=state,
+            )
             source = path.read_text()
             self._last_source = source
             self._last_error = ""
@@ -84,7 +133,7 @@ class SpecView(ViewApp):
             self._error_static.update("")
         except SpecNotFoundError as e:
             if self._name_or_path is None:
-                body = self._render_task_fallback(self._task_filter, state, default_error=str(e))
+                body = self._render_task_fallback(slug_for_tick, state, default_error=str(e))
                 self._last_source = body
                 self._last_error = ""
                 self._markdown.update(body)
