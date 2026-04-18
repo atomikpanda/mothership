@@ -40,7 +40,12 @@ class LogsView(ViewApp):
         """Return the task slug to render for this tick.
 
         Non-watch: returns the pre-resolved `task_slug` passed in by the CLI.
-        Watch: re-runs `resolve_task()` each call; resolver errors propagate.
+        Watch: re-runs `resolve_task()` each call.
+
+        Resolver errors propagate. `gather()` catches `NoActiveTaskError`,
+        `AmbiguousTaskError`, and `UnknownTaskError` and renders a placeholder;
+        any other exception will bubble up to `ViewApp._refresh_content`'s
+        generic error banner.
         """
         if self._task_slug is not None:
             return self._task_slug
@@ -62,8 +67,14 @@ class LogsView(ViewApp):
         scope = self._scope_to_repo
         # Watch mode re-reads state per tick so scoping follows `mship switch`.
         # Non-watch trusts the CLI-precomputed `scope_to_repo`. `--all` skips
-        # per-tick scoping regardless of mode.
-        if self._task_slug is None and not self._all:
+        # per-tick scoping regardless of mode. The `scope_to_repo is None`
+        # guard protects an explicitly-passed scope from being overwritten
+        # when this class is constructed outside the CLI (e.g. in tests).
+        if (
+            self._task_slug is None
+            and not self._all
+            and self._scope_to_repo is None
+        ):
             state = self._state_manager.load()
             task = state.tasks.get(slug)
             if task is not None:

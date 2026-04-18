@@ -1,6 +1,7 @@
 import pytest
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 from mship.cli.view.logs import LogsView
 
@@ -170,15 +171,12 @@ def test_logs_cli_rejects_unknown_task(tmp_path):
 
 # --- watch-mode resolver tolerance ---
 
-from pathlib import Path as _Path
-from dataclasses import dataclass as _dataclass, field as _field
 
-
-@_dataclass
+@dataclass
 class _FakeTask:
     slug: str
     active_repo: str | None = None
-    worktrees: dict = _field(default_factory=dict)
+    worktrees: dict = field(default_factory=dict)
 
 
 class _FakeStateWithTasks:
