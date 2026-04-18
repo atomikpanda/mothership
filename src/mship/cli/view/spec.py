@@ -279,15 +279,20 @@ def register(app: typer.Typer, get_container):
         state = container.state_manager().load()
 
         # Resolve target task. If the user specified an explicit spec name,
-        # skip task resolution entirely (rendering is name-driven). Otherwise
-        # require an anchor via resolve_or_exit.
+        # skip task resolution entirely (rendering is name-driven). If --watch
+        # is set, defer task resolution into the view so resolver errors
+        # become placeholder text instead of exit-1.
         resolved_task_slug: Optional[str] = None
+        cli_task_for_view: Optional[str] = None
         if name_or_path is None:
-            from mship.cli._resolve import resolve_or_exit
-            t = resolve_or_exit(state, task)
-            resolved_task_slug = t.slug
+            if watch:
+                cli_task_for_view = task
+            else:
+                from mship.cli._resolve import resolve_or_exit
+                t = resolve_or_exit(state, task)
+                resolved_task_slug = t.slug
 
-        # Direct render: either name_or_path or a resolved task slug.
+        # --web still requires a resolvable spec path at request time.
         if web:
             try:
                 path = find_spec(
@@ -298,12 +303,15 @@ def register(app: typer.Typer, get_container):
                 raise typer.Exit(code=1)
             _serve_web(path, port)
             return
+
         view = SpecView(
             workspace_root=workspace_root,
             name_or_path=name_or_path,
             task=resolved_task_slug,
-            state=state,
+            state_manager=container.state_manager(),
             log_manager=container.log_manager(),
+            cli_task=cli_task_for_view,
+            cwd=_P.cwd(),
             watch=watch,
             interval=interval,
         )

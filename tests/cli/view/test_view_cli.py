@@ -80,3 +80,36 @@ def test_journal_watch_with_unknown_task_constructs_view_without_exit(empty_work
     view = captured["view"]
     assert view._task_slug is None
     assert view._cli_task == "missing"
+
+
+def test_spec_non_watch_no_task_exits_1(empty_workspace):
+    runner = CliRunner()
+    result = runner.invoke(app, ["view", "spec"])
+    assert result.exit_code == 1
+    assert "no active task" in (result.output or "").lower()
+
+
+def test_spec_watch_no_task_constructs_view_without_exit(empty_workspace, monkeypatch):
+    from mship.cli.view import spec as spec_mod
+    captured = {}
+    monkeypatch.setattr(spec_mod.SpecView, "run", lambda self: captured.setdefault("view", self))
+    runner = CliRunner()
+    result = runner.invoke(app, ["view", "spec", "--watch"])
+    assert result.exit_code == 0, result.output
+    view = captured["view"]
+    assert view._task_filter is None
+    assert view._cli_task is None
+    assert view._watch is True
+    assert view._state_manager is not None
+
+
+def test_spec_watch_with_unknown_task_constructs_view_without_exit(empty_workspace, monkeypatch):
+    from mship.cli.view import spec as spec_mod
+    captured = {}
+    monkeypatch.setattr(spec_mod.SpecView, "run", lambda self: captured.setdefault("view", self))
+    runner = CliRunner()
+    result = runner.invoke(app, ["view", "spec", "--watch", "--task", "missing"])
+    assert result.exit_code == 0, result.output
+    view = captured["view"]
+    assert view._task_filter is None
+    assert view._cli_task == "missing"
