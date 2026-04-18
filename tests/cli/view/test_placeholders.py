@@ -29,7 +29,8 @@ def test_unknown_slug_placeholder_names_slug():
     err = UnknownTaskError(slug="missing-one")
     text = placeholder_for(err)
     assert "missing-one" in text
-    assert "Waiting" in text or "not found" in text
+    assert "not found" in text
+    assert "Waiting" in text
 
 
 def test_unknown_exception_type_reraised():
