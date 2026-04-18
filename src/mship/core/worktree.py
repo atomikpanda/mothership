@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from mship.core.config import WorkspaceConfig
 from mship.core.graph import DependencyGraph
@@ -36,6 +36,30 @@ class WorktreeManager:
         self._git = git
         self._shell = shell
         self._log = log
+
+    def _git_ignored_files(self, source_root: Path) -> list[PurePosixPath]:
+        """Return gitignored leaf files in source_root, as relative PurePosixPath.
+
+        Uses `git ls-files --others --ignored --exclude-standard`, which:
+        - returns gitignored files at their relative paths,
+        - does NOT descend into ignored directories (so .venv/*, node_modules/*, etc. are NOT listed),
+        - returns ignored directories themselves as "dir/" entries, which we filter out.
+        """
+        result = self._shell.run(
+            "git ls-files --others --ignored --exclude-standard",
+            cwd=source_root,
+        )
+        if result.returncode != 0:
+            return []
+        out: list[PurePosixPath] = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.endswith("/"):
+                continue
+            out.append(PurePosixPath(line))
+        return out
 
     def _create_symlinks(
         self,

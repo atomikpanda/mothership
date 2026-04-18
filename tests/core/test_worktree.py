@@ -417,3 +417,94 @@ repos:
     assert warnings == []
     assert (wt / "node_modules").is_symlink()
     assert (wt / "node_modules").resolve() == (repo / "node_modules").resolve()
+
+
+# --- bind_files helpers (issue #39) ---
+
+from pathlib import PurePosixPath
+
+
+def _init_repo_with_ignored_files(tmp_path: Path) -> Path:
+    """Git-init a repo with a few tracked and ignored leaf files for bind_files testing."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    # Write .gitignore FIRST, before creating ignored files
+    (repo / ".gitignore").write_text(
+        ".env\n"
+        ".env.*\n"
+        ".venv/\n"
+        "node_modules/\n"
+        "apps/*/.env\n"
+    )
+    # Commit .gitignore so git knows which paths are ignored
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True, capture_output=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "gitignore"], cwd=repo, check=True, capture_output=True, env=env)
+
+    # Create tracked file
+    (repo / "tracked.txt").write_text("tracked\n")
+    # Create ignored leaf files (not inside ignored directories)
+    (repo / ".env").write_text("ENV=yes\n")
+    (repo / ".env.local").write_text("LOCAL=1\n")
+    (repo / "apps").mkdir()
+    (repo / "apps" / "foo").mkdir()
+    (repo / "apps" / "foo" / ".env").write_text("FOO=1\n")
+    (repo / "apps" / "bar").mkdir()
+    (repo / "apps" / "bar" / ".env").write_text("BAR=1\n")
+    # Create empty ignored directories to simulate presence but no enumeration
+    # (In a real scenario, these would have many files that we don't want to enumerate)
+    (repo / ".venv").mkdir()
+    (repo / "node_modules").mkdir()
+
+    # Add only tracked.txt
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True, capture_output=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "tracked"], cwd=repo, check=True, capture_output=True, env=env)
+    return repo
+
+
+def test_git_ignored_files_lists_ignored_leaf_files(tmp_path: Path):
+    from mship.core.config import ConfigLoader
+    from mship.core.worktree import WorktreeManager
+
+    repo = _init_repo_with_ignored_files(tmp_path)
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  r:\n"
+        "    path: ./repo\n"
+        "    type: service\n"
+    )
+    (repo / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "add", "Taskfile.yml"], cwd=repo, check=True, capture_output=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "taskfile"], cwd=repo, check=True, capture_output=True, env=env)
+
+    cfg = ConfigLoader.load(tmp_path / "mothership.yaml")
+    from mship.util.shell import ShellRunner
+    from mship.util.git import GitRunner
+    mgr = WorktreeManager(
+        config=cfg, graph=None, state_manager=None,
+        git=GitRunner(), shell=ShellRunner(), log=None,
+    )
+    files = mgr._git_ignored_files(repo)
+    names = {str(p) for p in files}
+
+    # Leaf ignored files are present
+    assert ".env" in names
+    assert ".env.local" in names
+    assert "apps/foo/.env" in names
+    assert "apps/bar/.env" in names
+
+    # Tracked files are NOT present
+    assert "tracked.txt" not in names
+    assert ".gitignore" not in names
+
+    # Contents of ignored directories are NOT present
+    # (Git does not enumerate .venv/*, node_modules/*, etc. when those dirs are gitignored)
+    assert not any(n.startswith(".venv/") for n in names), f"should not include .venv contents: {names}"
+    assert not any(n.startswith("node_modules/") for n in names), f"should not include node_modules contents: {names}"
