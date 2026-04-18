@@ -108,8 +108,12 @@ def test_abort_removes_worktrees(worktree_deps):
     assert "to-abort" not in state.tasks
 
 
-def test_spawn_runs_setup_task(worktree_deps):
+def test_spawn_runs_setup_task(worktree_deps, monkeypatch):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    monkeypatch.setattr(
+        "mship.core.worktree.shutil.which",
+        lambda name: "/usr/local/bin/task" if name == "task" else None,
+    )
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
     mgr.spawn("with setup", repos=["shared"])
     shell.run_task.assert_called()
@@ -214,8 +218,12 @@ def test_spawn_returns_spawn_result_with_task(worktree_deps):
     assert result.setup_warnings == []
 
 
-def test_spawn_collects_setup_warnings_on_failure(worktree_deps):
+def test_spawn_collects_setup_warnings_on_failure(worktree_deps, monkeypatch):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    monkeypatch.setattr(
+        "mship.core.worktree.shutil.which",
+        lambda name: "/usr/local/bin/task" if name == "task" else None,
+    )
     # Make setup return non-zero
     shell.run_task.return_value = ShellResult(
         returncode=1, stdout="", stderr="setup task not found"
@@ -820,3 +828,24 @@ def test_spawn_copies_bind_files_and_coexists_with_symlink_dirs(tmp_path: Path):
     # Both succeeded with no warnings.
     bind_warnings = [w for w in result.setup_warnings if "bind_files" in w]
     assert bind_warnings == [], f"unexpected bind_files warnings: {bind_warnings}"
+
+
+def test_spawn_skips_setup_when_task_binary_missing(worktree_deps, monkeypatch):
+    """When `task` binary isn't on PATH, spawn skips the setup run_task
+    call silently — no warning appended, no mock invocation.
+    """
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    monkeypatch.setattr(
+        "mship.core.worktree.shutil.which",
+        lambda name: None if name == "task" else "/usr/bin/" + name,
+    )
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    result = mgr.spawn("task-missing-smoke", repos=["shared"])
+
+    # No setup warning about missing task binary
+    assert not any("setup failed" in w for w in result.setup_warnings)
+    # run_task was NOT called for setup (the guard short-circuits before the call)
+    assert not any(
+        call.kwargs.get("task_name") == "setup"
+        for call in shell.run_task.call_args_list
+    )

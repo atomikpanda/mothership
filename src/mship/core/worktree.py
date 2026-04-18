@@ -219,7 +219,7 @@ class WorktreeManager:
                 bind_warnings = self._copy_bind_files(repo_name, repo_config, effective)
                 setup_warnings.extend(bind_warnings)
 
-                if not skip_setup:
+                if not skip_setup and shutil.which("task") is not None:
                     actual_setup = repo_config.tasks.get("setup", "setup")
                     setup_result = self._shell.run_task(
                         task_name="setup",
@@ -254,7 +254,7 @@ class WorktreeManager:
             bind_warnings = self._copy_bind_files(repo_name, repo_config, wt_path)
             setup_warnings.extend(bind_warnings)
 
-            if not skip_setup:
+            if not skip_setup and shutil.which("task") is not None:
                 actual_setup = repo_config.tasks.get("setup", "setup")
                 setup_result = self._shell.run_task(
                     task_name="setup",
