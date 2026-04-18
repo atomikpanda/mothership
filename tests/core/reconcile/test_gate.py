@@ -99,6 +99,58 @@ def test_should_block_base_changed_on_precommit_is_allowed():
     assert should_block(d, command="precommit", ignored=[]) is GateAction.allow
 
 
+# --- finished_at plumbing (issue #36) ---
+
+
+def test_decision_has_finished_at_from_state_fresh_fetch(tmp_path: Path):
+    """reconcile_now populates Decision.finished_at from state.tasks."""
+    finished = datetime(2026, 4, 18, 13, 20, 28, tzinfo=timezone.utc)
+    state = WorkspaceState(tasks={"a": _task("a", finished_at=finished)})
+    cache = ReconcileCache(tmp_path)  # empty
+
+    def _fetcher(branches, wts):
+        return (
+            {"feat/a": PRSnapshot(head_ref="feat/a", state="MERGED", base_ref="main", merge_commit="abc", url="u", updated_at="2026-04-18T13:21:00Z")},
+            {"feat/a": GitSnapshot(has_upstream=True, behind=0, ahead=0)},
+        )
+
+    decisions = reconcile_now(state, cache=cache, fetcher=_fetcher)
+    assert decisions["a"].finished_at == finished.isoformat()
+
+
+def test_decision_finished_at_none_when_task_not_finished(tmp_path: Path):
+    state = WorkspaceState(tasks={"a": _task("a")})  # finished_at default None
+    cache = ReconcileCache(tmp_path)
+
+    def _fetcher(branches, wts):
+        return (
+            {"feat/a": PRSnapshot(head_ref="feat/a", state="OPEN", base_ref="main", merge_commit=None, url="u", updated_at="2026-04-18T13:21:00Z")},
+            {"feat/a": GitSnapshot(has_upstream=True, behind=0, ahead=0)},
+        )
+
+    decisions = reconcile_now(state, cache=cache, fetcher=_fetcher)
+    assert decisions["a"].finished_at is None
+
+
+def test_decision_finished_at_populated_from_cache_hit(tmp_path: Path):
+    """Cache-hit path still plumbs finished_at from live state, not cache."""
+    finished = datetime(2026, 4, 18, 13, 20, 28, tzinfo=timezone.utc)
+    cache = ReconcileCache(tmp_path)
+    cache.write(CachePayload(
+        fetched_at=time.time(), ttl_seconds=300,
+        results={"a": {"state": "merged", "pr_url": "u", "pr_number": 1, "base": "main"}},
+        ignored=[],
+    ))
+    state = WorkspaceState(tasks={"a": _task("a", finished_at=finished)})
+
+    decisions = reconcile_now(
+        state, cache=cache,
+        fetcher=lambda *_: (_ for _ in ()).throw(AssertionError("should not fetch")),
+    )
+    assert decisions["a"].state == UpstreamState.merged
+    assert decisions["a"].finished_at == finished.isoformat()
+
+
 def test_should_block_respects_ignore_list():
     d = Decision(slug="a", state=UpstreamState.merged, pr_url="u", pr_number=1,
                  base="main", merge_commit="x", updated_at="z")
