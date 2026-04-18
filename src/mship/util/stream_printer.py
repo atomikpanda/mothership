@@ -54,3 +54,41 @@ class StreamPrinter:
         with self._lock:
             sys.stdout.write(f"{prefix}{content}\n")
             sys.stdout.flush()
+
+
+def drain_to_printer(
+    proc,
+    repo: str,
+    printer: StreamPrinter,
+) -> list[threading.Thread]:
+    """Start daemon threads that read proc.stdout and proc.stderr and
+    feed every line to `printer`. Returns the threads so the caller can
+    join() them after proc.wait() if it wants to ensure all output has
+    flushed before continuing.
+
+    If either stream is None (e.g. caller didn't request a PIPE) the
+    corresponding thread exits immediately without error.
+    """
+    def _drain(stream):
+        if stream is None:
+            return
+        try:
+            for line in iter(stream.readline, ""):
+                printer.write(repo, line)
+        except Exception:
+            # Reading from a closed/broken stream: exit cleanly. The
+            # main thread will observe the process exit via proc.wait().
+            pass
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    threads = [
+        threading.Thread(target=_drain, args=(proc.stdout,), daemon=True),
+        threading.Thread(target=_drain, args=(proc.stderr,), daemon=True),
+    ]
+    for t in threads:
+        t.start()
+    return threads
