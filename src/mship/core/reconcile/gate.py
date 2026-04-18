@@ -31,6 +31,19 @@ class Decision:
     base: str | None
     merge_commit: str | None
     updated_at: str | None
+    finished_at: str | None = None
+
+
+def _finished_at_for(slug: str, state: WorkspaceState) -> str | None:
+    """Return the ISO-8601 string of the task's finished_at, or None.
+
+    Used at Decision-construction time to propagate finish-state into the
+    gate's settled-task auto-allow path (issue #36).
+    """
+    task = state.tasks.get(slug)
+    if task is None or task.finished_at is None:
+        return None
+    return task.finished_at.isoformat()
 
 
 class GateAction(str, Enum):
@@ -52,20 +65,31 @@ _MATRIX: dict[str, dict[str, GateAction]] = {
 def should_block(decision: Decision, *, command: Command, ignored: list[str]) -> GateAction:
     if decision.slug in ignored:
         return GateAction.allow
+    # Settled: a task whose PR is merged/closed AND whose finished_at is set.
+    # The user has already run `mship finish`; only `mship close` remains.
+    # Don't block subsequent `spawn`/`finish` on these tasks — surface them
+    # via `mship reconcile` (existing output) instead. Issue #36.
+    if (
+        decision.finished_at is not None
+        and decision.state in (UpstreamState.merged, UpstreamState.closed)
+        and command in ("spawn", "finish")
+    ):
+        return GateAction.allow
     return _MATRIX[decision.state.value][command]
 
 
 Fetcher = Callable[[list[str], dict[str, Path]], tuple[dict[str, PRSnapshot], dict[str, GitSnapshot]]]
 
 
-def _decision_from_detection(slug: str, det: Detection) -> Decision:
+def _decision_from_detection(slug: str, det: Detection, state: WorkspaceState) -> Decision:
     return Decision(
         slug=slug, state=det.state, pr_url=det.pr_url, pr_number=det.pr_number,
         base=det.base, merge_commit=det.merge_commit, updated_at=det.updated_at,
+        finished_at=_finished_at_for(slug, state),
     )
 
 
-def _decision_from_cache_entry(slug: str, raw: dict) -> Decision | None:
+def _decision_from_cache_entry(slug: str, raw: dict, state: WorkspaceState) -> Decision | None:
     try:
         return Decision(
             slug=slug,
@@ -75,6 +99,7 @@ def _decision_from_cache_entry(slug: str, raw: dict) -> Decision | None:
             base=raw.get("base"),
             merge_commit=raw.get("merge_commit"),
             updated_at=raw.get("updated_at"),
+            finished_at=_finished_at_for(slug, state),
         )
     except (KeyError, ValueError):
         return None
@@ -86,7 +111,7 @@ def _decisions_from_cache(state: WorkspaceState, payload: CachePayload) -> dict[
         raw = payload.results.get(slug)
         if raw is None:
             continue
-        d = _decision_from_cache_entry(slug, raw)
+        d = _decision_from_cache_entry(slug, raw, state)
         if d is not None:
             out[slug] = d
     return out
@@ -135,4 +160,4 @@ def reconcile_now(
         results=results,
         ignored=(payload.ignored if payload else []),
     ))
-    return {slug: _decision_from_detection(slug, d) for slug, d in detections.items()}
+    return {slug: _decision_from_detection(slug, d, state) for slug, d in detections.items()}
