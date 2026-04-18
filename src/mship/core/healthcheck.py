@@ -1,4 +1,5 @@
 import socket
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -36,6 +37,7 @@ class HealthcheckRunner:
         healthcheck: Healthcheck,
         repo_path: Path,
         env_runner: str | None = None,
+        proc: subprocess.Popen | None = None,
     ) -> HealthcheckResult:
         timeout_s = _parse_duration(healthcheck.timeout)
         interval_s = _parse_duration(healthcheck.retry_interval)
@@ -57,6 +59,22 @@ class HealthcheckRunner:
 
         while True:
             elapsed = time.monotonic() - start
+
+            # Fast-fail when the background Popen has crashed. Exit 0 is
+            # ignored because many legitimate `run` tasks (e.g., `docker
+            # run -d`) detach cleanly; the probe is the right signal for
+            # those. Non-zero exit means the task itself died.
+            if proc is not None:
+                rc = proc.poll()
+                if rc is not None and rc != 0:
+                    return HealthcheckResult(
+                        ready=False,
+                        message=(
+                            f"background process exited with code {rc} "
+                            f"before {probe_label} passed"
+                        ),
+                        duration_s=elapsed,
+                    )
 
             if healthcheck.tcp is not None:
                 ok, err = self._probe_tcp(healthcheck.tcp)
