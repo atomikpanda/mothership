@@ -113,3 +113,10 @@ def test_spec_watch_with_unknown_task_constructs_view_without_exit(empty_workspa
     view = captured["view"]
     assert view._task_filter is None
     assert view._cli_task == "missing"
+
+
+def test_spec_web_and_watch_are_mutually_exclusive(empty_workspace):
+    runner = CliRunner()
+    result = runner.invoke(app, ["view", "spec", "--web", "--watch"])
+    assert result.exit_code == 1
+    assert "mutually exclusive" in (result.output or "").lower()

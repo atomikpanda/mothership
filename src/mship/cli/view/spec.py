@@ -274,6 +274,10 @@ def register(app: typer.Typer, get_container):
             typer.echo("Error: --task and an explicit spec name are mutually exclusive.", err=True)
             raise typer.Exit(code=1)
 
+        if web and watch:
+            typer.echo("Error: --web and --watch are mutually exclusive.", err=True)
+            raise typer.Exit(code=1)
+
         container = get_container()
         workspace_root = _P(container.config_path()).parent
         state = container.state_manager().load()
