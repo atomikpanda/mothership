@@ -1,6 +1,7 @@
 import pytest
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 from mship.cli.view.logs import LogsView
 
@@ -166,3 +167,138 @@ def test_logs_cli_rejects_unknown_task(tmp_path):
         container.config.reset()
         container.state_manager.reset_override()
         container.state_manager.reset()
+
+
+# --- watch-mode resolver tolerance ---
+
+
+@dataclass
+class _FakeTask:
+    slug: str
+    active_repo: str | None = None
+    worktrees: dict = field(default_factory=dict)
+
+
+class _FakeStateWithTasks:
+    def __init__(self, tasks_dict):
+        self.tasks = tasks_dict
+
+
+class _MutableStateMgr:
+    """State manager whose returned state can be changed between ticks."""
+    def __init__(self, tasks_dict=None):
+        self._tasks = tasks_dict or {}
+
+    def set_tasks(self, tasks_dict):
+        self._tasks = tasks_dict
+
+    def load(self):
+        return _FakeStateWithTasks(self._tasks)
+
+
+@pytest.mark.asyncio
+async def test_logs_view_watch_no_active_task_shows_placeholder(tmp_path):
+    mgr = _MutableStateMgr(tasks_dict={})
+    view = LogsView(
+        state_manager=mgr,
+        log_manager=_FakeLogMgr([]),
+        task_slug=None,
+        cli_task=None,
+        cwd=tmp_path,
+        watch=True,
+        interval=0.5,
+    )
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        text = view.rendered_text()
+        assert "No active task" in text
+
+
+@pytest.mark.asyncio
+async def test_logs_view_watch_ambiguous_shows_placeholder(tmp_path):
+    mgr = _MutableStateMgr(tasks_dict={
+        "alpha": _FakeTask("alpha"),
+        "beta":  _FakeTask("beta"),
+    })
+    view = LogsView(
+        state_manager=mgr,
+        log_manager=_FakeLogMgr([]),
+        task_slug=None,
+        cli_task=None,
+        cwd=tmp_path,
+        watch=True,
+        interval=0.5,
+    )
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        text = view.rendered_text()
+        assert "Multiple active tasks" in text
+        assert "alpha" in text and "beta" in text
+
+
+@pytest.mark.asyncio
+async def test_logs_view_watch_unknown_slug_shows_placeholder(tmp_path):
+    mgr = _MutableStateMgr(tasks_dict={"other": _FakeTask("other")})
+    view = LogsView(
+        state_manager=mgr,
+        log_manager=_FakeLogMgr([]),
+        task_slug=None,
+        cli_task="missing-one",
+        cwd=tmp_path,
+        watch=True,
+        interval=0.5,
+    )
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        text = view.rendered_text()
+        assert "missing-one" in text
+
+
+@pytest.mark.asyncio
+async def test_logs_view_watch_transitions_from_placeholder_to_entries(tmp_path):
+    entries = [
+        _Entry(datetime(2026, 4, 18, 10, 0, tzinfo=timezone.utc), "first entry"),
+    ]
+    mgr = _MutableStateMgr(tasks_dict={})
+    view = LogsView(
+        state_manager=mgr,
+        log_manager=_FakeLogMgr(entries),
+        task_slug=None,
+        cli_task=None,
+        cwd=tmp_path,
+        watch=True,
+        interval=0.5,
+    )
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        assert "No active task" in view.rendered_text()
+        mgr.set_tasks({"solo": _FakeTask("solo")})
+        # Force a refresh (rather than wait for the 0.5s interval) so the test
+        # is deterministic on slow CI.
+        view._refresh_content()
+        await pilot.pause()
+        text = view.rendered_text()
+        assert "first entry" in text
+        assert "No active task" not in text
+
+
+@pytest.mark.asyncio
+async def test_logs_view_non_watch_with_task_slug_does_not_call_resolver(tmp_path):
+    """Regression: non-watch path stays pre-resolved, does not touch the resolver."""
+    class _BlowUpStateMgr:
+        def load(self):  # pragma: no cover - should never be called
+            raise AssertionError("resolver must not be called in non-watch path")
+
+    entries = [_Entry(datetime(2026, 4, 18, 10, 0, tzinfo=timezone.utc), "ok")]
+    view = LogsView(
+        state_manager=_BlowUpStateMgr(),
+        log_manager=_FakeLogMgr(entries),
+        task_slug="pre-resolved",
+        cli_task=None,
+        cwd=tmp_path,
+        watch=False,
+        interval=1.0,
+    )
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        assert "ok" in view.rendered_text()
