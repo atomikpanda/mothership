@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -74,6 +76,83 @@ def _run_gate(
             + "\nRun `mship reconcile` for details, then fix or pass --bypass-reconcile."
         )
         raise typer.Exit(code=1)
+
+
+@dataclass
+class PRGroup:
+    """A set of affected repos that share a single GitHub PR.
+
+    Members all push to the same branch on the same git repo (same
+    git_root_or_self) with the same effective base.
+    """
+    rep_name: str           # repo name driving push + create_pr calls
+    rep_path: Path          # absolute path to run git/gh from
+    members: list[str]      # all repos sharing this PR (includes rep_name)
+    branch: str
+    base: str | None
+
+
+def _build_pr_groups(
+    affected_repos: list[str],
+    config,
+    task,
+    effective_bases: dict[str, str | None],
+) -> list[PRGroup]:
+    """Group repos that share (git_root_or_self, branch, base) into PR groups.
+
+    For repos with `git_root` set, the group key uses the git_root name.
+    For repos without `git_root`, the key uses the repo's own name. One
+    group per distinct key.
+
+    Representative selection (determines where push + gh calls run):
+    - If the group's git_root_or_self IS in `affected_repos`, use it.
+    - Else, fall back to the first member in `affected_repos` input order.
+
+    Raises ValueError if a group's members have heterogeneous effective
+    bases (defensive — not expected for shared git_root).
+    """
+    from collections import defaultdict
+
+    def _root_of(repo_name: str) -> str:
+        r = config.repos[repo_name]
+        return r.git_root if r.git_root is not None else repo_name
+
+    def _effective_path(repo_name: str) -> Path:
+        r = config.repos[repo_name]
+        if r.git_root is not None:
+            parent = config.repos[r.git_root]
+            return (Path(parent.path) / Path(r.path)).resolve()
+        return Path(r.path).resolve()
+
+    # Preserve input order within each group by iterating affected_repos
+    # and appending.
+    buckets: dict[str, list[str]] = defaultdict(list)
+    for repo_name in affected_repos:
+        buckets[_root_of(repo_name)].append(repo_name)
+
+    groups: list[PRGroup] = []
+    for root, members in buckets.items():
+        bases = {effective_bases.get(m) for m in members}
+        if len(bases) > 1:
+            raise ValueError(
+                f"group {root!r} has mixed effective_bases: {sorted(str(b) for b in bases)}"
+            )
+        base = next(iter(bases))
+
+        if root in members:
+            rep_name = root
+        else:
+            rep_name = members[0]
+        rep_path = _effective_path(rep_name)
+
+        groups.append(PRGroup(
+            rep_name=rep_name,
+            rep_path=rep_path,
+            members=list(members),
+            branch=task.branch,
+            base=base,
+        ))
+    return groups
 
 
 def register(app: typer.Typer, get_container):
