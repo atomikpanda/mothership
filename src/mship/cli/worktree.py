@@ -118,6 +118,12 @@ def _build_pr_groups(
         return r.git_root if r.git_root is not None else repo_name
 
     def _effective_path(repo_name: str) -> Path:
+        worktree_path = task.worktrees.get(repo_name)
+        if worktree_path is not None:
+            candidate = Path(worktree_path).resolve()
+            if candidate.exists():
+                return candidate
+
         r = config.repos[repo_name]
         if r.git_root is not None:
             parent = config.repos[r.git_root]
