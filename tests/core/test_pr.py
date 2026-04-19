@@ -271,3 +271,122 @@ def test_check_pushed_to_origin_false_on_ls_remote_failure(mock_shell: MagicMock
     mock_shell.run.return_value = ShellResult(returncode=128, stdout="", stderr="network err")
     mgr = PRManager(mock_shell)
     assert mgr.check_pushed_to_origin(Path("/tmp/repo"), "feat/x") is False
+
+
+# --- ensure_upstream (spec 2026-04-19) ---
+
+
+def test_ensure_upstream_noop_when_already_set(mock_shell: MagicMock):
+    from mship.core.pr import PRManager
+    # `git rev-parse --abbrev-ref --symbolic-full-name @{u}` returns 0 → already set.
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="origin/feat/x\n", stderr="")
+    pr_mgr = PRManager(mock_shell)
+    pr_mgr.ensure_upstream(Path("/repo"), "feat/x")
+    assert mock_shell.run.call_count == 1
+    called_cmd = mock_shell.run.call_args_list[0].args[0]
+    assert "rev-parse" in called_cmd
+    assert "@{u}" in called_cmd
+
+
+def test_ensure_upstream_sets_tracking_when_missing(mock_shell: MagicMock):
+    from mship.core.pr import PRManager
+    rc_results = [
+        ShellResult(returncode=1, stdout="", stderr="fatal: no upstream"),  # rev-parse fails
+        ShellResult(returncode=0, stdout="", stderr=""),                     # set-upstream-to succeeds
+    ]
+    mock_shell.run.side_effect = rc_results
+    pr_mgr = PRManager(mock_shell)
+    pr_mgr.ensure_upstream(Path("/repo"), "feat/x")
+    assert mock_shell.run.call_count == 2
+    second_cmd = mock_shell.run.call_args_list[1].args[0]
+    assert "--set-upstream-to=origin/feat/x" in second_cmd
+    assert "feat/x" in second_cmd
+
+
+# --- list_pr_for_branch ---
+
+
+def test_list_pr_for_branch_returns_url_when_present(mock_shell: MagicMock):
+    from mship.core.pr import PRManager
+    mock_shell.run.return_value = ShellResult(
+        returncode=0,
+        stdout="https://github.com/org/repo/pull/17\n",
+        stderr="",
+    )
+    pr_mgr = PRManager(mock_shell)
+    url = pr_mgr.list_pr_for_branch(Path("/repo"), "feat/x")
+    assert url == "https://github.com/org/repo/pull/17"
+    cmd = mock_shell.run.call_args_list[0].args[0]
+    assert "gh pr list" in cmd
+    assert "--head" in cmd
+    assert "--state all" in cmd
+    assert "feat/x" in cmd
+
+
+def test_list_pr_for_branch_returns_none_when_empty(mock_shell: MagicMock):
+    from mship.core.pr import PRManager
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="\n", stderr="")
+    pr_mgr = PRManager(mock_shell)
+    assert pr_mgr.list_pr_for_branch(Path("/repo"), "feat/x") is None
+
+
+def test_list_pr_for_branch_returns_none_on_gh_failure(mock_shell: MagicMock):
+    from mship.core.pr import PRManager
+    mock_shell.run.return_value = ShellResult(returncode=1, stdout="", stderr="error")
+    pr_mgr = PRManager(mock_shell)
+    assert pr_mgr.list_pr_for_branch(Path("/repo"), "feat/x") is None
+
+
+# --- create_pr duplicate-PR fallback ---
+
+
+def test_create_pr_duplicate_harvests_existing_url(mock_shell: MagicMock):
+    from mship.core.pr import PRManager
+    mock_shell.run.side_effect = [
+        ShellResult(
+            returncode=1,
+            stdout="",
+            stderr="a pull request for branch \"feat/x\" into branch \"main\" already exists",
+        ),
+        ShellResult(
+            returncode=0,
+            stdout="https://github.com/org/repo/pull/17\n",
+            stderr="",
+        ),
+    ]
+    pr_mgr = PRManager(mock_shell)
+    url = pr_mgr.create_pr(
+        repo_path=Path("/repo"), branch="feat/x",
+        title="t", body="b", base="main",
+    )
+    assert url == "https://github.com/org/repo/pull/17"
+    assert "gh pr create" in mock_shell.run.call_args_list[0].args[0]
+    assert "gh pr list" in mock_shell.run.call_args_list[1].args[0]
+
+
+def test_create_pr_duplicate_but_list_fails_raises(mock_shell: MagicMock):
+    from mship.core.pr import PRManager
+    mock_shell.run.side_effect = [
+        ShellResult(returncode=1, stdout="", stderr="a pull request already exists"),
+        ShellResult(returncode=1, stdout="", stderr="gh auth error"),
+    ]
+    pr_mgr = PRManager(mock_shell)
+    with pytest.raises(RuntimeError, match="Failed to create PR"):
+        pr_mgr.create_pr(
+            repo_path=Path("/repo"), branch="feat/x",
+            title="t", body="b", base="main",
+        )
+
+
+def test_create_pr_non_duplicate_error_still_raises(mock_shell: MagicMock):
+    """Regression: non-duplicate rc=1 errors still raise (existing behavior)."""
+    from mship.core.pr import PRManager
+    mock_shell.run.return_value = ShellResult(
+        returncode=1, stdout="", stderr="fatal: some other error",
+    )
+    pr_mgr = PRManager(mock_shell)
+    with pytest.raises(RuntimeError, match="some other error"):
+        pr_mgr.create_pr(
+            repo_path=Path("/repo"), branch="feat/x",
+            title="t", body="b", base="main",
+        )
