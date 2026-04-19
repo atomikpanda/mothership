@@ -38,8 +38,9 @@ class PRManager:
         so `mship audit` doesn't report `no_upstream` after a finish where
         push succeeded but tracking config somehow wasn't written.
         """
+        upstream_ref = f"{branch}@{{u}}"
         check = self._shell.run(
-            "git rev-parse --abbrev-ref --symbolic-full-name @{u}",
+            f"git rev-parse --abbrev-ref --symbolic-full-name {shlex.quote(upstream_ref)}",
             cwd=repo_path,
         )
         if check.returncode == 0:
