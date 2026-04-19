@@ -31,6 +31,29 @@ class PRManager:
                 f"Failed to push branch '{branch}': {result.stderr.strip()}"
             )
 
+    def ensure_upstream(self, repo_path: Path, branch: str) -> None:
+        """Ensure `branch`'s tracking ref resolves. No-op when already set.
+
+        `git push -u` normally sets tracking; this is belt-and-suspenders
+        so `mship audit` doesn't report `no_upstream` after a finish where
+        push succeeded but tracking config somehow wasn't written.
+        """
+        upstream_ref = f"{branch}@{{u}}"
+        check = self._shell.run(
+            f"git rev-parse --abbrev-ref --symbolic-full-name {shlex.quote(upstream_ref)}",
+            cwd=repo_path,
+        )
+        if check.returncode == 0:
+            return
+        result = self._shell.run(
+            f"git branch --set-upstream-to=origin/{shlex.quote(branch)} {shlex.quote(branch)}",
+            cwd=repo_path,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Failed to set upstream for branch '{branch}': {result.stderr.strip()}"
+            )
+
     def create_pr(
         self, repo_path: Path, branch: str, title: str, body: str,
         base: str | None = None,
@@ -45,6 +68,11 @@ class PRManager:
             cmd += f" --base {shlex.quote(base)}"
         result = self._shell.run(cmd, cwd=repo_path)
         if result.returncode != 0:
+            stderr_lower = result.stderr.lower()
+            if "already exists" in stderr_lower and "pull request" in stderr_lower:
+                existing = self.list_pr_for_branch(repo_path, branch)
+                if existing is not None:
+                    return existing
             raise RuntimeError(
                 f"Failed to create PR: {result.stderr.strip()}"
             )
@@ -145,6 +173,24 @@ class PRManager:
         )
         return result.returncode == 0
 
+    def list_pr_for_branch(self, repo_path: Path, branch: str) -> str | None:
+        """Return the URL of any PR (open/closed/merged) whose head is `branch`, or None.
+
+        Used to:
+        - Pre-check whether a PR already exists before calling `create_pr`
+          (idempotent retry after mid-loop crash).
+        - Fallback-harvest on `gh pr create`'s `already exists` error.
+        """
+        result = self._shell.run(
+            f"gh pr list --head {shlex.quote(branch)} --state all "
+            f"--json url -q '.[0].url'",
+            cwd=repo_path,
+        )
+        if result.returncode != 0:
+            return None
+        url = result.stdout.strip()
+        return url or None
+
     def check_pr_state(self, pr_url: str) -> str:
         """Return 'merged', 'closed', 'open', or 'unknown' for a PR URL.
 
@@ -196,14 +242,19 @@ class PRManager:
         ]
 
         for pr in prs:
-            if pr["repo"] == current_repo:
+            members = pr.get("members", [pr["repo"]])
+            repo_label = (
+                pr["repo"] if len(members) == 1
+                else f"{pr['repo']} (+{', '.join(m for m in members if m != pr['repo'])})"
+            )
+            if current_repo in members:
                 order_label = "this PR"
             elif pr["order"] == 1:
                 order_label = "merge first"
             else:
                 order_label = f"merge #{pr['order']}"
             lines.append(
-                f"| {pr['order']} | {pr['repo']} | {pr['url']} | {order_label} |"
+                f"| {pr['order']} | {repo_label} | {pr['url']} | {order_label} |"
             )
 
         deps_note = " → ".join(pr["repo"] for pr in prs)

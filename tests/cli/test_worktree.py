@@ -996,3 +996,208 @@ def test_finish_body_file_dash_empty_stdin_rejected(configured_git_app: Path):
         )
     assert result.exit_code == 1
     assert "empty" in result.output.lower()
+
+
+def test_finish_shared_git_root_creates_one_pr_records_on_all(configured_git_app: Path):
+    """Two repos sharing git_root: one gh pr create call, both get the URL."""
+    from mship.cli import container as cli_container
+
+    # Extend the workspace with a shared-git_root pair.
+    cfg_path = configured_git_app / "mothership.yaml"
+    cfg_path.write_text(cfg_path.read_text() + """
+  infra:
+    path: .
+    git_root: shared
+    type: service
+""")
+
+    runner.invoke(app, ["spawn", "group prs", "--repos", "shared,infra", "--skip-setup"])
+
+    create_pr_call_count = 0
+
+    def mock_run(cmd, cwd, env=None):
+        nonlocal create_pr_call_count
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
+            # Pretend upstream is already set after push.
+            return ShellResult(returncode=0, stdout="origin/feat/group-prs", stderr="")
+        if "gh pr list --head" in cmd:
+            # No existing PR on first call.
+            return ShellResult(returncode=0, stdout="\n", stderr="")
+        if "gh pr create" in cmd:
+            create_pr_call_count += 1
+            return ShellResult(returncode=0, stdout="https://github.com/org/shared/pull/42\n", stderr="")
+        if "gh pr view" in cmd:
+            return ShellResult(returncode=0, stdout="body text", stderr="")
+        if "gh pr edit" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "git log --format=%s" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    cli_container.shell.override(mock_shell)
+
+    result = runner.invoke(app, ["finish", "--task", "group-prs"])
+    assert result.exit_code == 0, result.output
+    assert create_pr_call_count == 1, f"Expected 1 gh pr create call, got {create_pr_call_count}"
+
+    from mship.core.state import StateManager
+    mgr = StateManager(configured_git_app / ".mothership")
+    state = mgr.load()
+    pr_urls = state.tasks["group-prs"].pr_urls
+    assert pr_urls.get("shared") == "https://github.com/org/shared/pull/42"
+    assert pr_urls.get("infra") == "https://github.com/org/shared/pull/42"
+
+    cli_container.shell.reset_override()
+
+
+def test_finish_harvests_existing_pr_instead_of_creating(configured_git_app: Path):
+    """If a PR for the branch already exists (manual or prior mship run),
+    finish harvests it via `gh pr list --head` without calling `gh pr create`."""
+    from mship.cli import container as cli_container
+
+    runner.invoke(app, ["spawn", "reuse pr", "--repos", "shared", "--skip-setup"])
+
+    create_pr_called = False
+
+    def mock_run(cmd, cwd, env=None):
+        nonlocal create_pr_called
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
+            return ShellResult(returncode=0, stdout="origin/feat/reuse-pr", stderr="")
+        if "gh pr list --head" in cmd:
+            return ShellResult(returncode=0, stdout="https://github.com/org/shared/pull/88\n", stderr="")
+        if "gh pr create" in cmd:
+            create_pr_called = True
+            return ShellResult(returncode=0, stdout="", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    cli_container.shell.override(mock_shell)
+
+    result = runner.invoke(app, ["finish", "--task", "reuse-pr"])
+    assert result.exit_code == 0, result.output
+    assert create_pr_called is False, "gh pr create should not be called when PR already exists"
+
+    from mship.core.state import StateManager
+    mgr = StateManager(configured_git_app / ".mothership")
+    state = mgr.load()
+    assert state.tasks["reuse-pr"].pr_urls.get("shared") == "https://github.com/org/shared/pull/88"
+
+    cli_container.shell.reset_override()
+
+
+def test_finish_harvests_on_create_pr_duplicate_stderr(configured_git_app: Path):
+    """When `gh pr list` returns empty but `gh pr create` then errors with
+    'already exists' (race), finish harvests via a second list call."""
+    from mship.cli import container as cli_container
+
+    runner.invoke(app, ["spawn", "race pr", "--repos", "shared", "--skip-setup"])
+
+    list_call_count = 0
+
+    def mock_run(cmd, cwd, env=None):
+        nonlocal list_call_count
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
+            return ShellResult(returncode=0, stdout="origin/feat/race-pr", stderr="")
+        if "gh pr list --head" in cmd:
+            list_call_count += 1
+            if list_call_count == 1:
+                # First call (pre-create check): no PR yet.
+                return ShellResult(returncode=0, stdout="\n", stderr="")
+            else:
+                # Second call (fallback after create failed): PR exists now.
+                return ShellResult(
+                    returncode=0,
+                    stdout="https://github.com/org/shared/pull/99\n",
+                    stderr="",
+                )
+        if "gh pr create" in cmd:
+            return ShellResult(
+                returncode=1, stdout="",
+                stderr="a pull request for branch \"feat/race-pr\" into branch \"main\" already exists",
+            )
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    cli_container.shell.override(mock_shell)
+
+    result = runner.invoke(app, ["finish", "--task", "race-pr"])
+    assert result.exit_code == 0, result.output
+    assert list_call_count == 2, "Expected pre-check + fallback list calls"
+
+    from mship.core.state import StateManager
+    mgr = StateManager(configured_git_app / ".mothership")
+    state = mgr.load()
+    assert state.tasks["race-pr"].pr_urls.get("shared") == "https://github.com/org/shared/pull/99"
+
+    cli_container.shell.reset_override()
+
+
+def test_finish_calls_ensure_upstream_after_push(configured_git_app: Path):
+    """ensure_upstream fires after push; if @{u} fails, set-upstream-to runs."""
+    from mship.cli import container as cli_container
+
+    runner.invoke(app, ["spawn", "upstream check", "--repos", "shared", "--skip-setup"])
+
+    set_upstream_called = False
+    ensure_upstream_probe_count = 0
+
+    def mock_run(cmd, cwd, env=None):
+        nonlocal set_upstream_called, ensure_upstream_probe_count
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "symbolic-ref" in cmd and "HEAD" in cmd:
+            return ShellResult(returncode=0, stdout="main\n", stderr="")
+        if "fetch" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
+        if "status --porcelain" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
+            ensure_upstream_probe_count += 1
+            # First call: audit checks upstream (before push) - pass
+            # Subsequent calls: ensure_upstream checks after push - fail to trigger fallback
+            if ensure_upstream_probe_count == 1:
+                return ShellResult(returncode=0, stdout="origin/main\n", stderr="")
+            else:
+                return ShellResult(returncode=1, stdout="", stderr="fatal: no upstream")
+        if "--set-upstream-to=origin/" in cmd:
+            set_upstream_called = True
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr list --head" in cmd:
+            return ShellResult(returncode=0, stdout="\n", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://github.com/org/shared/pull/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    cli_container.shell.override(mock_shell)
+
+    result = runner.invoke(app, ["finish", "--task", "upstream-check"])
+    assert result.exit_code == 0, result.output
+    assert set_upstream_called, "ensure_upstream should have run set-upstream-to"
+
+    cli_container.shell.reset_override()

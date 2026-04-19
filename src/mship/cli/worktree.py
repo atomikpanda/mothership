@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -74,6 +76,89 @@ def _run_gate(
             + "\nRun `mship reconcile` for details, then fix or pass --bypass-reconcile."
         )
         raise typer.Exit(code=1)
+
+
+@dataclass
+class PRGroup:
+    """A set of affected repos that share a single GitHub PR.
+
+    Members all push to the same branch on the same git repo (same
+    git_root_or_self) with the same effective base.
+    """
+    rep_name: str           # repo name driving push + create_pr calls
+    rep_path: Path          # absolute path to run git/gh from
+    members: list[str]      # all repos sharing this PR (includes rep_name)
+    branch: str
+    base: str | None
+
+
+def _build_pr_groups(
+    affected_repos: list[str],
+    config,
+    task,
+    effective_bases: dict[str, str | None],
+) -> list[PRGroup]:
+    """Group repos that share (git_root_or_self, branch, base) into PR groups.
+
+    For repos with `git_root` set, the group key uses the git_root name.
+    For repos without `git_root`, the key uses the repo's own name. One
+    group per distinct key.
+
+    Representative selection (determines where push + gh calls run):
+    - If the group's git_root_or_self IS in `affected_repos`, use it.
+    - Else, fall back to the first member in `affected_repos` input order.
+
+    Raises ValueError if a group's members have heterogeneous effective
+    bases (defensive — not expected for shared git_root).
+    """
+    from collections import defaultdict
+
+    def _root_of(repo_name: str) -> str:
+        r = config.repos[repo_name]
+        return r.git_root if r.git_root is not None else repo_name
+
+    def _effective_path(repo_name: str) -> Path:
+        worktree_path = task.worktrees.get(repo_name)
+        if worktree_path is not None:
+            candidate = Path(worktree_path).resolve()
+            if candidate.exists():
+                return candidate
+
+        r = config.repos[repo_name]
+        if r.git_root is not None:
+            parent = config.repos[r.git_root]
+            return (Path(parent.path) / Path(r.path)).resolve()
+        return Path(r.path).resolve()
+
+    # Preserve input order within each group by iterating affected_repos
+    # and appending.
+    buckets: dict[str, list[str]] = defaultdict(list)
+    for repo_name in affected_repos:
+        buckets[_root_of(repo_name)].append(repo_name)
+
+    groups: list[PRGroup] = []
+    for root, members in buckets.items():
+        bases = {effective_bases.get(m) for m in members}
+        if len(bases) > 1:
+            raise ValueError(
+                f"group {root!r} has mixed effective_bases: {sorted(str(b) for b in bases)}"
+            )
+        base = next(iter(bases))
+
+        if root in members:
+            rep_name = root
+        else:
+            rep_name = members[0]
+        rep_path = _effective_path(rep_name)
+
+        groups.append(PRGroup(
+            rep_name=rep_name,
+            rep_path=rep_path,
+            members=list(members),
+            branch=task.branch,
+            base=base,
+        ))
+    return groups
 
 
 def register(app: typer.Typer, get_container):
@@ -706,118 +791,130 @@ def register(app: typer.Typer, get_container):
                     output.warning(f"  {repo_name}: {n} commits past origin/{task.branch}")
                 output.warning("Pass `--force` to push them to the existing PR(s).")
 
-        for i, repo_name in enumerate(ordered, 1):
-            # Skip if PR already created (idempotent re-run), unless --force.
-            if repo_name in task.pr_urls and not force:
+        groups = _build_pr_groups(ordered, config, task, effective_bases)
+
+        for i, group in enumerate(groups, 1):
+            members_str = (
+                group.rep_name
+                if len(group.members) == 1
+                else f"{group.rep_name} (+{', '.join(m for m in group.members if m != group.rep_name)})"
+            )
+
+            # --- Skip path: every member already has the PR URL recorded.
+            all_members_have_url = all(m in task.pr_urls for m in group.members)
+            if all_members_have_url and not force:
+                url = task.pr_urls[group.rep_name]
                 if output.is_tty:
-                    output.print(f"  {repo_name}: already has PR {task.pr_urls[repo_name]}")
+                    output.print(f"  {members_str}: already has PR {url}")
                 pr_list.append({
-                    "repo": repo_name,
-                    "url": task.pr_urls[repo_name],
+                    "repo": group.rep_name,
+                    "members": list(group.members),
+                    "url": url,
                     "order": i,
-                    "base": effective_bases.get(repo_name),
+                    "base": group.base,
                 })
                 continue
-            if repo_name in task.pr_urls and force:
-                # Re-push only: branch already exists on origin, new commits
-                # attach to the existing PR. Don't touch gh; don't rebuild body.
-                repo_config = config.repos[repo_name]
-                repo_path = repo_config.path
-                if repo_name in task.worktrees:
-                    wt_path = Path(task.worktrees[repo_name])
-                    if wt_path.exists():
-                        repo_path = wt_path
+
+            # --- --force re-push path: branch exists on origin, push new commits.
+            if all_members_have_url and force:
                 try:
-                    pr_mgr.push_branch(repo_path, task.branch)
+                    pr_mgr.push_branch(group.rep_path, task.branch)
                 except RuntimeError as e:
-                    output.error(f"{repo_name}: {e}")
+                    output.error(f"{group.rep_name}: {e}")
                     raise typer.Exit(code=1)
-                repushed_repos.append(repo_name)
+                pr_mgr.ensure_upstream(group.rep_path, task.branch)
+                repushed_repos.append(group.rep_name)
+                url = task.pr_urls[group.rep_name]
                 if output.is_tty:
-                    output.print(
-                        f"  {repo_name}: {task.branch} re-pushed to {task.pr_urls[repo_name]}"
-                    )
+                    output.print(f"  {members_str}: {task.branch} re-pushed to {url}")
                 pr_list.append({
-                    "repo": repo_name,
-                    "url": task.pr_urls[repo_name],
+                    "repo": group.rep_name,
+                    "members": list(group.members),
+                    "url": url,
                     "order": i,
-                    "base": effective_bases.get(repo_name),
+                    "base": group.base,
                 })
                 continue
 
-            repo_config = config.repos[repo_name]
-
-            # Use worktree path if available
-            repo_path = repo_config.path
-            if repo_name in task.worktrees:
-                wt_path = Path(task.worktrees[repo_name])
-                if wt_path.exists():
-                    repo_path = wt_path
-
-            # Push branch
+            # --- Fresh path: push, ensure_upstream, find-or-create PR.
             try:
-                pr_mgr.push_branch(repo_path, task.branch)
+                pr_mgr.push_branch(group.rep_path, task.branch)
             except RuntimeError as e:
-                output.error(f"{repo_name}: {e}")
+                output.error(f"{group.rep_name}: {e}")
                 raise typer.Exit(code=1)
 
-            # Build the PR body — appends `Closes #N` for any GitHub issue
-            # references in the task description, log entries, or commit subjects.
-            from mship.core.issue_refs import append_closes_footer, extract_issue_refs
-            texts: list[str] = [task.description]
-            try:
-                entries = container.log_manager().read(task.slug)
-                for e in entries:
-                    if e.message:
-                        texts.append(e.message)
-                    if e.action:
-                        texts.append(e.action)
-                    if e.open_question:
-                        texts.append(e.open_question)
-            except Exception:
-                pass
-            try:
-                eff_base = effective_bases[repo_name] or "HEAD"
-                import shlex as _shlex
-                subjects_res = shell.run(
-                    f"git log --format=%s origin/{_shlex.quote(eff_base)}..{_shlex.quote(task.branch)}",
-                    cwd=repo_path,
-                )
-                if subjects_res.returncode == 0:
-                    for line in subjects_res.stdout.splitlines():
-                        if line.strip():
-                            texts.append(line)
-            except Exception:
-                pass
-            pr_body_base = custom_body if custom_body is not None else task.description
-            pr_body = append_closes_footer(pr_body_base, extract_issue_refs(texts))
+            pr_mgr.ensure_upstream(group.rep_path, task.branch)
 
-            # Create PR
-            try:
-                pr_url = pr_mgr.create_pr(
-                    repo_path=repo_path,
-                    branch=task.branch,
-                    title=task.description,
-                    body=pr_body,
-                    base=effective_bases[repo_name],
-                )
-            except RuntimeError as e:
-                output.error(f"{repo_name}: {e}")
-                raise typer.Exit(code=1)
+            # Idempotent check: did a PR already get created for this branch?
+            existing_url = pr_mgr.list_pr_for_branch(group.rep_path, task.branch)
 
-            # Store in state (crash-safe: save after each PR)
-            def _record_pr(s, _repo=repo_name, _url=pr_url):
-                s.tasks[t.slug].pr_urls[_repo] = _url
+            if existing_url is not None:
+                pr_url = existing_url
+                if output.is_tty:
+                    output.print(f"  {members_str}: found existing PR {pr_url}")
+            else:
+                # Build the PR body — appends `Closes #N` for any GitHub issue
+                # references in the task description, log entries, or commit subjects.
+                from mship.core.issue_refs import append_closes_footer, extract_issue_refs
+                texts: list[str] = [task.description]
+                try:
+                    entries = container.log_manager().read(task.slug)
+                    for e in entries:
+                        if e.message:
+                            texts.append(e.message)
+                        if e.action:
+                            texts.append(e.action)
+                        if e.open_question:
+                            texts.append(e.open_question)
+                except Exception:
+                    pass
+                try:
+                    eff_base = group.base or "HEAD"
+                    import shlex as _shlex
+                    subjects_res = shell.run(
+                        f"git log --format=%s origin/{_shlex.quote(eff_base)}..{_shlex.quote(task.branch)}",
+                        cwd=group.rep_path,
+                    )
+                    if subjects_res.returncode == 0:
+                        for line in subjects_res.stdout.splitlines():
+                            if line.strip():
+                                texts.append(line)
+                except Exception:
+                    pass
+                pr_body_base = custom_body if custom_body is not None else task.description
+                pr_body = append_closes_footer(pr_body_base, extract_issue_refs(texts))
 
-            state_mgr.mutate(_record_pr)
-            task.pr_urls[repo_name] = pr_url
+                try:
+                    pr_url = pr_mgr.create_pr(
+                        repo_path=group.rep_path,
+                        branch=task.branch,
+                        title=task.description,
+                        body=pr_body,
+                        base=group.base,
+                    )
+                except RuntimeError as e:
+                    output.error(f"{group.rep_name}: {e}")
+                    raise typer.Exit(code=1)
 
-            pr_list.append({"repo": repo_name, "url": pr_url, "order": i})
+            # Store URL on every group member (crash-safe: single state mutation).
+            def _record_group(s, members=list(group.members), u=pr_url):
+                for name in members:
+                    s.tasks[t.slug].pr_urls[name] = u
+            state_mgr.mutate(_record_group)
+            for name in group.members:
+                task.pr_urls[name] = pr_url
 
-            base_label = effective_bases[repo_name] or "(default)"
+            pr_list.append({
+                "repo": group.rep_name,
+                "members": list(group.members),
+                "url": pr_url,
+                "order": i,
+                "base": group.base,
+            })
+
+            base_label = group.base or "(default)"
             if output.is_tty:
-                output.print(f"  {repo_name}: {task.branch} → {base_label}  ✓ {pr_url}")
-            pr_list[-1]["base"] = effective_bases[repo_name]
+                output.print(f"  {members_str}: {task.branch} → {base_label}  ✓ {pr_url}")
 
         # Update PRs with coordination blocks (multi-repo only). Skip under
         # --force re-push so we don't clobber a user's manual PR-body edits.
