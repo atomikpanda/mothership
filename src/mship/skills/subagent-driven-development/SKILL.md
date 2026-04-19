@@ -141,6 +141,8 @@ Implementer subagents report one of four statuses. Handle each appropriately:
 - `./spec-reviewer-prompt.md` - Dispatch spec compliance reviewer subagent
 - `./code-quality-reviewer-prompt.md` - Dispatch code quality reviewer subagent
 
+**Inside a mothership workspace:** prefer `mship dispatch --task <slug>` as the source of your implementer prompt's task context. It emits a self-contained Markdown block with the task slug, worktree path, phase, recent journal entries, and per-repo bases — handling multi-task disambiguation automatically. See `working-with-mothership` for the full decision tree on `mship dispatch` vs. `mship context`.
+
 ## Example Workflow
 
 ```
