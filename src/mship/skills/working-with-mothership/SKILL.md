@@ -34,6 +34,79 @@ If `mship status` errors with "No mothership.yaml found", you're not in a mother
 
 If you see a previous task is still active and `mship journal` shows recent work, **continue that task** rather than starting fresh. Don't spawn a new task that overlaps with an existing one — mothership will reject duplicate slugs.
 
+## Working on multiple tasks at once
+
+Mothership supports multiple active tasks simultaneously. Typical reasons:
+
+- Blocked on review of task A → start task B while waiting.
+- Two unrelated investigations in flight; one can progress while the other is idle.
+- Long-running `mship finish` / CI on task A while beginning new work on task B.
+
+Each task has its own worktree at `.worktrees/feat/<slug>/`; they coexist cleanly.
+
+### How mship resolves which task a command targets
+
+In order of precedence:
+
+1. **`--task <slug>` flag** — explicit; wins over everything else. Use for one-off commands from any pwd.
+2. **`MSHIP_TASK=<slug>` env var** — shell/tab-level default. Useful when you want every `mship` command in a shell to target one task.
+3. **cwd-based inference** — if pwd is inside `.worktrees/feat/<slug>/`, mship picks `<slug>`. This is the most ergonomic: `cd` into a worktree and every command defaults to that task.
+
+Zero anchors (no `--task`, no `MSHIP_TASK`, pwd outside any worktree) + two active tasks → `AmbiguousTaskError` with a clear message listing the options.
+
+### Typical parallel workflow
+
+```bash
+# Inventory active tasks:
+mship worktrees
+
+# Open a new terminal tab → enter a different task's worktree:
+cd .worktrees/feat/other-task
+
+# Every mship command in this tab now targets `other-task`:
+mship status
+mship journal "picked up work on other-task"
+
+# Or, from any pwd, run a one-off against a specific task:
+mship journal --task first-task "blocked on review; switching to other-task"
+
+# Pin a whole script to a task:
+MSHIP_TASK=other-task ./scripts/run-integration.sh
+```
+
+### Gotchas for multi-task
+
+- `mship run` starts services. If two tasks each run services, ports will conflict unless task-scoped ports are configured in `mothership.yaml`.
+- `mship sync` and `mship audit` operate on the workspace, not a single task — no `--task` needed (or honored).
+- Resources outside mship's state (docker containers, DB tables, shared caches) are NOT task-scoped. Share where safe; tear down where not.
+
+## Delegating to subagents: `mship context` and `mship dispatch`
+
+Two mship-native primitives for handing work to subagents. Use them instead of hand-rolling task context:
+
+- **`mship dispatch`** — emits a self-contained Markdown prompt for a subagent. Output includes task slug, worktree path, phase, recent journal entries, affected repos, and per-repo bases. Pipe stdout directly as the `prompt` field of a Claude Code `Task` tool dispatch (or analogous mechanism in Codex / other agent platforms).
+
+  ```bash
+  mship dispatch --task my-task   # prints a ready-to-use prompt to stdout
+  ```
+
+- **`mship context`** — emits structured JSON for programmatic consumers. Use when feeding state into a non-Claude-Code LLM, logging for audit, or scripting decisions. `jq`-friendly.
+
+  ```bash
+  mship context --task my-task | jq '.affected_repos'
+  ```
+
+### Decision tree
+
+| You want to… | Use |
+|---|---|
+| Dispatch a Claude Code (or Codex) subagent to DO work | `mship dispatch` |
+| Feed state into a different LLM / script / audit log | `mship context` |
+| Know "which repos are in test phase?" | `mship context \| jq` |
+| Generate an implementer prompt for a plan task | `mship dispatch` (see `subagent-driven-development`) |
+
+Both accept `--task <slug>` for multi-task disambiguation. When executing a plan task-by-task, use `mship dispatch` as the basis for implementer prompts rather than hand-rolling the task context — it already knows the worktree path, slug, base branches, and recent journal.
+
 ## Phase Workflow
 
 Four phases progress linearly. Always transition explicitly with `mship phase <target>`.

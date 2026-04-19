@@ -38,6 +38,13 @@ HISTORICAL_SOURCES: tuple[Path, ...] = (
     Path.home() / ".codex" / "mothership" / "skills",
 )
 
+# Skills that have been renamed over mship's history. Keys are old skill
+# names; values are the new names. On install, any stale owned symlink at
+# the old name is removed so users don't carry dangling links.
+_RENAMED_SKILLS: dict[str, str] = {
+    "using-superpowers": "using-mothership",
+}
+
 
 def pkg_skills_source() -> Path:
     """Return the package-bundled skills directory."""
@@ -110,10 +117,30 @@ def _iter_skill_dirs(src: Path) -> list[Path]:
     return sorted(p for p in src.iterdir() if p.is_dir() and (p / "SKILL.md").is_file())
 
 
+def _sweep_renamed_skills(skills_dir: Path, rename_map: dict[str, str]) -> None:
+    """Remove stale symlinks at renamed skill locations (mship-owned only).
+
+    For each old-name → new-name entry: if ``skills_dir / old_name`` exists
+    as an owned symlink (points inside a mship skills source), remove it.
+    Leave foreign symlinks and real files/dirs untouched.
+    """
+    for old_name in rename_map:
+        target = skills_dir / old_name
+        if not target.is_symlink():
+            continue  # regular file / dir / absent — leave alone
+        intended = Path(os.readlink(target))
+        if not intended.is_absolute():
+            intended = (target.parent / intended).resolve(strict=False)
+        if is_owned_target(intended):
+            target.unlink()
+
+
 def install_for_claude(*, force: bool = False) -> AgentInstallResult:
     """Symlink each skill into ~/.claude/skills/<name>/."""
     src = pkg_skills_source()
     dest = Path.home() / ".claude" / "skills"
+    dest.mkdir(parents=True, exist_ok=True)
+    _sweep_renamed_skills(dest, _RENAMED_SKILLS)
     skipped: list[str] = []
     replaced: list[str] = []
     skill_dirs = _iter_skill_dirs(src)
