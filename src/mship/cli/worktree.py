@@ -823,7 +823,7 @@ def register(app: typer.Typer, get_container):
                     output.error(f"{group.rep_name}: {e}")
                     raise typer.Exit(code=1)
                 pr_mgr.ensure_upstream(group.rep_path, task.branch)
-                repushed_repos.extend(group.members)
+                repushed_repos.append(group.rep_name)
                 url = task.pr_urls[group.rep_name]
                 if output.is_tty:
                     output.print(f"  {members_str}: {task.branch} re-pushed to {url}")
