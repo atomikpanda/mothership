@@ -237,14 +237,19 @@ class PRManager:
         ]
 
         for pr in prs:
-            if pr["repo"] == current_repo:
+            members = pr.get("members", [pr["repo"]])
+            repo_label = (
+                pr["repo"] if len(members) == 1
+                else f"{pr['repo']} (+{', '.join(m for m in members if m != pr['repo'])})"
+            )
+            if current_repo in members:
                 order_label = "this PR"
             elif pr["order"] == 1:
                 order_label = "merge first"
             else:
                 order_label = f"merge #{pr['order']}"
             lines.append(
-                f"| {pr['order']} | {pr['repo']} | {pr['url']} | {order_label} |"
+                f"| {pr['order']} | {repo_label} | {pr['url']} | {order_label} |"
             )
 
         deps_note = " → ".join(pr["repo"] for pr in prs)
