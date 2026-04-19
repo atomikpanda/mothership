@@ -45,10 +45,14 @@ class PRManager:
         )
         if check.returncode == 0:
             return
-        self._shell.run(
+        result = self._shell.run(
             f"git branch --set-upstream-to=origin/{shlex.quote(branch)} {shlex.quote(branch)}",
             cwd=repo_path,
         )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Failed to set upstream for branch '{branch}': {result.stderr.strip()}"
+            )
 
     def create_pr(
         self, repo_path: Path, branch: str, title: str, body: str,
