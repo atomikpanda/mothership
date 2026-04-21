@@ -123,8 +123,9 @@ def capture_snapshot(
         diag_dir = Path(state_dir) / "diagnostics"
         diag_dir.mkdir(parents=True, exist_ok=True)
 
+        ts = _safe_timestamp()
         payload: dict = {
-            "captured_at": _safe_timestamp(),
+            "captured_at": ts,
             "command": command,
             "reason": reason,
             "cwd": str(Path.cwd()),
@@ -137,7 +138,7 @@ def capture_snapshot(
         if extra:
             payload["extra"] = extra
 
-        filename = f"{_safe_timestamp()}-{command}-{reason}.json"
+        filename = f"{ts}-{command}-{reason}.json"
         target = diag_dir / filename
         target.write_text(json.dumps(payload, indent=2))
         return target
