@@ -72,6 +72,28 @@ def test_transition_to_review_warns_failing_tests(state_with_task: StateManager)
     assert any("auth-service" in w for w in result.warnings)
 
 
+def test_transition_to_review_suppresses_warn_when_journal_has_test_state_pass(
+    state_with_task: StateManager, tmp_path: Path,
+):
+    """Journal `test-state=pass` entries count as evidence. See #81."""
+    log = LogManager(tmp_path / "logs")
+    log.create("add-labels")
+    log.append("add-labels", "ran pytest in shared", repo="shared", test_state="pass")
+    log.append(
+        "add-labels", "ran pytest in auth-service",
+        repo="auth-service", test_state="pass",
+    )
+    state = state_with_task.load()
+    state.tasks["add-labels"].phase = "dev"
+    state_with_task.save(state)
+
+    pm = PhaseManager(state_with_task, log)
+    result = pm.transition("add-labels", "review")
+    assert result.warnings == [], (
+        f"expected no warnings with journal evidence; got {result.warnings}"
+    )
+
+
 def test_transition_to_review_no_warning_all_pass(state_with_task: StateManager):
     pm = PhaseManager(state_with_task, MagicMock(spec=LogManager))
     state = state_with_task.load()

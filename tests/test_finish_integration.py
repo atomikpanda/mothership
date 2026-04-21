@@ -695,3 +695,98 @@ def test_finish_pr_body_unchanged_when_no_issue_refs(finish_workspace):
     assert captured_body
     assert "Closes" not in captured_body[0]
     assert captured_body[0] == "ordinary task description"
+
+
+def test_finish_warns_when_no_test_evidence_default(finish_workspace):
+    """Default: missing test evidence is a WARNING (not a block). See #81."""
+    workspace, mock_shell = finish_workspace
+
+    result = runner.invoke(app, ["spawn", "no evidence", "--repos", "shared", "--force-audit"])
+    assert result.exit_code == 0, result.output
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://x/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    result = runner.invoke(app, ["finish", "--task", "no-evidence", "--force-audit"])
+    # Finish still succeeds; the warning is advisory.
+    assert result.exit_code == 0, result.output
+    # Warning text references the evidence gap.
+    lower = result.output.lower()
+    assert "test" in lower and ("not run" in lower or "missing" in lower or "evidence" in lower)
+
+
+def test_finish_blocks_when_require_tests_and_no_evidence(finish_workspace):
+    """--require-tests escalates missing evidence to a BLOCK. See #81."""
+    workspace, mock_shell = finish_workspace
+
+    result = runner.invoke(app, ["spawn", "require block", "--repos", "shared", "--force-audit"])
+    assert result.exit_code == 0, result.output
+
+    pushed: list[str] = []
+    prs: list[str] = []
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "git push" in cmd:
+            pushed.append(cmd)
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            prs.append(cmd)
+            return ShellResult(returncode=0, stdout="https://x/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    result = runner.invoke(
+        app, ["finish", "--task", "require-block", "--force-audit", "--require-tests"]
+    )
+    assert result.exit_code != 0
+    assert pushed == [], "finish must block before pushing when --require-tests"
+    assert prs == [], "finish must block before creating PRs when --require-tests"
+    assert "require-tests" in result.output.lower() or "blocking" in result.output.lower()
+
+
+def test_finish_evidence_via_journal_suppresses_warning(finish_workspace, tmp_path):
+    """Journal `test-state=pass` counts as evidence — no warning. See #81."""
+    workspace, mock_shell = finish_workspace
+
+    result = runner.invoke(app, ["spawn", "journal evidence", "--repos", "shared", "--force-audit"])
+    assert result.exit_code == 0, result.output
+
+    # Record journal evidence for the task (global scope — applies to all repos).
+    from mship.cli import container as cli_container
+    log_mgr = cli_container.log_manager()
+    log_mgr.append("journal-evidence", "ran pytest", test_state="pass")
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://x/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    result = runner.invoke(app, ["finish", "--task", "journal-evidence", "--force-audit"])
+    assert result.exit_code == 0, result.output
+    # No "not run" / "missing" / "evidence" warning.
+    lower = result.output.lower()
+    assert "test-evidence warnings" not in lower
+    assert "not run" not in lower

@@ -114,25 +114,17 @@ class PhaseManager:
         return ["No spec found — consider writing one before developing"]
 
     def _gate_review(self, task) -> list[str]:
-        warnings: list[str] = []
-        missing = []
-        failing = []
-        for repo in task.affected_repos:
-            result = task.test_results.get(repo)
-            if result is None:
-                missing.append(repo)
-            elif result.status == "fail":
-                failing.append(repo)
+        # Unified reader honors both task.test_results and journal
+        # `test_state=pass` entries so explicit evidence suppresses the
+        # warning. See #81.
+        from mship.core.test_evidence import format_missing_summary, read_evidence
 
-        if missing:
-            warnings.append(
-                f"Tests not run in: {', '.join(missing)} — consider running tests before review"
-            )
-        if failing:
-            warnings.append(
-                f"Tests not passing in: {', '.join(failing)} — consider fixing before review"
-            )
-        return warnings
+        evidence = read_evidence(task, self._log)
+        lines = format_missing_summary(evidence)
+        if not lines:
+            return []
+        hint = " — consider running tests before review"
+        return [lines[0] + hint] + lines[1:]
 
     def _gate_run(self, task) -> list[str]:
         return []

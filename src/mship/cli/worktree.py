@@ -584,6 +584,12 @@ def register(app: typer.Typer, get_container):
                  "Updates finished_at and appends a `re-finished` journal entry. "
                  "Does not touch the PR body — use `gh pr edit` for that.",
         ),
+        require_tests: bool = typer.Option(
+            False, "--require-tests",
+            help="Block finish when any affected repo lacks passing test evidence "
+                 "(task.test_results or journal test_state=pass). Default: WARN only. "
+                 "See #81.",
+        ),
         task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
     ):
         """Create PRs across repos in dependency order."""
@@ -821,6 +827,51 @@ def register(app: typer.Typer, get_container):
                 output.error(f"  {repo_name}: {branch} has no commits past {eff_base}")
             output.error("Commit your changes in each worktree, or run `mship close --yes --abandon`.")
             raise typer.Exit(code=1)
+
+        # --- Test-evidence gate (#81) ---
+        # Consult task.test_results + journal test_state entries. WARN by
+        # default; block only with --require-tests. Skipped-untouched repos
+        # don't need evidence (we're not finishing them).
+        from mship.core.test_evidence import (
+            format_missing_summary, read_evidence,
+        )
+
+        evidence_repo_paths: dict[str, Path] = {}
+        for repo_name in task.affected_repos:
+            if repo_name in untouched_repos:
+                continue
+            path = config.repos[repo_name].path
+            if repo_name in task.worktrees:
+                wt = Path(task.worktrees[repo_name])
+                if wt.exists():
+                    path = wt
+            evidence_repo_paths[repo_name] = path
+
+        evidence_task = task.model_copy(
+            update={"affected_repos": list(evidence_repo_paths.keys())}
+        )
+        evidence = read_evidence(
+            evidence_task, container.log_manager(),
+            shell=shell, repo_paths=evidence_repo_paths,
+        )
+        evidence_lines = format_missing_summary(evidence)
+        if evidence_lines:
+            if require_tests:
+                output.error("Test evidence missing — blocking finish (--require-tests):")
+                for line in evidence_lines:
+                    output.error(f"  {line}")
+                output.error(
+                    "Run `mship test` or record evidence via "
+                    "`mship journal --test-state pass`, then retry."
+                )
+                raise typer.Exit(code=1)
+            output.warning("Test-evidence warnings:")
+            for line in evidence_lines:
+                output.warning(f"  {line}")
+            output.warning(
+                "Pass `--require-tests` to treat as blocking, or record evidence via "
+                "`mship test` / `mship journal --test-state pass`."
+            )
 
         pr_list: list[dict] = []
         repushed_repos: list[str] = []  # repos where --force re-pushed commits
