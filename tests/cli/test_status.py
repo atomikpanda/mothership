@@ -37,7 +37,74 @@ def test_status_no_task(configured_app):
     assert result.exit_code == 0
     # Bimodal: non-TTY emits JSON workspace summary when no task resolves.
     payload = json.loads(result.output)
-    assert payload == {"active_tasks": []}
+    # No active tasks → cwd check is not applicable.
+    assert payload.get("active_tasks") == []
+
+
+def test_status_cwd_outside_worktrees_reports_true(workspace_with_git, monkeypatch, tmp_path):
+    """With an active task whose worktree is elsewhere, cwd outside → True. See #80."""
+    wt_path = tmp_path / "fake-wt"
+    wt_path.mkdir()
+    task = Task(
+        slug="t", description="d", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["shared"], branch="feat/t",
+        worktrees={"shared": str(wt_path)},
+    )
+    _seed(workspace_with_git, task)
+    container.config_path.override(workspace_with_git / "mothership.yaml")
+    container.state_dir.override(workspace_with_git / ".mothership")
+    try:
+        # Chdir to workspace root — outside the worktree.
+        monkeypatch.chdir(workspace_with_git)
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        # Flag surfaces regardless of which path renders (single-task auto-resolve
+        # or active_tasks summary).
+        assert payload.get("cwd_is_outside_worktrees") is True
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+
+def test_status_cwd_inside_worktree_reports_false(workspace_with_git, monkeypatch, tmp_path):
+    """Inside any active task's worktree → False."""
+    wt_path = tmp_path / "fake-wt"
+    wt_path.mkdir()
+    task = Task(
+        slug="t", description="d", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["shared"], branch="feat/t",
+        worktrees={"shared": str(wt_path)},
+    )
+    _seed(workspace_with_git, task)
+    container.config_path.override(workspace_with_git / "mothership.yaml")
+    container.state_dir.override(workspace_with_git / ".mothership")
+    try:
+        monkeypatch.chdir(wt_path)
+        # No task flag — auto-resolution will land on task `t` (single active),
+        # so this exercises the single-task path where the field is still False.
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        # Either way, the field should be False when cwd is inside the worktree.
+        assert payload.get("cwd_is_outside_worktrees") is False
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+
+def test_status_no_active_tasks_omits_cwd_field(configured_app):
+    """When there are zero tasks with worktrees, the cwd warning is not applicable."""
+    result = runner.invoke(app, ["status"])
+    payload = json.loads(result.output)
+    # The field must not be True; either absent or False is acceptable.
+    assert payload.get("cwd_is_outside_worktrees", False) is False
 
 
 def test_status_with_task(configured_app, workspace: Path):
