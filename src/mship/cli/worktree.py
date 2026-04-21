@@ -508,6 +508,43 @@ def register(app: typer.Typer, get_container):
             pass
         output.success(f"{log_msg.capitalize()}: {task_slug}")
 
+        # Post-op diagnostic: if any affected repo's main-checkout path is
+        # dirty after close completed, capture a snapshot. Silent — users
+        # see the snapshot count via `mship doctor`. See spec 2026-04-21.
+        try:
+            from mship.core.diagnostics import capture_snapshot
+            shell = container.shell()
+            config = container.config()
+            post_op_repos: dict[str, Path] = {}
+            for _repo_name in task.affected_repos:
+                _repo_cfg = config.repos.get(_repo_name)
+                if _repo_cfg is None:
+                    continue
+                if _repo_cfg.git_root is not None:
+                    _parent = config.repos.get(_repo_cfg.git_root)
+                    if _parent is None:
+                        continue
+                    _main_path = Path(_parent.path).resolve()
+                else:
+                    _main_path = Path(_repo_cfg.path).resolve()
+                if _main_path.is_dir():
+                    post_op_repos[_repo_name] = _main_path
+            any_dirty = False
+            for _name, _path in post_op_repos.items():
+                _res = shell.run("git status --porcelain", cwd=_path)
+                if _res.returncode == 0 and _res.stdout.strip():
+                    any_dirty = True
+                    break
+            if any_dirty and post_op_repos:
+                capture_snapshot(
+                    "close", "dirty-main-post-op",
+                    container.state_dir(),
+                    repos=post_op_repos,
+                )
+        except Exception:
+            # Diagnostics is strictly best-effort.
+            pass
+
     @app.command()
     def finish(
         handoff: bool = typer.Option(False, "--handoff", help="Generate CI handoff manifest"),
@@ -975,3 +1012,38 @@ def register(app: typer.Typer, get_container):
                 "finished_at": task.finished_at.isoformat(),
             })
             output.print("Task finished. After merge, run `mship close` to clean up.")
+
+        # Post-op diagnostic: if any affected repo's main-checkout path is
+        # dirty after finish completed, capture a snapshot. Silent — users
+        # see the snapshot count via `mship doctor`. See spec 2026-04-21.
+        try:
+            from mship.core.diagnostics import capture_snapshot
+            post_op_repos: dict[str, Path] = {}
+            for _repo_name in t.affected_repos:
+                _repo_cfg = config.repos.get(_repo_name)
+                if _repo_cfg is None:
+                    continue
+                if _repo_cfg.git_root is not None:
+                    _parent = config.repos.get(_repo_cfg.git_root)
+                    if _parent is None:
+                        continue
+                    _main_path = Path(_parent.path).resolve()
+                else:
+                    _main_path = Path(_repo_cfg.path).resolve()
+                if _main_path.is_dir():
+                    post_op_repos[_repo_name] = _main_path
+            any_dirty = False
+            for _name, _path in post_op_repos.items():
+                _res = shell.run("git status --porcelain", cwd=_path)
+                if _res.returncode == 0 and _res.stdout.strip():
+                    any_dirty = True
+                    break
+            if any_dirty and post_op_repos:
+                capture_snapshot(
+                    "finish", "dirty-main-post-op",
+                    container.state_dir(),
+                    repos=post_op_repos,
+                )
+        except Exception:
+            # Diagnostics is strictly best-effort.
+            pass
