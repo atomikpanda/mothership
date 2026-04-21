@@ -45,13 +45,6 @@ def _git_root_path(cfg: WorkspaceConfig, name: str) -> Path:
     return repo.path
 
 
-def _repo_root_path(repo: RepoAudit, cfg: WorkspaceConfig) -> Path:
-    """Resolve to the effective git root path (handles git_root indirection)."""
-    r = cfg.repos[repo.name]
-    if r.git_root is not None:
-        return Path(cfg.repos[r.git_root].path)
-    return Path(r.path)
-
 
 def _detect_branch(root: Path, shell: ShellRunner) -> str | None:
     r = shell.run("git rev-parse --abbrev-ref HEAD", cwd=root)
@@ -73,7 +66,7 @@ def _try_recover_stale_main(
     reset so the caller's fast-forward path can run. If not recovered, no
     state mutation occurred — user's working tree untouched.
     """
-    root = _repo_root_path(repo, cfg)
+    root = Path(_git_root_path(cfg, repo.name))
     # 1. Snapshot before doing anything.
     capture_snapshot(
         "sync", "dirty-main-pre-recovery", state_dir,
@@ -85,7 +78,9 @@ def _try_recover_stale_main(
         return (False, "could not resolve branch for recovery check")
 
     # 2. Fetch to ensure remote-tracking ref is current.
-    shell.run("git fetch origin", cwd=root)
+    fetch_r = shell.run("git fetch origin", cwd=root)
+    if fetch_r.returncode != 0:
+        return (False, f"fetch failed: {fetch_r.stderr.strip() or 'unknown'}")
 
     # 3. Behind check.
     r = shell.run(
