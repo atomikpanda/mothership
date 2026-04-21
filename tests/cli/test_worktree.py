@@ -64,6 +64,46 @@ def test_spawn(configured_git_app: Path):
     assert "add-labels-to-tasks" in state.tasks
 
 
+def test_spawn_slug_override(configured_git_app: Path):
+    """--slug overrides auto-generated slug. See #59."""
+    result = runner.invoke(
+        app, ["spawn", "a very long description for a simple task",
+              "--repos", "shared", "--slug", "short"],
+    )
+    assert result.exit_code == 0, result.output
+    mgr = StateManager(configured_git_app / ".mothership")
+    state = mgr.load()
+    assert "short" in state.tasks
+    # Auto-slug from the description is NOT registered.
+    assert not any("very-long" in s for s in state.tasks)
+    assert state.tasks["short"].branch == "feat/short"
+
+
+def test_spawn_slug_rejects_invalid_chars(configured_git_app: Path):
+    """Reject uppercase / underscores / spaces / empty. See #59."""
+    for bad in ["UPPER", "has_underscore", "with space", "", "-leading", "trailing-"]:
+        result = runner.invoke(
+            app, ["spawn", "d", "--repos", "shared", "--slug", bad],
+        )
+        assert result.exit_code != 0, f"expected rejection for slug={bad!r}: {result.output}"
+
+
+def test_spawn_slug_collision_errors(configured_git_app: Path):
+    """Two spawns with the same --slug → second fails with a clear error."""
+    first = runner.invoke(
+        app, ["spawn", "first", "--repos", "shared", "--slug", "dupe"],
+    )
+    assert first.exit_code == 0, first.output
+    second = runner.invoke(
+        app, ["spawn", "second", "--repos", "shared", "--slug", "dupe"],
+    )
+    assert second.exit_code != 0
+    # Collision ValueError bubbles up through the CLI (existing behavior for
+    # auto-slugs too); CliRunner captures it on `.exception`.
+    assert second.exception is not None
+    assert "already exists" in str(second.exception).lower()
+
+
 def test_spawn_all_repos(configured_git_app: Path):
     result = runner.invoke(app, ["spawn", "big change"])
     assert result.exit_code == 0, result.output
@@ -431,6 +471,94 @@ def test_finish_body_file_passed_to_gh_pr_create(configured_git_app: Path):
         assert "## Test plan" in captured["create_cmd"]
     finally:
         cli_container.shell.reset_override()
+
+
+def test_close_accepts_positional_slug(configured_git_app: Path):
+    """`mship close <slug>` is an alternative to `--task <slug>`. See #40."""
+    runner.invoke(app, ["spawn", "positional close", "--repos", "shared"])
+    result = runner.invoke(app, ["close", "positional-close", "-y", "--abandon"])
+    assert result.exit_code == 0, result.output
+    mgr = StateManager(configured_git_app / ".mothership")
+    assert "positional-close" not in mgr.load().tasks
+
+
+def test_close_positional_and_task_flag_conflict(configured_git_app: Path):
+    """Conflicting positional + --task values fail loudly."""
+    runner.invoke(app, ["spawn", "conflict a", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "conflict b", "--repos", "shared"])
+    result = runner.invoke(
+        app, ["close", "conflict-a", "--task", "conflict-b", "-y", "--abandon"],
+    )
+    assert result.exit_code != 0
+    assert "conflict" in result.output.lower()
+
+
+def test_close_positional_equal_to_task_flag_is_ok(configured_git_app: Path):
+    """Same value in both is not an error."""
+    runner.invoke(app, ["spawn", "equal case", "--repos", "shared"])
+    result = runner.invoke(
+        app, ["close", "equal-case", "--task", "equal-case", "-y", "--abandon"],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_finish_title_override_passed_to_gh_pr_create(configured_git_app: Path):
+    """--title replaces task.description in the gh pr create invocation. See #45."""
+    from mship.cli import container as cli_container
+
+    runner.invoke(app, ["spawn", "a long verbose description that shouldnt be the PR title", "--repos", "shared"])
+
+    captured: dict[str, str] = {}
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            captured["create_cmd"] = cmd
+            return ShellResult(returncode=0, stdout="https://x/pr/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    cli_container.shell.override(mock_shell)
+    try:
+        result = runner.invoke(
+            app, [
+                "finish",
+                "--task", "a-long-verbose-description-that-shouldnt-be-the-pr-title",
+                "--title", "feat(spawn): concise PR title",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "feat(spawn): concise PR title" in captured["create_cmd"]
+        # Original description is NOT in --title position.
+        import shlex as _shlex
+        tokens = _shlex.split(captured["create_cmd"])
+        idx = tokens.index("--title")
+        assert tokens[idx + 1] == "feat(spawn): concise PR title"
+    finally:
+        cli_container.shell.reset_override()
+
+
+def test_finish_title_rejected_with_force(configured_git_app: Path):
+    """--force won't rewrite existing PR titles; conflict rejected like --body."""
+    runner.invoke(app, ["spawn", "force title mutex", "--repos", "shared"])
+    result = runner.invoke(
+        app, ["finish", "--task", "force-title-mutex", "--force", "--title", "t"]
+    )
+    assert result.exit_code != 0
+    assert "title" in result.output.lower()
+
+
+def test_finish_title_incompatible_with_push_only(configured_git_app: Path):
+    runner.invoke(app, ["spawn", "po title mutex", "--repos", "shared"])
+    result = runner.invoke(
+        app, ["finish", "--task", "po-title-mutex", "--push-only", "--title", "t"]
+    )
+    assert result.exit_code != 0
 
 
 def test_finish_body_and_body_file_mutually_exclusive(configured_git_app: Path):

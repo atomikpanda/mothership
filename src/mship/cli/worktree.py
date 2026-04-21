@@ -215,13 +215,31 @@ def register(app: typer.Typer, get_container):
         skip_setup: bool = typer.Option(False, "--skip-setup", help="Skip running `task setup` in new worktrees"),
         force_audit: bool = typer.Option(False, "--force-audit", help="Bypass audit gate for this spawn"),
         bypass_reconcile: bool = typer.Option(False, "--bypass-reconcile", help="Skip upstream PR drift check for this spawn"),
+        slug: Optional[str] = typer.Option(
+            None, "--slug",
+            help="Override the auto-generated task slug (lowercase alphanumeric + dashes). "
+                 "Useful when the description would produce a 50+ char slug. See #59.",
+        ),
     ):
         """Create coordinated worktrees across repos for a new task."""
+        import re as _re
         from mship.core.audit_gate import run_audit_gate, AuditGateBlocked
         from mship.core.repo_state import audit_repos
 
         container = get_container()
         output = Output()
+
+        # Validate --slug format. Matches what slugify() produces: lowercase
+        # alphanumeric + internal dashes, no leading/trailing dashes, non-empty.
+        if slug is not None:
+            if not _re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug):
+                output.error(
+                    f"Invalid --slug {slug!r}: must be lowercase alphanumeric + "
+                    "internal dashes (e.g. 'add-labels'), no leading/trailing "
+                    "dashes, no spaces or underscores."
+                )
+                raise typer.Exit(code=1)
+
         _run_gate(get_container, command="spawn", bypass=bypass_reconcile, output=output)
         wt_mgr = container.worktree_manager()
         config = container.config()
@@ -290,7 +308,9 @@ def register(app: typer.Typer, get_container):
         if output.is_tty and not skip_setup:
             output.print("[dim]Running setup in each worktree (use --skip-setup to skip)...[/dim]")
 
-        result = wt_mgr.spawn(description, repos=repo_list, skip_setup=skip_setup)
+        result = wt_mgr.spawn(
+            description, repos=repo_list, skip_setup=skip_setup, slug=slug,
+        )
         task = result.task
 
         if pending_bypass:
@@ -339,6 +359,11 @@ def register(app: typer.Typer, get_container):
 
     @app.command()
     def close(
+        task_slug: Optional[str] = typer.Argument(
+            None,
+            help="Task slug to close (positional). Alternative to --task. "
+                 "Falls back to cwd > MSHIP_TASK when omitted. See #40.",
+        ),
         yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
         force: bool = typer.Option(False, "--force", "-f", help="Bypass ALL safety checks (destructive)"),
         abandon: bool = typer.Option(False, "--abandon", help="Close without finishing (discard PR flow)"),
@@ -357,6 +382,18 @@ def register(app: typer.Typer, get_container):
 
         container = get_container()
         output = Output()
+
+        # #40: positional `mship close <slug>` is an alternative spelling of
+        # `--task <slug>`. Conflicting different values must fail loudly.
+        if task_slug is not None and task is not None and task_slug != task:
+            output.error(
+                f"Conflicting task slug: positional {task_slug!r} vs --task {task!r}. "
+                "Pass one or the other."
+            )
+            raise typer.Exit(code=1)
+        if task is None and task_slug is not None:
+            task = task_slug
+
         _run_gate(get_container, command="close", bypass=bypass_reconcile, output=output)
         state_mgr = container.state_manager()
         state = state_mgr.load()
@@ -590,6 +627,11 @@ def register(app: typer.Typer, get_container):
                  "(task.test_results or journal test_state=pass). Default: WARN only. "
                  "See #81.",
         ),
+        title: Optional[str] = typer.Option(
+            None, "--title",
+            help="Override the PR title (default: task.description). "
+                 "Multi-repo tasks use the same title for every PR. See #45.",
+        ),
         task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
     ):
         """Create PRs across repos in dependency order."""
@@ -613,6 +655,15 @@ def register(app: typer.Typer, get_container):
                 "--force doesn't touch PR bodies — use `gh pr edit <url> --body-file <path>` "
                 "to update an existing PR body"
             )
+            raise typer.Exit(code=1)
+        if force and title is not None:
+            output.error(
+                "--force doesn't touch PR titles — use `gh pr edit <url> --title <text>` "
+                "to update an existing PR title"
+            )
+            raise typer.Exit(code=1)
+        if title is not None and (push_only or handoff):
+            output.error("--title has no effect with --push-only or --handoff")
             raise typer.Exit(code=1)
 
         # --- Resolve PR body source ---
@@ -1018,7 +1069,7 @@ def register(app: typer.Typer, get_container):
                     pr_url = pr_mgr.create_pr(
                         repo_path=group.rep_path,
                         branch=task.branch,
-                        title=task.description,
+                        title=title if title else task.description,
                         body=pr_body,
                         base=group.base,
                     )
