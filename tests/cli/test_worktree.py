@@ -64,6 +64,46 @@ def test_spawn(configured_git_app: Path):
     assert "add-labels-to-tasks" in state.tasks
 
 
+def test_spawn_slug_override(configured_git_app: Path):
+    """--slug overrides auto-generated slug. See #59."""
+    result = runner.invoke(
+        app, ["spawn", "a very long description for a simple task",
+              "--repos", "shared", "--slug", "short"],
+    )
+    assert result.exit_code == 0, result.output
+    mgr = StateManager(configured_git_app / ".mothership")
+    state = mgr.load()
+    assert "short" in state.tasks
+    # Auto-slug from the description is NOT registered.
+    assert not any("very-long" in s for s in state.tasks)
+    assert state.tasks["short"].branch == "feat/short"
+
+
+def test_spawn_slug_rejects_invalid_chars(configured_git_app: Path):
+    """Reject uppercase / underscores / spaces / empty. See #59."""
+    for bad in ["UPPER", "has_underscore", "with space", "", "-leading", "trailing-"]:
+        result = runner.invoke(
+            app, ["spawn", "d", "--repos", "shared", "--slug", bad],
+        )
+        assert result.exit_code != 0, f"expected rejection for slug={bad!r}: {result.output}"
+
+
+def test_spawn_slug_collision_errors(configured_git_app: Path):
+    """Two spawns with the same --slug → second fails with a clear error."""
+    first = runner.invoke(
+        app, ["spawn", "first", "--repos", "shared", "--slug", "dupe"],
+    )
+    assert first.exit_code == 0, first.output
+    second = runner.invoke(
+        app, ["spawn", "second", "--repos", "shared", "--slug", "dupe"],
+    )
+    assert second.exit_code != 0
+    # Collision ValueError bubbles up through the CLI (existing behavior for
+    # auto-slugs too); CliRunner captures it on `.exception`.
+    assert second.exception is not None
+    assert "already exists" in str(second.exception).lower()
+
+
 def test_spawn_all_repos(configured_git_app: Path):
     result = runner.invoke(app, ["spawn", "big change"])
     assert result.exit_code == 0, result.output

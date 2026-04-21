@@ -178,8 +178,9 @@ class WorktreeManager:
         description: str,
         repos: list[str] | None = None,
         skip_setup: bool = False,
+        slug: str | None = None,
     ) -> SpawnResult:
-        slug = slugify(description)
+        slug = slug if slug is not None else slugify(description)
         branch = self._config.branch_pattern.replace("{slug}", slug)
 
         # Early-exit preflight: avoid doing expensive worktree creation when
