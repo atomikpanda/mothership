@@ -5,6 +5,7 @@ from typing import Optional
 import typer
 
 from mship.cli.output import Output
+from mship.core.diagnostics import capture_snapshot
 
 
 def _read_stdin_body_or_exit(output: Output) -> str:
@@ -159,6 +160,51 @@ def _build_pr_groups(
             base=base,
         ))
     return groups
+
+
+def _capture_dirty_main_post_op(command: str, task, config, shell, state_dir: Path) -> None:
+    """Capture a diagnostic snapshot if any affected repo's main checkout is dirty.
+
+    Called after `finish` and `close` complete successfully. Strictly best-effort:
+    all exceptions are swallowed so diagnostics never interrupt normal operation.
+
+    Args:
+        command:   The CLI verb that just ran ("finish" or "close").
+        task:      The state.Task whose affected_repos we inspect.
+        config:    WorkspaceConfig holding repo path/git_root metadata.
+        shell:     ShellRunner used to run `git status --porcelain`.
+        state_dir: Path to the mothership state directory (passed to capture_snapshot).
+    """
+    try:
+        post_op_repos: dict[str, Path] = {}
+        for _repo_name in task.affected_repos:
+            _repo_cfg = config.repos.get(_repo_name)
+            if _repo_cfg is None:
+                continue
+            if _repo_cfg.git_root is not None:
+                _parent = config.repos.get(_repo_cfg.git_root)
+                if _parent is None:
+                    continue
+                _main_path = Path(_parent.path).resolve()
+            else:
+                _main_path = Path(_repo_cfg.path).resolve()
+            if _main_path.is_dir():
+                post_op_repos[_repo_name] = _main_path
+        any_dirty = False
+        for _name, _path in post_op_repos.items():
+            _res = shell.run("git status --porcelain", cwd=_path)
+            if _res.returncode == 0 and _res.stdout.strip():
+                any_dirty = True
+                break
+        if any_dirty:
+            capture_snapshot(
+                command, "dirty-main-post-op",
+                state_dir,
+                repos=post_op_repos,
+            )
+    except Exception:
+        # Diagnostics is strictly best-effort.
+        pass
 
 
 def register(app: typer.Typer, get_container):
@@ -511,39 +557,7 @@ def register(app: typer.Typer, get_container):
         # Post-op diagnostic: if any affected repo's main-checkout path is
         # dirty after close completed, capture a snapshot. Silent — users
         # see the snapshot count via `mship doctor`. See spec 2026-04-21.
-        try:
-            from mship.core.diagnostics import capture_snapshot
-            shell = container.shell()
-            config = container.config()
-            post_op_repos: dict[str, Path] = {}
-            for _repo_name in task.affected_repos:
-                _repo_cfg = config.repos.get(_repo_name)
-                if _repo_cfg is None:
-                    continue
-                if _repo_cfg.git_root is not None:
-                    _parent = config.repos.get(_repo_cfg.git_root)
-                    if _parent is None:
-                        continue
-                    _main_path = Path(_parent.path).resolve()
-                else:
-                    _main_path = Path(_repo_cfg.path).resolve()
-                if _main_path.is_dir():
-                    post_op_repos[_repo_name] = _main_path
-            any_dirty = False
-            for _name, _path in post_op_repos.items():
-                _res = shell.run("git status --porcelain", cwd=_path)
-                if _res.returncode == 0 and _res.stdout.strip():
-                    any_dirty = True
-                    break
-            if any_dirty and post_op_repos:
-                capture_snapshot(
-                    "close", "dirty-main-post-op",
-                    container.state_dir(),
-                    repos=post_op_repos,
-                )
-        except Exception:
-            # Diagnostics is strictly best-effort.
-            pass
+        _capture_dirty_main_post_op("close", task, config, container.shell(), container.state_dir())
 
     @app.command()
     def finish(
@@ -1016,34 +1030,4 @@ def register(app: typer.Typer, get_container):
         # Post-op diagnostic: if any affected repo's main-checkout path is
         # dirty after finish completed, capture a snapshot. Silent — users
         # see the snapshot count via `mship doctor`. See spec 2026-04-21.
-        try:
-            from mship.core.diagnostics import capture_snapshot
-            post_op_repos: dict[str, Path] = {}
-            for _repo_name in t.affected_repos:
-                _repo_cfg = config.repos.get(_repo_name)
-                if _repo_cfg is None:
-                    continue
-                if _repo_cfg.git_root is not None:
-                    _parent = config.repos.get(_repo_cfg.git_root)
-                    if _parent is None:
-                        continue
-                    _main_path = Path(_parent.path).resolve()
-                else:
-                    _main_path = Path(_repo_cfg.path).resolve()
-                if _main_path.is_dir():
-                    post_op_repos[_repo_name] = _main_path
-            any_dirty = False
-            for _name, _path in post_op_repos.items():
-                _res = shell.run("git status --porcelain", cwd=_path)
-                if _res.returncode == 0 and _res.stdout.strip():
-                    any_dirty = True
-                    break
-            if any_dirty and post_op_repos:
-                capture_snapshot(
-                    "finish", "dirty-main-post-op",
-                    container.state_dir(),
-                    repos=post_op_repos,
-                )
-        except Exception:
-            # Diagnostics is strictly best-effort.
-            pass
+        _capture_dirty_main_post_op("finish", t, config, shell, container.state_dir())
