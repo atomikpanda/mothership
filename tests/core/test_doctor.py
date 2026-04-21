@@ -454,3 +454,41 @@ def test_doctor_go_task_warn_when_binary_missing(workspace: Path, monkeypatch):
     assert "not installed" in go_task_checks[0].message
     assert "https://taskfile.dev" in go_task_checks[0].message
     assert "skip per-repo setup on spawn" in go_task_checks[0].message
+
+
+def test_doctor_diagnostics_row_warn_when_snapshots_present(workspace: Path):
+    from mship.core.config import ConfigLoader
+    from mship.core.doctor import DoctorChecker
+    from mship.util.shell import ShellRunner
+    from unittest.mock import MagicMock
+    # Pre-create a diagnostic file.
+    diag_dir = workspace / ".mothership" / "diagnostics"
+    diag_dir.mkdir(parents=True, exist_ok=True)
+    (diag_dir / "2026-01-01T00-00-00Z-sync-pre-recovery.json").write_text("{}")
+
+    config = ConfigLoader.load(workspace / "mothership.yaml")
+    shell = MagicMock(spec=ShellRunner)
+    from mship.util.shell import ShellResult
+    shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
+
+    report = DoctorChecker(config, shell, state_dir=workspace / ".mothership").run()
+    diag_checks = [c for c in report.checks if c.name == "diagnostics"]
+    assert len(diag_checks) == 1
+    assert diag_checks[0].status == "warn"
+    assert "1" in diag_checks[0].message or "snapshot" in diag_checks[0].message.lower()
+
+
+def test_doctor_no_diagnostics_row_when_absent(workspace: Path):
+    from mship.core.config import ConfigLoader
+    from mship.core.doctor import DoctorChecker
+    from mship.util.shell import ShellRunner
+    from unittest.mock import MagicMock
+    from mship.util.shell import ShellResult
+
+    config = ConfigLoader.load(workspace / "mothership.yaml")
+    shell = MagicMock(spec=ShellRunner)
+    shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
+
+    report = DoctorChecker(config, shell, state_dir=workspace / ".mothership").run()
+    diag_checks = [c for c in report.checks if c.name == "diagnostics"]
+    assert len(diag_checks) == 0

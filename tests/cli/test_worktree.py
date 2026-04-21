@@ -1201,3 +1201,98 @@ def test_finish_calls_ensure_upstream_after_push(configured_git_app: Path):
     assert set_upstream_called, "ensure_upstream should have run set-upstream-to"
 
     cli_container.shell.reset_override()
+
+
+def test_finish_captures_diagnostic_when_main_is_dirty_post_op(configured_git_app: Path):
+    """If main is dirty after finish completes, a diagnostic is captured."""
+    from mship.cli import container as cli_container
+    from mship.util.shell import ShellResult, ShellRunner
+    from unittest.mock import MagicMock
+
+    runner.invoke(app, ["spawn", "dirty diag", "--repos", "shared", "--skip-setup"])
+
+    # Pre-dirty the main repo's shared/ working tree by writing an extra
+    # file directly to simulate whatever causes the bug.
+    shared_path = configured_git_app / "shared" / "dirty-marker.txt"
+    shared_path.parent.mkdir(parents=True, exist_ok=True)
+    shared_path.write_text("synthetic dirty content\n")
+    # Stage so `git status --porcelain` reports it as a change.
+    import subprocess as _sp
+    _sp.run(["git", "add", "dirty-marker.txt"], cwd=configured_git_app / "shared", check=True)
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "rev-parse --abbrev-ref --symbolic-full-name" in cmd and "@{u}" in cmd:
+            return ShellResult(returncode=0, stdout="origin/feat/dirty-diag", stderr="")
+        if "gh pr list --head" in cmd:
+            return ShellResult(returncode=0, stdout="\n", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://github.com/org/shared/pull/1\n", stderr="")
+        if "git status --porcelain" in cmd:
+            # Simulate dirty state on the main repo path (our post-op check).
+            if "shared" in str(cwd):
+                return ShellResult(returncode=0, stdout="M  dirty-marker.txt\n", stderr="")
+            return ShellResult(returncode=0, stdout="", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    cli_container.shell.override(mock_shell)
+
+    result = runner.invoke(app, ["finish", "--task", "dirty-diag", "--force-audit"])
+    # Finish succeeds (diagnostic is silent).
+    assert result.exit_code == 0, result.output
+
+    # A finish-dirty-main-post-op diagnostic exists.
+    diag_dir = configured_git_app / ".mothership" / "diagnostics"
+    if diag_dir.is_dir():
+        names = [p.name for p in diag_dir.glob("*.json")]
+        assert any("finish-dirty-main-post-op" in n for n in names), names
+    else:
+        pytest.fail("diagnostics dir not created")
+
+    cli_container.shell.reset_override()
+
+
+def test_finish_does_not_capture_diagnostic_when_main_is_clean(configured_git_app: Path):
+    """Clean happy path — no post-op diagnostic."""
+    from mship.cli import container as cli_container
+    from mship.util.shell import ShellResult, ShellRunner
+    from unittest.mock import MagicMock
+
+    runner.invoke(app, ["spawn", "clean diag", "--repos", "shared", "--skip-setup"])
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "rev-parse --abbrev-ref --symbolic-full-name" in cmd and "@{u}" in cmd:
+            return ShellResult(returncode=0, stdout="origin/feat/clean-diag", stderr="")
+        if "gh pr list --head" in cmd:
+            return ShellResult(returncode=0, stdout="\n", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://github.com/org/shared/pull/1\n", stderr="")
+        if "git status --porcelain" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    cli_container.shell.override(mock_shell)
+
+    result = runner.invoke(app, ["finish", "--task", "clean-diag"])
+    assert result.exit_code == 0, result.output
+
+    diag_dir = configured_git_app / ".mothership" / "diagnostics"
+    if diag_dir.is_dir():
+        names = [p.name for p in diag_dir.glob("*.json")]
+        # No post-op diagnostics present for this run.
+        assert not any("finish-dirty-main-post-op" in n for n in names), names
+
+    cli_container.shell.reset_override()

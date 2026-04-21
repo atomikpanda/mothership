@@ -112,9 +112,16 @@ def _format_skill_check(agent: str, installed: int, dangling: int, foreign: int,
 class DoctorChecker:
     """Run health checks on a mothership workspace."""
 
-    def __init__(self, config: WorkspaceConfig, shell: ShellRunner) -> None:
+    def __init__(
+        self,
+        config: WorkspaceConfig,
+        shell: ShellRunner,
+        *,
+        state_dir: Path | None = None,
+    ) -> None:
         self._config = config
         self._shell = shell
+        self._state_dir = state_dir
 
     def run(self) -> DoctorReport:
         report = DoctorReport()
@@ -242,6 +249,21 @@ class DoctorChecker:
                     "mship will skip per-repo setup on spawn"
                 ),
             ))
+
+        # Pending diagnostics snapshots (spec 2026-04-21).
+        if self._state_dir is not None:
+            diag_dir = Path(self._state_dir) / "diagnostics"
+            if diag_dir.is_dir():
+                count = sum(1 for _ in diag_dir.glob("*.json"))
+                if count > 0:
+                    report.checks.append(CheckResult(
+                        name="diagnostics",
+                        status="warn",
+                        message=(
+                            f"{count} snapshot(s) in .mothership/diagnostics/ — "
+                            f"review for unexpected-state captures; `rm -rf` to clear"
+                        ),
+                    ))
 
         # Dev-mode trap: installed mship may lag workspace source
         mship_source = self._detect_mship_dev_workspace()
