@@ -6,6 +6,24 @@ import typer
 from mship.cli.output import Output
 
 
+def _relpath(path_str: str) -> str:
+    """Shorten for display: relative to cwd if possible, else absolute."""
+    from pathlib import Path
+    try:
+        return str(Path(path_str).relative_to(Path.cwd()))
+    except ValueError:
+        return path_str
+
+
+def _file_nonempty(path_str: str) -> bool:
+    """True if the path exists and has non-zero size. False on OSError."""
+    from pathlib import Path
+    try:
+        return Path(path_str).stat().st_size > 0
+    except OSError:
+        return False
+
+
 def _resolve_repos(
     config, task_affected: list[str],
     repos_filter: str | None, tag_filter: list[str] | None,
@@ -166,9 +184,17 @@ def register(app: typer.Typer, get_container):
                     if repo_tag in {"new failure", "regression", "fix"}:
                         line += f"  ← {repo_tag}"
                 output.print(line)
-                if status == "fail" and info["stderr_tail"]:
-                    for tline in info["stderr_tail"].splitlines()[-20:]:
-                        output.print(f"    {tline}")
+                if status == "fail":
+                    stderr_path = info.get("stderr_path")
+                    stdout_path = info.get("stdout_path")
+                    if stderr_path:
+                        output.print(f"    stderr: {_relpath(stderr_path)}")
+                    if stdout_path and _file_nonempty(stdout_path):
+                        output.print(f"    stdout: {_relpath(stdout_path)}")
+                    if info["stderr_tail"]:
+                        output.print("    last 20 lines of stderr:")
+                        for tline in info["stderr_tail"].splitlines()[-20:]:
+                            output.print(f"      {tline}")
             if diff:
                 prev_id = diff["previous_iteration"]
                 new_fail = diff["summary"]["new_failures"]
