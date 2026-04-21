@@ -610,6 +610,11 @@ def register(app: typer.Typer, get_container):
                  "(task.test_results or journal test_state=pass). Default: WARN only. "
                  "See #81.",
         ),
+        title: Optional[str] = typer.Option(
+            None, "--title",
+            help="Override the PR title (default: task.description). "
+                 "Multi-repo tasks use the same title for every PR. See #45.",
+        ),
         task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
     ):
         """Create PRs across repos in dependency order."""
@@ -633,6 +638,15 @@ def register(app: typer.Typer, get_container):
                 "--force doesn't touch PR bodies — use `gh pr edit <url> --body-file <path>` "
                 "to update an existing PR body"
             )
+            raise typer.Exit(code=1)
+        if force and title is not None:
+            output.error(
+                "--force doesn't touch PR titles — use `gh pr edit <url> --title <text>` "
+                "to update an existing PR title"
+            )
+            raise typer.Exit(code=1)
+        if title is not None and (push_only or handoff):
+            output.error("--title has no effect with --push-only or --handoff")
             raise typer.Exit(code=1)
 
         # --- Resolve PR body source ---
@@ -1038,7 +1052,7 @@ def register(app: typer.Typer, get_container):
                     pr_url = pr_mgr.create_pr(
                         repo_path=group.rep_path,
                         branch=task.branch,
-                        title=task.description,
+                        title=title if title else task.description,
                         body=pr_body,
                         base=group.base,
                     )

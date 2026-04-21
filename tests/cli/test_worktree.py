@@ -473,6 +473,65 @@ def test_finish_body_file_passed_to_gh_pr_create(configured_git_app: Path):
         cli_container.shell.reset_override()
 
 
+def test_finish_title_override_passed_to_gh_pr_create(configured_git_app: Path):
+    """--title replaces task.description in the gh pr create invocation. See #45."""
+    from mship.cli import container as cli_container
+
+    runner.invoke(app, ["spawn", "a long verbose description that shouldnt be the PR title", "--repos", "shared"])
+
+    captured: dict[str, str] = {}
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            captured["create_cmd"] = cmd
+            return ShellResult(returncode=0, stdout="https://x/pr/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    cli_container.shell.override(mock_shell)
+    try:
+        result = runner.invoke(
+            app, [
+                "finish",
+                "--task", "a-long-verbose-description-that-shouldnt-be-the-pr-title",
+                "--title", "feat(spawn): concise PR title",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "feat(spawn): concise PR title" in captured["create_cmd"]
+        # Original description is NOT in --title position.
+        import shlex as _shlex
+        tokens = _shlex.split(captured["create_cmd"])
+        idx = tokens.index("--title")
+        assert tokens[idx + 1] == "feat(spawn): concise PR title"
+    finally:
+        cli_container.shell.reset_override()
+
+
+def test_finish_title_rejected_with_force(configured_git_app: Path):
+    """--force won't rewrite existing PR titles; conflict rejected like --body."""
+    runner.invoke(app, ["spawn", "force title mutex", "--repos", "shared"])
+    result = runner.invoke(
+        app, ["finish", "--task", "force-title-mutex", "--force", "--title", "t"]
+    )
+    assert result.exit_code != 0
+    assert "title" in result.output.lower()
+
+
+def test_finish_title_incompatible_with_push_only(configured_git_app: Path):
+    runner.invoke(app, ["spawn", "po title mutex", "--repos", "shared"])
+    result = runner.invoke(
+        app, ["finish", "--task", "po-title-mutex", "--push-only", "--title", "t"]
+    )
+    assert result.exit_code != 0
+
+
 def test_finish_body_and_body_file_mutually_exclusive(configured_git_app: Path):
     runner.invoke(app, ["spawn", "mutex test", "--repos", "shared"])
     result = runner.invoke(
