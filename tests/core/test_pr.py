@@ -390,3 +390,127 @@ def test_create_pr_non_duplicate_error_still_raises(mock_shell: MagicMock):
             repo_path=Path("/repo"), branch="feat/x",
             title="t", body="b", base="main",
         )
+
+
+def test_create_pr_falls_back_to_rest_on_graphql_rate_limit(mock_shell: MagicMock):
+    """When gh pr create fails with GraphQL rate limit, fall back to REST."""
+    from mship.core.pr import PRManager
+    import json
+    mock_shell.run.side_effect = [
+        # 1. gh pr create hits the rate limit.
+        ShellResult(
+            returncode=1, stdout="",
+            stderr="GraphQL: API rate limit already exceeded for user ID 1.",
+        ),
+        # 2. git remote get-url origin → https URL.
+        ShellResult(
+            returncode=0,
+            stdout="https://github.com/org/repo.git\n",
+            stderr="",
+        ),
+        # 3. gh api repos/org/repo/pulls -X POST → JSON body.
+        ShellResult(
+            returncode=0,
+            stdout=json.dumps({"html_url": "https://github.com/org/repo/pull/99"}),
+            stderr="",
+        ),
+    ]
+    pr_mgr = PRManager(mock_shell)
+    url = pr_mgr.create_pr(
+        repo_path=Path("/repo"), branch="feat/x",
+        title="T", body="B", base="main",
+    )
+    assert url == "https://github.com/org/repo/pull/99"
+    # REST call is visible in the commands.
+    cmds = [c.args[0] for c in mock_shell.run.call_args_list]
+    assert any("gh api repos/org/repo/pulls" in c for c in cmds)
+
+
+def test_create_pr_falls_back_on_secondary_rate_limit(mock_shell: MagicMock):
+    """Secondary rate-limit signature also triggers REST fallback."""
+    from mship.core.pr import PRManager
+    import json
+    mock_shell.run.side_effect = [
+        ShellResult(
+            returncode=1, stdout="",
+            stderr="You have exceeded a secondary rate limit.",
+        ),
+        ShellResult(returncode=0, stdout="git@github.com:org/repo.git\n", stderr=""),
+        ShellResult(
+            returncode=0,
+            stdout=json.dumps({"html_url": "https://github.com/org/repo/pull/7"}),
+            stderr="",
+        ),
+    ]
+    pr_mgr = PRManager(mock_shell)
+    url = pr_mgr.create_pr(
+        repo_path=Path("/repo"), branch="feat/x",
+        title="T", body="B", base="main",
+    )
+    assert url == "https://github.com/org/repo/pull/7"
+
+
+def test_create_pr_rest_fallback_fails_surfaces_original_error(mock_shell: MagicMock):
+    """If REST also fails, surface the original GraphQL error, not the REST error."""
+    from mship.core.pr import PRManager
+    mock_shell.run.side_effect = [
+        ShellResult(
+            returncode=1, stdout="",
+            stderr="GraphQL: API rate limit already exceeded for user ID 1.",
+        ),
+        ShellResult(returncode=0, stdout="https://github.com/org/repo.git\n", stderr=""),
+        ShellResult(returncode=1, stdout="", stderr="rest api also broken"),
+    ]
+    pr_mgr = PRManager(mock_shell)
+    with pytest.raises(RuntimeError) as exc_info:
+        pr_mgr.create_pr(
+            repo_path=Path("/repo"), branch="feat/x",
+            title="T", body="B", base="main",
+        )
+    # Must include the ORIGINAL graphql signal so the user knows the cause.
+    assert "rate limit" in str(exc_info.value).lower()
+
+
+def test_create_pr_rest_fallback_parses_ssh_remote_url(mock_shell: MagicMock):
+    """SSH-style git@github.com:owner/repo.git parses correctly."""
+    from mship.core.pr import PRManager
+    import json
+    mock_shell.run.side_effect = [
+        ShellResult(returncode=1, stdout="", stderr="GraphQL: API rate limit exceeded"),
+        ShellResult(returncode=0, stdout="git@github.com:owner/repo.git\n", stderr=""),
+        ShellResult(
+            returncode=0,
+            stdout=json.dumps({"html_url": "https://github.com/owner/repo/pull/1"}),
+            stderr="",
+        ),
+    ]
+    pr_mgr = PRManager(mock_shell)
+    pr_mgr.create_pr(
+        repo_path=Path("/repo"), branch="feat/x",
+        title="T", body="B",
+    )
+    cmds = [c.args[0] for c in mock_shell.run.call_args_list]
+    # Owner/repo extracted from ssh-style remote.
+    assert any("repos/owner/repo/pulls" in c for c in cmds)
+
+
+def test_create_pr_rest_fallback_parses_https_without_git_suffix(mock_shell: MagicMock):
+    """HTTPS remote without .git suffix also parses."""
+    from mship.core.pr import PRManager
+    import json
+    mock_shell.run.side_effect = [
+        ShellResult(returncode=1, stdout="", stderr="GraphQL: API rate limit exceeded"),
+        ShellResult(returncode=0, stdout="https://github.com/a/b\n", stderr=""),
+        ShellResult(
+            returncode=0,
+            stdout=json.dumps({"html_url": "https://github.com/a/b/pull/3"}),
+            stderr="",
+        ),
+    ]
+    pr_mgr = PRManager(mock_shell)
+    pr_mgr.create_pr(
+        repo_path=Path("/repo"), branch="feat/x",
+        title="T", body="B",
+    )
+    cmds = [c.args[0] for c in mock_shell.run.call_args_list]
+    assert any("repos/a/b/pulls" in c for c in cmds)

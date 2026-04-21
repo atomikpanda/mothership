@@ -1,7 +1,29 @@
+import json
+import re
 import shlex
 from pathlib import Path
 
 from mship.util.shell import ShellRunner
+
+
+_REMOTE_URL_RE = re.compile(
+    r"github\.com[:/](?P<owner>[^/]+)/(?P<repo>[^/\s]+?)(?:\.git)?/?$"
+)
+
+
+def _parse_github_slug(remote_url: str) -> tuple[str, str] | None:
+    m = _REMOTE_URL_RE.search(remote_url.strip())
+    if not m:
+        return None
+    return m.group("owner"), m.group("repo")
+
+
+def _is_graphql_rate_limit(stderr: str) -> bool:
+    s = stderr.lower()
+    return (
+        ("graphql" in s and "rate limit" in s)
+        or "secondary rate limit" in s
+    )
 
 
 class PRManager:
@@ -73,10 +95,56 @@ class PRManager:
                 existing = self.list_pr_for_branch(repo_path, branch)
                 if existing is not None:
                     return existing
+            if _is_graphql_rate_limit(result.stderr):
+                rest_url = self._create_pr_via_rest(
+                    repo_path, branch, title, body, base,
+                )
+                if rest_url is not None:
+                    return rest_url
+                # REST also failed — surface the original graphql error
+                # since that's the cause users need to see.
+                raise RuntimeError(
+                    f"Failed to create PR (rate-limited; REST fallback also failed): "
+                    f"{result.stderr.strip()}"
+                )
             raise RuntimeError(
                 f"Failed to create PR: {result.stderr.strip()}"
             )
         return result.stdout.strip()
+
+    def _create_pr_via_rest(
+        self, repo_path: Path, branch: str, title: str, body: str,
+        base: str | None,
+    ) -> str | None:
+        """Call GitHub's REST endpoint for PR creation (no GraphQL quota).
+
+        Returns the PR html_url on success, or None on any failure so the
+        caller can surface the original rate-limit error.
+        """
+        remote = self._shell.run("git remote get-url origin", cwd=repo_path)
+        if remote.returncode != 0:
+            return None
+        slug = _parse_github_slug(remote.stdout)
+        if slug is None:
+            return None
+        owner, repo = slug
+        cmd = (
+            f"gh api repos/{owner}/{repo}/pulls -X POST "
+            f"-f title={shlex.quote(title)} "
+            f"-f head={shlex.quote(branch)} "
+            f"-f body={shlex.quote(body)}"
+        )
+        if base is not None:
+            cmd += f" -f base={shlex.quote(base)}"
+        result = self._shell.run(cmd, cwd=repo_path)
+        if result.returncode != 0:
+            return None
+        try:
+            payload = json.loads(result.stdout)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        url = payload.get("html_url")
+        return url if isinstance(url, str) and url else None
 
     def count_commits_ahead(self, repo_path: Path, base: str, branch: str) -> int:
         """Return the number of commits on `branch` not on `base`.
