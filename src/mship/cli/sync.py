@@ -36,7 +36,7 @@ def register(app: typer.Typer, get_container):
             output.error(str(e))
             raise typer.Exit(code=1)
 
-        out = sync_repos(report, config, shell)
+        out = sync_repos(report, config, shell, container.state_dir())
         write_last_sync_at(container.state_dir())
         for r in out.results:
             if r.status == "up_to_date":

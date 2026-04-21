@@ -23,15 +23,15 @@ def _result_for(rep, name):
     return next(r for r in rep.results if r.name == name)
 
 
-def test_sync_clean_repo_up_to_date(audit_workspace):
+def test_sync_clean_repo_up_to_date(audit_workspace, tmp_path):
     cfg, shell = _load(audit_workspace)
     report = audit_repos(cfg, shell)
-    out = sync_repos(report, cfg, shell)
+    out = sync_repos(report, cfg, shell, tmp_path / ".mothership")
     r = _result_for(out, "cli")
     assert r.status == "up_to_date"
 
 
-def test_sync_behind_repo_fast_forwards(audit_workspace):
+def test_sync_behind_repo_fast_forwards(audit_workspace, tmp_path):
     cfg, shell = _load(audit_workspace)
     clone = audit_workspace / "cli"
     (clone / "y.txt").write_text("y")
@@ -41,23 +41,23 @@ def test_sync_behind_repo_fast_forwards(audit_workspace):
     _sh("git", "reset", "--hard", "HEAD^", cwd=clone)
 
     report = audit_repos(cfg, shell)
-    out = sync_repos(report, cfg, shell)
+    out = sync_repos(report, cfg, shell, tmp_path / ".mothership")
     r = _result_for(out, "cli")
     assert r.status == "fast_forwarded"
     assert "1" in r.message  # 1 commit
 
 
-def test_sync_dirty_skipped(audit_workspace):
+def test_sync_dirty_skipped(audit_workspace, tmp_path):
     cfg, shell = _load(audit_workspace)
     (audit_workspace / "cli" / "README.md").write_text("modified\n")  # tracked-modified
     report = audit_repos(cfg, shell)
-    out = sync_repos(report, cfg, shell)
+    out = sync_repos(report, cfg, shell, tmp_path / ".mothership")
     r = _result_for(out, "cli")
     assert r.status == "skipped"
     assert "dirty_worktree" in r.message
 
 
-def test_sync_diverged_skipped(audit_workspace):
+def test_sync_diverged_skipped(audit_workspace, tmp_path):
     cfg, shell = _load(audit_workspace)
     clone = audit_workspace / "cli"
     (clone / "a.txt").write_text("a"); _sh("git", "add", "a.txt", cwd=clone); _sh("git", "commit", "-qm", "a", cwd=clone)
@@ -66,7 +66,7 @@ def test_sync_diverged_skipped(audit_workspace):
     (clone / "b.txt").write_text("b"); _sh("git", "add", "b.txt", cwd=clone); _sh("git", "commit", "-qm", "b", cwd=clone)
 
     report = audit_repos(cfg, shell)
-    out = sync_repos(report, cfg, shell)
+    out = sync_repos(report, cfg, shell, tmp_path / ".mothership")
     r = _result_for(out, "cli")
     assert r.status == "skipped"
     assert "diverged" in r.message
