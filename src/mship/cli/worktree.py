@@ -359,6 +359,11 @@ def register(app: typer.Typer, get_container):
 
     @app.command()
     def close(
+        task_slug: Optional[str] = typer.Argument(
+            None,
+            help="Task slug to close (positional). Alternative to --task. "
+                 "Falls back to cwd > MSHIP_TASK when omitted. See #40.",
+        ),
         yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
         force: bool = typer.Option(False, "--force", "-f", help="Bypass ALL safety checks (destructive)"),
         abandon: bool = typer.Option(False, "--abandon", help="Close without finishing (discard PR flow)"),
@@ -377,6 +382,18 @@ def register(app: typer.Typer, get_container):
 
         container = get_container()
         output = Output()
+
+        # #40: positional `mship close <slug>` is an alternative spelling of
+        # `--task <slug>`. Conflicting different values must fail loudly.
+        if task_slug is not None and task is not None and task_slug != task:
+            output.error(
+                f"Conflicting task slug: positional {task_slug!r} vs --task {task!r}. "
+                "Pass one or the other."
+            )
+            raise typer.Exit(code=1)
+        if task is None and task_slug is not None:
+            task = task_slug
+
         _run_gate(get_container, command="close", bypass=bypass_reconcile, output=output)
         state_mgr = container.state_manager()
         state = state_mgr.load()

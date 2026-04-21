@@ -473,6 +473,35 @@ def test_finish_body_file_passed_to_gh_pr_create(configured_git_app: Path):
         cli_container.shell.reset_override()
 
 
+def test_close_accepts_positional_slug(configured_git_app: Path):
+    """`mship close <slug>` is an alternative to `--task <slug>`. See #40."""
+    runner.invoke(app, ["spawn", "positional close", "--repos", "shared"])
+    result = runner.invoke(app, ["close", "positional-close", "-y", "--abandon"])
+    assert result.exit_code == 0, result.output
+    mgr = StateManager(configured_git_app / ".mothership")
+    assert "positional-close" not in mgr.load().tasks
+
+
+def test_close_positional_and_task_flag_conflict(configured_git_app: Path):
+    """Conflicting positional + --task values fail loudly."""
+    runner.invoke(app, ["spawn", "conflict a", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "conflict b", "--repos", "shared"])
+    result = runner.invoke(
+        app, ["close", "conflict-a", "--task", "conflict-b", "-y", "--abandon"],
+    )
+    assert result.exit_code != 0
+    assert "conflict" in result.output.lower()
+
+
+def test_close_positional_equal_to_task_flag_is_ok(configured_git_app: Path):
+    """Same value in both is not an error."""
+    runner.invoke(app, ["spawn", "equal case", "--repos", "shared"])
+    result = runner.invoke(
+        app, ["close", "equal-case", "--task", "equal-case", "-y", "--abandon"],
+    )
+    assert result.exit_code == 0, result.output
+
+
 def test_finish_title_override_passed_to_gh_pr_create(configured_git_app: Path):
     """--title replaces task.description in the gh pr create invocation. See #45."""
     from mship.cli import container as cli_container
