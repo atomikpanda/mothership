@@ -1,8 +1,33 @@
-from typing import Optional
+from pathlib import Path
+from typing import Iterable, Optional
 
 import typer
 
 from mship.cli.output import Output
+
+
+def _cwd_inside_any_worktree(cwd: Path, worktree_paths: Iterable[Path]) -> bool:
+    """True if `cwd` (resolved) is equal to or nested under any worktree path."""
+    try:
+        cwd_r = cwd.resolve()
+    except OSError:
+        return False
+    for wt in worktree_paths:
+        try:
+            wt_r = Path(wt).resolve()
+        except OSError:
+            continue
+        if cwd_r == wt_r or wt_r in cwd_r.parents:
+            return True
+    return False
+
+
+def _collect_worktree_paths(state) -> list[Path]:
+    paths: list[Path] = []
+    for task in state.tasks.values():
+        for p in task.worktrees.values():
+            paths.append(Path(p))
+    return paths
 
 
 def register(app: typer.Typer, get_container):
@@ -45,6 +70,12 @@ def register(app: typer.Typer, get_container):
                 key=lambda tt: (tt.phase_entered_at or tt.created_at),
                 reverse=True,
             )
+            worktree_paths = _collect_worktree_paths(state)
+            any_worktrees = bool(worktree_paths)
+            cwd_outside = (
+                any_worktrees
+                and not _cwd_inside_any_worktree(Path.cwd(), worktree_paths)
+            )
             if output.is_tty:
                 if not active:
                     output.print("No active tasks. Run `mship spawn \"description\"`.")
@@ -60,8 +91,18 @@ def register(app: typer.Typer, get_container):
                             f"phase={tt.phase} (entered {phase_rel})  "
                             f"branch={tt.branch}"
                         )
+                    if cwd_outside:
+                        output.print(
+                            "\n[yellow]⚠ cwd is outside every active task's worktree.[/yellow]"
+                        )
+                        output.print(
+                            "[yellow]  Running tests/git here will not reflect your task's work.[/yellow]"
+                        )
+                        for tt in active:
+                            for repo, path in tt.worktrees.items():
+                                output.print(f"  {tt.slug}:{repo} → {path}")
             else:
-                output.json({
+                payload = {
                     "active_tasks": [
                         {
                             "slug": tt.slug,
@@ -74,7 +115,10 @@ def register(app: typer.Typer, get_container):
                         }
                         for tt in active
                     ],
-                })
+                }
+                if any_worktrees:
+                    payload["cwd_is_outside_worktrees"] = cwd_outside
+                output.json(payload)
             return
 
         # Single-task detail — `t` is the resolved task from resolve_or_exit.
@@ -162,6 +206,11 @@ def register(app: typer.Typer, get_container):
                 {"message": last_log["message"], "timestamp": last_log["timestamp"].isoformat()}
                 if last_log is not None else None
             )
+            worktree_paths = _collect_worktree_paths(state)
+            if worktree_paths:
+                data["cwd_is_outside_worktrees"] = (
+                    not _cwd_inside_any_worktree(Path.cwd(), worktree_paths)
+                )
             output.json(data)
 
     @app.command()

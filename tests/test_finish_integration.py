@@ -349,6 +349,64 @@ def test_finish_unrelated_dirty_repo_does_not_block(finish_workspace):
     assert result.exit_code == 0, result.output
 
 
+def test_finish_skips_untouched_repos_in_multi_repo_task(finish_workspace):
+    """Finish should skip repos with 0 commits ahead, creating PRs only for the
+    others. See #83."""
+    import yaml
+
+    workspace, mock_shell = finish_workspace
+    cfg_path = workspace / "mothership.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["repos"]["shared"]["base_branch"] = "main"
+    cfg["repos"]["auth-service"]["base_branch"] = "main"
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    container.config.reset()
+
+    result = runner.invoke(
+        app, ["spawn", "partial work", "--repos", "shared,auth-service", "--force-audit"]
+    )
+    assert result.exit_code == 0, result.output
+
+    create_calls: list[str] = []
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "git ls-remote" in cmd:
+            return ShellResult(
+                returncode=0, stdout="abc\trefs/heads/main\n", stderr="",
+            )
+        if "git rev-list --count" in cmd:
+            # auth-service is untouched; shared has commits.
+            if "auth-service" in str(cwd):
+                return ShellResult(returncode=0, stdout="0\n", stderr="")
+            return ShellResult(returncode=0, stdout="2\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            create_calls.append(str(cwd))
+            return ShellResult(
+                returncode=0, stdout="https://github.com/org/repo/pull/1\n",
+                stderr="",
+            )
+        if "gh pr list" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    result = runner.invoke(app, ["finish", "--task", "partial-work", "--force-audit"])
+    assert result.exit_code == 0, result.output
+    # auth-service was untouched → no PR created there.
+    assert not any("auth-service" in c for c in create_calls), create_calls
+    # shared had commits → exactly 1 PR.
+    assert any("shared" in c for c in create_calls), create_calls
+    assert len(create_calls) == 1
+    # Output should name the skipped repo.
+    assert "auth-service" in result.output
+    assert "no commits" in result.output.lower() or "skipped" in result.output.lower()
+
+
 def test_finish_fails_when_branch_has_no_commits(finish_workspace):
     """Empty feature branch (no commits past base) must be caught pre-push."""
     import yaml
