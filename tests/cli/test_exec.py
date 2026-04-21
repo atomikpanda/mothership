@@ -505,3 +505,140 @@ repos:
     cli_container.config.reset()
     cli_container.state_manager.reset()
     cli_container.shell.reset_override()
+
+
+# --- Helpers for test-render path surfacing (issue #37) ---
+
+
+def test_relpath_returns_relative_when_cwd_is_parent(tmp_path, monkeypatch):
+    from mship.cli.exec import _relpath
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    target = tmp_path / "a" / "b" / "file.txt"
+    target.write_text("")
+    monkeypatch.chdir(tmp_path / "a")
+    assert _relpath(str(target)) == "b/file.txt"
+
+
+def test_relpath_returns_absolute_when_cwd_unrelated(tmp_path, monkeypatch):
+    from mship.cli.exec import _relpath
+    unrelated = tmp_path / "x"
+    unrelated.mkdir()
+    target = tmp_path / "y" / "file.txt"
+    target.parent.mkdir()
+    target.write_text("")
+    monkeypatch.chdir(unrelated)
+    result = _relpath(str(target))
+    assert result == str(target)
+
+
+def test_file_nonempty_true_for_non_empty_file(tmp_path):
+    from mship.cli.exec import _file_nonempty
+    f = tmp_path / "a.txt"
+    f.write_text("some content")
+    assert _file_nonempty(str(f)) is True
+
+
+def test_file_nonempty_false_for_empty_file(tmp_path):
+    from mship.cli.exec import _file_nonempty
+    f = tmp_path / "empty.txt"
+    f.write_text("")
+    assert _file_nonempty(str(f)) is False
+
+
+def test_file_nonempty_false_for_missing_file(tmp_path):
+    from mship.cli.exec import _file_nonempty
+    f = tmp_path / "nope.txt"
+    # Do not create it.
+    assert _file_nonempty(str(f)) is False
+
+
+# --- Render behavior for test failures (issue #37) ---
+
+
+def _force_tty(monkeypatch):
+    """Force Output.is_tty to True for the duration of a test so the TTY
+    render path runs instead of the JSON fallback."""
+    from mship.cli.output import Output
+    monkeypatch.setattr(Output, "is_tty", property(lambda self: True))
+
+
+def test_test_failure_prints_stderr_path(configured_exec_app, monkeypatch):
+    """mship test failure renders `stderr: <path>` under the failing repo."""
+    _force_tty(monkeypatch)
+    workspace, mock_shell = configured_exec_app
+    mock_shell.run_task.side_effect = [
+        ShellResult(returncode=1, stdout="", stderr="FAILED tests/foo.py::test_x — AssertionError"),
+        ShellResult(returncode=0, stdout="ok", stderr=""),
+    ]
+    result = runner.invoke(app, ["test", "--all", "--task", "test-task"])
+    # Verify stderr: line is present
+    assert "stderr:" in result.output, result.output
+    # Verify the path contains the expected components (may be wrapped across lines)
+    combined = result.output.replace('\n', '')
+    assert "test-runs" in combined, result.output
+    assert "last 20 lines of stderr:" in result.output, result.output
+
+
+def test_test_failure_prints_stdout_path_when_non_empty(configured_exec_app, monkeypatch):
+    """When stdout is non-empty on a failing repo, stdout: path line appears."""
+    _force_tty(monkeypatch)
+    workspace, mock_shell = configured_exec_app
+    mock_shell.run_task.side_effect = [
+        ShellResult(returncode=1, stdout="flutter stdout contents", stderr="framing"),
+        ShellResult(returncode=0, stdout="ok", stderr=""),
+    ]
+    result = runner.invoke(app, ["test", "--all", "--task", "test-task"])
+    assert "stdout:" in result.output, result.output
+
+
+def test_test_failure_suppresses_stdout_path_when_empty(configured_exec_app, monkeypatch):
+    """When stdout is empty on a failing repo, stdout: line is NOT emitted."""
+    _force_tty(monkeypatch)
+    workspace, mock_shell = configured_exec_app
+    mock_shell.run_task.side_effect = [
+        ShellResult(returncode=1, stdout="", stderr="FAILED tests/foo.py::test_x"),
+        ShellResult(returncode=0, stdout="ok", stderr=""),
+    ]
+    result = runner.invoke(app, ["test", "--all", "--task", "test-task"])
+    assert "stderr:" in result.output
+    assert "stdout:" not in result.output, result.output
+
+
+def test_test_pass_does_not_print_paths(configured_exec_app, monkeypatch):
+    """Passing repos render no stderr:/stdout: lines (control)."""
+    _force_tty(monkeypatch)
+    workspace, mock_shell = configured_exec_app
+    result = runner.invoke(app, ["test", "--task", "test-task"])
+    assert "stderr:" not in result.output
+    assert "stdout:" not in result.output
+
+
+def test_test_mixed_pass_fail_only_shows_paths_on_fail(configured_exec_app, monkeypatch):
+    """Pass repo is clean; fail repo shows paths."""
+    _force_tty(monkeypatch)
+    workspace, mock_shell = configured_exec_app
+    mock_shell.run_task.side_effect = [
+        ShellResult(returncode=1, stdout="", stderr="FAIL"),
+        ShellResult(returncode=0, stdout="ok", stderr=""),
+    ]
+    result = runner.invoke(app, ["test", "--all", "--task", "test-task"])
+    # Count lines that start with "    stderr:" (the path line, not the tail preamble)
+    stderr_lines = [line for line in result.output.splitlines() if line.strip().startswith("stderr:")]
+    assert len(stderr_lines) == 1, result.output
+    assert "pass" in result.output and "fail" in result.output
+
+
+def test_test_json_output_still_contains_paths(configured_exec_app):
+    """Non-TTY JSON output must still include stderr_path / stdout_path keys."""
+    workspace, mock_shell = configured_exec_app
+    mock_shell.run_task.side_effect = [
+        ShellResult(returncode=1, stdout="", stderr="err"),
+        ShellResult(returncode=0, stdout="out", stderr=""),
+    ]
+    result = runner.invoke(app, ["test", "--all", "--task", "test-task"])
+    import json as _json
+    payload = _json.loads(result.output)
+    repos = payload["repos"]
+    for name, info in repos.items():
+        assert "stderr_path" in info, f"{name} missing stderr_path"
+        assert "stdout_path" in info, f"{name} missing stdout_path"
