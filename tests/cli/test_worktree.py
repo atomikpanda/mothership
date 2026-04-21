@@ -1174,7 +1174,7 @@ def test_finish_calls_ensure_upstream_after_push(configured_git_app: Path):
             return ShellResult(returncode=0, stdout="", stderr="")
         if "git push" in cmd:
             return ShellResult(returncode=0, stdout="", stderr="")
-        if "rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
+        if "rev-parse --abbrev-ref --symbolic-full-name" in cmd and "@{u}" in cmd:
             ensure_upstream_probe_count += 1
             # First call: audit checks upstream (before push) - pass
             # Subsequent calls: ensure_upstream checks after push - fail to trigger fallback
