@@ -808,7 +808,14 @@ def register(app: typer.Typer, get_container):
                 output.error(f"  {repo_name}: {eff_base}")
             raise typer.Exit(code=1)
 
-        if empty_branches:
+        # Repos with zero commits are skipped (not errored) so partial-work
+        # multi-repo tasks can finish the repos that have commits. If EVERY
+        # affected repo is empty AND no prior PRs exist, the error is still
+        # the right signal (nothing to do at all). See #83.
+        untouched_repos = {repo_name for repo_name, _, _ in empty_branches}
+        if empty_branches and not task.pr_urls and len(untouched_repos) == len(
+            [n for n in effective_bases if n not in task.pr_urls]
+        ):
             output.error("No commits to push — nothing to PR:")
             for repo_name, branch, eff_base in empty_branches:
                 output.error(f"  {repo_name}: {branch} has no commits past {eff_base}")
@@ -843,6 +850,7 @@ def register(app: typer.Typer, get_container):
                 output.warning("Pass `--force` to push them to the existing PR(s).")
 
         groups = _build_pr_groups(ordered, config, task, effective_bases)
+        skipped_untouched: list[dict] = []
 
         for i, group in enumerate(groups, 1):
             members_str = (
@@ -850,6 +858,26 @@ def register(app: typer.Typer, get_container):
                 if len(group.members) == 1
                 else f"{group.rep_name} (+{', '.join(m for m in group.members if m != group.rep_name)})"
             )
+
+            # --- Skip path: all members have zero commits past base (#83).
+            # Members that already have a PR URL are handled by the next branch;
+            # this one is strictly "nothing to push, no PR yet."
+            if (
+                all(m in untouched_repos for m in group.members)
+                and not any(m in task.pr_urls for m in group.members)
+            ):
+                base_label = group.base or "(default)"
+                if output.is_tty:
+                    output.print(
+                        f"  {members_str}: skipped — no commits past {base_label}"
+                    )
+                skipped_untouched.append({
+                    "repo": group.rep_name,
+                    "members": list(group.members),
+                    "base": group.base,
+                    "reason": "no_commits_ahead",
+                })
+                continue
 
             # --- Skip path: every member already has the PR URL recorded.
             all_members_have_url = all(m in task.pr_urls for m in group.members)
@@ -1023,6 +1051,7 @@ def register(app: typer.Typer, get_container):
                 "task": task.slug,
                 "prs": pr_list,
                 "re_pushed": repushed_repos,
+                "skipped_untouched": skipped_untouched,
                 "finished_at": task.finished_at.isoformat(),
             })
             output.print("Task finished. After merge, run `mship close` to clean up.")
