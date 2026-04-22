@@ -378,7 +378,7 @@ def register(app: typer.Typer, get_container):
         """Close a task: check PR state, tear down worktrees, clear state."""
         from pathlib import Path
 
-        from mship.cli._resolve import resolve_or_exit
+        from mship.cli._resolve import resolve_for_command
 
         container = get_container()
         output = Output()
@@ -398,7 +398,8 @@ def register(app: typer.Typer, get_container):
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
-        t = resolve_or_exit(state, task)
+        resolved_close = resolve_for_command("close", state, task, output)
+        t = resolved_close.task
         task_slug = t.slug
         task = t
         pr_mgr = container.pr_manager()
@@ -637,7 +638,7 @@ def register(app: typer.Typer, get_container):
         """Create PRs across repos in dependency order."""
         from pathlib import Path
 
-        from mship.cli._resolve import resolve_or_exit
+        from mship.cli._resolve import resolve_for_command
 
         container = get_container()
         output = Output()
@@ -697,7 +698,8 @@ def register(app: typer.Typer, get_container):
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
-        t = resolve_or_exit(state, task)
+        resolved_finish = resolve_for_command("finish", state, task, output)
+        t = resolved_finish.task
         task = t
         graph = container.graph()
         config = container.config()
@@ -763,7 +765,12 @@ def register(app: typer.Typer, get_container):
             if output.is_tty:
                 output.success(f"Handoff manifest written to: {path}")
             else:
-                output.json({"handoff": str(path), "task": task.slug})
+                output.json({
+                    "handoff": str(path),
+                    "task": task.slug,
+                    "resolved_task": resolved_finish.task.slug,
+                    "resolution_source": resolved_finish.source,
+                })
             return
 
         # PR creation flow
@@ -803,7 +810,13 @@ def register(app: typer.Typer, get_container):
             if output.is_tty:
                 output.print("[green]Branch pushed.[/green] After merge/review, run `mship close` to clean up.")
             else:
-                output.json({"task": task.slug, "pushed": [p["repo"] for p in push_list], "finished_at": task.finished_at.isoformat()})
+                output.json({
+                    "task": task.slug,
+                    "pushed": [p["repo"] for p in push_list],
+                    "finished_at": task.finished_at.isoformat(),
+                    "resolved_task": resolved_finish.task.slug,
+                    "resolution_source": resolved_finish.source,
+                })
                 output.print("Branch pushed. After merge/review, run `mship close` to clean up.")
             return
 
@@ -1155,6 +1168,8 @@ def register(app: typer.Typer, get_container):
                 "re_pushed": repushed_repos,
                 "skipped_untouched": skipped_untouched,
                 "finished_at": task.finished_at.isoformat(),
+                "resolved_task": resolved_finish.task.slug,
+                "resolution_source": resolved_finish.source,
             })
             output.print("Task finished. After merge, run `mship close` to clean up.")
 
