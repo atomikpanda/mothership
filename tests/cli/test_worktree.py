@@ -1471,5 +1471,3 @@ def test_close_logs_rate_limit_reason_when_pr_state_unknown(configured_git_app: 
         )
     finally:
         cli_container.shell.reset_override()
-
-    cli_container.shell.reset_override()

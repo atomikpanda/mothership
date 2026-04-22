@@ -459,8 +459,9 @@ def register(app: typer.Typer, get_container):
                 raise typer.Exit(code=1)
 
         # Determine the log message based on PR state.
+        from mship.core.pr import PrStateResult
         pr_states: list[str] = []  # parallel to task.pr_urls values
-        pr_state_results: list = []  # PrStateResult entries; populated when gh check runs
+        pr_state_results: list[PrStateResult] = []  # populated when gh check runs
         if task.pr_urls and not skip_pr_check:
             import shutil
             if shutil.which("gh") is None and not force:
