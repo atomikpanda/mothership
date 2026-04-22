@@ -1,4 +1,5 @@
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -29,8 +30,6 @@ def _symlink_gitignore_footgun(repo_path: Path, name: str) -> bool:
     Probes via `git check-ignore` — exit 0 = ignored, 1 = not ignored, >1 = error.
     On any error we bail to False (no warning) to avoid false positives.
     """
-    import subprocess
-
     def _ignored(path_fragment: str) -> bool:
         try:
             r = subprocess.run(
