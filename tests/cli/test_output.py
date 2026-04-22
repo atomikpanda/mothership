@@ -1,9 +1,36 @@
+import io
 import json
 import sys
 from io import StringIO
 from unittest.mock import patch
 
 from mship.cli.output import Output
+
+
+class _TTYStream:
+    def __init__(self):
+        self._buf = io.StringIO()
+    def write(self, s):
+        self._buf.write(s)
+    def flush(self):
+        pass
+    def isatty(self):
+        return True
+    def getvalue(self):
+        return self._buf.getvalue()
+
+
+class _NonTTYStream:
+    def __init__(self):
+        self._buf = io.StringIO()
+    def write(self, s):
+        self._buf.write(s)
+    def flush(self):
+        pass
+    def isatty(self):
+        return False
+    def getvalue(self):
+        return self._buf.getvalue()
 
 
 def test_is_tty_false_when_piped():
@@ -39,3 +66,24 @@ def test_format_success():
     output = Output(stream=fake_stdout)
     output.success("All tests passed")
     assert "All tests passed" in fake_stdout.getvalue()
+
+
+def test_breadcrumb_writes_to_stderr_on_tty():
+    out = _TTYStream()
+    err = _TTYStream()
+    output = Output(stream=out, err_stream=err)
+    output.breadcrumb("→ task: foo  (resolved via cwd)")
+    assert "→ task: foo" in err.getvalue()
+    # Not on stdout.
+    assert out.getvalue() == ""
+    # No "ERROR:" prefix.
+    assert "ERROR" not in err.getvalue()
+
+
+def test_breadcrumb_suppressed_on_non_tty():
+    out = _NonTTYStream()
+    err = _NonTTYStream()
+    output = Output(stream=out, err_stream=err)
+    output.breadcrumb("→ task: foo")
+    assert out.getvalue() == ""
+    assert err.getvalue() == ""
