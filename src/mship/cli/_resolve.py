@@ -25,12 +25,13 @@ from mship.core.task_resolver import (
 def resolve_or_exit(state: WorkspaceState, cli_task: str | None) -> Task:
     output = Output()
     try:
-        return resolve_task(
+        task, _source = resolve_task(
             state,
             cli_task=cli_task,
             env_task=os.environ.get("MSHIP_TASK"),
             cwd=Path.cwd(),
         )
+        return task
     except NoActiveTaskError as e:
         output.error(str(e))
         raise typer.Exit(1)
