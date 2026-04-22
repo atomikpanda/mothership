@@ -42,8 +42,14 @@ def _resolve_state_dir(config_path):
         return config_path.parent / ".mothership"
 
 
-def get_container() -> Container:
-    """Lazy container initialization with config discovery."""
+def get_container(required: bool = True) -> "Container | None":
+    """Lazy container initialization with config discovery.
+
+    `required=True` (default): missing workspace → stderr error + typer.Exit(1).
+    `required=False`: missing workspace → return None silently. Used by hook
+    commands so they don't spam `No mothership.yaml` warnings from commits
+    in non-mship repos. See #86.
+    """
     from pathlib import Path
     from mship.core.config import ConfigLoader
 
@@ -56,6 +62,8 @@ def get_container() -> Container:
             state_dir = _resolve_state_dir(config_path)
             container.state_dir.override(state_dir)
     except FileNotFoundError:
+        if not required:
+            return None
         import sys
         print("Error: No mothership.yaml found in any parent directory", file=sys.stderr)
         raise typer.Exit(code=1)

@@ -17,7 +17,9 @@ def register(app: typer.Typer, get_container):
         Fail-open on any exception (corrupt state, missing config, etc.) -> exit 0.
         """
         try:
-            container = get_container()
+            container = get_container(required=False)
+            if container is None:
+                raise typer.Exit(code=0)
             state = container.state_manager().load()
         except Exception:
             raise typer.Exit(code=0)
@@ -135,7 +137,9 @@ def register(app: typer.Typer, get_container):
         from pathlib import Path
 
         try:
-            container = get_container()
+            container = get_container(required=False)
+            if container is None:
+                raise typer.Exit(code=0)
             state = container.state_manager().load()
         except Exception:
             raise typer.Exit(code=0)
@@ -197,7 +201,9 @@ def register(app: typer.Typer, get_container):
         from pathlib import Path
 
         try:
-            container = get_container()
+            container = get_container(required=False)
+            if container is None:
+                raise typer.Exit(code=0)
             state = container.state_manager().load()
         except Exception:
             raise typer.Exit(code=0)
