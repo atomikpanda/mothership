@@ -19,6 +19,33 @@ class SpawnResult:
     setup_warnings: list[str] = field(default_factory=list)
 
 
+def _symlink_gitignore_footgun(repo_path: Path, name: str) -> bool:
+    """Return True when `.gitignore` ignores `<name>/` (dir form) but not `<name>` alone.
+
+    This is the specific footgun that breaks `symlink_dirs`: git treats the
+    symlink as a file, not a directory, so a dir-only ignore pattern
+    (`foo/`) doesn't match the symlink (`foo`), and it shows up as untracked.
+
+    Probes via `git check-ignore` — exit 0 = ignored, 1 = not ignored, >1 = error.
+    On any error we bail to False (no warning) to avoid false positives.
+    """
+    import subprocess
+
+    def _ignored(path_fragment: str) -> bool:
+        try:
+            r = subprocess.run(
+                ["git", "check-ignore", "--", path_fragment],
+                cwd=repo_path, capture_output=True, text=True, check=False,
+            )
+        except OSError:
+            return False
+        return r.returncode == 0
+
+    dir_ignored = _ignored(f"{name}/")
+    file_ignored = _ignored(name)
+    return dir_ignored and not file_ignored
+
+
 class WorktreeManager:
     """Cross-repo worktree orchestration."""
 
@@ -166,10 +193,23 @@ class WorktreeManager:
                 )
                 continue
 
+            # Detect the `.gitignore has 'foo/' but not 'foo'` footgun before
+            # creating the symlink — git check-ignore behaves differently once
+            # the symlink exists (exit 128 for 'foo/' when foo → external dir).
+            # Probe while the path is still absent from the worktree. See #72.
+            footgun = _symlink_gitignore_footgun(worktree_path, dir_name)
+
             if target.is_symlink():
                 target.unlink()
 
             target.symlink_to(source.resolve())
+
+            if footgun:
+                warnings.append(
+                    f"{repo_name}: symlink '{dir_name}' is not ignored — "
+                    f"git treats it as an untracked file. "
+                    f"Add '{dir_name}' (not just '{dir_name}/') to .gitignore."
+                )
 
         return warnings
 
