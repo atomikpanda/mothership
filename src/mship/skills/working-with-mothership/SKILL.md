@@ -181,7 +181,18 @@ If you don't, your edits in the shell affect the main checkout, not the feature 
 
 **`finish` PR body — write a real one.** By default the PR body is just the task description plus a `Closes #N` footer for any issue refs found in the description, journal, and commit subjects. That's a placeholder, not a body. For agent-driven finishes, pass `--body-file <path>` (or `--body '<inline>'`, or `--body -` for stdin) with a real Summary and Test plan. Empty bodies are rejected — that's deliberate. If you forgot at finish time, follow up immediately with `gh pr edit <url> --body-file <path>`. A bare task-description PR is treated as incomplete.
 
-**`finish --force` — push post-finish commits to existing PRs.** After `finish` once, normal `finish` re-runs are idempotent no-ops. If reviewer feedback or on-device testing requires new commits, make them in the worktree, then run `mship finish --force` to push them to the existing PR(s). Updates `finished_at`, adds a `re-finished` journal entry, and does **not** create a new PR or touch the existing PR body. Without `--force`, finish warns when the worktree has commits past `origin/<branch>` so you don't silently lose work — but it won't push. To update a PR body after re-push, use `gh pr edit <url> --body-file <path>` separately (`--force` and `--body-file` are mutually exclusive).
+### Iterating after `mship finish` (reviewer feedback, CI fixes, typos)
+
+For small post-finish changes — reviewer comments, CI fixes, doc tweaks — use `mship commit <msg>` instead of spawning a new task:
+
+1. Stage the fix with `git add <files>` in the worktree.
+2. Run `mship commit "<commit message>"`. This iterates your task's `affected_repos`, commits staged changes in every worktree that has them, pushes to the existing PR (since the task is finished), and appends a journal entry per repo.
+
+For coordinated multi-repo fixes: stage in each worktree you need, then one `mship commit` handles all of them with the same commit message.
+
+For larger changes — new features, significant refactors — spawn a new task via `mship spawn`. Post-finish commits are for small iterations on the same branch.
+
+`mship phase` remains blocked post-finish (you're in review / integration, not re-planning). `mship journal` and `mship test` continue to work.
 
 **`close` gates (in order):**
 1. **Requires `finish` first.** Refuses if `task.finished_at is None` unless `--abandon` is passed.
@@ -375,7 +386,7 @@ Then `mship test --tag mobile` runs both.
 - **Don't run `mship finish` with failing tests** — run `mship test` first.
 - **Don't ship a PR with a placeholder body.** If you didn't pass `--body-file`/`--body` to `mship finish`, the PR body is just the task description — not a Summary + Test plan. Follow up with `gh pr edit <url> --body-file <path>` before declaring done. Reviewers (human or agent) need to know what changed and how it was verified.
 - **Don't paste test output into `mship journal`** — after every `mship test`, mship auto-logs a structured entry with iteration, test_state, and action. The iteration file under `.mothership/test-runs/` has stderr for failures.
-- **Don't keep editing a worktree after `mship finish`** — once `finish` stamps the task as done, phase transitions are blocked (except `run`). If you need to make changes, open a new task with `mship spawn`.
+- **Don't keep editing a worktree after `mship finish` without using `mship commit`** — once `finish` stamps the task as done, phase transitions are blocked (except `run`). For small post-finish changes (reviewer feedback, CI fixes, doc tweaks), stage your changes and run `mship commit "<msg>"` — it commits and pushes to the existing PR across all affected repos. For larger changes, open a new task with `mship spawn`.
 - **Don't manually edit `.mothership/state.yaml`** — use the CLI commands instead.
 - **Don't assume `mship` knows what's running outside of it** — if you started services manually, mothership won't track them. Use `mship run` or accept that `mship status` won't reflect them.
 - **Don't `--force-audit` without reading the drift** — the gate is there to stop you from starting work on a dirty/wrong-branch repo. If you bypass, know why; the task log records the bypass.

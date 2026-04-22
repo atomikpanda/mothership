@@ -30,32 +30,6 @@ def _audit_ok_run(cmd, cwd, env=None):
     return ShellResult(returncode=0, stdout="", stderr="")
 
 
-@pytest.fixture
-def configured_git_app(workspace_with_git: Path):
-    state_dir = workspace_with_git / ".mothership"
-    state_dir.mkdir(exist_ok=True)
-    container.config.reset()
-    container.state_manager.reset()
-    container.log_manager.reset()
-    container.config_path.override(workspace_with_git / "mothership.yaml")
-    container.state_dir.override(state_dir)
-
-    mock_shell = MagicMock(spec=ShellRunner)
-    mock_shell.run.side_effect = _audit_ok_run
-    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok\n", stderr="")
-    container.shell.override(mock_shell)
-
-    yield workspace_with_git
-    container.config_path.reset_override()
-    container.state_dir.reset_override()
-    container.config.reset_override()
-    container.config.reset()
-    container.state_manager.reset_override()
-    container.state_manager.reset()
-    container.log_manager.reset()
-    container.shell.reset_override()
-
-
 def test_spawn(configured_git_app: Path):
     result = runner.invoke(app, ["spawn", "add labels to tasks", "--repos", "shared"])
     assert result.exit_code == 0, result.output
