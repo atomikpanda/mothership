@@ -106,8 +106,7 @@ def register(app: typer.Typer, get_container):
             for s in skipped:
                 output.print(f"  {s}: skipped (nothing staged)")
         else:
-            import json as _json
-            payload = {
+            output.json({
                 "task": t.slug,
                 "repos": [
                     *results,
@@ -115,5 +114,4 @@ def register(app: typer.Typer, get_container):
                 ],
                 "resolved_task": resolved.task.slug,
                 "resolution_source": resolved.source,
-            }
-            print(_json.dumps(payload, indent=2))
+            })
