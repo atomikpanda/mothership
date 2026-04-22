@@ -204,7 +204,31 @@ class ConfigLoader:
 
     @staticmethod
     def discover(start: Path) -> Path:
-        current = start.resolve()
+        import os
+        from mship.core.workspace_marker import read_marker_from_ancestor
+
+        # 1. MSHIP_WORKSPACE env var — set-and-valid wins; set-but-invalid
+        #    raises so misconfiguration fails loud instead of silently
+        #    falling through to the walk-up.
+        env = os.environ.get("MSHIP_WORKSPACE")
+        if env:
+            env_root = Path(env).resolve()
+            env_yaml = env_root / "mothership.yaml"
+            if env_yaml.is_file():
+                return env_yaml
+            raise FileNotFoundError(
+                f"MSHIP_WORKSPACE={env!r} does not contain a mothership.yaml "
+                f"(expected {env_yaml})"
+            )
+
+        # 2. Marker walk-up — subrepo worktrees get a `.mship-workspace`
+        #    pointer from spawn. Stale markers return None silently.
+        marker_root = read_marker_from_ancestor(start)
+        if marker_root is not None:
+            return marker_root / "mothership.yaml"
+
+        # 3. Existing walk-up for mothership.yaml.
+        current = Path(start).resolve()
         while True:
             candidate = current / "mothership.yaml"
             if candidate.exists():
