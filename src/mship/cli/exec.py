@@ -248,7 +248,7 @@ def register(app: typer.Typer, get_container):
         # slug is still an error.
         fallback_repos: list[str]
         try:
-            t = resolve_task(
+            t, _ = resolve_task(
                 state,
                 cli_task=task,
                 env_task=_os.environ.get("MSHIP_TASK"),
@@ -388,7 +388,7 @@ def register(app: typer.Typer, get_container):
         # an explicit --task / MSHIP_TASK pointing at an unknown slug errors.
         resolved_task = None
         try:
-            resolved_task = resolve_task(
+            resolved_task, _ = resolve_task(
                 state,
                 cli_task=task,
                 env_task=_os.environ.get("MSHIP_TASK"),
