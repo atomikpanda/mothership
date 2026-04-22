@@ -170,6 +170,13 @@ class DoctorChecker:
                 continue  # skip per-task checks for this repo
             task_output = result.stdout
             for canonical in ["test", "run", "lint", "setup"]:
+                if canonical in repo.not_applicable:
+                    report.checks.append(CheckResult(
+                        name=f"{name}/task:{canonical}",
+                        status="pass",
+                        message=f"task '{canonical}' not applicable (declared)",
+                    ))
+                    continue
                 actual = repo.tasks.get(canonical, canonical)
                 if actual in task_output:
                     msg = (

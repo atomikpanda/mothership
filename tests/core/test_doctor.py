@@ -532,3 +532,43 @@ def test_doctor_warns_on_symlink_gitignore_footgun(workspace: Path):
     assert len(rows) == 1, [c.name for c in report.checks]
     assert rows[0].status == "warn"
     assert "foo" in rows[0].message
+
+
+def test_doctor_not_applicable_emits_pass_row(workspace: Path):
+    """Canonical tasks listed in not_applicable become pass rows with the
+    declared-not-applicable message instead of warn rows. See #76."""
+    import yaml as _yaml
+    cfg_path = workspace / "mothership.yaml"
+    cfg = _yaml.safe_load(cfg_path.read_text())
+    cfg["repos"]["shared"]["not_applicable"] = ["run", "lint"]
+    cfg_path.write_text(_yaml.safe_dump(cfg))
+
+    config = ConfigLoader.load(cfg_path)
+    shell = MagicMock(spec=ShellRunner)
+    # Return a Taskfile listing with only `test` and `setup` (not run/lint).
+    shell.run.return_value = ShellResult(
+        returncode=0, stdout="test\nsetup\n", stderr="",
+    )
+
+    report = DoctorChecker(config, shell).run()
+    rows = {c.name: c for c in report.checks if c.name.startswith("shared/task:")}
+    # run + lint are declared not applicable — must be pass, not warn.
+    assert rows["shared/task:run"].status == "pass"
+    assert "not applicable" in rows["shared/task:run"].message
+    assert rows["shared/task:lint"].status == "pass"
+    assert "not applicable" in rows["shared/task:lint"].message
+    # setup is present in the Taskfile → pass (existing behavior).
+    assert rows["shared/task:setup"].status == "pass"
+
+
+def test_not_applicable_overlap_rejected():
+    """Same task in both `tasks` and `not_applicable` is a config error."""
+    import pytest
+    from mship.core.config import RepoConfig
+    with pytest.raises(ValueError, match="overlap"):
+        RepoConfig(
+            path=Path("/tmp/x"),
+            type="service",
+            tasks={"run": "serve"},
+            not_applicable=["run"],
+        )
