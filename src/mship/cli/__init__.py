@@ -90,6 +90,7 @@ from mship.cli import internal as _internal_mod
 from mship.cli import reconcile as _reconcile_mod
 from mship.cli import context as _context_mod
 from mship.cli import dispatch as _dispatch_mod
+from mship.cli import commit as _commit_mod
 
 def _should_silent_exit(argv: list[str]) -> bool:
     """True if argv is invoking an unknown `_`-prefixed internal command.
@@ -136,3 +137,4 @@ _internal_mod.register(app, get_container)
 _reconcile_mod.register(app, get_container)
 _context_mod.register(app, get_container)
 _dispatch_mod.register(app, get_container)
+_commit_mod.register(app, get_container)
