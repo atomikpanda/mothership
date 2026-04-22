@@ -35,6 +35,7 @@ class RepoConfig(BaseModel):
     depends_on: list[Dependency] = []
     env_runner: str | None = None
     tasks: dict[str, str] = {}
+    not_applicable: list[str] = []
     tags: list[str] = []
     git_root: str | None = None
     start_mode: Literal["foreground", "background"] = "foreground"
@@ -59,6 +60,19 @@ class RepoConfig(BaseModel):
                     normalized.append(dep)
             data["depends_on"] = normalized
         return data
+
+    @model_validator(mode="after")
+    def validate_not_applicable(self) -> "RepoConfig":
+        """A canonical task can't be both declared (tasks: ...) and declared
+        not applicable — those are contradictory intents. See #76."""
+        overlap = set(self.tasks.keys()) & set(self.not_applicable)
+        if overlap:
+            raise ValueError(
+                f"tasks and not_applicable overlap on {sorted(overlap)}; "
+                f"a task is either declared (in `tasks`) or explicitly "
+                f"not applicable, not both"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_bind_files(self) -> "RepoConfig":
