@@ -58,8 +58,14 @@ class AmbiguousTaskError(Exception):
 
 
 def _first_worktree_path(task: Task) -> Path | None:
+    """Return the first worktree path (resolved) or None. `candidates` callers
+    can compare/display paths uniformly with the cwd-ambiguity branch, which
+    also stores resolved paths."""
     for p in task.worktrees.values():
-        return Path(p)
+        try:
+            return Path(p).resolve()
+        except OSError:
+            return Path(p)
     return None
 
 
