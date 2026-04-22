@@ -999,3 +999,79 @@ def test_create_symlinks_no_warn_when_plain_name_ignored(tmp_path: Path):
     (worktree / ".gitignore").write_text("foo\n")
     warnings = mgr._create_symlinks("src", repo_cfg, worktree)
     assert not any("not ignored" in w for w in warnings), warnings
+
+
+def test_spawn_writes_workspace_marker_in_each_worktree(workspace_with_git: Path):
+    """Spawn writes `.mship-workspace` in every worktree it creates. See #84."""
+    from mship.cli import container
+    from mship.core.workspace_marker import MARKER_NAME
+    from typer.testing import CliRunner
+    from mship.cli import app
+    runner = CliRunner()
+
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(workspace_with_git / "mothership.yaml")
+    container.state_dir.override(workspace_with_git / ".mothership")
+    (workspace_with_git / ".mothership").mkdir(exist_ok=True)
+
+    try:
+        result = runner.invoke(
+            app, ["spawn", "marker test", "--repos", "shared", "--skip-setup", "--force-audit"]
+        )
+        assert result.exit_code == 0, result.output
+        wt = workspace_with_git / "shared" / ".worktrees" / "feat" / "marker-test"
+        marker = wt / MARKER_NAME
+        assert marker.is_file(), (
+            f"expected marker at {marker}; "
+            f"worktree contents: {list(wt.iterdir()) if wt.is_dir() else 'wt not created'}"
+        )
+        assert marker.read_text().strip() == str(workspace_with_git.resolve())
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+
+def test_spawn_appends_marker_to_worktree_exclude(workspace_with_git: Path):
+    """Marker is added to per-worktree info/exclude so it doesn't pollute .gitignore."""
+    from mship.cli import container, app
+    from mship.core.workspace_marker import MARKER_NAME
+    from typer.testing import CliRunner
+    runner = CliRunner()
+
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(workspace_with_git / "mothership.yaml")
+    container.state_dir.override(workspace_with_git / ".mothership")
+    (workspace_with_git / ".mothership").mkdir(exist_ok=True)
+
+    try:
+        result = runner.invoke(
+            app, ["spawn", "exclude test", "--repos", "shared", "--skip-setup", "--force-audit"]
+        )
+        assert result.exit_code == 0, result.output
+        parent_repo = workspace_with_git / "shared"
+        # git worktree add <branch> creates state at .git/worktrees/<slug-last-segment>/
+        # Find whatever per-worktree dir was actually created.
+        worktrees_dir = parent_repo / ".git" / "worktrees"
+        assert worktrees_dir.is_dir(), "no per-worktree state dir created"
+        candidates = list(worktrees_dir.iterdir())
+        assert candidates, "no per-worktree state entries"
+        # Pick the one matching the branch we spawned.
+        info_exclude = None
+        for c in candidates:
+            if c.is_dir() and "exclude-test" in c.name:
+                info_exclude = c / "info" / "exclude"
+                break
+        if info_exclude is None:
+            info_exclude = candidates[0] / "info" / "exclude"
+        assert info_exclude.is_file(), f"exclude file not found at {info_exclude}"
+        content = info_exclude.read_text()
+        assert MARKER_NAME in content, f"{MARKER_NAME} not in {content!r}"
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()

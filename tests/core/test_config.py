@@ -635,3 +635,66 @@ def test_bind_files_empty_list_is_default(tmp_path):
     )
     cfg = ConfigLoader.load(cfg_path)
     assert cfg.repos["r"].bind_files == []
+
+
+def test_discover_env_var_valid(tmp_path, monkeypatch):
+    from mship.core.config import ConfigLoader
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    other = tmp_path / "other"; other.mkdir()
+    monkeypatch.setenv("MSHIP_WORKSPACE", str(root))
+    path = ConfigLoader.discover(other)
+    assert path == root / "mothership.yaml"
+
+
+def test_discover_env_var_invalid_raises(tmp_path, monkeypatch):
+    from mship.core.config import ConfigLoader
+    import pytest
+    monkeypatch.setenv("MSHIP_WORKSPACE", str(tmp_path / "does-not-exist"))
+    with pytest.raises(FileNotFoundError) as exc:
+        ConfigLoader.discover(tmp_path)
+    assert "MSHIP_WORKSPACE" in str(exc.value)
+
+
+def test_discover_marker_precedes_walk_up(tmp_path, monkeypatch):
+    """Marker at worktree points to root A; walk-up would find root B.
+    Marker wins."""
+    from mship.core.config import ConfigLoader
+    from mship.core.workspace_marker import write_marker
+    monkeypatch.delenv("MSHIP_WORKSPACE", raising=False)
+
+    root_a = tmp_path / "a-ws"; root_a.mkdir()
+    (root_a / "mothership.yaml").write_text("workspace: a\nrepos: {}\n")
+
+    root_b = tmp_path / "b-ws"; root_b.mkdir()
+    (root_b / "mothership.yaml").write_text("workspace: b\nrepos: {}\n")
+    worktree = root_b / "wt"; worktree.mkdir()
+    write_marker(worktree, root_a)
+
+    path = ConfigLoader.discover(worktree)
+    assert path == root_a / "mothership.yaml"
+
+
+def test_discover_stale_marker_falls_through_to_walk_up(tmp_path, monkeypatch):
+    from mship.core.config import ConfigLoader
+    from mship.core.workspace_marker import MARKER_NAME
+    monkeypatch.delenv("MSHIP_WORKSPACE", raising=False)
+
+    root = tmp_path / "ws"; root.mkdir()
+    (root / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    worktree = root / "sub"; worktree.mkdir()
+    (worktree / MARKER_NAME).write_text(str(tmp_path / "nope"))
+
+    path = ConfigLoader.discover(worktree)
+    assert path == root / "mothership.yaml"
+
+
+def test_discover_walk_up_unchanged_when_no_env_no_marker(tmp_path, monkeypatch):
+    """Regression: existing behavior works when env var and marker both absent."""
+    from mship.core.config import ConfigLoader
+    monkeypatch.delenv("MSHIP_WORKSPACE", raising=False)
+    root = tmp_path / "ws"; root.mkdir()
+    (root / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    nested = root / "a" / "b"; nested.mkdir(parents=True)
+    assert ConfigLoader.discover(nested) == root / "mothership.yaml"

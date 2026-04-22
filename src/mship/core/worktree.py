@@ -9,6 +9,9 @@ from mship.core.graph import DependencyGraph
 from mship.core.log import LogManager
 from mship.core.reconcile.fetch import workspace_default_branch_from_config
 from mship.core.state import StateManager, Task, WorkspaceState
+from mship.core.workspace_marker import (
+    MARKER_NAME, append_to_worktree_exclude, write_marker,
+)
 from mship.util.git import GitRunner
 from mship.util.shell import ShellRunner
 from mship.util.slug import slugify
@@ -243,6 +246,7 @@ class WorktreeManager:
         repos: list[str] | None = None,
         skip_setup: bool = False,
         slug: str | None = None,
+        workspace_root: Path | None = None,
     ) -> SpawnResult:
         slug = slug if slug is not None else slugify(description)
         branch = self._config.branch_pattern.replace("{slug}", slug)
@@ -312,6 +316,20 @@ class WorktreeManager:
                 branch=branch,
             )
             worktrees[repo_name] = wt_path
+
+            # Drop the .mship-workspace marker so subrepo worktrees can
+            # discover the workspace (#84) and add it to the per-worktree
+            # info/exclude so it doesn't pollute tracked .gitignore.
+            if workspace_root is not None:
+                write_marker(wt_path, workspace_root)
+                slug_segment = branch.split("/")[-1]
+                if not append_to_worktree_exclude(
+                    wt_path, repo_path / ".git", slug_segment
+                ):
+                    setup_warnings.append(
+                        f"{repo_name}: could not add {MARKER_NAME} to "
+                        f"per-worktree exclude — add it to .gitignore manually."
+                    )
 
             # Create symlinks before setup so setup can use the linked dirs
             symlink_warnings = self._create_symlinks(repo_name, repo_config, wt_path)
