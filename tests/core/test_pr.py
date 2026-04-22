@@ -190,7 +190,7 @@ def test_verify_base_exists_nonzero_exit_false(mock_shell: MagicMock):
 def test_check_pr_state_merged(mock_shell: MagicMock):
     mock_shell.run.return_value = ShellResult(returncode=0, stdout="MERGED\n", stderr="")
     mgr = PRManager(mock_shell)
-    assert mgr.check_pr_state("https://github.com/o/r/pull/1") == "merged"
+    assert mgr.check_pr_state("https://github.com/o/r/pull/1").state == "merged"
     cmd = mock_shell.run.call_args.args[0]
     assert "gh pr view" in cmd
     assert "--json state" in cmd
@@ -199,25 +199,25 @@ def test_check_pr_state_merged(mock_shell: MagicMock):
 def test_check_pr_state_closed(mock_shell: MagicMock):
     mock_shell.run.return_value = ShellResult(returncode=0, stdout="CLOSED\n", stderr="")
     mgr = PRManager(mock_shell)
-    assert mgr.check_pr_state("https://x/1") == "closed"
+    assert mgr.check_pr_state("https://x/1").state == "closed"
 
 
 def test_check_pr_state_open(mock_shell: MagicMock):
     mock_shell.run.return_value = ShellResult(returncode=0, stdout="OPEN\n", stderr="")
     mgr = PRManager(mock_shell)
-    assert mgr.check_pr_state("https://x/1") == "open"
+    assert mgr.check_pr_state("https://x/1").state == "open"
 
 
 def test_check_pr_state_unknown_on_failure(mock_shell: MagicMock):
     mock_shell.run.return_value = ShellResult(returncode=1, stdout="", stderr="not found")
     mgr = PRManager(mock_shell)
-    assert mgr.check_pr_state("https://x/1") == "unknown"
+    assert mgr.check_pr_state("https://x/1").state == "unknown"
 
 
 def test_check_pr_state_unknown_on_unexpected_output(mock_shell: MagicMock):
     mock_shell.run.return_value = ShellResult(returncode=0, stdout="DRAFT\n", stderr="")
     mgr = PRManager(mock_shell)
-    assert mgr.check_pr_state("https://x/1") == "unknown"
+    assert mgr.check_pr_state("https://x/1").state == "unknown"
 
 
 def test_check_merged_into_base_true(mock_shell: MagicMock):
@@ -514,3 +514,63 @@ def test_create_pr_rest_fallback_parses_https_without_git_suffix(mock_shell: Mag
     )
     cmds = [c.args[0] for c in mock_shell.run.call_args_list]
     assert any("repos/a/b/pulls" in c for c in cmds)
+
+
+# --- _classify_pr_state_reason + PrStateResult (issue #73) ---
+
+
+@pytest.mark.parametrize("stderr,expected", [
+    ("GraphQL: API rate limit exceeded for user ID 1", "rate limited"),
+    ("You have exceeded a secondary rate limit", "rate limited"),
+    ("authentication required; run 'gh auth login'", "gh not authenticated"),
+    ("error: not logged in", "gh not authenticated"),
+    ("could not resolve host: api.github.com", "network error"),
+    ("connection timed out", "network error"),
+    ("could not find pull request", "not found"),
+    ("GraphQL: Could not resolve to a PullRequest", "not found"),
+    ("HTTP 404: Not Found", "not found"),
+])
+def test_classify_pr_state_reason_signatures(stderr, expected):
+    from mship.core.pr import _classify_pr_state_reason
+    assert _classify_pr_state_reason(returncode=1, stderr=stderr, raw_state="") == expected
+
+
+def test_classify_pr_state_reason_unmapped_state():
+    from mship.core.pr import _classify_pr_state_reason
+    reason = _classify_pr_state_reason(returncode=0, stderr="", raw_state="DRAFT")
+    assert reason == "unmapped state: DRAFT"
+
+
+def test_classify_pr_state_reason_gh_not_installed():
+    from mship.core.pr import _classify_pr_state_reason
+    assert _classify_pr_state_reason(returncode=127, stderr="", raw_state="") == "gh not installed"
+
+
+def test_classify_pr_state_reason_other_excerpt():
+    """Unmatched stderr falls into 'other: <80-char excerpt>'."""
+    from mship.core.pr import _classify_pr_state_reason
+    stderr = "some unexpected error message we haven't classified: very long " * 3
+    reason = _classify_pr_state_reason(returncode=1, stderr=stderr, raw_state="")
+    assert reason.startswith("other: ")
+    assert len(reason) <= len("other: ") + 80
+
+
+def test_check_pr_state_returns_pr_state_result_tuple(mock_shell):
+    """Return value is a NamedTuple with .state and .reason."""
+    from mship.core.pr import PRManager, PrStateResult
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="MERGED\n", stderr="")
+    result = PRManager(mock_shell).check_pr_state("https://x/1")
+    assert isinstance(result, PrStateResult)
+    assert result.state == "merged"
+    assert result.reason == ""
+
+
+def test_check_pr_state_unknown_rate_limit_surfaces_reason(mock_shell):
+    from mship.core.pr import PRManager
+    mock_shell.run.return_value = ShellResult(
+        returncode=1, stdout="",
+        stderr="GraphQL: API rate limit exceeded for user ID 1",
+    )
+    result = PRManager(mock_shell).check_pr_state("https://x/1")
+    assert result.state == "unknown"
+    assert result.reason == "rate limited"

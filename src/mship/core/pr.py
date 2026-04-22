@@ -2,8 +2,54 @@ import json
 import re
 import shlex
 from pathlib import Path
+from typing import NamedTuple
 
 from mship.util.shell import ShellRunner
+
+
+class PrStateResult(NamedTuple):
+    """Result of `PRManager.check_pr_state`.
+
+    `state` is one of `merged` / `closed` / `open` / `unknown`. `reason` is
+    empty for known states; for `unknown` it's a classified label
+    (`rate limited`, `gh not authenticated`, `network error`, `not found`,
+    `unmapped state: <raw>`, `gh not installed`, or `other: <excerpt>`).
+    Callers include `reason` in log messages so users can act on the cause.
+    """
+    state: str
+    reason: str
+
+
+def _classify_pr_state_reason(returncode: int, stderr: str, raw_state: str) -> str:
+    """Classify why `gh pr view` produced an unknown state. See #73."""
+    if returncode == 127:
+        return "gh not installed"
+    if returncode == 0 and raw_state:
+        return f"unmapped state: {raw_state.strip()}"
+    s = stderr.lower()
+    if "rate limit" in s:
+        return "rate limited"
+    if (
+        "authentication" in s
+        or "not logged in" in s
+        or "gh auth login" in s
+    ):
+        return "gh not authenticated"
+    if (
+        "could not resolve host" in s
+        or "network is unreachable" in s
+        or "connection timed out" in s
+    ):
+        return "network error"
+    if (
+        "not found" in s
+        or "could not find pull request" in s
+        or "could not resolve to a pullrequest" in s
+        or "http 404" in s
+    ):
+        return "not found"
+    excerpt = stderr.strip()[:80]
+    return f"other: {excerpt}" if excerpt else "other: (no stderr)"
 
 
 _REMOTE_URL_RE = re.compile(
@@ -259,20 +305,27 @@ class PRManager:
         url = result.stdout.strip()
         return url or None
 
-    def check_pr_state(self, pr_url: str) -> str:
-        """Return 'merged', 'closed', 'open', or 'unknown' for a PR URL.
+    def check_pr_state(self, pr_url: str) -> PrStateResult:
+        """Return (state, reason) for a PR URL.
 
-        Uses `gh pr view --json state`. Any failure returns 'unknown'.
+        state: 'merged' | 'closed' | 'open' | 'unknown'.
+        reason: empty string for known states; classified label for unknown
+        (see `_classify_pr_state_reason`).
         """
         result = self._shell.run(
             f"gh pr view {shlex.quote(pr_url)} --json state -q .state",
             cwd=Path("."),
         )
-        if result.returncode != 0:
-            return "unknown"
         raw = result.stdout.strip().upper()
         mapping = {"MERGED": "merged", "CLOSED": "closed", "OPEN": "open"}
-        return mapping.get(raw, "unknown")
+        if result.returncode == 0 and raw in mapping:
+            return PrStateResult(state=mapping[raw], reason="")
+        reason = _classify_pr_state_reason(
+            returncode=result.returncode,
+            stderr=result.stderr,
+            raw_state=raw if result.returncode == 0 else "",
+        )
+        return PrStateResult(state="unknown", reason=reason)
 
     def get_pr_body(self, pr_url: str) -> str:
         result = self._shell.run(

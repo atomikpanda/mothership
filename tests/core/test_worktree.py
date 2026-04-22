@@ -849,3 +849,153 @@ def test_spawn_skips_setup_when_task_binary_missing(worktree_deps, monkeypatch):
         call.kwargs.get("task_name") == "setup"
         for call in shell.run_task.call_args_list
     )
+
+
+# --- _symlink_gitignore_footgun truth-table tests (issue #72) ---
+
+
+def _init_git_repo(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=path, check=True)
+
+
+def test_footgun_fires_when_only_dir_form_ignored(tmp_path: Path):
+    """`.gitignore` has `foo/` but not `foo` → footgun. See #72."""
+    from mship.core.worktree import _symlink_gitignore_footgun
+    repo = tmp_path / "r"
+    _init_git_repo(repo)
+    (repo / ".gitignore").write_text("foo/\n")
+    assert _symlink_gitignore_footgun(repo, "foo") is True
+
+
+def test_footgun_silent_when_plain_name_ignored(tmp_path: Path):
+    """`.gitignore` has `foo` (no slash) → matches both; no footgun."""
+    from mship.core.worktree import _symlink_gitignore_footgun
+    repo = tmp_path / "r"
+    _init_git_repo(repo)
+    (repo / ".gitignore").write_text("foo\n")
+    assert _symlink_gitignore_footgun(repo, "foo") is False
+
+
+def test_footgun_silent_when_both_forms_ignored(tmp_path: Path):
+    from mship.core.worktree import _symlink_gitignore_footgun
+    repo = tmp_path / "r"
+    _init_git_repo(repo)
+    (repo / ".gitignore").write_text("foo\nfoo/\n")
+    assert _symlink_gitignore_footgun(repo, "foo") is False
+
+
+def test_footgun_silent_when_neither_form_ignored(tmp_path: Path):
+    """Legitimate tracked symlink case — no warning."""
+    from mship.core.worktree import _symlink_gitignore_footgun
+    repo = tmp_path / "r"
+    _init_git_repo(repo)
+    (repo / ".gitignore").write_text("unrelated\n")
+    assert _symlink_gitignore_footgun(repo, "foo") is False
+
+
+def test_footgun_detected_post_symlink(tmp_path: Path):
+    """After the symlink exists pointing outside the repo, `check-ignore foo/`
+    fails with exit 128 (beyond a symbolic link). The helper must fall back
+    to pattern-only matching and still detect the footgun for unanchored
+    patterns — this is what makes the doctor check work. See #72."""
+    from mship.core.worktree import _symlink_gitignore_footgun
+    repo = tmp_path / "r"
+    _init_git_repo(repo)
+    (repo / ".gitignore").write_text("foo/\n")
+    external = tmp_path / "ext"
+    external.mkdir()
+    (external / "file.txt").write_text("data")
+    (repo / "foo").symlink_to(external)
+    # Direct probe would hit "beyond a symbolic link"; fallback must still fire.
+    assert _symlink_gitignore_footgun(repo, "foo") is True
+
+
+def test_footgun_silent_post_symlink_when_plain_ignored(tmp_path: Path):
+    """Post-symlink regression: `.gitignore` has `foo` (no slash) → no warning."""
+    from mship.core.worktree import _symlink_gitignore_footgun
+    repo = tmp_path / "r"
+    _init_git_repo(repo)
+    (repo / ".gitignore").write_text("foo\n")
+    external = tmp_path / "ext"
+    external.mkdir()
+    (repo / "foo").symlink_to(external)
+    assert _symlink_gitignore_footgun(repo, "foo") is False
+
+
+def test_create_symlinks_warns_on_dir_form_gitignore_footgun(tmp_path: Path):
+    """Spawn path: `.gitignore` has `foo/` and `symlink_dirs: [foo]` → warning. See #72."""
+    from mship.core.config import RepoConfig, WorkspaceConfig
+    from mship.core.state import StateManager
+    from mship.core.worktree import WorktreeManager
+    from mship.core.graph import DependencyGraph
+    from mship.util.shell import ShellRunner
+    from unittest.mock import MagicMock
+
+    # Source repo with `foo/` directory + `.gitignore` ignoring `foo/` only.
+    source = tmp_path / "source"
+    _init_git_repo(source)
+    (source / "foo").mkdir()
+    (source / "foo" / "data.txt").write_text("x")
+    (source / ".gitignore").write_text("foo/\n")
+    subprocess.run(["git", "add", ".gitignore"], cwd=source, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=source, check=True)
+
+    repo_cfg = RepoConfig(
+        path=source, type="service", symlink_dirs=["foo"],
+    )
+    cfg = WorkspaceConfig(workspace="t", repos={"src": repo_cfg})
+    mgr = WorktreeManager(
+        config=cfg,
+        state_manager=MagicMock(spec=StateManager),
+        shell=MagicMock(spec=ShellRunner),
+        graph=None,
+        git=MagicMock(),
+        log=MagicMock(),
+    )
+
+    # Call `_create_symlinks` directly so we don't exercise the whole spawn pipeline.
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    # Initialize git in the worktree so check-ignore has something to resolve.
+    _init_git_repo(worktree)
+    (worktree / ".gitignore").write_text("foo/\n")
+    warnings = mgr._create_symlinks("src", repo_cfg, worktree)
+    assert any("foo" in w and "not ignored" in w for w in warnings), warnings
+
+
+def test_create_symlinks_no_warn_when_plain_name_ignored(tmp_path: Path):
+    """Regression: `.gitignore` with `foo` (no slash) → NO warning."""
+    from mship.core.config import RepoConfig, WorkspaceConfig
+    from mship.core.state import StateManager
+    from mship.core.worktree import WorktreeManager
+    from mship.core.graph import DependencyGraph
+    from mship.util.shell import ShellRunner
+    from unittest.mock import MagicMock
+
+    source = tmp_path / "source"
+    _init_git_repo(source)
+    (source / "foo").mkdir()
+    (source / ".gitignore").write_text("foo\n")  # no trailing slash
+    subprocess.run(["git", "add", ".gitignore"], cwd=source, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=source, check=True)
+
+    repo_cfg = RepoConfig(path=source, type="service", symlink_dirs=["foo"])
+    cfg = WorkspaceConfig(workspace="t", repos={"src": repo_cfg})
+    mgr = WorktreeManager(
+        config=cfg,
+        state_manager=MagicMock(spec=StateManager),
+        shell=MagicMock(spec=ShellRunner),
+        graph=None,
+        git=MagicMock(),
+        log=MagicMock(),
+    )
+
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    _init_git_repo(worktree)
+    (worktree / ".gitignore").write_text("foo\n")
+    warnings = mgr._create_symlinks("src", repo_cfg, worktree)
+    assert not any("not ignored" in w for w in warnings), warnings

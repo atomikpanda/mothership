@@ -1423,4 +1423,51 @@ def test_finish_does_not_capture_diagnostic_when_main_is_clean(configured_git_ap
         # No post-op diagnostics present for this run.
         assert not any("finish-dirty-main-post-op" in n for n in names), names
 
-    cli_container.shell.reset_override()
+
+def test_close_logs_rate_limit_reason_when_pr_state_unknown(configured_git_app: Path):
+    """When gh pr view fails with rate-limit stderr, close surfaces the reason. See #73."""
+    from mship.cli import container as cli_container
+    from mship.util.shell import ShellResult, ShellRunner
+    from unittest.mock import MagicMock
+
+    runner.invoke(app, ["spawn", "rate-limit close", "--repos", "shared"])
+    # Set a pr_url manually so close actually calls gh pr view.
+    import yaml
+    state_path = configured_git_app / ".mothership" / "state.yaml"
+    data = yaml.safe_load(state_path.read_text())
+    data["tasks"]["rate-limit-close"]["pr_urls"] = {
+        "shared": "https://github.com/org/repo/pull/1"
+    }
+    data["tasks"]["rate-limit-close"]["finished_at"] = "2026-04-22T00:00:00Z"
+    state_path.write_text(yaml.safe_dump(data))
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh pr view" in cmd and "--json state" in cmd:
+            return ShellResult(
+                returncode=1, stdout="",
+                stderr="GraphQL: API rate limit exceeded for user ID 1",
+            )
+        if "gh pr view" in cmd:
+            return ShellResult(returncode=1, stdout="", stderr="err")
+        if "git log" in cmd or "merge-base" in cmd or "rev-parse" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    cli_container.shell.override(mock_shell)
+    try:
+        result = runner.invoke(
+            app, ["close", "rate-limit-close", "-y", "--force", "--bypass-base-ancestry"],
+        )
+        log_path = configured_git_app / ".mothership" / "logs" / "rate-limit-close.md"
+        if log_path.exists():
+            log_content = log_path.read_text()
+        else:
+            log_content = result.output
+        assert "rate limited" in log_content or "rate limited" in result.output, (
+            f"result.output={result.output!r}\nlog={log_content!r}"
+        )
+    finally:
+        cli_container.shell.reset_override()

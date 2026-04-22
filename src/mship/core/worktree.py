@@ -1,4 +1,5 @@
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -17,6 +18,56 @@ from mship.util.slug import slugify
 class SpawnResult:
     task: Task
     setup_warnings: list[str] = field(default_factory=list)
+
+
+def _symlink_gitignore_footgun(repo_path: Path, name: str) -> bool:
+    """Return True when `.gitignore` ignores `<name>/` (dir form) but not `<name>` alone.
+
+    This is the specific footgun that breaks `symlink_dirs`: git treats the
+    symlink as a file, not a directory, so a dir-only ignore pattern
+    (`foo/`) doesn't match the symlink (`foo`), and it shows up as untracked.
+
+    Probes via `git check-ignore` — exit 0 = ignored, 1 = not ignored, >1 = error.
+
+    Post-symlink wrinkle: once `<name>` is a symlink pointing outside the
+    repo, `git check-ignore <name>/` fails with `fatal: pathspec is beyond
+    a symbolic link` (exit 128). Fall back to probing under a synthetic
+    non-existent parent (`_mship_probe_absent_/<name>/`) to force pure
+    pattern matching. This loses anchored patterns like `/foo/` in the
+    post-symlink case — but spawn catches those via the direct probe
+    before the symlink is created, so the common unanchored case is
+    covered from both call sites.
+
+    On any error we bail to False (no warning) to avoid false positives.
+    """
+    def _probe(path_fragment: str) -> subprocess.CompletedProcess | None:
+        try:
+            return subprocess.run(
+                ["git", "check-ignore", "--", path_fragment],
+                cwd=repo_path, capture_output=True, text=True, check=False,
+            )
+        except OSError:
+            return None
+
+    dir_r = _probe(f"{name}/")
+    file_r = _probe(name)
+    if dir_r is None or file_r is None:
+        return False
+
+    # Fallback for post-symlink case: probe via non-existent parent to force
+    # pure pattern matching when the direct dir-form probe hits the
+    # "beyond a symbolic link" error.
+    if (
+        dir_r.returncode == 128
+        and "beyond a symbolic link" in dir_r.stderr.lower()
+    ):
+        dir_r = _probe(f"_mship_probe_absent_/{name}/")
+        if dir_r is None:
+            return False
+
+    dir_ignored = dir_r.returncode == 0
+    file_ignored = file_r.returncode == 0
+    return dir_ignored and not file_ignored
 
 
 class WorktreeManager:
@@ -166,10 +217,23 @@ class WorktreeManager:
                 )
                 continue
 
+            # Detect the `.gitignore has 'foo/' but not 'foo'` footgun before
+            # creating the symlink — git check-ignore behaves differently once
+            # the symlink exists (exit 128 for 'foo/' when foo → external dir).
+            # Probe while the path is still absent from the worktree. See #72.
+            footgun = _symlink_gitignore_footgun(worktree_path, dir_name)
+
             if target.is_symlink():
                 target.unlink()
 
             target.symlink_to(source.resolve())
+
+            if footgun:
+                warnings.append(
+                    f"{repo_name}: symlink '{dir_name}' is not ignored — "
+                    f"git treats it as an untracked file. "
+                    f"Add '{dir_name}' (not just '{dir_name}/') to .gitignore."
+                )
 
         return warnings
 

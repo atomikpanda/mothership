@@ -492,3 +492,43 @@ def test_doctor_no_diagnostics_row_when_absent(workspace: Path):
     report = DoctorChecker(config, shell, state_dir=workspace / ".mothership").run()
     diag_checks = [c for c in report.checks if c.name == "diagnostics"]
     assert len(diag_checks) == 0
+
+
+def test_doctor_warns_on_symlink_gitignore_footgun(workspace: Path):
+    """Doctor row per symlink_dir whose `.gitignore` has dir-form only. See #72."""
+    import subprocess
+    from mship.core.config import ConfigLoader
+    from mship.core.doctor import DoctorChecker
+    from mship.util.shell import ShellRunner
+    from unittest.mock import MagicMock
+    from mship.util.shell import ShellResult
+
+    # Workspace fixture already has a `shared` repo. Make it a git repo with
+    # `foo/` in .gitignore and `symlink_dirs: [foo]`.
+    import yaml
+    cfg_path = workspace / "mothership.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["repos"]["shared"]["symlink_dirs"] = ["foo"]
+    cfg_path.write_text(yaml.safe_dump(cfg))
+
+    shared = workspace / "shared"
+    shared.mkdir(exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=shared, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=shared, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=shared, check=True)
+    (shared / ".gitignore").write_text("foo/\n")
+    (shared / "Taskfile.yml").write_text("version: '3'\ntasks: {test: {cmds: ['true']}, run: {cmds: ['true']}}\n")
+    subprocess.run(["git", "add", "."], cwd=shared, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=shared, check=True)
+
+    config = ConfigLoader.load(workspace / "mothership.yaml")
+    shell = MagicMock(spec=ShellRunner)
+    shell.run.return_value = ShellResult(
+        returncode=0, stdout="test\nrun\nlint\nsetup\n", stderr="",
+    )
+
+    report = DoctorChecker(config, shell, state_dir=workspace / ".mothership").run()
+    rows = [c for c in report.checks if "symlink-ignore" in c.name]
+    assert len(rows) == 1, [c.name for c in report.checks]
+    assert rows[0].status == "warn"
+    assert "foo" in rows[0].message
