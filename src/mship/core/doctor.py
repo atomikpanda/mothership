@@ -224,6 +224,29 @@ class DoctorChecker:
                     ),
                 ))
 
+        # Symlink-gitignore footgun check (#72).
+        from mship.core.worktree import _symlink_gitignore_footgun
+        for name, repo in self._config.repos.items():
+            if not repo.symlink_dirs:
+                continue
+            if repo.git_root is not None:
+                parent = self._config.repos[repo.git_root]
+                check_path = Path(parent.path).resolve()
+            else:
+                check_path = Path(repo.path).resolve()
+            if not (check_path / ".git").exists():
+                continue  # can't check-ignore without a git repo
+            for dir_name in repo.symlink_dirs:
+                if _symlink_gitignore_footgun(check_path, dir_name):
+                    report.checks.append(CheckResult(
+                        name=f"{name}/symlink-ignore",
+                        status="warn",
+                        message=(
+                            f"symlink '{dir_name}' is not ignored — "
+                            f"add '{dir_name}' (no trailing slash) to .gitignore"
+                        ),
+                    ))
+
         # gh CLI
         gh_result = self._shell.run("gh auth status", cwd=Path("."))
         if gh_result.returncode == 0:
