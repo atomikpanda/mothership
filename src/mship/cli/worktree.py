@@ -310,6 +310,7 @@ def register(app: typer.Typer, get_container):
 
         result = wt_mgr.spawn(
             description, repos=repo_list, skip_setup=skip_setup, slug=slug,
+            workspace_root=container.config_path().parent,
         )
         task = result.task
 

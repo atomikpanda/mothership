@@ -70,8 +70,13 @@ def append_to_worktree_exclude(
     """
     try:
         info_dir = Path(parent_git_dir) / "worktrees" / slug / "info"
+        # git does not create info/ by default; create it if the parent
+        # worktree state dir exists (i.e. <git_dir>/worktrees/<slug>/ is present).
         if not info_dir.is_dir():
-            return False
+            parent = info_dir.parent
+            if not parent.is_dir():
+                return False
+            info_dir.mkdir()
         exclude = info_dir / "exclude"
         existing = exclude.read_text() if exclude.is_file() else ""
         if MARKER_NAME in existing.splitlines():
