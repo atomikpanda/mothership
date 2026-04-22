@@ -460,6 +460,7 @@ def register(app: typer.Typer, get_container):
 
         # Determine the log message based on PR state.
         pr_states: list[str] = []  # parallel to task.pr_urls values
+        pr_state_results: list = []  # PrStateResult entries; populated when gh check runs
         if task.pr_urls and not skip_pr_check:
             import shutil
             if shutil.which("gh") is None and not force:
@@ -468,7 +469,8 @@ def register(app: typer.Typer, get_container):
                 )
                 raise typer.Exit(code=1)
             for url in task.pr_urls.values():
-                pr_states.append(pr_mgr.check_pr_state(url))
+                pr_state_results.append(pr_mgr.check_pr_state(url))
+            pr_states = [r.state for r in pr_state_results]
 
         # Route on PR states
         open_count = sum(1 for s in pr_states if s == "open")
@@ -499,7 +501,16 @@ def register(app: typer.Typer, get_container):
         elif merged_count and closed_count:
             log_msg = f"closed: mixed ({merged_count} merged, {closed_count} closed)"
         else:
-            log_msg = "closed: pr state unknown"
+            # Surface the classification reason so users can act on the cause
+            # (auth, network, rate limit, etc). See #73.
+            unknown_reasons = [
+                r.reason for r in pr_state_results
+                if r.state == "unknown" and r.reason
+            ]
+            if unknown_reasons:
+                log_msg = f"closed: pr state unknown ({unknown_reasons[0]})"
+            else:
+                log_msg = "closed: pr state unknown"
 
         # --- Base-ancestry check (issue #33) ---
         # Catches stacked-PR footgun: PR shows MERGED but its merge commit
