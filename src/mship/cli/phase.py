@@ -2,7 +2,7 @@ from typing import Optional
 
 import typer
 
-from mship.cli._resolve import resolve_or_exit
+from mship.cli._resolve import resolve_for_command
 from mship.cli.output import Output
 from mship.core.phase import PHASE_ORDER, FinishedTaskError
 
@@ -25,7 +25,8 @@ def register(app: typer.Typer, get_container):
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
-        t = resolve_or_exit(state, task)
+        resolved = resolve_for_command("phase", state, task, output)
+        t = resolved.task
 
         if t.blocked_reason and not force:
             output.error(
@@ -56,4 +57,6 @@ def register(app: typer.Typer, get_container):
                 "task": t.slug,
                 "phase": result.new_phase,
                 "warnings": result.warnings,
+                "resolved_task": resolved.task.slug,
+                "resolution_source": resolved.source,
             })

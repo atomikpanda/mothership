@@ -65,7 +65,7 @@ def register(app: typer.Typer, get_container):
     ):
         """Run tests across affected repos; show diff vs. previous iteration."""
         from datetime import datetime, timezone
-        from mship.cli._resolve import resolve_or_exit
+        from mship.cli._resolve import resolve_for_command
         from mship.core.test_history import (
             write_run, read_run, latest_iteration, compute_diff, prune,
         )
@@ -75,7 +75,8 @@ def register(app: typer.Typer, get_container):
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
-        t = resolve_or_exit(state, task)
+        resolved = resolve_for_command("exec", state, task, output)
+        t = resolved.task
 
         from pathlib import Path as _P
         from mship.cli._cwd_check import format_cwd_warning
@@ -210,6 +211,8 @@ def register(app: typer.Typer, get_container):
             payload = dict(current_run)
             if diff is not None:
                 payload["diff"] = diff
+            payload["resolved_task"] = resolved.task.slug
+            payload["resolution_source"] = resolved.source
             output.json(payload)
 
         if not result.success:
@@ -248,7 +251,7 @@ def register(app: typer.Typer, get_container):
         # slug is still an error.
         fallback_repos: list[str]
         try:
-            t = resolve_task(
+            t, _ = resolve_task(
                 state,
                 cli_task=task,
                 env_task=_os.environ.get("MSHIP_TASK"),
@@ -388,7 +391,7 @@ def register(app: typer.Typer, get_container):
         # an explicit --task / MSHIP_TASK pointing at an unknown slug errors.
         resolved_task = None
         try:
-            resolved_task = resolve_task(
+            resolved_task, _ = resolve_task(
                 state,
                 cli_task=task,
                 env_task=_os.environ.get("MSHIP_TASK"),

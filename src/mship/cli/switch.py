@@ -2,7 +2,7 @@ from typing import Optional
 
 import typer
 
-from mship.cli._resolve import resolve_or_exit
+from mship.cli._resolve import resolve_for_command
 from mship.cli.output import Output
 
 
@@ -26,7 +26,8 @@ def register(app: typer.Typer, get_container):
         shell = container.shell()
         log_mgr = container.log_manager()
 
-        t = resolve_or_exit(state, task_opt)
+        resolved = resolve_for_command("switch", state, task_opt, output)
+        t = resolved.task
 
         if repo is None:
             if t.active_repo is None:
@@ -63,7 +64,10 @@ def register(app: typer.Typer, get_container):
         handoff = build_handoff(config, state_mgr.load(), shell, log_mgr, repo=target, task_slug=t.slug)
 
         if not output.is_tty:
-            output.json(handoff.to_json())
+            json_payload = handoff.to_json()
+            json_payload["resolved_task"] = resolved.task.slug
+            json_payload["resolution_source"] = resolved.source
+            output.json(json_payload)
             return
 
         # TTY rendering

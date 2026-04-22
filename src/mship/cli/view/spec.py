@@ -85,7 +85,7 @@ class SpecView(ViewApp):
             return None
         if self._task_filter is not None:
             return self._task_filter
-        task = resolve_task(
+        task, _ = resolve_task(
             state,
             cli_task=self._cli_task,
             env_task=os.environ.get("MSHIP_TASK"),

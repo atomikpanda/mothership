@@ -3,7 +3,7 @@ from typing import Optional
 
 import typer
 
-from mship.cli._resolve import resolve_or_exit
+from mship.cli._resolve import resolve_for_command
 from mship.cli.output import Output
 
 
@@ -19,7 +19,8 @@ def register(app: typer.Typer, get_container):
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
-        t = resolve_or_exit(state, task)
+        resolved = resolve_for_command("block", state, task, output)
+        t = resolved.task
 
         if t.blocked_reason is not None:
             output.error(
@@ -40,7 +41,12 @@ def register(app: typer.Typer, get_container):
         if output.is_tty:
             output.success(f"Task blocked: {reason}")
         else:
-            output.json({"task": t.slug, "blocked_reason": reason})
+            output.json({
+                "task": t.slug,
+                "blocked_reason": reason,
+                "resolved_task": resolved.task.slug,
+                "resolution_source": resolved.source,
+            })
 
     @app.command()
     def unblock(
@@ -52,7 +58,8 @@ def register(app: typer.Typer, get_container):
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
-        t = resolve_or_exit(state, task)
+        resolved = resolve_for_command("unblock", state, task, output)
+        t = resolved.task
 
         if t.blocked_reason is None:
             output.error("Task is not blocked. Use `mship block \"reason\"` to mark it as blocked.")
@@ -70,4 +77,9 @@ def register(app: typer.Typer, get_container):
         if output.is_tty:
             output.success("Task unblocked")
         else:
-            output.json({"task": t.slug, "blocked_reason": None})
+            output.json({
+                "task": t.slug,
+                "blocked_reason": None,
+                "resolved_task": resolved.task.slug,
+                "resolution_source": resolved.source,
+            })

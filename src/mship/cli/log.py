@@ -2,7 +2,7 @@ from typing import Optional
 
 import typer
 
-from mship.cli._resolve import resolve_or_exit
+from mship.cli._resolve import resolve_for_command
 from mship.cli.output import Output
 
 
@@ -29,7 +29,8 @@ def register(app: typer.Typer, get_container):
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
-        t = resolve_or_exit(state, task_opt)
+        resolved = resolve_for_command("log", state, task_opt, output)
+        t = resolved.task
 
         log_mgr = container.log_manager()
 
@@ -46,7 +47,11 @@ def register(app: typer.Typer, get_container):
                 if output.is_tty:
                     output.print("(no open questions)")
                 else:
-                    output.json({"open_questions": []})
+                    output.json({
+                        "open_questions": [],
+                        "resolved_task": resolved.task.slug,
+                        "resolution_source": resolved.source,
+                    })
                 return
             if output.is_tty:
                 output.print("[bold]Open questions:[/bold]")
@@ -55,14 +60,18 @@ def register(app: typer.Typer, get_container):
                     repo_prefix = f"{e.repo}: " if e.repo else ""
                     output.print(f"  [{rel}] {repo_prefix}{e.open_question}")
             else:
-                output.json({"open_questions": [
-                    {
-                        "timestamp": e.timestamp.isoformat(),
-                        "repo": e.repo,
-                        "question": e.open_question,
-                    }
-                    for e in opens
-                ]})
+                output.json({
+                    "open_questions": [
+                        {
+                            "timestamp": e.timestamp.isoformat(),
+                            "repo": e.repo,
+                            "question": e.open_question,
+                        }
+                        for e in opens
+                    ],
+                    "resolved_task": resolved.task.slug,
+                    "resolution_source": resolved.source,
+                })
             return
 
         if message is not None:
@@ -94,7 +103,12 @@ def register(app: typer.Typer, get_container):
             if output.is_tty:
                 output.success("Logged")
             else:
-                output.json({"task": t.slug, "logged": message})
+                output.json({
+                    "task": t.slug,
+                    "logged": message,
+                    "resolved_task": resolved.task.slug,
+                    "resolution_source": resolved.source,
+                })
             return
 
         # Read path (no message argument)
@@ -134,4 +148,6 @@ def register(app: typer.Typer, get_container):
                     }
                     for e in entries
                 ],
+                "resolved_task": resolved.task.slug,
+                "resolution_source": resolved.source,
             })

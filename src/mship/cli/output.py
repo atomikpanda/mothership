@@ -55,6 +55,16 @@ class Output:
         else:
             self.json({"title": title, "columns": columns, "rows": rows})
 
+    def breadcrumb(self, message: str) -> None:
+        """Dim informational line to stderr. Used for task-resolution breadcrumbs.
+
+        Suppressed when stdout is non-TTY (JSON-mode consumers should attach
+        the same info as structured fields in their payload). Stderr so it
+        doesn't corrupt stdout pipes; dim so it doesn't compete with real output.
+        """
+        if self.is_tty:
+            self._err_console.print(f"[dim]{message}[/dim]")
+
     def print(self, message: str) -> None:
         if self.is_tty:
             self._console.print(message)

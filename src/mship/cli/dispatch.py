@@ -9,7 +9,7 @@ from typing import Optional
 
 import typer
 
-from mship.cli._resolve import resolve_or_exit
+from mship.cli._resolve import resolve_for_command
 from mship.cli.output import Output
 from mship.core import dispatch as _d
 from mship.core.skill_install import pkg_skills_source
@@ -26,7 +26,8 @@ def register(app: typer.Typer, get_container):
         output = Output()
         container = get_container()
         state = container.state_manager().load()
-        task_obj = resolve_or_exit(state, task)
+        resolved = resolve_for_command("dispatch", state, task, output)
+        task_obj = resolved.task
 
         try:
             resolved_repo = _d.resolve_repo(task_obj, repo)

@@ -58,7 +58,7 @@ def register(app: typer.Typer, get_container):
             t = resolve_or_exit(state, task)
         else:
             try:
-                t = resolve_task(
+                t, _ = resolve_task(
                     state, cli_task=None, env_task=None, cwd=Path.cwd(),
                 )
             except (NoActiveTaskError, AmbiguousTaskError):

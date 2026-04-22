@@ -50,7 +50,7 @@ class LogsView(ViewApp):
         if self._task_slug is not None:
             return self._task_slug
         state = self._state_manager.load()
-        task = resolve_task(
+        task, _ = resolve_task(
             state,
             cli_task=self._cli_task,
             env_task=os.environ.get("MSHIP_TASK"),
