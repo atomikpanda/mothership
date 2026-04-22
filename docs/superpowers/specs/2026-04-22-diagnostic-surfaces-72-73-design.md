@@ -23,10 +23,13 @@ Two logically independent fixes, one PR (coherent "better diagnostic surfaces" t
 ## Scope
 
 ### #72 scope
-- New helper: probe `git check-ignore <literal_symlink_name>` inside each repo that has `symlink_dirs`.
-- Spawn: after each `target.symlink_to(...)` in `_create_symlinks`, add a non-fatal warning to the returned list when the check fails.
-- Doctor: new check per repo with `symlink_dirs` — iterate, probe each name, emit one `warn` row per bad entry.
-- Out of scope: auto-fixing the `.gitignore`. Out of scope: global workspace `.gitignore` — scope is per-repo.
+- New helper: probe two `git check-ignore` calls per symlink to detect the exact footgun:
+  1. `git check-ignore <name>/` (with trailing slash) — does the user's `.gitignore` intend to ignore the directory?
+  2. `git check-ignore <name>` (no trailing slash) — does it actually ignore the symlink (which git sees as a file)?
+- Warn **only when (1) is yes AND (2) is no**. That's the "dir-form-only ignore missed the symlink" case. Don't warn on symlinks whose originals weren't ignored at all — those are legitimate use cases where the user wants the linked content tracked.
+- Spawn: after each `target.symlink_to(...)` in `_create_symlinks`, add a non-fatal warning to the returned list when the footgun fires.
+- Doctor: new check per repo with `symlink_dirs` — iterate, probe each name, emit one `warn` row per footgun hit.
+- Out of scope: auto-fixing the `.gitignore`. Out of scope: global workspace `.gitignore` — scope is per-repo. Out of scope: warning on symlinks whose originals aren't ignored (legitimate tracked-symlink case).
 
 ### #73 scope
 - `check_pr_state` signature changes from `(pr_url) -> str` to `(pr_url) -> PrStateResult` NamedTuple with `state: str` (existing values: `merged` / `closed` / `open` / `unknown`) plus `reason: str` (empty for known states; populated for `unknown`).
@@ -46,13 +49,15 @@ Two logically independent fixes, one PR (coherent "better diagnostic surfaces" t
 Two small changes, each isolated to one subsystem. No shared helpers — the checks operate on different data.
 
 ```
+mship.core.worktree._symlink_gitignore_footgun(repo_path, name) -> bool
+  └─ True when `name/` is ignored but `name` is not (the footgun case)
+
 mship.core.worktree._create_symlinks()
-  └─ calls new helper _check_symlink_ignored(repo_path, name) -> bool
-     └─ appends warning to return list on miss
+  └─ probes the helper per symlink; appends warning to return list on hit
 
 mship.core.doctor.DoctorChecker.run()
   └─ new loop over repos with symlink_dirs
-     └─ same check helper, appends warn CheckResult per miss
+     └─ same helper, appends warn CheckResult per hit
 
 mship.core.pr.PRManager.check_pr_state() -> PrStateResult (NamedTuple)
   └─ classifies reason from subprocess result
@@ -108,10 +113,19 @@ One row per bad entry. `status=warn` (not `fail`) — consistent with other doct
 
 ### #72 tests (`tests/core/test_worktree.py` + `tests/core/test_doctor.py`)
 
-- Unit: `_check_symlink_ignored(repo_path, name)` returns False when `.gitignore` has `name/` (dir form only); True when `.gitignore` has `name`; True when both; False when neither.
-- Spawn integration: spawn a workspace where the repo's `.gitignore` has `foo/` (dir form) and `symlink_dirs: [foo]`; assert spawn output includes the warning.
+Truth table the helper must satisfy (returns True = footgun fires = warn):
+
+| `.gitignore` contains | `name/` ignored? | `name` ignored? | Footgun? |
+|---|---|---|---|
+| `name/` (dir form only) | yes | no | **yes** — warn |
+| `name` (no slash) | yes | yes | no |
+| both `name` and `name/` | yes | yes | no |
+| neither | no | no | no (legitimate tracked symlink) |
+
+- Unit: `_symlink_gitignore_footgun(repo_path, name)` returns True only for the dir-form-only row.
+- Spawn integration: spawn a workspace where `.gitignore` has `foo/` and `symlink_dirs: [foo]`; assert spawn output includes the warning.
 - Doctor integration: same setup, assert doctor report has a warn row with the expected name.
-- Regression: spawn where `.gitignore` has `foo` (no trailing slash) emits NO warning.
+- Regression: spawn where `.gitignore` has `foo` (no trailing slash) emits NO warning. Spawn where neither `foo` nor `foo/` is ignored emits NO warning (legitimate tracked case).
 
 ### #73 tests (`tests/core/test_pr.py` + `tests/cli/test_worktree.py`)
 
