@@ -48,10 +48,10 @@ def register(app: typer.Typer, get_container):
                     output.print("(no open questions)")
                 else:
                     output.json({
-                    "open_questions": [],
-                    "resolved_task": resolved.task.slug,
-                    "resolution_source": resolved.source,
-                })
+                        "open_questions": [],
+                        "resolved_task": resolved.task.slug,
+                        "resolution_source": resolved.source,
+                    })
                 return
             if output.is_tty:
                 output.print("[bold]Open questions:[/bold]")

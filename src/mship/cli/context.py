@@ -10,10 +10,17 @@ from typing import Optional
 
 import typer
 
-from mship.cli._resolve import resolve_for_command
+import os
+
 from mship.cli.output import Output
 from mship.core.context import build_context
 from mship.core.reconcile.cache import ReconcileCache
+from mship.core.task_resolver import (
+    AmbiguousTaskError,
+    NoActiveTaskError,
+    UnknownTaskError,
+    resolve_task,
+)
 
 
 def register(app: typer.Typer, get_container):
@@ -34,8 +41,16 @@ def register(app: typer.Typer, get_container):
             state_dir=state_dir,
             cache=ReconcileCache(state_dir),
         )
-        if task is not None:
-            resolved = resolve_for_command("context", state, task, output)
-            payload["resolved_task"] = resolved.task.slug
-            payload["resolution_source"] = resolved.source
+        try:
+            resolved_task, source = resolve_task(
+                state,
+                cli_task=task,
+                env_task=os.environ.get("MSHIP_TASK"),
+                cwd=Path.cwd(),
+            )
+            output.breadcrumb(f"→ task: {resolved_task.slug}  (resolved via {source.value})")
+            payload["resolved_task"] = resolved_task.slug
+            payload["resolution_source"] = source.value
+        except (NoActiveTaskError, AmbiguousTaskError, UnknownTaskError):
+            pass
         output.json(payload)
