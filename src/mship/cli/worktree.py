@@ -220,6 +220,11 @@ def register(app: typer.Typer, get_container):
             help="Override the auto-generated task slug (lowercase alphanumeric + dashes). "
                  "Useful when the description would produce a 50+ char slug. See #59.",
         ),
+        yes: bool = typer.Option(
+            False, "--yes", "-y",
+            help="Skip confirmation prompts (required in non-TTY mode when "
+                 "spawn would exceed spawn_confirm_threshold). See #74.",
+        ),
     ):
         """Create coordinated worktrees across repos for a new task."""
         import re as _re
@@ -245,7 +250,55 @@ def register(app: typer.Typer, get_container):
         config = container.config()
         shell = container.shell()
 
+        user_passed_repos = repos is not None
         repo_list = repos.split(",") if repos else None
+
+        # Apply default_scope + spawn_confirm_threshold (#74) when the user
+        # didn't pass --repos. Workspace-level controls in mothership.yaml.
+        if not user_passed_repos:
+            ds = config.default_scope
+            if ds == "none":
+                output.error(
+                    "default_scope is 'none' — spawn requires explicit --repos. "
+                    f"Available repos: {', '.join(sorted(config.repos.keys()))}"
+                )
+                raise typer.Exit(code=1)
+            if isinstance(ds, list):
+                repo_list = list(ds)
+
+        effective_scope = repo_list if repo_list else list(config.repos.keys())
+
+        # Threshold confirmation (#74): only fires when user didn't pass --repos
+        # AND effective scope exceeds the workspace-configured threshold.
+        if (
+            not user_passed_repos
+            and config.spawn_confirm_threshold is not None
+            and len(effective_scope) > config.spawn_confirm_threshold
+        ):
+            repos_flag = f"--repos {','.join(sorted(effective_scope))}"
+            if yes:
+                pass  # --yes bypasses
+            elif output.is_tty:
+                import typer as _typer
+                proceed = _typer.confirm(
+                    f"Spawn will create worktrees for {len(effective_scope)} repos "
+                    f"(exceeds spawn_confirm_threshold={config.spawn_confirm_threshold}). "
+                    f"Continue?",
+                    default=False,
+                )
+                if not proceed:
+                    output.error(
+                        f"Aborted. To proceed with the full set: {repos_flag}"
+                    )
+                    raise typer.Exit(code=1)
+            else:
+                output.error(
+                    f"Spawn would create worktrees for {len(effective_scope)} repos "
+                    f"(exceeds spawn_confirm_threshold={config.spawn_confirm_threshold}). "
+                    f"Pass --yes to confirm, or scope explicitly: {repos_flag}"
+                )
+                raise typer.Exit(code=1)
+
         audit_names = repo_list if repo_list else list(config.repos.keys())
 
         from mship.core.audit_gate import collect_known_worktree_paths

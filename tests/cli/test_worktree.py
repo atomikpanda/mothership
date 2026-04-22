@@ -1471,3 +1471,80 @@ def test_close_logs_rate_limit_reason_when_pr_state_unknown(configured_git_app: 
         )
     finally:
         cli_container.shell.reset_override()
+
+
+def test_spawn_default_scope_none_requires_explicit_repos(configured_git_app: Path):
+    """default_scope: none → spawn without --repos errors. See #74."""
+    import yaml
+    cfg_path = configured_git_app / "mothership.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["default_scope"] = "none"
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    from mship.cli import container as cli_container
+    cli_container.config.reset()
+
+    result = runner.invoke(app, ["spawn", "no scope"])
+    assert result.exit_code != 0
+    assert "default_scope" in result.output
+    assert "--repos" in result.output
+
+
+def test_spawn_default_scope_list_selects_repos(configured_git_app: Path):
+    """default_scope: [shared] → spawn without --repos uses that list. See #74."""
+    import yaml
+    cfg_path = configured_git_app / "mothership.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["default_scope"] = ["shared"]
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    from mship.cli import container as cli_container
+    cli_container.config.reset()
+
+    result = runner.invoke(app, ["spawn", "scoped default"])
+    assert result.exit_code == 0, result.output
+    mgr = StateManager(configured_git_app / ".mothership")
+    state = mgr.load()
+    assert state.tasks["scoped-default"].affected_repos == ["shared"]
+
+
+def test_spawn_threshold_non_tty_requires_yes(configured_git_app: Path):
+    """spawn_confirm_threshold: 1 + 3 repos → non-TTY without --yes errors. See #74."""
+    import yaml
+    cfg_path = configured_git_app / "mothership.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["spawn_confirm_threshold"] = 1
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    from mship.cli import container as cli_container
+    cli_container.config.reset()
+
+    # CliRunner is non-TTY by default.
+    result = runner.invoke(app, ["spawn", "big fan out"])
+    assert result.exit_code != 0
+    assert "spawn_confirm_threshold" in result.output
+    assert "--yes" in result.output
+
+
+def test_spawn_threshold_bypassed_with_yes(configured_git_app: Path):
+    import yaml
+    cfg_path = configured_git_app / "mothership.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["spawn_confirm_threshold"] = 1
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    from mship.cli import container as cli_container
+    cli_container.config.reset()
+
+    result = runner.invoke(app, ["spawn", "confirmed fan out", "--yes"])
+    assert result.exit_code == 0, result.output
+
+
+def test_spawn_threshold_not_triggered_with_explicit_repos(configured_git_app: Path):
+    """--repos always bypasses the threshold (user explicitly scoped). See #74."""
+    import yaml
+    cfg_path = configured_git_app / "mothership.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["spawn_confirm_threshold"] = 1
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    from mship.cli import container as cli_container
+    cli_container.config.reset()
+
+    result = runner.invoke(app, ["spawn", "explicit scope", "--repos", "shared,auth-service"])
+    assert result.exit_code == 0, result.output

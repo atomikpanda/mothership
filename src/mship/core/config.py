@@ -99,7 +99,33 @@ class WorkspaceConfig(BaseModel):
     env_runner: str | None = None
     branch_pattern: str = "feat/{slug}"
     audit: AuditPolicy = AuditPolicy()
+    # Default repo scope when `mship spawn` is invoked without --repos.
+    # - "all" (default): use every repo — today's behavior.
+    # - "none": require explicit --repos; no-flag spawn errors with the repo list.
+    # - list[str]: use those repos as the default. See #74.
+    default_scope: str | list[str] = "all"
+    # If set and the effective spawn scope exceeds N repos AND no --repos was
+    # passed, require confirmation (TTY) or --yes (non-TTY). See #74.
+    spawn_confirm_threshold: int | None = None
     repos: dict[str, RepoConfig]
+
+    @model_validator(mode="after")
+    def validate_default_scope(self) -> "WorkspaceConfig":
+        """default_scope may be 'all', 'none', or a list of existing repo names."""
+        if isinstance(self.default_scope, str):
+            if self.default_scope not in ("all", "none"):
+                raise ValueError(
+                    f"default_scope must be 'all', 'none', or a list of "
+                    f"repo names; got {self.default_scope!r}"
+                )
+        elif isinstance(self.default_scope, list):
+            unknown = [r for r in self.default_scope if r not in self.repos]
+            if unknown:
+                raise ValueError(
+                    f"default_scope references unknown repos: {unknown}. "
+                    f"Valid repos: {sorted(self.repos.keys())}"
+                )
+        return self
 
     @model_validator(mode="after")
     def validate_depends_on_refs(self) -> "WorkspaceConfig":
