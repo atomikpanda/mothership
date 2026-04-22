@@ -896,6 +896,35 @@ def test_footgun_silent_when_neither_form_ignored(tmp_path: Path):
     assert _symlink_gitignore_footgun(repo, "foo") is False
 
 
+def test_footgun_detected_post_symlink(tmp_path: Path):
+    """After the symlink exists pointing outside the repo, `check-ignore foo/`
+    fails with exit 128 (beyond a symbolic link). The helper must fall back
+    to pattern-only matching and still detect the footgun for unanchored
+    patterns — this is what makes the doctor check work. See #72."""
+    from mship.core.worktree import _symlink_gitignore_footgun
+    repo = tmp_path / "r"
+    _init_git_repo(repo)
+    (repo / ".gitignore").write_text("foo/\n")
+    external = tmp_path / "ext"
+    external.mkdir()
+    (external / "file.txt").write_text("data")
+    (repo / "foo").symlink_to(external)
+    # Direct probe would hit "beyond a symbolic link"; fallback must still fire.
+    assert _symlink_gitignore_footgun(repo, "foo") is True
+
+
+def test_footgun_silent_post_symlink_when_plain_ignored(tmp_path: Path):
+    """Post-symlink regression: `.gitignore` has `foo` (no slash) → no warning."""
+    from mship.core.worktree import _symlink_gitignore_footgun
+    repo = tmp_path / "r"
+    _init_git_repo(repo)
+    (repo / ".gitignore").write_text("foo\n")
+    external = tmp_path / "ext"
+    external.mkdir()
+    (repo / "foo").symlink_to(external)
+    assert _symlink_gitignore_footgun(repo, "foo") is False
+
+
 def test_create_symlinks_warns_on_dir_form_gitignore_footgun(tmp_path: Path):
     """Spawn path: `.gitignore` has `foo/` and `symlink_dirs: [foo]` → warning. See #72."""
     from mship.core.config import RepoConfig, WorkspaceConfig
