@@ -17,6 +17,10 @@ class LogEntry:
     test_state: Optional[TestState] = None
     action: Optional[str] = None
     open_question: Optional[str] = None
+    id: Optional[str] = None
+    parent: Optional[str] = None
+    evidence: Optional[str] = None
+    category: Optional[str] = None
 
 
 _HEADER_RE = re.compile(
@@ -53,6 +57,19 @@ def _format_kv(entry: LogEntry) -> str:
     if entry.open_question is not None:
         q = entry.open_question.replace('"', '\\"')
         parts.append(f'open="{q}"')
+    if entry.id is not None:
+        parts.append(f"id={entry.id}")
+    if entry.parent is not None:
+        parts.append(f"parent={entry.parent}")
+    if entry.evidence is not None:
+        ev = entry.evidence.replace('"', '\\"')
+        parts.append(f'evidence="{ev}"')
+    if entry.category is not None:
+        if ' ' in entry.category:
+            c = entry.category.replace('"', '\\"')
+            parts.append(f'category="{c}"')
+        else:
+            parts.append(f"category={entry.category}")
     return "  " + "  ".join(parts) if parts else ""
 
 
@@ -80,6 +97,10 @@ class LogManager:
         test_state: Optional[TestState] = None,
         action: Optional[str] = None,
         open_question: Optional[str] = None,
+        id: Optional[str] = None,
+        parent: Optional[str] = None,
+        evidence: Optional[str] = None,
+        category: Optional[str] = None,
     ) -> None:
         path = self._log_path(task_slug)
         if not path.exists():
@@ -93,6 +114,10 @@ class LogManager:
             test_state=test_state,
             action=action,
             open_question=open_question,
+            id=id,
+            parent=parent,
+            evidence=evidence,
+            category=category,
         )
         kv = _format_kv(entry)
         with open(path, "a") as f:
@@ -126,5 +151,9 @@ class LogManager:
                 test_state=kv.get("test"),
                 action=kv.get("action"),
                 open_question=kv.get("open"),
+                id=kv.get("id"),
+                parent=kv.get("parent"),
+                evidence=kv.get("evidence"),
+                category=kv.get("category"),
             ))
         return entries
