@@ -92,6 +92,7 @@ from mship.cli import context as _context_mod
 from mship.cli import dispatch as _dispatch_mod
 from mship.cli import commit as _commit_mod
 from mship.cli import debug as _debug_mod
+from mship.cli import bind as _bind_mod
 
 def _should_silent_exit(argv: list[str]) -> bool:
     """True if argv is invoking an unknown `_`-prefixed internal command.
@@ -140,3 +141,4 @@ _context_mod.register(app, get_container)
 _dispatch_mod.register(app, get_container)
 _commit_mod.register(app, get_container)
 _debug_mod.register(app, get_container)
+_bind_mod.register(app, get_container)
