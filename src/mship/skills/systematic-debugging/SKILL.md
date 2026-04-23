@@ -212,6 +212,38 @@ You MUST complete each phase before proceeding to the next.
 
    This is NOT a failed hypothesis - this is a wrong architecture.
 
+## mship integration (REQUIRED when mship is present)
+
+If `mship` is available in PATH and the current working directory is inside an mship workspace, you MUST invoke the tool at each methodology checkpoint. This generates the durable audit trace the supervisor relies on and enables tree-compilation tools to reconstruct your debugging path.
+
+- **When forming a hypothesis:**
+  ```
+  mship debug hypothesis "<claim>" --evidence <ref> [--id <slug>]
+  ```
+  `<ref>` is a free-form pointer like `test-runs/5`, `HEAD`, or `<path>:<start>-<end>`. `--id` is optional (mship auto-generates an 8-char hex handle); use it when you want human-readable references (e.g. `--id h1`).
+
+- **When ruling out a hypothesis:**
+  ```
+  mship debug rule-out "<reason>" --parent <hypothesis-id> --evidence <ref> [--category <label>]
+  ```
+  `--parent` points at the hypothesis id you are refuting. `--category` is optional; adopt the AgentRx failure taxonomy (e.g. `intent-plan-misalignment`, `tool-output-misread`, `invention-of-new-information`) if doing cross-session analysis.
+
+- **When closing the investigation:**
+  ```
+  mship debug resolved "<root cause and fix summary>"
+  ```
+  Only an explicit `debug-resolved` closes the thread. A passing test run does NOT implicitly close it — write the explicit entry so the supervisor can audit what you concluded.
+
+- **While running tests:** `mship test` during an open debug thread automatically enriches its journal entry with `parent=<latest-hypothesis-id>`. Nothing extra for you to do.
+
+### If mship is NOT available
+
+Non-mship projects, mship not on PATH, or running outside a workspace: fall back to the methodology as described in the rest of this skill. Log hypotheses and rule-outs as inline notes, commit messages, or PR comments — whatever durable medium is available. The structure (hypothesis → evidence → rule-out → resolution) stays the same; the storage differs.
+
+### Why tight coupling here
+
+Research from 2026 agentic-coding literature (Debug-gym, AgentRx, SWE-agent) is unambiguous: for debugging specifically, loosely coupled tools get skipped under context pressure, and the diagnostic trail vanishes. Mandating invocation at each step produces a verifiable trace the supervisor can reconstruct — which is the whole point of doing systematic debugging in the first place.
+
 ## Red Flags - STOP and Follow Process
 
 If you catch yourself thinking:
