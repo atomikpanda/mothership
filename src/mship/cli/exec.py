@@ -156,12 +156,26 @@ def register(app: typer.Typer, get_container):
             test_state = "fail"
         else:
             test_state = "mixed"
+        # If a debug thread is open, attach parent=<latest hypothesis id> so
+        # tree-compilation tools can fold this test run into the hypothesis
+        # being evaluated. See #30.
+        from mship.core.debug import current_debug_thread
+        thread = current_debug_thread(container.log_manager(), t.slug)
+        parent_id = None
+        if thread:
+            # Latest `hypothesis` entry in the thread (search from end).
+            for e in reversed(thread):
+                if e.action == "hypothesis":
+                    parent_id = e.id
+                    break
+
         container.log_manager().append(
             t.slug,
             f"iter {new_iter}: {pass_count}/{total} passing",
             iteration=new_iter,
             test_state=test_state,
             action="ran tests",
+            parent=parent_id,
         )
 
         # Render

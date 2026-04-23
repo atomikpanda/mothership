@@ -642,3 +642,30 @@ def test_test_json_output_still_contains_paths(configured_exec_app):
     for name, info in repos.items():
         assert "stderr_path" in info, f"{name} missing stderr_path"
         assert "stdout_path" in info, f"{name} missing stdout_path"
+
+
+def test_test_run_journal_entry_includes_parent_during_open_debug_thread(configured_git_app: Path):
+    """mship test during open debug thread enriches the `ran tests` journal
+    entry with parent=<latest-hypothesis-id>. See #30."""
+    runner.invoke(app, ["spawn", "test parent", "--repos", "shared", "--skip-setup"])
+    # Open a debug thread with a known id.
+    runner.invoke(
+        app, ["debug", "hypothesis", "H1", "--id", "h1", "--task", "test-parent"],
+    )
+
+    result = runner.invoke(app, ["test", "--task", "test-parent"])
+    assert result.exit_code == 0, result.output
+    log = (configured_git_app / ".mothership" / "logs" / "test-parent.md").read_text()
+    assert "action=ran tests" in log or 'action="ran tests"' in log
+    # The ran-tests entry must carry parent=h1.
+    assert "parent=h1" in log
+
+
+def test_test_run_journal_entry_no_parent_when_no_debug_thread(configured_git_app: Path):
+    """Regression: without open debug thread, ran-tests entry has no parent kv."""
+    runner.invoke(app, ["spawn", "plain test", "--repos", "shared", "--skip-setup"])
+
+    result = runner.invoke(app, ["test", "--task", "plain-test"])
+    assert result.exit_code == 0, result.output
+    log = (configured_git_app / ".mothership" / "logs" / "plain-test.md").read_text()
+    assert "parent=" not in log
