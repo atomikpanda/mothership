@@ -12,7 +12,7 @@ Frontier research (SWE-agent, Debug-gym, AgentRx, CodeTracer, HypoExplore) conve
 
 Three-part fix:
 
-1. **Thin `mship debug` sub-app** adds convenience wrappers over the existing journal for a named action vocabulary: `debug-start`, `hypothesis`, `ruled-out`, `debug-resolved`.
+1. **Thin `mship debug` sub-app** adds convenience wrappers over the existing journal for three shipped verbs: `hypothesis`, `rule-out`, and `resolved`, which write `action=hypothesis|ruled-out|debug-resolved`.
 2. **`mship test` integration**: when an open debug thread exists, the existing "ran tests" journal entry gains a `parent=<hypothesis-id>` field. One journal entry per test run, debug context inlined — exactly what tree-compilation tools (CodeTracer, AgentStepper) consume happily.
 3. **`systematic-debugging` skill update**: the methodology MANDATES mship invocation when mship is present (tight coupling). Without mship, falls back to prior free-form methodology (graceful degradation).
 
