@@ -157,3 +157,53 @@ def test_parse_mixed_old_and_new_entries(tmp_path):
     assert entries[0].repo is None
     assert entries[1].message == "structured"
     assert entries[1].repo == "shared"
+
+
+def test_append_writes_new_kv_fields(tmp_path: Path):
+    """id/parent/evidence/category are stored as kv on the journal line."""
+    from mship.core.log import LogManager
+    mgr = LogManager(tmp_path / "logs")
+    mgr.create("t")
+    mgr.append(
+        "t", "test hypothesis",
+        action="hypothesis",
+        id="a3f4c2e1",
+        evidence="test-runs/5",
+    )
+    content = (tmp_path / "logs" / "t.md").read_text()
+    assert "id=a3f4c2e1" in content
+    assert "evidence=" in content and "test-runs/5" in content
+
+
+def test_read_parses_new_kv_fields(tmp_path: Path):
+    from mship.core.log import LogManager
+    mgr = LogManager(tmp_path / "logs")
+    mgr.create("t")
+    mgr.append(
+        "t", "refuted because TZ is fixed",
+        action="ruled-out",
+        id="b7d9e2a0",
+        parent="a3f4c2e1",
+        evidence="test-runs/6",
+        category="tool-output-misread",
+    )
+    entries = mgr.read("t")
+    assert len(entries) == 1
+    e = entries[0]
+    assert e.id == "b7d9e2a0"
+    assert e.parent == "a3f4c2e1"
+    assert e.evidence == "test-runs/6"
+    assert e.category == "tool-output-misread"
+
+
+def test_append_backcompat_no_new_kv(tmp_path: Path):
+    """Existing callers (no new kwargs) still produce identical output."""
+    from mship.core.log import LogManager
+    mgr = LogManager(tmp_path / "logs")
+    mgr.create("t")
+    mgr.append("t", "plain message", action="committed")
+    content = (tmp_path / "logs" / "t.md").read_text()
+    assert "id=" not in content
+    assert "parent=" not in content
+    assert "evidence=" not in content
+    assert "category=" not in content
