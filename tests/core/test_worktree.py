@@ -1075,3 +1075,126 @@ def test_spawn_appends_marker_to_worktree_exclude(workspace_with_git: Path):
         container.state_dir.reset_override()
         container.config.reset()
         container.state_manager.reset()
+
+
+def test_refresh_bind_files_copies_missing(tmp_path: Path):
+    """First-time refresh copies files missing from worktree."""
+    from mship.core.config import ConfigLoader, RepoConfig, WorkspaceConfig
+    from mship.core.worktree import WorktreeManager
+    from mship.core.state import StateManager
+    from mship.util.git import GitRunner
+    from mship.util.shell import ShellRunner
+    from unittest.mock import MagicMock
+
+    source = _init_repo_with_ignored_files(tmp_path)
+    repo_cfg = RepoConfig(path=source, type="service", bind_files=[".env"])
+    cfg = WorkspaceConfig(workspace="t", repos={"r": repo_cfg})
+    mgr = WorktreeManager(
+        config=cfg, graph=None,
+        state_manager=MagicMock(spec=StateManager),
+        git=GitRunner(), shell=ShellRunner(), log=None,
+    )
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    result = mgr.refresh_bind_files("r", repo_cfg, wt)
+    assert ".env" in result["copied"]
+    assert (wt / ".env").read_text() == "ENV=yes\n"
+
+
+def test_refresh_bind_files_unchanged_when_identical(tmp_path: Path):
+    from mship.core.config import RepoConfig, WorkspaceConfig
+    from mship.core.worktree import WorktreeManager
+    from mship.core.state import StateManager
+    from mship.util.git import GitRunner
+    from mship.util.shell import ShellRunner
+    from unittest.mock import MagicMock
+
+    source = _init_repo_with_ignored_files(tmp_path)
+    repo_cfg = RepoConfig(path=source, type="service", bind_files=[".env"])
+    cfg = WorkspaceConfig(workspace="t", repos={"r": repo_cfg})
+    mgr = WorktreeManager(
+        config=cfg, graph=None,
+        state_manager=MagicMock(spec=StateManager),
+        git=GitRunner(), shell=ShellRunner(), log=None,
+    )
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    # Pre-seed worktree with identical content.
+    (wt / ".env").write_text("ENV=yes\n")
+    result = mgr.refresh_bind_files("r", repo_cfg, wt)
+    assert ".env" in result["unchanged"]
+    assert ".env" not in result["copied"]
+
+
+def test_refresh_bind_files_skip_modified_without_overwrite(tmp_path: Path):
+    from mship.core.config import RepoConfig, WorkspaceConfig
+    from mship.core.worktree import WorktreeManager
+    from mship.core.state import StateManager
+    from mship.util.git import GitRunner
+    from mship.util.shell import ShellRunner
+    from unittest.mock import MagicMock
+
+    source = _init_repo_with_ignored_files(tmp_path)
+    repo_cfg = RepoConfig(path=source, type="service", bind_files=[".env"])
+    cfg = WorkspaceConfig(workspace="t", repos={"r": repo_cfg})
+    mgr = WorktreeManager(
+        config=cfg, graph=None,
+        state_manager=MagicMock(spec=StateManager),
+        git=GitRunner(), shell=ShellRunner(), log=None,
+    )
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".env").write_text("USER_EDIT=yes\n")  # differs from source
+    result = mgr.refresh_bind_files("r", repo_cfg, wt, overwrite=False)
+    assert ".env" in result["skipped"]
+    assert (wt / ".env").read_text() == "USER_EDIT=yes\n"  # preserved
+
+
+def test_refresh_bind_files_overwrite_replaces_modified(tmp_path: Path):
+    from mship.core.config import RepoConfig, WorkspaceConfig
+    from mship.core.worktree import WorktreeManager
+    from mship.core.state import StateManager
+    from mship.util.git import GitRunner
+    from mship.util.shell import ShellRunner
+    from unittest.mock import MagicMock
+
+    source = _init_repo_with_ignored_files(tmp_path)
+    repo_cfg = RepoConfig(path=source, type="service", bind_files=[".env"])
+    cfg = WorkspaceConfig(workspace="t", repos={"r": repo_cfg})
+    mgr = WorktreeManager(
+        config=cfg, graph=None,
+        state_manager=MagicMock(spec=StateManager),
+        git=GitRunner(), shell=ShellRunner(), log=None,
+    )
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".env").write_text("USER_EDIT=yes\n")
+    result = mgr.refresh_bind_files("r", repo_cfg, wt, overwrite=True)
+    assert ".env" in result["updated"]
+    assert (wt / ".env").read_text() == "ENV=yes\n"  # replaced
+
+
+def test_refresh_bind_files_warns_on_missing_literal(tmp_path: Path):
+    from mship.core.config import RepoConfig, WorkspaceConfig
+    from mship.core.worktree import WorktreeManager
+    from mship.core.state import StateManager
+    from mship.util.git import GitRunner
+    from mship.util.shell import ShellRunner
+    from unittest.mock import MagicMock
+
+    source = _init_repo_with_ignored_files(tmp_path)
+    repo_cfg = RepoConfig(
+        path=source, type="service",
+        bind_files=[".env", "nonexistent.config"],
+    )
+    cfg = WorkspaceConfig(workspace="t", repos={"r": repo_cfg})
+    mgr = WorktreeManager(
+        config=cfg, graph=None,
+        state_manager=MagicMock(spec=StateManager),
+        git=GitRunner(), shell=ShellRunner(), log=None,
+    )
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    result = mgr.refresh_bind_files("r", repo_cfg, wt)
+    assert any("nonexistent.config" in w for w in result["warnings"])
+    assert ".env" in result["copied"]

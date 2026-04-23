@@ -137,6 +137,79 @@ class WorktreeManager:
                     out.append(cand)
         return out
 
+    def refresh_bind_files(
+        self,
+        repo_name: str,
+        repo_config,
+        worktree_path: Path,
+        overwrite: bool = False,
+    ) -> dict:
+        """Re-sync bind_files from source into an existing worktree. See #71.
+
+        Returns a dict with keys:
+        - `copied`:    files that didn't exist in worktree and were copied
+        - `updated`:   files that differed and were overwritten (only when overwrite=True)
+        - `unchanged`: files that already matched source byte-for-byte
+        - `skipped`:   files that differed but were preserved (overwrite=False)
+        - `warnings`:  missing-source / not-a-regular-file warnings (same shape as _copy_bind_files)
+
+        All lists contain relative path strings. Caller decides exit status
+        based on whether `skipped` is non-empty.
+        """
+        result: dict[str, list] = {
+            "copied": [], "updated": [], "unchanged": [], "skipped": [],
+            "warnings": [],
+        }
+        if not repo_config.bind_files:
+            return result
+
+        if repo_config.git_root is not None:
+            parent = self._config.repos[repo_config.git_root]
+            source_root = parent.path / repo_config.path
+        else:
+            source_root = repo_config.path
+
+        for entry in repo_config.bind_files:
+            if any(c in entry for c in "*?["):
+                continue
+            if not (source_root / entry).exists():
+                result["warnings"].append(
+                    f"{repo_name}: bind_files source missing: {entry} (will not be copied)"
+                )
+
+        candidates = self._git_ignored_files(source_root)
+        matches = self._match_bind_patterns(repo_config.bind_files, candidates)
+
+        for rel in matches:
+            src = source_root / rel
+            dst = worktree_path / rel
+            rel_str = str(rel)
+
+            if not src.is_file():
+                result["warnings"].append(
+                    f"{repo_name}: bind_files match is not a regular file: {rel} (skipped)"
+                )
+                continue
+
+            if not dst.exists():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                result["copied"].append(rel_str)
+                continue
+
+            # dst exists — compare bytes.
+            if src.read_bytes() == dst.read_bytes():
+                result["unchanged"].append(rel_str)
+                continue
+
+            if overwrite:
+                shutil.copy2(src, dst)
+                result["updated"].append(rel_str)
+            else:
+                result["skipped"].append(rel_str)
+
+        return result
+
     def _copy_bind_files(
         self,
         repo_name: str,
