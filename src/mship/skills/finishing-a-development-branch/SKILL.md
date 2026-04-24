@@ -104,6 +104,8 @@ EOF
 mship finish --body-file /tmp/pr-body.md
 ```
 
+**Post-finish iteration (reviewer feedback, CI fixes, typos):** don't spawn a new task. Stage the fix in the worktree and run `mship commit "<msg>"` — it commits across the task's affected repos, pushes to the existing PR, and journals per repo. Use this for small iterations until the PR merges.
+
 Then: Cleanup worktree (Step 5)
 
 #### Option 3: Keep As-Is
@@ -137,7 +139,7 @@ Then: Cleanup worktree (Step 5)
 
 **For Options 1, 2, 4:**
 
-*In a mothership workspace, worktree cleanup is handled by `mship close`. Run it after the local merge (Option 1) or after the PR merges on GitHub (Option 2 — check via `mship reconcile` or `gh pr view`). No manual `git worktree remove` needed.*
+*In a mothership workspace, worktree cleanup is handled by `mship close`. Run it after the local merge (Option 1) or after the PR merges on GitHub (Option 2 — check via `mship pr` for an aggregate view across tasks, `mship reconcile` for drift, or `gh pr view <url>` for a single PR). No manual `git worktree remove` needed.*
 
 **For Option 3:** Keep worktree.
 
