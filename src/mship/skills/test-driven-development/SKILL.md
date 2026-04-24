@@ -354,6 +354,8 @@ Bug found? Write failing test reproducing it. Follow TDD cycle. Test proves fix 
 
 Never fix bugs without a test.
 
+In a mothership workspace with an open debug thread (`mship debug hypothesis`), `mship test` auto-attaches `parent=<hypothesis-id>` to the test-run journal entry — linking the failing→passing transition to the hypothesis that predicted it. See the `systematic-debugging` skill for the full hypothesis → rule-out → resolved loop.
+
 ## Testing Anti-Patterns
 
 When adding mocks or test utilities, read @testing-anti-patterns.md to avoid common pitfalls:

@@ -206,11 +206,14 @@ For larger changes — new features, significant refactors — spawn a new task 
 ```bash
 mship status                          # task, phase, branch, drift, last log, finished warning
 mship audit [--repos r] [--json]
+mship pr                              # aggregate PR state across all active tasks
 mship view status|logs|diff|spec [--watch]
 mship view spec --web                 # serves HTML on localhost
 mship graph
 mship worktrees
 ```
+
+**`mship pr`** iterates active tasks with `pr_urls` and shows per-PR state (`open`/`merged`/`closed`/`unknown`) and base branch. Use this instead of `gh pr view <url>` per task when you want the full cross-task picture — it's the answer to "what's merged vs. still in review across everything I have open?" TTY → table; non-TTY → JSON `{tasks: [{slug, prs: [...]}]}`.
 
 **`audit` issue codes** (errors unless noted): `path_missing`, `not_a_git_repo`, `fetch_failed`, `detached_head`, `unexpected_branch`, `dirty_worktree`, `no_upstream`, `behind_remote`, `diverged`, `extra_worktrees`; `dirty_untracked` (warn — untracked files only, doesn't block); `ahead_remote` (info-only).
 
@@ -223,9 +226,12 @@ mship worktrees
 ```bash
 mship sync [--repos r]                # fast-forward behind-only clean repos
 mship prune [--force]                 # remove orphaned worktrees
+mship bind refresh [--task T] [--repos R] [--overwrite]
 ```
 
 **`sync` is strictly safe.** `git fetch --prune` + `git pull --ff-only` only. It never switches branches, never resets, never touches dirty trees — if a repo isn't cleanly behind the expected branch, it's skipped with a reason.
+
+**`bind refresh` re-syncs `bind_files`.** `bind_files` (declared in `mothership.yaml`) are files copied from a source repo into each worktree at spawn time — shared configs, prompts, fixtures. After spawn, source edits don't propagate automatically, so "works in main checkout but not in worktree" is a drift symptom. `mship bind refresh` re-copies matching files for each repo in `task.affected_repos` (or a `--repos` subset). Per-file outcomes: `copied`, `updated`, `unchanged`, or `skipped` (worktree-modified, preserved). Without `--overwrite`, worktree-modified files are preserved and the command exits 1 if any were skipped.
 
 ### Long-running services
 
