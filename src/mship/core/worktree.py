@@ -9,9 +9,7 @@ from mship.core.graph import DependencyGraph
 from mship.core.log import LogManager
 from mship.core.reconcile.fetch import workspace_default_branch_from_config
 from mship.core.state import StateManager, Task, WorkspaceState
-from mship.core.workspace_marker import (
-    MARKER_NAME, write_marker,
-)
+from mship.core.workspace_marker import write_marker
 from mship.util.git import GitRunner
 from mship.util.shell import ShellRunner
 from mship.util.slug import slugify

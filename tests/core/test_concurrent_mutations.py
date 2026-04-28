@@ -169,7 +169,7 @@ def _real_spawn_worker(workspace_str: str, result_path_str: str, desc: str) -> N
     mgr = WorktreeManager(config, graph, sm, git, shell, log)
     result_path = Path(result_path_str)
     try:
-        mgr.spawn(desc, repos=["shared"])
+        mgr.spawn(desc, repos=["shared"], workspace_root=workspace)
         result_path.write_text("ok")
     except ValueError as e:
         # Expected error on the losing racer
