@@ -470,7 +470,7 @@ class WorktreeManager:
                 bind_warnings = self._copy_bind_files(repo_name, repo_config, effective)
                 setup_warnings.extend(bind_warnings)
 
-                if not skip_setup and shutil.which("task") is not None:
+                if not is_passive and not skip_setup and shutil.which("task") is not None:
                     actual_setup = repo_config.tasks.get("setup", "setup")
                     setup_result = self._shell.run_task(
                         task_name="setup",
@@ -595,7 +595,6 @@ class WorktreeManager:
                     worktree_path=Path(wt_path),
                 )
             except Exception:
-                import shutil
                 shutil.rmtree(Path(wt_path), ignore_errors=True)
             try:
                 self._git.branch_delete(
@@ -620,8 +619,7 @@ class WorktreeManager:
                 # Sanity: only remove if it looks like a hub (parent ends in .worktrees)
                 if hub.name == task_slug and hub.parent.name == ".worktrees":
                     if hub.exists():
-                        import shutil as _shutil
-                        _shutil.rmtree(hub, ignore_errors=True)
+                        shutil.rmtree(hub, ignore_errors=True)
         except Exception:
             pass
 

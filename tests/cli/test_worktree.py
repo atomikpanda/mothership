@@ -1687,6 +1687,8 @@ def test_spawn_cli_passes_offline_flag(workspace_with_git, tmp_path, monkeypatch
 
     container.config_path.override(workspace_with_git / "mothership.yaml")
     container.state_dir.override(workspace_with_git / ".mothership")
+    container.config.reset()
+    container.state_manager.reset()
     monkeypatch.chdir(workspace_with_git)
     try:
         runner = CliRunner()
@@ -1711,3 +1713,56 @@ def test_spawn_cli_passes_offline_flag(workspace_with_git, tmp_path, monkeypatch
     finally:
         container.config_path.reset_override()
         container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+
+def test_spawn_cli_writes_offline_journal_entry(workspace_with_git, monkeypatch):
+    """`mship spawn --offline` writes an OFFLINE-tagged journal entry post-spawn."""
+    from typer.testing import CliRunner
+    from unittest.mock import patch
+    from mship.cli import app, container
+    from mship.core.log import LogManager
+    from mship.core.worktree import SpawnResult
+    from mship.core.state import Task
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    state_dir = workspace_with_git / ".mothership"
+    container.config_path.override(workspace_with_git / "mothership.yaml")
+    container.state_dir.override(state_dir)
+    container.config.reset()
+    container.state_manager.reset()
+    container.log_manager.reset()
+    monkeypatch.chdir(workspace_with_git)
+    try:
+        runner = CliRunner()
+        # Mock spawn so we don't need real git work; the OFFLINE journal write
+        # is in the CLI handler post-spawn, so it still fires.
+        with patch("mship.core.worktree.WorktreeManager.spawn") as mock_spawn:
+            mock_spawn.return_value = SpawnResult(
+                task=Task(
+                    slug="off", description="off", phase="plan",
+                    created_at=datetime.now(timezone.utc),
+                    affected_repos=["shared"], branch="feat/off",
+                    worktrees={"shared": Path("/tmp/off")},
+                ),
+            )
+            result = runner.invoke(
+                app, ["spawn", "off", "--repos", "shared",
+                      "--skip-setup", "--force-audit", "--offline"],
+            )
+            assert result.exit_code == 0, result.output
+
+        entries = LogManager(state_dir / "logs").read("off")
+        offline_entries = [e for e in entries if "OFFLINE" in e.message]
+        assert offline_entries, (
+            f"expected an OFFLINE journal entry; got: "
+            f"{[e.message for e in entries]}"
+        )
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+        container.log_manager.reset()
