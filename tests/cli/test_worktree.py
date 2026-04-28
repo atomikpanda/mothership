@@ -447,6 +447,114 @@ def test_finish_body_file_passed_to_gh_pr_create(configured_git_app: Path):
         cli_container.shell.reset_override()
 
 
+def test_finish_body_map_per_repo_bodies(configured_git_app: Path):
+    """--body-map gives each PR its own body; --body-file is the catch-all
+    for repos not in the map. See #114."""
+    from mship.cli import container as cli_container
+
+    runner.invoke(app, ["spawn", "body map", "--repos", "shared,api-gateway"])
+
+    shared_body = configured_git_app / "shared.md"
+    shared_body.write_text("## Shared\n- lib change\n\n## Test plan\n- [ ] unit\n")
+    api_body = configured_git_app / "api.md"
+    api_body.write_text("## API\n- consumer update\n\n## Test plan\n- [ ] integration\n")
+    fallback_body = configured_git_app / "fallback.md"
+    fallback_body.write_text("## Fallback\n- shared body\n\n## Test plan\n- [ ] noop\n")
+
+    captured_per_repo: dict[str, str] = {}
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            cwd_str = str(cwd)
+            for repo in ("shared", "api-gateway"):
+                if repo in cwd_str:
+                    captured_per_repo[repo] = cmd
+                    break
+            return ShellResult(returncode=0, stdout="https://x/pr/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    cli_container.shell.override(mock_shell)
+    try:
+        result = runner.invoke(
+            app, [
+                "finish",
+                "--task", "body-map",
+                "--body-map", f"shared={shared_body}",
+                "--body-file", str(fallback_body),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        # 'shared' got its mapped body.
+        assert "## Shared" in captured_per_repo["shared"]
+        assert "- lib change" in captured_per_repo["shared"]
+        # 'api-gateway' was not in the map → fell back to --body-file.
+        assert "## Fallback" in captured_per_repo["api-gateway"]
+        assert "- shared body" in captured_per_repo["api-gateway"]
+    finally:
+        cli_container.shell.reset_override()
+
+
+def test_finish_body_map_unknown_repo_rejected(configured_git_app: Path):
+    """--body-map referencing a repo NOT in task.affected_repos errors clearly."""
+    from mship.cli import container as cli_container
+
+    runner.invoke(app, ["spawn", "unknown body", "--repos", "shared"])
+
+    body_path = configured_git_app / "ghost.md"
+    body_path.write_text("## body\n- noop\n\n## Test plan\n- [ ] x\n")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    cli_container.shell.override(mock_shell)
+    try:
+        result = runner.invoke(
+            app, [
+                "finish",
+                "--task", "unknown-body",
+                "--body-map", f"ghost={body_path}",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "ghost" in result.output.lower() or "unknown" in result.output.lower()
+    finally:
+        cli_container.shell.reset_override()
+
+
+def test_finish_body_map_empty_body_rejected(configured_git_app: Path):
+    """An empty file in --body-map is rejected (consistent with --body-file rule)."""
+    from mship.cli import container as cli_container
+
+    runner.invoke(app, ["spawn", "empty body", "--repos", "shared"])
+
+    body_path = configured_git_app / "empty.md"
+    body_path.write_text("   \n\n  \n")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    cli_container.shell.override(mock_shell)
+    try:
+        result = runner.invoke(
+            app, [
+                "finish",
+                "--task", "empty-body",
+                "--body-map", f"shared={body_path}",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "empty" in result.output.lower()
+    finally:
+        cli_container.shell.reset_override()
+
+
 def test_close_accepts_positional_slug(configured_git_app: Path):
     """`mship close <slug>` is an alternative to `--task <slug>`. See #40."""
     runner.invoke(app, ["spawn", "positional close", "--repos", "shared"])
