@@ -106,3 +106,5 @@ def test_check_commit_refuses_passive_worktree(tmp_path, monkeypatch):
     finally:
         container.config_path.reset_override()
         container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
