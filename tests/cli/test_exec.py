@@ -83,6 +83,67 @@ def test_mship_test_fail_fast(configured_exec_app):
     assert mock_shell.run_task.call_count == 1
 
 
+def test_mship_test_skips_repos_with_not_applicable_test(workspace: Path):
+    """End-to-end: a repo with not_applicable: [test] is skipped, not failed.
+    Iteration file records status='skip'; CLI exit code is 0; no warning. See #109.
+    """
+    cfg = workspace / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: test-platform
+repos:
+  shared:
+    path: ./shared
+    type: library
+  fixtures:
+    path: ./fixtures
+    type: library
+    not_applicable: [test]
+"""
+    )
+    (workspace / "fixtures").mkdir(exist_ok=True)
+    (workspace / "fixtures" / "Taskfile.yml").write_text(
+        "version: '3'\ntasks:\n  build:\n    cmds:\n      - echo build\n"
+    )
+
+    state_dir = workspace / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(cfg)
+    container.state_dir.override(state_dir)
+    mgr = StateManager(state_dir)
+    task = Task(
+        slug="skip-task",
+        description="Skip task",
+        phase="dev",
+        created_at=datetime(2026, 4, 27, tzinfo=timezone.utc),
+        affected_repos=["shared", "fixtures"],
+        branch="feat/skip-task",
+    )
+    mgr.save(WorkspaceState(tasks={"skip-task": task}))
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok\n", stderr="")
+    container.shell.override(mock_shell)
+
+    try:
+        result = runner.invoke(app, ["test", "--task", "skip-task"])
+        assert result.exit_code == 0, result.output
+        # Only shared had `task test` invoked — fixtures was skipped.
+        assert mock_shell.run_task.call_count == 1
+        # The skipped repo is recorded as `skip`, not `pass`.
+        persisted = mgr.load()
+        assert persisted.tasks["skip-task"].test_results["fixtures"].status == "skip"
+        assert persisted.tasks["skip-task"].test_results["shared"].status == "pass"
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+        container.shell.reset_override()
+
+
 def test_mship_run(configured_exec_app):
     workspace, mock_shell = configured_exec_app
     result = runner.invoke(app, ["run", "--task", "test-task"])

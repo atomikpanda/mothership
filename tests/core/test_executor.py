@@ -181,6 +181,66 @@ def test_execute_updates_test_results(executor_deps):
     assert task.test_results["api-gateway"].status == "pass"
 
 
+def test_execute_skips_test_when_in_not_applicable(workspace: Path, mock_shell: MagicMock):
+    """Repos that declare `not_applicable: [test]` are skipped — no `task test` invocation,
+    and the test result is recorded as `status="skip"`. See #109.
+    """
+    cfg = workspace / "mothership.yaml"
+    cfg.write_text(
+        """\
+workspace: test
+repos:
+  shared:
+    path: ./shared
+    type: library
+  fixtures:
+    path: ./fixtures
+    type: library
+    not_applicable: [test]
+"""
+    )
+    (workspace / "fixtures").mkdir(exist_ok=True)
+    # Even though `test` is not applicable, ConfigLoader still requires a Taskfile.
+    (workspace / "fixtures" / "Taskfile.yml").write_text(
+        "version: '3'\ntasks:\n  build:\n    cmds:\n      - echo build\n"
+    )
+    config = ConfigLoader.load(cfg)
+    graph = DependencyGraph(config)
+    state_dir = workspace / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    state_mgr = StateManager(state_dir)
+    task = Task(
+        slug="test-task",
+        description="Test",
+        phase="dev",
+        created_at=datetime(2026, 4, 27, tzinfo=timezone.utc),
+        affected_repos=["shared", "fixtures"],
+        branch="feat/test-task",
+    )
+    state_mgr.save(WorkspaceState(tasks={"test-task": task}))
+
+    executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())
+    result = executor.execute(
+        "test", repos=["shared", "fixtures"], task_slug="test-task",
+    )
+
+    # `task test` was invoked once (for shared) — fixtures was skipped.
+    cwds = [str(c.kwargs["cwd"]) for c in mock_shell.run_task.call_args_list]
+    assert any("shared" in c for c in cwds)
+    assert not any("fixtures" in c for c in cwds), (
+        "fixtures should NOT have task test invoked"
+    )
+
+    # Both results are present; fixtures is recorded as skip.
+    persisted_state = state_mgr.load()
+    persisted_task = persisted_state.tasks["test-task"]
+    assert persisted_task.test_results["shared"].status == "pass"
+    assert persisted_task.test_results["fixtures"].status == "skip"
+
+    # Overall execution succeeds (skipped repos count as success).
+    assert result.success is True
+
+
 def test_upstream_env_no_task_slug(executor_deps):
     config, graph, state_mgr, mock_shell = executor_deps
     executor = RepoExecutor(config, graph, state_mgr, mock_shell, healthcheck=MagicMock())

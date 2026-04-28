@@ -108,6 +108,39 @@ def test_evidence_missing_when_nothing(tmp_path: Path):
     assert ev["a"].source == "none"
 
 
+def test_evidence_skip_status_is_non_blocking(tmp_path: Path):
+    """A repo with TestResult status='skip' (declared not_applicable: [test])
+    yields a 'skipped' evidence status — not 'missing' (which would warn).
+    See #109.
+    """
+    from mship.core.test_evidence import read_evidence
+    log = LogManager(tmp_path / "logs")
+    log.create("t")
+    task = _make_task(
+        affected_repos=["fixtures"],
+        test_results={"fixtures": TestResult(status="skip", at=datetime.now(timezone.utc))},
+    )
+    ev = read_evidence(task, log)
+    assert ev["fixtures"].status == "skipped"
+    assert ev["fixtures"].source == "test_results"
+
+
+def test_format_missing_summary_does_not_warn_on_skipped(tmp_path: Path):
+    """Skipped repos must not appear in the missing/stale/failed warning lines."""
+    from mship.core.test_evidence import read_evidence, format_missing_summary
+    log = LogManager(tmp_path / "logs")
+    log.create("t")
+    task = _make_task(
+        affected_repos=["fixtures", "real"],
+        test_results={
+            "fixtures": TestResult(status="skip", at=datetime.now(timezone.utc)),
+            "real": TestResult(status="pass", at=datetime.now(timezone.utc)),
+        },
+    )
+    ev = read_evidence(task, log)
+    assert format_missing_summary(ev) == []  # nothing to warn about
+
+
 def test_evidence_stale_when_branch_has_newer_commit(tmp_path: Path):
     """Pass evidence older than the repo's task-branch HEAD → 'stale'."""
     from mship.core.test_evidence import read_evidence

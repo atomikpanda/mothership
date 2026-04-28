@@ -125,11 +125,26 @@ class RepoExecutor:
 
         Returns (RepoResult, background_process_or_None).
         """
+        repo_config = self._config.repos[repo_name]
+
+        # Honor `not_applicable` (#76 / #109): if the canonical task is
+        # declared not applicable for this repo, skip without invoking go-task.
+        # The result is recorded as skipped (not pass/fail).
+        if canonical_task in repo_config.not_applicable:
+            return (
+                RepoResult(
+                    repo=repo_name,
+                    task_name=f"(skipped: {canonical_task} not applicable)",
+                    shell_result=ShellResult(returncode=0, stdout="", stderr=""),
+                    skipped=True,
+                ),
+                None,
+            )
+
         actual_name = self.resolve_task_name(repo_name, canonical_task)
         env_runner = self.resolve_env_runner(repo_name)
         upstream_env = self.resolve_upstream_env(repo_name, task_slug)
         cwd = self._resolve_cwd(repo_name, task_slug)
-        repo_config = self._config.repos[repo_name]
 
         if repo_config.start_mode == "background" and canonical_task == "run":
             # Launch as background subprocess, don't wait
@@ -282,8 +297,14 @@ class RepoExecutor:
                         return
                     now = datetime.now(timezone.utc)
                     for repo_result in _results:
+                        if repo_result.skipped:
+                            status = "skip"
+                        elif repo_result.success:
+                            status = "pass"
+                        else:
+                            status = "fail"
                         task.test_results[repo_result.repo] = TestResult(
-                            status="pass" if repo_result.success else "fail",
+                            status=status,
                             at=now,
                         )
                 self._state_manager.mutate(_apply_test_results)
