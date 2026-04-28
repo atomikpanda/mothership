@@ -28,6 +28,14 @@ def register(app: typer.Typer, get_container):
         resolved = resolve_for_command("phase", state, task, output)
         t = resolved.task
 
+        if t.active_repo and t.active_repo in t.passive_repos:
+            output.error(
+                f"Cannot transition phase: active_repo '{t.active_repo}' is passive. "
+                f"Switch to an affected repo first, or close & respawn with "
+                f"`--repos {t.active_repo},...` to make it editable."
+            )
+            raise typer.Exit(code=1)
+
         if t.blocked_reason and not force:
             output.error(
                 f"Task is blocked: {t.blocked_reason}. "

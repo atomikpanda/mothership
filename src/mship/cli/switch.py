@@ -36,8 +36,9 @@ def register(app: typer.Typer, get_container):
             target = t.active_repo
             is_switch = False
         else:
-            if repo not in t.affected_repos:
-                valid = ", ".join(t.affected_repos)
+            all_repos = list(t.affected_repos) + [r for r in t.passive_repos if r not in t.affected_repos]
+            if repo not in all_repos:
+                valid = ", ".join(all_repos)
                 output.error(f"Unknown repo '{repo}'. Valid: {valid}.")
                 raise typer.Exit(code=1)
             target = repo
@@ -63,10 +64,13 @@ def register(app: typer.Typer, get_container):
 
         handoff = build_handoff(config, state_mgr.load(), shell, log_mgr, repo=target, task_slug=t.slug)
 
+        is_passive = target in t.passive_repos
+
         if not output.is_tty:
             json_payload = handoff.to_json()
             json_payload["resolved_task"] = resolved.task.slug
             json_payload["resolution_source"] = resolved.source
+            json_payload["is_passive"] = is_passive
             output.json(json_payload)
             return
 
@@ -104,6 +108,13 @@ def register(app: typer.Typer, get_container):
         lines.append(
             f"[bold]{verb}:[/bold] {handoff.repo} (task: {handoff.task_slug}, phase: {handoff.phase})"
         )
+        if is_passive:
+            repo_cfg = config.repos.get(target)
+            ref = (repo_cfg.expected_branch or repo_cfg.base_branch) if repo_cfg else target
+            lines.append(
+                f"[yellow]⚠[/yellow] Switched to `{target}` (passive — read-only on `{ref}`).\n"
+                f"  To edit, close this task and respawn with `--repos {target},...`"
+            )
         lines.append(f"[bold]Branch:[/bold]   {handoff.branch}")
         lines.append(f"[bold]Worktree:[/bold] {handoff.worktree_path}")
         lines.append("")

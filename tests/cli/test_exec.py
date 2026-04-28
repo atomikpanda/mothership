@@ -730,3 +730,44 @@ def test_test_run_journal_entry_no_parent_when_no_debug_thread(configured_git_ap
     assert result.exit_code == 0, result.output
     log = (configured_git_app / ".mothership" / "logs" / "plain-test.md").read_text()
     assert "parent=" not in log
+
+
+def test_test_refuses_when_active_repo_is_passive(tmp_path, monkeypatch):
+    """`mship test` errors if active_repo is passive."""
+    from datetime import datetime, timezone
+    from typer.testing import CliRunner
+    from mship.cli import app, container
+    from mship.core.state import StateManager, Task, WorkspaceState
+
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\nrepos:\n  shared:\n    path: ./shared\n    type: library\n"
+    )
+    (tmp_path / "shared").mkdir()
+    (tmp_path / "shared" / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    StateManager(state_dir).save(WorkspaceState(tasks={
+        "x": Task(
+            slug="x", description="x", phase="dev",
+            created_at=datetime.now(timezone.utc),
+            affected_repos=["shared"], branch="feat/x",
+            worktrees={"shared": tmp_path / "wt"},
+            passive_repos={"shared"},
+            active_repo="shared",
+        )
+    }))
+    container.config_path.override(tmp_path / "mothership.yaml")
+    container.state_dir.override(state_dir)
+    container.config.reset()
+    container.state_manager.reset()
+    monkeypatch.chdir(tmp_path)
+    try:
+        runner = CliRunner()
+        result = runner.invoke(app, ["test", "--task", "x"])
+        assert result.exit_code != 0
+        assert "passive" in (result.output or "").lower()
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
