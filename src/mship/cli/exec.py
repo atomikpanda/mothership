@@ -117,7 +117,12 @@ def register(app: typer.Typer, get_container):
         per_repo: dict[str, dict] = {}
         streams: dict[str, tuple[str, str]] = {}
         for r in result.results:
-            status = "pass" if r.success else "fail"
+            if r.skipped:
+                status = "skip"
+            elif r.success:
+                status = "pass"
+            else:
+                status = "fail"
             stderr_tail = None
             if status == "fail":
                 stderr = (r.shell_result.stderr or "").splitlines()
@@ -147,15 +152,16 @@ def register(app: typer.Typer, get_container):
 
         prune(state_dir, t.slug, keep=20)
 
-        # Summary for log entry
-        pass_count = sum(1 for v in per_repo.values() if v["status"] == "pass")
+        # Summary for log entry — skipped repos count as not-a-failure.
+        fail_count = sum(1 for v in per_repo.values() if v["status"] == "fail")
         total = len(per_repo)
-        if pass_count == total:
+        if fail_count == 0:
             test_state = "pass"
-        elif pass_count == 0:
+        elif fail_count == total:
             test_state = "fail"
         else:
             test_state = "mixed"
+        pass_count = total - fail_count  # for the log line below
         # If a debug thread is open, attach parent=<latest hypothesis id> so
         # tree-compilation tools can fold this test run into the hypothesis
         # being evaluated. See #30.
@@ -191,7 +197,11 @@ def register(app: typer.Typer, get_container):
             output.print(f"[bold]Test run #{new_iter}[/bold]  ({run_duration_ms / 1000:.1f}s)")
             for repo_name, info in per_repo.items():
                 status = info["status"]
-                color = "green" if status == "pass" else "red"
+                color = (
+                    "green" if status == "pass"
+                    else "yellow" if status == "skip"
+                    else "red"
+                )
                 dur_s = info["duration_ms"] / 1000
                 line = f"  {repo_name}: [{color}]{status}[/{color}]  ({dur_s:.1f}s)"
                 if diff and repo_name in diff["tags"]:

@@ -29,7 +29,7 @@ from mship.core.state import Task
 from mship.util.shell import ShellRunner
 
 
-EvidenceStatus = Literal["passed", "failed", "missing", "stale"]
+EvidenceStatus = Literal["passed", "failed", "missing", "stale", "skipped"]
 
 
 @dataclass(frozen=True)
@@ -113,6 +113,7 @@ def _resolve_repo(
         status: EvidenceStatus = (
             "passed" if tr.status == "pass"
             else "failed" if tr.status == "fail"
+            else "skipped" if tr.status == "skip"
             else "missing"
         )
         candidates.append(RepoEvidence(status=status, source="test_results", at=tr.at))
