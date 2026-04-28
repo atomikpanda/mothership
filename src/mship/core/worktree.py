@@ -260,6 +260,88 @@ class WorktreeManager:
 
         return warnings
 
+    def refresh_symlink_dirs(
+        self,
+        repo_name: str,
+        repo_config,
+        worktree_path: Path,
+        overwrite: bool = False,
+    ) -> dict:
+        """Re-evaluate symlink_dirs in an existing worktree. See #111.
+
+        Returns a dict with keys (mirroring `refresh_bind_files`):
+        - `copied`:    symlinks that didn't exist and were created
+        - `updated`:   symlinks pointing at the wrong target, replaced (overwrite=True only)
+        - `unchanged`: symlinks already pointing at the correct target
+        - `skipped`:   symlinks pointing elsewhere preserved (overwrite=False),
+                      OR a real directory exists at the target (always preserved)
+        - `warnings`:  missing-source / footgun warnings
+
+        Real directories at the target are NEVER overwritten, even with
+        overwrite=True — that would risk destroying user data.
+        """
+        result: dict[str, list] = {
+            "copied": [], "updated": [], "unchanged": [], "skipped": [],
+            "warnings": [],
+        }
+        if not repo_config.symlink_dirs:
+            return result
+
+        if repo_config.git_root is not None:
+            parent = self._config.repos[repo_config.git_root]
+            source_root = parent.path / repo_config.path
+        else:
+            source_root = repo_config.path
+
+        for dir_name in repo_config.symlink_dirs:
+            source = source_root / dir_name
+            target = worktree_path / dir_name
+            expected = source.resolve() if source.exists() else None
+
+            if expected is None:
+                result["warnings"].append(
+                    f"{repo_name}: symlink source missing: {dir_name} (will not be linked)"
+                )
+                continue
+
+            if target.exists() and not target.is_symlink():
+                # Real directory in the worktree — never destroyed.
+                result["skipped"].append(dir_name)
+                result["warnings"].append(
+                    f"{repo_name}: {dir_name} is a real directory in the worktree — "
+                    f"refusing to replace with symlink (preserve user data)."
+                )
+                continue
+
+            if target.is_symlink():
+                try:
+                    current = target.resolve()
+                except OSError:
+                    current = None
+                if current == expected:
+                    result["unchanged"].append(dir_name)
+                    continue
+                if overwrite:
+                    target.unlink()
+                    target.symlink_to(expected)
+                    result["updated"].append(dir_name)
+                else:
+                    result["skipped"].append(dir_name)
+                continue
+
+            # Nothing at target — create the symlink.
+            footgun = _symlink_gitignore_footgun(worktree_path, dir_name)
+            target.symlink_to(expected)
+            result["copied"].append(dir_name)
+            if footgun:
+                result["warnings"].append(
+                    f"{repo_name}: symlink {dir_name!r} is not ignored — "
+                    f"git treats it as an untracked file. "
+                    f"Add '{dir_name}' (not just '{dir_name}/') to .gitignore."
+                )
+
+        return result
+
     def _create_symlinks(
         self,
         repo_name: str,
