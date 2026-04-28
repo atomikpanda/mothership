@@ -1676,3 +1676,38 @@ def test_spawn_threshold_not_triggered_with_explicit_repos(configured_git_app: P
 
     result = runner.invoke(app, ["spawn", "explicit scope", "--repos", "shared,auth-service"])
     assert result.exit_code == 0, result.output
+
+
+def test_spawn_cli_passes_offline_flag(workspace_with_git, tmp_path, monkeypatch):
+    """`mship spawn --offline` sets offline=True in the manager call."""
+    from typer.testing import CliRunner
+    from unittest.mock import patch
+    from mship.cli import app, container
+    from pathlib import Path
+
+    container.config_path.override(workspace_with_git / "mothership.yaml")
+    container.state_dir.override(workspace_with_git / ".mothership")
+    monkeypatch.chdir(workspace_with_git)
+    try:
+        runner = CliRunner()
+        with patch("mship.core.worktree.WorktreeManager.spawn") as mock_spawn:
+            from mship.core.worktree import SpawnResult
+            from mship.core.state import Task
+            from datetime import datetime, timezone
+            mock_spawn.return_value = SpawnResult(
+                task=Task(
+                    slug="x", description="x", phase="plan",
+                    created_at=datetime.now(timezone.utc),
+                    affected_repos=["shared"], branch="feat/x",
+                    worktrees={"shared": Path("/tmp/x")},
+                ),
+            )
+            result = runner.invoke(
+                app, ["spawn", "x", "--repos", "shared",
+                      "--skip-setup", "--force-audit", "--offline"],
+            )
+            assert result.exit_code == 0, result.output
+            assert mock_spawn.call_args.kwargs.get("offline") is True
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
