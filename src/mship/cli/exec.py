@@ -78,6 +78,14 @@ def register(app: typer.Typer, get_container):
         resolved = resolve_for_command("exec", state, task, output)
         t = resolved.task
 
+        if t.active_repo and t.active_repo in t.passive_repos:
+            output.error(
+                f"Cannot run tests: active_repo '{t.active_repo}' is passive. "
+                f"Switch to an affected repo first, or close & respawn with "
+                f"`--repos {t.active_repo},...` to make it editable."
+            )
+            raise typer.Exit(code=1)
+
         from pathlib import Path as _P
         from mship.cli._cwd_check import format_cwd_warning
         if t.active_repo is not None and t.active_repo in t.worktrees:

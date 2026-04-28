@@ -118,10 +118,12 @@ class DoctorChecker:
         shell: ShellRunner,
         *,
         state_dir: Path | None = None,
+        workspace_root: Path | None = None,
     ) -> None:
         self._config = config
         self._shell = shell
         self._state_dir = state_dir
+        self._workspace_root = workspace_root
 
     def run(self) -> DoctorReport:
         report = DoctorReport()
@@ -322,6 +324,21 @@ class DoctorChecker:
 
         # Append skill-availability checks (workspace-independent)
         report.checks.extend(check_skill_availability())
+
+        # Workspace .gitignore check: warn if .worktrees not listed
+        ws = self._workspace_root
+        if ws is not None and (ws / ".git").exists():
+            gi = ws / ".gitignore"
+            entries = gi.read_text().splitlines() if gi.exists() else []
+            if ".worktrees" not in entries:
+                report.checks.append(CheckResult(
+                    name="workspace/gitignore",
+                    status="warn",
+                    message=(
+                        "workspace .gitignore missing `.worktrees` entry "
+                        "(will be added on next spawn)"
+                    ),
+                ))
 
         return report
 

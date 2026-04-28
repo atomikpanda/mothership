@@ -14,7 +14,12 @@ def register(app: typer.Typer, get_container):
 
         config = container.config()
         shell = container.shell()
-        checker = DoctorChecker(config, shell, state_dir=container.state_dir())
+        checker = DoctorChecker(
+            config,
+            shell,
+            state_dir=container.state_dir(),
+            workspace_root=container.config_path().parent,
+        )
         report = checker.run()
 
         if output.is_tty:

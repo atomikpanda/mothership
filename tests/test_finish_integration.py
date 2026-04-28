@@ -19,9 +19,14 @@ def finish_workspace(workspace_with_git: Path):
     container.config_path.override(workspace_with_git / "mothership.yaml")
     container.state_dir.override(state_dir)
 
+    def _default_run(cmd, cwd, env=None):
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
     mock_shell = MagicMock(spec=ShellRunner)
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok\n", stderr="")
-    mock_shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    mock_shell.run.side_effect = _default_run
     container.shell.override(mock_shell)
 
     yield workspace_with_git, mock_shell
@@ -45,6 +50,10 @@ def test_finish_single_repo_no_coordination_block(finish_workspace):
         call_log.append(cmd)
         if "gh auth status" in cmd:
             return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
         if "git push" in cmd:
             return ShellResult(returncode=0, stdout="", stderr="")
         if "gh pr create" in cmd:
@@ -78,6 +87,10 @@ def test_finish_multi_repo_adds_coordination(finish_workspace):
         call_log.append(cmd)
         if "gh auth status" in cmd:
             return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
         if "git push" in cmd:
             return ShellResult(returncode=0, stdout="", stderr="")
         if "gh pr create" in cmd:
@@ -110,12 +123,19 @@ def test_finish_idempotent_rerun(finish_workspace):
     assert result.exit_code == 0, result.output
 
     # First finish
-    mock_shell.run.side_effect = lambda cmd, cwd, env=None: (
-        ShellResult(returncode=0, stdout="Logged in", stderr="") if "gh auth" in cmd
-        else ShellResult(returncode=0, stdout="", stderr="") if "git push" in cmd
-        else ShellResult(returncode=0, stdout="https://github.com/org/shared/pull/1\n", stderr="") if "gh pr create" in cmd
-        else ShellResult(returncode=0, stdout="", stderr="")
-    )
+    def _first_finish_run(cmd, cwd, env=None):
+        if "gh auth" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://github.com/org/shared/pull/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+    mock_shell.run.side_effect = _first_finish_run
 
     result = runner.invoke(app, ["finish", "--task", "idempotent-test"])
     assert result.exit_code == 0, result.output
@@ -160,6 +180,8 @@ def test_finish_not_blocked_by_own_worktree(finish_workspace):
             return ShellResult(returncode=0, stdout="main\n", stderr="")
         if "rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
             return ShellResult(returncode=0, stdout="origin/main\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
         if "rev-list --count" in cmd:
             return ShellResult(returncode=0, stdout="0\n", stderr="")
         if "git worktree list --porcelain" in cmd:
@@ -334,6 +356,8 @@ def test_finish_unrelated_dirty_repo_does_not_block(finish_workspace):
             return ShellResult(returncode=0, stdout="main\n", stderr="")
         if "rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
             return ShellResult(returncode=0, stdout="origin/main\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
         if "rev-list --count" in cmd:
             return ShellResult(returncode=0, stdout="0\n", stderr="")
         if "worktree list" in cmd:
@@ -634,7 +658,7 @@ def test_finish_does_not_block_on_drift_in_unrelated_repo(finish_workspace):
     # Spawn affecting shared (will have commits) and api-gateway (untouched).
     # api-gateway depends on shared, but shared has no upstream deps so the
     # scope of "shared has commits" is just {shared} — api-gateway is excluded.
-    result = runner.invoke(app, ["spawn", "scoped finish", "--repos", "shared,api-gateway", "--force-audit"])
+    result = runner.invoke(app, ["spawn", "scoped finish", "--repos", "shared,auth-service,api-gateway", "--force-audit"])
     assert result.exit_code == 0
 
     def mock_run(cmd, cwd, env=None):
@@ -645,6 +669,8 @@ def test_finish_does_not_block_on_drift_in_unrelated_repo(finish_workspace):
             return ShellResult(returncode=0, stdout="https://x/pr/1\n", stderr="")
         if "git push" in cmd:
             return ShellResult(returncode=0, stdout="", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
         if "git fetch" in cmd:
             return ShellResult(returncode=0, stdout="", stderr="")
         if "symbolic-ref --short HEAD" in cmd:
@@ -742,6 +768,8 @@ def test_finish_pr_body_unchanged_when_no_issue_refs(finish_workspace):
     def mock_run(cmd, cwd, env=None):
         if "gh auth status" in cmd:
             return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
         if "rev-list --count" in cmd and "origin/" in cmd:
             return ShellResult(returncode=0, stdout="1\n", stderr="")
         if "rev-list --count" in cmd:
@@ -778,6 +806,8 @@ def test_finish_warns_when_no_test_evidence_default(finish_workspace):
     def mock_run(cmd, cwd, env=None):
         if "gh auth status" in cmd:
             return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
         if "rev-list --count" in cmd:
             return ShellResult(returncode=0, stdout="1\n", stderr="")
         if "git push" in cmd:
@@ -809,6 +839,8 @@ def test_finish_blocks_when_require_tests_and_no_evidence(finish_workspace):
     def mock_run(cmd, cwd, env=None):
         if "gh auth status" in cmd:
             return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
         if "rev-list --count" in cmd:
             return ShellResult(returncode=0, stdout="1\n", stderr="")
         if "git push" in cmd:
@@ -845,6 +877,8 @@ def test_finish_evidence_via_journal_suppresses_warning(finish_workspace, tmp_pa
     def mock_run(cmd, cwd, env=None):
         if "gh auth status" in cmd:
             return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
         if "rev-list --count" in cmd:
             return ShellResult(returncode=0, stdout="1\n", stderr="")
         if "git push" in cmd:

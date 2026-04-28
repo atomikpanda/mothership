@@ -131,3 +131,37 @@ def test_prune_partial_missing_keeps_task(prune_deps):
     # But shared worktree entry should be removed
     assert "shared" not in state.tasks["partial"].worktrees
     assert "auth-service" in state.tasks["partial"].worktrees
+
+
+def test_prune_detects_hub_layout_orphan(tmp_path):
+    """An orphan dir under <workspace>/.worktrees/<slug>/<repo>/ is detected."""
+    import os
+    import subprocess
+    from mship.core.config import ConfigLoader
+    from mship.core.state import StateManager
+    from mship.core.prune import PruneManager
+    from mship.util.git import GitRunner
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\nrepos:\n  shared:\n    path: ./shared\n    type: library\n"
+    )
+    (tmp_path / "shared").mkdir()
+    (tmp_path / "shared" / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    subprocess.run(["git", "init", "-q", str(tmp_path / "shared")],
+                   check=True, capture_output=True)
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "commit", "--allow-empty", "-qm", "init"],
+                   cwd=tmp_path / "shared", check=True, capture_output=True, env=env)
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    sm = StateManager(state_dir)
+    config = ConfigLoader.load(tmp_path / "mothership.yaml")
+    # Seed an orphan: hub-style worktree with no state entry
+    orphan = tmp_path / ".worktrees" / "stale-task" / "shared"
+    subprocess.run(["git", "worktree", "add", str(orphan), "-b", "feat/stale"],
+                   cwd=tmp_path / "shared", check=True, capture_output=True)
+    pm = PruneManager(config, sm, GitRunner())
+    orphans = pm.scan()
+    paths = {str(o.path.resolve()) for o in orphans}
+    assert str(orphan.resolve()) in paths

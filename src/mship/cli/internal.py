@@ -30,18 +30,31 @@ def register(app: typer.Typer, get_container):
         try:
             tl = Path(toplevel).resolve()
             registered = [
-                (slug, Path(wt).resolve())
+                (slug, repo, Path(wt).resolve())
                 for slug, task in state.tasks.items()
-                for wt in task.worktrees.values()
+                for repo, wt in task.worktrees.items()
             ]
         except (OSError, RuntimeError):
             raise typer.Exit(code=0)
 
         matched_task = None
-        for slug, wt in registered:
+        matched_repo: str | None = None
+        for slug, repo, wt in registered:
             if tl == wt:
                 matched_task = state.tasks[slug]
+                matched_repo = repo
                 break
+
+        if matched_task is not None and matched_repo in matched_task.passive_repos:
+            import sys
+            sys.stderr.write(
+                f"⛔ mship: refusing commit — {tl} is a passive worktree of "
+                f"`{matched_repo}` for task `{matched_task.slug}`.\n"
+                f"   To edit {matched_repo}, close this task and respawn with "
+                f"`--repos {matched_repo},...`\n"
+                f"   (or `git commit --no-verify` to override).\n"
+            )
+            raise typer.Exit(code=1)
 
         if matched_task is not None:
             # Reconcile gate (per-task, unchanged behavior)
@@ -88,7 +101,7 @@ def register(app: typer.Typer, get_container):
             f"\u26d4 mship: refusing commit — {tl} is not a registered worktree.\n"
             f"   Active task worktrees:\n"
         )
-        for slug, wt in registered:
+        for slug, _repo, wt in registered:
             sys.stderr.write(f"     {wt} ({slug})\n")
 
         # If the rejected toplevel has uncommitted changes, it's almost
@@ -110,7 +123,7 @@ def register(app: typer.Typer, get_container):
                 f"\n   {tl} has uncommitted changes — looks like edits landed here\n"
                 f"   instead of the worktree. To move them:\n"
             )
-            for slug, wt in registered:
+            for slug, _repo, wt in registered:
                 q_wt = shlex.quote(str(wt))
                 sys.stderr.write(
                     f"     git -C {q_tl} stash push -u -m {slug}-misrouted\n"

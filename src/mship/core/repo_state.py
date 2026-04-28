@@ -357,3 +357,76 @@ def audit_repos(
         for n in target_names
     )
     return AuditReport(repos=repos)
+
+
+def audit_passive_worktrees(
+    passive_paths: dict[str, Path],
+    ref_per_repo: dict[str, str],
+    canonical_paths: dict[str, Path],
+) -> dict[str, list[Issue]]:
+    """Audit passive worktrees for drift / dirtiness / fetch failure.
+
+    For each passive repo:
+      - Run `git fetch origin <ref>` against the canonical checkout. If it fails,
+        emit `passive_fetch_failed` (error). Skip remaining checks.
+      - Compare `<passive>/HEAD` against `<canonical>/origin/<ref>`. If they
+        differ, emit `passive_drift` (warn).
+      - Run `git status --porcelain` in the passive worktree. If non-empty
+        after filtering untracked, emit `passive_dirty_worktree` (warn).
+
+    Returns a per-repo list of issues (empty list if clean).
+    """
+    import subprocess
+    out: dict[str, list[Issue]] = {}
+    for name, passive in passive_paths.items():
+        issues: list[Issue] = []
+        ref = ref_per_repo.get(name)
+        canonical = canonical_paths.get(name)
+        if ref is None or canonical is None:
+            out[name] = issues
+            continue
+
+        fetch = subprocess.run(
+            ["git", "fetch", "origin", ref],
+            cwd=canonical, capture_output=True, text=True, check=False, timeout=60,
+        )
+        if fetch.returncode != 0:
+            issues.append(Issue(
+                "passive_fetch_failed", "error",
+                f"git fetch origin {ref} failed: {fetch.stderr.strip()[:160]}",
+            ))
+            out[name] = issues
+            continue
+
+        rev_passive = subprocess.run(
+            ["git", "-C", str(passive), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=False,
+        )
+        rev_origin = subprocess.run(
+            ["git", "-C", str(canonical), "rev-parse", f"origin/{ref}"],
+            capture_output=True, text=True, check=False,
+        )
+        if (rev_passive.returncode == 0 and rev_origin.returncode == 0
+                and rev_passive.stdout.strip() != rev_origin.stdout.strip()):
+            issues.append(Issue(
+                "passive_drift", "warn",
+                f"passive HEAD {rev_passive.stdout.strip()[:8]} drifted "
+                f"from origin/{ref} ({rev_origin.stdout.strip()[:8]})",
+            ))
+
+        status = subprocess.run(
+            ["git", "-C", str(passive), "status", "--porcelain"],
+            capture_output=True, text=True, check=False,
+        )
+        if status.returncode == 0:
+            modified = sum(
+                1 for line in status.stdout.splitlines()
+                if line.strip() and not line.startswith("??")
+            )
+            if modified:
+                issues.append(Issue(
+                    "passive_dirty_worktree", "warn",
+                    f"{modified} modified file(s) in passive worktree",
+                ))
+        out[name] = issues
+    return out

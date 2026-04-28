@@ -557,3 +557,112 @@ def test_probe_dirty_mixed_emits_both(audit_workspace):
     assert ("dirty_worktree", "error") in codes
     assert ("dirty_untracked", "warn") in codes
     assert cli.has_errors is True
+
+
+# ---------------------------------------------------------------------------
+# Task 5.1: audit_passive_worktrees
+# ---------------------------------------------------------------------------
+
+
+def test_audit_passive_drift_warns(tmp_path):
+    """Passive worktree behind origin/<ref> emits a warn-level passive_drift issue."""
+    import os
+    import subprocess
+    from mship.core.repo_state import audit_passive_worktrees
+
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "--bare", "-q", "-b", "main", str(bare)],
+                   check=True, capture_output=True)
+    src = tmp_path / "src"
+    subprocess.run(["git", "clone", "-q", str(bare), str(src)],
+                   check=True, capture_output=True)
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "commit", "--allow-empty", "-qm", "c1"], cwd=src,
+                   check=True, capture_output=True, env=env)
+    sha1 = subprocess.run(["git", "rev-parse", "HEAD"], cwd=src,
+                          check=True, capture_output=True, text=True).stdout.strip()
+    subprocess.run(["git", "push", "-q", "origin", "main"], cwd=src,
+                   check=True, capture_output=True)
+    subprocess.run(["git", "commit", "--allow-empty", "-qm", "c2"], cwd=src,
+                   check=True, capture_output=True, env=env)
+    subprocess.run(["git", "push", "-q", "origin", "main"], cwd=src,
+                   check=True, capture_output=True)
+
+    # Passive worktree at the OLD sha — drift exists vs origin/main
+    passive = tmp_path / "passive"
+    subprocess.run(["git", "worktree", "add", "--detach", str(passive), sha1],
+                   cwd=src, check=True, capture_output=True)
+
+    issues = audit_passive_worktrees(
+        passive_paths={"shared": passive},
+        ref_per_repo={"shared": "main"},
+        canonical_paths={"shared": src},
+    )
+    codes = [i.code for i in issues["shared"]]
+    assert "passive_drift" in codes
+
+
+def test_audit_passive_fetch_failed_errors(tmp_path):
+    """Fetch failure produces an error-level passive_fetch_failed issue."""
+    import os
+    import subprocess
+    from mship.core.repo_state import audit_passive_worktrees
+
+    src = tmp_path / "src"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(src)],
+                   check=True, capture_output=True)
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "commit", "--allow-empty", "-qm", "c"], cwd=src,
+                   check=True, capture_output=True, env=env)
+    passive = tmp_path / "passive"
+    subprocess.run(["git", "worktree", "add", "--detach", str(passive), "main"],
+                   cwd=src, check=True, capture_output=True)
+
+    issues = audit_passive_worktrees(
+        passive_paths={"shared": passive},
+        ref_per_repo={"shared": "main"},
+        canonical_paths={"shared": src},
+    )
+    codes = [(i.code, i.severity) for i in issues["shared"]]
+    assert ("passive_fetch_failed", "error") in codes
+
+
+def test_audit_passive_dirty_worktree_warns(tmp_path):
+    """Modified files in a passive worktree produce a warn-level passive_dirty_worktree issue."""
+    import os
+    import subprocess
+    from mship.core.repo_state import audit_passive_worktrees
+
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "--bare", "-q", "-b", "main", str(bare)],
+                   check=True, capture_output=True)
+    src = tmp_path / "src"
+    subprocess.run(["git", "clone", "-q", str(bare), str(src)],
+                   check=True, capture_output=True)
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    (src / "f.txt").write_text("orig\n")
+    subprocess.run(["git", "add", "f.txt"], cwd=src, check=True, capture_output=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=src,
+                   check=True, capture_output=True, env=env)
+    subprocess.run(["git", "push", "-q", "origin", "main"], cwd=src,
+                   check=True, capture_output=True)
+
+    passive = tmp_path / "passive"
+    subprocess.run(["git", "worktree", "add", "--detach", str(passive), "main"],
+                   cwd=src, check=True, capture_output=True)
+    # Modify a tracked file in the passive worktree
+    (passive / "f.txt").write_text("modified\n")
+
+    issues = audit_passive_worktrees(
+        passive_paths={"shared": passive},
+        ref_per_repo={"shared": "main"},
+        canonical_paths={"shared": src},
+    )
+    codes = [i.code for i in issues["shared"]]
+    assert "passive_dirty_worktree" in codes

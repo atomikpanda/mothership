@@ -51,6 +51,49 @@ class PruneManager:
                         reason="not_in_state",
                     ))
 
+        # Hub layout: scan <workspace>/.worktrees/<slug>/<repo>/
+        # Workspace root is not stored on WorkspaceConfig, so derive it from
+        # each configured repo. In a single-repo workspace the repo path may
+        # itself be the workspace root (for example "."), so use repo_cfg.path
+        # when it contains mothership.yaml; otherwise fall back to its parent.
+        candidates: set[Path] = set()
+        for repo_cfg in self._config.repos.values():
+            repo_path = repo_cfg.path.resolve()
+            ws_root = repo_path if (repo_path / "mothership.yaml").exists() else repo_path.parent
+            candidates.add(ws_root)
+        for ws_root in candidates:
+            hub_root = ws_root / ".worktrees"
+            if not hub_root.is_dir():
+                continue
+            for slug_dir in hub_root.iterdir():
+                if not slug_dir.is_dir():
+                    continue
+                for repo_dir in slug_dir.iterdir():
+                    if not repo_dir.is_dir():
+                        continue
+                    if not (repo_dir / ".git").exists():
+                        continue
+                    resolved = str(repo_dir.resolve())
+                    if resolved in tracked_paths:
+                        continue
+                    # Hub worktrees are created under <hub>/<slug>/<repo_name>/,
+                    # so prefer matching the directory name as a configured repo
+                    # key. Fall back to the canonical path name for compatibility
+                    # with older or unusual layouts.
+                    matched_repo = repo_dir.name if repo_dir.name in self._config.repos else None
+                    if matched_repo is None:
+                        for name, rc in self._config.repos.items():
+                            if rc.path.name == repo_dir.name:
+                                matched_repo = name
+                                break
+                    if matched_repo is None:
+                        continue
+                    orphans.append(OrphanedWorktree(
+                        repo=matched_repo,
+                        path=repo_dir,
+                        reason="not_in_state",
+                    ))
+
         # Check state entries pointing to nonexistent worktrees
         for task_slug, task in state.tasks.items():
             for repo_name, wt_path in task.worktrees.items():

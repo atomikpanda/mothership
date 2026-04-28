@@ -19,14 +19,17 @@ repos:
   shared:
     path: ./shared
     type: library
+    base_branch: main
     depends_on: []
   auth-service:
     path: ./auth-service
     type: service
+    base_branch: main
     depends_on: [shared]
   api-gateway:
     path: ./api-gateway
     type: service
+    base_branch: main
     depends_on: [shared, auth-service]
 """
     )

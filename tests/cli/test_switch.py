@@ -155,3 +155,71 @@ def test_switch_includes_worktree_path_in_output(switch_workspace, monkeypatch):
             assert str(cli_wt) in result.output
     finally:
         _reset()
+
+
+def test_switch_to_passive_warns(tmp_path, monkeypatch):
+    """`mship switch <passive-repo>` succeeds but prints a passive warning."""
+    import os
+    import subprocess
+    from datetime import datetime, timezone
+    from typer.testing import CliRunner
+    from mship.cli import app, container
+    from mship.core.state import StateManager, Task, WorkspaceState
+
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\nrepos:\n"
+        "  api:\n    path: ./api\n    type: service\n    base_branch: main\n    expected_branch: main\n"
+        "  shared:\n    path: ./shared\n    type: library\n    base_branch: main\n    expected_branch: main\n"
+    )
+    for n in ("api", "shared"):
+        d = tmp_path / n
+        d.mkdir()
+        (d / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+        subprocess.run(["git", "init", "-q", str(d)], check=True, capture_output=True)
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    api_wt = tmp_path / ".worktrees" / "x" / "api"
+    shared_wt = tmp_path / ".worktrees" / "x" / "shared"
+    api_wt.mkdir(parents=True); shared_wt.mkdir(parents=True)
+    # In real spawns passive repos are NOT in affected_repos (only explicit --repos are).
+    # Both are in worktrees so switch can reach them; passive_repos marks the read-only ones.
+    StateManager(state_dir).save(WorkspaceState(tasks={
+        "x": Task(
+            slug="x", description="x", phase="plan",
+            created_at=datetime.now(timezone.utc),
+            affected_repos=["api"], branch="feat/x",
+            worktrees={"api": api_wt, "shared": shared_wt},
+            passive_repos={"shared"},
+        )
+    }))
+    container.config_path.override(tmp_path / "mothership.yaml")
+    container.state_dir.override(state_dir)
+    container.config.reset()
+    container.state_manager.reset()
+    monkeypatch.chdir(api_wt)
+    try:
+        runner = CliRunner()
+        result = runner.invoke(app, ["switch", "shared", "--task", "x"])
+        # Switch can succeed (exit 0) but must mention "passive"
+        out = (result.output or "").lower()
+        # Must explicitly mention "passive" in a warning context, not just in
+        # the worktree path (which may contain the test name "passive_warns").
+        # Check for a JSON "is_passive" key or a standalone warning line.
+        import json as _json
+        warned = False
+        try:
+            payload = _json.loads(result.output)
+            warned = payload.get("is_passive", False)
+        except _json.JSONDecodeError:
+            # TTY mode: look for a warning line mentioning passive
+            warned = any(
+                "passive" in line.lower()
+                for line in result.output.splitlines()
+                if "worktree" not in line.lower() and "worktrees" not in line.lower()
+            )
+        assert warned, f"expected a passive warning in output; got: {result.output}"
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()

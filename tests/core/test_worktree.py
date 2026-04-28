@@ -34,22 +34,23 @@ def worktree_deps(workspace_with_git: Path):
 def test_spawn_creates_worktrees(worktree_deps):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
-    mgr.spawn("add labels to tasks", repos=["shared", "auth-service"])
+    mgr.spawn("add labels to tasks", repos=["shared", "auth-service"], workspace_root=workspace)
     state = state_mgr.load()
     assert "add-labels-to-tasks" in state.tasks
     task = state.tasks["add-labels-to-tasks"]
     assert task.phase == "plan"
     assert set(task.affected_repos) == {"shared", "auth-service"}
     assert task.branch == "feat/add-labels-to-tasks"
+    hub = workspace / ".worktrees" / "add-labels-to-tasks"
     for repo_name in ["shared", "auth-service"]:
-        wt_path = task.worktrees[repo_name]
-        assert Path(wt_path).exists()
+        assert task.worktrees[repo_name] == hub / repo_name
+        assert Path(task.worktrees[repo_name]).exists()
 
 
 def test_spawn_dependency_order(worktree_deps):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
-    mgr.spawn("fix auth", repos=["auth-service", "shared"])
+    mgr.spawn("fix auth", repos=["auth-service", "shared"], workspace_root=workspace)
     state = state_mgr.load()
     task = state.tasks["fix-auth"]
     assert "shared" in task.worktrees
@@ -59,31 +60,11 @@ def test_spawn_dependency_order(worktree_deps):
 def test_spawn_all_repos(worktree_deps):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
-    mgr.spawn("big change")
+    mgr.spawn("big change", workspace_root=workspace)
     state = state_mgr.load()
     task = state.tasks["big-change"]
     assert set(task.affected_repos) == {"shared", "auth-service", "api-gateway"}
 
-
-def test_spawn_ensures_gitignore(worktree_deps):
-    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
-    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
-    mgr.spawn("test gitignore", repos=["shared"])
-    gitignore = workspace / "shared" / ".gitignore"
-    assert gitignore.exists()
-    assert ".worktrees" in gitignore.read_text()
-
-
-def test_spawn_gitignores_mship_workspace_marker(worktree_deps):
-    """The .mship-workspace marker file dropped in each worktree should be
-    gitignored so it doesn't show up as untracked in `git status`. See #107.
-    """
-    from mship.core.workspace_marker import MARKER_NAME
-    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
-    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
-    mgr.spawn("test marker gitignore", repos=["shared"])
-    gitignore = (workspace / "shared" / ".gitignore").read_text()
-    assert MARKER_NAME in gitignore
 
 
 def test_spawn_custom_branch_pattern(workspace_with_git: Path):
@@ -101,7 +82,7 @@ def test_spawn_custom_branch_pattern(workspace_with_git: Path):
     shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
 
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, MagicMock(spec=LogManager))
-    mgr.spawn("custom branch", repos=["shared"])
+    mgr.spawn("custom branch", repos=["shared"], workspace_root=workspace)
     state = state_mgr.load()
     task = state.tasks["custom-branch"]
     assert task.branch == "mship/custom-branch"
@@ -110,7 +91,7 @@ def test_spawn_custom_branch_pattern(workspace_with_git: Path):
 def test_abort_removes_worktrees(worktree_deps):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
-    mgr.spawn("to abort", repos=["shared"])
+    mgr.spawn("to abort", repos=["shared"], workspace_root=workspace)
     state = state_mgr.load()
     wt_path = state.tasks["to-abort"].worktrees["shared"]
 
@@ -127,22 +108,22 @@ def test_spawn_runs_setup_task(worktree_deps, monkeypatch):
         lambda name: "/usr/local/bin/task" if name == "task" else None,
     )
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
-    mgr.spawn("with setup", repos=["shared"])
+    mgr.spawn("with setup", repos=["shared"], workspace_root=workspace)
     shell.run_task.assert_called()
 
 
 def test_spawn_duplicate_slug_raises(worktree_deps):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
-    mgr.spawn("duplicate test", repos=["shared"])
+    mgr.spawn("duplicate test", repos=["shared"], workspace_root=workspace)
     with pytest.raises(ValueError, match="already exists"):
-        mgr.spawn("duplicate test", repos=["shared"])
+        mgr.spawn("duplicate test", repos=["shared"], workspace_root=workspace)
 
 
 def test_abort_succeeds_even_if_branch_delete_fails(worktree_deps):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
-    mgr.spawn("abort fail test", repos=["shared"])
+    mgr.spawn("abort fail test", repos=["shared"], workspace_root=workspace)
 
     # Make branch_delete fail
     original_branch_delete = git.branch_delete
@@ -203,14 +184,16 @@ repos:
     log = MagicMock(spec=LogManager)
 
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
-    mgr.spawn("mono test", repos=["root", "web"])
+    mgr.spawn("mono test", repos=["root", "web"], workspace_root=tmp_path)
 
     state = state_mgr.load()
     task = state.tasks["mono-test"]
 
-    # root gets a worktree at <root>/.worktrees/feat/mono-test
+    # root gets a worktree at <workspace>/.worktrees/mono-test/root
     assert "root" in task.worktrees
     root_wt = Path(task.worktrees["root"])
+    expected_root_wt = tmp_path / ".worktrees" / "mono-test" / "root"
+    assert root_wt == expected_root_wt
     assert root_wt.exists()
     # web's worktree is a subdirectory of root's worktree
     assert "web" in task.worktrees
@@ -224,7 +207,7 @@ def test_spawn_returns_spawn_result_with_task(worktree_deps):
     from mship.core.worktree import SpawnResult
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
-    result = mgr.spawn("result test", repos=["shared"])
+    result = mgr.spawn("result test", repos=["shared"], workspace_root=workspace)
     assert isinstance(result, SpawnResult)
     assert result.task.slug == "result-test"
     assert result.setup_warnings == []
@@ -241,7 +224,7 @@ def test_spawn_collects_setup_warnings_on_failure(worktree_deps, monkeypatch):
         returncode=1, stdout="", stderr="setup task not found"
     )
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
-    result = mgr.spawn("warning test", repos=["shared"])
+    result = mgr.spawn("warning test", repos=["shared"], workspace_root=workspace)
     assert len(result.setup_warnings) == 1
     assert "shared" in result.setup_warnings[0]
     assert "setup" in result.setup_warnings[0].lower()
@@ -250,7 +233,7 @@ def test_spawn_collects_setup_warnings_on_failure(worktree_deps, monkeypatch):
 def test_spawn_skip_setup_does_not_call_setup(worktree_deps):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
-    mgr.spawn("skip test", repos=["shared"], skip_setup=True)
+    mgr.spawn("skip test", repos=["shared"], skip_setup=True, workspace_root=workspace)
     # run_task should not have been called (no setup ran)
     shell.run_task.assert_not_called()
 
@@ -830,7 +813,7 @@ def test_spawn_copies_bind_files_and_coexists_with_symlink_dirs(tmp_path: Path):
         shell=ShellRunner(),
         log=LogManager(logs_dir=state_dir / "logs"),
     )
-    result = mgr.spawn(description="add labels", skip_setup=True)
+    result = mgr.spawn(description="add labels", skip_setup=True, workspace_root=tmp_path)
     wt = result.task.worktrees["r"]
 
     # bind_files: .env is copied byte-identical.
@@ -852,7 +835,7 @@ def test_spawn_skips_setup_when_task_binary_missing(worktree_deps, monkeypatch):
         lambda name: None if name == "task" else "/usr/bin/" + name,
     )
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
-    result = mgr.spawn("task-missing-smoke", repos=["shared"])
+    result = mgr.spawn("task-missing-smoke", repos=["shared"], workspace_root=workspace)
 
     # No setup warning about missing task binary
     assert not any("setup failed" in w for w in result.setup_warnings)
@@ -1014,7 +997,7 @@ def test_create_symlinks_no_warn_when_plain_name_ignored(tmp_path: Path):
 
 
 def test_spawn_writes_workspace_marker_in_each_worktree(workspace_with_git: Path):
-    """Spawn writes `.mship-workspace` in every worktree it creates. See #84."""
+    """Spawn writes `.mship-workspace` at the hub root (not per-worktree). See #84."""
     from mship.cli import container
     from mship.core.workspace_marker import MARKER_NAME
     from typer.testing import CliRunner
@@ -1032,47 +1015,21 @@ def test_spawn_writes_workspace_marker_in_each_worktree(workspace_with_git: Path
             app, ["spawn", "marker test", "--repos", "shared", "--skip-setup", "--force-audit"]
         )
         assert result.exit_code == 0, result.output
-        wt = workspace_with_git / "shared" / ".worktrees" / "feat" / "marker-test"
-        marker = wt / MARKER_NAME
+        hub = workspace_with_git / ".worktrees" / "marker-test"
+        marker = hub / MARKER_NAME
         assert marker.is_file(), (
             f"expected marker at {marker}; "
-            f"worktree contents: {list(wt.iterdir()) if wt.is_dir() else 'wt not created'}"
+            f"hub contents: {list(hub.iterdir()) if hub.is_dir() else 'hub not created'}"
         )
         assert marker.read_text().strip() == str(workspace_with_git.resolve())
+        # No per-worktree marker
+        assert not (hub / "shared" / MARKER_NAME).exists()
     finally:
         container.config_path.reset_override()
         container.state_dir.reset_override()
         container.config.reset()
         container.state_manager.reset()
 
-
-def test_spawn_adds_marker_to_gitignore(workspace_with_git: Path):
-    """Marker is added to the repo's tracked .gitignore so `git status` stays
-    clean. Per-worktree info/exclude doesn't work because git resolves it to
-    the shared main-repo path. See #107."""
-    from mship.cli import container, app
-    from mship.core.workspace_marker import MARKER_NAME
-    from typer.testing import CliRunner
-    runner = CliRunner()
-
-    container.config.reset()
-    container.state_manager.reset()
-    container.config_path.override(workspace_with_git / "mothership.yaml")
-    container.state_dir.override(workspace_with_git / ".mothership")
-    (workspace_with_git / ".mothership").mkdir(exist_ok=True)
-
-    try:
-        result = runner.invoke(
-            app, ["spawn", "exclude test", "--repos", "shared", "--skip-setup", "--force-audit"]
-        )
-        assert result.exit_code == 0, result.output
-        gitignore = (workspace_with_git / "shared" / ".gitignore").read_text()
-        assert MARKER_NAME in gitignore, f"{MARKER_NAME} not in {gitignore!r}"
-    finally:
-        container.config_path.reset_override()
-        container.state_dir.reset_override()
-        container.config.reset()
-        container.state_manager.reset()
 
 
 def test_refresh_bind_files_copies_missing(tmp_path: Path):
@@ -1332,3 +1289,102 @@ def test_refresh_symlink_dirs_empty_config_returns_empty(tmp_path: Path):
     wt.mkdir()
     result = mgr.refresh_symlink_dirs("r", repo_cfg, wt)
     assert result == {"copied": [], "updated": [], "unchanged": [], "skipped": [], "warnings": []}
+
+
+def test_spawn_uses_hub_layout(worktree_deps):
+    """New spawns place worktrees at <workspace>/.worktrees/<slug>/<repo>/, not <repo>/.worktrees/."""
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("hub layout", repos=["shared", "auth-service"], workspace_root=workspace)
+    state = state_mgr.load()
+    task = state.tasks["hub-layout"]
+    expected_hub = workspace / ".worktrees" / "hub-layout"
+    assert Path(task.worktrees["shared"]) == expected_hub / "shared"
+    assert Path(task.worktrees["auth-service"]) == expected_hub / "auth-service"
+    assert (expected_hub / "shared").exists()
+    assert (expected_hub / "auth-service").exists()
+
+
+def test_spawn_writes_single_marker_at_hub_root(worktree_deps):
+    """One .mship-workspace marker per hub, not per worktree."""
+    from mship.core.workspace_marker import MARKER_NAME
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("marker test", repos=["shared", "auth-service"], workspace_root=workspace)
+    hub = workspace / ".worktrees" / "marker-test"
+    assert (hub / MARKER_NAME).is_file()
+    # No per-worktree markers
+    assert not (hub / "shared" / MARKER_NAME).exists()
+    assert not (hub / "auth-service" / MARKER_NAME).exists()
+
+
+def test_spawn_workspace_gitignore_includes_worktrees(worktree_deps, tmp_path):
+    """Workspace root .gitignore (if root is a git repo) gets `.worktrees` added."""
+    import subprocess
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    # Make the workspace root itself a git repo
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True, capture_output=True)
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("ignore test", repos=["shared"], workspace_root=workspace)
+    gi = workspace / ".gitignore"
+    assert gi.exists()
+    assert ".worktrees" in gi.read_text().splitlines()
+
+
+def test_abort_removes_hub_directory(worktree_deps):
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("abort test", repos=["shared", "auth-service"], workspace_root=workspace)
+    hub = workspace / ".worktrees" / "abort-test"
+    assert hub.exists()
+    mgr.abort("abort-test")
+    assert not hub.exists(), "abort should rm -rf the hub directory"
+
+
+def test_spawn_materializes_passive_dep(worktree_deps):
+    """When --repos is auth-service only, shared (its dep) becomes passive."""
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    # auth-service depends_on shared; spawn auth-service alone
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    # workspace_with_git fixture has no remotes set up; pass offline=True
+    # so we use the local main branch instead of origin/main.
+    mgr.spawn("passive dep", repos=["auth-service"],
+              workspace_root=workspace, offline=True)
+    state = state_mgr.load()
+    task = state.tasks["passive-dep"]
+    # affected_repos contains only what user asked for
+    assert task.affected_repos == ["auth-service"]
+    # passive_repos contains the dep
+    assert task.passive_repos == {"shared"}
+    # both are in worktrees
+    assert "auth-service" in task.worktrees
+    assert "shared" in task.worktrees
+    # passive worktree exists on disk
+    assert Path(task.worktrees["shared"]).exists()
+
+
+def test_spawn_passive_worktree_is_detached(worktree_deps):
+    import subprocess
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("detached check", repos=["auth-service"],
+              workspace_root=workspace, offline=True)
+    state = state_mgr.load()
+    passive_wt = Path(state.tasks["detached-check"].worktrees["shared"])
+    rc = subprocess.run(["git", "-C", str(passive_wt), "symbolic-ref", "-q", "HEAD"],
+                        capture_output=True).returncode
+    assert rc != 0, "passive worktree should be on detached HEAD"
+
+
+def test_spawn_passive_skips_task_setup(worktree_deps):
+    """Passive worktrees materialize symlinks/binds but don't run `task setup`."""
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("no setup", repos=["auth-service"],
+              workspace_root=workspace, offline=True)
+    # `shell.run_task` should be called for affected (auth-service) but not passive (shared).
+    setup_calls = [c for c in shell.run_task.call_args_list
+                   if c.kwargs.get("task_name") == "setup"]
+    cwds = {Path(c.kwargs.get("cwd")).name for c in setup_calls}
+    assert "auth-service" in cwds
+    assert "shared" not in cwds

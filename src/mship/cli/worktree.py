@@ -225,6 +225,11 @@ def register(app: typer.Typer, get_container):
             help="Skip confirmation prompts (required in non-TTY mode when "
                  "spawn would exceed spawn_confirm_threshold). See #74.",
         ),
+        offline: bool = typer.Option(
+            False, "--offline",
+            help="Skip `git fetch` for passive worktrees; use local refs. "
+                 "Journal entry tagged OFFLINE.",
+        ),
     ):
         """Create coordinated worktrees across repos for a new task."""
         import re as _re
@@ -364,6 +369,7 @@ def register(app: typer.Typer, get_container):
         result = wt_mgr.spawn(
             description, repos=repo_list, skip_setup=skip_setup, slug=slug,
             workspace_root=container.config_path().parent,
+            offline=offline,
         )
         task = result.task
 
@@ -371,6 +377,9 @@ def register(app: typer.Typer, get_container):
             log_mgr = container.log_manager()
             for codes in pending_bypass:
                 log_mgr.append(task.slug, f"BYPASSED AUDIT: spawn — {', '.join(codes)}")
+
+        if offline:
+            container.log_manager().append(task.slug, "OFFLINE: passive fetches skipped")
 
         if output.is_tty:
             output.success(f"Spawned task: {task.slug}")

@@ -34,6 +34,7 @@ class Task(BaseModel):
     last_switched_at_sha: dict[str, dict[str, str]] = {}
     test_iteration: int = 0
     base_branch: str | None = None
+    passive_repos: set[str] = set()
 
 
 class WorkspaceState(BaseModel):
@@ -84,6 +85,8 @@ class StateManager:
             task["worktrees"] = {
                 k: str(v) for k, v in task.get("worktrees", {}).items()
             }
+            if "passive_repos" in task:
+                task["passive_repos"] = sorted(task["passive_repos"])
         fd, tmp_path = tempfile.mkstemp(
             dir=self._state_dir, suffix=".yaml.tmp"
         )

@@ -572,3 +572,25 @@ def test_not_applicable_overlap_rejected():
             tasks={"run": "serve"},
             not_applicable=["run"],
         )
+
+
+def test_doctor_warns_when_workspace_gitignore_missing_worktrees(tmp_path):
+    """If workspace root is a git repo and .gitignore lacks `.worktrees`, doctor warns."""
+    import subprocess
+    from mship.core.config import ConfigLoader
+    from mship.core.doctor import DoctorChecker
+    from unittest.mock import MagicMock
+    from mship.util.shell import ShellRunner, ShellResult
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\nrepos:\n  a:\n    path: ./a\n    type: service\n"
+    )
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    config = ConfigLoader.load(tmp_path / "mothership.yaml")
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    checker = DoctorChecker(config, mock_shell, workspace_root=tmp_path)
+    report = checker.run()
+    relevant = [c for c in report.checks if "worktrees" in c.message.lower()]
+    assert any(c.status == "warn" for c in relevant), [c.message for c in report.checks]

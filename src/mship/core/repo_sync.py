@@ -200,6 +200,70 @@ def _result_for(
     return SyncResult(repo.name, repo.path, "up_to_date", "no action")
 
 
+def refresh_passive_worktrees(
+    state_manager,
+    config: WorkspaceConfig,
+) -> list[SyncResult]:
+    """Re-fetch and reset each passive worktree to `origin/<expected || base>`.
+
+    Safe by construction: passive worktrees are detached HEAD, mship-managed,
+    and pre-commit-hook-protected. Nothing the user could lose by hard reset.
+    Returns a SyncResult per (task, repo) tuple for reporting.
+    """
+    import subprocess
+    state = state_manager.load()
+    results: list[SyncResult] = []
+    for task in state.tasks.values():
+        for repo_name in task.passive_repos:
+            wt = task.worktrees.get(repo_name)
+            if wt is None or not Path(wt).exists():
+                continue
+            repo_cfg = config.repos.get(repo_name)
+            if repo_cfg is None:
+                continue
+            ref = repo_cfg.expected_branch or repo_cfg.base_branch
+            if ref is None:
+                results.append(SyncResult(
+                    name=f"{task.slug}/{repo_name}",
+                    path=Path(wt),
+                    status="skipped",
+                    message="no expected_branch or base_branch declared",
+                ))
+                continue
+            canonical = repo_cfg.path
+            fetch = subprocess.run(
+                ["git", "fetch", "origin", ref], cwd=canonical,
+                capture_output=True, text=True, check=False, timeout=60,
+            )
+            if fetch.returncode != 0:
+                results.append(SyncResult(
+                    name=f"{task.slug}/{repo_name}",
+                    path=Path(wt),
+                    status="skipped",
+                    message=f"fetch failed: {fetch.stderr.strip()[:160]}",
+                ))
+                continue
+            reset = subprocess.run(
+                ["git", "-C", str(wt), "reset", "--hard", f"origin/{ref}"],
+                capture_output=True, text=True, check=False,
+            )
+            if reset.returncode == 0:
+                results.append(SyncResult(
+                    name=f"{task.slug}/{repo_name}",
+                    path=Path(wt),
+                    status="fast_forwarded",
+                    message=f"reset to origin/{ref}",
+                ))
+            else:
+                results.append(SyncResult(
+                    name=f"{task.slug}/{repo_name}",
+                    path=Path(wt),
+                    status="skipped",
+                    message=f"reset failed: {reset.stderr.strip()[:160]}",
+                ))
+    return results
+
+
 def sync_repos(
     report: AuditReport,
     config: WorkspaceConfig,

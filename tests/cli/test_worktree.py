@@ -19,6 +19,8 @@ def _audit_ok_run(cmd, cwd, env=None):
         return ShellResult(returncode=0, stdout="main\n", stderr="")
     if "fetch" in cmd:
         return ShellResult(returncode=0, stdout="", stderr="")
+    if "ls-remote" in cmd:
+        return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
     if "rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
         return ShellResult(returncode=0, stdout="origin/main\n", stderr="")
     if "rev-list --count" in cmd:
@@ -87,12 +89,15 @@ def test_spawn_all_repos(configured_git_app: Path):
     assert set(task.affected_repos) == {"shared", "auth-service", "api-gateway"}
 
 
-def test_spawn_records_base_branch_main(configured_git_app: Path):
+def test_spawn_records_base_branch(configured_git_app: Path):
+    """Spawn records base_branch from workspace config if available, else None."""
     result = runner.invoke(app, ["spawn", "record base", "--repos", "shared"])
     assert result.exit_code == 0, result.output
     mgr = StateManager(configured_git_app / ".mothership")
     state = mgr.load()
-    assert state.tasks["record-base"].base_branch == "main"
+    # gh is unavailable in unit tests, so workspace_default_branch_from_config
+    # returns None; base_branch is recorded as None (no silent "main" fallback).
+    assert state.tasks["record-base"].base_branch is None
 
 
 def test_worktrees_list(configured_git_app: Path):
@@ -378,6 +383,10 @@ def test_finish_creates_prs(configured_git_app: Path):
     def mock_run(cmd, cwd, env=None):
         if "gh auth status" in cmd:
             return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
         if "git push" in cmd:
             return ShellResult(returncode=0, stdout="", stderr="")
         if "gh pr create" in cmd:
@@ -422,6 +431,10 @@ def test_finish_body_file_passed_to_gh_pr_create(configured_git_app: Path):
     def mock_run(cmd, cwd, env=None):
         if "gh auth status" in cmd:
             return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
         if "git push" in cmd:
             return ShellResult(returncode=0, stdout="", stderr="")
         if "gh pr create" in cmd:
@@ -452,7 +465,7 @@ def test_finish_body_map_per_repo_bodies(configured_git_app: Path):
     for repos not in the map. See #114."""
     from mship.cli import container as cli_container
 
-    runner.invoke(app, ["spawn", "body map", "--repos", "shared,api-gateway"])
+    runner.invoke(app, ["spawn", "body map", "--repos", "shared,auth-service,api-gateway"])
 
     shared_body = configured_git_app / "shared.md"
     shared_body.write_text("## Shared\n- lib change\n\n## Test plan\n- [ ] unit\n")
@@ -466,6 +479,10 @@ def test_finish_body_map_per_repo_bodies(configured_git_app: Path):
     def mock_run(cmd, cwd, env=None):
         if "gh auth status" in cmd:
             return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
         if "git push" in cmd:
             return ShellResult(returncode=0, stdout="", stderr="")
         if "gh pr create" in cmd:
@@ -595,6 +612,10 @@ def test_finish_title_override_passed_to_gh_pr_create(configured_git_app: Path):
     def mock_run(cmd, cwd, env=None):
         if "gh auth status" in cmd:
             return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
         if "git push" in cmd:
             return ShellResult(returncode=0, stdout="", stderr="")
         if "gh pr create" in cmd:
@@ -1219,6 +1240,7 @@ def test_finish_shared_git_root_creates_one_pr_records_on_all(configured_git_app
     path: .
     git_root: shared
     type: service
+    base_branch: main
 """)
 
     runner.invoke(app, ["spawn", "group prs", "--repos", "shared,infra", "--skip-setup"])
@@ -1229,6 +1251,10 @@ def test_finish_shared_git_root_creates_one_pr_records_on_all(configured_git_app
         nonlocal create_pr_call_count
         if "gh auth status" in cmd:
             return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
         if "git push" in cmd:
             return ShellResult(returncode=0, stdout="", stderr="")
         if "rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
@@ -1280,6 +1306,10 @@ def test_finish_harvests_existing_pr_instead_of_creating(configured_git_app: Pat
         nonlocal create_pr_called
         if "gh auth status" in cmd:
             return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
         if "git push" in cmd:
             return ShellResult(returncode=0, stdout="", stderr="")
         if "rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
@@ -1321,6 +1351,10 @@ def test_finish_harvests_on_create_pr_duplicate_stderr(configured_git_app: Path)
         nonlocal list_call_count
         if "gh auth status" in cmd:
             return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
         if "git push" in cmd:
             return ShellResult(returncode=0, stdout="", stderr="")
         if "rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
@@ -1374,10 +1408,14 @@ def test_finish_calls_ensure_upstream_after_push(configured_git_app: Path):
         nonlocal set_upstream_called, ensure_upstream_probe_count
         if "gh auth status" in cmd:
             return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
         if "symbolic-ref" in cmd and "HEAD" in cmd:
             return ShellResult(returncode=0, stdout="main\n", stderr="")
         if "fetch" in cmd:
             return ShellResult(returncode=0, stdout="", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd and "@{u}" not in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
         if "rev-list --count" in cmd:
             return ShellResult(returncode=0, stdout="0\n", stderr="")
         if "status --porcelain" in cmd:
@@ -1433,6 +1471,10 @@ def test_finish_captures_diagnostic_when_main_is_dirty_post_op(configured_git_ap
     def mock_run(cmd, cwd, env=None):
         if "gh auth status" in cmd:
             return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
         if "git push" in cmd:
             return ShellResult(returncode=0, stdout="", stderr="")
         if "rev-parse --abbrev-ref --symbolic-full-name" in cmd and "@{u}" in cmd:
@@ -1479,6 +1521,10 @@ def test_finish_does_not_capture_diagnostic_when_main_is_clean(configured_git_ap
     def mock_run(cmd, cwd, env=None):
         if "gh auth status" in cmd:
             return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
         if "git push" in cmd:
             return ShellResult(returncode=0, stdout="", stderr="")
         if "rev-parse --abbrev-ref --symbolic-full-name" in cmd and "@{u}" in cmd:
@@ -1630,3 +1676,93 @@ def test_spawn_threshold_not_triggered_with_explicit_repos(configured_git_app: P
 
     result = runner.invoke(app, ["spawn", "explicit scope", "--repos", "shared,auth-service"])
     assert result.exit_code == 0, result.output
+
+
+def test_spawn_cli_passes_offline_flag(workspace_with_git, tmp_path, monkeypatch):
+    """`mship spawn --offline` sets offline=True in the manager call."""
+    from typer.testing import CliRunner
+    from unittest.mock import patch
+    from mship.cli import app, container
+    from pathlib import Path
+
+    container.config_path.override(workspace_with_git / "mothership.yaml")
+    container.state_dir.override(workspace_with_git / ".mothership")
+    container.config.reset()
+    container.state_manager.reset()
+    monkeypatch.chdir(workspace_with_git)
+    try:
+        runner = CliRunner()
+        with patch("mship.core.worktree.WorktreeManager.spawn") as mock_spawn:
+            from mship.core.worktree import SpawnResult
+            from mship.core.state import Task
+            from datetime import datetime, timezone
+            mock_spawn.return_value = SpawnResult(
+                task=Task(
+                    slug="x", description="x", phase="plan",
+                    created_at=datetime.now(timezone.utc),
+                    affected_repos=["shared"], branch="feat/x",
+                    worktrees={"shared": Path("/tmp/x")},
+                ),
+            )
+            result = runner.invoke(
+                app, ["spawn", "x", "--repos", "shared",
+                      "--skip-setup", "--force-audit", "--offline"],
+            )
+            assert result.exit_code == 0, result.output
+            assert mock_spawn.call_args.kwargs.get("offline") is True
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+
+def test_spawn_cli_writes_offline_journal_entry(workspace_with_git, monkeypatch):
+    """`mship spawn --offline` writes an OFFLINE-tagged journal entry post-spawn."""
+    from typer.testing import CliRunner
+    from unittest.mock import patch
+    from mship.cli import app, container
+    from mship.core.log import LogManager
+    from mship.core.worktree import SpawnResult
+    from mship.core.state import Task
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    state_dir = workspace_with_git / ".mothership"
+    container.config_path.override(workspace_with_git / "mothership.yaml")
+    container.state_dir.override(state_dir)
+    container.config.reset()
+    container.state_manager.reset()
+    container.log_manager.reset()
+    monkeypatch.chdir(workspace_with_git)
+    try:
+        runner = CliRunner()
+        # Mock spawn so we don't need real git work; the OFFLINE journal write
+        # is in the CLI handler post-spawn, so it still fires.
+        with patch("mship.core.worktree.WorktreeManager.spawn") as mock_spawn:
+            mock_spawn.return_value = SpawnResult(
+                task=Task(
+                    slug="off", description="off", phase="plan",
+                    created_at=datetime.now(timezone.utc),
+                    affected_repos=["shared"], branch="feat/off",
+                    worktrees={"shared": Path("/tmp/off")},
+                ),
+            )
+            result = runner.invoke(
+                app, ["spawn", "off", "--repos", "shared",
+                      "--skip-setup", "--force-audit", "--offline"],
+            )
+            assert result.exit_code == 0, result.output
+
+        entries = LogManager(state_dir / "logs").read("off")
+        offline_entries = [e for e in entries if "OFFLINE" in e.message]
+        assert offline_entries, (
+            f"expected an OFFLINE journal entry; got: "
+            f"{[e.message for e in entries]}"
+        )
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+        container.log_manager.reset()

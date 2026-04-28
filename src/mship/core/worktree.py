@@ -9,9 +9,7 @@ from mship.core.graph import DependencyGraph
 from mship.core.log import LogManager
 from mship.core.reconcile.fetch import workspace_default_branch_from_config
 from mship.core.state import StateManager, Task, WorkspaceState
-from mship.core.workspace_marker import (
-    MARKER_NAME, write_marker,
-)
+from mship.core.workspace_marker import write_marker
 from mship.util.git import GitRunner
 from mship.util.shell import ShellRunner
 from mship.util.slug import slugify
@@ -402,6 +400,7 @@ class WorktreeManager:
         skip_setup: bool = False,
         slug: str | None = None,
         workspace_root: Path | None = None,
+        offline: bool = False,
     ) -> SpawnResult:
         slug = slug if slug is not None else slugify(description)
         branch = self._config.branch_pattern.replace("{slug}", slug)
@@ -423,27 +422,55 @@ class WorktreeManager:
 
         ordered = self._graph.topo_sort(repos)
 
+        # Passive expansion: collect transitive depends_on of each repo in
+        # `ordered` that isn't already in `ordered`. Topo-sort the union so
+        # passive deps materialize before their consumers.
+        affected = set(ordered)
+        passive: set[str] = set()
+        frontier = list(ordered)
+        while frontier:
+            r = frontier.pop()
+            for dep in self._graph.direct_deps(r):
+                if dep not in affected and dep not in passive:
+                    passive.add(dep)
+                    frontier.append(dep)
+        all_repos = self._graph.topo_sort(list(affected | passive))
+
         worktrees: dict[str, Path] = {}
         setup_warnings: list[str] = []
 
-        for repo_name in ordered:
+        if workspace_root is None:
+            raise ValueError(
+                "workspace_root required for hub layout spawn; "
+                "callers must pass container.config_path().parent"
+            )
+
+        hub = workspace_root / ".worktrees" / slug
+        hub.mkdir(parents=True, exist_ok=True)
+
+        # Workspace-root .gitignore gets .worktrees if root is a git repo.
+        if (workspace_root / ".git").exists():
+            if not self._git.is_ignored(workspace_root, ".worktrees"):
+                self._git.add_to_gitignore(workspace_root, ".worktrees")
+
+        for repo_name in all_repos:
             repo_config = self._config.repos[repo_name]
+            is_passive = repo_name in passive
 
             if repo_config.git_root is not None:
-                # Subdirectory service: share parent's worktree
+                # Subdirectory child: nested inside parent's hub worktree.
                 parent_wt = worktrees.get(repo_config.git_root)
                 if parent_wt is None:
                     parent_wt = self._config.repos[repo_config.git_root].path
                 effective = parent_wt / repo_config.path
                 worktrees[repo_name] = effective
 
-                # Create symlinks before setup so setup can use the linked dirs
                 symlink_warnings = self._create_symlinks(repo_name, repo_config, effective)
                 setup_warnings.extend(symlink_warnings)
                 bind_warnings = self._copy_bind_files(repo_name, repo_config, effective)
                 setup_warnings.extend(bind_warnings)
 
-                if not skip_setup and shutil.which("task") is not None:
+                if not is_passive and not skip_setup and shutil.which("task") is not None:
                     actual_setup = repo_config.tasks.get("setup", "setup")
                     setup_result = self._shell.run_task(
                         task_name="setup",
@@ -458,36 +485,50 @@ class WorktreeManager:
                         )
                 continue
 
-            # Normal repo: create its own worktree
+            # Normal repo: hub worktree.
             repo_path = repo_config.path
+            wt_path = hub / repo_name
 
-            if not self._git.is_ignored(repo_path, ".worktrees"):
-                self._git.add_to_gitignore(repo_path, ".worktrees")
-            if not self._git.is_ignored(repo_path, MARKER_NAME):
-                self._git.add_to_gitignore(repo_path, MARKER_NAME)
-
-            wt_path = repo_path / ".worktrees" / branch
-            self._git.worktree_add(
-                repo_path=repo_path,
-                worktree_path=wt_path,
-                branch=branch,
-            )
+            if is_passive:
+                # Passive: detached HEAD at origin/<expected || base>.
+                ref = repo_config.expected_branch or repo_config.base_branch
+                if ref is None:
+                    raise ValueError(
+                        f"Passive materialization for '{repo_name}' requires "
+                        f"`expected_branch` or `base_branch` declared in "
+                        f"mothership.yaml."
+                    )
+                if not offline:
+                    fetched = self._git.fetch_remote_ref(repo_path=repo_path, ref=ref)
+                    if not fetched:
+                        raise RuntimeError(
+                            f"Failed to fetch origin/{ref} for passive repo "
+                            f"'{repo_name}'. Re-run with `--offline` to use "
+                            f"the local ref."
+                        )
+                    target_ref = f"origin/{ref}"
+                else:
+                    target_ref = ref
+                self._git.worktree_add_detached(
+                    repo_path=repo_path,
+                    worktree_path=wt_path,
+                    ref=target_ref,
+                )
+            else:
+                self._git.worktree_add(
+                    repo_path=repo_path,
+                    worktree_path=wt_path,
+                    branch=branch,
+                )
             worktrees[repo_name] = wt_path
 
-            # Drop the .mship-workspace marker so subrepo worktrees can
-            # discover the workspace (#84). Tracked .gitignore (above) keeps
-            # it out of `git status`; per-worktree info/exclude doesn't work
-            # because git resolves info/exclude to the shared main-repo path.
-            if workspace_root is not None:
-                write_marker(wt_path, workspace_root)
-
-            # Create symlinks before setup so setup can use the linked dirs
             symlink_warnings = self._create_symlinks(repo_name, repo_config, wt_path)
             setup_warnings.extend(symlink_warnings)
             bind_warnings = self._copy_bind_files(repo_name, repo_config, wt_path)
             setup_warnings.extend(bind_warnings)
 
-            if not skip_setup and shutil.which("task") is not None:
+            # Skip task setup for passive worktrees.
+            if not is_passive and not skip_setup and shutil.which("task") is not None:
                 actual_setup = repo_config.tasks.get("setup", "setup")
                 setup_result = self._shell.run_task(
                     task_name="setup",
@@ -501,7 +542,9 @@ class WorktreeManager:
                         f"{setup_result.stderr.strip()[:200]}"
                     )
 
-        base_branch = workspace_default_branch_from_config(self._config) or "main"
+        # Single .mship-workspace marker at the hub root.
+        write_marker(hub, workspace_root)
+
         task = Task(
             slug=slug,
             description=description,
@@ -510,7 +553,8 @@ class WorktreeManager:
             affected_repos=ordered,
             worktrees=worktrees,
             branch=branch,
-            base_branch=base_branch,
+            base_branch=workspace_default_branch_from_config(self._config),
+            passive_repos=passive,
         )
 
         def _apply(s: WorkspaceState) -> None:
@@ -551,7 +595,6 @@ class WorktreeManager:
                     worktree_path=Path(wt_path),
                 )
             except Exception:
-                import shutil
                 shutil.rmtree(Path(wt_path), ignore_errors=True)
             try:
                 self._git.branch_delete(
@@ -560,6 +603,25 @@ class WorktreeManager:
                 )
             except Exception:
                 pass
+
+        # Remove the hub directory for this task. Inferred from the first
+        # worktree's parent.parent, which is `<workspace>/.worktrees/<slug>/`.
+        # Legacy per-repo-layout tasks have a different parent shape — leave
+        # those alone.
+        try:
+            sample_wt = None
+            for name, wt in task.worktrees.items():
+                if self._config.repos[name].git_root is None:
+                    sample_wt = wt
+                    break
+            if sample_wt is not None:
+                hub = Path(sample_wt).parent
+                # Sanity: only remove if it looks like a hub (parent ends in .worktrees)
+                if hub.name == task_slug and hub.parent.name == ".worktrees":
+                    if hub.exists():
+                        shutil.rmtree(hub, ignore_errors=True)
+        except Exception:
+            pass
 
         # Only update state after all cleanup attempts
         def _abort(s):

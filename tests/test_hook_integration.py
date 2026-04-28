@@ -280,3 +280,41 @@ def test_commit_in_main_checkout_allowed_with_zero_tasks(workspace_for_hooks):
         cwd=repo, capture_output=True, text=True, env=env,
     )
     assert result.returncode == 0, (result.stdout, result.stderr)
+
+
+def test_commit_in_passive_worktree_refused(workspace_for_hooks, monkeypatch):
+    """End-to-end: commit attempt in a passive worktree refused via the real git hook."""
+    from datetime import datetime, timezone
+    from mship.core.state import StateManager, Task, WorkspaceState
+
+    tmp_path, repo = workspace_for_hooks
+    runner.invoke(app, ["init", "--install-hooks"])
+
+    state_dir = tmp_path / ".mothership"
+    sm = StateManager(state_dir)
+    state = sm.load()
+    passive_wt = tmp_path / ".worktrees" / "x" / "cli"
+    passive_wt.parent.mkdir(parents=True, exist_ok=True)
+    # Create a real git worktree of `repo` at HEAD to give us a valid git context
+    subprocess.run(["git", "worktree", "add", "--detach", str(passive_wt), "HEAD"],
+                   cwd=repo, check=True, capture_output=True)
+    state.tasks["x"] = Task(
+        slug="x", description="x", phase="plan",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["cli"], branch="feat/x",
+        worktrees={"cli": passive_wt},
+        passive_repos={"cli"},
+    )
+    sm.save(state)
+
+    (passive_wt / "p.py").write_text("p\n")
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "add", "p.py"], cwd=passive_wt, check=True, capture_output=True, env=env)
+    result = subprocess.run(
+        ["git", "commit", "-m", "should refuse"],
+        cwd=passive_wt, capture_output=True, text=True, env=env,
+    )
+    assert result.returncode != 0
+    assert "passive worktree" in result.stderr.lower()
