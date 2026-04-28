@@ -91,3 +91,7 @@ class DependencyGraph:
                 visited.add(node)
                 stack.extend(self._reverse[node])
         return sorted(visited)
+
+    def direct_deps(self, repo_name: str) -> list[str]:
+        """Return the direct dependency names of `repo_name`."""
+        return list(self._reverse[repo_name])

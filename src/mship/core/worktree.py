@@ -400,6 +400,7 @@ class WorktreeManager:
         skip_setup: bool = False,
         slug: str | None = None,
         workspace_root: Path | None = None,
+        offline: bool = False,
     ) -> SpawnResult:
         slug = slug if slug is not None else slugify(description)
         branch = self._config.branch_pattern.replace("{slug}", slug)
@@ -421,6 +422,20 @@ class WorktreeManager:
 
         ordered = self._graph.topo_sort(repos)
 
+        # Passive expansion: collect transitive depends_on of each repo in
+        # `ordered` that isn't already in `ordered`. Topo-sort the union so
+        # passive deps materialize before their consumers.
+        affected = set(ordered)
+        passive: set[str] = set()
+        frontier = list(ordered)
+        while frontier:
+            r = frontier.pop()
+            for dep in self._graph.direct_deps(r):
+                if dep not in affected and dep not in passive:
+                    passive.add(dep)
+                    frontier.append(dep)
+        all_repos = self._graph.topo_sort(list(affected | passive))
+
         worktrees: dict[str, Path] = {}
         setup_warnings: list[str] = []
 
@@ -433,13 +448,16 @@ class WorktreeManager:
         hub = workspace_root / ".worktrees" / slug
         hub.mkdir(parents=True, exist_ok=True)
 
+        base_branch = workspace_default_branch_from_config(self._config) or "main"
+
         # Workspace-root .gitignore gets .worktrees if root is a git repo.
         if (workspace_root / ".git").exists():
             if not self._git.is_ignored(workspace_root, ".worktrees"):
                 self._git.add_to_gitignore(workspace_root, ".worktrees")
 
-        for repo_name in ordered:
+        for repo_name in all_repos:
             repo_config = self._config.repos[repo_name]
+            is_passive = repo_name in passive
 
             if repo_config.git_root is not None:
                 # Subdirectory child: nested inside parent's hub worktree.
@@ -473,11 +491,35 @@ class WorktreeManager:
             repo_path = repo_config.path
             wt_path = hub / repo_name
 
-            self._git.worktree_add(
-                repo_path=repo_path,
-                worktree_path=wt_path,
-                branch=branch,
-            )
+            if is_passive:
+                # Passive: detached HEAD at origin/<expected || base>.
+                ref = (
+                    repo_config.expected_branch
+                    or repo_config.base_branch
+                    or base_branch
+                )
+                if not offline:
+                    fetched = self._git.fetch_remote_ref(repo_path=repo_path, ref=ref)
+                    if not fetched:
+                        raise RuntimeError(
+                            f"Failed to fetch origin/{ref} for passive repo "
+                            f"'{repo_name}'. Re-run with `--offline` to use "
+                            f"the local ref."
+                        )
+                    target_ref = f"origin/{ref}"
+                else:
+                    target_ref = ref
+                self._git.worktree_add_detached(
+                    repo_path=repo_path,
+                    worktree_path=wt_path,
+                    ref=target_ref,
+                )
+            else:
+                self._git.worktree_add(
+                    repo_path=repo_path,
+                    worktree_path=wt_path,
+                    branch=branch,
+                )
             worktrees[repo_name] = wt_path
 
             symlink_warnings = self._create_symlinks(repo_name, repo_config, wt_path)
@@ -485,7 +527,8 @@ class WorktreeManager:
             bind_warnings = self._copy_bind_files(repo_name, repo_config, wt_path)
             setup_warnings.extend(bind_warnings)
 
-            if not skip_setup and shutil.which("task") is not None:
+            # Skip task setup for passive worktrees.
+            if not is_passive and not skip_setup and shutil.which("task") is not None:
                 actual_setup = repo_config.tasks.get("setup", "setup")
                 setup_result = self._shell.run_task(
                     task_name="setup",
@@ -502,7 +545,6 @@ class WorktreeManager:
         # Single .mship-workspace marker at the hub root.
         write_marker(hub, workspace_root)
 
-        base_branch = workspace_default_branch_from_config(self._config) or "main"
         task = Task(
             slug=slug,
             description=description,
@@ -512,6 +554,7 @@ class WorktreeManager:
             worktrees=worktrees,
             branch=branch,
             base_branch=base_branch,
+            passive_repos=passive,
         )
 
         def _apply(s: WorkspaceState) -> None:

@@ -1339,3 +1339,52 @@ def test_abort_removes_hub_directory(worktree_deps):
     assert hub.exists()
     mgr.abort("abort-test")
     assert not hub.exists(), "abort should rm -rf the hub directory"
+
+
+def test_spawn_materializes_passive_dep(worktree_deps):
+    """When --repos is auth-service only, shared (its dep) becomes passive."""
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    # auth-service depends_on shared; spawn auth-service alone
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    # workspace_with_git fixture has no remotes set up; pass offline=True
+    # so we use the local main branch instead of origin/main.
+    mgr.spawn("passive dep", repos=["auth-service"],
+              workspace_root=workspace, offline=True)
+    state = state_mgr.load()
+    task = state.tasks["passive-dep"]
+    # affected_repos contains only what user asked for
+    assert task.affected_repos == ["auth-service"]
+    # passive_repos contains the dep
+    assert task.passive_repos == {"shared"}
+    # both are in worktrees
+    assert "auth-service" in task.worktrees
+    assert "shared" in task.worktrees
+    # passive worktree exists on disk
+    assert Path(task.worktrees["shared"]).exists()
+
+
+def test_spawn_passive_worktree_is_detached(worktree_deps):
+    import subprocess
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("detached check", repos=["auth-service"],
+              workspace_root=workspace, offline=True)
+    state = state_mgr.load()
+    passive_wt = Path(state.tasks["detached-check"].worktrees["shared"])
+    rc = subprocess.run(["git", "-C", str(passive_wt), "symbolic-ref", "-q", "HEAD"],
+                        capture_output=True).returncode
+    assert rc != 0, "passive worktree should be on detached HEAD"
+
+
+def test_spawn_passive_skips_task_setup(worktree_deps):
+    """Passive worktrees materialize symlinks/binds but don't run `task setup`."""
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("no setup", repos=["auth-service"],
+              workspace_root=workspace, offline=True)
+    # `shell.run_task` should be called for affected (auth-service) but not passive (shared).
+    setup_calls = [c for c in shell.run_task.call_args_list
+                   if c.kwargs.get("task_name") == "setup"]
+    cwds = {Path(c.kwargs.get("cwd")).name for c in setup_calls}
+    assert "auth-service" in cwds
+    assert "shared" not in cwds
