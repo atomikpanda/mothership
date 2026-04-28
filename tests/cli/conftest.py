@@ -14,6 +14,8 @@ def _audit_ok_run(cmd, cwd, env=None):
         return ShellResult(returncode=0, stdout="main\n", stderr="")
     if "fetch" in cmd:
         return ShellResult(returncode=0, stdout="", stderr="")
+    if "ls-remote" in cmd:
+        return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
     if "rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
         return ShellResult(returncode=0, stdout="origin/main\n", stderr="")
     if "rev-list --count" in cmd:

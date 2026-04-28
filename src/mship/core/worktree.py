@@ -448,8 +448,6 @@ class WorktreeManager:
         hub = workspace_root / ".worktrees" / slug
         hub.mkdir(parents=True, exist_ok=True)
 
-        base_branch = workspace_default_branch_from_config(self._config) or "main"
-
         # Workspace-root .gitignore gets .worktrees if root is a git repo.
         if (workspace_root / ".git").exists():
             if not self._git.is_ignored(workspace_root, ".worktrees"):
@@ -493,11 +491,13 @@ class WorktreeManager:
 
             if is_passive:
                 # Passive: detached HEAD at origin/<expected || base>.
-                ref = (
-                    repo_config.expected_branch
-                    or repo_config.base_branch
-                    or base_branch
-                )
+                ref = repo_config.expected_branch or repo_config.base_branch
+                if ref is None:
+                    raise ValueError(
+                        f"Passive materialization for '{repo_name}' requires "
+                        f"`expected_branch` or `base_branch` declared in "
+                        f"mothership.yaml."
+                    )
                 if not offline:
                     fetched = self._git.fetch_remote_ref(repo_path=repo_path, ref=ref)
                     if not fetched:
@@ -553,7 +553,7 @@ class WorktreeManager:
             affected_repos=ordered,
             worktrees=worktrees,
             branch=branch,
-            base_branch=base_branch,
+            base_branch=workspace_default_branch_from_config(self._config),
             passive_repos=passive,
         )
 
