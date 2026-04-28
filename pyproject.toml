@@ -1,6 +1,6 @@
 [project]
 name = "mothership"
-version = "0.1.1"
+version = "0.2.0"
 description = "Phase-based workflow engine for multi-repo AI development"
 requires-python = ">=3.14"
 dependencies = [
@@ -33,4 +33,5 @@ dev = [
     "pytest>=8.0",
     "pytest-tmp-files>=0.0.2",
     "pytest-asyncio>=0.23",
+    "coverage>=7.13.5",
 ]
