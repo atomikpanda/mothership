@@ -562,6 +562,26 @@ class WorktreeManager:
             except Exception:
                 pass
 
+        # Remove the hub directory for this task. Inferred from the first
+        # worktree's parent.parent, which is `<workspace>/.worktrees/<slug>/`.
+        # Legacy per-repo-layout tasks have a different parent shape — leave
+        # those alone.
+        try:
+            sample_wt = None
+            for name, wt in task.worktrees.items():
+                if self._config.repos[name].git_root is None:
+                    sample_wt = wt
+                    break
+            if sample_wt is not None:
+                hub = Path(sample_wt).parent
+                # Sanity: only remove if it looks like a hub (parent ends in .worktrees)
+                if hub.name == task_slug and hub.parent.name == ".worktrees":
+                    if hub.exists():
+                        import shutil as _shutil
+                        _shutil.rmtree(hub, ignore_errors=True)
+        except Exception:
+            pass
+
         # Only update state after all cleanup attempts
         def _abort(s):
             s.tasks.pop(task_slug, None)

@@ -1329,3 +1329,13 @@ def test_spawn_workspace_gitignore_includes_worktrees(worktree_deps, tmp_path):
     gi = workspace / ".gitignore"
     assert gi.exists()
     assert ".worktrees" in gi.read_text().splitlines()
+
+
+def test_abort_removes_hub_directory(worktree_deps):
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("abort test", repos=["shared", "auth-service"], workspace_root=workspace)
+    hub = workspace / ".worktrees" / "abort-test"
+    assert hub.exists()
+    mgr.abort("abort-test")
+    assert not hub.exists(), "abort should rm -rf the hub directory"
