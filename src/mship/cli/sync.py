@@ -9,6 +9,10 @@ def register(app: typer.Typer, get_container):
     @app.command()
     def sync(
         repos: Optional[str] = typer.Option(None, "--repos", help="Comma-separated repo names"),
+        no_passive: bool = typer.Option(
+            False, "--no-passive",
+            help="Skip refreshing passive worktrees (default: include).",
+        ),
     ):
         """Fast-forward repos that audit cleanly and are behind origin."""
         from mship.core.repo_state import audit_repos
@@ -45,5 +49,16 @@ def register(app: typer.Typer, get_container):
                 output.print(f"  [green]{r.name}[/green]: fast-forwarded ({r.message})")
             else:
                 output.print(f"  [yellow]{r.name}[/yellow]: skipped ({r.message})")
+
+        if not no_passive:
+            from mship.core.repo_sync import refresh_passive_worktrees
+            passive_results = refresh_passive_worktrees(
+                container.state_manager(), config,
+            )
+            for r in passive_results:
+                if r.status == "fast_forwarded":
+                    output.print(f"  [green]{r.name}[/green]: {r.message}")
+                else:
+                    output.print(f"  [yellow]{r.name}[/yellow]: skipped ({r.message})")
 
         raise typer.Exit(code=1 if out.has_errors else 0)
