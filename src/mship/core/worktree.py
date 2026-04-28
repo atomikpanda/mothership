@@ -10,7 +10,7 @@ from mship.core.log import LogManager
 from mship.core.reconcile.fetch import workspace_default_branch_from_config
 from mship.core.state import StateManager, Task, WorkspaceState
 from mship.core.workspace_marker import (
-    MARKER_NAME, append_to_worktree_exclude, write_marker,
+    MARKER_NAME, write_marker,
 )
 from mship.util.git import GitRunner
 from mship.util.shell import ShellRunner
@@ -381,6 +381,8 @@ class WorktreeManager:
 
             if not self._git.is_ignored(repo_path, ".worktrees"):
                 self._git.add_to_gitignore(repo_path, ".worktrees")
+            if not self._git.is_ignored(repo_path, MARKER_NAME):
+                self._git.add_to_gitignore(repo_path, MARKER_NAME)
 
             wt_path = repo_path / ".worktrees" / branch
             self._git.worktree_add(
@@ -391,18 +393,11 @@ class WorktreeManager:
             worktrees[repo_name] = wt_path
 
             # Drop the .mship-workspace marker so subrepo worktrees can
-            # discover the workspace (#84) and add it to the per-worktree
-            # info/exclude so it doesn't pollute tracked .gitignore.
+            # discover the workspace (#84). Tracked .gitignore (above) keeps
+            # it out of `git status`; per-worktree info/exclude doesn't work
+            # because git resolves info/exclude to the shared main-repo path.
             if workspace_root is not None:
                 write_marker(wt_path, workspace_root)
-                slug_segment = branch.split("/")[-1]
-                if not append_to_worktree_exclude(
-                    wt_path, repo_path / ".git", slug_segment
-                ):
-                    setup_warnings.append(
-                        f"{repo_name}: could not add {MARKER_NAME} to "
-                        f"per-worktree exclude — add it to .gitignore manually."
-                    )
 
             # Create symlinks before setup so setup can use the linked dirs
             symlink_warnings = self._create_symlinks(repo_name, repo_config, wt_path)
