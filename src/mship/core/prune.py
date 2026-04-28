@@ -73,12 +73,16 @@ class PruneManager:
                     resolved = str(repo_dir.resolve())
                     if resolved in tracked_paths:
                         continue
-                    # Match the directory name against a configured repo.
-                    matched_repo = None
-                    for name, rc in self._config.repos.items():
-                        if rc.path.name == repo_dir.name:
-                            matched_repo = name
-                            break
+                    # Hub worktrees are created under <hub>/<slug>/<repo_name>/,
+                    # so prefer matching the directory name as a configured repo
+                    # key. Fall back to the canonical path name for compatibility
+                    # with older or unusual layouts.
+                    matched_repo = repo_dir.name if repo_dir.name in self._config.repos else None
+                    if matched_repo is None:
+                        for name, rc in self._config.repos.items():
+                            if rc.path.name == repo_dir.name:
+                                matched_repo = name
+                                break
                     if matched_repo is None:
                         continue
                     orphans.append(OrphanedWorktree(
