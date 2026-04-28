@@ -107,6 +107,11 @@ class WorkspaceConfig(BaseModel):
     # If set and the effective spawn scope exceeds N repos AND no --repos was
     # passed, require confirmation (TTY) or --yes (non-TTY). See #74.
     spawn_confirm_threshold: int | None = None
+    # Workspace-relative paths searched for specs by `mship phase dev`'s
+    # soft gate and `mship view spec`. None = default `["docs/superpowers/specs"]`
+    # which matches the bundled `brainstorming` / `writing-plans` skill
+    # convention. See #113.
+    spec_paths: list[str] | None = None
     repos: dict[str, RepoConfig]
 
     @model_validator(mode="after")

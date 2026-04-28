@@ -18,6 +18,7 @@ def find_spec(
     *,
     task: str | None = None,
     state: Optional["WorkspaceState"] = None,
+    spec_paths: list[str] | None = None,
 ) -> Path:
     """Resolve a spec file.
 
@@ -26,6 +27,9 @@ def find_spec(
     - `name_or_path=<name>, task=<slug>`: that name, searching only the task's worktrees.
     - `name_or_path=<name>, task=None, state=<state>`: that name, searching main + every worktree.
     - `name_or_path=<absolute path>`: that literal file.
+
+    `spec_paths` (workspace-relative) overrides the default `docs/superpowers/specs`
+    search root. None = default. See #113.
     """
     if name_or_path is not None:
         candidate = Path(name_or_path)
@@ -34,7 +38,7 @@ def find_spec(
                 return candidate
             raise SpecNotFoundError(f"Spec not found: {name_or_path}")
 
-    search_roots = _resolve_search_roots(workspace_root, task, state)
+    search_roots = _resolve_search_roots(workspace_root, task, state, spec_paths)
 
     if name_or_path is None:
         return _newest_across(search_roots, task)
@@ -54,18 +58,21 @@ def _resolve_search_roots(
     workspace_root: Path,
     task: str | None,
     state: "WorkspaceState | None",
+    spec_paths: list[str] | None = None,
 ) -> list[Path]:
+    subdirs = [Path(p) for p in spec_paths] if spec_paths else [SPEC_SUBDIR]
     if task is not None:
         if state is None or task not in state.tasks:
             raise SpecNotFoundError(f"Unknown task: {task!r}")
         worktrees = state.tasks[task].worktrees
-        roots = [Path(p) / SPEC_SUBDIR for p in worktrees.values()]
+        roots = [Path(p) / sub for p in worktrees.values() for sub in subdirs]
         return [r for r in roots if r.is_dir()] or roots
-    roots: list[Path] = [workspace_root / SPEC_SUBDIR]
+    roots: list[Path] = [workspace_root / sub for sub in subdirs]
     if state is not None:
         for t in state.tasks.values():
             for wt in t.worktrees.values():
-                roots.append(Path(wt) / SPEC_SUBDIR)
+                for sub in subdirs:
+                    roots.append(Path(wt) / sub)
     return roots
 
 
