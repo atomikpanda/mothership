@@ -279,7 +279,11 @@ def test_finish_fails_when_base_missing_on_remote(finish_workspace):
 
 
 def test_finish_blocks_when_affected_repo_is_dirty(finish_workspace):
-    """Dirty affected repo blocks finish under default block_finish=true."""
+    """Dirty affected repo blocks finish under default block_finish=true.
+
+    Note: shared must have local commits (rev-list count > 0) so it's in the
+    audit scope per #112 — drift in repos with no pending work no longer blocks.
+    """
     workspace, mock_shell = finish_workspace
 
     result = runner.invoke(app, ["spawn", "finish gate", "--repos", "shared", "--force-audit"])
@@ -295,7 +299,8 @@ def test_finish_blocks_when_affected_repo_is_dirty(finish_workspace):
         if "rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
             return ShellResult(returncode=0, stdout="origin/main\n", stderr="")
         if "rev-list --count" in cmd:
-            return ShellResult(returncode=0, stdout="0\n", stderr="")
+            # shared has 1 commit past origin/main → in audit scope.
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
         if "worktree list" in cmd:
             return ShellResult(returncode=0, stdout="worktree /tmp/shared\n", stderr="")
         if "gh auth status" in cmd:
@@ -578,7 +583,11 @@ def test_finish_suppresses_no_upstream_for_task_branch(finish_workspace):
 
 
 def test_finish_still_blocks_other_audit_errors(finish_workspace):
-    """The fix must only suppress no_upstream; dirty_worktree etc. still block."""
+    """The fix must only suppress no_upstream; dirty_worktree etc. still block.
+
+    Note: shared must have local commits (count > 0) so it's in the audit scope
+    per #112 — drift in repos with no pending work is no longer a blocking error.
+    """
     workspace, mock_shell = finish_workspace
 
     result = runner.invoke(app, ["spawn", "still blocks", "--repos", "shared", "--force-audit"])
@@ -600,6 +609,9 @@ def test_finish_still_blocks_other_audit_errors(finish_workspace):
             return ShellResult(returncode=0, stdout=".git\n", stderr="")
         if "git worktree list" in cmd:
             return ShellResult(returncode=0, stdout="worktree /tmp/shared\n", stderr="")
+        if "git rev-list --count" in cmd:
+            # shared has 1 commit past origin/main → in audit scope.
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
         return ShellResult(returncode=0, stdout="", stderr="")
 
     mock_shell.run.side_effect = mock_run
@@ -607,6 +619,65 @@ def test_finish_still_blocks_other_audit_errors(finish_workspace):
     result = runner.invoke(app, ["finish", "--task", "still-blocks"])
     assert result.exit_code != 0
     assert "dirty_worktree" in result.output
+
+
+def test_finish_does_not_block_on_drift_in_unrelated_repo(finish_workspace):
+    """Drift in a repo without local commits should NOT block finish (#112).
+
+    The user's reported scenario: an unrelated repo is `behind_remote` but has
+    no commits on the task branch. Previously this blocked finish; now it
+    should be silently filtered out of the audit-blocking scope while
+    affected_repos with actual commits still get audited.
+    """
+    workspace, mock_shell = finish_workspace
+
+    # Spawn affecting shared (will have commits) and api-gateway (untouched).
+    # api-gateway depends on shared, but shared has no upstream deps so the
+    # scope of "shared has commits" is just {shared} — api-gateway is excluded.
+    result = runner.invoke(app, ["spawn", "scoped finish", "--repos", "shared,api-gateway", "--force-audit"])
+    assert result.exit_code == 0
+
+    def mock_run(cmd, cwd, env=None):
+        cwd_str = str(cwd) if cwd else ""
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://x/pr/1\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "git fetch" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "symbolic-ref --short HEAD" in cmd:
+            return ShellResult(returncode=0, stdout="feat/scoped-finish\n", stderr="")
+        if "git rev-parse --abbrev-ref --symbolic-full-name @{u}" in cmd:
+            return ShellResult(returncode=128, stdout="", stderr="")
+        if "git rev-parse --git-common-dir" in cmd:
+            return ShellResult(returncode=0, stdout=".git\n", stderr="")
+        if "git worktree list" in cmd:
+            return ShellResult(returncode=0, stdout="worktree /tmp\n", stderr="")
+        if "git status --porcelain" in cmd:
+            # api-gateway is dirty — but it has no commits on this task, so
+            # it's out of audit scope and the dirty state should NOT block.
+            if "api-gateway" in cwd_str:
+                return ShellResult(returncode=0, stdout=" M unrelated.py\n", stderr="")
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "git rev-list --count" in cmd:
+            # shared has commits; api-gateway does not.
+            if "shared" in cwd_str:
+                return ShellResult(returncode=0, stdout="1\n", stderr="")
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    result = runner.invoke(
+        app,
+        ["finish", "--task", "scoped-finish", "--body", "## Summary\nx\n## Test plan\n- [x] manual"],
+    )
+    # Tailrd's dirty_worktree is out of scope (no commits) → does not block.
+    # Shared has commits and clean state → finish proceeds.
+    assert result.exit_code == 0, result.output
+    assert "blocked by audit" not in result.output
 
 
 def test_finish_auto_links_issue_refs_in_description(finish_workspace):

@@ -772,7 +772,7 @@ def register(app: typer.Typer, get_container):
         ordered = graph.topo_sort(task.affected_repos)
 
         # --- Audit gate ---
-        from mship.core.audit_gate import run_audit_gate, AuditGateBlocked
+        from mship.core.audit_gate import run_audit_gate, AuditGateBlocked, compute_finish_audit_scope
         from mship.core.repo_state import audit_repos
 
         shell = container.shell()
@@ -791,6 +791,13 @@ def register(app: typer.Typer, get_container):
             from mship.core.repo_state import without_no_upstream_on_task_branch
             report = without_no_upstream_on_task_branch(report, task.branch)
 
+        # Scope blocking to repos that will actually produce a PR (have local
+        # commits past their base) plus their transitive deps. Drift in repos
+        # that won't be pushed is informational, not blocking. See #112.
+        scope_repos = compute_finish_audit_scope(
+            task, config, graph, container.pr_manager(),
+        )
+
         def _log_bypass(codes: list[str]) -> None:
             container.log_manager().append(
                 task.slug, f"BYPASSED AUDIT: finish — {', '.join(codes)}"
@@ -803,6 +810,7 @@ def register(app: typer.Typer, get_container):
                 force=force_audit,
                 command_name="finish",
                 on_bypass=_log_bypass,
+                scope_repos=scope_repos,
             )
         except AuditGateBlocked as e:
             output.error(str(e))
