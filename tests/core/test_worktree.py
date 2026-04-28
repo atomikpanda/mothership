@@ -1332,3 +1332,43 @@ def test_refresh_symlink_dirs_empty_config_returns_empty(tmp_path: Path):
     wt.mkdir()
     result = mgr.refresh_symlink_dirs("r", repo_cfg, wt)
     assert result == {"copied": [], "updated": [], "unchanged": [], "skipped": [], "warnings": []}
+
+
+def test_spawn_uses_hub_layout(worktree_deps):
+    """New spawns place worktrees at <workspace>/.worktrees/<slug>/<repo>/, not <repo>/.worktrees/."""
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("hub layout", repos=["shared", "auth-service"], workspace_root=workspace)
+    state = state_mgr.load()
+    task = state.tasks["hub-layout"]
+    expected_hub = workspace / ".worktrees" / "hub-layout"
+    assert Path(task.worktrees["shared"]) == expected_hub / "shared"
+    assert Path(task.worktrees["auth-service"]) == expected_hub / "auth-service"
+    assert (expected_hub / "shared").exists()
+    assert (expected_hub / "auth-service").exists()
+
+
+def test_spawn_writes_single_marker_at_hub_root(worktree_deps):
+    """One .mship-workspace marker per hub, not per worktree."""
+    from mship.core.workspace_marker import MARKER_NAME
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("marker test", repos=["shared", "auth-service"], workspace_root=workspace)
+    hub = workspace / ".worktrees" / "marker-test"
+    assert (hub / MARKER_NAME).is_file()
+    # No per-worktree markers
+    assert not (hub / "shared" / MARKER_NAME).exists()
+    assert not (hub / "auth-service" / MARKER_NAME).exists()
+
+
+def test_spawn_workspace_gitignore_includes_worktrees(worktree_deps, tmp_path):
+    """Workspace root .gitignore (if root is a git repo) gets `.worktrees` added."""
+    import subprocess
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    # Make the workspace root itself a git repo
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True, capture_output=True)
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("ignore test", repos=["shared"], workspace_root=workspace)
+    gi = workspace / ".gitignore"
+    assert gi.exists()
+    assert ".worktrees" in gi.read_text().splitlines()

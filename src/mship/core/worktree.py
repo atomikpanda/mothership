@@ -426,18 +426,31 @@ class WorktreeManager:
         worktrees: dict[str, Path] = {}
         setup_warnings: list[str] = []
 
+        if workspace_root is None:
+            raise ValueError(
+                "workspace_root required for hub layout spawn; "
+                "callers must pass container.config_path().parent"
+            )
+
+        hub = workspace_root / ".worktrees" / slug
+        hub.mkdir(parents=True, exist_ok=True)
+
+        # Workspace-root .gitignore gets .worktrees if root is a git repo.
+        if (workspace_root / ".git").exists():
+            if not self._git.is_ignored(workspace_root, ".worktrees"):
+                self._git.add_to_gitignore(workspace_root, ".worktrees")
+
         for repo_name in ordered:
             repo_config = self._config.repos[repo_name]
 
             if repo_config.git_root is not None:
-                # Subdirectory service: share parent's worktree
+                # Subdirectory child: nested inside parent's hub worktree.
                 parent_wt = worktrees.get(repo_config.git_root)
                 if parent_wt is None:
                     parent_wt = self._config.repos[repo_config.git_root].path
                 effective = parent_wt / repo_config.path
                 worktrees[repo_name] = effective
 
-                # Create symlinks before setup so setup can use the linked dirs
                 symlink_warnings = self._create_symlinks(repo_name, repo_config, effective)
                 setup_warnings.extend(symlink_warnings)
                 bind_warnings = self._copy_bind_files(repo_name, repo_config, effective)
@@ -458,15 +471,10 @@ class WorktreeManager:
                         )
                 continue
 
-            # Normal repo: create its own worktree
+            # Normal repo: hub worktree.
             repo_path = repo_config.path
+            wt_path = hub / repo_name
 
-            if not self._git.is_ignored(repo_path, ".worktrees"):
-                self._git.add_to_gitignore(repo_path, ".worktrees")
-            if not self._git.is_ignored(repo_path, MARKER_NAME):
-                self._git.add_to_gitignore(repo_path, MARKER_NAME)
-
-            wt_path = repo_path / ".worktrees" / branch
             self._git.worktree_add(
                 repo_path=repo_path,
                 worktree_path=wt_path,
@@ -474,14 +482,6 @@ class WorktreeManager:
             )
             worktrees[repo_name] = wt_path
 
-            # Drop the .mship-workspace marker so subrepo worktrees can
-            # discover the workspace (#84). Tracked .gitignore (above) keeps
-            # it out of `git status`; per-worktree info/exclude doesn't work
-            # because git resolves info/exclude to the shared main-repo path.
-            if workspace_root is not None:
-                write_marker(wt_path, workspace_root)
-
-            # Create symlinks before setup so setup can use the linked dirs
             symlink_warnings = self._create_symlinks(repo_name, repo_config, wt_path)
             setup_warnings.extend(symlink_warnings)
             bind_warnings = self._copy_bind_files(repo_name, repo_config, wt_path)
@@ -500,6 +500,9 @@ class WorktreeManager:
                         f"{repo_name}: setup failed (task '{actual_setup}') — "
                         f"{setup_result.stderr.strip()[:200]}"
                     )
+
+        # Single .mship-workspace marker at the hub root.
+        write_marker(hub, workspace_root)
 
         base_branch = workspace_default_branch_from_config(self._config) or "main"
         task = Task(
