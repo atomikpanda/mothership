@@ -1196,3 +1196,139 @@ def test_refresh_bind_files_warns_on_missing_literal(tmp_path: Path):
     result = mgr.refresh_bind_files("r", repo_cfg, wt)
     assert any("nonexistent.config" in w for w in result["warnings"])
     assert ".env" in result["copied"]
+
+
+# --- refresh_symlink_dirs (#111) ---
+
+
+def _mgr_with_repo(tmp_path: Path, repo_cfg) -> "WorktreeManager":
+    """Helper: build a WorktreeManager wrapping a single repo for symlink tests."""
+    from mship.core.config import WorkspaceConfig
+    from mship.core.worktree import WorktreeManager
+    from mship.core.state import StateManager
+    from mship.util.git import GitRunner
+    from mship.util.shell import ShellRunner
+    from unittest.mock import MagicMock
+    cfg = WorkspaceConfig(workspace="t", repos={"r": repo_cfg})
+    return WorktreeManager(
+        config=cfg, graph=None,
+        state_manager=MagicMock(spec=StateManager),
+        git=GitRunner(), shell=ShellRunner(), log=None,
+    )
+
+
+def test_refresh_symlink_dirs_creates_missing(tmp_path: Path):
+    """Symlink absent in worktree → created → 'copied'. See #111."""
+    from mship.core.config import RepoConfig
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "node_modules").mkdir()
+    repo_cfg = RepoConfig(path=source, type="service", symlink_dirs=["node_modules"])
+    mgr = _mgr_with_repo(tmp_path, repo_cfg)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    result = mgr.refresh_symlink_dirs("r", repo_cfg, wt)
+    assert "node_modules" in result["copied"]
+    assert (wt / "node_modules").is_symlink()
+    assert (wt / "node_modules").resolve() == (source / "node_modules").resolve()
+
+
+def test_refresh_symlink_dirs_unchanged_when_correct_target(tmp_path: Path):
+    """Existing symlink that already points at the right target → 'unchanged'."""
+    from mship.core.config import RepoConfig
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "node_modules").mkdir()
+    repo_cfg = RepoConfig(path=source, type="service", symlink_dirs=["node_modules"])
+    mgr = _mgr_with_repo(tmp_path, repo_cfg)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / "node_modules").symlink_to((source / "node_modules").resolve())
+    result = mgr.refresh_symlink_dirs("r", repo_cfg, wt)
+    assert "node_modules" in result["unchanged"]
+    assert "node_modules" not in result["copied"]
+
+
+def test_refresh_symlink_dirs_skip_when_target_changed_no_overwrite(tmp_path: Path):
+    """Symlink points at a different target without --overwrite → 'skipped'."""
+    from mship.core.config import RepoConfig
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "node_modules").mkdir()
+    other = tmp_path / "other_modules"
+    other.mkdir()
+    repo_cfg = RepoConfig(path=source, type="service", symlink_dirs=["node_modules"])
+    mgr = _mgr_with_repo(tmp_path, repo_cfg)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / "node_modules").symlink_to(other.resolve())
+    result = mgr.refresh_symlink_dirs("r", repo_cfg, wt, overwrite=False)
+    assert "node_modules" in result["skipped"]
+    # User's choice preserved.
+    assert (wt / "node_modules").resolve() == other.resolve()
+
+
+def test_refresh_symlink_dirs_overwrite_relinks(tmp_path: Path):
+    """Symlink points at wrong target with --overwrite → 'updated'."""
+    from mship.core.config import RepoConfig
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "node_modules").mkdir()
+    other = tmp_path / "other_modules"
+    other.mkdir()
+    repo_cfg = RepoConfig(path=source, type="service", symlink_dirs=["node_modules"])
+    mgr = _mgr_with_repo(tmp_path, repo_cfg)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / "node_modules").symlink_to(other.resolve())
+    result = mgr.refresh_symlink_dirs("r", repo_cfg, wt, overwrite=True)
+    assert "node_modules" in result["updated"]
+    assert (wt / "node_modules").resolve() == (source / "node_modules").resolve()
+
+
+def test_refresh_symlink_dirs_skip_when_real_dir_exists(tmp_path: Path):
+    """Real directory at target → always skipped, never blown away. Even with --overwrite."""
+    from mship.core.config import RepoConfig
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "node_modules").mkdir()
+    repo_cfg = RepoConfig(path=source, type="service", symlink_dirs=["node_modules"])
+    mgr = _mgr_with_repo(tmp_path, repo_cfg)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / "node_modules").mkdir()
+    (wt / "node_modules" / "user-content.txt").write_text("hands off\n")
+    result = mgr.refresh_symlink_dirs("r", repo_cfg, wt, overwrite=True)
+    assert "node_modules" in result["skipped"]
+    assert any("real directory" in w for w in result["warnings"])
+    # User's content preserved — still a real dir, file intact.
+    assert (wt / "node_modules").is_dir() and not (wt / "node_modules").is_symlink()
+    assert (wt / "node_modules" / "user-content.txt").read_text() == "hands off\n"
+
+
+def test_refresh_symlink_dirs_warns_on_missing_source(tmp_path: Path):
+    """Source dir absent → warning, no symlink created."""
+    from mship.core.config import RepoConfig
+    source = tmp_path / "src"
+    source.mkdir()
+    repo_cfg = RepoConfig(path=source, type="service", symlink_dirs=["node_modules"])
+    mgr = _mgr_with_repo(tmp_path, repo_cfg)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    result = mgr.refresh_symlink_dirs("r", repo_cfg, wt)
+    assert any("source missing" in w for w in result["warnings"])
+    assert "node_modules" not in result["copied"]
+    assert not (wt / "node_modules").exists()
+
+
+def test_refresh_symlink_dirs_empty_config_returns_empty(tmp_path: Path):
+    """No symlink_dirs configured → empty result, no errors."""
+    from mship.core.config import RepoConfig
+    source = tmp_path / "src"
+    source.mkdir()
+    repo_cfg = RepoConfig(path=source, type="service")  # no symlink_dirs
+    mgr = _mgr_with_repo(tmp_path, repo_cfg)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    result = mgr.refresh_symlink_dirs("r", repo_cfg, wt)
+    assert result == {"copied": [], "updated": [], "unchanged": [], "skipped": [], "warnings": []}
