@@ -270,3 +270,36 @@ def test_task_base_branch_set_via_kwarg():
         base_branch="main",
     )
     assert t.base_branch == "main"
+
+
+def test_task_passive_repos_defaults_empty(tmp_path):
+    from mship.core.state import StateManager, Task, WorkspaceState
+    from datetime import datetime, timezone
+    sm = StateManager(tmp_path)
+    state = WorkspaceState(tasks={
+        "t": Task(
+            slug="t", description="d", phase="plan",
+            created_at=datetime.now(timezone.utc),
+            affected_repos=["a"], branch="feat/t",
+        )
+    })
+    sm.save(state)
+    loaded = sm.load()
+    assert loaded.tasks["t"].passive_repos == set()
+
+
+def test_task_passive_repos_round_trips(tmp_path):
+    from mship.core.state import StateManager, Task, WorkspaceState
+    from datetime import datetime, timezone
+    sm = StateManager(tmp_path)
+    state = WorkspaceState(tasks={
+        "t": Task(
+            slug="t", description="d", phase="plan",
+            created_at=datetime.now(timezone.utc),
+            affected_repos=["a", "b"], branch="feat/t",
+            passive_repos={"b"},
+        )
+    })
+    sm.save(state)
+    loaded = sm.load()
+    assert loaded.tasks["t"].passive_repos == {"b"}
