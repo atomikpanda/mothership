@@ -51,6 +51,42 @@ class PruneManager:
                         reason="not_in_state",
                     ))
 
+        # Hub layout: scan <workspace>/.worktrees/<slug>/<repo>/
+        # Workspace root is the parent dir of mothership.yaml — not stored on
+        # WorkspaceConfig, so derive from any repo's path.parent. Multiple
+        # repos in different workspace roots is unusual but supported.
+        candidates: set[Path] = set()
+        for repo_cfg in self._config.repos.values():
+            candidates.add(repo_cfg.path.parent.resolve())
+        for ws_root in candidates:
+            hub_root = ws_root / ".worktrees"
+            if not hub_root.is_dir():
+                continue
+            for slug_dir in hub_root.iterdir():
+                if not slug_dir.is_dir():
+                    continue
+                for repo_dir in slug_dir.iterdir():
+                    if not repo_dir.is_dir():
+                        continue
+                    if not (repo_dir / ".git").exists():
+                        continue
+                    resolved = str(repo_dir.resolve())
+                    if resolved in tracked_paths:
+                        continue
+                    # Match the directory name against a configured repo.
+                    matched_repo = None
+                    for name, rc in self._config.repos.items():
+                        if rc.path.name == repo_dir.name:
+                            matched_repo = name
+                            break
+                    if matched_repo is None:
+                        continue
+                    orphans.append(OrphanedWorktree(
+                        repo=matched_repo,
+                        path=repo_dir,
+                        reason="not_in_state",
+                    ))
+
         # Check state entries pointing to nonexistent worktrees
         for task_slug, task in state.tasks.items():
             for repo_name, wt_path in task.worktrees.items():
