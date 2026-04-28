@@ -60,15 +60,23 @@ def test_build_command_with_env_runner():
     assert cmd == "dotenvx run -- task test"
 
 
-def test_run_with_env_runner():
+def test_run_with_env_runner(tmp_path):
+    """`run_task` returns a ShellResult regardless of whether `task` is
+    installed or whether the cwd has a Taskfile target.
+
+    Uses `tmp_path` (no Taskfile.yml) so this test fails fast even in
+    environments where `task` is on PATH. Previously used `Path(".")`,
+    which in dev environments with go-task installed would invoke the
+    project's `task test` target — which itself runs `uv run pytest` —
+    causing infinite recursion and a hung suite. See #115.
+    """
     runner = ShellRunner()
     result = runner.run_task(
         task_name="test",
         actual_task_name="test",
-        cwd=Path("."),
+        cwd=tmp_path,
         env_runner=None,
     )
-    # task binary likely not installed in test env, so we just check it tried
     assert isinstance(result, ShellResult)
 
 
