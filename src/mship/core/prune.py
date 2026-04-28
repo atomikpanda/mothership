@@ -52,12 +52,15 @@ class PruneManager:
                     ))
 
         # Hub layout: scan <workspace>/.worktrees/<slug>/<repo>/
-        # Workspace root is the parent dir of mothership.yaml — not stored on
-        # WorkspaceConfig, so derive from any repo's path.parent. Multiple
-        # repos in different workspace roots is unusual but supported.
+        # Workspace root is not stored on WorkspaceConfig, so derive it from
+        # each configured repo. In a single-repo workspace the repo path may
+        # itself be the workspace root (for example "."), so use repo_cfg.path
+        # when it contains mothership.yaml; otherwise fall back to its parent.
         candidates: set[Path] = set()
         for repo_cfg in self._config.repos.values():
-            candidates.add(repo_cfg.path.parent.resolve())
+            repo_path = repo_cfg.path.resolve()
+            ws_root = repo_path if (repo_path / "mothership.yaml").exists() else repo_path.parent
+            candidates.add(ws_root)
         for ws_root in candidates:
             hub_root = ws_root / ".worktrees"
             if not hub_root.is_dir():
