@@ -119,7 +119,8 @@ def register(app: typer.Typer, get_container):
         except Exception as e:
             # Best-effort: failing to audit passive worktrees should not break
             # the canonical audit output.
-            output.warning(f"passive audit unavailable: {e}")
+            if not json_output:
+                output.warning(f"passive audit unavailable: {e}")
 
         if json_output:
             import json as _json
