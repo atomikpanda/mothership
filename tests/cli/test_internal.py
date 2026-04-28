@@ -63,3 +63,46 @@ def test_journal_commit_silent_outside_workspace(tmp_path, monkeypatch):
     result = runner.invoke(app, ["_journal-commit"])
     assert result.exit_code == 0
     assert "No mothership.yaml" not in (result.output or "")
+
+
+def test_check_commit_refuses_passive_worktree(tmp_path, monkeypatch):
+    """A commit attempted in a registered-but-passive worktree is rejected."""
+    from datetime import datetime, timezone
+    from mship.core.state import StateManager, Task, WorkspaceState
+    from typer.testing import CliRunner
+    from mship.cli import app, container
+
+    # Workspace skeleton
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\nrepos:\n  shared:\n    path: ./shared\n    type: library\n"
+    )
+    (tmp_path / "shared").mkdir()
+    (tmp_path / "shared" / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    passive_wt = tmp_path / ".worktrees" / "x" / "shared"
+    passive_wt.mkdir(parents=True)
+    StateManager(state_dir).save(WorkspaceState(tasks={
+        "x": Task(
+            slug="x", description="x", phase="plan",
+            created_at=datetime.now(timezone.utc),
+            affected_repos=["shared"], branch="feat/x",
+            worktrees={"shared": passive_wt},
+            passive_repos={"shared"},
+        )
+    }))
+
+    container.config_path.override(tmp_path / "mothership.yaml")
+    container.state_dir.override(state_dir)
+    monkeypatch.chdir(passive_wt)
+    try:
+        runner = CliRunner()
+        result = runner.invoke(app, ["_check-commit", str(passive_wt)])
+        assert result.exit_code == 1
+        # CliRunner mixes stdout and stderr by default; check `output`.
+        out = (result.output or "")
+        assert "passive worktree" in out.lower()
+        assert "shared" in out
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
