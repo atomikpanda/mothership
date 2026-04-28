@@ -15,6 +15,35 @@ class GitRunner:
             text=True,
         )
 
+    def worktree_add_detached(self, repo_path: Path, worktree_path: Path, ref: str) -> None:
+        """Create a detached-HEAD worktree at `worktree_path` pointing at `ref`.
+
+        `ref` may be a SHA, a tag, or a remote ref like `origin/main`.
+        """
+        worktree_path.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", str(worktree_path), ref],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def fetch_remote_ref(self, repo_path: Path, ref: str, remote: str = "origin") -> bool:
+        """Fetch a single ref from `remote`. Returns True on success, False on any failure.
+
+        Used by passive-worktree materialization: we want to know if origin has
+        the ref, and we want it locally as `<remote>/<ref>` for `worktree add`.
+        """
+        try:
+            result = subprocess.run(
+                ["git", "fetch", remote, ref],
+                cwd=repo_path, capture_output=True, text=True, check=False, timeout=60,
+            )
+            return result.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
     def worktree_remove(self, repo_path: Path, worktree_path: Path) -> None:
         subprocess.run(
             ["git", "worktree", "remove", str(worktree_path), "--force"],
