@@ -107,23 +107,26 @@ def _resolve_repo(
     global_latest: tuple[datetime, str] | None,
     per_repo_latest: dict[str, tuple[datetime, str]],
 ) -> RepoEvidence:
+    candidates: list[RepoEvidence] = []
     tr = task.test_results.get(repo)
-    if tr is not None:
+    if tr is not None and tr.at is not None:
         status: EvidenceStatus = (
             "passed" if tr.status == "pass"
             else "failed" if tr.status == "fail"
             else "missing"
         )
-        return RepoEvidence(status=status, source="test_results", at=tr.at)
+        candidates.append(RepoEvidence(status=status, source="test_results", at=tr.at))
     if repo in per_repo_latest:
         at, state = per_repo_latest[repo]
         status = _TEST_STATE_TO_STATUS.get(state, "missing")
-        return RepoEvidence(status=status, source="journal", at=at)
-    if global_latest is not None:
+        candidates.append(RepoEvidence(status=status, source="journal", at=at))
+    elif global_latest is not None:
         at, state = global_latest
         status = _TEST_STATE_TO_STATUS.get(state, "missing")
-        return RepoEvidence(status=status, source="journal", at=at)
-    return RepoEvidence(status="missing", source="none", at=None)
+        candidates.append(RepoEvidence(status=status, source="journal", at=at))
+    if not candidates:
+        return RepoEvidence(status="missing", source="none", at=None)
+    return max(candidates, key=lambda c: c.at)
 
 
 def _head_commit_time(

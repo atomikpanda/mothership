@@ -38,6 +38,30 @@ def test_evidence_prefers_test_results_over_journal(tmp_path: Path):
     assert ev["a"].source == "test_results"
 
 
+def test_evidence_journal_newer_than_test_results_wins(tmp_path: Path):
+    """Regression of #81 (issue #108): when `mship journal --test-state pass`
+    is logged AFTER an `mship test` failure, the newer journal entry wins.
+
+    Previously the reader unconditionally preferred test_results, which made
+    `mship journal --test-state pass` ineffective as a workaround when
+    `mship test` couldn't run (e.g., Taskfile lacks a `test` target).
+    """
+    from mship.core.test_evidence import read_evidence
+    log = LogManager(tmp_path / "logs")
+    log.create("t")
+    # mship test ran 5 minutes ago, failed.
+    earlier = datetime.now(timezone.utc) - timedelta(minutes=5)
+    task = _make_task(
+        affected_repos=["a"],
+        test_results={"a": TestResult(status="fail", at=earlier)},
+    )
+    # User then journaled a pass entry now (newer than test_results).
+    log.append("t", "tests pass after fixing", repo="a", test_state="pass")
+    ev = read_evidence(task, log)
+    assert ev["a"].status == "passed"
+    assert ev["a"].source == "journal"
+
+
 def test_evidence_uses_latest_per_repo_journal_when_no_test_results(tmp_path: Path):
     from mship.core.test_evidence import read_evidence
     log = LogManager(tmp_path / "logs")

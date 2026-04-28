@@ -74,6 +74,18 @@ def test_spawn_ensures_gitignore(worktree_deps):
     assert ".worktrees" in gitignore.read_text()
 
 
+def test_spawn_gitignores_mship_workspace_marker(worktree_deps):
+    """The .mship-workspace marker file dropped in each worktree should be
+    gitignored so it doesn't show up as untracked in `git status`. See #107.
+    """
+    from mship.core.workspace_marker import MARKER_NAME
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("test marker gitignore", repos=["shared"])
+    gitignore = (workspace / "shared" / ".gitignore").read_text()
+    assert MARKER_NAME in gitignore
+
+
 def test_spawn_custom_branch_pattern(workspace_with_git: Path):
     workspace = workspace_with_git
     cfg = workspace / "mothership.yaml"
@@ -1034,8 +1046,10 @@ def test_spawn_writes_workspace_marker_in_each_worktree(workspace_with_git: Path
         container.state_manager.reset()
 
 
-def test_spawn_appends_marker_to_worktree_exclude(workspace_with_git: Path):
-    """Marker is added to per-worktree info/exclude so it doesn't pollute .gitignore."""
+def test_spawn_adds_marker_to_gitignore(workspace_with_git: Path):
+    """Marker is added to the repo's tracked .gitignore so `git status` stays
+    clean. Per-worktree info/exclude doesn't work because git resolves it to
+    the shared main-repo path. See #107."""
     from mship.cli import container, app
     from mship.core.workspace_marker import MARKER_NAME
     from typer.testing import CliRunner
@@ -1052,24 +1066,8 @@ def test_spawn_appends_marker_to_worktree_exclude(workspace_with_git: Path):
             app, ["spawn", "exclude test", "--repos", "shared", "--skip-setup", "--force-audit"]
         )
         assert result.exit_code == 0, result.output
-        parent_repo = workspace_with_git / "shared"
-        # git worktree add <branch> creates state at .git/worktrees/<slug-last-segment>/
-        # Find whatever per-worktree dir was actually created.
-        worktrees_dir = parent_repo / ".git" / "worktrees"
-        assert worktrees_dir.is_dir(), "no per-worktree state dir created"
-        candidates = list(worktrees_dir.iterdir())
-        assert candidates, "no per-worktree state entries"
-        # Pick the one matching the branch we spawned.
-        info_exclude = None
-        for c in candidates:
-            if c.is_dir() and "exclude-test" in c.name:
-                info_exclude = c / "info" / "exclude"
-                break
-        if info_exclude is None:
-            info_exclude = candidates[0] / "info" / "exclude"
-        assert info_exclude.is_file(), f"exclude file not found at {info_exclude}"
-        content = info_exclude.read_text()
-        assert MARKER_NAME in content, f"{MARKER_NAME} not in {content!r}"
+        gitignore = (workspace_with_git / "shared" / ".gitignore").read_text()
+        assert MARKER_NAME in gitignore, f"{MARKER_NAME} not in {gitignore!r}"
     finally:
         container.config_path.reset_override()
         container.state_dir.reset_override()

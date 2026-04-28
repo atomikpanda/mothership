@@ -502,7 +502,7 @@ def test_finish_title_override_passed_to_gh_pr_create(configured_git_app: Path):
         result = runner.invoke(
             app, [
                 "finish",
-                "--task", "a-long-verbose-description-that-shouldnt-be-the-pr-title",
+                "--task", "a-long-verbose-description-that-shouldnt",
                 "--title", "feat(spawn): concise PR title",
             ],
         )
