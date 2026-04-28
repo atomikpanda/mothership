@@ -682,6 +682,12 @@ def register(app: typer.Typer, get_container):
                  "Recommended for agents: write a Summary + Test plan rather than "
                  "letting finish fall back to the task description.",
         ),
+        body_map: Optional[str] = typer.Option(
+            None, "--body-map",
+            help="Per-repo PR body overrides, e.g. 'shared=/tmp/shared.md,api=/tmp/api.md'. "
+                 "Each value is a path to a markdown file. Repos not in the map fall back "
+                 "to --body / --body-file, then to the task description. See #114.",
+        ),
         force: bool = typer.Option(
             False, "--force", "-f",
             help="Push new commits to an already-finished task's existing PR(s). "
@@ -717,7 +723,7 @@ def register(app: typer.Typer, get_container):
         if force and handoff:
             output.error("--force is incompatible with --handoff")
             raise typer.Exit(code=1)
-        if force and (body is not None or body_file is not None):
+        if force and (body is not None or body_file is not None or body_map is not None):
             output.error(
                 "--force doesn't touch PR bodies — use `gh pr edit <url> --body-file <path>` "
                 "to update an existing PR body"
@@ -737,8 +743,8 @@ def register(app: typer.Typer, get_container):
         if body is not None and body_file is not None:
             output.error("--body and --body-file are mutually exclusive")
             raise typer.Exit(code=1)
-        if (body is not None or body_file is not None) and (push_only or handoff):
-            output.error("--body/--body-file has no effect with --push-only or --handoff")
+        if (body is not None or body_file is not None or body_map is not None) and (push_only or handoff):
+            output.error("--body/--body-file/--body-map has no effect with --push-only or --handoff")
             raise typer.Exit(code=1)
         custom_body: Optional[str] = None
         if body is not None:
@@ -761,6 +767,20 @@ def register(app: typer.Typer, get_container):
                 "to fall back to the task description."
             )
             raise typer.Exit(code=1)
+
+        # Parse --body-map; defer file reads until we know task.affected_repos.
+        from mship.core.body_resolver import (
+            EmptyBodyInMapError,
+            InvalidBodyMapError,
+            UnknownRepoInBodyMapError,
+            parse_body_map,
+        )
+        try:
+            body_map_parsed = parse_body_map(body_map or "")
+        except InvalidBodyMapError as e:
+            output.error(str(e))
+            raise typer.Exit(code=1)
+
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
@@ -770,6 +790,17 @@ def register(app: typer.Typer, get_container):
         graph = container.graph()
         config = container.config()
         ordered = graph.topo_sort(task.affected_repos)
+
+        # Load --body-map files now that task.affected_repos is available.
+        from mship.core.body_resolver import load_body_map
+        try:
+            body_map_loaded = load_body_map(body_map_parsed, task.affected_repos)
+        except UnknownRepoInBodyMapError as e:
+            output.error(str(e))
+            raise typer.Exit(code=1)
+        except (InvalidBodyMapError, EmptyBodyInMapError) as e:
+            output.error(str(e))
+            raise typer.Exit(code=1)
 
         # --- Audit gate ---
         from mship.core.audit_gate import run_audit_gate, AuditGateBlocked, compute_finish_audit_scope
@@ -1149,7 +1180,19 @@ def register(app: typer.Typer, get_container):
                                 texts.append(line)
                 except Exception:
                     pass
-                pr_body_base = custom_body if custom_body is not None else task.description
+                # Per-PR body precedence: --body-map entry > --body/--body-file > task.description.
+                # Multi-repo groups (git_root sharing) use the rep_name's entry if any member matches.
+                map_body: Optional[str] = None
+                for member in group.members:
+                    if member in body_map_loaded:
+                        map_body = body_map_loaded[member]
+                        break
+                if map_body is not None:
+                    pr_body_base = map_body
+                elif custom_body is not None:
+                    pr_body_base = custom_body
+                else:
+                    pr_body_base = task.description
                 pr_body = append_closes_footer(pr_body_base, extract_issue_refs(texts))
 
                 try:
