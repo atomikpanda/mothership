@@ -1,9 +1,13 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Literal
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
 from mship.core.log import LogManager
 from mship.core.state import StateManager
+
+if TYPE_CHECKING:
+    from mship.core.config import WorkspaceConfig
 
 Phase = Literal["plan", "dev", "review", "run"]
 PHASE_ORDER: list[Phase] = ["plan", "dev", "review", "run"]
@@ -22,9 +26,17 @@ class PhaseTransition:
 class PhaseManager:
     """Manages phase transitions with soft gates."""
 
-    def __init__(self, state_manager: StateManager, log: LogManager) -> None:
+    def __init__(
+        self,
+        state_manager: StateManager,
+        log: LogManager,
+        config: "WorkspaceConfig | None" = None,
+        workspace_root: Path | None = None,
+    ) -> None:
         self._state_manager = state_manager
         self._log = log
+        self._config = config
+        self._workspace_root = workspace_root
 
     def transition(
         self,
@@ -111,7 +123,23 @@ class PhaseManager:
         return warnings
 
     def _gate_dev(self, task_slug: str) -> list[str]:
-        return ["No spec found — consider writing one before developing"]
+        # Without DI'd config + workspace_root we can't actually search for
+        # specs — fall back to the always-warn stub. See #113 for the wiring.
+        if self._config is None or self._workspace_root is None:
+            return ["No spec found — consider writing one before developing"]
+        # Search workspace-level specs + all worktrees (no task= filter):
+        # specs are typically authored before the task slug exists.
+        from mship.core.view.spec_discovery import find_spec, SpecNotFoundError
+        try:
+            find_spec(
+                self._workspace_root,
+                None,
+                state=self._state_manager.load(),
+                spec_paths=self._config.spec_paths,
+            )
+        except SpecNotFoundError:
+            return ["No spec found — consider writing one before developing"]
+        return []
 
     def _gate_review(self, task) -> list[str]:
         # Unified reader honors both task.test_results and journal

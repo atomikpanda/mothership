@@ -31,10 +31,63 @@ def state_with_task(tmp_path: Path) -> StateManager:
     return mgr
 
 
-def test_transition_plan_to_dev(state_with_task: StateManager):
-    pm = PhaseManager(state_with_task, MagicMock(spec=LogManager))
+def _make_phase_manager(state_mgr: StateManager, workspace_root: Path,
+                        spec_paths: list[str] | None = None) -> PhaseManager:
+    """Helper: build a PhaseManager with the optional spec_paths override."""
+    from mship.core.config import WorkspaceConfig, RepoConfig
+    config = WorkspaceConfig(
+        workspace="test",
+        repos={"shared": RepoConfig(path=Path("./shared"), type="library")},
+        spec_paths=spec_paths,
+    )
+    return PhaseManager(
+        state_mgr,
+        MagicMock(spec=LogManager),
+        config=config,
+        workspace_root=workspace_root,
+    )
+
+
+def test_transition_plan_to_dev_warns_when_no_spec_exists(state_with_task: StateManager, tmp_path: Path):
+    """No spec at any search path → warn (current behavior, but now actually evidence-based)."""
+    pm = _make_phase_manager(state_with_task, tmp_path)
     result = pm.transition("add-labels", "dev")
     assert result.new_phase == "dev"
+    assert any("spec" in w.lower() for w in result.warnings)
+
+
+def test_transition_plan_to_dev_silent_when_spec_at_default_path(
+    state_with_task: StateManager, tmp_path: Path,
+):
+    """Spec at the default `docs/superpowers/specs/` should suppress the warning. See #113."""
+    spec_dir = tmp_path / "docs" / "superpowers" / "specs"
+    spec_dir.mkdir(parents=True)
+    (spec_dir / "2026-04-27-add-labels-design.md").write_text("# spec\n")
+    pm = _make_phase_manager(state_with_task, tmp_path)
+    result = pm.transition("add-labels", "dev")
+    assert result.new_phase == "dev"
+    assert not any("spec" in w.lower() for w in result.warnings), result.warnings
+
+
+def test_transition_plan_to_dev_silent_when_spec_at_configured_path(
+    state_with_task: StateManager, tmp_path: Path,
+):
+    """A configured `spec_paths` override is honored. See #113."""
+    custom = tmp_path / "design" / "specs"
+    custom.mkdir(parents=True)
+    (custom / "feature.md").write_text("# spec\n")
+    pm = _make_phase_manager(state_with_task, tmp_path, spec_paths=["design/specs"])
+    result = pm.transition("add-labels", "dev")
+    assert not any("spec" in w.lower() for w in result.warnings), result.warnings
+
+
+def test_transition_plan_to_dev_warns_when_configured_path_empty(
+    state_with_task: StateManager, tmp_path: Path,
+):
+    """Configured spec_paths but no specs → still warns."""
+    (tmp_path / "design" / "specs").mkdir(parents=True)
+    pm = _make_phase_manager(state_with_task, tmp_path, spec_paths=["design/specs"])
+    result = pm.transition("add-labels", "dev")
     assert any("spec" in w.lower() for w in result.warnings)
 
 

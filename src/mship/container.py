@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from dependency_injector import containers, providers
 
 from mship.core.config import ConfigLoader, WorkspaceConfig
@@ -73,6 +75,11 @@ class Container(containers.DeclarativeContainer):
         PhaseManager,
         state_manager=state_manager,
         log=log_manager,
+        config=config,
+        workspace_root=providers.Factory(
+            lambda config_path: Path(config_path).parent,
+            config_path,
+        ),
     )
 
     pr_manager = providers.Factory(
