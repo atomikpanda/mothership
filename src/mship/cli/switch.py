@@ -112,7 +112,9 @@ def register(app: typer.Typer, get_container):
             repo_cfg = config.repos.get(target)
             ref = (repo_cfg.expected_branch or repo_cfg.base_branch) if repo_cfg else target
             lines.append(
-                f"[yellow]⚠[/yellow] Switched to `{target}` (passive — read-only on `{ref}`).\n"
+                f"[yellow]⚠[/yellow] Switched to `{target}` (passive — read-only on `{ref}`)."
+            )
+            lines.append(
                 f"  To edit, close this task and respawn with `--repos {target},...`"
             )
         lines.append(f"[bold]Branch:[/bold]   {handoff.branch}")
