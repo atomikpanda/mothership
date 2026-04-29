@@ -4,13 +4,44 @@ from pathlib import Path
 import typer
 
 
+def _staged_source_paths(toplevel: str, container) -> list[str]:
+    """List staged paths under src/ or tests/ at `toplevel` when it is the
+    workspace root. Returns [] on any error (fail-open by design).
+
+    Used by `_check-commit` to enforce "spawn before editing source files"
+    when no task is active. Bare patterns (`src/`, `tests/`) are intentionally
+    narrow — anything outside those still commits freely.
+    """
+    import subprocess
+    try:
+        tl = Path(toplevel).resolve()
+        cfg = Path(container.config_path()).resolve()
+        if not cfg.is_file() or tl != cfg.parent:
+            return []
+        result = subprocess.run(
+            ["git", "-C", str(tl), "diff", "--cached", "--name-only"],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+        if result.returncode != 0:
+            return []
+        return [
+            p for p in result.stdout.splitlines()
+            if p.startswith("src/") or p.startswith("tests/")
+        ]
+    except (OSError, subprocess.SubprocessError, RuntimeError):
+        return []
+
+
 def register(app: typer.Typer, get_container):
     @app.command(name="_check-commit", hidden=True)
     def check_commit(toplevel: str = typer.Argument(..., help="git rev-parse --show-toplevel value")):
         """Exit 0 if committing at `toplevel` is allowed under the active tasks.
 
         Rules:
-        - No active tasks -> allow (exit 0).
+        - No active tasks AND staged paths under src/ or tests/ at the
+          workspace root -> reject (exit 1). Closes the "agent edits main
+          without spawning" loophole.
+        - No active tasks otherwise -> allow (exit 0).
         - Active tasks but toplevel not in any registered worktree -> reject (exit 1).
         - toplevel matches an active task's worktree -> allow (after reconcile gate).
 
@@ -25,6 +56,29 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=0)
 
         if not state.tasks:
+            # In a mship workspace with no active task, source/test edits at
+            # the workspace root are almost always "agent edited main without
+            # spawning". Require a spawn so the existing worktree-gate covers
+            # the rest of the lifecycle.
+            staged_source = _staged_source_paths(toplevel, container)
+            if staged_source:
+                import sys
+                n = len(staged_source)
+                preview = ", ".join(staged_source[:3])
+                if n > 3:
+                    preview += f", … (+{n - 3} more)"
+                sys.stderr.write(
+                    f"⛔ mship: refusing commit — no active task and "
+                    f"{n} staged file{'s' if n != 1 else ''} under src/ or "
+                    f"tests/ ({preview}).\n"
+                    f"   Spawn a task first:\n"
+                    f"     mship spawn \"<description>\"\n"
+                    f"   then move staged changes into the new worktree:\n"
+                    f"     git stash push --staged -m misrouted\n"
+                    f"     cd .worktrees/<slug>/<repo> && git stash pop\n"
+                    f"   (or `git commit --no-verify` to override).\n"
+                )
+                raise typer.Exit(code=1)
             raise typer.Exit(code=0)
 
         try:
