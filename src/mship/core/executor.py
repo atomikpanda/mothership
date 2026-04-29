@@ -21,6 +21,8 @@ class RepoResult:
     background_pid: int | None = None
     healthcheck: HealthcheckResult | None = None
     duration_ms: int = 0
+    # Other logical repos that shared this physical run via path-dedup (#127).
+    shared_with: list[str] = field(default_factory=list)
 
     @property
     def success(self) -> bool:
@@ -41,6 +43,37 @@ class ExecutionResult:
     @property
     def success(self) -> bool:
         return all(r.success for r in self.results)
+
+
+@dataclass
+class _TestGroup:
+    """A group of repos that share a resolved test cwd (#127)."""
+    cwd: Path
+    members: list[str]            # all repos in the group
+    skipped_members: list[str]    # subset with `test` in not_applicable
+    runnable_members: list[str]   # subset that will share the actual run
+    representative: str | None    # the one whose tasks.test is invoked; None if all skipped
+    actual_task_name: str | None  # what to run as `task <X>`; None if all skipped
+
+
+class TestTargetConflictError(Exception):
+    """Raised when path-sharing repos resolve to different test task targets.
+
+    Carries enough context for the CLI to render the actionable error message
+    described in #127's acceptance criteria.
+    """
+    def __init__(
+        self, *, cwd: Path, conflicting_repos: list[str],
+        explicit_repos: list[str], implicit_repos: list[str],
+    ) -> None:
+        self.cwd = cwd
+        self.conflicting_repos = sorted(conflicting_repos)
+        self.explicit_repos = sorted(explicit_repos)
+        self.implicit_repos = sorted(implicit_repos)
+        super().__init__(
+            f"Path-sharing repos at {cwd} resolve `task test` to different targets: "
+            f"{', '.join(self.conflicting_repos)}"
+        )
 
 
 class RepoExecutor:
@@ -92,6 +125,81 @@ class RepoExecutor:
                 env[var_name] = str(task.worktrees[dep_name])
                 env[f"{var_name}_TYPE"] = dep_type
         return env
+
+    def _plan_test_targets(
+        self, repos: list[str], task_slug: str | None,
+    ) -> list[_TestGroup]:
+        """Group repos by resolved test cwd; validate; pick a representative per group.
+
+        Within each group:
+        - Members with `test` in `not_applicable` are filtered out (recorded skip).
+        - Remaining members must agree on the effective `task test` target —
+          either an explicit `tasks.test` value or the canonical `test` fallback.
+          Disagreement raises TestTargetConflictError.
+        - The representative is the member whose `tasks.test` is most-specific
+          (explicit declaration preferred over canonical fallback), tie-broken
+          by name. The representative is what `_execute_one` actually invokes.
+        """
+        by_cwd: dict[Path, list[str]] = {}
+        order: list[Path] = []
+        for r in repos:
+            cwd = self._resolve_cwd(r, task_slug).resolve()
+            if cwd not in by_cwd:
+                order.append(cwd)
+            by_cwd.setdefault(cwd, []).append(r)
+
+        groups: list[_TestGroup] = []
+        for cwd in order:
+            members = by_cwd[cwd]
+            skipped = [
+                m for m in members
+                if "test" in self._config.repos[m].not_applicable
+            ]
+            runnable = [m for m in members if m not in skipped]
+
+            if not runnable:
+                groups.append(_TestGroup(
+                    cwd=cwd, members=members,
+                    skipped_members=skipped, runnable_members=[],
+                    representative=None, actual_task_name=None,
+                ))
+                continue
+
+            effective = {
+                m: self._config.repos[m].tasks.get("test", "test")
+                for m in runnable
+            }
+            distinct = set(effective.values())
+            if len(distinct) > 1:
+                explicit = [m for m in runnable if "test" in self._config.repos[m].tasks]
+                implicit = [m for m in runnable if "test" not in self._config.repos[m].tasks]
+                raise TestTargetConflictError(
+                    cwd=cwd,
+                    conflicting_repos=runnable,
+                    explicit_repos=explicit,
+                    implicit_repos=implicit,
+                )
+
+            actual = next(iter(distinct))
+            with_explicit = sorted(
+                m for m in runnable if "test" in self._config.repos[m].tasks
+            )
+            rep = with_explicit[0] if with_explicit else sorted(runnable)[0]
+
+            groups.append(_TestGroup(
+                cwd=cwd, members=members,
+                skipped_members=skipped, runnable_members=runnable,
+                representative=rep, actual_task_name=actual,
+            ))
+        return groups
+
+    def _make_skip_result(self, repo_name: str, canonical_task: str) -> RepoResult:
+        return RepoResult(
+            repo=repo_name,
+            task_name=f"(skipped: {canonical_task} not applicable)",
+            shell_result=ShellResult(returncode=0, stdout="", stderr=""),
+            skipped=True,
+        )
 
     def _resolve_cwd(self, repo_name: str, task_slug: str | None) -> Path:
         """Get execution directory: worktree if available, otherwise resolved path.
@@ -222,8 +330,40 @@ class RepoExecutor:
         run_all: bool = False,
         task_slug: str | None = None,
     ) -> ExecutionResult:
-        tiers = self._graph.topo_tiers(repos)
         result = ExecutionResult()
+
+        # Test-mode dedup (#127): repos that resolve to the same cwd are
+        # collapsed into a single physical run. Members with `not_applicable:
+        # [test]` become pre-recorded skips; conflicting effective task names
+        # raise TestTargetConflictError up to the CLI.
+        rep_to_group: dict[str, _TestGroup] = {}
+        if canonical_task == "test":
+            groups = self._plan_test_targets(repos, task_slug)
+            run_repos: list[str] = []
+            pre_skips: list[RepoResult] = []
+            for g in groups:
+                if g.representative is None:
+                    for m in g.members:
+                        pre_skips.append(self._make_skip_result(m, "test"))
+                else:
+                    run_repos.append(g.representative)
+                    rep_to_group[g.representative] = g
+                    for m in g.skipped_members:
+                        pre_skips.append(self._make_skip_result(m, "test"))
+            if pre_skips:
+                if task_slug:
+                    def _record_pre_skips(s, _results=pre_skips, _slug=task_slug):
+                        task = s.tasks.get(_slug)
+                        if task is None:
+                            return
+                        now = datetime.now(timezone.utc)
+                        for rr in _results:
+                            task.test_results[rr.repo] = TestResult(status="skip", at=now)
+                    self._state_manager.mutate(_record_pre_skips)
+                result.results.extend(pre_skips)
+            repos = run_repos
+
+        tiers = self._graph.topo_tiers(repos)
 
         if canonical_task == "run":
             self._printer = StreamPrinter(repos=sorted(set(repos)))
@@ -257,6 +397,31 @@ class RepoExecutor:
                         if bg is not None:
                             tier_backgrounds.append(bg)
                             repo_to_proc[repo_result.repo] = bg
+
+            # Expand path-share groups (#127): each non-representative member
+            # gets its own RepoResult sharing the rep's shell_result. The rep
+            # and members carry `shared_with` listing the other repos in the
+            # group, so renderers can collapse them into a single line.
+            if rep_to_group:
+                expanded: list[RepoResult] = []
+                for r in tier_results:
+                    expanded.append(r)
+                    g = rep_to_group.get(r.repo)
+                    if g is None or len(g.runnable_members) <= 1:
+                        continue
+                    others = [m for m in g.runnable_members if m != r.repo]
+                    r.shared_with = others
+                    for m in others:
+                        expanded.append(RepoResult(
+                            repo=m,
+                            task_name=r.task_name,
+                            shell_result=r.shell_result,
+                            duration_ms=r.duration_ms,
+                            shared_with=[
+                                x for x in g.runnable_members if x != m
+                            ],
+                        ))
+                tier_results = expanded
 
             # Sort tier results for deterministic output order
             tier_results.sort(key=lambda r: r.repo)

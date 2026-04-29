@@ -771,3 +771,167 @@ def test_test_refuses_when_active_repo_is_passive(tmp_path, monkeypatch):
         container.state_dir.reset_override()
         container.config.reset()
         container.state_manager.reset()
+
+
+# -----------------------------------------------------------------------------
+# Issue #127 — dedupe repos that share a resolved path; clear error on conflict
+# -----------------------------------------------------------------------------
+
+def _shared_path_workspace(
+    workspace: Path,
+    *,
+    infra_tasks: dict[str, str] | None = None,
+    infra_not_applicable: list[str] | None = None,
+    tailrd_tasks: dict[str, str] | None = None,
+    tailrd_not_applicable: list[str] | None = None,
+) -> Path:
+    """Build a workspace with two repos sharing `path: .`. Returns workspace root."""
+    import yaml as _yaml
+
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "Taskfile.yml").write_text(
+        "version: '3'\ntasks:\n  test:\n    cmds:\n      - echo root\n"
+    )
+    repos: dict = {
+        "infra": {"path": ".", "type": "service"},
+        "tailrd": {"path": ".", "type": "service"},
+    }
+    if infra_tasks:
+        repos["infra"]["tasks"] = infra_tasks
+    if infra_not_applicable:
+        repos["infra"]["not_applicable"] = infra_not_applicable
+    if tailrd_tasks:
+        repos["tailrd"]["tasks"] = tailrd_tasks
+    if tailrd_not_applicable:
+        repos["tailrd"]["not_applicable"] = tailrd_not_applicable
+    (workspace / "mothership.yaml").write_text(
+        _yaml.safe_dump({"workspace": "shared", "repos": repos})
+    )
+    return workspace
+
+
+def _seed_state(workspace: Path, *, slug: str, repos: list[str]) -> StateManager:
+    state_dir = workspace / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(workspace / "mothership.yaml")
+    container.state_dir.override(state_dir)
+    mgr = StateManager(state_dir)
+    task = Task(
+        slug=slug,
+        description="t",
+        phase="dev",
+        created_at=datetime(2026, 4, 29, tzinfo=timezone.utc),
+        affected_repos=repos,
+        branch=f"feat/{slug}",
+    )
+    mgr.save(WorkspaceState(tasks={slug: task}))
+    return mgr
+
+
+def _override_shell() -> MagicMock:
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok\n", stderr="")
+    container.shell.override(mock_shell)
+    return mock_shell
+
+
+def _reset_container():
+    container.config_path.reset_override()
+    container.state_dir.reset_override()
+    container.config.reset_override()
+    container.config.reset()
+    container.state_manager.reset_override()
+    container.state_manager.reset()
+    container.shell.reset_override()
+
+
+def test_mship_test_dedupes_repos_sharing_resolved_path(workspace: Path):
+    """Two repos at `path: .` with identical (empty) `tasks.test` → run once.
+    Both repos appear in the iteration record sharing the same result."""
+    ws = _shared_path_workspace(workspace.parent / "ws127a")
+    mgr = _seed_state(ws, slug="t", repos=["infra", "tailrd"])
+    mock_shell = _override_shell()
+    try:
+        result = runner.invoke(app, ["test", "--task", "t"])
+        assert result.exit_code == 0, result.output
+        # Single invocation, not two.
+        assert mock_shell.run_task.call_count == 1, (
+            f"expected 1 task invocation, got {mock_shell.run_task.call_count}"
+        )
+        # Both repos record the same status (pass).
+        persisted = mgr.load().tasks["t"]
+        assert persisted.test_results["infra"].status == "pass"
+        assert persisted.test_results["tailrd"].status == "pass"
+        # Output names both repos sharing the run.
+        assert "infra" in result.output and "tailrd" in result.output
+    finally:
+        _reset_container()
+
+
+def test_mship_test_dedupes_repos_with_same_explicit_task(workspace: Path):
+    """Two repos at `path: .`, both with `tasks.test: pytest` → run pytest once."""
+    ws = workspace.parent / "ws127b"
+    ws.mkdir(parents=True, exist_ok=True)
+    _shared_path_workspace(
+        ws, infra_tasks={"test": "pytest"}, tailrd_tasks={"test": "pytest"}
+    )
+    mgr = _seed_state(ws, slug="t", repos=["infra", "tailrd"])
+    mock_shell = _override_shell()
+    try:
+        result = runner.invoke(app, ["test", "--task", "t"])
+        assert result.exit_code == 0, result.output
+        assert mock_shell.run_task.call_count == 1
+        # The actual task name resolved is `pytest`, not the canonical `test`.
+        call = mock_shell.run_task.call_args
+        assert call.kwargs["actual_task_name"] == "pytest"
+    finally:
+        _reset_container()
+
+
+def test_mship_test_errors_on_path_share_with_conflicting_task_targets(workspace: Path):
+    """A repo at `path: .` with no `tasks.test` AND no `not_applicable: [test]`,
+    sharing the path with a repo that *does* declare `tasks.test`, must error
+    rather than silently fall through to a different default. See #127."""
+    ws = workspace.parent / "ws127c"
+    ws.mkdir(parents=True, exist_ok=True)
+    _shared_path_workspace(ws, tailrd_tasks={"test": "pytest"})
+    _seed_state(ws, slug="t", repos=["infra", "tailrd"])
+    mock_shell = _override_shell()
+    try:
+        result = runner.invoke(app, ["test", "--task", "t"])
+        assert result.exit_code != 0, result.output
+        # No `task` invocation should have happened — we error before running.
+        assert mock_shell.run_task.call_count == 0
+        out = (result.output or "").lower()
+        # Names the offending repo and the three remediation paths.
+        assert "infra" in out
+        assert "tasks.test" in out or "tasks: test" in out.replace("`", "")
+        assert "not_applicable" in out
+        assert "--repos" in out
+    finally:
+        _reset_container()
+
+
+def test_mship_test_path_share_skips_when_partner_is_not_applicable(workspace: Path):
+    """One repo opted out via `not_applicable: [test]`, the other has
+    `tasks.test`. Run once for the latter; skip-record the former. No error."""
+    ws = workspace.parent / "ws127d"
+    ws.mkdir(parents=True, exist_ok=True)
+    _shared_path_workspace(
+        ws,
+        infra_not_applicable=["test"],
+        tailrd_tasks={"test": "pytest"},
+    )
+    mgr = _seed_state(ws, slug="t", repos=["infra", "tailrd"])
+    mock_shell = _override_shell()
+    try:
+        result = runner.invoke(app, ["test", "--task", "t"])
+        assert result.exit_code == 0, result.output
+        assert mock_shell.run_task.call_count == 1
+        persisted = mgr.load().tasks["t"]
+        assert persisted.test_results["infra"].status == "skip"
+        assert persisted.test_results["tailrd"].status == "pass"
+    finally:
+        _reset_container()

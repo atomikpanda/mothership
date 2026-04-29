@@ -112,10 +112,22 @@ def register(app: typer.Typer, get_container):
         started_at = datetime.now(timezone.utc)
 
         executor = container.executor()
-        result = executor.execute(
-            "test", repos=target_repos, run_all=run_all,
-            task_slug=t.slug,
-        )
+        from mship.core.executor import TestTargetConflictError
+        try:
+            result = executor.execute(
+                "test", repos=target_repos, run_all=run_all,
+                task_slug=t.slug,
+            )
+        except TestTargetConflictError as exc:
+            implicit = ", ".join(exc.implicit_repos) or "(none)"
+            explicit = ", ".join(exc.explicit_repos) or "(none)"
+            output.error(
+                f"{implicit} share path {exc.cwd} with {explicit} but resolve "
+                f"`task test` to different targets. {implicit} has no `test` task; "
+                f"declare one in `tasks.test`, list `test` in `not_applicable`, "
+                f"or pass `--repos {explicit}`."
+            )
+            raise typer.Exit(code=1)
 
         run_duration_ms = int(
             (datetime.now(timezone.utc) - started_at).total_seconds() * 1000
@@ -135,12 +147,15 @@ def register(app: typer.Typer, get_container):
             if status == "fail":
                 stderr = (r.shell_result.stderr or "").splitlines()
                 stderr_tail = "\n".join(stderr[-40:]) if stderr else None
-            per_repo[r.repo] = {
+            entry = {
                 "status": status,
                 "duration_ms": r.duration_ms,
                 "exit_code": r.shell_result.returncode,
                 "stderr_tail": stderr_tail,
             }
+            if r.shared_with:
+                entry["shared_with"] = list(r.shared_with)
+            per_repo[r.repo] = entry
             streams[r.repo] = (
                 r.shell_result.stdout or "",
                 r.shell_result.stderr or "",
@@ -203,7 +218,12 @@ def register(app: typer.Typer, get_container):
 
         if output.is_tty:
             output.print(f"[bold]Test run #{new_iter}[/bold]  ({run_duration_ms / 1000:.1f}s)")
+            # Collapse path-share groups (#127): a set of repos that shared a
+            # physical run renders as one line listing every member.
+            rendered: set[str] = set()
             for repo_name, info in per_repo.items():
+                if repo_name in rendered:
+                    continue
                 status = info["status"]
                 color = (
                     "green" if status == "pass"
@@ -211,7 +231,14 @@ def register(app: typer.Typer, get_container):
                     else "red"
                 )
                 dur_s = info["duration_ms"] / 1000
-                line = f"  {repo_name}: [{color}]{status}[/{color}]  ({dur_s:.1f}s)"
+                shared = info.get("shared_with") or []
+                if shared:
+                    label = ", ".join(sorted([repo_name, *shared]))
+                    rendered.update([repo_name, *shared])
+                else:
+                    label = repo_name
+                    rendered.add(repo_name)
+                line = f"  {label}: [{color}]{status}[/{color}]  ({dur_s:.1f}s)"
                 if diff and repo_name in diff["tags"]:
                     repo_tag = diff["tags"][repo_name]
                     if repo_tag in {"new failure", "regression", "fix"}:
