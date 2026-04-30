@@ -242,6 +242,139 @@ def test_check_commit_multi_worktree_recovery_warns_pick_one(tmp_path):
         container.state_manager.reset()
 
 
+# -----------------------------------------------------------------------------
+# No-active-task + staged source files at workspace root → reject (#???).
+# Closes the loophole where agents edit main directly because no worktree
+# exists yet.
+# -----------------------------------------------------------------------------
+
+def _bootstrap_main_repo(workspace: Path) -> None:
+    """Initialize a git repo at `workspace` so `git diff --cached` works."""
+    workspace.mkdir(parents=True, exist_ok=True)
+    _git(["init", "-q"], cwd=workspace)
+    (workspace / "README.md").write_text("hello\n")
+    _git(["add", "README.md"], cwd=workspace)
+    _git(["commit", "-q", "-m", "init"], cwd=workspace)
+
+
+def test_check_commit_no_task_with_staged_src_rejects(tmp_path):
+    """No active task + staged file under src/ at workspace root → reject."""
+    container.config_path.override(tmp_path / "mothership.yaml")
+    container.state_dir.override(tmp_path / ".mothership")
+    (tmp_path / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    (tmp_path / ".mothership").mkdir()
+    _seed(tmp_path / ".mothership")  # empty state
+    _bootstrap_main_repo(tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "thing.py").write_text("x = 1\n")
+    _git(["add", "src/thing.py"], cwd=tmp_path)
+
+    try:
+        result = runner.invoke(app, ["_check-commit", str(tmp_path)])
+        assert result.exit_code == 1, result.output
+        out = result.output
+        assert "src/thing.py" in out
+        assert "spawn" in out.lower()
+        assert "--no-verify" in out
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+
+def test_check_commit_no_task_with_staged_tests_rejects(tmp_path):
+    """Same rule applies to tests/** — those are typically dev-code too."""
+    container.config_path.override(tmp_path / "mothership.yaml")
+    container.state_dir.override(tmp_path / ".mothership")
+    (tmp_path / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    (tmp_path / ".mothership").mkdir()
+    _seed(tmp_path / ".mothership")
+    _bootstrap_main_repo(tmp_path)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text("def test_x(): pass\n")
+    _git(["add", "tests/test_x.py"], cwd=tmp_path)
+
+    try:
+        result = runner.invoke(app, ["_check-commit", str(tmp_path)])
+        assert result.exit_code == 1, result.output
+        assert "tests/test_x.py" in result.output
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+
+def test_check_commit_no_task_with_doc_changes_only_allowed(tmp_path):
+    """Doc/config edits at workspace root remain allowed without a task —
+    the rule is narrowly about src/ and tests/."""
+    container.config_path.override(tmp_path / "mothership.yaml")
+    container.state_dir.override(tmp_path / ".mothership")
+    (tmp_path / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    (tmp_path / ".mothership").mkdir()
+    _seed(tmp_path / ".mothership")
+    _bootstrap_main_repo(tmp_path)
+    # Only a top-level doc change is staged.
+    (tmp_path / "README.md").write_text("changed\n")
+    _git(["add", "README.md"], cwd=tmp_path)
+
+    try:
+        result = runner.invoke(app, ["_check-commit", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+
+def test_check_commit_no_task_outside_workspace_root_allowed(tmp_path):
+    """The rule only fires when toplevel == workspace root. Commits in
+    unrelated repos that happen to share a no-task state must not break."""
+    container.config_path.override(tmp_path / "mothership.yaml")
+    container.state_dir.override(tmp_path / ".mothership")
+    (tmp_path / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    (tmp_path / ".mothership").mkdir()
+    _seed(tmp_path / ".mothership")
+
+    other = tmp_path / "unrelated"
+    other.mkdir()
+    _git(["init", "-q"], cwd=other)
+    (other / "src").mkdir()
+    (other / "src" / "thing.py").write_text("x = 1\n")
+    _git(["add", "src/thing.py"], cwd=other)
+
+    try:
+        # toplevel is the unrelated repo, not the workspace root.
+        result = runner.invoke(app, ["_check-commit", str(other)])
+        assert result.exit_code == 0, result.output
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+
+def test_check_commit_no_task_no_git_repo_fails_open(tmp_path):
+    """Workspace root that isn't a git repo → fail-open (existing behavior)."""
+    container.config_path.override(tmp_path / "mothership.yaml")
+    container.state_dir.override(tmp_path / ".mothership")
+    (tmp_path / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    (tmp_path / ".mothership").mkdir()
+    _seed(tmp_path / ".mothership")
+    # Deliberately not a git repo.
+
+    try:
+        result = runner.invoke(app, ["_check-commit", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+
 def test_check_commit_fails_open_on_corrupt_state(tmp_path):
     container.config_path.override(tmp_path / "mothership.yaml")
     container.state_dir.override(tmp_path / ".mothership")
