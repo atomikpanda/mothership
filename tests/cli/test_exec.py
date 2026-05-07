@@ -935,3 +935,92 @@ def test_mship_test_path_share_skips_when_partner_is_not_applicable(workspace: P
         assert persisted.test_results["tailrd"].status == "pass"
     finally:
         _reset_container()
+
+
+# ---------------------------------------------------------------------------
+# mship logs: declarative Taskfile-target check (#125)
+#
+# Previously: when the requested service had no `logs` target in its
+# Taskfile, mship shelled out to `task <name>` and the user got a wall
+# of go-task help text instead of an actionable error.
+# ---------------------------------------------------------------------------
+
+
+def test_mship_logs_known_service_missing_logs_target_errors(configured_exec_app):
+    """Service is registered, but its Taskfile has no `logs` target → exit 1
+    with a targeted error that names the missing target. See #125."""
+    workspace, mock_shell = configured_exec_app
+    # The `workspace` fixture writes Taskfiles with only `test:` defined,
+    # so `logs:` is missing for every repo.
+    result = runner.invoke(app, ["logs", "shared"])
+    assert result.exit_code == 1, result.output
+    assert "shared" in result.output
+    assert "logs" in result.output.lower()
+    # Should NOT have shelled out to `task logs` — the whole point.
+    mock_shell.run_task.assert_not_called()
+
+
+def test_mship_logs_runs_when_taskfile_has_logs_target(configured_exec_app):
+    """When the Taskfile DOES define `logs:`, the command shells out as
+    before — the new check is non-intrusive for the happy path."""
+    workspace, mock_shell = configured_exec_app
+    (workspace / "shared" / "Taskfile.yml").write_text(
+        "version: '3'\n"
+        "tasks:\n"
+        "  test:\n    cmds: [echo t]\n"
+        "  logs:\n    cmds: [echo logs]\n"
+    )
+    mock_shell.run_task.return_value = ShellResult(
+        returncode=0, stdout="some log output\n", stderr="",
+    )
+    result = runner.invoke(app, ["logs", "shared"])
+    assert result.exit_code == 0, result.output
+    assert mock_shell.run_task.call_count == 1
+    assert "some log output" in result.output
+
+
+def test_mship_logs_aliased_target_via_mship_yaml(workspace: Path):
+    """When the repo aliases `logs: <real-name>` in mothership.yaml, the
+    check looks for the aliased target in the Taskfile, not 'logs'."""
+    state_dir = workspace / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(workspace / "mothership.yaml")
+    container.state_dir.override(state_dir)
+
+    # Override mothership.yaml to alias logs → tail for `shared`.
+    (workspace / "mothership.yaml").write_text(
+        "workspace: test-platform\n"
+        "repos:\n"
+        "  shared:\n"
+        "    path: ./shared\n"
+        "    type: library\n"
+        "    base_branch: main\n"
+        "    depends_on: []\n"
+        "    tasks:\n"
+        "      logs: tail\n"
+    )
+    (workspace / "shared" / "Taskfile.yml").write_text(
+        "version: '3'\n"
+        "tasks:\n"
+        "  tail:\n    cmds: [echo tailing]\n"
+    )
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="tailing\n", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        result = runner.invoke(app, ["logs", "shared"])
+        assert result.exit_code == 0, result.output
+        # The aliased target name was actually invoked.
+        call = mock_shell.run_task.call_args
+        assert call.kwargs.get("actual_task_name") == "tail"
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset_override()
+        container.config.reset()
+        container.state_manager.reset_override()
+        container.state_manager.reset()
+        container.shell.reset_override()

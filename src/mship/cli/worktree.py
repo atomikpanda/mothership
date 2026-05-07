@@ -1046,7 +1046,8 @@ def register(app: typer.Typer, get_container):
                     output.error(f"  {line}")
                 output.error(
                     "Run `mship test` or record evidence via "
-                    "`mship journal --test-state pass`, then retry."
+                    "`mship journal \"tests verified externally\" --test-state pass`, "
+                    "then retry."
                 )
                 raise typer.Exit(code=1)
             output.warning("Test-evidence warnings:")
@@ -1054,7 +1055,8 @@ def register(app: typer.Typer, get_container):
                 output.warning(f"  {line}")
             output.warning(
                 "Pass `--require-tests` to treat as blocking, or record evidence via "
-                "`mship test` / `mship journal --test-state pass`."
+                "`mship test` / "
+                "`mship journal \"tests verified externally\" --test-state pass`."
             )
 
         pr_list: list[dict] = []
