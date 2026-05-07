@@ -89,8 +89,16 @@ def test_spec_non_watch_no_task_exits_1(empty_workspace):
     assert "no active task" in (result.output or "").lower()
 
 
+def _force_tty(monkeypatch):
+    """Force Output.is_tty=True so non-TTY short-circuit (#124) doesn't trip
+    in tests that exercise the interactive --watch view path."""
+    from mship.cli.output import Output
+    monkeypatch.setattr(Output, "is_tty", property(lambda self: True))
+
+
 def test_spec_watch_no_task_constructs_view_without_exit(empty_workspace, monkeypatch):
     from mship.cli.view import spec as spec_mod
+    _force_tty(monkeypatch)
     captured = {}
     monkeypatch.setattr(spec_mod.SpecView, "run", lambda self: captured.setdefault("view", self))
     runner = CliRunner()
@@ -105,6 +113,7 @@ def test_spec_watch_no_task_constructs_view_without_exit(empty_workspace, monkey
 
 def test_spec_watch_with_unknown_task_constructs_view_without_exit(empty_workspace, monkeypatch):
     from mship.cli.view import spec as spec_mod
+    _force_tty(monkeypatch)
     captured = {}
     monkeypatch.setattr(spec_mod.SpecView, "run", lambda self: captured.setdefault("view", self))
     runner = CliRunner()
