@@ -123,13 +123,23 @@ class PhaseManager:
         return warnings
 
     def _gate_dev(self, task_slug: str) -> list[str]:
+        warn = (
+            "No spec found — consider writing one before developing "
+            "(create one with `mship spec new` or set `spec_paths` "
+            "in mothership.yaml)"
+        )
         # Without DI'd config + workspace_root we can't actually search for
         # specs — fall back to the always-warn stub. See #113 for the wiring.
         if self._config is None or self._workspace_root is None:
-            return ["No spec found — consider writing one before developing"]
-        # Search workspace-level specs + all worktrees (no task= filter):
-        # specs are typically authored before the task slug exists.
-        from mship.core.view.spec_discovery import find_spec, SpecNotFoundError
+            return [warn]
+        # Blessed task-scoped path (#126) is the primary check. If absent,
+        # fall through to the workspace-level + worktree search so existing
+        # workspaces (`docs/superpowers/specs/...`) still satisfy the gate.
+        from mship.core.view.spec_discovery import (
+            SpecNotFoundError, blessed_spec_path, find_spec,
+        )
+        if blessed_spec_path(self._workspace_root, task_slug).is_file():
+            return []
         try:
             find_spec(
                 self._workspace_root,
@@ -138,7 +148,7 @@ class PhaseManager:
                 spec_paths=self._config.spec_paths,
             )
         except SpecNotFoundError:
-            return ["No spec found — consider writing one before developing"]
+            return [warn]
         return []
 
     def _gate_review(self, task) -> list[str]:

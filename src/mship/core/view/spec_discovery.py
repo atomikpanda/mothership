@@ -11,6 +11,15 @@ class SpecNotFoundError(Exception):
 
 SPEC_SUBDIR = Path("docs") / "superpowers" / "specs"
 
+# Blessed mship-private, task-scoped spec location (#126). Lives under the
+# workspace state dir; one SPEC.md per task at a known path so the
+# dev-phase gate has something deterministic to find.
+BLESSED_TASK_SPEC_DIR = Path(".mothership") / "tasks"  # joined with <slug>/SPEC.md
+
+
+def blessed_spec_path(workspace_root: Path, slug: str) -> Path:
+    return workspace_root / BLESSED_TASK_SPEC_DIR / slug / "SPEC.md"
+
 
 def find_spec(
     workspace_root: Path,
@@ -37,6 +46,14 @@ def find_spec(
             if candidate.is_file():
                 return candidate
             raise SpecNotFoundError(f"Spec not found: {name_or_path}")
+
+    # Blessed task-scoped path (#126) takes precedence when task is set and
+    # no explicit name was passed. One file at a known path beats the
+    # workspace-wide newest-mtime lookup.
+    if task is not None and name_or_path is None:
+        blessed = blessed_spec_path(workspace_root, task)
+        if blessed.is_file():
+            return blessed
 
     search_roots = _resolve_search_roots(workspace_root, task, state, spec_paths)
 
