@@ -15,6 +15,33 @@ def _relpath(path_str: str) -> str:
         return path_str
 
 
+def _taskfile_has_target(repo_path, target: str) -> bool:
+    """True if `<repo_path>/Taskfile.yml` (or .yaml) defines `target`.
+
+    Reads the local Taskfile only; `includes:` are not recursed into. That
+    covers the common case — `mship logs` looks for a target defined
+    locally in the repo's Taskfile. False on missing file or parse error,
+    which is the correct, fail-loud signal for the caller.
+    """
+    from pathlib import Path
+    import yaml
+    p = Path(repo_path)
+    candidates = [p / "Taskfile.yml", p / "Taskfile.yaml"]
+    taskfile = next((c for c in candidates if c.exists()), None)
+    if taskfile is None:
+        return False
+    try:
+        data = yaml.safe_load(taskfile.read_text())
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    tasks = data.get("tasks", {})
+    if not isinstance(tasks, dict):
+        return False
+    return target in tasks
+
+
 def _file_nonempty(path_str: str) -> bool:
     """True if the path exists and has non-zero size. False on OSError."""
     from pathlib import Path
@@ -473,6 +500,19 @@ def register(app: typer.Typer, get_container):
                 wt_path = Path(resolved_task.worktrees[name])
                 if wt_path.exists():
                     cwd = wt_path
+
+            # Declarative target check (#125): without this, a missing
+            # `logs:` target lets go-task print its general help text
+            # instead of an actionable error. Reads the local Taskfile
+            # only — `includes:` aren't recursed into.
+            if not _taskfile_has_target(cwd, actual_task):
+                output.error(
+                    f"'{name}' has no '{actual_task}' task in its Taskfile.\n"
+                    f"  Add a `{actual_task}:` task to {cwd}/Taskfile.yml, "
+                    f"or alias it via `tasks: {{logs: <real-name>}}` "
+                    f"in mothership.yaml."
+                )
+                raise typer.Exit(code=1)
 
             if all_services:
                 output.print(f"[bold]── {name} ──[/bold]")
