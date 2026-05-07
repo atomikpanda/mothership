@@ -242,3 +242,66 @@ def test_log_silent_when_cwd_inside_active_worktree(workspace_with_git, monkeypa
         container.config.reset()
         container.state_manager.reset()
         container.log_manager.reset()
+
+
+# --- Structured-flag-without-message validation (#108) ---
+#
+# Root cause of #108: `mship journal --test-state pass` (no message) silently
+# fell through to the read path. The flag was accepted but no entry was
+# written, so the unified test-evidence reader had no journal evidence to
+# consider. The reader was correct (#81 / 68753e5); the CLI was lossy.
+
+
+def test_journal_test_state_without_message_errors(configured_app_with_task: Path):
+    """`mship journal --test-state pass` (no message) must error, not silently
+    drop the flag. See #108."""
+    result = runner.invoke(
+        app, ["journal", "--test-state", "pass", "--task", "add-labels"],
+    )
+    assert result.exit_code != 0, result.output
+    assert "message" in result.output.lower()
+
+
+def test_journal_action_without_message_errors(configured_app_with_task: Path):
+    """`mship journal --action ...` without a message also errors."""
+    result = runner.invoke(
+        app, ["journal", "--action", "ran tests", "--task", "add-labels"],
+    )
+    assert result.exit_code != 0, result.output
+    assert "message" in result.output.lower()
+
+
+def test_journal_open_without_message_errors(configured_app_with_task: Path):
+    """`mship journal --open ...` without a message also errors."""
+    result = runner.invoke(
+        app, ["journal", "--open", "blocked on api key", "--task", "add-labels"],
+    )
+    assert result.exit_code != 0, result.output
+    assert "message" in result.output.lower()
+
+
+def test_journal_test_state_with_message_writes_entry(configured_app_with_task: Path):
+    """The recommended invocation still writes a usable journal entry."""
+    result = runner.invoke(
+        app,
+        ["journal", "tests verified externally",
+         "--test-state", "pass", "--task", "add-labels"],
+    )
+    assert result.exit_code == 0, result.output
+
+    log_mgr = LogManager(configured_app_with_task / ".mothership" / "logs")
+    entries = log_mgr.read("add-labels")
+    state_entries = [e for e in entries if e.test_state == "pass"]
+    assert len(state_entries) == 1, [e.message for e in entries]
+    assert state_entries[0].message == "tests verified externally"
+
+
+def test_journal_no_args_still_reads(configured_app_with_task: Path):
+    """Bare `mship journal` (no message, no structured flags) still reads
+    entries \u2014 the validation only fires when flags are present."""
+    runner.invoke(
+        app, ["journal", "first entry", "--task", "add-labels"],
+    )
+    result = runner.invoke(app, ["journal", "--task", "add-labels"])
+    assert result.exit_code == 0, result.output
+    assert "first entry" in result.output

@@ -40,6 +40,20 @@ def register(app: typer.Typer, get_container):
         if t.active_repo is not None and t.active_repo in t.worktrees:
             cwd_warn = format_cwd_warning(_P.cwd(), _P(t.worktrees[t.active_repo]))
 
+        # Structured-flag validation (#108): `mship journal --test-state pass`
+        # (or --action / --open) without a message silently dropped the flag
+        # and fell through to read mode. That made `--test-state pass`
+        # ineffective as test-evidence — the unified reader (#81) had nothing
+        # to read. Fail loud instead.
+        if message is None and not show_open and (
+            test_state is not None or action is not None or open_question is not None
+        ):
+            output.error(
+                "Structured journal flags require a message argument. Try:\n"
+                "  mship journal \"tests verified externally\" --test-state pass"
+            )
+            raise typer.Exit(code=1)
+
         if show_open:
             entries = log_mgr.read(t.slug)
             opens = [e for e in entries if e.open_question]
