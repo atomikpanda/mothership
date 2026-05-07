@@ -390,6 +390,12 @@ def register(app: typer.Typer, get_container):
                 output.print(f"  {repo}: {path}")
             for warning in result.setup_warnings:
                 output.warning(warning)
+            if task.worktrees:
+                first_repo = task.affected_repos[0] if task.affected_repos else next(iter(task.worktrees))
+                hint_path = task.worktrees.get(first_repo) or next(iter(task.worktrees.values()))
+                output.print("")
+                output.print("[bold]Next:[/bold] cd into the worktree before editing.")
+                output.print(f"  cd {hint_path}")
         else:
             data = task.model_dump(mode="json")
             data["setup_warnings"] = result.setup_warnings

@@ -100,6 +100,36 @@ def test_spawn_records_base_branch(configured_git_app: Path):
     assert state.tasks["record-base"].base_branch is None
 
 
+def test_spawn_tty_prints_cd_hint(configured_git_app: Path, monkeypatch):
+    """TTY spawn output includes a 'cd into the worktree' next-step hint
+    with a copy-pasteable cd command. See #129."""
+    from mship.cli.output import Output
+    monkeypatch.setattr(Output, "is_tty", property(lambda self: True))
+
+    result = runner.invoke(app, ["spawn", "cd hint", "--repos", "shared"])
+    assert result.exit_code == 0, result.output
+
+    mgr = StateManager(configured_git_app / ".mothership")
+    state = mgr.load()
+    worktree_path = state.tasks["cd-hint"].worktrees["shared"]
+
+    assert "Next:" in result.output
+    # Rich may soft-wrap long paths; flatten before checking the cd command.
+    flat = result.output.replace("\n", "").replace(" ", "")
+    assert f"cd{worktree_path}" in flat
+
+
+def test_spawn_non_tty_json_omits_cd_hint(configured_git_app: Path):
+    """Non-TTY spawn output is JSON only — no cd hint mixed in. See #129."""
+    import json as _json
+    result = runner.invoke(app, ["spawn", "json hint", "--repos", "shared"])
+    assert result.exit_code == 0, result.output
+    # Parses as JSON — proves no hint text was appended.
+    payload = _json.loads(result.output)
+    assert payload["slug"] == "json-hint"
+    assert "Next:" not in result.output
+
+
 def test_worktrees_list(configured_git_app: Path):
     runner.invoke(app, ["spawn", "test list", "--repos", "shared"])
     result = runner.invoke(app, ["worktrees"])
