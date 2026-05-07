@@ -308,6 +308,21 @@ def register(app: typer.Typer, get_container):
             _serve_web(path, port)
             return
 
+        # Non-TTY short-circuit (#124): the SpecView TUI hangs forever when
+        # stdout isn't a terminal (agent pipes, redirects, CI). Mirror the
+        # `mship status` pattern — print the resolved spec to stdout and exit.
+        from mship.cli.output import Output
+        if not Output().is_tty:
+            try:
+                path = find_spec(
+                    workspace_root, name_or_path, task=resolved_task_slug, state=state,
+                )
+            except SpecNotFoundError as e:
+                typer.echo(f"Error: {e}", err=True)
+                raise typer.Exit(code=1)
+            typer.echo(path.read_text(), nl=False)
+            return
+
         view = SpecView(
             workspace_root=workspace_root,
             name_or_path=name_or_path,

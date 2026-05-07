@@ -335,3 +335,82 @@ async def test_spec_view_watch_transitions_to_fallback_when_task_appears(tmp_pat
         # Either a spec was rendered (none in tmp_path/docs/superpowers/specs)
         # or the task fallback with the description appears.
         assert "My task description" in text or "No spec yet for task" in text
+
+
+# --- Non-TTY short-circuit tests (#124) ---
+
+
+def _setup_workspace(tmp_path: Path):
+    """Configure container overrides for an empty workspace. Caller is
+    responsible for resetting overrides via container.*.reset_override()."""
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text("workspace: t\nrepos: {}\n")
+    StateManager(state_dir).save(WorkspaceState(tasks={}))
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(cfg)
+    container.state_dir.override(state_dir)
+
+
+def _reset_overrides():
+    container.config_path.reset_override()
+    container.state_dir.reset_override()
+    container.config.reset_override()
+    container.config.reset()
+    container.state_manager.reset_override()
+    container.state_manager.reset()
+
+
+def test_spec_cli_non_tty_prints_spec_and_exits(tmp_path):
+    """Non-TTY: short-circuit the TUI, print spec contents, exit 0. See #124."""
+    runner = CliRunner()
+    _setup_workspace(tmp_path)
+    spec_file = tmp_path / "design.md"
+    spec_file.write_text("# Hello\n\nSpec body content.\n")
+    try:
+        # Pass an explicit absolute path so task resolution is bypassed
+        # (the bug is the TUI hang in non-TTY, not task lookup).
+        result = runner.invoke(app, ["view", "spec", str(spec_file)])
+        assert result.exit_code == 0, result.output
+        assert "Spec body content." in result.output
+    finally:
+        _reset_overrides()
+
+
+def test_spec_cli_non_tty_missing_spec_exits_1(tmp_path):
+    """Non-TTY: missing spec errors with code 1, no TUI launch. See #124."""
+    runner = CliRunner()
+    _setup_workspace(tmp_path)
+    try:
+        result = runner.invoke(app, ["view", "spec", str(tmp_path / "nope.md")])
+        assert result.exit_code == 1, result.output
+        # Should be the SpecNotFoundError surfaced, not a TUI hang.
+        assert "not found" in result.output.lower() or "no spec" in result.output.lower()
+    finally:
+        _reset_overrides()
+
+
+def test_spec_cli_non_tty_does_not_construct_specview(tmp_path, monkeypatch):
+    """Non-TTY path must not instantiate the Textual app at all. See #124."""
+    runner = CliRunner()
+    _setup_workspace(tmp_path)
+    spec_file = tmp_path / "s.md"
+    spec_file.write_text("# stub\nbody\n")
+
+    constructed = []
+    from mship.cli.view import spec as spec_mod
+    real_init = spec_mod.SpecView.__init__
+
+    def _trap_init(self, *a, **kw):
+        constructed.append(True)
+        real_init(self, *a, **kw)
+
+    monkeypatch.setattr(spec_mod.SpecView, "__init__", _trap_init)
+    try:
+        result = runner.invoke(app, ["view", "spec", str(spec_file)])
+        assert result.exit_code == 0, result.output
+        assert constructed == [], "SpecView must not be constructed in non-TTY mode"
+    finally:
+        _reset_overrides()
