@@ -6,18 +6,19 @@ Use this template when dispatching an implementer subagent.
 (a `mothership.yaml` exists at the repo root or any ancestor). If yes:
 
 1. There MUST be a single, anchored mship task before you dispatch implementer
-   subagents. Run `mship status`:
-   - If the output is `{"active_tasks": []}`, refuse to dispatch and tell the
-     user to `mship spawn "<description>"` first.
-   - If the output is `{"active_tasks": [...]}` with a non-empty list, two or
-     more tasks are active with no anchor — refuse to dispatch, pick one with
-     the user, then set `MSHIP_TASK=<slug>` (or pass `--task <slug>`) and
-     re-run `mship status` to confirm it resolves.
-   - Otherwise the output is the resolved task's detail (keys like `slug`,
-     `phase`, `worktrees`). Use that shape for step 2.
+   subagents. Run `mship status` — it always returns an envelope shape:
+   - If `.active_tasks` is empty (`mship status | jq '.active_tasks'` → `[]`),
+     refuse to dispatch and tell the user to `mship spawn "<description>"`
+     first.
+   - If `.active_tasks` is non-empty but `.resolved_task` is `null`, multiple
+     tasks are active with no anchor — refuse to dispatch, pick one with the
+     user, then set `MSHIP_TASK=<slug>` (or pass `--task <slug>`) and re-run
+     `mship status` to confirm `.resolved_task` is populated.
+   - Otherwise `.resolved_task` is the resolved task's detail (`slug`, `phase`,
+     `worktrees`, …). Use that for step 2.
 2. The subagent MUST work in the task's worktree, not the main checkout. Set
-   `Work from:` below to `worktrees.<repo>` from the resolved `mship status`
-   output. Never point it at the main repo root.
+   `Work from:` below to `.resolved_task.worktrees.<repo>` from the
+   `mship status` output. Never point it at the main repo root.
 3. The subagent MUST commit on the task's feature branch (inside the worktree).
    The mship pre-commit hook will refuse commits from the main checkout, but
    the prompt should say this explicitly so the subagent doesn't waste a cycle.
