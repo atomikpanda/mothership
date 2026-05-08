@@ -423,13 +423,19 @@ Mothership pairs well with:
 Mothership outputs JSON automatically when stdout isn't a TTY:
 
 ```bash
-# If you're inside a task's worktree or have MSHIP_TASK set,
-# `mship status` returns the resolved task's detail:
-mship status | jq -r .phase
+# `mship status` always returns the same envelope shape (#128). When a
+# task can be resolved from context (cwd / MSHIP_TASK / --task), its
+# full detail is under `.resolved_task`:
+mship status | jq -r .resolved_task.phase
+mship status | jq -r '.resolved_task.worktrees."<repo>"'
 
-# With 0 or 2+ active tasks and no anchor, `mship status` returns a
-# workspace summary instead; use this to list active task slugs:
+# `.active_tasks[]` is always present — use it to list active slugs:
 mship status | jq '.active_tasks[].slug'
+
+# `.resolution_source` tells you how the task was resolved
+# ("cwd" | "MSHIP_TASK" | "--task" | "only active task"), or null
+# when no task resolved:
+mship status | jq -r .resolution_source
 
 mship journal | jq '.entries[].message'
 mship graph | jq '.order'

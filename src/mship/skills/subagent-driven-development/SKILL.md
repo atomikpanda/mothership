@@ -15,15 +15,20 @@ Execute plan by dispatching fresh subagent per task, with two-stage review after
 repo root or any ancestor): before dispatching ANY implementer subagent, verify
 there is an active mship task with a worktree. Run `mship status`.
 
-- If the output is `{"active_tasks": []}`, no tasks exist — stop and tell the
-  user to `mship spawn "<description>"` first.
-- If the output is `{"active_tasks": [...]}` with a non-empty list, multiple
+`mship status` always emits the same envelope shape: `.active_tasks[]` lists
+every active task, and `.resolved_task` is the resolved task's full detail
+(keys like `slug`, `phase`, `branch`, `worktrees`, …) — or `null` when no task
+resolves from context (cwd / `MSHIP_TASK` / `--task`).
+
+- If `.active_tasks` is empty (`mship status | jq '.active_tasks'` → `[]`), no
+  tasks exist — stop and tell the user to `mship spawn "<description>"` first.
+- If `.active_tasks` is non-empty but `.resolved_task` is `null`, multiple
   tasks are active and no single one is anchored. Pick one with the user and
   pass `--task <slug>` (or set `MSHIP_TASK=<slug>`) on every subsequent mship
   command, then `cd` into that task's worktree before dispatching.
-- Otherwise `mship status` returns the resolved task's detail directly (keys
-  like `slug`, `phase`, `branch`, `worktrees`, …). Use `worktrees.<repo>` as
-  `Work from:` in every implementer prompt.
+- Otherwise `.resolved_task` is the resolved task (`mship status | jq
+  .resolved_task`). Use `.resolved_task.worktrees.<repo>` as `Work from:` in
+  every implementer prompt.
 
 Subagents work and commit inside that worktree, never on `main`. This is what
 keeps worktree isolation intact across the whole plan execution. See
