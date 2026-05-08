@@ -92,7 +92,10 @@ def test_full_lifecycle(full_workspace: Path):
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0
     payload = _json.loads(result.output)
-    assert payload == {"active_tasks": []}
+    # Envelope shape (#128): always has workspace + active_tasks + resolved_task.
+    assert payload["active_tasks"] == []
+    assert payload["resolved_task"] is None
+    assert payload["resolution_source"] is None
 
 
 # ---------------------------------------------------------------------------
