@@ -35,10 +35,10 @@ def configured_app(workspace: Path):
 def test_status_no_task(configured_app):
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0
-    # Bimodal: non-TTY emits JSON workspace summary when no task resolves.
     payload = json.loads(result.output)
-    # No active tasks → cwd check is not applicable.
-    assert payload.get("active_tasks") == []
+    assert payload["active_tasks"] == []
+    assert payload["resolved_task"] is None
+    assert payload["resolution_source"] is None
 
 
 def test_status_cwd_outside_worktrees_reports_true(workspace_with_git, monkeypatch, tmp_path):
@@ -147,10 +147,11 @@ def test_status_shows_phase_duration_and_drift(workspace_with_git):
     try:
         result = runner.invoke(app, ["status", "--task", "t"])
         assert result.exit_code == 0, result.output
-        # CliRunner is non-TTY so output is JSON; assert the enriched fields are present.
         payload = json.loads(result.output)
-        assert payload["phase_entered_at"] is not None  # phase duration encoded
-        assert "drift" in payload  # drift field present
+        rt = payload["resolved_task"]
+        assert rt is not None
+        assert rt["phase_entered_at"] is not None  # phase duration encoded
+        assert "drift" in rt  # drift field present
     finally:
         container.config_path.reset_override()
         container.state_dir.reset_override()
@@ -170,14 +171,15 @@ def test_status_json_includes_new_fields(workspace_with_git):
     container.config_path.override(workspace_with_git / "mothership.yaml")
     container.state_dir.override(workspace_with_git / ".mothership")
     try:
-        # Non-TTY → JSON
         result = runner.invoke(app, ["status", "--task", "t"])
         assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
-        assert payload["finished_at"] is not None
-        assert payload["phase_entered_at"] is not None
-        assert "drift" in payload
-        assert "last_log" in payload
+        rt = payload["resolved_task"]
+        assert rt is not None
+        assert rt["finished_at"] is not None
+        assert rt["phase_entered_at"] is not None
+        assert "drift" in rt
+        assert "last_log" in rt
     finally:
         container.config_path.reset_override()
         container.state_dir.reset_override()
@@ -225,7 +227,9 @@ def test_status_shows_active_repo(workspace_with_git):
         import json as _j
         try:
             payload = _j.loads(result.output)
-            assert payload["active_repo"] == "shared"
+            rt = payload["resolved_task"]
+            assert rt is not None
+            assert rt["active_repo"] == "shared"
         except _j.JSONDecodeError:
             assert "Active repo" in result.output
             assert "shared" in result.output
@@ -282,7 +286,10 @@ def test_status_no_tasks_emits_empty_active_list(tmp_path, monkeypatch):
         result = runner.invoke(app, ["status"])
         assert result.exit_code == 0, result.stderr
         data = json.loads(result.stdout)
-        assert data == {"active_tasks": []}
+        assert data["workspace"] == "t"
+        assert data["active_tasks"] == []
+        assert data["resolved_task"] is None
+        assert data["resolution_source"] is None
     finally:
         _reset_container()
 
@@ -301,6 +308,8 @@ def test_status_multiple_tasks_no_anchor_lists_all(tmp_path, monkeypatch):
         assert set(slugs) == {"A", "B"}
         for t in data["active_tasks"]:
             assert "slug" in t and "phase" in t and "branch" in t
+        # Multiple active, no anchor → no resolution.
+        assert data["resolved_task"] is None
     finally:
         _reset_container()
 
@@ -315,7 +324,8 @@ def test_status_resolves_via_task_flag(tmp_path, monkeypatch):
         result = runner.invoke(app, ["status", "--task", "A"])
         assert result.exit_code == 0, result.stderr
         data = json.loads(result.stdout)
-        assert data["slug"] == "A"
+        assert data["resolved_task"]["slug"] == "A"
+        assert data["resolution_source"] == "--task"
     finally:
         _reset_container()
 

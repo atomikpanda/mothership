@@ -37,46 +37,105 @@ def register(app: typer.Typer, get_container):
             None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."
         ),
     ):
-        """Show status of a task (resolved from cwd/env/flag) or workspace summary."""
+        """Show workspace summary + resolved task detail (when a task can be
+        resolved from cwd / MSHIP_TASK / --task).
+
+        Always returns a single envelope shape (#128) — no bimodal output."""
         from datetime import datetime, timezone
         from mship.util.duration import format_relative
-        from mship.cli._resolve import resolve_or_exit
         from mship.core.task_resolver import (
-            AmbiguousTaskError, NoActiveTaskError, resolve_task,
+            AmbiguousTaskError, NoActiveTaskError, UnknownTaskError, resolve_task,
         )
         import os
         from pathlib import Path
 
         container = get_container()
         output = Output()
+        config = container.config()
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
+        # --- Resolution: capture both task and source. UnknownTaskError still
+        # errors loudly (someone passed --task <unknown> or MSHIP_TASK=<unknown>);
+        # NoActive / Ambiguous → resolved_task stays None.
         t = None
-        if task is not None or os.environ.get("MSHIP_TASK"):
-            # Explicit target — resolve_or_exit shows friendly error on miss.
-            t = resolve_or_exit(state, task)
-        else:
-            try:
-                t, _ = resolve_task(
-                    state, cli_task=None, env_task=None, cwd=Path.cwd(),
-                )
-            except (NoActiveTaskError, AmbiguousTaskError):
-                t = None
+        source: str | None = None
+        try:
+            t, source_enum = resolve_task(
+                state,
+                cli_task=task,
+                env_task=os.environ.get("MSHIP_TASK"),
+                cwd=Path.cwd(),
+            )
+            source = source_enum.value
+        except UnknownTaskError as e:
+            known = ", ".join(sorted(state.tasks.keys())) or "(none)"
+            output.error(f"Unknown task: {e.slug}. Known: {known}.")
+            raise typer.Exit(1)
+        except (NoActiveTaskError, AmbiguousTaskError):
+            pass  # leave t / source as None
 
-        if t is None:
-            active = sorted(
-                state.tasks.values(),
-                key=lambda tt: (tt.phase_entered_at or tt.created_at),
-                reverse=True,
+        # --- Workspace-level data (always in the envelope).
+        active = sorted(
+            state.tasks.values(),
+            key=lambda tt: (tt.phase_entered_at or tt.created_at),
+            reverse=True,
+        )
+        worktree_paths = _collect_worktree_paths(state)
+        any_worktrees = bool(worktree_paths)
+        cwd_outside = (
+            any_worktrees
+            and not _cwd_inside_any_worktree(Path.cwd(), worktree_paths)
+        )
+
+        # --- Resolved-task detail (only when a task resolved).
+        resolved_payload: dict | None = None
+        drift_summary = {"has_errors": False, "error_count": 0}
+        last_log: dict | None = None
+        if t is not None:
+            try:
+                from mship.core.repo_state import audit_repos
+                from mship.core.audit_gate import collect_known_worktree_paths
+                shell = container.shell()
+                try:
+                    known = collect_known_worktree_paths(state_mgr)
+                except Exception:
+                    known = frozenset()
+                report = audit_repos(
+                    config, shell, names=t.affected_repos,
+                    known_worktree_paths=known, local_only=True,
+                )
+                errors = [i for r in report.repos for i in r.issues if i.severity == "error"]
+                drift_summary = {"has_errors": bool(errors), "error_count": len(errors)}
+            except Exception:
+                pass
+            try:
+                entries = container.log_manager().read(t.slug, last=1)
+                if entries:
+                    e = entries[-1]
+                    first_line = e.message.splitlines()[0] if e.message else ""
+                    last_log = {"message": first_line[:60], "timestamp": e.timestamp}
+            except Exception:
+                last_log = None
+
+            resolved_payload = t.model_dump(mode="json")
+            resolved_payload["active_repo"] = t.active_repo
+            if t.blocked_reason:
+                resolved_payload["phase_display"] = (
+                    f"{t.phase} (BLOCKED: {t.blocked_reason})"
+                )
+            if t.finished_at is not None:
+                resolved_payload["close_hint"] = "mship close"
+            resolved_payload["drift"] = drift_summary
+            resolved_payload["last_log"] = (
+                {"message": last_log["message"], "timestamp": last_log["timestamp"].isoformat()}
+                if last_log is not None else None
             )
-            worktree_paths = _collect_worktree_paths(state)
-            any_worktrees = bool(worktree_paths)
-            cwd_outside = (
-                any_worktrees
-                and not _cwd_inside_any_worktree(Path.cwd(), worktree_paths)
-            )
-            if output.is_tty:
+
+        # --- TTY rendering: unchanged. Workspace summary when no task resolves;
+        # task-detail block when one does.
+        if output.is_tty:
+            if t is None:
                 if not active:
                     output.print("No active tasks. Run `mship spawn \"description\"`.")
                 else:
@@ -102,116 +161,68 @@ def register(app: typer.Typer, get_container):
                             for repo, path in tt.worktrees.items():
                                 output.print(f"  {tt.slug}:{repo} → {path}")
             else:
-                payload = {
-                    "active_tasks": [
-                        {
-                            "slug": tt.slug,
-                            "phase": tt.phase,
-                            "branch": tt.branch,
-                            "phase_entered_at": (
-                                tt.phase_entered_at.isoformat()
-                                if tt.phase_entered_at else None
-                            ),
-                        }
-                        for tt in active
-                    ],
-                }
-                if any_worktrees:
-                    payload["cwd_is_outside_worktrees"] = cwd_outside
-                output.json(payload)
+                output.print(f"[bold]Task:[/bold] {t.slug}")
+                if t.finished_at is not None:
+                    output.print(
+                        f"[yellow]⚠ Finished:[/yellow] {format_relative(t.finished_at)} — run `mship close` after merge"
+                    )
+                if t.active_repo is not None:
+                    output.print(f"[bold]Active repo:[/bold] {t.active_repo}")
+                phase_str = t.phase
+                if t.phase_entered_at is not None:
+                    rel = format_relative(t.phase_entered_at)
+                    phase_str = f"{t.phase} (entered {rel})"
+                if t.blocked_reason:
+                    phase_str = f"{phase_str}  [red]BLOCKED:[/red] {t.blocked_reason}"
+                output.print(f"[bold]Phase:[/bold] {phase_str}")
+                if t.blocked_at:
+                    output.print(f"[bold]Blocked since:[/bold] {t.blocked_at}")
+                output.print(f"[bold]Branch:[/bold] {t.branch}")
+                output.print(f"[bold]Repos:[/bold] {', '.join(t.affected_repos)}")
+                if t.worktrees:
+                    output.print("[bold]Worktrees:[/bold]")
+                    for repo, path in t.worktrees.items():
+                        output.print(f"  {repo}: {path}")
+                if t.test_results:
+                    output.print("[bold]Tests:[/bold]")
+                    for repo, result in t.test_results.items():
+                        status_str = (
+                            "[green]pass[/green]" if result.status == "pass"
+                            else "[red]fail[/red]"
+                        )
+                        output.print(f"  {repo}: {status_str}")
+                if drift_summary["has_errors"]:
+                    output.print(
+                        f"[bold]Drift:[/bold] [red]{drift_summary['error_count']} error(s)[/red] — run `mship audit`"
+                    )
+                else:
+                    output.print("[bold]Drift:[/bold] [green]clean[/green]")
+                if last_log is not None:
+                    ts_rel = format_relative(last_log["timestamp"])
+                    output.print(f"[bold]Last log:[/bold] \"{last_log['message']}\" ({ts_rel})")
             return
 
-        # Single-task detail — `t` is the resolved task from resolve_or_exit.
-        task_obj = t
-
-        # Drift (local-only)
-        drift_summary: dict = {"has_errors": False, "error_count": 0}
-        try:
-            from mship.core.repo_state import audit_repos
-            from mship.core.audit_gate import collect_known_worktree_paths
-            config = container.config()
-            shell = container.shell()
-            try:
-                known = collect_known_worktree_paths(state_mgr)
-            except Exception:
-                known = frozenset()
-            report = audit_repos(
-                config, shell, names=task_obj.affected_repos,
-                known_worktree_paths=known, local_only=True,
-            )
-            errors = [i for r in report.repos for i in r.issues if i.severity == "error"]
-            drift_summary = {"has_errors": bool(errors), "error_count": len(errors)}
-        except Exception:
-            pass
-
-        last_log: dict | None = None
-        try:
-            entries = container.log_manager().read(task_obj.slug, last=1)
-            if entries:
-                e = entries[-1]
-                first_line = e.message.splitlines()[0] if e.message else ""
-                last_log = {"message": first_line[:60], "timestamp": e.timestamp}
-        except Exception:
-            last_log = None
-
-        if output.is_tty:
-            output.print(f"[bold]Task:[/bold] {task_obj.slug}")
-            if task_obj.finished_at is not None:
-                output.print(
-                    f"[yellow]⚠ Finished:[/yellow] {format_relative(task_obj.finished_at)} — run `mship close` after merge"
-                )
-            if task_obj.active_repo is not None:
-                output.print(f"[bold]Active repo:[/bold] {task_obj.active_repo}")
-            phase_str = task_obj.phase
-            if task_obj.phase_entered_at is not None:
-                rel = format_relative(task_obj.phase_entered_at)
-                phase_str = f"{task_obj.phase} (entered {rel})"
-            if task_obj.blocked_reason:
-                phase_str = f"{phase_str}  [red]BLOCKED:[/red] {task_obj.blocked_reason}"
-            output.print(f"[bold]Phase:[/bold] {phase_str}")
-            if task_obj.blocked_at:
-                output.print(f"[bold]Blocked since:[/bold] {task_obj.blocked_at}")
-            output.print(f"[bold]Branch:[/bold] {task_obj.branch}")
-            output.print(f"[bold]Repos:[/bold] {', '.join(task_obj.affected_repos)}")
-            if task_obj.worktrees:
-                output.print("[bold]Worktrees:[/bold]")
-                for repo, path in task_obj.worktrees.items():
-                    output.print(f"  {repo}: {path}")
-            if task_obj.test_results:
-                output.print("[bold]Tests:[/bold]")
-                for repo, result in task_obj.test_results.items():
-                    status_str = (
-                        "[green]pass[/green]" if result.status == "pass"
-                        else "[red]fail[/red]"
-                    )
-                    output.print(f"  {repo}: {status_str}")
-            if drift_summary["has_errors"]:
-                output.print(
-                    f"[bold]Drift:[/bold] [red]{drift_summary['error_count']} error(s)[/red] — run `mship audit`"
-                )
-            else:
-                output.print("[bold]Drift:[/bold] [green]clean[/green]")
-            if last_log is not None:
-                ts_rel = format_relative(last_log["timestamp"])
-                output.print(f"[bold]Last log:[/bold] \"{last_log['message']}\" ({ts_rel})")
-        else:
-            data = task_obj.model_dump(mode="json")
-            data["active_repo"] = task_obj.active_repo
-            if task_obj.blocked_reason:
-                data["phase_display"] = f"{task_obj.phase} (BLOCKED: {task_obj.blocked_reason})"
-            if task_obj.finished_at is not None:
-                data["close_hint"] = "mship close"
-            data["drift"] = drift_summary
-            data["last_log"] = (
-                {"message": last_log["message"], "timestamp": last_log["timestamp"].isoformat()}
-                if last_log is not None else None
-            )
-            worktree_paths = _collect_worktree_paths(state)
-            if worktree_paths:
-                data["cwd_is_outside_worktrees"] = (
-                    not _cwd_inside_any_worktree(Path.cwd(), worktree_paths)
-                )
-            output.json(data)
+        # --- JSON envelope (single shape, always).
+        envelope = {
+            "workspace": config.workspace,
+            "active_tasks": [
+                {
+                    "slug": tt.slug,
+                    "phase": tt.phase,
+                    "branch": tt.branch,
+                    "phase_entered_at": (
+                        tt.phase_entered_at.isoformat()
+                        if tt.phase_entered_at else None
+                    ),
+                }
+                for tt in active
+            ],
+            "resolved_task": resolved_payload,
+            "resolution_source": source,
+        }
+        if any_worktrees:
+            envelope["cwd_is_outside_worktrees"] = cwd_outside
+        output.json(envelope)
 
     @app.command()
     def graph():
