@@ -318,3 +318,98 @@ def test_status_resolves_via_task_flag(tmp_path, monkeypatch):
         assert data["slug"] == "A"
     finally:
         _reset_container()
+
+
+# --- Single-envelope JSON shape (#128) ---
+
+
+def test_status_envelope_zero_tasks(tmp_path, monkeypatch):
+    """No tasks → envelope with workspace, empty active_tasks, null resolved_task."""
+    _mk_workspace(tmp_path, {})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MSHIP_TASK", raising=False)
+    try:
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["workspace"] == "t"
+        assert data["active_tasks"] == []
+        assert data["resolved_task"] is None
+        assert data["resolution_source"] is None
+    finally:
+        _reset_container()
+
+
+def test_status_envelope_multiple_tasks_no_anchor(tmp_path, monkeypatch):
+    """2+ active tasks with no anchor → resolved_task null, active_tasks lists all."""
+    _mk_workspace(tmp_path, {"A": "dev", "B": "review"})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MSHIP_TASK", raising=False)
+    try:
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0, result.stderr
+        data = json.loads(result.stdout)
+        slugs = {t["slug"] for t in data["active_tasks"]}
+        assert slugs == {"A", "B"}
+        assert data["resolved_task"] is None
+        assert data["resolution_source"] is None
+    finally:
+        _reset_container()
+
+
+def test_status_envelope_resolves_via_task_flag(tmp_path, monkeypatch):
+    """`--task X` populates resolved_task with full detail; source = '--task'."""
+    _mk_workspace(tmp_path, {"A": "dev", "B": "review"})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MSHIP_TASK", raising=False)
+    try:
+        result = runner.invoke(app, ["status", "--task", "A"])
+        assert result.exit_code == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["resolved_task"] is not None
+        assert data["resolved_task"]["slug"] == "A"
+        assert data["resolved_task"]["phase"] == "dev"
+        assert data["resolution_source"] == "--task"
+        # Top-level no longer carries task-detail keys.
+        assert "phase" not in data
+        assert "slug" not in data
+    finally:
+        _reset_container()
+
+
+def test_status_envelope_resolved_task_has_drift_and_last_log(workspace_with_git):
+    """resolved_task carries the enriched fields (drift, last_log) the old top-level had."""
+    task = Task(
+        slug="t", description="d", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        phase_entered_at=datetime.now(timezone.utc),
+        affected_repos=["shared"], branch="feat/t",
+    )
+    _seed(workspace_with_git, task)
+    container.config_path.override(workspace_with_git / "mothership.yaml")
+    container.state_dir.override(workspace_with_git / ".mothership")
+    try:
+        result = runner.invoke(app, ["status", "--task", "t"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["resolved_task"] is not None
+        assert "drift" in data["resolved_task"]
+        assert "last_log" in data["resolved_task"]
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+
+def test_status_envelope_unknown_task_flag_errors(tmp_path, monkeypatch):
+    """`--task <unknown>` still errors loudly (unchanged behavior)."""
+    _mk_workspace(tmp_path, {"A": "dev"})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MSHIP_TASK", raising=False)
+    try:
+        result = runner.invoke(app, ["status", "--task", "nope"])
+        assert result.exit_code != 0
+        assert "nope" in result.output.lower()
+    finally:
+        _reset_container()
