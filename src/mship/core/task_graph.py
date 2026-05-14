@@ -98,3 +98,25 @@ def find_cycle(
                 parent[up] = node
                 stack.append(up)
     return None
+
+
+def is_ready(
+    state: WorkspaceState,
+    slug: str,
+    reconcile_decisions: dict,
+) -> bool:
+    """True iff `slug` is a finished task whose reconcile state is merged.
+
+    `reconcile_decisions` is a `dict[str, Decision]` from
+    `mship.core.reconcile.gate.reconcile_now`. We import lazily to avoid a
+    circular import — reconcile may grow dependency-aware logic later.
+    """
+    from mship.core.reconcile.detect import UpstreamState
+
+    task = state.tasks.get(slug)
+    if task is None or task.finished_at is None:
+        return False
+    decision = reconcile_decisions.get(slug)
+    if decision is None:
+        return False
+    return decision.state == UpstreamState.merged

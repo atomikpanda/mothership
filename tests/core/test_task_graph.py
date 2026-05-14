@@ -93,3 +93,51 @@ def test_cycle_error_carries_path():
     err = CycleError(["a", "b", "a"])
     assert err.path == ["a", "b", "a"]
     assert "a → b → a" in str(err)
+
+
+def test_is_ready_finished_and_merged():
+    """A finished task whose reconcile state is merged is ready."""
+    from mship.core.reconcile.detect import UpstreamState
+    from mship.core.reconcile.gate import Decision
+    from mship.core.task_graph import is_ready
+
+    ws = _ws(_task("a"))
+    ws.tasks["a"].finished_at = _now()
+    decisions = {
+        "a": Decision(slug="a", state=UpstreamState.merged, pr_url=None,
+                      pr_number=None, base=None, merge_commit=None,
+                      updated_at=None),
+    }
+    assert is_ready(ws, "a", decisions) is True
+
+
+def test_is_ready_finished_but_open():
+    """A finished task whose PR is still open is NOT ready."""
+    from mship.core.reconcile.detect import UpstreamState
+    from mship.core.reconcile.gate import Decision
+    from mship.core.task_graph import is_ready
+
+    ws = _ws(_task("a"))
+    ws.tasks["a"].finished_at = _now()
+    decisions = {
+        "a": Decision(slug="a", state=UpstreamState.in_sync, pr_url=None,
+                      pr_number=None, base=None, merge_commit=None,
+                      updated_at=None),
+    }
+    assert is_ready(ws, "a", decisions) is False
+
+
+def test_is_ready_unfinished():
+    """An unfinished task is never ready."""
+    from mship.core.task_graph import is_ready
+
+    ws = _ws(_task("a"))  # finished_at is None
+    assert is_ready(ws, "a", {}) is False
+
+
+def test_is_ready_unknown_task():
+    """Unknown slug returns False."""
+    from mship.core.task_graph import is_ready
+
+    ws = _ws(_task("a"))
+    assert is_ready(ws, "nope", {}) is False
