@@ -423,3 +423,41 @@ def test_status_envelope_unknown_task_flag_errors(tmp_path, monkeypatch):
         assert "nope" in result.output.lower()
     finally:
         _reset_container()
+
+
+def test_status_dependencies_block_present(tmp_path, monkeypatch):
+    """resolved_task.dependencies includes upstream, downstream, blocked, blocked_by."""
+    from mship.core.state import DependencyEdge, StateManager, Task, WorkspaceState
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    StateManager(tmp_path / ".mothership").save(WorkspaceState(tasks={
+        "a": Task(slug="a", description="a", phase="dev",
+                  created_at=now, affected_repos=["mothership"], branch="feat/a"),
+        "b": Task(slug="b", description="b", phase="dev",
+                  created_at=now, affected_repos=["mothership"], branch="feat/b",
+                  depends_on=[DependencyEdge(upstream_slug="a", created_at=now)]),
+        "c": Task(slug="c", description="c", phase="dev",
+                  created_at=now, affected_repos=["mothership"], branch="feat/c",
+                  depends_on=[DependencyEdge(upstream_slug="b", created_at=now)]),
+    }))
+
+    (tmp_path / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    container.config_path.override(tmp_path / "mothership.yaml")
+    container.state_dir.override(tmp_path / ".mothership")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MSHIP_TASK", raising=False)
+    try:
+        result = runner.invoke(app, ["status", "--task", "b"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        deps = data["resolved_task"]["dependencies"]
+        assert [u["slug"] for u in deps["upstream"]] == ["a"]
+        assert [d["slug"] for d in deps["downstream"]] == ["c"]
+        # ready is False because reconcile won't say merged for an unfinished task
+        assert deps["blocked"] is True
+        assert deps["blocked_by"] == ["a"]
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
