@@ -16,6 +16,11 @@ class TestResult(BaseModel):
     at: datetime
 
 
+class DependencyEdge(BaseModel):
+    upstream_slug: str
+    created_at: datetime
+
+
 class Task(BaseModel):
     slug: str
     description: str
@@ -35,6 +40,7 @@ class Task(BaseModel):
     test_iteration: int = 0
     base_branch: str | None = None
     passive_repos: set[str] = set()
+    depends_on: list[DependencyEdge] = []
 
 
 class WorkspaceState(BaseModel):
