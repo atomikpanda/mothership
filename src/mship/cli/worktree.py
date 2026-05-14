@@ -497,6 +497,15 @@ def register(app: typer.Typer, get_container):
             help="Skip the check that merged PR commits actually reached the base branch",
         ),
         task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
+        cascade: bool = typer.Option(
+            False, "--cascade",
+            help="Also remove downstream tasks from state (#104). "
+                 "Their worktrees stay until `mship prune`.",
+        ),
+        detach_downstream: bool = typer.Option(
+            False, "--detach-downstream",
+            help="Clear the inbound dependency edges, leave downstream tasks alive (#104).",
+        ),
     ):
         """Close a task: check PR state, tear down worktrees, clear state."""
         from pathlib import Path
@@ -580,6 +589,35 @@ def register(app: typer.Typer, get_container):
                 output.error("  - push from each worktree to save work")
                 output.error("  - `mship close --force` to delete anyway (destructive)")
                 raise typer.Exit(code=1)
+
+        # --- #104 downstream check ---
+        from mship.core.task_graph import downstream_of
+        downstream = sorted(downstream_of(state, task.slug))
+        if downstream and not force:
+            if cascade and detach_downstream:
+                output.error("Pass only one of --cascade / --detach-downstream.")
+                raise typer.Exit(code=1)
+            if not (cascade or detach_downstream):
+                if output.is_tty:
+                    choice = typer.prompt(
+                        f"Task {task.slug!r} has downstream tasks: {', '.join(downstream)}. "
+                        "[c]ascade close downstream, [d]etach edges, [a]bort",
+                        default="a",
+                    ).strip().lower()
+                    if choice.startswith("c"):
+                        cascade = True
+                    elif choice.startswith("d"):
+                        detach_downstream = True
+                    else:
+                        output.error("Aborted.")
+                        raise typer.Exit(code=1)
+                else:
+                    output.error(
+                        f"close refused: downstream tasks depend on {task.slug!r}: "
+                        f"{', '.join(downstream)}. Pass --cascade (close them too) "
+                        "or --detach-downstream (clear the edges) to proceed."
+                    )
+                    raise typer.Exit(code=1)
 
         # Determine the log message based on PR state.
         from mship.core.pr import PrStateResult
@@ -719,6 +757,21 @@ def register(app: typer.Typer, get_container):
 
         wt_mgr = container.worktree_manager()
         wt_mgr.abort(task_slug)  # core method retains the name; only CLI verb changed
+
+        if downstream and detach_downstream:
+            def _detach(s):
+                for d_slug in downstream:
+                    t = s.tasks.get(d_slug)
+                    if t is None:
+                        continue
+                    t.depends_on = [e for e in t.depends_on if e.upstream_slug != task.slug]
+            state_mgr.mutate(_detach)
+        elif downstream and cascade:
+            def _cascade(s):
+                for d_slug in downstream:
+                    s.tasks.pop(d_slug, None)
+            state_mgr.mutate(_cascade)
+
         log_mgr.append(task_slug, log_msg)
         try:
             from mship.core.reconcile.cache import ReconcileCache

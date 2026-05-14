@@ -1902,3 +1902,62 @@ def test_finish_bypass_deps(configured_git_app: Path, monkeypatch):
     # (no actual PR infra) but the blocked-upstream message must be absent.
     assert "depends on" not in out
     assert "blocked: upstream" not in out
+
+
+# ---------------------------------------------------------------------------
+# close: downstream-check tests (#104)
+# ---------------------------------------------------------------------------
+
+def _seed_ab_tasks(workspace_root: Path):
+    """Seed tasks a (finished) and b (depends on a) into state."""
+    from mship.core.state import DependencyEdge, StateManager, Task, WorkspaceState
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    sm = StateManager(workspace_root / ".mothership")
+    sm.save(WorkspaceState(tasks={
+        "a": Task(
+            slug="a", description="a", phase="dev",
+            finished_at=now, created_at=now,
+            affected_repos=["shared"], branch="feat/a",
+        ),
+        "b": Task(
+            slug="b", description="b", phase="dev",
+            created_at=now, affected_repos=["shared"], branch="feat/b",
+            depends_on=[DependencyEdge(upstream_slug="a", created_at=now)],
+        ),
+    }))
+    return sm
+
+
+def test_close_with_downstream_non_tty_refuses(configured_git_app: Path):
+    """Non-TTY close refuses when downstream tasks exist."""
+    sm = _seed_ab_tasks(configured_git_app)
+
+    result = runner.invoke(app, ["close", "a", "--yes", "--skip-pr-check"])
+    assert result.exit_code != 0
+    out = (result.output or "").lower()
+    assert "downstream" in out
+    assert "b" in out
+    assert "--cascade" in (result.output or "") or "--detach-downstream" in (result.output or "")
+
+
+def test_close_detach_downstream_clears_edges(configured_git_app: Path):
+    """--detach-downstream clears the inbound edges but leaves downstream alive."""
+    sm = _seed_ab_tasks(configured_git_app)
+
+    result = runner.invoke(app, ["close", "a", "--yes", "--skip-pr-check", "--detach-downstream"])
+    assert result.exit_code == 0, result.output
+    state = sm.load()
+    assert "a" not in state.tasks
+    assert state.tasks["b"].depends_on == []
+
+
+def test_close_cascade_removes_downstream(configured_git_app: Path):
+    """--cascade removes both upstream and downstream tasks from state."""
+    sm = _seed_ab_tasks(configured_git_app)
+
+    result = runner.invoke(app, ["close", "a", "--yes", "--skip-pr-check", "--cascade"])
+    assert result.exit_code == 0, result.output
+    state = sm.load()
+    assert state.tasks == {}
