@@ -139,5 +139,6 @@ def test_dispatch_prompt_includes_dependencies_section(tmp_path: Path):
         assert result.exit_code == 0, result.output
         assert "## Dependencies" in result.output
         assert "a" in result.output
+        assert "not ready" in result.output
     finally:
         _reset()

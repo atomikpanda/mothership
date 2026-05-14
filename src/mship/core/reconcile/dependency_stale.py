@@ -22,7 +22,10 @@ def apply_dependency_stale(state, decisions: dict) -> dict:
             up = out.get(edge.upstream_slug)
             if up is None or up.state != UpstreamState.merged:
                 continue
-            up_merge_time = getattr(up, "merge_at", None) or _parse(getattr(up, "updated_at", None))
+            # Decision exposes `updated_at` (the PR's last-updated timestamp), which is
+            # the closest available proxy for merge time. We don't have a dedicated
+            # merge_at — if Decision grows one, prefer it here.
+            up_merge_time = _parse(getattr(up, "updated_at", None))
             if up_merge_time is None:
                 continue
             if up_merge_time > task.created_at:
