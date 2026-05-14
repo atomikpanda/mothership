@@ -20,7 +20,7 @@ is supported — `--repos mothership` is the whole invocation.
 Workflow specifics live in `skills/`, not here. The relevant ones:
 
 - `skills/working-with-mothership/SKILL.md` — the canonical mship workflow
-  (session start, phases, switch/finish/close, recovery)
+  (session start, phases, switch/finish/close, recovery, task dependencies)
 - `skills/using-git-worktrees/SKILL.md` — worktree mechanics
 - `skills/finishing-a-development-branch/SKILL.md` — finish → PR flow
 - `skills/verification-before-completion/SKILL.md` — what "done" means
