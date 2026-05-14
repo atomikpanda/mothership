@@ -8,7 +8,7 @@ from mship.core.config import WorkspaceConfig
 from mship.core.graph import DependencyGraph
 from mship.core.log import LogManager
 from mship.core.reconcile.fetch import workspace_default_branch_from_config
-from mship.core.state import StateManager, Task, WorkspaceState
+from mship.core.state import DependencyEdge, StateManager, Task, WorkspaceState
 from mship.core.workspace_marker import write_marker
 from mship.util.git import GitRunner
 from mship.util.shell import ShellRunner
@@ -401,6 +401,7 @@ class WorktreeManager:
         slug: str | None = None,
         workspace_root: Path | None = None,
         offline: bool = False,
+        depends_on: list[DependencyEdge] | None = None,
     ) -> SpawnResult:
         slug = slug if slug is not None else slugify(description)
         branch = self._config.branch_pattern.replace("{slug}", slug)
@@ -555,6 +556,7 @@ class WorktreeManager:
             branch=branch,
             base_branch=workspace_default_branch_from_config(self._config),
             passive_repos=passive,
+            depends_on=depends_on or [],
         )
 
         def _apply(s: WorkspaceState) -> None:

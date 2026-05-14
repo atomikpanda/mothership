@@ -230,6 +230,10 @@ def register(app: typer.Typer, get_container):
             help="Skip `git fetch` for passive worktrees; use local refs. "
                  "Journal entry tagged OFFLINE.",
         ),
+        depends_on: Optional[str] = typer.Option(
+            None, "--depends-on",
+            help="Comma-separated upstream task slugs this task depends on. See #104.",
+        ),
     ):
         """Create coordinated worktrees across repos for a new task."""
         import re as _re
@@ -366,10 +370,38 @@ def register(app: typer.Typer, get_container):
         if output.is_tty and not skip_setup:
             output.print("[dim]Running setup in each worktree (use --skip-setup to skip)...[/dim]")
 
+        # --- #104 dependency edges ---
+        from datetime import datetime, timezone
+        from mship.core.state import DependencyEdge
+        from mship.core.task_graph import find_cycle
+        from mship.util.slug import slugify
+
+        dep_edges: list[DependencyEdge] = []
+        if depends_on:
+            requested = [s.strip() for s in depends_on.split(",") if s.strip()]
+            existing_state = container.state_manager().load()
+            known = set(existing_state.tasks.keys())
+            unknown = [s for s in requested if s not in known]
+            if unknown:
+                listing = ", ".join(sorted(known)) or "(none)"
+                output.error(
+                    f"Unknown upstream task(s): {', '.join(unknown)}. Known: {listing}."
+                )
+                raise typer.Exit(code=1)
+            slug_for_cycle = slug if slug else slugify(description)
+            for up in requested:
+                cycle = find_cycle(existing_state, downstream=slug_for_cycle, new_upstream=up)
+                if cycle is not None:
+                    output.error(f"Cycle detected: {' → '.join(cycle)}")
+                    raise typer.Exit(code=1)
+            now = datetime.now(timezone.utc)
+            dep_edges = [DependencyEdge(upstream_slug=s, created_at=now) for s in requested]
+
         result = wt_mgr.spawn(
             description, repos=repo_list, skip_setup=skip_setup, slug=slug,
             workspace_root=container.config_path().parent,
             offline=offline,
+            depends_on=dep_edges,
         )
         task = result.task
 

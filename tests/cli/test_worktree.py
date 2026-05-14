@@ -130,6 +130,43 @@ def test_spawn_non_tty_json_omits_cd_hint(configured_git_app: Path):
     assert "Next:" not in result.output
 
 
+def test_spawn_with_depends_on_persists_edges(configured_git_app: Path):
+    """spawn --depends-on a creates the task with an edge to a. See #104."""
+    from datetime import datetime, timezone
+    from mship.core.state import StateManager, Task, WorkspaceState
+
+    # Seed an upstream task so it's already known to state.
+    sm = StateManager(configured_git_app / ".mothership")
+    sm.save(WorkspaceState(tasks={
+        "a": Task(
+            slug="a", description="upstream", phase="dev",
+            created_at=datetime.now(timezone.utc),
+            affected_repos=["shared"], branch="feat/a",
+        ),
+    }))
+
+    result = runner.invoke(
+        app,
+        ["spawn", "downstream task", "--repos", "shared", "--slug", "down",
+         "--depends-on", "a", "--skip-setup"],
+    )
+    assert result.exit_code == 0, result.stderr or result.output
+    state = StateManager(configured_git_app / ".mothership").load()
+    edges = state.tasks["down"].depends_on
+    assert [e.upstream_slug for e in edges] == ["a"]
+
+
+def test_spawn_with_unknown_depends_on_errors(configured_git_app: Path):
+    """spawn --depends-on <unknown> errors before creating the task. See #104."""
+    result = runner.invoke(
+        app,
+        ["spawn", "x", "--repos", "shared", "--slug", "x",
+         "--depends-on", "nope", "--skip-setup"],
+    )
+    assert result.exit_code != 0
+    assert "nope" in (result.stderr or result.output).lower()
+
+
 def test_worktrees_list(configured_git_app: Path):
     runner.invoke(app, ["spawn", "test list", "--repos", "shared"])
     result = runner.invoke(app, ["worktrees"])
