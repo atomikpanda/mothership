@@ -52,3 +52,33 @@ def register(app: typer.Typer, get_container):
             output.success(f"{downstream} now depends on {upstream_slug}")
         else:
             output.json({"downstream": downstream, "upstream": upstream_slug, "added": True})
+
+    @depends_app.command("remove")
+    def remove(
+        upstream_slug: str = typer.Argument(..., help="Upstream task slug to detach from."),
+        task: Optional[str] = typer.Option(None, "--task", help="Downstream task (defaults to cwd-resolved)."),
+    ):
+        """Remove the dependency edge from the current/specified task to <upstream_slug>."""
+        output = Output()
+        container = get_container()
+        state_mgr = container.state_manager()
+        state = state_mgr.load()
+        resolved = resolve_for_command("depends", state, task, output)
+        downstream = resolved.task.slug
+
+        t = state.tasks[downstream]
+        if not any(e.upstream_slug == upstream_slug for e in t.depends_on):
+            output.error(f"No edge from {downstream!r} to {upstream_slug!r}.")
+            raise typer.Exit(code=1)
+
+        def _mutate(s):
+            s.tasks[downstream].depends_on = [
+                e for e in s.tasks[downstream].depends_on
+                if e.upstream_slug != upstream_slug
+            ]
+
+        state_mgr.mutate(_mutate)
+        if output.is_tty:
+            output.success(f"{downstream} no longer depends on {upstream_slug}")
+        else:
+            output.json({"downstream": downstream, "upstream": upstream_slug, "removed": True})

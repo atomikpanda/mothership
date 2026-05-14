@@ -93,3 +93,25 @@ def test_depends_add_duplicate_idempotent(workspace, configured_app):
     sm = StateManager(workspace / ".mothership")
     edges = sm.load().tasks["b"].depends_on
     assert len(edges) == 1
+
+
+def test_depends_remove_clears_edge(workspace, configured_app):
+    from mship.core.state import DependencyEdge
+    a = _task("a")
+    b = _task("b")
+    b.depends_on = [DependencyEdge(upstream_slug="a", created_at=datetime.now(timezone.utc))]
+    _seed(workspace, a, b)
+
+    result = runner.invoke(app, ["depends", "remove", "a", "--task", "b"])
+    assert result.exit_code == 0
+    sm = StateManager(workspace / ".mothership")
+    assert sm.load().tasks["b"].depends_on == []
+
+
+def test_depends_remove_missing_edge_errors(workspace, configured_app):
+    """Removing an edge that doesn't exist errors loudly."""
+    _seed(workspace, _task("a"), _task("b"))
+    result = runner.invoke(app, ["depends", "remove", "a", "--task", "b"])
+    assert result.exit_code != 0
+    err = (result.stderr or result.output).lower()
+    assert "no edge" in err or "not found" in err
