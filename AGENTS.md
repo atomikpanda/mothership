@@ -31,5 +31,5 @@ stop and read it.
 ## Bypass flags
 
 Safety overrides use `--bypass-<check>` (e.g. `--bypass-reconcile`,
-`--bypass-base-ancestry`), not `--force-<check>`. `--force` is the
+`--bypass-base-ancestry`, `--bypass-deps`), not `--force-<check>`. `--force` is the
 all-bypass nuclear option; prefer the targeted flag.
