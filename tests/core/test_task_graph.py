@@ -2,8 +2,6 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 
-import pytest
-
 from mship.core.state import Task, WorkspaceState, DependencyEdge
 from mship.core.task_graph import (
     CycleError,
@@ -88,3 +86,10 @@ def test_no_cycle_on_diamond():
     ws = _ws(_task("a"), _task("b", ["a"]), _task("c", ["a"]))
     assert find_cycle(ws, downstream="d", new_upstream="b") is None
     assert find_cycle(ws, downstream="d", new_upstream="c") is None
+
+
+def test_cycle_error_carries_path():
+    """CycleError preserves the cycle path for error messages."""
+    err = CycleError(["a", "b", "a"])
+    assert err.path == ["a", "b", "a"]
+    assert "a → b → a" in str(err)
