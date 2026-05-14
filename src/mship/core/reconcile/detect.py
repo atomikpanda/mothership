@@ -14,6 +14,7 @@ class UpstreamState(str, Enum):
     diverged = "diverged"
     base_changed = "base_changed"
     missing = "missing"
+    dependency_stale = "dependency_stale"
 
 
 @dataclass(frozen=True)

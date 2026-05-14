@@ -132,6 +132,28 @@ def register(app: typer.Typer, get_container):
                 if last_log is not None else None
             )
 
+            # --- #104 dependencies block ---
+            from mship.core.task_graph import downstream_of, is_ready
+            # We deliberately pass an empty dict — `status` is on the hot path and
+            # shouldn't trigger network reconcile. The real readiness check happens
+            # in `mship finish`. Here, anything not already confirmed merged is
+            # treated as "not ready" / "blocked", which is the safe-side answer.
+            decisions: dict = {}
+            deps_upstream = []
+            blocked_by: list[str] = []
+            for edge in t.depends_on:
+                ready = is_ready(state, edge.upstream_slug, decisions)
+                deps_upstream.append({"slug": edge.upstream_slug, "ready": ready})
+                if not ready:
+                    blocked_by.append(edge.upstream_slug)
+            deps_downstream = [{"slug": s} for s in sorted(downstream_of(state, t.slug))]
+            resolved_payload["dependencies"] = {
+                "upstream": deps_upstream,
+                "downstream": deps_downstream,
+                "blocked": bool(blocked_by),
+                "blocked_by": blocked_by,
+            }
+
         # --- TTY rendering: unchanged. Workspace summary when no task resolves;
         # task-detail block when one does.
         if output.is_tty:

@@ -16,6 +16,7 @@ from mship.core.reconcile.cache import ReconcileCache, CachePayload, DEFAULT_TTL
 from mship.core.reconcile.detect import (
     Detection, GitSnapshot, PRSnapshot, UpstreamState, detect_many,
 )
+from mship.core.reconcile.dependency_stale import apply_dependency_stale
 from mship.core.reconcile.fetch import FetchError
 
 
@@ -53,12 +54,13 @@ class GateAction(str, Enum):
 
 
 _MATRIX: dict[str, dict[str, GateAction]] = {
-    "in_sync":      {"spawn": GateAction.allow, "finish": GateAction.allow, "close": GateAction.allow, "precommit": GateAction.allow},
-    "merged":       {"spawn": GateAction.block, "finish": GateAction.block, "close": GateAction.allow, "precommit": GateAction.block},
-    "closed":       {"spawn": GateAction.block, "finish": GateAction.block, "close": GateAction.allow, "precommit": GateAction.block},
-    "diverged":     {"spawn": GateAction.warn,  "finish": GateAction.block, "close": GateAction.allow, "precommit": GateAction.block},
-    "base_changed": {"spawn": GateAction.warn,  "finish": GateAction.block, "close": GateAction.allow, "precommit": GateAction.allow},
-    "missing":      {"spawn": GateAction.allow, "finish": GateAction.allow, "close": GateAction.allow, "precommit": GateAction.allow},
+    "in_sync":           {"spawn": GateAction.allow, "finish": GateAction.allow, "close": GateAction.allow, "precommit": GateAction.allow},
+    "merged":            {"spawn": GateAction.block, "finish": GateAction.block, "close": GateAction.allow, "precommit": GateAction.block},
+    "closed":            {"spawn": GateAction.block, "finish": GateAction.block, "close": GateAction.allow, "precommit": GateAction.block},
+    "diverged":          {"spawn": GateAction.warn,  "finish": GateAction.block, "close": GateAction.allow, "precommit": GateAction.block},
+    "base_changed":      {"spawn": GateAction.warn,  "finish": GateAction.block, "close": GateAction.allow, "precommit": GateAction.allow},
+    "missing":           {"spawn": GateAction.allow, "finish": GateAction.allow, "close": GateAction.allow, "precommit": GateAction.allow},
+    "dependency_stale":  {"spawn": GateAction.warn,  "finish": GateAction.block, "close": GateAction.allow, "precommit": GateAction.warn},
 }
 
 
@@ -160,4 +162,5 @@ def reconcile_now(
         results=results,
         ignored=(payload.ignored if payload else []),
     ))
-    return {slug: _decision_from_detection(slug, d, state) for slug, d in detections.items()}
+    decisions = {slug: _decision_from_detection(slug, d, state) for slug, d in detections.items()}
+    return apply_dependency_stale(state, decisions)

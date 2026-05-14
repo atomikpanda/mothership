@@ -7,7 +7,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from mship.cli import app, container
-from mship.core.state import StateManager, Task, WorkspaceState
+from mship.core.state import StateManager, Task, WorkspaceState, DependencyEdge
 
 
 runner = CliRunner()
@@ -110,5 +110,35 @@ def test_dispatch_unknown_task_errors(tmp_path: Path):
         result = runner.invoke(app, ["dispatch", "--task", "missing", "-i", "x"])
         assert result.exit_code == 1
         assert "Unknown task" in result.output
+    finally:
+        _reset()
+
+
+def test_dispatch_prompt_includes_dependencies_section(tmp_path: Path):
+    now = datetime.now(timezone.utc)
+    wt_a = tmp_path / "wt-a"; wt_a.mkdir()
+    wt_b = tmp_path / "wt-b"; wt_b.mkdir()
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text("workspace: t\nrepos: {}\n")
+    StateManager(state_dir).save(WorkspaceState(tasks={
+        "a": Task(slug="a", description="a", phase="dev",
+                  created_at=now, affected_repos=["mothership"], branch="feat/a",
+                  worktrees={"mothership": wt_a}),
+        "b": Task(slug="b", description="b", phase="dev",
+                  created_at=now, affected_repos=["mothership"], branch="feat/b",
+                  worktrees={"mothership": wt_b},
+                  depends_on=[DependencyEdge(upstream_slug="a", created_at=now)]),
+    }))
+    container.config.reset(); container.state_manager.reset(); container.log_manager.reset()
+    container.config_path.override(cfg)
+    container.state_dir.override(state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "b", "-i", "go"])
+        assert result.exit_code == 0, result.output
+        assert "## Dependencies" in result.output
+        assert "a" in result.output
+        assert "not ready" in result.output
     finally:
         _reset()

@@ -303,3 +303,60 @@ def test_task_passive_repos_round_trips(tmp_path):
     sm.save(state)
     loaded = sm.load()
     assert loaded.tasks["t"].passive_repos == {"b"}
+
+
+def test_task_depends_on_defaults_empty(tmp_path):
+    """New Task model has depends_on field defaulting to []."""
+    from mship.core.state import Task
+    from datetime import datetime, timezone
+
+    t = Task(
+        slug="x", description="d", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["r"], branch="feat/x",
+    )
+    assert t.depends_on == []
+
+
+def test_dependency_edge_roundtrip(tmp_path):
+    """DependencyEdge serializes and deserializes through state.yaml."""
+    from mship.core.state import StateManager, Task, WorkspaceState, DependencyEdge
+    from datetime import datetime, timezone
+
+    sm = StateManager(tmp_path / ".mothership")
+    now = datetime.now(timezone.utc)
+    t = Task(
+        slug="b", description="d", phase="dev",
+        created_at=now,
+        affected_repos=["r"], branch="feat/b",
+        depends_on=[DependencyEdge(upstream_slug="a", created_at=now)],
+    )
+    sm.save(WorkspaceState(tasks={"b": t}))
+
+    loaded = sm.load()
+    assert "b" in loaded.tasks
+    edges = loaded.tasks["b"].depends_on
+    assert len(edges) == 1
+    assert edges[0].upstream_slug == "a"
+
+
+def test_legacy_state_without_depends_on_loads_clean(tmp_path):
+    """state.yaml without depends_on field loads with depends_on=[]."""
+    from mship.core.state import StateManager
+    import yaml
+
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    (state_dir / "state.yaml").write_text(yaml.dump({
+        "tasks": {
+            "t": {
+                "slug": "t", "description": "d", "phase": "dev",
+                "created_at": "2026-05-14T00:00:00+00:00",
+                "affected_repos": ["r"], "worktrees": {},
+                "branch": "feat/t",
+            }
+        }
+    }))
+    sm = StateManager(state_dir)
+    state = sm.load()
+    assert state.tasks["t"].depends_on == []
