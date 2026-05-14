@@ -9,7 +9,32 @@ import typer
 from mship.cli._resolve import resolve_for_command
 from mship.cli.output import Output
 from mship.core.state import DependencyEdge
-from mship.core.task_graph import find_cycle
+from mship.core.task_graph import find_cycle, downstream_of
+
+
+def _render_task_deps_tty(output, payload):
+    output.print(f"Task: {payload['task']}")
+    output.print("Upstream:")
+    if not payload["upstream"]:
+        output.print("  (none)")
+    else:
+        for u in payload["upstream"]:
+            output.print(f"  → {u['slug']}")
+    output.print("Downstream:")
+    if not payload["downstream"]:
+        output.print("  (none)")
+    else:
+        for d in payload["downstream"]:
+            output.print(f"  ← {d['slug']}")
+
+
+def _render_graph_tty(output, payload):
+    output.print("Workspace DAG:")
+    if not payload["edges"]:
+        output.print("  (no edges)")
+        return
+    for e in payload["edges"]:
+        output.print(f"  {e['downstream']} → {e['upstream']}")
 
 
 def register(app: typer.Typer, get_container):
@@ -82,3 +107,37 @@ def register(app: typer.Typer, get_container):
             output.success(f"{downstream} no longer depends on {upstream_slug}")
         else:
             output.json({"downstream": downstream, "upstream": upstream_slug, "removed": True})
+
+    @depends_app.command("list")
+    def list_cmd(
+        task: Optional[str] = typer.Option(None, "--task", help="Task slug to scope to."),
+        graph: bool = typer.Option(False, "--graph", help="Emit the full workspace DAG instead of one task's edges."),
+    ):
+        """List dependencies for a task (default) or the whole workspace (--graph)."""
+        output = Output()
+        container = get_container()
+        state = container.state_manager().load()
+
+        if graph:
+            nodes = [{"slug": s} for s in sorted(state.tasks.keys())]
+            edges = []
+            for slug, t in state.tasks.items():
+                for e in t.depends_on:
+                    edges.append({"downstream": slug, "upstream": e.upstream_slug})
+            edges.sort(key=lambda e: (e["downstream"], e["upstream"]))
+            payload = {"nodes": nodes, "edges": edges}
+            if output.is_tty:
+                _render_graph_tty(output, payload)
+            else:
+                output.json(payload)
+            return
+
+        resolved = resolve_for_command("depends", state, task, output)
+        slug = resolved.task.slug
+        upstream = [{"slug": e.upstream_slug} for e in state.tasks[slug].depends_on]
+        downstream = [{"slug": s} for s in sorted(downstream_of(state, slug))]
+        payload = {"task": slug, "upstream": upstream, "downstream": downstream}
+        if output.is_tty:
+            _render_task_deps_tty(output, payload)
+        else:
+            output.json(payload)

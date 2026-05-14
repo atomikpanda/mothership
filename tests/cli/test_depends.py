@@ -115,3 +115,36 @@ def test_depends_remove_missing_edge_errors(workspace, configured_app):
     assert result.exit_code != 0
     err = (result.stderr or result.output).lower()
     assert "no edge" in err or "not found" in err
+
+
+def test_depends_list_task_scoped(workspace, configured_app):
+    """Without --graph, list shows the resolved task's upstream + downstream."""
+    from mship.core.state import DependencyEdge
+    a = _task("a")
+    b = _task("b")
+    c = _task("c")
+    b.depends_on = [DependencyEdge(upstream_slug="a", created_at=datetime.now(timezone.utc))]
+    c.depends_on = [DependencyEdge(upstream_slug="b", created_at=datetime.now(timezone.utc))]
+    _seed(workspace, a, b, c)
+
+    result = runner.invoke(app, ["depends", "list", "--task", "b"])
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert data["task"] == "b"
+    assert [u["slug"] for u in data["upstream"]] == ["a"]
+    assert [d["slug"] for d in data["downstream"]] == ["c"]
+
+
+def test_depends_list_graph_emits_workspace_dag(workspace, configured_app):
+    """--graph emits all tasks + edges."""
+    from mship.core.state import DependencyEdge
+    a = _task("a")
+    b = _task("b")
+    b.depends_on = [DependencyEdge(upstream_slug="a", created_at=datetime.now(timezone.utc))]
+    _seed(workspace, a, b)
+
+    result = runner.invoke(app, ["depends", "list", "--graph"])
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert {n["slug"] for n in data["nodes"]} == {"a", "b"}
+    assert {(e["downstream"], e["upstream"]) for e in data["edges"]} == {("b", "a")}
