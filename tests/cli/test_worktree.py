@@ -1833,3 +1833,72 @@ def test_spawn_cli_writes_offline_journal_entry(workspace_with_git, monkeypatch)
         container.config.reset()
         container.state_manager.reset()
         container.log_manager.reset()
+
+
+def test_finish_blocked_by_unready_upstream(configured_git_app: Path, monkeypatch):
+    """finish refuses when an upstream task isn't merged."""
+    from datetime import datetime, timezone
+    from mship.core.state import DependencyEdge, StateManager, Task, WorkspaceState
+
+    now = datetime.now(timezone.utc)
+    sm = StateManager(configured_git_app / ".mothership")
+    sm.save(WorkspaceState(tasks={
+        "a": Task(slug="a", description="a", phase="dev",
+                  created_at=now, affected_repos=["shared"], branch="feat/a"),
+        "b": Task(slug="b", description="b", phase="dev",
+                  created_at=now, affected_repos=["shared"], branch="feat/b",
+                  depends_on=[DependencyEdge(upstream_slug="a", created_at=now)]),
+    }))
+
+    from mship.core.reconcile.detect import UpstreamState
+    from mship.core.reconcile.gate import Decision
+
+    def _fake_decisions(state):
+        return {"a": Decision(
+            slug="a", state=UpstreamState.in_sync,
+            pr_url=None, pr_number=None, base=None,
+            merge_commit=None, updated_at=None,
+        )}
+
+    monkeypatch.setattr("mship.cli.worktree._dependency_decisions", _fake_decisions)
+
+    result = runner.invoke(app, ["finish", "--task", "b"])
+    assert result.exit_code != 0
+    err = (result.output or "").lower()
+    assert "a" in err
+    assert "not ready" in err or "blocked" in err
+
+
+def test_finish_bypass_deps(configured_git_app: Path, monkeypatch):
+    """--bypass-deps proceeds past the upstream-readiness check."""
+    from datetime import datetime, timezone
+    from mship.core.state import DependencyEdge, StateManager, Task, WorkspaceState
+
+    now = datetime.now(timezone.utc)
+    sm = StateManager(configured_git_app / ".mothership")
+    sm.save(WorkspaceState(tasks={
+        "a": Task(slug="a", description="a", phase="dev",
+                  created_at=now, affected_repos=["shared"], branch="feat/a"),
+        "b": Task(slug="b", description="b", phase="dev",
+                  created_at=now, affected_repos=["shared"], branch="feat/b",
+                  depends_on=[DependencyEdge(upstream_slug="a", created_at=now)]),
+    }))
+
+    from mship.core.reconcile.detect import UpstreamState
+    from mship.core.reconcile.gate import Decision
+
+    def _fake_decisions(state):
+        return {"a": Decision(
+            slug="a", state=UpstreamState.in_sync,
+            pr_url=None, pr_number=None, base=None,
+            merge_commit=None, updated_at=None,
+        )}
+
+    monkeypatch.setattr("mship.cli.worktree._dependency_decisions", _fake_decisions)
+
+    result = runner.invoke(app, ["finish", "--task", "b", "--bypass-deps"])
+    out = (result.output or "").lower()
+    # The deps gate must NOT have fired; finish may fail for unrelated reasons
+    # (no actual PR infra) but the blocked-upstream message must be absent.
+    assert "depends on" not in out
+    assert "blocked: upstream" not in out

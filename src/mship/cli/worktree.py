@@ -79,6 +79,28 @@ def _run_gate(
         raise typer.Exit(code=1)
 
 
+def _dependency_decisions(state):
+    """Return reconcile decisions for use by the deps gate (#104).
+
+    Module-level so tests can stub it via monkeypatch.
+    Returns a dict[str, Decision] or {} on any error (fail-open).
+    """
+    try:
+        from mship.core.reconcile.cache import ReconcileCache
+        from mship.core.reconcile.gate import reconcile_now
+        from mship.core.reconcile.fetch import fetch_pr_snapshots, collect_git_snapshots
+        from mship.cli import container as _container_singleton
+
+        cache = ReconcileCache(_container_singleton.state_dir())
+
+        def _fetcher(branches, worktrees_by_branch):
+            return (fetch_pr_snapshots(branches), collect_git_snapshots(worktrees_by_branch))
+
+        return reconcile_now(state, cache=cache, fetcher=_fetcher)
+    except Exception:
+        return {}
+
+
 @dataclass
 class PRGroup:
     """A set of affected repos that share a single GitHub PR.
@@ -718,6 +740,7 @@ def register(app: typer.Typer, get_container):
         force_audit: bool = typer.Option(False, "--force-audit", help="Bypass audit gate for this finish"),
         push_only: bool = typer.Option(False, "--push-only", help="Push branches only; skip gh pr create"),
         bypass_reconcile: bool = typer.Option(False, "--bypass-reconcile", help="Skip upstream PR drift check for this finish"),
+        bypass_deps: bool = typer.Option(False, "--bypass-deps", help="Skip the dependency-readiness check (#104)."),
         body: Optional[str] = typer.Option(
             None, "--body",
             help="Inline PR body. Use '-' to read from stdin. Mutually exclusive with --body-file.",
@@ -848,6 +871,23 @@ def register(app: typer.Typer, get_container):
         except (InvalidBodyMapError, EmptyBodyInMapError) as e:
             output.error(str(e))
             raise typer.Exit(code=1)
+
+        # --- #104 dependency-readiness gate ---
+        if task.depends_on and not bypass_deps:
+            decisions = _dependency_decisions(state)
+            from mship.core.task_graph import is_ready
+            blocked_by = [
+                edge.upstream_slug
+                for edge in task.depends_on
+                if not is_ready(state, edge.upstream_slug, decisions)
+            ]
+            if blocked_by:
+                output.error(
+                    f"finish blocked: upstream task(s) not ready: {', '.join(blocked_by)}.\n"
+                    f"  Run `mship status --task <slug>` for state, "
+                    f"or pass --bypass-deps to override."
+                )
+                raise typer.Exit(code=1)
 
         # --- Audit gate ---
         from mship.core.audit_gate import run_audit_gate, AuditGateBlocked, compute_finish_audit_scope
