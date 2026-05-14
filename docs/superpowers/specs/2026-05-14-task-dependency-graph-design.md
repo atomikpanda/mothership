@@ -19,7 +19,7 @@ The substrate value: once the graph exists as state, every existing command (`st
 ## Goals
 
 - First-class `depends_on` edges between tasks, persisted in `state.yaml`.
-- Hard edges block `finish` until the upstream is merged; soft edges advise.
+- An edge is a constraint: `finish` refuses to ship a downstream task until every upstream is merged.
 - `status`, `dispatch`, `reconcile` surface the graph so a single agent or human can act on it.
 - Cycle detection at write time.
 - Lay the v1 primitive that v2 multi-agent orchestration will sit on top of, without speculative design.
@@ -33,6 +33,7 @@ The substrate value: once the graph exists as state, every existing command (`st
 - **No cross-repo edges.** Edges are task-to-task; the per-repo axis stays out.
 - **No OR / alternative-groups fan-in.** Default is AND (all upstream must be ready).
 - **No PR-URL endpoints.** Edges name task slugs only. External-PR dependencies are a v2 cross-workspace concern.
+- **No soft / advisory edges.** A single edge type with a single behavior keeps the model coherent. Tracking-without-enforcement is what `mship journal` already covers ("informed by task-a"). If a use case for advisory edges surfaces in practice, it's an additive change.
 
 ## Design
 
@@ -43,7 +44,6 @@ Additive on `Task` in `src/mship/core/state.py`:
 ```python
 class DependencyEdge(BaseModel):
     upstream_slug: str
-    soft: bool = False           # default: hard
     created_at: datetime
 
 class Task(BaseModel):
@@ -61,7 +61,6 @@ An upstream task is "ready" iff `reconcile` reports it as fully merged across ev
 
 - For each repo in `upstream.affected_repos`, the existing `reconcile.gate` machinery decides an `UpstreamState`. Ready ⇔ every repo is `UpstreamState.merged`.
 - A task with `finished_at` set but PRs not yet merged is **not** ready. Finishing creates PRs; readiness requires merge.
-- A soft edge never blocks `finish`; it only advises.
 
 This reuses the existing reconcile decision logic. No new readiness machinery; no parallel state tracker.
 
@@ -70,7 +69,7 @@ This reuses the existing reconcile decision logic. No new readiness machinery; n
 One new top-level verb group, three subcommands:
 
 ```
-mship depends add <upstream-slug> [--soft] [--task <slug>]
+mship depends add <upstream-slug> [--task <slug>]
 mship depends remove <upstream-slug> [--task <slug>]
 mship depends list [--task <slug>] [--graph]
 ```
@@ -80,9 +79,8 @@ mship depends list [--task <slug>] [--graph]
 
 Extensions on existing commands:
 
-- `mship spawn --depends-on <slug>[,<slug>]` — hard edges by default.
-- `mship spawn --depends-on-soft <slug>[,<slug>]` — soft edges.
-- `mship finish` — refuses if any **hard** upstream isn't ready. Bypass flag: `--bypass-deps` (per memory: `--bypass-<check>` naming).
+- `mship spawn --depends-on <slug>[,<slug>]` — declare upstream task(s) at spawn time.
+- `mship finish` — refuses if any upstream isn't ready. Bypass flag: `--bypass-deps`.
 - `mship close` — when downstream tasks exist:
   - TTY: interactive prompt with `[c]ascade-close downstream`, `[d]etach edges`, `[a]bort`.
   - Non-TTY: refuses; requires `--cascade` (cascade-close downstream) or `--detach-downstream` (clear inbound edges, leave downstream alive).
@@ -91,17 +89,17 @@ Extensions on existing commands:
   ```json
   "dependencies": {
     "upstream": [
-      {"slug": "task-a", "soft": false, "ready": true},
-      {"slug": "task-b", "soft": true,  "ready": false}
+      {"slug": "task-a", "ready": true},
+      {"slug": "task-b", "ready": false}
     ],
     "downstream": [
-      {"slug": "task-c", "soft": false}
+      {"slug": "task-c"}
     ],
-    "blocked": false,
-    "blocked_by": []
+    "blocked": true,
+    "blocked_by": ["task-b"]
   }
   ```
-  `blocked` is `true` iff any hard upstream is not ready. `blocked_by` lists those slugs. Existing envelope shape is unchanged; this is one new key under `resolved_task`.
+  `blocked` is `true` iff any upstream is not ready. `blocked_by` lists those slugs. Existing envelope shape is unchanged; this is one new key under `resolved_task`.
 - `mship dispatch` — prompt body grows a `## Dependencies` section listing upstream slugs and their ready state. Whether the agent task-switches when blocked is methodology — surfaced in the `working-with-mothership` skill, not in CLI logic.
 - `mship reconcile` — adds a new state `dependency_stale` to `UpstreamState`, surfaced when an upstream became `merged` AFTER the downstream task was created (downstream needs rebase). Same `Decision` shape; one new enum value.
 
@@ -119,8 +117,8 @@ Bounded by workspace task count. Cycle checking happens before persistence; no h
 
 | Command | New behavior |
 |---|---|
-| `spawn` | `--depends-on` / `--depends-on-soft` create edges at spawn time. Cycle check runs. |
-| `finish` | Refuses if any hard upstream not ready. `--bypass-deps` overrides. |
+| `spawn` | `--depends-on` creates edges at spawn time. Cycle check runs. |
+| `finish` | Refuses if any upstream not ready. `--bypass-deps` overrides. |
 | `close` | Refuses (or prompts) when downstream tasks exist. `--cascade` / `--detach-downstream`. (`--force` covers the destructive path.) |
 | `status` | Emits `dependencies` block under `resolved_task`. |
 | `dispatch` | Includes upstream slugs + ready state in the prompt body. |
@@ -134,27 +132,28 @@ Bounded by workspace task count. Cycle checking happens before persistence; no h
 - **Self-edge** → loud error (degenerate cycle).
 - **Removing an edge that doesn't exist** → loud error; do not silently no-op.
 - **Finish blocked by upstream** → error names the offending upstream(s) and their state; hints at `mship status --task <upstream>` and `--bypass-deps`.
+- **Spawning with `--depends-on` for an upstream that hasn't merged yet** is fine — that's the normal case. The block only fires at `finish` time.
 - **Close with downstream, non-TTY, no flag** → refuses; lists downstream slugs and instructs to pass `--cascade` or `--detach-downstream`.
 
 ## Files touched
 
 - **Modified:** `src/mship/core/state.py` — add `DependencyEdge`; add `depends_on` field on `Task`.
 - **Modified:** `src/mship/core/graph.py` — already exists; add cycle detection + readiness queries (`is_ready(slug)`, `downstream_of(slug)`, `transitive_upstream(slug)`).
-- **Modified:** `src/mship/cli/worktree.py` — `spawn` flags (`--depends-on`, `--depends-on-soft`); `finish` blocked-by-deps check; `close` downstream check with cascade/detach options.
+- **Modified:** `src/mship/cli/worktree.py` — `spawn --depends-on` flag; `finish` blocked-by-deps check; `close` downstream check with cascade/detach options.
 - **Modified:** `src/mship/cli/__init__.py` — register the `depends` subcommand group.
 - **New:** `src/mship/cli/depends.py` — `add`, `remove`, `list` commands.
 - **Modified:** `src/mship/cli/status.py` — emit `dependencies` block under `resolved_task`.
 - **Modified:** `src/mship/core/dispatch.py` — add `## Dependencies` section to prompt template.
 - **Modified:** `src/mship/core/reconcile/detect.py` + `src/mship/core/reconcile/gate.py` — extend `UpstreamState` with `dependency_stale`; emit it when applicable.
 - **Modified:** `src/mship/cli/reconcile.py` — render the new state in TTY + JSON output, add an action hint.
-- **Docs:** `working-with-mothership` skill, `README.md`, `AGENTS.md`, `GEMINI.md` — document the new verb, `--depends-on*` flags, and `status.resolved_task.dependencies` shape.
+- **Docs:** `working-with-mothership` skill, `README.md`, `AGENTS.md`, `GEMINI.md` — document the new verb, `--depends-on` flag, and `status.resolved_task.dependencies` shape.
 
 ## Testing strategy
 
 Unit (`tests/core/test_graph.py`):
 
 1. **Cycle detection:** self-edge rejected; 2-node cycle rejected; 3-node cycle rejected; diamond DAG (A → B, A → C, B → D, C → D) accepted with no false-positive.
-2. **Readiness:** upstream with all repos merged → ready; one repo unmerged → not ready; soft edge → blocking-irrelevant.
+2. **Readiness:** upstream with all repos merged → ready; one repo unmerged → not ready.
 3. **Transitive upstream:** correct closure across multi-hop chains.
 
 CLI (`tests/cli/`):
@@ -162,18 +161,17 @@ CLI (`tests/cli/`):
 4. `spawn --depends-on task-a` creates the edge; unknown upstream errors loudly.
 5. `spawn --depends-on task-a` where `task-a` doesn't exist → loud error listing workspace task slugs.
 6. `depends add task-a` / `depends remove task-a` / `depends list` round-trip on an existing task.
-7. `depends add task-a --soft` produces `soft: true` in state.
-8. `finish` on a task with an unready hard upstream → refuses with named upstream.
-9. `finish --bypass-deps` succeeds even with unready upstream.
-10. `close` on a task with downstream, non-TTY, no flag → refuses with downstream slugs listed.
-11. `close --cascade` removes both tasks; downstream worktrees torn down.
-12. `close --detach-downstream` leaves downstream alive with empty `depends_on` for the removed edge.
-13. `status` envelope: `dependencies.blocked = true` when hard upstream unready; downstream list populated; soft edges visible but never set `blocked`.
-14. `dispatch` payload contains a `## Dependencies` section with upstream slugs and ready state.
+7. `finish` on a task with an unready upstream → refuses with named upstream.
+8. `finish --bypass-deps` succeeds even with unready upstream.
+9. `close` on a task with downstream, non-TTY, no flag → refuses with downstream slugs listed.
+10. `close --cascade` removes both tasks; downstream worktrees torn down.
+11. `close --detach-downstream` leaves downstream alive with empty `depends_on` for the removed edge.
+12. `status` envelope: `dependencies.blocked = true` when upstream unready; downstream list populated.
+13. `dispatch` payload contains a `## Dependencies` section with upstream slugs and ready state.
 
 Integration (one):
 
-15. `spawn task-a → spawn task-b --depends-on task-a → finish task-b fails (blocked) → finish task-a → reconcile → finish task-b succeeds`.
+14. `spawn task-a → spawn task-b --depends-on task-a → finish task-b fails (blocked) → finish task-a → reconcile → finish task-b succeeds`.
 
 ## Risk and rollout
 
@@ -189,7 +187,7 @@ Integration (one):
 None at design time. The 8 design questions in #104 are all resolved:
 
 1. **Target:** slug only.
-2. **Hard vs soft:** hard by default; per-edge `--soft` opt-in.
+2. **Hard vs soft:** single edge type with hard semantics. Soft edges deferred — `mship journal` covers the tracking-without-enforcement case for v1.
 3. **Fan-in:** AND (all upstream must be ready).
 4. **Cascade:** TTY-interactive prompt; non-TTY refuses without `--cascade` or `--detach-downstream`.
 5. **Dispatch autonomy:** CLI surfaces blocked state only; task-switching is methodology in the skill.
