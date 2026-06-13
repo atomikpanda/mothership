@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import yaml
+from pydantic import ValidationError
 
 from mship.core.spec import Spec
 
@@ -22,8 +23,13 @@ def parse_spec(text: str) -> Spec:
         raise SpecParseError("unterminated YAML frontmatter")
     fm_text = "".join(lines[1:end])
     body = "".join(lines[end + 1:])
-    data = yaml.safe_load(fm_text) or {}
-    return Spec(**data, body=body)
+    try:
+        data = yaml.safe_load(fm_text) or {}
+        return Spec(**data, body=body)
+    except yaml.YAMLError as exc:
+        raise SpecParseError(f"invalid YAML frontmatter: {exc}") from exc
+    except ValidationError as exc:
+        raise SpecParseError(f"spec frontmatter failed validation: {exc}") from exc
 
 
 def serialize_spec(spec: Spec) -> str:

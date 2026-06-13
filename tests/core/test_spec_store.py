@@ -33,3 +33,19 @@ def test_body_is_preserved_verbatim():
 def test_missing_frontmatter_raises():
     with pytest.raises(SpecParseError):
         parse_spec("# just markdown, no frontmatter\n")
+
+
+def test_unterminated_frontmatter_raises():
+    with pytest.raises(SpecParseError):
+        parse_spec("---\nid: foo\n")  # no closing ---
+
+
+def test_invalid_schema_frontmatter_raises_spec_parse_error():
+    # valid YAML, but missing required Spec fields -> SpecParseError, not raw ValidationError
+    with pytest.raises(SpecParseError):
+        parse_spec("---\nid: foo\n---\nbody\n")
+
+
+def test_malformed_yaml_raises_spec_parse_error():
+    with pytest.raises(SpecParseError):
+        parse_spec("---\nid: [unclosed\n---\nbody\n")
