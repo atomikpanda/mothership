@@ -7,6 +7,8 @@ from pydantic import ValidationError
 
 from mship.core.spec import Spec
 
+SPECS_DIRNAME = "specs"  # canonical name of the workspace-level specs directory
+
 
 class SpecParseError(Exception):
     pass

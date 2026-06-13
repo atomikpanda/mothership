@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+from mship.core.spec_store import SPECS_DIRNAME
+
 if TYPE_CHECKING:
     from mship.core.state import WorkspaceState
 
@@ -17,12 +19,13 @@ SPEC_SUBDIR = Path("docs") / "superpowers" / "specs"
 BLESSED_TASK_SPEC_DIR = Path(".mothership") / "tasks"  # joined with <slug>/SPEC.md
 
 # Structured spec store directory (Task 6 / MOS-145).
-SPECS_DIR = Path("specs")
+SPECS_DIR = Path(SPECS_DIRNAME)
 
 
 def _find_in_specs_dir(workspace_root: Path, *, spec_id=None, task_slug=None):
     """Return the path of a spec file in `<workspace_root>/specs` matching
     `spec_id` (frontmatter id) or `task_slug` (bound task), else None."""
+    # imported lazily to keep this discovery module loosely coupled to the store
     from mship.core.spec_store import SpecParseError, parse_spec
     specs_dir = workspace_root / SPECS_DIR
     if not specs_dir.is_dir():
