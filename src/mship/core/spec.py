@@ -40,6 +40,8 @@ class Spec(BaseModel):
 
     @property
     def dispatch_ready(self) -> bool:
+        # acceptance_criteria verdicts are gated at approval time (status == "approved");
+        # they are intentionally not re-checked here. Only open questions block dispatch.
         return self.status == "approved" and all(
             q.answer is not None for q in self.open_questions
         )
