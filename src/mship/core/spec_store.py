@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import tempfile
 import yaml
+from pathlib import Path
 from pydantic import ValidationError
 
 from mship.core.spec import Spec
@@ -36,3 +38,40 @@ def serialize_spec(spec: Spec) -> str:
     data = spec.model_dump(mode="json", exclude={"body"})
     fm = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
     return f"---\n{fm}---\n{spec.body}"
+
+
+class SpecStore:
+    """Filesystem registry for markdown-canonical specs under `specs/`."""
+
+    def __init__(self, specs_dir: Path) -> None:
+        self._dir = Path(specs_dir)
+
+    def path_for(self, spec: Spec) -> Path:
+        return self._dir / f"{spec.created_at:%Y-%m-%d}-{spec.id}.md"
+
+    def save(self, spec: Spec) -> Path:
+        self._dir.mkdir(parents=True, exist_ok=True)
+        path = self.path_for(spec)
+        fd, tmp = tempfile.mkstemp(dir=self._dir, suffix=".md.tmp")
+        try:
+            with open(fd, "w") as f:
+                f.write(serialize_spec(spec))
+            Path(tmp).replace(path)
+        except Exception:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+        return path
+
+    def load(self, path: Path) -> Spec:
+        return parse_spec(Path(path).read_text())
+
+    def list(self) -> list[Spec]:
+        if not self._dir.is_dir():
+            return []
+        return [self.load(p) for p in sorted(self._dir.glob("*.md"))]
+
+    def find_by_id(self, spec_id: str) -> Spec | None:
+        for spec in self.list():
+            if spec.id == spec_id:
+                return spec
+        return None

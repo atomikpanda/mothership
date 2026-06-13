@@ -49,3 +49,40 @@ def test_invalid_schema_frontmatter_raises_spec_parse_error():
 def test_malformed_yaml_raises_spec_parse_error():
     with pytest.raises(SpecParseError):
         parse_spec("---\nid: [unclosed\n---\nbody\n")
+
+
+from pathlib import Path
+
+from mship.core.spec_store import SpecStore
+
+
+def _new_spec(spec_id: str):
+    now = datetime(2026, 6, 13, tzinfo=timezone.utc)
+    return Spec(id=spec_id, title=spec_id, status="drafting", created_at=now, updated_at=now)
+
+
+def test_save_then_find_by_id(tmp_path: Path):
+    store = SpecStore(tmp_path / "specs")
+    path = store.save(_new_spec("alpha"))
+    assert path.name == "2026-06-13-alpha.md"
+    assert path.is_file()
+    found = store.find_by_id("alpha")
+    assert found is not None and found.id == "alpha"
+
+
+def test_find_by_id_is_exact_not_mtime(tmp_path: Path):
+    store = SpecStore(tmp_path / "specs")
+    store.save(_new_spec("alpha"))
+    store.save(_new_spec("beta"))   # newer mtime
+    assert store.find_by_id("alpha").id == "alpha"
+
+
+def test_list_returns_all(tmp_path: Path):
+    store = SpecStore(tmp_path / "specs")
+    store.save(_new_spec("alpha"))
+    store.save(_new_spec("beta"))
+    assert sorted(s.id for s in store.list()) == ["alpha", "beta"]
+
+
+def test_find_by_id_missing_returns_none(tmp_path: Path):
+    assert SpecStore(tmp_path / "specs").find_by_id("nope") is None
