@@ -40,6 +40,7 @@ class Task(BaseModel):
     test_iteration: int = 0
     base_branch: str | None = None
     passive_repos: set[str] = set()
+    spec_id: str | None = None
     depends_on: list[DependencyEdge] = []
 
 

@@ -360,3 +360,40 @@ def test_legacy_state_without_depends_on_loads_clean(tmp_path):
     sm = StateManager(state_dir)
     state = sm.load()
     assert state.tasks["t"].depends_on == []
+
+
+def test_task_spec_id_defaults_none():
+    from datetime import datetime, timezone
+    from mship.core.state import Task
+    t = Task(
+        slug="t", description="d", phase="plan",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["a"], branch="feat/t",
+    )
+    assert t.spec_id is None
+
+
+def test_task_spec_id_round_trips(tmp_path):
+    from datetime import datetime, timezone
+    from mship.core.state import StateManager, Task, WorkspaceState
+    sm = StateManager(tmp_path)
+    sm.save(WorkspaceState(tasks={"t": Task(
+        slug="t", description="d", phase="plan",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["a"], branch="feat/t", spec_id="decision-queue",
+    )}))
+    assert sm.load().tasks["t"].spec_id == "decision-queue"
+
+
+def test_legacy_state_without_spec_id_loads(tmp_path):
+    """Old state.yaml (no spec_id key) loads cleanly (default None)."""
+    import yaml
+    from mship.core.state import StateManager
+    (tmp_path / "state.yaml").write_text(yaml.safe_dump({
+        "tasks": {"t": {
+            "slug": "t", "description": "d", "phase": "dev",
+            "created_at": "2026-04-10T00:00:00+00:00",
+            "affected_repos": ["a"], "branch": "feat/t",
+        }}
+    }))
+    assert StateManager(tmp_path).load().tasks["t"].spec_id is None
