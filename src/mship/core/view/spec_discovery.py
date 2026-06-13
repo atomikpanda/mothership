@@ -16,6 +16,28 @@ SPEC_SUBDIR = Path("docs") / "superpowers" / "specs"
 # dev-phase gate has something deterministic to find.
 BLESSED_TASK_SPEC_DIR = Path(".mothership") / "tasks"  # joined with <slug>/SPEC.md
 
+# Structured spec store directory (Task 6 / MOS-145).
+SPECS_DIR = Path("specs")
+
+
+def _find_in_specs_dir(workspace_root: Path, *, spec_id=None, task_slug=None):
+    """Return the path of a spec file in `<workspace_root>/specs` matching
+    `spec_id` (frontmatter id) or `task_slug` (bound task), else None."""
+    from mship.core.spec_store import SpecParseError, parse_spec
+    specs_dir = workspace_root / SPECS_DIR
+    if not specs_dir.is_dir():
+        return None
+    for p in sorted(specs_dir.glob("*.md")):
+        try:
+            spec = parse_spec(p.read_text())
+        except SpecParseError:
+            continue
+        if spec_id is not None and spec.id == spec_id:
+            return p
+        if task_slug is not None and spec.task_slug == task_slug:
+            return p
+    return None
+
 
 def blessed_spec_path(workspace_root: Path, slug: str) -> Path:
     return workspace_root / BLESSED_TASK_SPEC_DIR / slug / "SPEC.md"
@@ -54,11 +76,20 @@ def find_spec(
         blessed = blessed_spec_path(workspace_root, task)
         if blessed.is_file():
             return blessed
+        # Fall back to specs/ dir bound to this task slug before the legacy lookup.
+        found = _find_in_specs_dir(workspace_root, task_slug=task)
+        if found is not None:
+            return found
 
     search_roots = _resolve_search_roots(workspace_root, task, state, spec_paths)
 
     if name_or_path is None:
         return _newest_across(search_roots, task)
+
+    # Try specs/ dir by frontmatter id before the legacy search-roots name loop.
+    found = _find_in_specs_dir(workspace_root, spec_id=name_or_path)
+    if found is not None:
+        return found
 
     for root in search_roots:
         for candidate_name in (name_or_path, f"{name_or_path}.md"):

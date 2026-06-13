@@ -108,3 +108,35 @@ def test_find_spec_by_name_searches_all_worktrees_when_no_task(tmp_path: Path):
 
     result = find_spec(workspace_root=tmp_path, name_or_path="found", state=state)
     assert result == specs / "found.md"
+
+
+# ---------------------------------------------------------------------------
+# specs/ directory discovery (by id and task_slug)
+# ---------------------------------------------------------------------------
+
+from mship.core.spec import Spec
+from mship.core.spec_store import SpecStore
+
+
+def _seed_spec(tmp_path: Path, spec_id: str, task_slug=None) -> Path:
+    now = datetime(2026, 6, 13, tzinfo=timezone.utc)
+    store = SpecStore(tmp_path / "specs")
+    return store.save(Spec(
+        id=spec_id, title=spec_id, status="drafting",
+        created_at=now, updated_at=now, task_slug=task_slug,
+    ))
+
+
+def test_find_spec_resolves_specs_dir_by_id(tmp_path: Path):
+    path = _seed_spec(tmp_path, "decision-queue")
+    assert find_spec(tmp_path, "decision-queue") == path
+
+
+def test_find_spec_resolves_specs_dir_by_task_slug(tmp_path: Path):
+    path = _seed_spec(tmp_path, "decision-queue", task_slug="dq")
+    state = WorkspaceState(tasks={"dq": Task(
+        slug="dq", description="d", phase="plan",
+        created_at=datetime(2026, 6, 13, tzinfo=timezone.utc),
+        affected_repos=["a"], branch="feat/dq",
+    )})
+    assert find_spec(tmp_path, None, task="dq", state=state) == path
