@@ -54,7 +54,7 @@ class SpecStore:
         Saving again with the same id + creation date overwrites the file
         (this is the intended update mechanism).
         """
-        if "/" in spec.id or "\\" in spec.id or spec.id in (".", "..") or spec.id.startswith("."):
+        if not spec.id or "/" in spec.id or "\\" in spec.id or spec.id in (".", "..") or spec.id.startswith("."):
             raise ValueError(f"unsafe spec id for filename: {spec.id!r}")
         return self._dir / f"{spec.created_at:%Y-%m-%d}-{spec.id}.md"
 

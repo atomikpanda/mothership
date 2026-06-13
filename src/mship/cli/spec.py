@@ -38,7 +38,7 @@ def register(parent: typer.Typer, get_container):
     def new(
         title: Optional[str] = typer.Option(None, "--title", help="Spec title (required unless --task is given)."),
         spec_id: Optional[str] = typer.Option(None, "--id", help="Stable spec id (slug). Defaults to a slug of the title."),
-        task_opt: Optional[str] = typer.Option(None, "--task", help="Bind to an existing task: prefill affected_repos + task_slug."),
+        task_opt: Optional[str] = typer.Option(None, "--task", help="Link to an existing task: sets task_slug and prefills title + repos."),
         force: bool = typer.Option(False, "--force", "-f", help="Overwrite an existing spec file."),
     ):
         """Create a structured spec at `<workspace>/specs/YYYY-MM-DD-<id>.md`."""
@@ -74,6 +74,9 @@ def register(parent: typer.Typer, get_container):
             raise typer.Exit(1)
         if spec_id is None:
             spec_id = slugify(title)
+        if not spec_id:
+            output.error("Could not derive a spec id from the title; pass --id explicitly.")
+            raise typer.Exit(1)
 
         now = datetime.now(timezone.utc)
         spec = Spec(

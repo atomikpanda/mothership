@@ -158,6 +158,37 @@ def test_gate_dev_satisfied_by_blessed_path(tmp_path: Path):
     assert not any("spec" in w.lower() for w in result.warnings), result.warnings
 
 
+def test_spec_new_id_override(configured_app_with_task: Path):
+    result = runner.invoke(app, ["spec", "new", "--title", "Something", "--id", "my-id"])
+    assert result.exit_code == 0, result.output
+    assert _store(configured_app_with_task).find_by_id("my-id") is not None
+
+
+def test_spec_new_title_overrides_task_description(configured_app_with_task: Path):
+    result = runner.invoke(app, ["spec", "new", "--task", "add-labels", "--title", "Override"])
+    assert result.exit_code == 0, result.output
+    spec = _store(configured_app_with_task).find_by_id("add-labels")
+    assert spec.title == "Override"          # explicit title wins over task.description
+    assert spec.task_slug == "add-labels"    # still bound + prefilled
+
+
+def test_spec_new_empty_title_errors(configured_app_with_task: Path):
+    result = runner.invoke(app, ["spec", "new", "--title", ""])
+    assert result.exit_code != 0
+
+
+def test_spec_new_json_output_non_tty(configured_app_with_task: Path, monkeypatch):
+    import json
+    from mship.cli.output import Output
+    monkeypatch.setattr(Output, "is_tty", property(lambda self: False))
+    result = runner.invoke(app, ["spec", "new", "--title", "Json Spec"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["id"] == "json-spec"
+    assert payload["status"] == "drafting"
+    assert "path" in payload
+
+
 def test_gate_dev_hint_mentions_spec_new(tmp_path: Path):
     """The empty-workspace warning points at `mship spec new`."""
     from unittest.mock import MagicMock
