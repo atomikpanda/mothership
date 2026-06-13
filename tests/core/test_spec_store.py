@@ -1,9 +1,10 @@
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
 from mship.core.spec import AcceptanceCriterion, OpenQuestion, Spec
-from mship.core.spec_store import SpecParseError, parse_spec, serialize_spec
+from mship.core.spec_store import SpecParseError, SpecStore, parse_spec, serialize_spec
 
 
 def _spec():
@@ -51,11 +52,6 @@ def test_malformed_yaml_raises_spec_parse_error():
         parse_spec("---\nid: [unclosed\n---\nbody\n")
 
 
-from pathlib import Path
-
-from mship.core.spec_store import SpecStore
-
-
 def _new_spec(spec_id: str):
     now = datetime(2026, 6, 13, tzinfo=timezone.utc)
     return Spec(id=spec_id, title=spec_id, status="drafting", created_at=now, updated_at=now)
@@ -86,3 +82,21 @@ def test_list_returns_all(tmp_path: Path):
 
 def test_find_by_id_missing_returns_none(tmp_path: Path):
     assert SpecStore(tmp_path / "specs").find_by_id("nope") is None
+
+
+def test_save_overwrites_and_reflects_update(tmp_path: Path):
+    store = SpecStore(tmp_path / "specs")
+    store.save(_new_spec("alpha"))
+    updated = _new_spec("alpha")
+    updated.status = "needs_review"
+    store.save(updated)
+    assert store.find_by_id("alpha").status == "needs_review"
+    assert len(store.list()) == 1  # same path, overwritten not duplicated
+
+
+def test_path_for_rejects_unsafe_id(tmp_path: Path):
+    store = SpecStore(tmp_path / "specs")
+    bad = _new_spec("alpha")
+    bad.id = "../escape"
+    with pytest.raises(ValueError):
+        store.save(bad)
