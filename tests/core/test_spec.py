@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 
-from mship.core.spec import AcceptanceCriterion, OpenQuestion, Spec
+import pytest
+
+from mship.core.spec import AcceptanceCriterion, InvalidTransition, OpenQuestion, Spec, can_transition, validate_transition
 
 
 def _spec(**kw):
@@ -35,11 +37,6 @@ def test_acceptance_criterion_verdict_defaults_unreviewed():
     assert ac.verdict == "unreviewed"
 
 
-import pytest
-
-from mship.core.spec import InvalidTransition, can_transition, validate_transition
-
-
 @pytest.mark.parametrize("current,target", [
     ("captured", "drafting"),
     ("drafting", "needs_review"),
@@ -52,6 +49,8 @@ from mship.core.spec import InvalidTransition, can_transition, validate_transiti
     ("implemented", "archived"),
     ("drafting", "archived"),              # abandon from any non-terminal
     ("approved", "archived"),              # abandon
+    ("needs_clarification", "archived"),   # abandon
+    ("dispatched", "archived"),            # abandon
 ])
 def test_legal_transitions_allowed(current, target):
     assert can_transition(current, target) is True

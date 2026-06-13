@@ -66,12 +66,21 @@ class InvalidTransition(Exception):
 
 
 def can_transition(current: str, target: str) -> bool:
+    """Whether `current` may transition to `target`.
+
+    Takes raw strings (not the `SpecStatus` Literal) for caller convenience;
+    unknown `current` values simply have no outgoing edges. The map is
+    authoritative; the abandon rule is an additive fallback that lets any
+    non-terminal status jump straight to `archived`.
+    """
     if current == target:
         return False
+    if target in ALLOWED_TRANSITIONS.get(current, set()):
+        return True
     # Abandon: any non-terminal status may jump to archived.
     if target == "archived" and current not in TERMINAL_STATUSES:
         return True
-    return target in ALLOWED_TRANSITIONS.get(current, set())
+    return False
 
 
 def validate_transition(current: str, target: str) -> None:
