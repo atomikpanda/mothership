@@ -33,3 +33,38 @@ def test_dispatch_ready_requires_approved_and_no_open_questions():
 def test_acceptance_criterion_verdict_defaults_unreviewed():
     ac = AcceptanceCriterion(id="ac1", text="works")
     assert ac.verdict == "unreviewed"
+
+
+import pytest
+
+from mship.core.spec import InvalidTransition, can_transition, validate_transition
+
+
+@pytest.mark.parametrize("current,target", [
+    ("captured", "drafting"),
+    ("drafting", "needs_review"),
+    ("needs_review", "approved"),
+    ("needs_review", "needs_clarification"),
+    ("needs_clarification", "needs_review"),
+    ("approved", "dispatched"),
+    ("approved", "needs_clarification"),   # re-open
+    ("dispatched", "implemented"),
+    ("implemented", "archived"),
+    ("drafting", "archived"),              # abandon from any non-terminal
+    ("approved", "archived"),              # abandon
+])
+def test_legal_transitions_allowed(current, target):
+    assert can_transition(current, target) is True
+    validate_transition(current, target)  # must not raise
+
+
+@pytest.mark.parametrize("current,target", [
+    ("captured", "approved"),     # skips drafting/review
+    ("drafting", "dispatched"),   # skips review/approval
+    ("archived", "drafting"),     # terminal
+    ("approved", "approved"),     # no-op
+])
+def test_illegal_transitions_rejected(current, target):
+    assert can_transition(current, target) is False
+    with pytest.raises(InvalidTransition):
+        validate_transition(current, target)

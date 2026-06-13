@@ -45,3 +45,35 @@ class Spec(BaseModel):
         return self.status == "approved" and all(
             q.answer is not None for q in self.open_questions
         )
+
+
+TERMINAL_STATUSES: set[str] = {"archived"}
+
+ALLOWED_TRANSITIONS: dict[str, set[str]] = {
+    "captured": {"drafting"},
+    "drafting": {"needs_review"},
+    "needs_review": {"needs_clarification", "approved"},
+    "needs_clarification": {"needs_review", "drafting"},
+    "approved": {"dispatched", "needs_clarification"},
+    "dispatched": {"implemented"},
+    "implemented": {"archived"},
+    "archived": set(),
+}
+
+
+class InvalidTransition(Exception):
+    pass
+
+
+def can_transition(current: str, target: str) -> bool:
+    if current == target:
+        return False
+    # Abandon: any non-terminal status may jump to archived.
+    if target == "archived" and current not in TERMINAL_STATUSES:
+        return True
+    return target in ALLOWED_TRANSITIONS.get(current, set())
+
+
+def validate_transition(current: str, target: str) -> None:
+    if not can_transition(current, target):
+        raise InvalidTransition(f"illegal spec transition: {current} -> {target}")
