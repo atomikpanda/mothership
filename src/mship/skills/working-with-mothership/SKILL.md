@@ -181,6 +181,31 @@ If you don't, your edits in the shell affect the main checkout, not the feature 
 
 **`finish` PR body — write a real one.** By default the PR body is just the task description plus a `Closes #N` footer for any issue refs found in the description, journal, and commit subjects. That's a placeholder, not a body. For agent-driven finishes, pass `--body-file <path>` (or `--body '<inline>'`, or `--body -` for stdin) with a real Summary and Test plan. Empty bodies are rejected — that's deliberate. If you forgot at finish time, follow up immediately with `gh pr edit <url> --body-file <path>`. A bare task-description PR is treated as incomplete.
 
+### Task dependencies
+
+Express that task B depends on task A. `finish` refuses to ship B until every upstream is merged.
+
+```bash
+mship spawn "downstream work" --depends-on a,b          # declare at spawn
+mship depends add <upstream-slug> [--task <slug>]       # retrofit on an existing task
+mship depends remove <upstream-slug> [--task <slug>]
+mship depends list [--task <slug>] [--graph]            # --graph = full workspace DAG
+mship finish --bypass-deps                              # override the readiness gate
+mship close --cascade        # also remove downstream from state
+mship close --detach-downstream   # clear inbound edges, leave downstream alive
+```
+
+`mship status` exposes the graph under `.resolved_task.dependencies`:
+
+```bash
+mship status | jq .resolved_task.dependencies
+# { "upstream": [...], "downstream": [...], "blocked": bool, "blocked_by": [...] }
+```
+
+`mship dispatch` includes a `## Dependencies` section in the subagent prompt body. `mship reconcile` reports `dependency_stale` for a downstream that's in sync but whose upstream merged after the downstream was created (i.e., the downstream needs a rebase).
+
+No soft/advisory edges in v1 — for "informed by task-a" relationships, use `mship journal`.
+
 ### Iterating after `mship finish` (reviewer feedback, CI fixes, typos)
 
 For small post-finish changes — reviewer comments, CI fixes, doc tweaks — use `mship commit <msg>` instead of spawning a new task:

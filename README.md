@@ -39,6 +39,31 @@ Requires Python 3.14+ and [uv](https://docs.astral.sh/uv/). Optional: [go-task](
 
 The quickstart above is deliberately minimal — one repo, one file — to show the task lifecycle in isolation. For the multi-repo case mship was built for, see [`docs/configuration.md`](docs/configuration.md) for `mothership.yaml` examples with dependency graphs, healthchecks, and `env_runner` delegation, and [`docs/cli.md`](docs/cli.md) for the full command surface including `mship spawn --repos`, `mship switch`, and cross-repo `mship finish`.
 
+## Cheat sheet
+
+```bash
+# Workflow
+mship spawn "description"               # start a task in isolated worktrees
+mship switch <repo>                     # context switch across repos
+mship phase plan|dev|review|run         # transition through phases
+mship test                              # run tests in dependency order
+mship finish --body-file - <<'EOF'...   # open PR(s)
+mship close                             # clean up task state and worktrees
+
+# Task dependencies (#104)
+mship spawn "downstream" --depends-on a,b  # declare at spawn
+mship depends add/remove/list               # manage task-to-task dependency edges
+mship finish --bypass-deps                 # ship a downstream even if upstream isn't ready
+
+# Inspection
+mship status                            # active task, phase, branch, drift
+mship journal                           # task log with context
+mship context                           # JSON snapshot of workspace state
+mship graph                             # dependency graph across all tasks
+```
+
+For details, see `mship spawn --help`, [`docs/cli.md`](docs/cli.md), and the `working-with-mothership` skill.
+
 ## What mship gives agents
 
 **Cross-repo coordination as a first-class concept.** A task in mship is a single unit of work that can span many repos. `mship spawn "propagate user schema v2" --repos schemas,svc-users,svc-billing,api,api-client` creates one worktree per repo on a shared feature branch. `mship test` runs them in dependency order. `mship finish` opens five PRs in dependency order with coordination blocks in each body linking the others. Audits catch drift per repo. The agent operates on "the task" — mship tracks which files across which repos belong to it.

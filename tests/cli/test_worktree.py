@@ -130,6 +130,43 @@ def test_spawn_non_tty_json_omits_cd_hint(configured_git_app: Path):
     assert "Next:" not in result.output
 
 
+def test_spawn_with_depends_on_persists_edges(configured_git_app: Path):
+    """spawn --depends-on a creates the task with an edge to a. See #104."""
+    from datetime import datetime, timezone
+    from mship.core.state import StateManager, Task, WorkspaceState
+
+    # Seed an upstream task so it's already known to state.
+    sm = StateManager(configured_git_app / ".mothership")
+    sm.save(WorkspaceState(tasks={
+        "a": Task(
+            slug="a", description="upstream", phase="dev",
+            created_at=datetime.now(timezone.utc),
+            affected_repos=["shared"], branch="feat/a",
+        ),
+    }))
+
+    result = runner.invoke(
+        app,
+        ["spawn", "downstream task", "--repos", "shared", "--slug", "down",
+         "--depends-on", "a", "--skip-setup"],
+    )
+    assert result.exit_code == 0, result.stderr or result.output
+    state = StateManager(configured_git_app / ".mothership").load()
+    edges = state.tasks["down"].depends_on
+    assert [e.upstream_slug for e in edges] == ["a"]
+
+
+def test_spawn_with_unknown_depends_on_errors(configured_git_app: Path):
+    """spawn --depends-on <unknown> errors before creating the task. See #104."""
+    result = runner.invoke(
+        app,
+        ["spawn", "x", "--repos", "shared", "--slug", "x",
+         "--depends-on", "nope", "--skip-setup"],
+    )
+    assert result.exit_code != 0
+    assert "nope" in (result.stderr or result.output).lower()
+
+
 def test_worktrees_list(configured_git_app: Path):
     runner.invoke(app, ["spawn", "test list", "--repos", "shared"])
     result = runner.invoke(app, ["worktrees"])
@@ -1796,3 +1833,131 @@ def test_spawn_cli_writes_offline_journal_entry(workspace_with_git, monkeypatch)
         container.config.reset()
         container.state_manager.reset()
         container.log_manager.reset()
+
+
+def test_finish_blocked_by_unready_upstream(configured_git_app: Path, monkeypatch):
+    """finish refuses when an upstream task isn't merged."""
+    from datetime import datetime, timezone
+    from mship.core.state import DependencyEdge, StateManager, Task, WorkspaceState
+
+    now = datetime.now(timezone.utc)
+    sm = StateManager(configured_git_app / ".mothership")
+    sm.save(WorkspaceState(tasks={
+        "a": Task(slug="a", description="a", phase="dev",
+                  created_at=now, affected_repos=["shared"], branch="feat/a"),
+        "b": Task(slug="b", description="b", phase="dev",
+                  created_at=now, affected_repos=["shared"], branch="feat/b",
+                  depends_on=[DependencyEdge(upstream_slug="a", created_at=now)]),
+    }))
+
+    from mship.core.reconcile.detect import UpstreamState
+    from mship.core.reconcile.gate import Decision
+
+    def _fake_decisions(state):
+        return {"a": Decision(
+            slug="a", state=UpstreamState.in_sync,
+            pr_url=None, pr_number=None, base=None,
+            merge_commit=None, updated_at=None,
+        )}
+
+    monkeypatch.setattr("mship.cli.worktree._dependency_decisions", _fake_decisions)
+
+    result = runner.invoke(app, ["finish", "--task", "b"])
+    assert result.exit_code != 0
+    err = (result.output or "").lower()
+    assert "a" in err
+    assert "not ready" in err or "blocked" in err
+
+
+def test_finish_bypass_deps(configured_git_app: Path, monkeypatch):
+    """--bypass-deps proceeds past the upstream-readiness check."""
+    from datetime import datetime, timezone
+    from mship.core.state import DependencyEdge, StateManager, Task, WorkspaceState
+
+    now = datetime.now(timezone.utc)
+    sm = StateManager(configured_git_app / ".mothership")
+    sm.save(WorkspaceState(tasks={
+        "a": Task(slug="a", description="a", phase="dev",
+                  created_at=now, affected_repos=["shared"], branch="feat/a"),
+        "b": Task(slug="b", description="b", phase="dev",
+                  created_at=now, affected_repos=["shared"], branch="feat/b",
+                  depends_on=[DependencyEdge(upstream_slug="a", created_at=now)]),
+    }))
+
+    from mship.core.reconcile.detect import UpstreamState
+    from mship.core.reconcile.gate import Decision
+
+    def _fake_decisions(state):
+        return {"a": Decision(
+            slug="a", state=UpstreamState.in_sync,
+            pr_url=None, pr_number=None, base=None,
+            merge_commit=None, updated_at=None,
+        )}
+
+    monkeypatch.setattr("mship.cli.worktree._dependency_decisions", _fake_decisions)
+
+    result = runner.invoke(app, ["finish", "--task", "b", "--bypass-deps"])
+    out = (result.output or "").lower()
+    # The deps gate must NOT have fired; finish may fail for unrelated reasons
+    # (no actual PR infra) but the blocked-upstream message must be absent.
+    assert "depends on" not in out
+    assert "blocked: upstream" not in out
+
+
+# ---------------------------------------------------------------------------
+# close: downstream-check tests (#104)
+# ---------------------------------------------------------------------------
+
+def _seed_ab_tasks(workspace_root: Path):
+    """Seed tasks a (finished) and b (depends on a) into state."""
+    from mship.core.state import DependencyEdge, StateManager, Task, WorkspaceState
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    sm = StateManager(workspace_root / ".mothership")
+    sm.save(WorkspaceState(tasks={
+        "a": Task(
+            slug="a", description="a", phase="dev",
+            finished_at=now, created_at=now,
+            affected_repos=["shared"], branch="feat/a",
+        ),
+        "b": Task(
+            slug="b", description="b", phase="dev",
+            created_at=now, affected_repos=["shared"], branch="feat/b",
+            depends_on=[DependencyEdge(upstream_slug="a", created_at=now)],
+        ),
+    }))
+    return sm
+
+
+def test_close_with_downstream_non_tty_refuses(configured_git_app: Path):
+    """Non-TTY close refuses when downstream tasks exist."""
+    sm = _seed_ab_tasks(configured_git_app)
+
+    result = runner.invoke(app, ["close", "a", "--yes", "--skip-pr-check"])
+    assert result.exit_code != 0
+    out = (result.output or "").lower()
+    assert "downstream" in out
+    assert "b" in out
+    assert "--cascade" in (result.output or "") or "--detach-downstream" in (result.output or "")
+
+
+def test_close_detach_downstream_clears_edges(configured_git_app: Path):
+    """--detach-downstream clears the inbound edges but leaves downstream alive."""
+    sm = _seed_ab_tasks(configured_git_app)
+
+    result = runner.invoke(app, ["close", "a", "--yes", "--skip-pr-check", "--detach-downstream"])
+    assert result.exit_code == 0, result.output
+    state = sm.load()
+    assert "a" not in state.tasks
+    assert state.tasks["b"].depends_on == []
+
+
+def test_close_cascade_removes_downstream(configured_git_app: Path):
+    """--cascade removes both upstream and downstream tasks from state."""
+    sm = _seed_ab_tasks(configured_git_app)
+
+    result = runner.invoke(app, ["close", "a", "--yes", "--skip-pr-check", "--cascade"])
+    assert result.exit_code == 0, result.output
+    state = sm.load()
+    assert state.tasks == {}

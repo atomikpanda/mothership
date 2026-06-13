@@ -79,6 +79,28 @@ def _run_gate(
         raise typer.Exit(code=1)
 
 
+def _dependency_decisions(state):
+    """Return reconcile decisions for use by the deps gate (#104).
+
+    Module-level so tests can stub it via monkeypatch.
+    Returns a dict[str, Decision] or {} on any error (fail-open).
+    """
+    try:
+        from mship.core.reconcile.cache import ReconcileCache
+        from mship.core.reconcile.gate import reconcile_now
+        from mship.core.reconcile.fetch import fetch_pr_snapshots, collect_git_snapshots
+        from mship.cli import container as _container_singleton
+
+        cache = ReconcileCache(_container_singleton.state_dir())
+
+        def _fetcher(branches, worktrees_by_branch):
+            return (fetch_pr_snapshots(branches), collect_git_snapshots(worktrees_by_branch))
+
+        return reconcile_now(state, cache=cache, fetcher=_fetcher)
+    except Exception:
+        return {}
+
+
 @dataclass
 class PRGroup:
     """A set of affected repos that share a single GitHub PR.
@@ -230,6 +252,10 @@ def register(app: typer.Typer, get_container):
             help="Skip `git fetch` for passive worktrees; use local refs. "
                  "Journal entry tagged OFFLINE.",
         ),
+        depends_on: Optional[str] = typer.Option(
+            None, "--depends-on",
+            help="Comma-separated upstream task slugs this task depends on. See #104.",
+        ),
     ):
         """Create coordinated worktrees across repos for a new task."""
         import re as _re
@@ -366,10 +392,38 @@ def register(app: typer.Typer, get_container):
         if output.is_tty and not skip_setup:
             output.print("[dim]Running setup in each worktree (use --skip-setup to skip)...[/dim]")
 
+        # --- #104 dependency edges ---
+        from datetime import datetime, timezone
+        from mship.core.state import DependencyEdge
+        from mship.core.task_graph import find_cycle
+        from mship.util.slug import slugify
+
+        dep_edges: list[DependencyEdge] = []
+        if depends_on:
+            requested = [s.strip() for s in depends_on.split(",") if s.strip()]
+            existing_state = container.state_manager().load()
+            known = set(existing_state.tasks.keys())
+            unknown = [s for s in requested if s not in known]
+            if unknown:
+                listing = ", ".join(sorted(known)) or "(none)"
+                output.error(
+                    f"Unknown upstream task(s): {', '.join(unknown)}. Known: {listing}."
+                )
+                raise typer.Exit(code=1)
+            slug_for_cycle = slug if slug else slugify(description)
+            for up in requested:
+                cycle = find_cycle(existing_state, downstream=slug_for_cycle, new_upstream=up)
+                if cycle is not None:
+                    output.error(f"Cycle detected: {' → '.join(cycle)}")
+                    raise typer.Exit(code=1)
+            now = datetime.now(timezone.utc)
+            dep_edges = [DependencyEdge(upstream_slug=s, created_at=now) for s in requested]
+
         result = wt_mgr.spawn(
             description, repos=repo_list, skip_setup=skip_setup, slug=slug,
             workspace_root=container.config_path().parent,
             offline=offline,
+            depends_on=dep_edges,
         )
         task = result.task
 
@@ -443,6 +497,15 @@ def register(app: typer.Typer, get_container):
             help="Skip the check that merged PR commits actually reached the base branch",
         ),
         task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
+        cascade: bool = typer.Option(
+            False, "--cascade",
+            help="Also remove downstream tasks from state (#104). "
+                 "Their worktrees stay until `mship prune`.",
+        ),
+        detach_downstream: bool = typer.Option(
+            False, "--detach-downstream",
+            help="Clear the inbound dependency edges, leave downstream tasks alive (#104).",
+        ),
     ):
         """Close a task: check PR state, tear down worktrees, clear state."""
         from pathlib import Path
@@ -526,6 +589,35 @@ def register(app: typer.Typer, get_container):
                 output.error("  - push from each worktree to save work")
                 output.error("  - `mship close --force` to delete anyway (destructive)")
                 raise typer.Exit(code=1)
+
+        # --- #104 downstream check ---
+        from mship.core.task_graph import downstream_of
+        downstream = sorted(downstream_of(state, task.slug))
+        if downstream and not force:
+            if cascade and detach_downstream:
+                output.error("Pass only one of --cascade / --detach-downstream.")
+                raise typer.Exit(code=1)
+            if not (cascade or detach_downstream):
+                if output.is_tty:
+                    choice = typer.prompt(
+                        f"Task {task.slug!r} has downstream tasks: {', '.join(downstream)}. "
+                        "[c]ascade close downstream, [d]etach edges, [a]bort",
+                        default="a",
+                    ).strip().lower()
+                    if choice.startswith("c"):
+                        cascade = True
+                    elif choice.startswith("d"):
+                        detach_downstream = True
+                    else:
+                        output.error("Aborted.")
+                        raise typer.Exit(code=1)
+                else:
+                    output.error(
+                        f"close refused: downstream tasks depend on {task.slug!r}: "
+                        f"{', '.join(downstream)}. Pass --cascade (close them too) "
+                        "or --detach-downstream (clear the edges) to proceed."
+                    )
+                    raise typer.Exit(code=1)
 
         # Determine the log message based on PR state.
         from mship.core.pr import PrStateResult
@@ -665,6 +757,21 @@ def register(app: typer.Typer, get_container):
 
         wt_mgr = container.worktree_manager()
         wt_mgr.abort(task_slug)  # core method retains the name; only CLI verb changed
+
+        if downstream and detach_downstream:
+            def _detach(s):
+                for d_slug in downstream:
+                    t = s.tasks.get(d_slug)
+                    if t is None:
+                        continue
+                    t.depends_on = [e for e in t.depends_on if e.upstream_slug != task.slug]
+            state_mgr.mutate(_detach)
+        elif downstream and cascade:
+            def _cascade(s):
+                for d_slug in downstream:
+                    s.tasks.pop(d_slug, None)
+            state_mgr.mutate(_cascade)
+
         log_mgr.append(task_slug, log_msg)
         try:
             from mship.core.reconcile.cache import ReconcileCache
@@ -686,6 +793,7 @@ def register(app: typer.Typer, get_container):
         force_audit: bool = typer.Option(False, "--force-audit", help="Bypass audit gate for this finish"),
         push_only: bool = typer.Option(False, "--push-only", help="Push branches only; skip gh pr create"),
         bypass_reconcile: bool = typer.Option(False, "--bypass-reconcile", help="Skip upstream PR drift check for this finish"),
+        bypass_deps: bool = typer.Option(False, "--bypass-deps", help="Skip the dependency-readiness check (#104)."),
         body: Optional[str] = typer.Option(
             None, "--body",
             help="Inline PR body. Use '-' to read from stdin. Mutually exclusive with --body-file.",
@@ -816,6 +924,23 @@ def register(app: typer.Typer, get_container):
         except (InvalidBodyMapError, EmptyBodyInMapError) as e:
             output.error(str(e))
             raise typer.Exit(code=1)
+
+        # --- #104 dependency-readiness gate ---
+        if task.depends_on and not bypass_deps:
+            decisions = _dependency_decisions(state)
+            from mship.core.task_graph import is_ready
+            blocked_by = [
+                edge.upstream_slug
+                for edge in task.depends_on
+                if not is_ready(state, edge.upstream_slug, decisions)
+            ]
+            if blocked_by:
+                output.error(
+                    f"finish blocked: upstream task(s) not ready: {', '.join(blocked_by)}.\n"
+                    f"  Run `mship status --task <slug>` for state, "
+                    f"or pass --bypass-deps to override."
+                )
+                raise typer.Exit(code=1)
 
         # --- Audit gate ---
         from mship.core.audit_gate import run_audit_gate, AuditGateBlocked, compute_finish_audit_scope

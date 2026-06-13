@@ -16,12 +16,13 @@ from mship.core.reconcile.gate import Decision, reconcile_now
 
 
 _ACTION_HINTS = {
-    UpstreamState.merged:       "run `mship close`",
-    UpstreamState.closed:       "run `mship close --abandon`",
-    UpstreamState.diverged:     "pull and rebase",
-    UpstreamState.base_changed: "rebase onto new base",
-    UpstreamState.missing:      "—",
-    UpstreamState.in_sync:      "—",
+    UpstreamState.merged:            "run `mship close`",
+    UpstreamState.closed:            "run `mship close --abandon`",
+    UpstreamState.diverged:          "pull and rebase",
+    UpstreamState.base_changed:      "rebase onto new base",
+    UpstreamState.missing:           "—",
+    UpstreamState.in_sync:           "—",
+    UpstreamState.dependency_stale:  "rebase onto upstream's merge",
 }
 
 

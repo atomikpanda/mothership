@@ -54,6 +54,7 @@ def register(app: typer.Typer, get_container):
             base_sha_info=base_sha_info,
             agents_md_path=agents_md_path,
             pkg_skills_source=pkg_skills_source(),
+            state=state,
         )
         # Print directly to stdout (NOT via Output.json — this is meant to be piped).
         print(prompt)

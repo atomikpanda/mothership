@@ -199,6 +199,24 @@ def _render_skills(skills: list[SkillRef]) -> str:
     return "\n".join(f"- `{s.name}` — `{s.path}`" for s in skills)
 
 
+def _format_dependencies_section(task: Task, state=None) -> str:
+    """Format Dependencies section if task has upstream dependencies."""
+    if not task.depends_on:
+        return ""
+    lines = ["## Dependencies", ""]
+    if state is not None:
+        from mship.core.task_graph import is_ready
+        for edge in task.depends_on:
+            ready = is_ready(state, edge.upstream_slug, {})
+            mark = "ready" if ready else "not ready"
+            lines.append(f"- depends on: `{edge.upstream_slug}` ({mark})")
+    else:
+        for edge in task.depends_on:
+            lines.append(f"- depends on: `{edge.upstream_slug}`")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def build_dispatch_prompt(
     task: Task,
     repo: str,
@@ -208,6 +226,7 @@ def build_dispatch_prompt(
     base_sha_info: BaseShaInfo,
     agents_md_path: Path | None,
     pkg_skills_source: Path,
+    state=None,
 ) -> str:
     """Return the full markdown dispatch prompt for a fresh subagent."""
     worktree = task.worktrees[repo]
@@ -215,6 +234,7 @@ def build_dispatch_prompt(
     skills_block = _render_skills(canonical_skills(pkg_skills_source))
     journal_block = _render_journal(journal_entries)
     base_block = _render_base_sha_block(base_sha_info, base_branch)
+    dependencies_block = _format_dependencies_section(task, state=state)
     agents_line = f"\nFull doc: `{agents_md_path}`." if agents_md_path else ""
 
     return f"""\
@@ -239,6 +259,7 @@ This is a git worktree checked out on branch `{task.branch}`. Every edit, test r
 - **base branch:** {base_branch}
 - **active repo:** {repo}
 
+{dependencies_block}
 ## Where the branch stands
 
 {base_block}

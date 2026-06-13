@@ -71,30 +71,31 @@ def get_container(required: bool = True) -> "Container | None":
 
 
 # Register command modules
-from mship.cli import status as _status_mod
-from mship.cli import phase as _phase_mod
-from mship.cli import worktree as _worktree_mod
-from mship.cli import exec as _exec_mod
-from mship.cli import block as _block_mod
-from mship.cli import log as _log_mod
-from mship.cli import prune as _prune_mod
-from mship.cli import init as _init_mod
-from mship.cli import doctor as _doctor_mod
-from mship.cli import skill as _skill_mod
-from mship.cli import view as _view_mod
 from mship.cli import audit as _audit_mod
-from mship.cli import sync as _sync_mod
-from mship.cli import switch as _switch_mod
-from mship.cli import layout as _layout_mod
-from mship.cli import internal as _internal_mod
-from mship.cli import reconcile as _reconcile_mod
-from mship.cli import context as _context_mod
-from mship.cli import dispatch as _dispatch_mod
-from mship.cli import commit as _commit_mod
-from mship.cli import debug as _debug_mod
 from mship.cli import bind as _bind_mod
+from mship.cli import block as _block_mod
+from mship.cli import commit as _commit_mod
+from mship.cli import context as _context_mod
+from mship.cli import debug as _debug_mod
+from mship.cli import depends as _depends_mod
+from mship.cli import dispatch as _dispatch_mod
+from mship.cli import doctor as _doctor_mod
+from mship.cli import exec as _exec_mod
+from mship.cli import init as _init_mod
+from mship.cli import internal as _internal_mod
+from mship.cli import layout as _layout_mod
+from mship.cli import log as _log_mod
+from mship.cli import phase as _phase_mod
 from mship.cli import pr as _pr_mod
+from mship.cli import prune as _prune_mod
+from mship.cli import reconcile as _reconcile_mod
+from mship.cli import skill as _skill_mod
 from mship.cli import spec as _spec_mod
+from mship.cli import status as _status_mod
+from mship.cli import switch as _switch_mod
+from mship.cli import sync as _sync_mod
+from mship.cli import view as _view_mod
+from mship.cli import worktree as _worktree_mod
 
 def _should_silent_exit(argv: list[str]) -> bool:
     """True if argv is invoking an unknown `_`-prefixed internal command.
@@ -122,27 +123,28 @@ def run() -> None:
     app()
 
 
-_status_mod.register(app, get_container)
-_phase_mod.register(app, get_container)
-_worktree_mod.register(app, get_container)
-_exec_mod.register(app, get_container)
-_block_mod.register(app, get_container)
-_log_mod.register(app, get_container)
-_prune_mod.register(app, get_container)
-_init_mod.register(app, get_container)
-_doctor_mod.register(app, get_container)
-_skill_mod.register(app, get_container)
-_view_mod.register(app, get_container)
 _audit_mod.register(app, get_container)
-_sync_mod.register(app, get_container)
-_switch_mod.register(app, get_container)
-_layout_mod.register(app, get_container)
-_internal_mod.register(app, get_container)
-_reconcile_mod.register(app, get_container)
-_context_mod.register(app, get_container)
-_dispatch_mod.register(app, get_container)
-_commit_mod.register(app, get_container)
-_debug_mod.register(app, get_container)
 _bind_mod.register(app, get_container)
+_block_mod.register(app, get_container)
+_commit_mod.register(app, get_container)
+_context_mod.register(app, get_container)
+_debug_mod.register(app, get_container)
+_depends_mod.register(app, get_container)
+_dispatch_mod.register(app, get_container)
+_doctor_mod.register(app, get_container)
+_exec_mod.register(app, get_container)
+_init_mod.register(app, get_container)
+_internal_mod.register(app, get_container)
+_layout_mod.register(app, get_container)
+_log_mod.register(app, get_container)
+_phase_mod.register(app, get_container)
 _pr_mod.register(app, get_container)
+_prune_mod.register(app, get_container)
+_reconcile_mod.register(app, get_container)
+_skill_mod.register(app, get_container)
 _spec_mod.register(app, get_container)
+_status_mod.register(app, get_container)
+_switch_mod.register(app, get_container)
+_sync_mod.register(app, get_container)
+_view_mod.register(app, get_container)
+_worktree_mod.register(app, get_container)
