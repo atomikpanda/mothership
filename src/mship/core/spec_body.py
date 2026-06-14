@@ -12,7 +12,12 @@ def render_body(problem: str, user_story: str, approach: str) -> str:
 
 
 def parse_body_sections(body: str) -> dict[str, str]:
-    """Split a markdown body into {section-heading: prose} by `## ` headings."""
+    """Split a markdown body into {section-heading: prose} by `## ` headings.
+
+    Any line starting with `## ` opens a new section, so body prose should not
+    use `## ` decoratively (use `### ` for sub-headings — h3 is not a section
+    boundary). Duplicate headings: last occurrence wins.
+    """
     sections: dict[str, str] = {}
     current: str | None = None
     buf: list[str] = []
