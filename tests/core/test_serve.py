@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from mship.core.serve import create_app
-from mship.core.spec import AcceptanceCriterion, Spec
+from mship.core.spec import AcceptanceCriterion, OpenQuestion, Spec
 from mship.core.spec_body import render_body
 from mship.core.spec_store import SpecStore
 from mship.core.state import StateManager, Task, WorkspaceState
@@ -28,6 +28,7 @@ def _seed_spec(tmp_path: Path):
         created_at=now, updated_at=now, task_slug="dq",
         body=render_body("the problem", "as a user", "the approach"),
         acceptance_criteria=[AcceptanceCriterion(id="ac1", text="view questions", verdict="approved")],
+        open_questions=[OpenQuestion(id="q1", text="Mobile too?")],
     ))
 
 
@@ -145,3 +146,68 @@ def test_non_ascii_token_still_401_not_500(tmp_path):
     # Positive case (correct non-ascii token) omitted: httpx/TestClient encodes
     # header values as ASCII and raises UnicodeEncodeError before the request
     # reaches the server, so we cannot test the success path via TestClient.
+
+
+def test_post_verdict(tmp_path):
+    _seed_spec(tmp_path)
+    client = TestClient(_app(tmp_path))
+    r = client.post("/specs/dq/verdict", json={"criterion_id": "ac1", "verdict": "flagged"})
+    assert r.status_code == 200
+    assert r.json()["acceptance_criteria"][0]["verdict"] == "flagged"
+    assert client.post("/specs/dq/verdict", json={"criterion_id": "ac1", "verdict": "bogus"}).status_code == 400
+    assert client.post("/specs/dq/verdict", json={"criterion_id": "nope", "verdict": "approved"}).status_code == 400
+    assert client.post("/specs/none/verdict", json={"criterion_id": "ac1", "verdict": "approved"}).status_code == 404
+
+
+def test_post_question_and_answer(tmp_path):
+    _seed_spec(tmp_path)
+    client = TestClient(_app(tmp_path))
+    add = client.post("/specs/dq/questions", json={"text": "Tablets too?"})
+    assert add.status_code == 200
+    assert [q["id"] for q in add.json()["open_questions"]] == ["q1", "q2"]
+    ans = client.post("/specs/dq/questions/q1/answer", json={"answer": "yes"})
+    assert ans.status_code == 200
+    assert ans.json()["open_questions"][0]["answer"] == "yes"
+    assert client.post("/specs/dq/questions/q99/answer", json={"answer": "x"}).status_code == 400
+
+
+def test_post_question_unknown_spec_404(tmp_path):
+    assert TestClient(_app(tmp_path)).post("/specs/none/questions", json={"text": "x"}).status_code == 404
+
+
+def test_post_approve_gate_and_success(tmp_path):
+    _seed_spec(tmp_path)
+    client = TestClient(_app(tmp_path))
+    blocked = client.post("/specs/dq/approve", json={})
+    assert blocked.status_code == 409          # q1 unanswered
+    assert isinstance(blocked.json()["detail"], str)   # uniform string shape
+    client.post("/specs/dq/questions/q1/answer", json={"answer": "yes"})
+    ok = client.post("/specs/dq/approve", json={})
+    assert ok.status_code == 200 and ok.json()["status"] == "approved"
+    assert client.post("/specs/dq/approve", json={}).status_code == 409           # re-approve illegal
+
+
+def test_post_approve_bypass(tmp_path):
+    _seed_spec(tmp_path)
+    client = TestClient(_app(tmp_path))
+    r = client.post("/specs/dq/approve", json={"bypass_gate": True})
+    assert r.status_code == 200 and r.json()["status"] == "approved"
+
+
+def test_post_request_changes(tmp_path):
+    _seed_spec(tmp_path)
+    client = TestClient(_app(tmp_path))
+    r = client.post("/specs/dq/request-changes", json={"reason": "tighten scope"})
+    assert r.status_code == 200 and r.json()["status"] == "needs_clarification"
+
+
+def test_writes_require_auth(tmp_path):
+    client = TestClient(_auth_app(tmp_path, "secret"))
+    # No Authorization header → 401 even for a write.
+    assert client.post("/specs/dq/verdict", json={"criterion_id": "ac1", "verdict": "approved"}).status_code == 401
+    # With the token → allowed.
+    ok = client.post(
+        "/specs/dq/verdict", json={"criterion_id": "ac1", "verdict": "approved"},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert ok.status_code == 200
