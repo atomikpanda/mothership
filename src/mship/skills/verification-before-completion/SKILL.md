@@ -130,6 +130,12 @@ From 24 failure memories:
 - Implications of success
 - ANY communication suggesting completion/correctness
 
+## Mothership Workspace
+
+In a mothership workspace, run verification via `mship test` so the result is
+recorded as evidence; `mship finish --require-tests` enforces that gate before
+a PR is opened. See `working-with-mothership`.
+
 ## The Bottom Line
 
 **No shortcuts for verification.**

@@ -86,3 +86,21 @@ def test_context_empty_workspace(tmp_path: Path):
         assert data["cwd_matches_repo"] is None
     finally:
         _reset_container()
+
+
+def test_context_includes_docs_dir(tmp_path: Path):
+    runner = CliRunner()
+    cfg, state_dir = _bootstrap(tmp_path, [])
+
+    container.config.reset()
+    container.state_manager.reset()
+    container.log_manager.reset()
+    container.config_path.override(cfg)
+    container.state_dir.override(state_dir)
+    try:
+        result = runner.invoke(app, ["context"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["docs_dir"] == "docs"
+    finally:
+        _reset_container()

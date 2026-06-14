@@ -17,7 +17,7 @@ def register(app: typer.Typer, get_container):
         ),
         port: int = typer.Option(47100, "--port", help="Port."),
     ):
-        """Run a read-only JSON API over the spec + task model (Ground Control)."""
+        """Run a JSON API over the spec + task model — reads plus review/approve writes (Ground Control)."""
         import os
         import uvicorn
         from mship.core.serve import create_app

@@ -35,6 +35,10 @@ If CLAUDE.md, GEMINI.md, or AGENTS.md says "don't use TDD" and a skill says "alw
 
 **In other environments:** Check your platform's documentation for how skills are loaded.
 
+### Installing bundled skills
+
+mship ships its skills under `src/mship/skills/`. `mship skill list` shows what's bundled; `mship skill install` deploys them into the agent's skill directories. Available install flags: `--only <agents>` (comma-separated: claude,codex,gemini), `--force` (override safe-skip on foreign content), `--yes`/`-y` (skip per-agent confirmation prompts).
+
 ## Platform Adaptation
 
 Skills use Claude Code tool names. Non-CC platforms: see `references/copilot-tools.md` (Copilot CLI), `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.

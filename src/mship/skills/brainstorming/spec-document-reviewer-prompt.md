@@ -4,7 +4,7 @@ Use this template when dispatching a spec document reviewer subagent.
 
 **Purpose:** Verify the spec is complete, consistent, and ready for implementation planning.
 
-**Dispatch after:** Spec document is written to docs/superpowers/specs/
+**Dispatch after:** the spec is captured — an `mship spec` in a workspace (review via `mship spec review <id>`), or a design doc at `docs/specs/`.
 
 ```
 Task tool (general-purpose):

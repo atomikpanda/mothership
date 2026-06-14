@@ -116,6 +116,11 @@ class WorkspaceConfig(BaseModel):
     # approved spec exists (status in approved/dispatched/implemented).
     # Default False so existing configs/tests are unaffected. See MOS-151.
     require_approved_spec: bool = False
+    # Workspace-relative directory where the bundled skills write plan docs (and,
+    # outside a workspace, fallback design docs). Plans live at `<docs_dir>/plans/`.
+    # Does NOT affect canonical mship specs (always `specs/`) or the `spec_paths`
+    # legacy spec-search default. Surfaced in `mship context` for skills.
+    docs_dir: str = "docs"
     repos: dict[str, RepoConfig]
 
     @model_validator(mode="after")

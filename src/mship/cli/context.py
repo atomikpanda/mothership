@@ -41,6 +41,7 @@ def register(app: typer.Typer, get_container):
             state_dir=state_dir,
             cache=ReconcileCache(state_dir),
         )
+        payload["docs_dir"] = container.config().docs_dir
         try:
             resolved_task, source = resolve_task(
                 state,

@@ -19,7 +19,7 @@ Load plan, review critically, execute all tasks, report when complete.
 1. Read plan file
 2. Review critically — identify any questions or concerns about the plan
 3. If concerns: Raise them with your human partner before starting
-4. **If this is a mothership workspace** (`mothership.yaml` at any ancestor): verify `mship status` shows an active task BEFORE starting (`mship status | jq .resolved_task` should be non-null, or `.active_tasks` should contain the slug you intend to anchor). No active task → stop and tell the user to `mship spawn "<description>"` first. Then `cd` into `.resolved_task.worktrees.<repo>` and do all work and commits there. The mship pre-commit hook refuses commits from outside the worktree, so "just commit on main" is both wrong and blocked.
+4. **If this is a mothership workspace** (`mothership.yaml` at any ancestor): verify `mship status` shows an active task BEFORE starting (`mship status | jq .resolved_task` should be non-null, or `.active_tasks` should contain the slug you intend to anchor). No active task → stop and tell the user to `mship spawn "<description>"` first. Then `cd` into `.resolved_task.worktrees.<repo>` and do all work and commits there. The mship pre-commit hook refuses commits from outside the worktree, so "just commit on main" is both wrong and blocked. If `require_approved_spec: true`, the task needs a bound, approved spec before `mship phase dev` will advance — create/approve one (`mship spec …`) or pass `mship phase dev --bypass-spec-gate`. See `working-with-mothership`.
 5. If no concerns: Create TodoWrite and proceed
 
 ### Step 2: Execute Tasks

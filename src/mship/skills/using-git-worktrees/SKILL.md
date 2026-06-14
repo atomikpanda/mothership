@@ -46,8 +46,8 @@ If no directory exists and no CLAUDE.md preference:
 ```
 No worktree directory found. Where should I create worktrees?
 
-1. .worktrees/ (project-local, hidden)
-2. ~/.config/superpowers/worktrees/<project-name>/ (global location)
+1. .worktrees/ (project-local, hidden) [default]
+2. worktrees/ (project-local, visible)
 
 Which would you prefer?
 ```
@@ -72,10 +72,6 @@ Per Jesse's rule "Fix broken things immediately":
 
 **Why critical:** Prevents accidentally committing worktree contents to repository.
 
-### For Global Directory (~/.config/superpowers/worktrees)
-
-No .gitignore verification needed - outside project entirely.
-
 ## Creation Steps
 
 ### 1. Detect Project Name
@@ -89,15 +85,9 @@ project=$(basename "$(git rev-parse --show-toplevel)")
 *For non-mship workflows, create the worktree directly:*
 
 ```bash
-# Determine full path
-case $LOCATION in
-  .worktrees|worktrees)
-    path="$LOCATION/$BRANCH_NAME"
-    ;;
-  ~/.config/superpowers/worktrees/*)
-    path="~/.config/superpowers/worktrees/$project/$BRANCH_NAME"
-    ;;
-esac
+# Determine full path (default: .worktrees/)
+LOCATION="${LOCATION:-.worktrees}"
+path="$LOCATION/$BRANCH_NAME"
 
 # Create worktree with new branch
 git worktree add "$path" -b "$BRANCH_NAME"

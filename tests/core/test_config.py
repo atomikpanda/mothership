@@ -698,3 +698,15 @@ def test_discover_walk_up_unchanged_when_no_env_no_marker(tmp_path, monkeypatch)
     (root / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
     nested = root / "a" / "b"; nested.mkdir(parents=True)
     assert ConfigLoader.discover(nested) == root / "mothership.yaml"
+
+
+def test_docs_dir_defaults_to_docs(workspace: Path):
+    config = ConfigLoader.load(workspace / "mothership.yaml")
+    assert config.docs_dir == "docs"
+
+
+def test_custom_docs_dir(workspace: Path):
+    cfg = workspace / "mothership.yaml"
+    cfg.write_text(cfg.read_text() + 'docs_dir: "documentation"\n')
+    config = ConfigLoader.load(cfg)
+    assert config.docs_dir == "documentation"
