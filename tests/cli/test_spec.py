@@ -346,3 +346,55 @@ def test_spec_apply_missing_file_errors(configured_app_with_task: Path):
     result = runner.invoke(app, ["spec", "apply", "dq", "--from-json", "/no/such/file.json"])
     assert result.exit_code != 0
     assert "from-json" in result.output or "read" in result.output.lower()
+
+
+# --- spec review (#147) ---
+
+
+def test_spec_review_emits_units(configured_app_with_task: Path, tmp_path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    jf = tmp_path / "draft.json"; jf.write_text(_draft_json())
+    runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf)])
+    result = runner.invoke(app, ["spec", "review", "dq"])
+    assert result.exit_code == 0, result.output
+    payload = _json.loads(result.output)
+    assert payload["id"] == "dq"
+    assert payload["acceptance_criteria"][0]["id"] == "ac1"
+    assert payload["summary"]["criteria_total"] == 1
+
+
+def test_spec_review_unknown_id_errors(configured_app_with_task: Path):
+    result = runner.invoke(app, ["spec", "review", "nope"])
+    assert result.exit_code != 0
+    assert "nope" in result.output
+
+
+# --- spec verdict (#147) ---
+
+
+def _apply_dq(tmp_path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    jf = tmp_path / "draft.json"; jf.write_text(_draft_json())
+    runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf)])
+
+
+def test_spec_verdict_sets_and_persists(configured_app_with_task: Path, tmp_path):
+    _apply_dq(tmp_path)
+    result = runner.invoke(app, ["spec", "verdict", "dq", "ac1", "approved"])
+    assert result.exit_code == 0, result.output
+    review = _json.loads(runner.invoke(app, ["spec", "review", "dq"]).output)
+    assert review["acceptance_criteria"][0]["verdict"] == "approved"
+
+
+def test_spec_verdict_rejects_bad_verdict(configured_app_with_task: Path, tmp_path):
+    _apply_dq(tmp_path)
+    result = runner.invoke(app, ["spec", "verdict", "dq", "ac1", "bogus"])
+    assert result.exit_code != 0
+    assert "bogus" in result.output
+
+
+def test_spec_verdict_rejects_unknown_criterion(configured_app_with_task: Path, tmp_path):
+    _apply_dq(tmp_path)
+    result = runner.invoke(app, ["spec", "verdict", "dq", "ac99", "approved"])
+    assert result.exit_code != 0
+    assert "ac99" in result.output
