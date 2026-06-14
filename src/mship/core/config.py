@@ -112,6 +112,10 @@ class WorkspaceConfig(BaseModel):
     # which matches the bundled `brainstorming` / `writing-plans` skill
     # convention. See #113.
     spec_paths: list[str] | None = None
+    # When True, `mship phase dev` hard-blocks plan→dev unless a bound,
+    # approved spec exists (status in approved/dispatched/implemented).
+    # Default False so existing configs/tests are unaffected. See MOS-151.
+    require_approved_spec: bool = False
     repos: dict[str, RepoConfig]
 
     @model_validator(mode="after")

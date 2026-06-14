@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from mship.core.log import LogManager
-from mship.core.phase import FinishedTaskError, PhaseManager, PhaseTransition
+from mship.core.phase import FinishedTaskError, PhaseManager, PhaseTransition, SpecGateError
 from mship.core.state import StateManager, Task, TestResult, WorkspaceState
 
 
@@ -276,3 +276,108 @@ def test_transition_to_run_on_finished_task_allowed_without_force(phase_env):
     sm.save(state)
     result = pm.transition("t", "run")
     assert result.new_phase == "run"
+
+
+# ---------------------------------------------------------------------------
+# A7 — require_approved_spec gate (MOS-151)
+# ---------------------------------------------------------------------------
+
+def _make_phase_manager_with_approved_spec_gate(
+    state_mgr: StateManager,
+    workspace_root: Path,
+    require_approved_spec: bool = True,
+) -> PhaseManager:
+    """Build a PhaseManager with require_approved_spec toggled."""
+    from mship.core.config import WorkspaceConfig, RepoConfig
+    config = WorkspaceConfig(
+        workspace="test",
+        repos={"shared": RepoConfig(path=Path("./shared"), type="library")},
+        require_approved_spec=require_approved_spec,
+    )
+    return PhaseManager(
+        state_mgr,
+        MagicMock(spec=LogManager),
+        config=config,
+        workspace_root=workspace_root,
+    )
+
+
+def _seed_approved_spec(workspace_root: Path, task_slug: str) -> None:
+    """Write a minimal approved spec bound to task_slug into the specs dir."""
+    from datetime import datetime, timezone
+    from mship.core.spec import Spec
+    from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+
+    now = datetime.now(timezone.utc)
+    spec = Spec(
+        id=f"{task_slug}-spec",
+        title=f"Spec for {task_slug}",
+        status="approved",
+        created_at=now,
+        updated_at=now,
+        task_slug=task_slug,
+    )
+    SpecStore(workspace_root / SPECS_DIRNAME).save(spec)
+
+
+def test_a7_plan_to_dev_blocked_when_require_approved_spec_and_no_spec(
+    state_with_task: StateManager, tmp_path: Path
+):
+    """require_approved_spec=True + no bound approved spec → SpecGateError."""
+    pm = _make_phase_manager_with_approved_spec_gate(state_with_task, tmp_path)
+    with pytest.raises(SpecGateError):
+        pm.transition("add-labels", "dev")
+
+
+def test_a7_plan_to_dev_allowed_when_approved_spec_exists(
+    state_with_task: StateManager, tmp_path: Path
+):
+    """require_approved_spec=True + bound approved spec → transition succeeds."""
+    _seed_approved_spec(tmp_path, "add-labels")
+    pm = _make_phase_manager_with_approved_spec_gate(state_with_task, tmp_path)
+    result = pm.transition("add-labels", "dev")
+    assert result.new_phase == "dev"
+
+
+def test_a7_plan_to_dev_allowed_with_bypass_spec_gate(
+    state_with_task: StateManager, tmp_path: Path
+):
+    """require_approved_spec=True + no spec + bypass_spec_gate=True → succeeds."""
+    pm = _make_phase_manager_with_approved_spec_gate(state_with_task, tmp_path)
+    result = pm.transition("add-labels", "dev", bypass_spec_gate=True)
+    assert result.new_phase == "dev"
+
+
+def test_a7_plan_to_dev_default_off_no_spec_still_succeeds(
+    state_with_task: StateManager, tmp_path: Path
+):
+    """Default config (require_approved_spec=False) + no spec → plan→dev succeeds (backward compat)."""
+    pm = _make_phase_manager_with_approved_spec_gate(
+        state_with_task, tmp_path, require_approved_spec=False
+    )
+    result = pm.transition("add-labels", "dev")
+    assert result.new_phase == "dev"
+
+
+def test_a7_dispatched_spec_also_satisfies_gate(
+    state_with_task: StateManager, tmp_path: Path
+):
+    """A spec with status='dispatched' should also satisfy the gate."""
+    from datetime import datetime, timezone
+    from mship.core.spec import Spec
+    from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+
+    now = datetime.now(timezone.utc)
+    spec = Spec(
+        id="add-labels-dispatched",
+        title="Dispatched spec",
+        status="dispatched",
+        created_at=now,
+        updated_at=now,
+        task_slug="add-labels",
+    )
+    SpecStore(tmp_path / SPECS_DIRNAME).save(spec)
+
+    pm = _make_phase_manager_with_approved_spec_gate(state_with_task, tmp_path)
+    result = pm.transition("add-labels", "dev")
+    assert result.new_phase == "dev"

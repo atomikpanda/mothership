@@ -17,6 +17,10 @@ class FinishedTaskError(RuntimeError):
     """Raised when transitioning a finished task to plan/dev/review without --force."""
 
 
+class SpecGateError(RuntimeError):
+    """Raised when plan→dev requires an approved spec and none is bound to the task."""
+
+
 @dataclass
 class PhaseTransition:
     new_phase: Phase
@@ -44,6 +48,7 @@ class PhaseManager:
         target: Phase,
         force_unblock: bool = False,
         force_finished: bool = False,
+        bypass_spec_gate: bool = False,
     ) -> PhaseTransition:
         # Read-only preflight: compute soft-gate warnings from current state.
         # These read repo state (specs, tests, uncommitted files) and mship
@@ -59,6 +64,21 @@ class PhaseManager:
                 f"Task '{task_slug}' is finished. Transitioning to {target} "
                 f"probably means you want `mship close` then `mship spawn` for "
                 f"the next task. Use --force to override."
+            )
+
+        # Approved-spec gate: opt-in via require_approved_spec in mothership.yaml.
+        if (
+            task.phase == "plan"
+            and target == "dev"
+            and self._config is not None
+            and self._config.require_approved_spec
+            and not bypass_spec_gate
+            and not self._has_approved_spec(task_slug)
+        ):
+            raise SpecGateError(
+                f"Task '{task_slug}' has no bound approved spec. "
+                f"Create and approve one (`mship spec approve`) or pass "
+                f"--bypass-spec-gate to skip this check."
             )
 
         old_phase = task.phase
@@ -150,6 +170,24 @@ class PhaseManager:
         except SpecNotFoundError:
             return [warn]
         return []
+
+    def _has_approved_spec(self, task_slug: str) -> bool:
+        """Return True if a spec bound to task_slug has an approved-or-beyond status."""
+        if self._workspace_root is None:
+            return False
+        # Import inside method to avoid potential import cycles at module load.
+        from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+
+        specs_dir = self._workspace_root / SPECS_DIRNAME
+        try:
+            specs = SpecStore(specs_dir).list()
+        except Exception:
+            return False
+        approved_statuses = {"approved", "dispatched", "implemented"}
+        return any(
+            s.task_slug == task_slug and s.status in approved_statuses
+            for s in specs
+        )
 
     def _gate_review(self, task) -> list[str]:
         # Unified reader honors both task.test_results and journal
