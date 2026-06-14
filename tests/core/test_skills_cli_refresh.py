@@ -24,9 +24,11 @@ REAL_SPEC_SUBCOMMANDS = {
 
 @pytest.mark.parametrize("skill", EDITED_SKILLS)
 def test_no_stale_superpowers_paths(skill):
-    text = (SKILLS_DIR / skill / "SKILL.md").read_text()
-    for stale in STALE_PATHS:
-        assert stale not in text, f"{skill}: stale path {stale!r}"
+    # Scan SKILL.md AND sibling files (prompt templates etc.) — drift hides there too.
+    for md in sorted((SKILLS_DIR / skill).rglob("*.md")):
+        text = md.read_text()
+        for stale in STALE_PATHS:
+            assert stale not in text, f"{md.relative_to(SKILLS_DIR)}: stale path {stale!r}"
 
 
 def test_working_with_mothership_names_real_spec_commands():
