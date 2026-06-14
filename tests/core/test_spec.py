@@ -67,3 +67,24 @@ def test_illegal_transitions_rejected(current, target):
     assert can_transition(current, target) is False
     with pytest.raises(InvalidTransition):
         validate_transition(current, target)
+
+
+def test_spec_draft_defaults():
+    from mship.core.spec import SpecDraft
+    d = SpecDraft(problem="p", user_story="u", approach="a")
+    assert d.non_goals == []
+    assert d.risks == []
+    assert d.affected_repos == []
+    assert d.acceptance_criteria == []
+    assert d.open_questions == []
+
+
+def test_spec_draft_accepts_lists():
+    from mship.core.spec import SpecDraft
+    d = SpecDraft(
+        problem="p", user_story="u", approach="a",
+        acceptance_criteria=["c1", "c2"], open_questions=["q1"],
+        non_goals=["ng"], risks=["r"], affected_repos=["mothership"],
+    )
+    assert d.acceptance_criteria == ["c1", "c2"]
+    assert d.open_questions == ["q1"]

@@ -86,3 +86,18 @@ def can_transition(current: str, target: str) -> bool:
 def validate_transition(current: str, target: str) -> None:
     if not can_transition(current, target):
         raise InvalidTransition(f"illegal spec transition: {current} -> {target}")
+
+
+class SpecDraft(BaseModel):
+    """The draftable subset a model produces; ingested by `mship spec apply`.
+
+    Criteria/questions are plain text — mship assigns their ids on apply.
+    """
+    problem: str
+    user_story: str
+    approach: str
+    non_goals: list[str] = []
+    risks: list[str] = []
+    affected_repos: list[str] = []
+    acceptance_criteria: list[str] = []
+    open_questions: list[str] = []
