@@ -4,10 +4,28 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from mship.core.spec import SpecDraft
+
 
 class VerdictBody(BaseModel):
     criterion_id: str
     verdict: str
+
+
+class NewSpecBody(BaseModel):
+    title: str
+    id: str | None = None
+    affected_repos: list[str] = []
+    task_slug: str | None = None
+
+
+class DraftIntentBody(BaseModel):
+    intent: str
+
+
+class ApplyDraftBody(BaseModel):
+    draft: SpecDraft
+    bypass_status_gate: bool = False
 
 
 class QuestionBody(BaseModel):
@@ -47,9 +65,13 @@ def create_app(
     workspace_root: Path,
     workspace_name: str = "mothership",
     auth_token: str | None = None,
+    worktree_manager=None,
 ):
     """Build the mship serve FastAPI app (read + review/approve write endpoints).
-    Sync handlers call the core directly; FastAPI serializes the returns."""
+    Sync handlers call the core directly; FastAPI serializes the returns.
+
+    `worktree_manager` (optional) enables the dispatch endpoint to auto-spawn a
+    task when none exists; without it, dispatch can only bind a pre-existing task."""
     from fastapi import Depends, FastAPI, HTTPException
 
     from mship.core.spec_store import SpecStore
@@ -188,5 +210,75 @@ def create_app(
             except Exception:
                 pass
         return review
+
+    # --- capture-write endpoints (B3): the phone Capture path over HTTP ---
+
+    from mship.core.spec_draft import apply_draft, build_draft_prompt, new_spec
+
+    @app.post("/specs")
+    def post_create_spec(body: NewSpecBody):
+        now = datetime.now(timezone.utc)
+        try:
+            spec = new_spec(
+                body.title, now=now, spec_id=body.id,
+                affected_repos=body.affected_repos, task_slug=body.task_slug,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if store.find_by_id(spec.id) is not None:
+            raise HTTPException(status_code=409, detail=f"spec {spec.id!r} already exists")
+        store.save(spec)
+        return spec.model_dump(mode="json")
+
+    @app.post("/specs/{spec_id}/draft")
+    def post_draft(spec_id: str, body: DraftIntentBody):
+        _load_or_404(spec_id)
+        return {"prompt": build_draft_prompt(spec_id, body.intent)}
+
+    @app.post("/specs/{spec_id}/apply")
+    def post_apply(spec_id: str, body: ApplyDraftBody):
+        spec = _load_or_404(spec_id)
+        if not body.bypass_status_gate:
+            try:
+                validate_transition(spec.status, "needs_review")
+            except InvalidTransition as e:
+                raise HTTPException(status_code=409, detail=str(e))
+        apply_draft(spec, body.draft)
+        spec.status = "needs_review"
+        spec.updated_at = datetime.now(timezone.utc)
+        store.save(spec)
+        return spec.model_dump(mode="json")
+
+    # --- dispatch endpoint (B4): close the dispatch-from-phone loop ---
+
+    from mship.core.spec_dispatch import DispatchError, dispatch_spec
+
+    def _serve_spawn(s):
+        if worktree_manager is None:
+            raise DispatchError(
+                "auto-spawn unavailable: this server has no worktree manager; "
+                f"spawn a task named {s.id!r} first, then dispatch."
+            )
+        return worktree_manager.spawn(
+            description=s.title, repos=list(s.affected_repos),
+            slug=s.id, workspace_root=workspace_root,
+        ).task
+
+    @app.post("/specs/{spec_id}/dispatch")
+    def post_dispatch(spec_id: str):
+        spec = _load_or_404(spec_id)
+        try:
+            result = dispatch_spec(
+                spec, state_manager=state_manager, store=store,
+                spawn_fn=_serve_spawn, now=datetime.now(timezone.utc),
+            )
+        except DispatchError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        return {
+            "spec": result.spec.model_dump(mode="json"),
+            "task_slug": result.task.slug,
+            "spawned": result.spawned,
+            "handoff": result.handoff,
+        }
 
     return app

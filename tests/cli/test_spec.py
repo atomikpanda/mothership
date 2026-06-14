@@ -41,6 +41,25 @@ def configured_app_with_task(workspace: Path):
     container.state_manager.reset()
 
 
+@pytest.fixture
+def configured_app_git_no_task(workspace_with_git: Path):
+    """Git-backed workspace with no tasks — for exercising real auto-spawn."""
+    state_dir = workspace_with_git / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(workspace_with_git / "mothership.yaml")
+    container.state_dir.override(state_dir)
+    StateManager(state_dir).save(WorkspaceState(tasks={}))
+    yield workspace_with_git
+    container.config_path.reset_override()
+    container.state_dir.reset_override()
+    container.config.reset_override()
+    container.config.reset()
+    container.state_manager.reset_override()
+    container.state_manager.reset()
+
+
 def _store(workspace: Path) -> SpecStore:
     return SpecStore(workspace / "specs")
 
@@ -470,9 +489,9 @@ def test_spec_request_changes(configured_app_with_task: Path, tmp_path):
     assert _store(configured_app_with_task).find_by_id("dq").status == "needs_clarification"
 
 
-# --- spec dispatch (A6) ---
-# FALLBACK implementation: requires an already-existing task whose slug == spec.id.
+# --- spec dispatch (A6 + B4 auto-spawn) ---
 # The spec must be approved; the task binds spec_id; spec transitions to "dispatched".
+# When no task exists, dispatch auto-spawns one (worktrees per affected_repos).
 
 
 def _approve_add_labels(workspace: Path, tmp_path: Path) -> None:
@@ -520,15 +539,43 @@ def test_spec_dispatch_requires_approved_status(configured_app_with_task: Path, 
     assert "approve" in result.output.lower()
 
 
-def test_spec_dispatch_requires_matching_task(configured_app_with_task: Path, tmp_path: Path):
-    """If no task with slug==spec.id exists, dispatch must exit non-zero with helpful hint."""
-    # Create a spec with id "dq" — no matching task in state
-    _apply_dq(tmp_path)
-    # Approve it manually (bypass gate to skip verdict/answer steps)
+def test_spec_dispatch_auto_spawns_when_no_task(configured_app_git_no_task: Path, tmp_path: Path):
+    """No matching task → dispatch auto-spawns one (real worktrees) and dispatches."""
+    runner.invoke(app, ["spec", "new", "--title", "Cap feature", "--id", "capfeat"])
+    draft = _json.dumps({
+        "problem": "P", "user_story": "U", "approach": "A",
+        "acceptance_criteria": ["view"], "open_questions": [], "affected_repos": ["shared"],
+    })
+    jf = tmp_path / "cap.json"
+    jf.write_text(draft)
+    runner.invoke(app, ["spec", "apply", "capfeat", "--from-json", str(jf)])
+    runner.invoke(app, ["spec", "approve", "capfeat", "--bypass-gate"])
+
+    result = runner.invoke(app, ["spec", "dispatch", "capfeat"])
+    assert result.exit_code == 0, result.output
+
+    state = StateManager(configured_app_git_no_task / ".mothership").load()
+    assert "capfeat" in state.tasks                       # task auto-created
+    assert state.tasks["capfeat"].spec_id == "capfeat"    # bound
+    # real worktree materialized
+    assert (configured_app_git_no_task / ".worktrees" / "capfeat" / "shared").exists()
+    assert _store(configured_app_git_no_task).find_by_id("capfeat").status == "dispatched"
+
+
+def test_spec_dispatch_auto_spawn_refused_without_affected_repos(configured_app_with_task: Path, tmp_path: Path):
+    """No task + spec has no affected_repos → dispatch refuses (can't auto-spawn)."""
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    draft = _json.dumps({
+        "problem": "P", "user_story": "U", "approach": "A",
+        "acceptance_criteria": ["x"], "open_questions": [], "affected_repos": [],
+    })
+    jf = tmp_path / "dq.json"
+    jf.write_text(draft)
+    runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf)])
     runner.invoke(app, ["spec", "approve", "dq", "--bypass-gate"])
     result = runner.invoke(app, ["spec", "dispatch", "dq"])
     assert result.exit_code != 0
-    assert "mship spawn" in result.output or "spawn" in result.output.lower()
+    assert "affected_repos" in result.output
 
 
 def test_spec_dispatch_unknown_id_errors(configured_app_with_task: Path):
