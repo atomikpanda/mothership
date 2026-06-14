@@ -146,7 +146,7 @@ Implementer subagents report one of four statuses. Handle each appropriately:
 - `./spec-reviewer-prompt.md` - Dispatch spec compliance reviewer subagent
 - `./code-quality-reviewer-prompt.md` - Dispatch code quality reviewer subagent
 
-**Inside a mothership workspace:** prefer `mship dispatch --task <slug> -i "<implementer instruction>"` to build your implementer prompt. The `-i/--instruction` text is **required**; it is wrapped together with the task slug, worktree path, phase, recent journal entries, and per-repo bases into a self-contained Markdown block — handling multi-task disambiguation automatically. See `working-with-mothership` for the full decision tree on `mship dispatch` vs. `mship context`.
+**Inside a mothership workspace:** prefer `mship dispatch --task <slug> -i "<implementer instruction>"` to build your implementer prompt. The `-i/--instruction` text is **required**; it is wrapped together with the task slug, worktree path, phase, recent journal entries, and per-repo bases into a self-contained Markdown block — handling multi-task disambiguation automatically. For a spec-driven kickoff, `mship spec dispatch <id>` binds an approved spec to its task and emits a handoff that includes the acceptance criteria — complementary to `mship dispatch -i`. See `working-with-mothership` for the full decision tree on `mship dispatch` vs. `mship context`.
 
 ## Example Workflow
 

@@ -15,7 +15,10 @@ Assume they are a skilled developer, but know almost nothing about our toolset o
 
 **Context:** This should be run in a dedicated worktree (created by brainstorming skill).
 
-**Save plans to:** `docs/superpowers/plans/YYYY-MM-DD-<feature-name>.md`
+**Mothership workspace:** In a mothership workspace, the input to a plan is an **approved `mship spec`** — reference its id in the plan header. `mship phase dev` may be gated on that approval (see the `working-with-mothership` skill).
+
+**Save plans to:** `<docs_dir>/plans/YYYY-MM-DD-<feature-name>.md`
+- Default `docs_dir` is `docs/plans/`; in a workspace, `docs_dir` comes from `mship context`.
 - (User preferences for plan location override this default)
 
 ## Scope Check
@@ -139,7 +142,7 @@ If you find issues, fix them inline. No need to re-review — just fix and move 
 
 After saving the plan, offer execution choice:
 
-**"Plan complete and saved to `docs/superpowers/plans/<filename>.md`. Two execution options:**
+**"Plan complete and saved to `docs/plans/<filename>.md`. Two execution options:**
 
 **1. Subagent-Driven (recommended)** - I dispatch a fresh subagent per task, review between tasks, fast iteration
 
