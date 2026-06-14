@@ -48,8 +48,8 @@ def create_app(
     workspace_name: str = "mothership",
     auth_token: str | None = None,
 ):
-    """Build the read-only mship serve FastAPI app. Sync handlers call the core
-    directly; FastAPI serializes the returns (pydantic models, dicts, dataclasses)."""
+    """Build the mship serve FastAPI app (read + review/approve write endpoints).
+    Sync handlers call the core directly; FastAPI serializes the returns."""
     from fastapi import Depends, FastAPI, HTTPException
 
     from mship.core.spec_store import SpecStore
@@ -165,7 +165,7 @@ def create_app(
         if not body.bypass_gate:
             blockers = approval_blockers(spec)
             if blockers:
-                raise HTTPException(status_code=409, detail={"blocked": blockers})
+                raise HTTPException(status_code=409, detail="cannot approve: " + "; ".join(blockers))
         try:
             validate_transition(spec.status, "approved")
         except InvalidTransition as e:

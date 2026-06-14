@@ -171,10 +171,16 @@ def test_post_question_and_answer(tmp_path):
     assert client.post("/specs/dq/questions/q99/answer", json={"answer": "x"}).status_code == 400
 
 
+def test_post_question_unknown_spec_404(tmp_path):
+    assert TestClient(_app(tmp_path)).post("/specs/none/questions", json={"text": "x"}).status_code == 404
+
+
 def test_post_approve_gate_and_success(tmp_path):
     _seed_spec(tmp_path)
     client = TestClient(_app(tmp_path))
-    assert client.post("/specs/dq/approve", json={}).status_code == 409          # q1 unanswered
+    blocked = client.post("/specs/dq/approve", json={})
+    assert blocked.status_code == 409          # q1 unanswered
+    assert isinstance(blocked.json()["detail"], str)   # uniform string shape
     client.post("/specs/dq/questions/q1/answer", json={"answer": "yes"})
     ok = client.post("/specs/dq/approve", json={})
     assert ok.status_code == 200 and ok.json()["status"] == "approved"
