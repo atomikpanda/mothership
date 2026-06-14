@@ -142,7 +142,7 @@ Four phases progress linearly. Always transition explicitly with `mship phase <t
 
 | Phase | What happens here | Common per-repo skills |
 |---|---|---|
-| `plan` | Brainstorm requirements, write spec, write implementation plan | brainstorming, writing-plans (superpowers), or your team's spec process |
+| `plan` | Brainstorm requirements, author + approve an `mship spec` (see Specs above), write implementation plan | brainstorming, writing-plans, or your team's spec process |
 | `dev` | Implement, write tests, commit | TDD, subagent-driven-development, or your team's coding workflow |
 | `review` | Verify tests pass, code review, lint | code-review, verification-before-completion |
 | `run` | Start services, integration test, deploy | depends on environment |
@@ -473,7 +473,7 @@ If you realize you've been editing or committing from the main checkout instead 
 ## Integration with Other Tools
 
 Mothership pairs well with:
-- **superpowers** — methodology skills (TDD, brainstorming, code review) within each repo
+- **mship-skills** — the in-tree methodology skills (TDD, brainstorming, code review, …) bundled with mship and installed via `mship skill install`
 - **Dagger** — containerized execution, polyglot builds; receives `UPSTREAM_*` env vars from mothership
 - **gh** — required for `mship finish` PR creation
 - **Custom agent frameworks** — anything that can call shell commands and parse JSON works
