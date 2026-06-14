@@ -1,8 +1,10 @@
+import pytest
+
 from datetime import datetime, timezone
 
 from mship.core.spec import AcceptanceCriterion, OpenQuestion, Spec
 from mship.core.spec_body import render_body
-from mship.core.spec_review import build_review
+from mship.core.spec_review import build_review, set_criterion_verdict
 
 
 def _spec():
@@ -38,11 +40,6 @@ def test_build_review_summary_counts():
         "criteria_total": 2, "approved": 1, "flagged": 0, "unreviewed": 1,
         "open_questions_unanswered": 1,
     }
-
-
-import pytest
-
-from mship.core.spec_review import set_criterion_verdict
 
 
 def test_set_criterion_verdict_updates():
