@@ -56,3 +56,8 @@ def test_set_criterion_verdict_rejects_bad_verdict():
 def test_set_criterion_verdict_rejects_unknown_id():
     with pytest.raises(ValueError):
         set_criterion_verdict(_spec(), "nope", "approved")
+
+
+def test_set_criterion_verdict_rejects_prose_unit():
+    with pytest.raises(ValueError, match="not verdict-able"):
+        set_criterion_verdict(_spec(), "problem", "approved")

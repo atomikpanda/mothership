@@ -4,6 +4,9 @@ from mship.core.spec import Spec
 from mship.core.spec_body import parse_body_sections
 
 VERDICTS: tuple[str, ...] = ("unreviewed", "approved", "flagged")
+PROSE_UNIT_IDS: frozenset[str] = frozenset(
+    {"problem", "user_story", "approach", "non_goals", "risks", "scope_risk"}
+)
 
 
 def build_review(spec: Spec) -> dict:
@@ -52,6 +55,11 @@ def set_criterion_verdict(spec: Spec, criterion_id: str, verdict: str) -> Spec:
     if verdict not in VERDICTS:
         raise ValueError(
             f"invalid verdict {verdict!r}; expected one of {', '.join(VERDICTS)}"
+        )
+    if criterion_id in PROSE_UNIT_IDS:
+        raise ValueError(
+            f"{criterion_id!r} is not verdict-able; only acceptance criteria "
+            f"(ac1, ac2, …) carry verdicts in this version."
         )
     for c in spec.acceptance_criteria:
         if c.id == criterion_id:
