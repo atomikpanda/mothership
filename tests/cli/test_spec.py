@@ -314,3 +314,21 @@ def test_spec_validate_flags_missing_section(configured_app_with_task: Path):
 def test_spec_validate_unknown_id_errors(configured_app_with_task: Path):
     result = runner.invoke(app, ["spec", "validate", "nope"])
     assert result.exit_code != 0
+
+
+def test_spec_apply_rejects_malformed_json(configured_app_with_task: Path, tmp_path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    jf = tmp_path / "broken.json"
+    jf.write_text("this is not json at all")        # JSONDecodeError branch
+    result = runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf)])
+    assert result.exit_code != 0
+
+
+def test_spec_apply_reads_stdin(configured_app_with_task: Path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    result = runner.invoke(
+        app, ["spec", "apply", "dq", "--from-json", "-"], input=_draft_json()
+    )
+    assert result.exit_code == 0, result.output
+    spec = _store(configured_app_with_task).find_by_id("dq")
+    assert spec.status == "needs_review"

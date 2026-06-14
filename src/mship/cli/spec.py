@@ -200,6 +200,10 @@ def register(parent: typer.Typer, get_container):
             output.error(f"{spec_id}: invalid frontmatter — {e}")
             raise typer.Exit(1)
 
+        if spec.id != spec_id:
+            output.error(f"{spec_id}: file {matches[0].name} has mismatched id {spec.id!r}.")
+            raise typer.Exit(1)
+
         missing = validate_body_structure(spec.body)
         if missing:
             output.error(f"{spec_id}: missing body section(s): {', '.join(missing)}")
