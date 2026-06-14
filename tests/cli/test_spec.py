@@ -426,3 +426,45 @@ def test_spec_answer_unknown_question_errors(configured_app_with_task: Path, tmp
     result = runner.invoke(app, ["spec", "answer", "dq", "q99", "x"])
     assert result.exit_code != 0
     assert "q99" in result.output
+
+
+# --- spec approve / request-changes (A5) ---
+
+
+def test_spec_approve_refused_while_unreviewed(configured_app_with_task: Path, tmp_path):
+    _apply_dq(tmp_path)  # ac1 unreviewed, q1 unanswered
+    result = runner.invoke(app, ["spec", "approve", "dq"])
+    assert result.exit_code != 0
+    assert "ac1" in result.output
+
+
+def test_spec_approve_succeeds_when_clear(configured_app_with_task: Path, tmp_path):
+    _apply_dq(tmp_path)
+    runner.invoke(app, ["spec", "verdict", "dq", "ac1", "approved"])
+    runner.invoke(app, ["spec", "answer", "dq", "q1", "yes"])
+    result = runner.invoke(app, ["spec", "approve", "dq"])
+    assert result.exit_code == 0, result.output
+    assert _store(configured_app_with_task).find_by_id("dq").status == "approved"
+
+
+def test_spec_approve_bypass_gate(configured_app_with_task: Path, tmp_path):
+    _apply_dq(tmp_path)  # still blocked
+    result = runner.invoke(app, ["spec", "approve", "dq", "--bypass-gate"])
+    assert result.exit_code == 0, result.output
+    assert _store(configured_app_with_task).find_by_id("dq").status == "approved"
+
+
+def test_spec_approve_rejected_from_wrong_status(configured_app_with_task: Path, tmp_path):
+    _apply_dq(tmp_path)
+    runner.invoke(app, ["spec", "verdict", "dq", "ac1", "approved"])
+    runner.invoke(app, ["spec", "answer", "dq", "q1", "yes"])
+    runner.invoke(app, ["spec", "approve", "dq"])              # -> approved
+    again = runner.invoke(app, ["spec", "approve", "dq"])      # approved -> approved illegal
+    assert again.exit_code != 0
+
+
+def test_spec_request_changes(configured_app_with_task: Path, tmp_path):
+    _apply_dq(tmp_path)
+    result = runner.invoke(app, ["spec", "request-changes", "dq", "--reason", "tighten scope"])
+    assert result.exit_code == 0, result.output
+    assert _store(configured_app_with_task).find_by_id("dq").status == "needs_clarification"

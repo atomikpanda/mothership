@@ -352,4 +352,75 @@ def register(parent: typer.Typer, get_container):
         else:
             output.json({"id": spec.id, "question_id": q_id})
 
+    @spec_app.command("approve")
+    def approve(
+        spec_id: str = typer.Argument(...),
+        bypass_gate: bool = typer.Option(False, "--bypass-gate", help="Approve despite unmet review gate."),
+    ):
+        """Approve a spec (gate: all criteria approved + all questions answered)."""
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from mship.core.spec import InvalidTransition, validate_transition
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+        from mship.core.spec_approve import approval_blockers
+        output = Output()
+        container = get_container()
+        store = SpecStore(Path(container.config_path()).parent / SPECS_DIRNAME)
+        spec = store.find_by_id(spec_id)
+        if spec is None:
+            output.error(f"No spec with id {spec_id!r}.")
+            raise typer.Exit(1)
+        if not bypass_gate:
+            blockers = approval_blockers(spec)
+            if blockers:
+                output.error("Cannot approve — " + "; ".join(blockers) + ". Use --bypass-gate to override.")
+                raise typer.Exit(1)
+        try:
+            validate_transition(spec.status, "approved")
+        except InvalidTransition as e:
+            output.error(str(e))
+            raise typer.Exit(1)
+        spec.status = "approved"
+        spec.updated_at = datetime.now(timezone.utc)
+        path = store.save(spec)
+        if output.is_tty:
+            output.success(f"Approved: {path}")
+        else:
+            output.json({"id": spec.id, "status": spec.status})
+
+    @spec_app.command("request-changes")
+    def request_changes(
+        spec_id: str = typer.Argument(...),
+        reason: str = typer.Option(..., "--reason", help="What needs to change."),
+    ):
+        """Send a spec back for changes (→ needs_clarification)."""
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from mship.core.spec import InvalidTransition, validate_transition
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+        output = Output()
+        container = get_container()
+        store = SpecStore(Path(container.config_path()).parent / SPECS_DIRNAME)
+        spec = store.find_by_id(spec_id)
+        if spec is None:
+            output.error(f"No spec with id {spec_id!r}.")
+            raise typer.Exit(1)
+        try:
+            validate_transition(spec.status, "needs_clarification")
+        except InvalidTransition as e:
+            output.error(str(e))
+            raise typer.Exit(1)
+        spec.status = "needs_clarification"
+        spec.updated_at = datetime.now(timezone.utc)
+        store.save(spec)
+        # Reason is echoed + journaled, not persisted on the spec (see design A5).
+        try:
+            container.log_manager().append(spec.id, f"spec request-changes: {reason}")
+        except Exception:
+            pass
+        if output.is_tty:
+            output.success(f"Requested changes ({spec.status}): {reason}")
+        else:
+            output.json({"id": spec.id, "status": spec.status, "reason": reason})
+
     parent.add_typer(spec_app)
