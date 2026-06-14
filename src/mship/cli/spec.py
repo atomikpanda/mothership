@@ -123,7 +123,14 @@ def register(parent: typer.Typer, get_container):
             output.error(f"No spec with id {spec_id!r}. Create it first with `mship spec new`.")
             raise typer.Exit(1)
 
-        intent = from_text if from_text is not None else Path(from_file).read_text()
+        if from_text is not None:
+            intent = from_text
+        else:
+            try:
+                intent = Path(from_file).read_text()
+            except OSError as e:
+                output.error(f"Cannot read --from-file {from_file!r}: {e}")
+                raise typer.Exit(1)
         typer.echo(build_draft_prompt(spec_id, intent))
 
     @spec_app.command("apply")
@@ -143,7 +150,14 @@ def register(parent: typer.Typer, get_container):
         from mship.core.spec_store import SpecStore, SPECS_DIRNAME
 
         output = Output()
-        raw = sys.stdin.read() if from_json == "-" else Path(from_json).read_text()
+        if from_json == "-":
+            raw = sys.stdin.read()
+        else:
+            try:
+                raw = Path(from_json).read_text()
+            except OSError as e:
+                output.error(f"Cannot read --from-json {from_json!r}: {e}")
+                raise typer.Exit(1)
         try:
             draft = SpecDraft(**json.loads(raw))
         except (json.JSONDecodeError, ValidationError) as e:

@@ -332,3 +332,17 @@ def test_spec_apply_reads_stdin(configured_app_with_task: Path):
     assert result.exit_code == 0, result.output
     spec = _store(configured_app_with_task).find_by_id("dq")
     assert spec.status == "needs_review"
+
+
+def test_spec_draft_missing_file_errors(configured_app_with_task: Path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    result = runner.invoke(app, ["spec", "draft", "dq", "--from-file", "/no/such/file.md"])
+    assert result.exit_code != 0
+    assert "from-file" in result.output or "read" in result.output.lower()
+
+
+def test_spec_apply_missing_file_errors(configured_app_with_task: Path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    result = runner.invoke(app, ["spec", "apply", "dq", "--from-json", "/no/such/file.json"])
+    assert result.exit_code != 0
+    assert "from-json" in result.output or "read" in result.output.lower()
