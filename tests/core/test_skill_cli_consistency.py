@@ -72,9 +72,6 @@ _CMD_WORD = re.compile(r"^[a-z][a-z-]{1,}[a-z]$")
 # Matches inline backtick form: `mship …`
 _BACKTICK_RE = re.compile(r"`(mship [^`]+)`")
 
-# Matches code-fence form at start of line (optionally prefixed with "$ ")
-_FENCE_LINE_RE = re.compile(r"(?m)^[ \t]{0,4}(?:\$ )?(mship \S.*?)(?:\s*#.*)?$")
-
 
 class InvocationRef(NamedTuple):
     file: Path
