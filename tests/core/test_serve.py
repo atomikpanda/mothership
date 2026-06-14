@@ -199,3 +199,15 @@ def test_post_request_changes(tmp_path):
     client = TestClient(_app(tmp_path))
     r = client.post("/specs/dq/request-changes", json={"reason": "tighten scope"})
     assert r.status_code == 200 and r.json()["status"] == "needs_clarification"
+
+
+def test_writes_require_auth(tmp_path):
+    client = TestClient(_auth_app(tmp_path, "secret"))
+    # No Authorization header → 401 even for a write.
+    assert client.post("/specs/dq/verdict", json={"criterion_id": "ac1", "verdict": "approved"}).status_code == 401
+    # With the token → allowed.
+    ok = client.post(
+        "/specs/dq/verdict", json={"criterion_id": "ac1", "verdict": "approved"},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert ok.status_code == 200
