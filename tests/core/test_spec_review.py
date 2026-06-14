@@ -38,3 +38,24 @@ def test_build_review_summary_counts():
         "criteria_total": 2, "approved": 1, "flagged": 0, "unreviewed": 1,
         "open_questions_unanswered": 1,
     }
+
+
+import pytest
+
+from mship.core.spec_review import set_criterion_verdict
+
+
+def test_set_criterion_verdict_updates():
+    spec = _spec()
+    set_criterion_verdict(spec, "ac2", "flagged")
+    assert spec.acceptance_criteria[1].verdict == "flagged"
+
+
+def test_set_criterion_verdict_rejects_bad_verdict():
+    with pytest.raises(ValueError):
+        set_criterion_verdict(_spec(), "ac1", "bogus")
+
+
+def test_set_criterion_verdict_rejects_unknown_id():
+    with pytest.raises(ValueError):
+        set_criterion_verdict(_spec(), "nope", "approved")

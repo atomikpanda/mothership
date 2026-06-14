@@ -44,3 +44,18 @@ def build_review(spec: Spec) -> dict:
             ),
         },
     }
+
+
+def set_criterion_verdict(spec: Spec, criterion_id: str, verdict: str) -> Spec:
+    """Set one acceptance criterion's verdict in place. Raises ValueError on an
+    invalid verdict or unknown criterion id. Does not change status or persist."""
+    if verdict not in VERDICTS:
+        raise ValueError(
+            f"invalid verdict {verdict!r}; expected one of {', '.join(VERDICTS)}"
+        )
+    for c in spec.acceptance_criteria:
+        if c.id == criterion_id:
+            c.verdict = verdict
+            return spec
+    valid = ", ".join(c.id for c in spec.acceptance_criteria) or "(none)"
+    raise ValueError(f"no acceptance criterion {criterion_id!r}; valid ids: {valid}")
