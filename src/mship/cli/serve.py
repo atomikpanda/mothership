@@ -44,5 +44,6 @@ def register(app: typer.Typer, get_container):
             auth_token=token,
         )
         auth_note = "auth: bearer token" if token else "auth: none (loopback only)"
-        output.print(f"mship serve → http://{host}:{port}  ({auth_note}; docs: /docs)")
+        docs_note = "docs: disabled (auth)" if token else "docs: /docs"
+        output.print(f"mship serve → http://{host}:{port}  ({auth_note}; {docs_note})")
         uvicorn.run(api, host=host, port=port)
