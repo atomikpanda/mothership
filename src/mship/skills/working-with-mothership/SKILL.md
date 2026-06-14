@@ -80,6 +80,35 @@ MSHIP_TASK=other-task ./scripts/run-integration.sh
 - `mship sync` and `mship audit` operate on the workspace, not a single task — no `--task` needed (or honored).
 - Resources outside mship's state (docker containers, DB tables, shared caches) are NOT task-scoped. Share where safe; tear down where not.
 
+## Specs: the spec lifecycle (`mship spec`)
+
+In a mothership workspace the **canonical design artifact is a structured `mship spec`**, not an ad-hoc design doc. A spec is the shared communication substrate: a durable, queryable artifact that agents hand off to each other and that humans review/steer from the mobile app over `mship serve`. The `plan` phase is where a spec is authored and approved.
+
+A spec lives at `<workspace>/specs/<date>-<id>.md` — frontmatter (id, title, status, acceptance criteria, open questions, non-goals, risks, bound task) + a body with `Problem` / `User story` / `Approach` sections. Status flows:
+`captured → drafting → needs_review → needs_clarification → approved → dispatched → implemented → archived`.
+
+The lifecycle, in order:
+
+```bash
+mship spec new --title "<title>"            # create a stub (status: captured)
+mship spec draft <id>                        # emit a drafting prompt to stdout
+#   → run that prompt through an agent to produce SpecDraft JSON, then:
+mship spec apply <id> --from-json <file>     # ingest the draft (→ needs_review)
+mship spec validate <id>                     # check body structure
+mship spec review <id>                       # print the review payload (criteria, questions, context)
+mship spec verdict <id> <criterion-id> approved|flagged
+mship spec questions <id>                    # list open questions
+mship spec ask <id> "<question>"             # add a question
+mship spec answer <id> <question-id> "<answer>"
+mship spec approve <id> [--bypass-gate]      # → approved (gate: all criteria approved + questions answered)
+mship spec request-changes <id> --reason "<why>"   # → needs_clarification
+mship spec dispatch <id>                     # bind the approved spec to a task + emit a handoff
+```
+
+Review a spec without the CLI via `mship view spec [--web]`, or over HTTP via `mship serve` (the Ground Control phone path).
+
+**The approval gate.** With `require_approved_spec: true` in `mothership.yaml`, `mship phase dev` is **hard-blocked** until a bound, approved spec exists — escape with `mship phase dev --bypass-spec-gate`. **This is opt-in: the default is OFF**, so by default `phase dev` only warns when no spec is found. Spec-first is the recommended methodology regardless of the gate.
+
 ## Delegating to subagents: `mship context` and `mship dispatch`
 
 Two mship-native primitives for handing work to subagents. Use them instead of hand-rolling task context:
@@ -119,7 +148,7 @@ Four phases progress linearly. Always transition explicitly with `mship phase <t
 | `run` | Start services, integration test, deploy | depends on environment |
 
 **Soft gates** warn (don't block) when preconditions aren't met:
-- `phase dev` → warns if no spec is found
+- `phase dev` → warns if no spec is found (default); **hard-blocks when `require_approved_spec: true`** in `mothership.yaml` — escape with `--bypass-spec-gate`. See [Specs: the spec lifecycle](#specs-the-spec-lifecycle-mship-spec) above.
 - `phase review` → warns if tests haven't passed
 - `phase run` → warns if there are uncommitted changes
 
@@ -157,7 +186,7 @@ mship block "reason" | mship unblock
 mship test [--all] [--repos|--tag] [--no-diff]
 mship journal "msg" [--action X] [--open Y] [--repo R] [--test-state pass|fail|mixed]
 mship journal --show-open                 # what am I blocked on across this task?
-mship finish [--base B] [--base-map ...] [--push-only] [--handoff] [--force-audit] [--body-file F | --body TEXT] [--force]
+mship finish [--base B] [--base-map ...] [--push-only] [--handoff] [--force-audit] [--body-file F | --body TEXT] [--force] [--require-tests] [--title T] [--body-map ...]
 mship close [--yes] [--abandon] [--force] [--skip-pr-check]
 ```
 
@@ -177,7 +206,9 @@ If you don't, your edits in the shell affect the main checkout, not the feature 
 
 **Always log structured.** `--action` makes session resume actually work. `--open` flags blockers you'll come back to. `--show-open` lists them. The `repo` field is auto-inferred from `mship switch`'s active repo.
 
-**`finish`:** PR base resolves as `--base-map` entry > `--base` > `repo.base_branch` in config > gh default. Every base is verified on origin before any push; empty branches and missing bases fail fast with no partial state.
+**Structured debugging entries.** `mship debug hypothesis|rule-out|resolved` records structured debugging entries into the task journal. `mship test` auto-attaches to the open hypothesis if one exists. See the `systematic-debugging` skill for the full workflow.
+
+**`finish`:** PR base resolves as `--base-map` entry > `--base` > `repo.base_branch` in config > gh default. Every base is verified on origin before any push; empty branches and missing bases fail fast with no partial state. `--require-tests` blocks (not just warns) when no passing test evidence exists for the task. `--title` overrides the PR title; `--body-map` sets per-repo bodies when repos need different PR descriptions. `--force`/`-f` re-pushes new commits to an already-finished task's existing PR (useful when iterating post-finish without opening a new task).
 
 **`finish` PR body — write a real one.** By default the PR body is just the task description plus a `Closes #N` footer for any issue refs found in the description, journal, and commit subjects. That's a placeholder, not a body. For agent-driven finishes, pass `--body-file <path>` (or `--body '<inline>'`, or `--body -` for stdin) with a real Summary and Test plan. Empty bodies are rejected — that's deliberate. If you forgot at finish time, follow up immediately with `gh pr edit <url> --body-file <path>`. A bare task-description PR is treated as incomplete.
 
@@ -236,6 +267,8 @@ mship view status|journal|diff|spec [--watch]
 mship view spec --web                 # serves HTML on localhost
 mship graph
 mship worktrees
+mship serve [--host H] [--port 47100] # read + review/approve write API over the spec + task model;
+                                      # bearer MSHIP_SERVE_TOKEN required for non-loopback — the Ground Control phone surface
 ```
 
 **`mship pr`** iterates active tasks with `pr_urls` and shows per-PR state (`open`/`merged`/`closed`/`unknown`) and base branch. Use this instead of `gh pr view <url>` per task when you want the full cross-task picture — it's the answer to "what's merged vs. still in review across everything I have open?" TTY → table; non-TTY → JSON `{tasks: [{slug, prs: [...]}]}`.
