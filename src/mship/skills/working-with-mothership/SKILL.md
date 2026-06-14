@@ -42,7 +42,7 @@ Mothership supports multiple active tasks simultaneously. Typical reasons:
 - Two unrelated investigations in flight; one can progress while the other is idle.
 - Long-running `mship finish` / CI on task A while beginning new work on task B.
 
-Each task has its own worktree at `.worktrees/feat/<slug>/`; they coexist cleanly.
+Each task gets a worktree per affected repo at `.worktrees/<slug>/<repo>/` (the branch is `feat/<slug>`); they coexist cleanly.
 
 ### How mship resolves which task a command targets
 
@@ -50,7 +50,7 @@ In order of precedence:
 
 1. **`--task <slug>` flag** — explicit; wins over everything else. Use for one-off commands from any pwd.
 2. **`MSHIP_TASK=<slug>` env var** — shell/tab-level default. Useful when you want every `mship` command in a shell to target one task.
-3. **cwd-based inference** — if pwd is inside `.worktrees/feat/<slug>/`, mship picks `<slug>`. This is the most ergonomic: `cd` into a worktree and every command defaults to that task.
+3. **cwd-based inference** — if pwd is inside `.worktrees/<slug>/<repo>/`, mship picks `<slug>`. This is the most ergonomic: `cd` into a worktree and every command defaults to that task.
 
 Zero anchors (no `--task`, no `MSHIP_TASK`, pwd outside any worktree) + two active tasks → `AmbiguousTaskError` with a clear message listing the options.
 
@@ -61,7 +61,7 @@ Zero anchors (no `--task`, no `MSHIP_TASK`, pwd outside any worktree) + two acti
 mship worktrees
 
 # Open a new terminal tab → enter a different task's worktree:
-cd .worktrees/feat/other-task
+cd .worktrees/other-task/<repo>
 
 # Every mship command in this tab now targets `other-task`:
 mship status
@@ -84,10 +84,10 @@ MSHIP_TASK=other-task ./scripts/run-integration.sh
 
 Two mship-native primitives for handing work to subagents. Use them instead of hand-rolling task context:
 
-- **`mship dispatch`** — emits a self-contained Markdown prompt for a subagent. Output includes task slug, worktree path, phase, recent journal entries, affected repos, and per-repo bases. Pipe stdout directly as the `prompt` field of a Claude Code `Task` tool dispatch (or analogous mechanism in Codex / other agent platforms).
+- **`mship dispatch`** — wraps your instruction (`-i/--instruction`, **required**) in a self-contained Markdown prompt for a subagent. Output includes your instruction plus the task slug, worktree path, phase, recent journal entries, affected repos, and per-repo bases. Pipe stdout directly as the `prompt` field of a Claude Code `Task` tool dispatch (or analogous mechanism in Codex / other agent platforms).
 
   ```bash
-  mship dispatch --task my-task   # prints a ready-to-use prompt to stdout
+  mship dispatch --task my-task -i "implement the parser changes"   # prints a ready-to-use prompt to stdout
   ```
 
 - **`mship context`** — emits structured JSON for programmatic consumers. Use when feeding state into a non-Claude-Code LLM, logging for audit, or scripting decisions. `jq`-friendly.
@@ -232,7 +232,7 @@ For larger changes — new features, significant refactors — spawn a new task 
 mship status                          # task, phase, branch, drift, last log, finished warning
 mship audit [--repos r] [--json]
 mship pr                              # aggregate PR state across all active tasks
-mship view status|logs|diff|spec [--watch]
+mship view status|journal|diff|spec [--watch]
 mship view spec --web                 # serves HTML on localhost
 mship graph
 mship worktrees
