@@ -3,20 +3,34 @@ from __future__ import annotations
 from pathlib import Path
 
 
+def _make_auth_dependency(token: str):
+    import hmac
+    from fastapi import Header, HTTPException
+
+    def _require_token(authorization: str | None = Header(default=None)):
+        expected = f"Bearer {token}"
+        if authorization is None or not hmac.compare_digest(authorization, expected):
+            raise HTTPException(status_code=401, detail="missing or invalid bearer token")
+
+    return _require_token
+
+
 def create_app(
     specs_dir: Path,
     state_manager,
     log_manager,
     workspace_root: Path,
     workspace_name: str = "mothership",
+    auth_token: str | None = None,
 ):
     """Build the read-only mship serve FastAPI app. Sync handlers call the core
     directly; FastAPI serializes the returns (pydantic models, dicts, dataclasses)."""
-    from fastapi import FastAPI, HTTPException
+    from fastapi import Depends, FastAPI, HTTPException
 
     from mship.core.spec_store import SpecStore
 
-    app = FastAPI(title="mship serve", version="0")
+    dependencies = [Depends(_make_auth_dependency(auth_token))] if auth_token else []
+    app = FastAPI(title="mship serve", version="0", dependencies=dependencies)
     store = SpecStore(specs_dir)
 
     @app.get("/health")

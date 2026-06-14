@@ -104,3 +104,23 @@ def test_post_is_405(tmp_path):
 
 def test_unknown_path_404(tmp_path):
     assert TestClient(_app(tmp_path)).get("/nope").status_code == 404
+
+
+def _auth_app(tmp_path: Path, token):
+    _seed_spec(tmp_path)
+    state = StateManager(tmp_path / ".mothership")
+    return create_app(
+        specs_dir=tmp_path / "specs", state_manager=state, log_manager=None,
+        workspace_root=tmp_path, workspace_name="test-ws", auth_token=token,
+    )
+
+
+def test_auth_required_when_token_set(tmp_path):
+    client = TestClient(_auth_app(tmp_path, "secret"))
+    assert client.get("/specs").status_code == 401
+    assert client.get("/specs", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.get("/specs", headers={"Authorization": "Bearer secret"}).status_code == 200
+
+
+def test_open_when_no_token(tmp_path):
+    assert TestClient(_auth_app(tmp_path, None)).get("/specs").status_code == 200
