@@ -94,3 +94,13 @@ def test_journal(tmp_path):
     entries = client.get("/journal/dq").json()
     assert any("spawned" in e["message"] for e in entries)
     assert client.get("/journal/nope").status_code == 404
+
+
+def test_post_is_405(tmp_path):
+    # No write routes registered → POST to a GET path is 405 (Method Not Allowed).
+    r = TestClient(_app(tmp_path)).post("/specs/dq/review")
+    assert r.status_code == 405
+
+
+def test_unknown_path_404(tmp_path):
+    assert TestClient(_app(tmp_path)).get("/nope").status_code == 404
