@@ -100,4 +100,132 @@ def register(parent: typer.Typer, get_container):
                 "status": spec.status, "task_slug": task_slug,
             })
 
+    @spec_app.command("draft")
+    def draft(
+        spec_id: str = typer.Argument(..., help="Spec id to draft (must already exist)."),
+        from_text: Optional[str] = typer.Option(None, "--from-text", help="Inline intent text."),
+        from_file: Optional[str] = typer.Option(None, "--from-file", help="Read intent from a file."),
+    ):
+        """Emit a drafting prompt for `<id>` to stdout (run it through your agent, then `spec apply`)."""
+        from pathlib import Path
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+        from mship.core.spec_draft import build_draft_prompt
+
+        output = Output()
+        if (from_text is None) == (from_file is None):
+            output.error("Provide exactly one of --from-text or --from-file.")
+            raise typer.Exit(1)
+
+        container = get_container()
+        workspace_root = Path(container.config_path()).parent
+        store = SpecStore(workspace_root / SPECS_DIRNAME)
+        if store.find_by_id(spec_id) is None:
+            output.error(f"No spec with id {spec_id!r}. Create it first with `mship spec new`.")
+            raise typer.Exit(1)
+
+        if from_text is not None:
+            intent = from_text
+        else:
+            try:
+                intent = Path(from_file).read_text()
+            except OSError as e:
+                output.error(f"Cannot read --from-file {from_file!r}: {e}")
+                raise typer.Exit(1)
+        typer.echo(build_draft_prompt(spec_id, intent))
+
+    @spec_app.command("apply")
+    def apply(
+        spec_id: str = typer.Argument(..., help="Spec id to apply the draft to."),
+        from_json: str = typer.Option(..., "--from-json", help="Path to the draft JSON, or - for stdin."),
+        bypass_status_gate: bool = typer.Option(False, "--bypass-status-gate", help="Apply regardless of current status."),
+    ):
+        """Ingest a SpecDraft JSON: render the body, set fields, advance to needs_review."""
+        import json
+        import sys
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from pydantic import ValidationError
+        from mship.core.spec import SpecDraft, InvalidTransition, validate_transition
+        from mship.core.spec_draft import apply_draft
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+
+        output = Output()
+        if from_json == "-":
+            raw = sys.stdin.read()
+        else:
+            try:
+                raw = Path(from_json).read_text()
+            except OSError as e:
+                output.error(f"Cannot read --from-json {from_json!r}: {e}")
+                raise typer.Exit(1)
+        try:
+            draft = SpecDraft(**json.loads(raw))
+        except (json.JSONDecodeError, ValidationError) as e:
+            output.error(f"Invalid draft JSON: {e}")
+            raise typer.Exit(1)
+
+        container = get_container()
+        workspace_root = Path(container.config_path()).parent
+        store = SpecStore(workspace_root / SPECS_DIRNAME)
+        spec = store.find_by_id(spec_id)
+        if spec is None:
+            output.error(f"No spec with id {spec_id!r}.")
+            raise typer.Exit(1)
+
+        if not bypass_status_gate:
+            try:
+                validate_transition(spec.status, "needs_review")
+            except InvalidTransition as e:
+                output.error(f"{e}. Use --bypass-status-gate to override.")
+                raise typer.Exit(1)
+
+        apply_draft(spec, draft)
+        spec.status = "needs_review"
+        spec.updated_at = datetime.now(timezone.utc)
+        path = store.save(spec)
+
+        if output.is_tty:
+            output.success(f"Applied draft → {spec.status}: {path}")
+        else:
+            output.json({"id": spec.id, "status": spec.status, "path": str(path)})
+
+    @spec_app.command("validate")
+    def validate(
+        spec_id: str = typer.Argument(..., help="Spec id to validate."),
+    ):
+        """Check a spec conforms: frontmatter validates + canonical body sections present."""
+        from pathlib import Path
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME, SpecParseError, parse_spec
+        from mship.core.spec_body import validate_body_structure
+
+        output = Output()
+        container = get_container()
+        workspace_root = Path(container.config_path()).parent
+        specs_dir = workspace_root / SPECS_DIRNAME
+
+        matches = sorted(specs_dir.glob(f"*-{spec_id}.md"))
+        if not matches:
+            output.error(f"No spec file for id {spec_id!r} in {specs_dir}.")
+            raise typer.Exit(1)
+
+        try:
+            spec = parse_spec(matches[0].read_text())
+        except SpecParseError as e:
+            output.error(f"{spec_id}: invalid frontmatter — {e}")
+            raise typer.Exit(1)
+
+        if spec.id != spec_id:
+            output.error(f"{spec_id}: file {matches[0].name} has mismatched id {spec.id!r}.")
+            raise typer.Exit(1)
+
+        missing = validate_body_structure(spec.body)
+        if missing:
+            output.error(f"{spec_id}: missing body section(s): {', '.join(missing)}")
+            raise typer.Exit(1)
+
+        if output.is_tty:
+            output.success(f"{spec_id}: valid")
+        else:
+            output.json({"id": spec_id, "valid": True})
+
     parent.add_typer(spec_app)

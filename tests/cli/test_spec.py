@@ -222,3 +222,127 @@ def test_gate_dev_hint_mentions_spec_new(tmp_path: Path):
     spec_warn = next((w for w in result.warnings if "spec" in w.lower()), None)
     assert spec_warn is not None, result.warnings
     assert "mship spec new" in spec_warn
+
+
+def test_spec_draft_emits_prompt(configured_app_with_task: Path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    result = runner.invoke(app, ["spec", "draft", "dq", "--from-text", "rambled intent here"])
+    assert result.exit_code == 0, result.output
+    assert "rambled intent here" in result.output
+    assert "mship spec apply dq --from-json" in result.output
+
+
+def test_spec_draft_requires_exactly_one_source(configured_app_with_task: Path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    neither = runner.invoke(app, ["spec", "draft", "dq"])
+    assert neither.exit_code != 0
+    both = runner.invoke(app, ["spec", "draft", "dq", "--from-text", "x", "--from-file", "f.md"])
+    assert both.exit_code != 0
+
+
+def test_spec_draft_unknown_id_errors(configured_app_with_task: Path):
+    result = runner.invoke(app, ["spec", "draft", "nope", "--from-text", "x"])
+    assert result.exit_code != 0
+    assert "nope" in result.output
+
+
+# --- spec apply (#146) ---
+
+import json as _json
+
+
+def _draft_json() -> str:
+    return _json.dumps({
+        "problem": "P", "user_story": "U", "approach": "A",
+        "acceptance_criteria": ["view questions"], "open_questions": ["Android?"],
+        "non_goals": ["chat"], "risks": [], "affected_repos": ["mothership"],
+    })
+
+
+def test_spec_apply_merges_and_advances_status(configured_app_with_task: Path, tmp_path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    jf = tmp_path / "draft.json"
+    jf.write_text(_draft_json())
+    result = runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf)])
+    assert result.exit_code == 0, result.output
+    spec = _store(configured_app_with_task).find_by_id("dq")
+    assert spec.status == "needs_review"
+    assert [c.id for c in spec.acceptance_criteria] == ["ac1"]
+    assert "## Problem" in spec.body
+
+
+def test_spec_apply_rejects_invalid_json(configured_app_with_task: Path, tmp_path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    jf = tmp_path / "bad.json"
+    jf.write_text('{"problem": "only problem"}')   # missing required fields
+    result = runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf)])
+    assert result.exit_code != 0
+
+
+def test_spec_apply_refuses_wrong_status(configured_app_with_task: Path, tmp_path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    jf = tmp_path / "draft.json"; jf.write_text(_draft_json())
+    runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf)])           # -> needs_review
+    again = runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf)])    # needs_review->needs_review illegal
+    assert again.exit_code != 0
+    forced = runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf), "--bypass-status-gate"])
+    assert forced.exit_code == 0, forced.output
+
+
+# --- spec validate (#146) ---
+
+
+def test_spec_validate_passes_on_applied_spec(configured_app_with_task: Path, tmp_path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    jf = tmp_path / "draft.json"; jf.write_text(_draft_json())
+    runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf)])
+    result = runner.invoke(app, ["spec", "validate", "dq"])
+    assert result.exit_code == 0, result.output
+
+
+def test_spec_validate_flags_missing_section(configured_app_with_task: Path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    store = _store(configured_app_with_task)
+    spec = store.find_by_id("dq")
+    spec.body = "## Problem\n\njust the problem\n"   # drop User story + Approach
+    store.save(spec)
+    result = runner.invoke(app, ["spec", "validate", "dq"])
+    assert result.exit_code != 0
+    assert "User story" in result.output or "Approach" in result.output
+
+
+def test_spec_validate_unknown_id_errors(configured_app_with_task: Path):
+    result = runner.invoke(app, ["spec", "validate", "nope"])
+    assert result.exit_code != 0
+
+
+def test_spec_apply_rejects_malformed_json(configured_app_with_task: Path, tmp_path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    jf = tmp_path / "broken.json"
+    jf.write_text("this is not json at all")        # JSONDecodeError branch
+    result = runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf)])
+    assert result.exit_code != 0
+
+
+def test_spec_apply_reads_stdin(configured_app_with_task: Path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    result = runner.invoke(
+        app, ["spec", "apply", "dq", "--from-json", "-"], input=_draft_json()
+    )
+    assert result.exit_code == 0, result.output
+    spec = _store(configured_app_with_task).find_by_id("dq")
+    assert spec.status == "needs_review"
+
+
+def test_spec_draft_missing_file_errors(configured_app_with_task: Path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    result = runner.invoke(app, ["spec", "draft", "dq", "--from-file", "/no/such/file.md"])
+    assert result.exit_code != 0
+    assert "from-file" in result.output or "read" in result.output.lower()
+
+
+def test_spec_apply_missing_file_errors(configured_app_with_task: Path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    result = runner.invoke(app, ["spec", "apply", "dq", "--from-json", "/no/such/file.json"])
+    assert result.exit_code != 0
+    assert "from-json" in result.output or "read" in result.output.lower()
