@@ -9,7 +9,7 @@ description: Use when creating new skills, editing existing skills, or verifying
 
 **Writing skills IS Test-Driven Development applied to process documentation.**
 
-**Personal skills live in agent-specific directories (`~/.claude/skills` for Claude Code, `~/.agents/skills/` for Codex)** 
+**Personal skills live in agent-specific directories (`~/.claude/skills` for Claude Code, `~/.agents/skills/` for Codex). In mothership, bundled skills live in `src/mship/skills/<name>/SKILL.md` and are distributed with `mship skill install`.**
 
 You write test cases (pressure scenarios with subagents), watch them fail (baseline behavior), write the skill (documentation), watch tests pass (agents comply), and refactor (close loopholes).
 
@@ -553,7 +553,7 @@ Run same scenarios WITH skill. Agent should now comply.
 
 Agent found new rationalization? Add explicit counter. Re-test until bulletproof.
 
-**Testing methodology:** See @testing-skills-with-subagents.md for the complete testing methodology:
+**Testing methodology:** See testing-skills-with-subagents.md for the complete testing methodology:
 - How to write pressure scenarios
 - Pressure types (time, sunk cost, authority, exhaustion)
 - Plugging holes systematically
@@ -630,6 +630,7 @@ Deploying untested skills = deploying untested code. It's a violation of quality
 
 **Deployment:**
 - [ ] Commit skill to git and push to your fork (if configured)
+- [ ] In the mothership repo, run `mship skill install` after committing to propagate the skill into agent dirs
 - [ ] Consider contributing back via PR (if broadly useful)
 
 ## Discovery Workflow
