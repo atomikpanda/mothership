@@ -287,3 +287,30 @@ def test_spec_apply_refuses_wrong_status(configured_app_with_task: Path, tmp_pat
     assert again.exit_code != 0
     forced = runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf), "--bypass-status-gate"])
     assert forced.exit_code == 0, forced.output
+
+
+# --- spec validate (#146) ---
+
+
+def test_spec_validate_passes_on_applied_spec(configured_app_with_task: Path, tmp_path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    jf = tmp_path / "draft.json"; jf.write_text(_draft_json())
+    runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf)])
+    result = runner.invoke(app, ["spec", "validate", "dq"])
+    assert result.exit_code == 0, result.output
+
+
+def test_spec_validate_flags_missing_section(configured_app_with_task: Path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    store = _store(configured_app_with_task)
+    spec = store.find_by_id("dq")
+    spec.body = "## Problem\n\njust the problem\n"   # drop User story + Approach
+    store.save(spec)
+    result = runner.invoke(app, ["spec", "validate", "dq"])
+    assert result.exit_code != 0
+    assert "User story" in result.output or "Approach" in result.output
+
+
+def test_spec_validate_unknown_id_errors(configured_app_with_task: Path):
+    result = runner.invoke(app, ["spec", "validate", "nope"])
+    assert result.exit_code != 0

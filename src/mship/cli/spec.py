@@ -175,4 +175,39 @@ def register(parent: typer.Typer, get_container):
         else:
             output.json({"id": spec.id, "status": spec.status, "path": str(path)})
 
+    @spec_app.command("validate")
+    def validate(
+        spec_id: str = typer.Argument(..., help="Spec id to validate."),
+    ):
+        """Check a spec conforms: frontmatter validates + canonical body sections present."""
+        from pathlib import Path
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME, SpecParseError, parse_spec
+        from mship.core.spec_body import validate_body_structure
+
+        output = Output()
+        container = get_container()
+        workspace_root = Path(container.config_path()).parent
+        specs_dir = workspace_root / SPECS_DIRNAME
+
+        matches = sorted(specs_dir.glob(f"*-{spec_id}.md"))
+        if not matches:
+            output.error(f"No spec file for id {spec_id!r} in {specs_dir}.")
+            raise typer.Exit(1)
+
+        try:
+            spec = parse_spec(matches[0].read_text())
+        except SpecParseError as e:
+            output.error(f"{spec_id}: invalid frontmatter — {e}")
+            raise typer.Exit(1)
+
+        missing = validate_body_structure(spec.body)
+        if missing:
+            output.error(f"{spec_id}: missing body section(s): {', '.join(missing)}")
+            raise typer.Exit(1)
+
+        if output.is_tty:
+            output.success(f"{spec_id}: valid")
+        else:
+            output.json({"id": spec_id, "valid": True})
+
     parent.add_typer(spec_app)
