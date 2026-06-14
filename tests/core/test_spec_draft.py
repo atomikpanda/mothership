@@ -41,3 +41,34 @@ def test_apply_draft_merges_fields_and_assigns_ids():
     assert [q.id for q in out.open_questions] == ["q1"]
     assert out.open_questions[0].answer is None
     assert out.id == "dq" and out.task_slug == "dq"         # identity preserved
+
+
+import pytest
+
+from mship.core.spec_draft import new_spec, SPEC_BODY_TEMPLATE
+
+
+def test_new_spec_defaults_id_from_title():
+    now = datetime(2026, 6, 14, tzinfo=timezone.utc)
+    spec = new_spec("Decision Queue", now=now)
+    assert spec.id == "decision-queue"          # slugified title
+    assert spec.title == "Decision Queue"
+    assert spec.status == "drafting"            # fresh specs start drafting
+    assert spec.created_at == now and spec.updated_at == now
+    assert spec.body == SPEC_BODY_TEMPLATE      # canonical empty body
+    assert spec.affected_repos == [] and spec.task_slug is None
+
+
+def test_new_spec_honors_explicit_id_repos_and_task():
+    now = datetime(2026, 6, 14, tzinfo=timezone.utc)
+    spec = new_spec("Anything", now=now, spec_id="custom",
+                    affected_repos=["a", "b"], task_slug="t")
+    assert spec.id == "custom"
+    assert spec.affected_repos == ["a", "b"]
+    assert spec.task_slug == "t"
+
+
+def test_new_spec_unslugifiable_title_raises():
+    now = datetime(2026, 6, 14, tzinfo=timezone.utc)
+    with pytest.raises(ValueError):
+        new_spec("!!!", now=now)             # slug collapses to empty

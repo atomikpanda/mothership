@@ -1,7 +1,57 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from mship.core.spec import AcceptanceCriterion, OpenQuestion, Spec, SpecDraft
 from mship.core.spec_body import render_body
+from mship.util.slug import slugify
+
+
+SPEC_BODY_TEMPLATE = """\
+## Problem
+
+_What problem does this solve? Why now?_
+
+## User story
+
+_As a <user>, I want <capability>, so that <benefit>._
+
+## Approach
+
+_How will it work? Key decisions._
+"""
+
+
+def new_spec(
+    title: str,
+    *,
+    now: datetime,
+    spec_id: str | None = None,
+    affected_repos: list[str] | None = None,
+    task_slug: str | None = None,
+) -> Spec:
+    """Construct a fresh spec in `drafting` with the canonical empty body.
+
+    Pure: builds and returns the `Spec` but does NOT persist it — callers own
+    save + collision handling. `spec_id` defaults to a slug of the title;
+    raises `ValueError` if the title yields an empty slug and no id is given.
+    """
+    if spec_id is None:
+        spec_id = slugify(title)
+    if not spec_id:
+        raise ValueError(
+            f"could not derive a spec id from title {title!r}; pass spec_id explicitly"
+        )
+    return Spec(
+        id=spec_id,
+        title=title,
+        status="drafting",
+        created_at=now,
+        updated_at=now,
+        affected_repos=list(affected_repos or []),
+        task_slug=task_slug,
+        body=SPEC_BODY_TEMPLATE,
+    )
 
 
 def build_draft_prompt(spec_id: str, intent_text: str) -> str:

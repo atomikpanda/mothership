@@ -211,3 +211,176 @@ def test_writes_require_auth(tmp_path):
         headers={"Authorization": "Bearer secret"},
     )
     assert ok.status_code == 200
+
+
+# --- B3: capture-write endpoints (create / draft / apply) ---
+
+
+def test_post_create_spec(tmp_path):
+    client = TestClient(_app(tmp_path))
+    r = client.post("/specs", json={"title": "Decision Queue", "affected_repos": ["mothership"]})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["id"] == "decision-queue"     # slugified title
+    assert body["status"] == "drafting"
+    assert body["affected_repos"] == ["mothership"]
+    # persisted → shows up in the list
+    assert any(s["id"] == "decision-queue" for s in client.get("/specs").json())
+
+
+def test_post_create_spec_explicit_id(tmp_path):
+    client = TestClient(_app(tmp_path))
+    r = client.post("/specs", json={"title": "Anything", "id": "custom"})
+    assert r.status_code == 200 and r.json()["id"] == "custom"
+
+
+def test_post_create_spec_collision_409(tmp_path):
+    client = TestClient(_app(tmp_path))
+    assert client.post("/specs", json={"title": "Dup"}).status_code == 200
+    assert client.post("/specs", json={"title": "Dup"}).status_code == 409
+
+
+def test_post_create_spec_unslugifiable_title_400(tmp_path):
+    client = TestClient(_app(tmp_path))
+    assert client.post("/specs", json={"title": "!!!"}).status_code == 400
+
+
+def test_post_draft_returns_prompt_no_mutation(tmp_path):
+    client = TestClient(_app(tmp_path))
+    client.post("/specs", json={"title": "DQ", "id": "dq"})
+    r = client.post("/specs/dq/draft", json={"intent": "I want a decision queue"})
+    assert r.status_code == 200
+    prompt = r.json()["prompt"]
+    assert "I want a decision queue" in prompt          # the intent
+    assert "acceptance_criteria" in prompt              # the draft JSON shape
+    # draft is read-only: status unchanged
+    assert client.get("/specs/dq").json()["status"] == "drafting"
+
+
+def test_post_draft_unknown_spec_404(tmp_path):
+    assert TestClient(_app(tmp_path)).post("/specs/none/draft", json={"intent": "x"}).status_code == 404
+
+
+def test_post_apply_advances_to_needs_review(tmp_path):
+    client = TestClient(_app(tmp_path))
+    client.post("/specs", json={"title": "DQ", "id": "dq"})   # drafting
+    r = client.post("/specs/dq/apply", json={"draft": {
+        "problem": "P", "user_story": "U", "approach": "A",
+        "acceptance_criteria": ["view questions"], "open_questions": ["android?"],
+        "affected_repos": ["mothership"],
+    }})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "needs_review"
+    assert [c["id"] for c in body["acceptance_criteria"]] == ["ac1"]
+    assert body["affected_repos"] == ["mothership"]
+
+
+def test_post_apply_unknown_spec_404(tmp_path):
+    r = TestClient(_app(tmp_path)).post(
+        "/specs/none/apply", json={"draft": {"problem": "P", "user_story": "U", "approach": "A"}}
+    )
+    assert r.status_code == 404
+
+
+def test_post_apply_illegal_transition_409_and_bypass(tmp_path):
+    _seed_spec(tmp_path)   # status needs_review already
+    client = TestClient(_app(tmp_path))
+    draft = {"draft": {"problem": "P", "user_story": "U", "approach": "A"}}
+    assert client.post("/specs/dq/apply", json=draft).status_code == 409      # needs_review → needs_review illegal
+    ok = client.post("/specs/dq/apply", json={**draft, "bypass_status_gate": True})
+    assert ok.status_code == 200 and ok.json()["status"] == "needs_review"
+
+
+def test_capture_writes_require_auth(tmp_path):
+    client = TestClient(_auth_app(tmp_path, "secret"))
+    assert client.post("/specs", json={"title": "X"}).status_code == 401
+    ok = client.post("/specs", json={"title": "X"}, headers={"Authorization": "Bearer secret"})
+    assert ok.status_code == 200
+
+
+# --- B4: dispatch endpoint + auto-spawn ---
+
+from types import SimpleNamespace
+
+
+def _seed_approved_spec(tmp_path: Path, spec_id="dq", repos=("mothership",)):
+    now = datetime(2026, 6, 14, tzinfo=timezone.utc)
+    SpecStore(tmp_path / "specs").save(Spec(
+        id=spec_id, title="Decision queue", status="approved",
+        created_at=now, updated_at=now, affected_repos=list(repos),
+        body=render_body("the problem", "as a user", "the approach"),
+        acceptance_criteria=[AcceptanceCriterion(id="ac1", text="view questions", verdict="approved")],
+    ))
+
+
+class _FakeWorktreeManager:
+    """Stands in for WorktreeManager.spawn — registers a task, no real git."""
+
+    def __init__(self, sm):
+        self._sm = sm
+
+    def spawn(self, *, description, repos, slug, workspace_root):
+        task = Task(
+            slug=slug, description=description, phase="plan",
+            created_at=datetime(2026, 6, 14, tzinfo=timezone.utc),
+            affected_repos=list(repos), branch=f"feat/{slug}",
+            worktrees={r: Path(f"/wt/{slug}/{r}") for r in repos},
+        )
+        self._sm.mutate(lambda s: s.tasks.__setitem__(slug, task))
+        return SimpleNamespace(task=task)
+
+
+def _empty_state(tmp_path: Path) -> StateManager:
+    (tmp_path / ".mothership").mkdir(exist_ok=True)
+    sm = StateManager(tmp_path / ".mothership")
+    sm.save(WorkspaceState(tasks={}))
+    return sm
+
+
+def test_post_dispatch_binds_existing_task(tmp_path):
+    sm, log = _seed_task(tmp_path)        # task "dq", affected_repos=["mothership"]
+    _seed_approved_spec(tmp_path)         # approved spec "dq"
+    client = TestClient(_app_with(tmp_path, sm, log))
+    r = client.post("/specs/dq/dispatch")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["spawned"] is False
+    assert body["spec"]["status"] == "dispatched"
+    assert body["task_slug"] == "dq"
+    assert "view questions" in body["handoff"]
+    assert sm.load().tasks["dq"].spec_id == "dq"
+
+
+def test_post_dispatch_auto_spawns(tmp_path):
+    sm = _empty_state(tmp_path)
+    _seed_approved_spec(tmp_path, spec_id="cap", repos=["shared"])
+    app = create_app(
+        specs_dir=tmp_path / "specs", state_manager=sm, log_manager=None,
+        workspace_root=tmp_path, workspace_name="t",
+        worktree_manager=_FakeWorktreeManager(sm),
+    )
+    r = TestClient(app).post("/specs/cap/dispatch")
+    assert r.status_code == 200, r.text
+    assert r.json()["spawned"] is True
+    assert sm.load().tasks["cap"].spec_id == "cap"
+
+
+def test_post_dispatch_not_approved_409(tmp_path):
+    _seed_spec(tmp_path)                  # status needs_review
+    assert TestClient(_app(tmp_path)).post("/specs/dq/dispatch").status_code == 409
+
+
+def test_post_dispatch_unknown_spec_404(tmp_path):
+    assert TestClient(_app(tmp_path)).post("/specs/none/dispatch").status_code == 404
+
+
+def test_post_dispatch_auto_spawn_unavailable_409(tmp_path):
+    # approved spec, no task, no worktree_manager configured → cannot auto-spawn
+    sm = _empty_state(tmp_path)
+    _seed_approved_spec(tmp_path, spec_id="cap", repos=["shared"])
+    app = create_app(
+        specs_dir=tmp_path / "specs", state_manager=sm, log_manager=None,
+        workspace_root=tmp_path, workspace_name="t",
+    )
+    assert TestClient(app).post("/specs/cap/dispatch").status_code == 409

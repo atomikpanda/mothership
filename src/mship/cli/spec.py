@@ -12,21 +12,6 @@ import typer
 from mship.cli.output import Output
 
 
-SPEC_BODY_TEMPLATE = """\
-## Problem
-
-_What problem does this solve? Why now?_
-
-## User story
-
-_As a <user>, I want <capability>, so that <benefit>._
-
-## Approach
-
-_How will it work? Key decisions._
-"""
-
-
 def register(parent: typer.Typer, get_container):
     spec_app = typer.Typer(
         name="spec",
@@ -44,9 +29,8 @@ def register(parent: typer.Typer, get_container):
         """Create a structured spec at `<workspace>/specs/YYYY-MM-DD-<id>.md`."""
         from datetime import datetime, timezone
         from pathlib import Path
-        from mship.core.spec import Spec
+        from mship.core.spec_draft import new_spec
         from mship.core.spec_store import SpecStore, SPECS_DIRNAME
-        from mship.util.slug import slugify
 
         container = get_container()
         output = Output()
@@ -72,19 +56,16 @@ def register(parent: typer.Typer, get_container):
         if title is None:
             output.error("Provide --title (or --task to derive it).")
             raise typer.Exit(1)
-        if spec_id is None:
-            spec_id = slugify(title)
-        if not spec_id:
-            output.error("Could not derive a spec id from the title; pass --id explicitly.")
-            raise typer.Exit(1)
 
         now = datetime.now(timezone.utc)
-        spec = Spec(
-            id=spec_id, title=title, status="drafting",
-            created_at=now, updated_at=now,
-            affected_repos=affected_repos, task_slug=task_slug,
-            body=SPEC_BODY_TEMPLATE,
-        )
+        try:
+            spec = new_spec(
+                title, now=now, spec_id=spec_id,
+                affected_repos=affected_repos, task_slug=task_slug,
+            )
+        except ValueError:
+            output.error("Could not derive a spec id from the title; pass --id explicitly.")
+            raise typer.Exit(1)
         path = store.path_for(spec)
         if path.exists() and not force:
             output.error(f"Spec already exists: {path}\n  Pass --force to overwrite.")
@@ -392,21 +373,17 @@ def register(parent: typer.Typer, get_container):
     def dispatch(
         spec_id: str = typer.Argument(..., help="Spec id to dispatch (must be approved)."),
     ):
-        """Bind an approved spec to its pre-existing task and emit a handoff prompt.
+        """Dispatch an approved spec to its task.
 
-        FALLBACK implementation (A6): requires an already-existing task whose
-        slug == spec.id (create it first with `mship spawn`). Transitions the spec
-        to 'dispatched', sets task.spec_id, and prints an instruction block
-        containing the acceptance criteria + worktree paths.
-
-        TODO(auto-spawn): upgrade to auto-spawn (PRIMARY) when the git/worktree
-        mocking story is cleaner — see MOS-150 A6 spec for details.
+        Binds the spec to a task whose slug == spec.id, auto-spawning that task
+        (worktrees per the spec's `affected_repos`) when none exists yet.
+        Transitions the spec to 'dispatched', sets task.spec_id, and prints a
+        handoff prompt with acceptance criteria + worktree paths.
         """
         from datetime import datetime, timezone
         from pathlib import Path
-        from mship.core.spec import InvalidTransition, validate_transition
         from mship.core.spec_store import SpecStore, SPECS_DIRNAME
-        from mship.core.spec_body import parse_body_sections
+        from mship.core.spec_dispatch import DispatchError, dispatch_spec
 
         output = Output()
         container = get_container()
@@ -417,77 +394,32 @@ def register(parent: typer.Typer, get_container):
             output.error(f"No spec with id {spec_id!r}.")
             raise typer.Exit(1)
 
-        # Gate: spec must be approved
-        if spec.status != "approved":
-            output.error(
-                f"Spec {spec_id!r} is {spec.status!r} — approve the spec first "
-                f"(mship spec approve {spec_id})."
-            )
-            raise typer.Exit(1)
+        def _spawn(s):
+            return container.worktree_manager().spawn(
+                description=s.title,
+                repos=list(s.affected_repos),
+                slug=s.id,
+                workspace_root=workspace_root,
+            ).task
 
-        # FALLBACK: require a pre-existing task whose slug == spec.id
-        state = container.state_manager().load()
-        if spec_id not in state.tasks:
-            output.error(
-                f"No task with slug {spec_id!r}. "
-                f"Create one first with `mship spawn` (use the same slug as the spec id), "
-                f"then re-run `mship spec dispatch {spec_id}`."
-            )
-            raise typer.Exit(1)
-
-        task = state.tasks[spec_id]
-
-        # Validate the spec→dispatched transition
         try:
-            validate_transition(spec.status, "dispatched")
-        except InvalidTransition as e:
+            result = dispatch_spec(
+                spec,
+                state_manager=container.state_manager(),
+                store=store,
+                spawn_fn=_spawn,
+                now=datetime.now(timezone.utc),
+            )
+        except DispatchError as e:
             output.error(str(e))
             raise typer.Exit(1)
 
-        # Bind: task.spec_id = spec.id (mutate under lock)
-        container.state_manager().mutate(
-            lambda s: setattr(s.tasks[spec_id], "spec_id", spec.id)
-            if spec_id in s.tasks else None
-        )
-
-        # Bind: spec.status = "dispatched", spec.task_slug = slug
-        spec.status = "dispatched"
-        spec.task_slug = spec_id
-        spec.updated_at = datetime.now(timezone.utc)
-        store.save(spec)
-
-        # Emit handoff prompt
-        sections = parse_body_sections(spec.body)
-        problem = sections.get("Problem", "").strip()
-        criteria_lines = "\n".join(
-            f"  - [{ac.id}] {ac.text}" for ac in spec.acceptance_criteria
-        )
-        worktrees_lines = "\n".join(
-            f"  - {repo}: {path}" for repo, path in task.worktrees.items()
-        ) or "  (no worktrees registered yet)"
-
-        prompt = f"""\
-# Spec dispatch: {spec.title}
-
-**spec id:** {spec.id}
-**task slug:** {task.slug}
-**branch:** {task.branch}
-
-## Problem
-
-{problem or "(see spec body)"}
-
-## Acceptance criteria
-
-{criteria_lines or "  (none)"}
-
-## Worktrees
-
-{worktrees_lines}
-
-Run `mship dispatch --task {task.slug} --instruction "<your instruction>"` to emit a full subagent prompt.
-"""
-        typer.echo(prompt)
+        if output.is_tty and result.spawned:
+            output.success(
+                f"Auto-spawned task {result.task.slug!r} "
+                f"({', '.join(result.task.affected_repos)})."
+            )
+        typer.echo(result.handoff)
 
     @spec_app.command("request-changes")
     def request_changes(
