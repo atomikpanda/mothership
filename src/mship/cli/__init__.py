@@ -93,6 +93,7 @@ from mship.cli import skill as _skill_mod
 from mship.cli import spec as _spec_mod
 from mship.cli import status as _status_mod
 from mship.cli import switch as _switch_mod
+from mship.cli import serve as _serve_mod
 from mship.cli import sync as _sync_mod
 from mship.cli import view as _view_mod
 from mship.cli import worktree as _worktree_mod
@@ -145,6 +146,7 @@ _skill_mod.register(app, get_container)
 _spec_mod.register(app, get_container)
 _status_mod.register(app, get_container)
 _switch_mod.register(app, get_container)
+_serve_mod.register(app, get_container)
 _sync_mod.register(app, get_container)
 _view_mod.register(app, get_container)
 _worktree_mod.register(app, get_container)
