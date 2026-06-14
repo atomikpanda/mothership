@@ -468,3 +468,71 @@ def test_spec_request_changes(configured_app_with_task: Path, tmp_path):
     result = runner.invoke(app, ["spec", "request-changes", "dq", "--reason", "tighten scope"])
     assert result.exit_code == 0, result.output
     assert _store(configured_app_with_task).find_by_id("dq").status == "needs_clarification"
+
+
+# --- spec dispatch (A6) ---
+# FALLBACK implementation: requires an already-existing task whose slug == spec.id.
+# The spec must be approved; the task binds spec_id; spec transitions to "dispatched".
+
+
+def _approve_add_labels(workspace: Path, tmp_path: Path) -> None:
+    """Create, apply, and approve a spec with id='add-labels' (matches the seeded task)."""
+    runner.invoke(app, ["spec", "new", "--title", "Add labels to tasks", "--id", "add-labels"])
+    jf = tmp_path / "al_draft.json"
+    jf.write_text(_draft_json())
+    runner.invoke(app, ["spec", "apply", "add-labels", "--from-json", str(jf)])
+    runner.invoke(app, ["spec", "verdict", "add-labels", "ac1", "approved"])
+    runner.invoke(app, ["spec", "answer", "add-labels", "q1", "yes"])
+    runner.invoke(app, ["spec", "approve", "add-labels"])
+
+
+def test_spec_dispatch_exits_zero_and_sets_dispatched(configured_app_with_task: Path, tmp_path: Path):
+    """Happy path: approved spec + matching task → status=dispatched, task.spec_id set, output has AC text."""
+    _approve_add_labels(configured_app_with_task, tmp_path)
+    result = runner.invoke(app, ["spec", "dispatch", "add-labels"])
+    assert result.exit_code == 0, result.output
+    spec = _store(configured_app_with_task).find_by_id("add-labels")
+    assert spec.status == "dispatched"
+    assert spec.task_slug == "add-labels"
+    # Output should contain the acceptance criterion text from _draft_json
+    assert "view questions" in result.output
+
+
+def test_spec_dispatch_binds_spec_id_on_task(configured_app_with_task: Path, tmp_path: Path):
+    """spec dispatch must set task.spec_id = spec.id in workspace state."""
+    _approve_add_labels(configured_app_with_task, tmp_path)
+    runner.invoke(app, ["spec", "dispatch", "add-labels"])
+    state_dir = configured_app_with_task / ".mothership"
+    mgr = StateManager(state_dir)
+    state = mgr.load()
+    assert state.tasks["add-labels"].spec_id == "add-labels"
+
+
+def test_spec_dispatch_requires_approved_status(configured_app_with_task: Path, tmp_path: Path):
+    """Dispatching a spec that is not approved must exit non-zero."""
+    # Create spec but only apply (status=needs_review, not approved)
+    runner.invoke(app, ["spec", "new", "--title", "Add labels to tasks", "--id", "add-labels"])
+    jf = tmp_path / "al_draft.json"
+    jf.write_text(_draft_json())
+    runner.invoke(app, ["spec", "apply", "add-labels", "--from-json", str(jf)])
+    result = runner.invoke(app, ["spec", "dispatch", "add-labels"])
+    assert result.exit_code != 0
+    assert "approve" in result.output.lower()
+
+
+def test_spec_dispatch_requires_matching_task(configured_app_with_task: Path, tmp_path: Path):
+    """If no task with slug==spec.id exists, dispatch must exit non-zero with helpful hint."""
+    # Create a spec with id "dq" — no matching task in state
+    _apply_dq(tmp_path)
+    # Approve it manually (bypass gate to skip verdict/answer steps)
+    runner.invoke(app, ["spec", "approve", "dq", "--bypass-gate"])
+    result = runner.invoke(app, ["spec", "dispatch", "dq"])
+    assert result.exit_code != 0
+    assert "mship spawn" in result.output or "spawn" in result.output.lower()
+
+
+def test_spec_dispatch_unknown_id_errors(configured_app_with_task: Path):
+    """Dispatching a non-existent spec id must exit non-zero."""
+    result = runner.invoke(app, ["spec", "dispatch", "no-such-spec"])
+    assert result.exit_code != 0
+    assert "no-such-spec" in result.output
