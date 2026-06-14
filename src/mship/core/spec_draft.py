@@ -37,3 +37,22 @@ or pipe it directly:
 
     cat draft.json | mship spec apply {spec_id} --from-json -
 """
+
+
+def apply_draft(spec: Spec, draft: SpecDraft) -> Spec:
+    """Merge a SpecDraft into `spec` in place: render the canonical body, set the
+    structured fields, and assign deterministic `ac`/`q` ids. Does NOT change
+    status/updated_at — the caller owns the lifecycle transition + persistence."""
+    spec.body = render_body(draft.problem, draft.user_story, draft.approach)
+    spec.non_goals = list(draft.non_goals)
+    spec.risks = list(draft.risks)
+    spec.affected_repos = list(draft.affected_repos)
+    spec.acceptance_criteria = [
+        AcceptanceCriterion(id=f"ac{i + 1}", text=t)
+        for i, t in enumerate(draft.acceptance_criteria)
+    ]
+    spec.open_questions = [
+        OpenQuestion(id=f"q{i + 1}", text=t)
+        for i, t in enumerate(draft.open_questions)
+    ]
+    return spec
