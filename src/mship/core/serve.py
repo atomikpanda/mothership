@@ -46,4 +46,26 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
         return build_review(spec)
 
+    from fastapi.encoders import jsonable_encoder
+    from mship.core.view.task_index import build_task_index
+
+    @app.get("/tasks")
+    def list_tasks():
+        return jsonable_encoder(build_task_index(state_manager.load(), workspace_root))
+
+    @app.get("/tasks/{slug}")
+    def get_task(slug: str):
+        state = state_manager.load()
+        if slug not in state.tasks:
+            raise HTTPException(status_code=404, detail=f"no task {slug!r}")
+        by_slug = {t.slug: t for t in build_task_index(state, workspace_root)}
+        return jsonable_encoder(by_slug[slug])
+
+    @app.get("/journal/{slug}")
+    def get_journal(slug: str):
+        state = state_manager.load()
+        if slug not in state.tasks:
+            raise HTTPException(status_code=404, detail=f"no task {slug!r}")
+        return jsonable_encoder(log_manager.read(slug, last=50))
+
     return app
