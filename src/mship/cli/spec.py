@@ -100,4 +100,30 @@ def register(parent: typer.Typer, get_container):
                 "status": spec.status, "task_slug": task_slug,
             })
 
+    @spec_app.command("draft")
+    def draft(
+        spec_id: str = typer.Argument(..., help="Spec id to draft (must already exist)."),
+        from_text: Optional[str] = typer.Option(None, "--from-text", help="Inline intent text."),
+        from_file: Optional[str] = typer.Option(None, "--from-file", help="Read intent from a file."),
+    ):
+        """Emit a drafting prompt for `<id>` to stdout (run it through your agent, then `spec apply`)."""
+        from pathlib import Path
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+        from mship.core.spec_draft import build_draft_prompt
+
+        output = Output()
+        if (from_text is None) == (from_file is None):
+            output.error("Provide exactly one of --from-text or --from-file.")
+            raise typer.Exit(1)
+
+        container = get_container()
+        workspace_root = Path(container.config_path()).parent
+        store = SpecStore(workspace_root / SPECS_DIRNAME)
+        if store.find_by_id(spec_id) is None:
+            output.error(f"No spec with id {spec_id!r}. Create it first with `mship spec new`.")
+            raise typer.Exit(1)
+
+        intent = from_text if from_text is not None else Path(from_file).read_text()
+        typer.echo(build_draft_prompt(spec_id, intent))
+
     parent.add_typer(spec_app)

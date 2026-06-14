@@ -222,3 +222,25 @@ def test_gate_dev_hint_mentions_spec_new(tmp_path: Path):
     spec_warn = next((w for w in result.warnings if "spec" in w.lower()), None)
     assert spec_warn is not None, result.warnings
     assert "mship spec new" in spec_warn
+
+
+def test_spec_draft_emits_prompt(configured_app_with_task: Path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    result = runner.invoke(app, ["spec", "draft", "dq", "--from-text", "rambled intent here"])
+    assert result.exit_code == 0, result.output
+    assert "rambled intent here" in result.output
+    assert "mship spec apply dq --from-json" in result.output
+
+
+def test_spec_draft_requires_exactly_one_source(configured_app_with_task: Path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    neither = runner.invoke(app, ["spec", "draft", "dq"])
+    assert neither.exit_code != 0
+    both = runner.invoke(app, ["spec", "draft", "dq", "--from-text", "x", "--from-file", "f.md"])
+    assert both.exit_code != 0
+
+
+def test_spec_draft_unknown_id_errors(configured_app_with_task: Path):
+    result = runner.invoke(app, ["spec", "draft", "nope", "--from-text", "x"])
+    assert result.exit_code != 0
+    assert "nope" in result.output
