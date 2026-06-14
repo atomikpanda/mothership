@@ -126,4 +126,53 @@ def register(parent: typer.Typer, get_container):
         intent = from_text if from_text is not None else Path(from_file).read_text()
         typer.echo(build_draft_prompt(spec_id, intent))
 
+    @spec_app.command("apply")
+    def apply(
+        spec_id: str = typer.Argument(..., help="Spec id to apply the draft to."),
+        from_json: str = typer.Option(..., "--from-json", help="Path to the draft JSON, or - for stdin."),
+        bypass_status_gate: bool = typer.Option(False, "--bypass-status-gate", help="Apply regardless of current status."),
+    ):
+        """Ingest a SpecDraft JSON: render the body, set fields, advance to needs_review."""
+        import json
+        import sys
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from pydantic import ValidationError
+        from mship.core.spec import SpecDraft, InvalidTransition, validate_transition
+        from mship.core.spec_draft import apply_draft
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+
+        output = Output()
+        raw = sys.stdin.read() if from_json == "-" else Path(from_json).read_text()
+        try:
+            draft = SpecDraft(**json.loads(raw))
+        except (json.JSONDecodeError, ValidationError) as e:
+            output.error(f"Invalid draft JSON: {e}")
+            raise typer.Exit(1)
+
+        container = get_container()
+        workspace_root = Path(container.config_path()).parent
+        store = SpecStore(workspace_root / SPECS_DIRNAME)
+        spec = store.find_by_id(spec_id)
+        if spec is None:
+            output.error(f"No spec with id {spec_id!r}.")
+            raise typer.Exit(1)
+
+        if not bypass_status_gate:
+            try:
+                validate_transition(spec.status, "needs_review")
+            except InvalidTransition as e:
+                output.error(f"{e}. Use --bypass-status-gate to override.")
+                raise typer.Exit(1)
+
+        apply_draft(spec, draft)
+        spec.status = "needs_review"
+        spec.updated_at = datetime.now(timezone.utc)
+        path = store.save(spec)
+
+        if output.is_tty:
+            output.success(f"Applied draft → {spec.status}: {path}")
+        else:
+            output.json({"id": spec.id, "status": spec.status, "path": str(path)})
+
     parent.add_typer(spec_app)

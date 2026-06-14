@@ -244,3 +244,46 @@ def test_spec_draft_unknown_id_errors(configured_app_with_task: Path):
     result = runner.invoke(app, ["spec", "draft", "nope", "--from-text", "x"])
     assert result.exit_code != 0
     assert "nope" in result.output
+
+
+# --- spec apply (#146) ---
+
+import json as _json
+
+
+def _draft_json() -> str:
+    return _json.dumps({
+        "problem": "P", "user_story": "U", "approach": "A",
+        "acceptance_criteria": ["view questions"], "open_questions": ["Android?"],
+        "non_goals": ["chat"], "risks": [], "affected_repos": ["mothership"],
+    })
+
+
+def test_spec_apply_merges_and_advances_status(configured_app_with_task: Path, tmp_path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    jf = tmp_path / "draft.json"
+    jf.write_text(_draft_json())
+    result = runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf)])
+    assert result.exit_code == 0, result.output
+    spec = _store(configured_app_with_task).find_by_id("dq")
+    assert spec.status == "needs_review"
+    assert [c.id for c in spec.acceptance_criteria] == ["ac1"]
+    assert "## Problem" in spec.body
+
+
+def test_spec_apply_rejects_invalid_json(configured_app_with_task: Path, tmp_path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    jf = tmp_path / "bad.json"
+    jf.write_text('{"problem": "only problem"}')   # missing required fields
+    result = runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf)])
+    assert result.exit_code != 0
+
+
+def test_spec_apply_refuses_wrong_status(configured_app_with_task: Path, tmp_path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    jf = tmp_path / "draft.json"; jf.write_text(_draft_json())
+    runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf)])           # -> needs_review
+    again = runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf)])    # needs_review->needs_review illegal
+    assert again.exit_code != 0
+    forced = runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf), "--bypass-status-gate"])
+    assert forced.exit_code == 0, forced.output
