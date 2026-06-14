@@ -398,3 +398,31 @@ def test_spec_verdict_rejects_unknown_criterion(configured_app_with_task: Path, 
     result = runner.invoke(app, ["spec", "verdict", "dq", "ac99", "approved"])
     assert result.exit_code != 0
     assert "ac99" in result.output
+
+
+# --- spec ask / answer / questions (#148) ---
+
+
+def test_spec_ask_adds_question(configured_app_with_task: Path, tmp_path):
+    _apply_dq(tmp_path)  # seeds q1 (from _draft_json open_questions)
+    result = runner.invoke(app, ["spec", "ask", "dq", "Should we support tablets?"])
+    assert result.exit_code == 0, result.output
+    qs = _json.loads(runner.invoke(app, ["spec", "questions", "dq"]).output)
+    assert [q["id"] for q in qs] == ["q1", "q2"]
+
+
+def test_spec_answer_sets_and_status_unchanged(configured_app_with_task: Path, tmp_path):
+    _apply_dq(tmp_path)
+    runner.invoke(app, ["spec", "answer", "dq", "q1", "yes"])
+    review = _json.loads(runner.invoke(app, ["spec", "review", "dq"]).output)
+    assert review["open_questions"][0]["answer"] == "yes"
+    assert review["status"] == "needs_review"  # answering didn't transition status
+    qs = _json.loads(runner.invoke(app, ["spec", "questions", "dq"]).output)
+    assert qs[0]["answer"] == "yes"
+
+
+def test_spec_answer_unknown_question_errors(configured_app_with_task: Path, tmp_path):
+    _apply_dq(tmp_path)
+    result = runner.invoke(app, ["spec", "answer", "dq", "q99", "x"])
+    assert result.exit_code != 0
+    assert "q99" in result.output

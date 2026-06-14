@@ -293,4 +293,63 @@ def register(parent: typer.Typer, get_container):
         else:
             output.json({"id": spec_id, "valid": True})
 
+    @spec_app.command("questions")
+    def questions(spec_id: str = typer.Argument(..., help="Spec id.")):
+        """List a spec's open questions."""
+        from pathlib import Path
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+        from mship.core.spec_questions import list_questions
+        output = Output(); container = get_container()
+        store = SpecStore(Path(container.config_path()).parent / SPECS_DIRNAME)
+        spec = store.find_by_id(spec_id)
+        if spec is None:
+            output.error(f"No spec with id {spec_id!r}."); raise typer.Exit(1)
+        qs = list_questions(spec)
+        if output.is_tty:
+            for q in qs:
+                output.print(f"  {q['id']}: {q['text']}" + (f"  → {q['answer']}" if q['answer'] else "  (unanswered)"))
+        else:
+            output.json(qs)
+
+    @spec_app.command("ask")
+    def ask(spec_id: str = typer.Argument(...), text: str = typer.Argument(..., help="Question text.")):
+        """Add an open question to a spec."""
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+        from mship.core.spec_questions import add_question
+        output = Output(); container = get_container()
+        store = SpecStore(Path(container.config_path()).parent / SPECS_DIRNAME)
+        spec = store.find_by_id(spec_id)
+        if spec is None:
+            output.error(f"No spec with id {spec_id!r}."); raise typer.Exit(1)
+        q = add_question(spec, text)
+        spec.updated_at = datetime.now(timezone.utc); store.save(spec)
+        if output.is_tty:
+            output.success(f"Added {q.id}: {text}")
+        else:
+            output.json({"id": spec.id, "question_id": q.id})
+
+    @spec_app.command("answer")
+    def answer(spec_id: str = typer.Argument(...), q_id: str = typer.Argument(...), answer_text: str = typer.Argument(..., metavar="ANSWER")):
+        """Answer an open question (does not change status)."""
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+        from mship.core.spec_questions import answer_question
+        output = Output(); container = get_container()
+        store = SpecStore(Path(container.config_path()).parent / SPECS_DIRNAME)
+        spec = store.find_by_id(spec_id)
+        if spec is None:
+            output.error(f"No spec with id {spec_id!r}."); raise typer.Exit(1)
+        try:
+            answer_question(spec, q_id, answer_text)
+        except ValueError as e:
+            output.error(str(e)); raise typer.Exit(1)
+        spec.updated_at = datetime.now(timezone.utc); store.save(spec)
+        if output.is_tty:
+            output.success(f"{q_id} answered.")
+        else:
+            output.json({"id": spec.id, "question_id": q_id})
+
     parent.add_typer(spec_app)
