@@ -188,10 +188,10 @@ You: I'm using the using-git-worktrees skill to set up an isolated workspace.
 
 [Detect: mothership.yaml found at /abs/workspace — routing through mship spawn]
 [Run: mship spawn "implement auth middleware" --repos auth-service]
-[mship creates worktree at .worktrees/feat/implement-auth-middleware, runs task setup]
+[mship creates worktree at .worktrees/implement-auth-middleware/auth-service, runs task setup]
 [Run: mship test (baseline check)]
 
-Worktree ready at /abs/workspace/.worktrees/feat/implement-auth-middleware
+Worktree ready at /abs/workspace/.worktrees/implement-auth-middleware/auth-service
 Tests passing (47 tests, 0 failures)
 Ready to implement auth middleware
 ```
