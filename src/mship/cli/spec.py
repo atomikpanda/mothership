@@ -220,6 +220,40 @@ def register(parent: typer.Typer, get_container):
         else:
             output.json(payload)
 
+    @spec_app.command("verdict")
+    def verdict(
+        spec_id: str = typer.Argument(..., help="Spec id."),
+        criterion_id: str = typer.Argument(..., help="Acceptance criterion id (e.g. ac1)."),
+        verdict_value: str = typer.Argument(..., metavar="VERDICT", help="unreviewed | approved | flagged."),
+    ):
+        """Record a verdict on one acceptance criterion (no status change)."""
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+        from mship.core.spec_review import set_criterion_verdict
+
+        output = Output()
+        container = get_container()
+        workspace_root = Path(container.config_path()).parent
+        store = SpecStore(workspace_root / SPECS_DIRNAME)
+        spec = store.find_by_id(spec_id)
+        if spec is None:
+            output.error(f"No spec with id {spec_id!r}.")
+            raise typer.Exit(1)
+
+        try:
+            set_criterion_verdict(spec, criterion_id, verdict_value)
+        except ValueError as e:
+            output.error(str(e))
+            raise typer.Exit(1)
+
+        spec.updated_at = datetime.now(timezone.utc)
+        path = store.save(spec)
+        if output.is_tty:
+            output.success(f"{criterion_id} → {verdict_value}: {path}")
+        else:
+            output.json({"id": spec.id, "criterion": criterion_id, "verdict": verdict_value})
+
     @spec_app.command("validate")
     def validate(
         spec_id: str = typer.Argument(..., help="Spec id to validate."),
