@@ -293,4 +293,235 @@ def register(parent: typer.Typer, get_container):
         else:
             output.json({"id": spec_id, "valid": True})
 
+    @spec_app.command("questions")
+    def questions(spec_id: str = typer.Argument(..., help="Spec id.")):
+        """List a spec's open questions."""
+        from pathlib import Path
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+        from mship.core.spec_questions import list_questions
+        output = Output(); container = get_container()
+        store = SpecStore(Path(container.config_path()).parent / SPECS_DIRNAME)
+        spec = store.find_by_id(spec_id)
+        if spec is None:
+            output.error(f"No spec with id {spec_id!r}."); raise typer.Exit(1)
+        qs = list_questions(spec)
+        if output.is_tty:
+            for q in qs:
+                output.print(f"  {q['id']}: {q['text']}" + (f"  → {q['answer']}" if q['answer'] else "  (unanswered)"))
+        else:
+            output.json(qs)
+
+    @spec_app.command("ask")
+    def ask(spec_id: str = typer.Argument(...), text: str = typer.Argument(..., help="Question text.")):
+        """Add an open question to a spec."""
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+        from mship.core.spec_questions import add_question
+        output = Output(); container = get_container()
+        store = SpecStore(Path(container.config_path()).parent / SPECS_DIRNAME)
+        spec = store.find_by_id(spec_id)
+        if spec is None:
+            output.error(f"No spec with id {spec_id!r}."); raise typer.Exit(1)
+        q = add_question(spec, text)
+        spec.updated_at = datetime.now(timezone.utc); store.save(spec)
+        if output.is_tty:
+            output.success(f"Added {q.id}: {text}")
+        else:
+            output.json({"id": spec.id, "question_id": q.id})
+
+    @spec_app.command("answer")
+    def answer(spec_id: str = typer.Argument(...), q_id: str = typer.Argument(...), answer_text: str = typer.Argument(..., metavar="ANSWER")):
+        """Answer an open question (does not change status)."""
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+        from mship.core.spec_questions import answer_question
+        output = Output(); container = get_container()
+        store = SpecStore(Path(container.config_path()).parent / SPECS_DIRNAME)
+        spec = store.find_by_id(spec_id)
+        if spec is None:
+            output.error(f"No spec with id {spec_id!r}."); raise typer.Exit(1)
+        try:
+            answer_question(spec, q_id, answer_text)
+        except ValueError as e:
+            output.error(str(e)); raise typer.Exit(1)
+        spec.updated_at = datetime.now(timezone.utc); store.save(spec)
+        if output.is_tty:
+            output.success(f"{q_id} answered.")
+        else:
+            output.json({"id": spec.id, "question_id": q_id})
+
+    @spec_app.command("approve")
+    def approve(
+        spec_id: str = typer.Argument(...),
+        bypass_gate: bool = typer.Option(False, "--bypass-gate", help="Approve despite unmet review gate."),
+    ):
+        """Approve a spec (gate: all criteria approved + all questions answered)."""
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from mship.core.spec import InvalidTransition, validate_transition
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+        from mship.core.spec_approve import approval_blockers
+        output = Output()
+        container = get_container()
+        store = SpecStore(Path(container.config_path()).parent / SPECS_DIRNAME)
+        spec = store.find_by_id(spec_id)
+        if spec is None:
+            output.error(f"No spec with id {spec_id!r}.")
+            raise typer.Exit(1)
+        if not bypass_gate:
+            blockers = approval_blockers(spec)
+            if blockers:
+                output.error("Cannot approve — " + "; ".join(blockers) + ". Use --bypass-gate to override.")
+                raise typer.Exit(1)
+        try:
+            validate_transition(spec.status, "approved")
+        except InvalidTransition as e:
+            output.error(str(e))
+            raise typer.Exit(1)
+        spec.status = "approved"
+        spec.updated_at = datetime.now(timezone.utc)
+        path = store.save(spec)
+        if output.is_tty:
+            output.success(f"Approved: {path}")
+        else:
+            output.json({"id": spec.id, "status": spec.status})
+
+    @spec_app.command("dispatch")
+    def dispatch(
+        spec_id: str = typer.Argument(..., help="Spec id to dispatch (must be approved)."),
+    ):
+        """Bind an approved spec to its pre-existing task and emit a handoff prompt.
+
+        FALLBACK implementation (A6): requires an already-existing task whose
+        slug == spec.id (create it first with `mship spawn`). Transitions the spec
+        to 'dispatched', sets task.spec_id, and prints an instruction block
+        containing the acceptance criteria + worktree paths.
+
+        TODO(auto-spawn): upgrade to auto-spawn (PRIMARY) when the git/worktree
+        mocking story is cleaner — see MOS-150 A6 spec for details.
+        """
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from mship.core.spec import InvalidTransition, validate_transition
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+        from mship.core.spec_body import parse_body_sections
+
+        output = Output()
+        container = get_container()
+        workspace_root = Path(container.config_path()).parent
+        store = SpecStore(workspace_root / SPECS_DIRNAME)
+        spec = store.find_by_id(spec_id)
+        if spec is None:
+            output.error(f"No spec with id {spec_id!r}.")
+            raise typer.Exit(1)
+
+        # Gate: spec must be approved
+        if spec.status != "approved":
+            output.error(
+                f"Spec {spec_id!r} is {spec.status!r} — approve the spec first "
+                f"(mship spec approve {spec_id})."
+            )
+            raise typer.Exit(1)
+
+        # FALLBACK: require a pre-existing task whose slug == spec.id
+        state = container.state_manager().load()
+        if spec_id not in state.tasks:
+            output.error(
+                f"No task with slug {spec_id!r}. "
+                f"Create one first with `mship spawn` (use the same slug as the spec id), "
+                f"then re-run `mship spec dispatch {spec_id}`."
+            )
+            raise typer.Exit(1)
+
+        task = state.tasks[spec_id]
+
+        # Validate the spec→dispatched transition
+        try:
+            validate_transition(spec.status, "dispatched")
+        except InvalidTransition as e:
+            output.error(str(e))
+            raise typer.Exit(1)
+
+        # Bind: task.spec_id = spec.id (mutate under lock)
+        container.state_manager().mutate(
+            lambda s: setattr(s.tasks[spec_id], "spec_id", spec.id)
+            if spec_id in s.tasks else None
+        )
+
+        # Bind: spec.status = "dispatched", spec.task_slug = slug
+        spec.status = "dispatched"
+        spec.task_slug = spec_id
+        spec.updated_at = datetime.now(timezone.utc)
+        store.save(spec)
+
+        # Emit handoff prompt
+        sections = parse_body_sections(spec.body)
+        problem = sections.get("Problem", "").strip()
+        criteria_lines = "\n".join(
+            f"  - [{ac.id}] {ac.text}" for ac in spec.acceptance_criteria
+        )
+        worktrees_lines = "\n".join(
+            f"  - {repo}: {path}" for repo, path in task.worktrees.items()
+        ) or "  (no worktrees registered yet)"
+
+        prompt = f"""\
+# Spec dispatch: {spec.title}
+
+**spec id:** {spec.id}
+**task slug:** {task.slug}
+**branch:** {task.branch}
+
+## Problem
+
+{problem or "(see spec body)"}
+
+## Acceptance criteria
+
+{criteria_lines or "  (none)"}
+
+## Worktrees
+
+{worktrees_lines}
+
+Run `mship dispatch --task {task.slug} --instruction "<your instruction>"` to emit a full subagent prompt.
+"""
+        typer.echo(prompt)
+
+    @spec_app.command("request-changes")
+    def request_changes(
+        spec_id: str = typer.Argument(...),
+        reason: str = typer.Option(..., "--reason", help="What needs to change."),
+    ):
+        """Send a spec back for changes (→ needs_clarification)."""
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from mship.core.spec import InvalidTransition, validate_transition
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+        output = Output()
+        container = get_container()
+        store = SpecStore(Path(container.config_path()).parent / SPECS_DIRNAME)
+        spec = store.find_by_id(spec_id)
+        if spec is None:
+            output.error(f"No spec with id {spec_id!r}.")
+            raise typer.Exit(1)
+        try:
+            validate_transition(spec.status, "needs_clarification")
+        except InvalidTransition as e:
+            output.error(str(e))
+            raise typer.Exit(1)
+        spec.status = "needs_clarification"
+        spec.updated_at = datetime.now(timezone.utc)
+        store.save(spec)
+        # Reason is echoed + journaled, not persisted on the spec (see design A5).
+        try:
+            container.log_manager().append(spec.id, f"spec request-changes: {reason}")
+        except Exception:
+            pass
+        if output.is_tty:
+            output.success(f"Requested changes ({spec.status}): {reason}")
+        else:
+            output.json({"id": spec.id, "status": spec.status, "reason": reason})
+
     parent.add_typer(spec_app)
