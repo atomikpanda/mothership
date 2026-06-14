@@ -1,8 +1,0 @@
-workspace: mothership
-
-repos:
-  mothership:
-    path: .
-    type: service
-    base_branch: main
-    expected_branch: main
