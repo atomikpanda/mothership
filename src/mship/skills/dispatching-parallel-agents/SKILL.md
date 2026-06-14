@@ -157,6 +157,13 @@ Agent 3 → Fix tool-approval-race-conditions.test.ts
 
 **Time saved:** 3 problems solved in parallel vs sequentially
 
+## Mothership Workspace
+
+Before dispatching parallel agents in a mothership workspace, confirm there is
+an anchored task (`mship status`) and set each agent's working directory to its
+task worktree (`.resolved_task.worktrees.<repo>`). Agents that run on `main`
+will be blocked by the pre-commit hook.
+
 ## Key Benefits
 
 1. **Parallelization** - Multiple investigations happen simultaneously
