@@ -169,3 +169,27 @@ def test_post_question_and_answer(tmp_path):
     assert ans.status_code == 200
     assert ans.json()["open_questions"][0]["answer"] == "yes"
     assert client.post("/specs/dq/questions/q99/answer", json={"answer": "x"}).status_code == 400
+
+
+def test_post_approve_gate_and_success(tmp_path):
+    _seed_spec(tmp_path)
+    client = TestClient(_app(tmp_path))
+    assert client.post("/specs/dq/approve", json={}).status_code == 409          # q1 unanswered
+    client.post("/specs/dq/questions/q1/answer", json={"answer": "yes"})
+    ok = client.post("/specs/dq/approve", json={})
+    assert ok.status_code == 200 and ok.json()["status"] == "approved"
+    assert client.post("/specs/dq/approve", json={}).status_code == 409           # re-approve illegal
+
+
+def test_post_approve_bypass(tmp_path):
+    _seed_spec(tmp_path)
+    client = TestClient(_app(tmp_path))
+    r = client.post("/specs/dq/approve", json={"bypass_gate": True})
+    assert r.status_code == 200 and r.json()["status"] == "approved"
+
+
+def test_post_request_changes(tmp_path):
+    _seed_spec(tmp_path)
+    client = TestClient(_app(tmp_path))
+    r = client.post("/specs/dq/request-changes", json={"reason": "tighten scope"})
+    assert r.status_code == 200 and r.json()["status"] == "needs_clarification"
