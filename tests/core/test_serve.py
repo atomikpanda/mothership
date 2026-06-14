@@ -104,3 +104,44 @@ def test_post_is_405(tmp_path):
 
 def test_unknown_path_404(tmp_path):
     assert TestClient(_app(tmp_path)).get("/nope").status_code == 404
+
+
+def _auth_app(tmp_path: Path, token):
+    _seed_spec(tmp_path)
+    state = StateManager(tmp_path / ".mothership")
+    return create_app(
+        specs_dir=tmp_path / "specs", state_manager=state, log_manager=None,
+        workspace_root=tmp_path, workspace_name="test-ws", auth_token=token,
+    )
+
+
+def test_auth_required_when_token_set(tmp_path):
+    client = TestClient(_auth_app(tmp_path, "secret"))
+    assert client.get("/specs").status_code == 401
+    assert client.get("/specs", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.get("/specs", headers={"Authorization": "Bearer secret"}).status_code == 200
+
+
+def test_open_when_no_token(tmp_path):
+    assert TestClient(_auth_app(tmp_path, None)).get("/specs").status_code == 200
+
+
+def test_docs_disabled_when_token_set(tmp_path):
+    client = TestClient(_auth_app(tmp_path, "secret"))
+    # No unauthenticated schema/docs surface when exposed behind auth.
+    assert client.get("/openapi.json").status_code == 404
+    assert client.get("/docs").status_code == 404
+
+
+def test_docs_available_when_no_token(tmp_path):
+    client = TestClient(_auth_app(tmp_path, None))
+    assert client.get("/openapi.json").status_code == 200
+
+
+def test_non_ascii_token_still_401_not_500(tmp_path):
+    client = TestClient(_auth_app(tmp_path, "tøken-✓"))
+    r = client.get("/specs")          # missing header
+    assert r.status_code == 401       # fail-closed, not 500
+    # Positive case (correct non-ascii token) omitted: httpx/TestClient encodes
+    # header values as ASCII and raises UnicodeEncodeError before the request
+    # reaches the server, so we cannot test the success path via TestClient.
