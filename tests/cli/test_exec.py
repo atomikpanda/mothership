@@ -1024,3 +1024,67 @@ def test_mship_logs_aliased_target_via_mship_yaml(workspace: Path):
         container.state_manager.reset_override()
         container.state_manager.reset()
         container.shell.reset_override()
+
+
+# ---------------------------------------------------------------------------
+# mship build (MOS-32): dependency-ordered `task build` per repo
+# ---------------------------------------------------------------------------
+
+
+def test_mship_build(configured_exec_app):
+    workspace, mock_shell = configured_exec_app
+    result = runner.invoke(app, ["build", "--task", "test-task"])
+    assert result.exit_code == 0, result.output
+    assert mock_shell.run_task.call_count == 2
+
+
+def test_mship_build_fail_fast(configured_exec_app):
+    workspace, mock_shell = configured_exec_app
+    # shared (tier 1) fails → auth-service (tier 2) never runs.
+    mock_shell.run_task.side_effect = [
+        ShellResult(returncode=1, stdout="", stderr="boom"),
+        ShellResult(returncode=0, stdout="ok", stderr=""),
+    ]
+    result = runner.invoke(app, ["build", "--task", "test-task"])
+    assert result.exit_code != 0
+    assert mock_shell.run_task.call_count == 1
+
+
+def test_mship_build_all_flag_continues_past_failure(configured_exec_app):
+    workspace, mock_shell = configured_exec_app
+    mock_shell.run_task.side_effect = [
+        ShellResult(returncode=1, stdout="", stderr="boom"),
+        ShellResult(returncode=0, stdout="ok", stderr=""),
+    ]
+    result = runner.invoke(app, ["build", "--all", "--task", "test-task"])
+    assert mock_shell.run_task.call_count == 2
+
+
+def test_mship_build_repos_filter(configured_exec_app):
+    workspace, mock_shell = configured_exec_app
+    result = runner.invoke(app, ["build", "--repos", "shared", "--task", "test-task"])
+    assert result.exit_code == 0
+    assert mock_shell.run_task.call_count == 1
+
+
+def test_mship_build_works_without_active_task(workspace: Path):
+    """build falls back to all repos when no task is active (workspace-scoped, like run)."""
+    state_dir = workspace / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(workspace / "mothership.yaml")
+    container.state_dir.override(state_dir)
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok\n", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        result = runner.invoke(app, ["build", "--repos", "shared"])
+        assert result.exit_code == 0, result.output
+        assert mock_shell.run_task.call_count == 1
+    finally:
+        container.shell.reset_override()
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
