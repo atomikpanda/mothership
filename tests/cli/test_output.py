@@ -47,11 +47,23 @@ def test_format_json():
     assert result["status"] == "ok"
 
 
-def test_format_warning():
-    fake_stdout = StringIO()
-    output = Output(stream=fake_stdout)
+def test_warning_to_stderr_in_non_tty():
+    # MOS-177: in non-TTY mode warnings go to stderr so they never corrupt the
+    # JSON payload on stdout (e.g. `mship phase dev | jq`).
+    out, err = StringIO(), StringIO()
+    output = Output(stream=out, err_stream=err)
     output.warning("Tests not passing")
-    assert "Tests not passing" in fake_stdout.getvalue()
+    assert "Tests not passing" in err.getvalue()
+    assert out.getvalue() == ""
+
+
+def test_warning_to_stdout_on_tty():
+    # On a TTY (human), the warning still renders on stdout.
+    out = _TTYStream()
+    err = _TTYStream()
+    output = Output(stream=out, err_stream=err)
+    output.warning("careful")
+    assert "careful" in out.getvalue()
 
 
 def test_format_error():
