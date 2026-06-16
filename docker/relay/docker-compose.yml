@@ -19,9 +19,11 @@ services:
       - --https=true
       - --https-ondemand-certificate=true
       - --https-ondemand-certificate-email=${ACME_EMAIL}
+      - --https-ondemand-certificate-accept-terms=true
       - --domain=${RELAY_DOMAIN}
       - --authentication=true
       - --authentication-keys-directory=/pubkeys
+      - --private-keys-directory=/keys
       - --bind-random-subdomains=false      # honor the requested subdomain
       - --bind-random-ports=false
       - --idle-connection=false
