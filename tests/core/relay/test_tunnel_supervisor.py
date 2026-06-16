@@ -35,3 +35,35 @@ def test_restart_on_unexpected_exit():
 
     assert len(procs) == 2, "supervisor should have spawned a replacement proc"
     assert sup.is_running(), "supervisor should report running after respawn"
+
+
+def test_backoff_gates_respawn():
+    """tick() must NOT respawn until the backoff delay has elapsed."""
+    procs = []
+    def factory(argv): p = FakeProc(); procs.append(p); return p
+
+    t = [0.0]
+    def fake_clock(): return t[0]
+
+    sup = TunnelSupervisor(
+        argv=["ssh", "..."],
+        proc_factory=factory,
+        backoff_delay=1.0,
+        clock=fake_clock,
+    )
+    sup.start()
+    assert len(procs) == 1
+
+    # Kill the process
+    procs[0]._alive = False
+
+    # tick() at t=0: delay=1.0, elapsed=0.0 → must NOT respawn
+    t[0] = 0.0
+    sup.tick()
+    assert len(procs) == 1, "should NOT have respawned before backoff delay elapsed"
+
+    # Advance clock past the backoff delay
+    t[0] = 1.5
+    sup.tick()
+    assert len(procs) == 2, "should have respawned after backoff delay elapsed"
+    assert sup.is_running()

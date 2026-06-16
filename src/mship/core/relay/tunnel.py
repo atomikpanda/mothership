@@ -1,15 +1,26 @@
 from __future__ import annotations
 import os
+import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Callable
 
 from mship.core.relay.config import RelayConfig
-from mship.util.slug import slugify
 
 
 def subdomain_for(workspace: str) -> str:
-    return slugify(workspace)
+    """Return a DNS-label-safe slug for the given workspace name.
+
+    Rules: lowercase; runs of non-[a-z0-9] become a single '-'; leading/
+    trailing '-' stripped; capped at 63 characters (DNS label max) with any
+    trailing '-' after truncation also stripped.
+    """
+    s = workspace.lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = s.strip("-")
+    s = s[:63].rstrip("-")
+    return s
 
 
 def build_tunnel_argv(rc: RelayConfig, *, subdomain: str, local_port: int, key_path: Path) -> list[str]:
@@ -65,11 +76,13 @@ class TunnelSupervisor:
         proc_factory: Callable | None = None,
         backoff_delay: float = 5.0,
         max_backoff_delay: float = 60.0,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self._argv = argv
         self._proc_factory = proc_factory if proc_factory is not None else _default_proc_factory
         self._backoff_delay = backoff_delay
         self._max_backoff_delay = max_backoff_delay
+        self._clock = clock if clock is not None else time.monotonic
 
         self._proc = None
         self._stopped = False          # True once stop() has been called
@@ -84,6 +97,7 @@ class TunnelSupervisor:
     def start(self) -> None:
         """Spawn the process for the first time."""
         self._stopped = False
+        self._restart_count = 0
         self._spawn()
 
     def tick(self) -> None:
@@ -99,10 +113,21 @@ class TunnelSupervisor:
         if self._proc.poll() is None:
             # Still alive — nothing to do.
             return
-        # Process has exited unexpectedly.  Respawn (backoff is injectable to
-        # 0 for tests, so we always allow immediate respawn when backoff_delay=0).
-        self._spawn()
+        # Process has exited unexpectedly.  Check whether the backoff delay has
+        # elapsed before respawning.
+        delay = min(
+            self._backoff_delay * (2 ** self._restart_count),
+            self._max_backoff_delay,
+        )
+        now = self._clock()
+        if self._last_restart_at is None:
+            # First detected exit: record the time and wait for the backoff.
+            self._last_restart_at = now
+        if now - self._last_restart_at < delay:
+            return
+        self._last_restart_at = now
         self._restart_count += 1
+        self._spawn()
 
     def stop(self) -> None:
         """Terminate the supervised process and mark as intentionally stopped.

@@ -5,6 +5,12 @@ from mship.core.relay.tunnel import subdomain_for, build_tunnel_argv
 def test_subdomain_slugs_workspace():
     assert subdomain_for("Mship Workspace") == "mship-workspace"
 
+def test_subdomain_no_phrase_heuristic_colon():
+    assert subdomain_for("team: alpha") == "team-alpha"
+
+def test_subdomain_no_phrase_heuristic_dot():
+    assert subdomain_for("My.Cool Workspace") == "my-cool-workspace"
+
 def test_build_tunnel_argv():
     rc = RelayConfig(host="relay.example.com", ssh_port=2222, user="tunnel")
     argv = build_tunnel_argv(rc, subdomain="mship-workspace", local_port=47100, key_path=Path("/k/relay_ed25519"))
