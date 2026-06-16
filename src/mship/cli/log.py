@@ -6,11 +6,48 @@ from mship.cli._resolve import resolve_for_command
 from mship.cli.output import Output
 
 
+def _entry_to_dict(e) -> dict:
+    """Stable JSON view of a LogEntry — all known kv fields (#101)."""
+    return {
+        "timestamp": e.timestamp.isoformat(),
+        "message": e.message,
+        "action": e.action,
+        "repo": e.repo,
+        "iteration": e.iteration,
+        "test_state": e.test_state,
+        "open_question": e.open_question,
+        "id": e.id,
+        "parent": e.parent,
+        "evidence": e.evidence,
+        "category": e.category,
+    }
+
+
+def _resolve_since_cutoff(value: str, entries: list):
+    """Resolve a `--since` value to a cutoff datetime (#101).
+
+    `last-phase-change` → timestamp of the most recent "Phase transition:"
+    entry, or None if there is none (no filtering). Otherwise an ISO-8601
+    timestamp (trailing `Z` accepted).
+    """
+    from datetime import datetime
+
+    if value == "last-phase-change":
+        for e in reversed(entries):
+            if e.message.startswith("Phase transition:"):
+                return e.timestamp
+        return None
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 def register(app: typer.Typer, get_container):
     @app.command(name="journal")
     def log_cmd(
         message: Optional[str] = typer.Argument(None, help="Message to append to task journal"),
         last: Optional[int] = typer.Option(None, "--last", help="Show only last N entries"),
+        json_out: bool = typer.Option(False, "--json", help="Read: emit entries as a JSON array"),
+        fmt: Optional[str] = typer.Option(None, "--format", help="Read: output format — json | jsonl"),
+        since: Optional[str] = typer.Option(None, "--since", help="Read: only entries at/after an ISO timestamp or 'last-phase-change'"),
         action: Optional[str] = typer.Option(None, "--action", help="Structured: what you were doing"),
         open_question: Optional[str] = typer.Option(None, "--open", help="Structured: blocking question"),
         test_state: Optional[str] = typer.Option(None, "--test-state", help="Structured: pass|fail|mixed"),
@@ -40,12 +77,21 @@ def register(app: typer.Typer, get_container):
         if t.active_repo is not None and t.active_repo in t.worktrees:
             cwd_warn = format_cwd_warning(_P.cwd(), _P(t.worktrees[t.active_repo]))
 
+        # Export mode (#101): --json / --format turn the read path into a
+        # machine-readable exporter. In that mode --action / --repo / --since
+        # are read filters, not write-intent flags.
+        export_mode = json_out or fmt is not None
+        if fmt is not None and fmt not in ("json", "jsonl"):
+            output.error("Invalid --format: use 'json' or 'jsonl'.")
+            raise typer.Exit(code=1)
+
         # Structured-flag validation (#108): `mship journal --test-state pass`
         # (or --action / --open) without a message silently dropped the flag
         # and fell through to read mode. That made `--test-state pass`
         # ineffective as test-evidence — the unified reader (#81) had nothing
-        # to read. Fail loud instead.
-        if message is None and not show_open and (
+        # to read. Fail loud instead. (Skipped in export mode, where these
+        # narrow the read instead of writing.)
+        if message is None and not show_open and not export_mode and (
             test_state is not None or action is not None or open_question is not None
         ):
             output.error(
@@ -127,6 +173,28 @@ def register(app: typer.Typer, get_container):
 
         # Read path (no message argument)
         entries = log_mgr.read(t.slug, last=last)
+
+        # Read filters (#101): action / repo / since narrow the entries.
+        if action is not None:
+            entries = [e for e in entries if e.action == action]
+        if repo is not None:
+            entries = [e for e in entries if e.repo == repo]
+        if since is not None:
+            cutoff = _resolve_since_cutoff(since, log_mgr.read(t.slug))
+            if cutoff is not None:
+                entries = [e for e in entries if e.timestamp >= cutoff]
+
+        # Export (#101): --json → a JSON array; --format jsonl → one object/line.
+        if export_mode:
+            import json as _json
+            dicts = [_entry_to_dict(e) for e in entries]
+            if fmt == "jsonl":
+                for d in dicts:
+                    typer.echo(_json.dumps(d))
+            else:
+                typer.echo(_json.dumps(dicts))
+            return
+
         if not entries:
             output.print("No journal entries")
             return

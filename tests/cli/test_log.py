@@ -305,3 +305,85 @@ def test_journal_no_args_still_reads(configured_app_with_task: Path):
     result = runner.invoke(app, ["journal", "--task", "add-labels"])
     assert result.exit_code == 0, result.output
     assert "first entry" in result.output
+
+
+# --- MOS-101: --json / --format jsonl exporter + filters ---
+
+import json as _json
+from datetime import datetime as _dt, timezone as _tz
+
+
+def test_journal_json_emits_array(configured_app_with_task: Path):
+    runner.invoke(app, ["journal", "first", "--task", "add-labels"])
+    runner.invoke(app, ["journal", "second", "--task", "add-labels", "--action", "ran tests"])
+    result = runner.invoke(app, ["journal", "--task", "add-labels", "--json"])
+    assert result.exit_code == 0, result.output
+    data = _json.loads(result.output)
+    assert isinstance(data, list)
+    msgs = [e["message"] for e in data]
+    assert "first" in msgs and "second" in msgs
+    expected = {"timestamp", "message", "action", "repo", "iteration",
+                "test_state", "open_question", "id", "parent", "evidence", "category"}
+    assert expected.issubset(data[0].keys())
+
+
+def test_journal_jsonl_one_object_per_line(configured_app_with_task: Path):
+    runner.invoke(app, ["journal", "a", "--task", "add-labels"])
+    runner.invoke(app, ["journal", "b", "--task", "add-labels"])
+    result = runner.invoke(app, ["journal", "--task", "add-labels", "--format", "jsonl"])
+    assert result.exit_code == 0, result.output
+    lines = [ln for ln in result.output.splitlines() if ln.strip()]
+    assert len(lines) >= 2
+    for ln in lines:
+        _json.loads(ln)  # each line is a valid JSON object
+
+
+def test_journal_json_filters_by_action(configured_app_with_task: Path):
+    runner.invoke(app, ["journal", "plain", "--task", "add-labels"])
+    runner.invoke(app, ["journal", "tested", "--task", "add-labels", "--action", "ran tests"])
+    result = runner.invoke(app, ["journal", "--task", "add-labels", "--action", "ran tests", "--json"])
+    assert result.exit_code == 0, result.output
+    data = _json.loads(result.output)
+    assert [e["message"] for e in data] == ["tested"]
+    assert all(e["action"] == "ran tests" for e in data)
+
+
+def test_journal_invalid_format_errors(configured_app_with_task: Path):
+    result = runner.invoke(app, ["journal", "--task", "add-labels", "--format", "yaml"])
+    assert result.exit_code != 0
+    assert "format" in result.output.lower()
+
+
+def test_resolve_since_cutoff_iso():
+    from mship.cli.log import _resolve_since_cutoff
+    assert _resolve_since_cutoff("2026-06-16T12:00:05Z", []) == _dt(2026, 6, 16, 12, 0, 5, tzinfo=_tz.utc)
+
+
+def test_resolve_since_cutoff_last_phase_change():
+    from mship.cli.log import _resolve_since_cutoff
+    from mship.core.log import LogEntry
+    entries = [
+        LogEntry(timestamp=_dt(2026, 6, 16, 12, 0, 0, tzinfo=_tz.utc), message="old"),
+        LogEntry(timestamp=_dt(2026, 6, 16, 12, 0, 5, tzinfo=_tz.utc), message="Phase transition: plan → dev"),
+        LogEntry(timestamp=_dt(2026, 6, 16, 12, 0, 9, tzinfo=_tz.utc), message="new"),
+    ]
+    assert _resolve_since_cutoff("last-phase-change", entries) == _dt(2026, 6, 16, 12, 0, 5, tzinfo=_tz.utc)
+
+
+def test_resolve_since_cutoff_no_phase_change_returns_none():
+    from mship.cli.log import _resolve_since_cutoff
+    from mship.core.log import LogEntry
+    entries = [LogEntry(timestamp=_dt(2026, 6, 16, 12, 0, 0, tzinfo=_tz.utc), message="x")]
+    assert _resolve_since_cutoff("last-phase-change", entries) is None
+
+
+def test_entry_to_dict_includes_all_fields():
+    from mship.cli.log import _entry_to_dict
+    from mship.core.log import LogEntry
+    e = LogEntry(timestamp=_dt(2026, 6, 16, 12, 0, 0, tzinfo=_tz.utc), message="m",
+                 action="a", id="x1", evidence="f.py:1-2", category="c", parent="p1")
+    d = _entry_to_dict(e)
+    assert d["message"] == "m" and d["action"] == "a" and d["id"] == "x1"
+    assert d["evidence"] == "f.py:1-2" and d["category"] == "c" and d["parent"] == "p1"
+    assert set(d) == {"timestamp", "message", "action", "repo", "iteration",
+                      "test_state", "open_question", "id", "parent", "evidence", "category"}
