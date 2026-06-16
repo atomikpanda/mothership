@@ -82,11 +82,14 @@ def test_journal_watch_with_unknown_task_constructs_view_without_exit(empty_work
     assert view._cli_task == "missing"
 
 
-def test_spec_non_watch_no_task_exits_1(empty_workspace):
+def test_spec_non_watch_no_task_empty_workspace_exits_1(empty_workspace):
+    # MOS-175 (#195): `view spec` with no active task no longer errors "no active
+    # task" — it falls back to the newest spec. In an empty workspace (no specs)
+    # that fallback finds nothing, so it exits 1 with a "no specs" message.
     runner = CliRunner()
     result = runner.invoke(app, ["view", "spec"])
     assert result.exit_code == 1
-    assert "no active task" in (result.output or "").lower()
+    assert "no specs" in (result.output or "").lower()
 
 
 def _force_tty(monkeypatch):
