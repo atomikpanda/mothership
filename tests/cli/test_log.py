@@ -387,3 +387,25 @@ def test_entry_to_dict_includes_all_fields():
     assert d["evidence"] == "f.py:1-2" and d["category"] == "c" and d["parent"] == "p1"
     assert set(d) == {"timestamp", "message", "action", "repo", "iteration",
                       "test_state", "open_question", "id", "parent", "evidence", "category"}
+
+
+def test_journal_last_applies_after_filters(configured_app_with_task: Path):
+    # Interleave matching (ran tests) and non-matching entries.
+    runner.invoke(app, ["journal", "t1", "--task", "add-labels", "--action", "ran tests"])
+    runner.invoke(app, ["journal", "p1", "--task", "add-labels"])
+    runner.invoke(app, ["journal", "t2", "--task", "add-labels", "--action", "ran tests"])
+    runner.invoke(app, ["journal", "p2", "--task", "add-labels"])
+    runner.invoke(app, ["journal", "t3", "--task", "add-labels", "--action", "ran tests"])
+    # Filter first, THEN --last → the 2 most-recent *matching* entries (not <2).
+    result = runner.invoke(
+        app, ["journal", "--task", "add-labels", "--action", "ran tests", "--last", "2", "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    assert [e["message"] for e in _json.loads(result.output)] == ["t2", "t3"]
+
+
+def test_journal_json_with_message_errors(configured_app_with_task: Path):
+    # Export flags are read-only; combining with a message (write) is an error.
+    result = runner.invoke(app, ["journal", "hello", "--task", "add-labels", "--json"])
+    assert result.exit_code != 0
+    assert "read-only" in result.output.lower()

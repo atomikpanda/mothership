@@ -84,6 +84,12 @@ def register(app: typer.Typer, get_container):
         if fmt is not None and fmt not in ("json", "jsonl"):
             output.error("Invalid --format: use 'json' or 'jsonl'.")
             raise typer.Exit(code=1)
+        # --json/--format are read-only exporters; combining them with a message
+        # (a write) is contradictory — fail loud rather than silently dropping
+        # the flag (#101 review).
+        if message is not None and export_mode:
+            output.error("--json / --format are read-only and cannot be combined with a message (a write).")
+            raise typer.Exit(code=1)
 
         # Structured-flag validation (#108): `mship journal --test-state pass`
         # (or --action / --open) without a message silently dropped the flag
@@ -171,18 +177,21 @@ def register(app: typer.Typer, get_container):
                 })
             return
 
-        # Read path (no message argument)
-        entries = log_mgr.read(t.slug, last=last)
-
-        # Read filters (#101): action / repo / since narrow the entries.
+        # Read path (no message argument). Read the FULL history once, apply
+        # filters, THEN apply --last to the filtered result so `--last N
+        # --action X` returns up to N *matching* entries (#101 review). The
+        # full list also resolves `--since last-phase-change`, so the cutoff is
+        # computed before action/repo filtering and no second read is needed.
+        entries = log_mgr.read(t.slug)
+        cutoff = _resolve_since_cutoff(since, entries) if since is not None else None
         if action is not None:
             entries = [e for e in entries if e.action == action]
         if repo is not None:
             entries = [e for e in entries if e.repo == repo]
-        if since is not None:
-            cutoff = _resolve_since_cutoff(since, log_mgr.read(t.slug))
-            if cutoff is not None:
-                entries = [e for e in entries if e.timestamp >= cutoff]
+        if cutoff is not None:
+            entries = [e for e in entries if e.timestamp >= cutoff]
+        if last is not None:
+            entries = entries[-last:]
 
         # Export (#101): --json → a JSON array; --format jsonl → one object/line.
         if export_mode:
