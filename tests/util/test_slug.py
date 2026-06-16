@@ -78,3 +78,34 @@ def test_long_single_word_hard_truncated():
 def test_short_input_unchanged_by_truncation():
     # Truncation should not affect inputs already within limits.
     assert slugify("add labels to tasks") == "add-labels-to-tasks"
+
+
+def test_multi_issue_ids_preserved_after_truncation():
+    # All issue IDs survive even when they fall past the word-boundary cut.
+    text = (
+        "long description with lots of filler words to force truncation "
+        "here MOS-170 MOS-171"
+    )
+    s = slugify(text)
+    assert "mos-170" in s
+    assert "mos-171" in s
+
+
+def test_single_issue_id_preserved_after_truncation():
+    # A trailing issue ID survives truncation of a long description.
+    text = "offboarding progress reporter surface per task offboarding MOS-170"
+    s = slugify(text)
+    assert "mos-170" in s
+
+
+def test_issue_id_already_in_truncated_slug_not_duplicated():
+    # An issue ID that fits within the truncation window is not appended again.
+    s = slugify("MOS-170 short")
+    assert s.count("mos-170") == 1
+
+
+def test_non_issue_tokens_not_preserved_past_truncation():
+    # Only tokens matching the issue-ID pattern are preserved; plain words are not.
+    text = "word " * 20 + "plain"
+    s = slugify(text)
+    assert "plain" not in s
