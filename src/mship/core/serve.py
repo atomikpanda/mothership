@@ -97,7 +97,7 @@ def create_app(
     @app.get("/specs")
     def list_specs():
         return [
-            {"id": s.id, "title": s.title, "status": s.status, "task_slug": s.task_slug}
+            {"id": s.id, "title": s.title, "status": s.status, "task_slug": s.task_slug, "affected_repos": s.affected_repos}
             for s in store.list()
         ]
 
