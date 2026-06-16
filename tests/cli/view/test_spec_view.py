@@ -414,3 +414,33 @@ def test_spec_cli_non_tty_does_not_construct_specview(tmp_path, monkeypatch):
         assert constructed == [], "SpecView must not be constructed in non-TTY mode"
     finally:
         _reset_overrides()
+
+
+# --- MOS-175: no-active-task fallback to newest structured spec ---
+
+
+def test_spec_cli_non_tty_no_active_task_renders_newest_structured_spec(tmp_path):
+    """Non-TTY, no active task: fall back to newest spec in <workspace>/specs/. MOS-175."""
+    runner = CliRunner()
+    _setup_workspace(tmp_path)
+    specs_dir = tmp_path / "specs"
+    specs_dir.mkdir()
+    (specs_dir / "my-spec.md").write_text("# My Spec\n\nStructured spec body.\n")
+    try:
+        result = runner.invoke(app, ["view", "spec"])
+        assert result.exit_code == 0, result.output
+        assert "Structured spec body" in result.output
+    finally:
+        _reset_overrides()
+
+
+def test_spec_cli_explicit_task_still_exits_on_unknown(tmp_path):
+    """--task <unknown> still errors even with MOS-175 fallback in place."""
+    runner = CliRunner()
+    _setup_workspace(tmp_path)
+    try:
+        result = runner.invoke(app, ["view", "spec", "--task", "nope"])
+        assert result.exit_code != 0
+        assert "nope" in result.output
+    finally:
+        _reset_overrides()

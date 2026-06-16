@@ -140,3 +140,24 @@ def test_find_spec_resolves_specs_dir_by_task_slug(tmp_path: Path):
         affected_repos=["a"], branch="feat/dq",
     )})
     assert find_spec(tmp_path, None, task="dq", state=state) == path
+
+
+def test_find_spec_newest_structured_specs_dir_no_task(tmp_path: Path):
+    """find_spec(name=None, task=None) returns the newest spec from <workspace>/specs/."""
+    path = _seed_spec(tmp_path, "structured-newest")
+    result = find_spec(workspace_root=tmp_path, name_or_path=None, task=None)
+    assert result == path
+
+
+def test_find_spec_newest_prefers_higher_mtime_across_dirs(tmp_path: Path):
+    """When both legacy and structured dirs exist, newest mtime wins."""
+    legacy = tmp_path / "docs" / "superpowers" / "specs"
+    legacy.mkdir(parents=True)
+    older = legacy / "old-legacy.md"
+    older.write_text("# old\n")
+    import os as _os, time as _time
+    _os.utime(older, (_time.time() - 200, _time.time() - 200))
+
+    path = _seed_spec(tmp_path, "newer-structured")
+    result = find_spec(workspace_root=tmp_path, name_or_path=None, task=None)
+    assert result == path
