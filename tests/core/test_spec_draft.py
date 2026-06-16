@@ -72,3 +72,25 @@ def test_new_spec_unslugifiable_title_raises():
     now = datetime(2026, 6, 14, tzinfo=timezone.utc)
     with pytest.raises(ValueError):
         new_spec("!!!", now=now)             # slug collapses to empty
+
+
+def test_specdraft_accepts_additional_sections():
+    d = SpecDraft(problem="P", user_story="U", approach="A",
+                  additional_sections=[{"heading": "Architecture", "body": "arch"}])
+    assert d.additional_sections[0].heading == "Architecture"
+    assert d.additional_sections[0].body == "arch"
+
+
+def test_apply_draft_renders_additional_sections():
+    from mship.core.spec_body import parse_body_sections, validate_body_structure
+    spec = _spec()
+    draft = SpecDraft(problem="P", user_story="U", approach="A",
+                      additional_sections=[{"heading": "Testing", "body": "the tests"}])
+    out = apply_draft(spec, draft)
+    sections = parse_body_sections(out.body)
+    assert sections["Testing"] == "the tests"
+    assert validate_body_structure(out.body) == []   # required still present
+
+
+def test_build_draft_prompt_mentions_additional_sections():
+    assert "additional_sections" in build_draft_prompt("x", "intent")

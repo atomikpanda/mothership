@@ -70,7 +70,8 @@ object matching this shape — no prose, no markdown fence:
   "risks": ["<known risk>"],
   "affected_repos": ["<repo>"],
   "acceptance_criteria": ["<testable, user-visible outcome>"],
-  "open_questions": ["<must be resolved before approval>"]
+  "open_questions": ["<must be resolved before approval>"],
+  "additional_sections": [{{"heading": "<optional extra section, e.g. Architecture | Testing | Security>", "body": "<prose; include only for design-heavy specs>"}}]
 }}
 
 ## Intent
@@ -93,7 +94,10 @@ def apply_draft(spec: Spec, draft: SpecDraft) -> Spec:
     """Merge a SpecDraft into `spec` in place: render the canonical body, set the
     structured fields, and assign deterministic `ac`/`q` ids. Does NOT change
     status/updated_at — the caller owns the lifecycle transition + persistence."""
-    spec.body = render_body(draft.problem, draft.user_story, draft.approach)
+    spec.body = render_body(
+        draft.problem, draft.user_story, draft.approach,
+        additional_sections=[(s.heading, s.body) for s in draft.additional_sections],
+    )
     spec.non_goals = list(draft.non_goals)
     spec.risks = list(draft.risks)
     spec.affected_repos = list(draft.affected_repos)
