@@ -1,0 +1,37 @@
+# Example two-repo mship workspace — a teaching artifact.
+#
+# Copy this to your workspace root as `mothership.yaml` and adjust the names,
+# paths, and URLs. This is illustrative and intentionally separate from the
+# live mship-workspace config.
+#
+# Layout: members live as gitignored subdirectories cloned into the workspace
+# (each is its own git repo). On a machine that already has a member checked
+# out elsewhere, that member directory may instead be a symlink to the existing
+# checkout — mship treats either the same.
+#
+#   my-workspace/
+#     mothership.yaml      <- this file
+#     api/                 <- gitignored member repo (clone or symlink)
+#     shared/              <- gitignored member repo (clone or symlink)
+#
+# `mship` coordinates the members from the workspace root: spawn worktrees,
+# run tests/builds in dependency order, and open a PR per repo on finish.
+
+workspace: example-workspace
+
+repos:
+  # A shared library other repos compile against.
+  shared:
+    path: shared
+    type: library
+    base_branch: main
+    expected_branch: main
+
+  # A service that depends on `shared` at build time. Dependency ordering means
+  # `mship test` / `mship build` run `shared` before `api`.
+  api:
+    path: api
+    type: service
+    base_branch: main
+    expected_branch: main
+    depends_on: [shared]
