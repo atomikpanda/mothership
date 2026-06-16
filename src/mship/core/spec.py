@@ -88,6 +88,12 @@ def validate_transition(current: str, target: str) -> None:
         raise InvalidTransition(f"illegal spec transition: {current} -> {target}")
 
 
+class BodySection(BaseModel):
+    """An extra spec body section beyond the canonical three (e.g. Architecture, Testing)."""
+    heading: str
+    body: str
+
+
 class SpecDraft(BaseModel):
     """The draftable subset a model produces; ingested by `mship spec apply`.
 
@@ -101,3 +107,4 @@ class SpecDraft(BaseModel):
     affected_repos: list[str] = []
     acceptance_criteria: list[str] = []
     open_questions: list[str] = []
+    additional_sections: list[BodySection] = []
