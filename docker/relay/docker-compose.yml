@@ -1,0 +1,29 @@
+# Self-hosted sish relay for mship serve reverse tunnels.
+# Requires: a wildcard DNS record *.RELAY_DOMAIN -> this host, ports 80/443/2222 open.
+services:
+  sish:
+    image: antoniomika/sish:latest
+    restart: unless-stopped
+    ports:
+      - "2222:2222"   # SSH (clients open reverse tunnels here)
+      - "80:80"       # HTTP (ACME challenges + redirect)
+      - "443:443"     # HTTPS (public app traffic)
+    volumes:
+      - ./pubkeys:/pubkeys:ro       # allow-listed client public keys
+      - ./keys:/keys                # sish host keys (persisted)
+      - ./acme:/acme                # Let's Encrypt cert cache
+    command:
+      - --ssh-address=:2222
+      - --http-address=:80
+      - --https-address=:443
+      - --https=true
+      - --https-ondemand-certificate=true
+      - --https-ondemand-certificate-email=${ACME_EMAIL}
+      - --https-ondemand-certificate-accept-terms=true
+      - --domain=${RELAY_DOMAIN}
+      - --authentication=true
+      - --authentication-keys-directory=/pubkeys
+      - --private-keys-directory=/keys
+      - --bind-random-subdomains=false      # honor the requested subdomain
+      - --bind-random-ports=false
+      - --idle-connection=false

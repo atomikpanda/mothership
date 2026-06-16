@@ -1,0 +1,32 @@
+from pathlib import Path
+from mship.core.relay.keys import ensure_relay_key, relay_public_key
+
+def test_generates_key_when_absent(tmp_path):
+    calls = []
+    def fake_run(argv):                      # stand in for subprocess
+        calls.append(argv)
+        key = tmp_path / ".mothership" / "relay_ed25519"
+        key.write_text("PRIV"); (Path(str(key) + ".pub")).write_text("ssh-ed25519 AAAA mship-relay\n")
+        return 0
+    path = ensure_relay_key(home=tmp_path, runner=fake_run)
+    assert path == tmp_path / ".mothership" / "relay_ed25519" or path.name == "relay_ed25519"
+    assert any("ssh-keygen" in a for a in calls[0])
+    assert relay_public_key(path).startswith("ssh-ed25519 ")
+
+def test_idempotent_when_present(tmp_path):
+    # pre-create the key; runner must NOT be called
+    mothership_dir = tmp_path / ".mothership"
+    mothership_dir.mkdir(parents=True, exist_ok=True)
+    key_path = mothership_dir / "relay_ed25519"
+    key_path.write_text("PRIV")
+    pub_path = Path(str(key_path) + ".pub")
+    pub_path.write_text("ssh-ed25519 BBBB mship-relay\n")
+
+    calls = []
+    def fake_run(argv):
+        calls.append(argv)
+        return 0
+
+    path = ensure_relay_key(home=tmp_path, runner=fake_run)
+    assert len(calls) == 0, "runner must NOT be called when key already exists"
+    assert path == key_path

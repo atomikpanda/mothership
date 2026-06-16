@@ -85,10 +85,12 @@ from mship.cli import init as _init_mod
 from mship.cli import internal as _internal_mod
 from mship.cli import layout as _layout_mod
 from mship.cli import log as _log_mod
+from mship.cli import pair as _pair_mod
 from mship.cli import phase as _phase_mod
 from mship.cli import pr as _pr_mod
 from mship.cli import prune as _prune_mod
 from mship.cli import reconcile as _reconcile_mod
+from mship.cli import relay as _relay_mod
 from mship.cli import skill as _skill_mod
 from mship.cli import spec as _spec_mod
 from mship.cli import status as _status_mod
@@ -138,10 +140,12 @@ _init_mod.register(app, get_container)
 _internal_mod.register(app, get_container)
 _layout_mod.register(app, get_container)
 _log_mod.register(app, get_container)
+_pair_mod.register(app, get_container)
 _phase_mod.register(app, get_container)
 _pr_mod.register(app, get_container)
 _prune_mod.register(app, get_container)
 _reconcile_mod.register(app, get_container)
+_relay_mod.register(app, get_container)
 _skill_mod.register(app, get_container)
 _spec_mod.register(app, get_container)
 _status_mod.register(app, get_container)

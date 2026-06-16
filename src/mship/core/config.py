@@ -2,7 +2,9 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, field_validator, model_validator
+
+from mship.core.relay.config import RelayConfig
 
 
 class Dependency(BaseModel):
@@ -121,7 +123,15 @@ class WorkspaceConfig(BaseModel):
     # Does NOT affect canonical mship specs (always `specs/`) or the `spec_paths`
     # legacy spec-search default. Surfaced in `mship context` for skills.
     docs_dir: str = "docs"
+    relay: RelayConfig | None = None
     repos: dict[str, RepoConfig]
+
+    @field_validator("relay", mode="before")
+    @classmethod
+    def parse_relay(cls, v) -> RelayConfig | None:
+        if isinstance(v, dict) or v is None:
+            return RelayConfig.from_mapping(v)
+        return v  # already a RelayConfig instance
 
     @model_validator(mode="after")
     def validate_default_scope(self) -> "WorkspaceConfig":

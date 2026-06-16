@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 import typer
 
@@ -16,14 +17,52 @@ def register(app: typer.Typer, get_container):
                  "other devices — requires MSHIP_SERVE_TOKEN.",
         ),
         port: int = typer.Option(47100, "--port", help="Port."),
+        relay: bool = typer.Option(
+            False, "--relay",
+            help="Expose this workspace via a reverse SSH tunnel to a relay host. "
+                 "Uses config.relay.host unless --relay-host overrides it. Serve "
+                 "stays bound to loopback; a bearer token is required (auto-generated).",
+        ),
+        relay_host: Optional[str] = typer.Option(
+            None, "--relay-host",
+            metavar="HOST",
+            help="Relay host to tunnel through (implies --relay). Overrides config.relay.host.",
+            show_default=False,
+        ),
+        relay_tick: float = typer.Option(
+            1.0, "--relay-tick", hidden=True,
+            help="Seconds between tunnel-supervisor health checks.",
+        ),
     ):
         """Run a JSON API over the spec + task model — reads plus review/approve writes (Ground Control)."""
         import os
+
+        # Relaying is on if --relay is given OR a --relay-host override is supplied.
+        relay_enabled = relay or relay_host is not None
+        relay_host_override = relay_host
+
+        output = Output()
+        container = get_container()
+        workspace_root = Path(container.config_path()).parent
+        config = container.config()
+
+        if relay_enabled:
+            _serve_with_relay(
+                container=container,
+                config=config,
+                workspace_root=workspace_root,
+                output=output,
+                relay_host_override=relay_host_override,
+                port=port,
+                relay_tick=relay_tick,
+            )
+            return
+
+        # ---- existing (non-relay) behavior ----
         import uvicorn
         from mship.core.serve import create_app
         from mship.core.spec_store import SPECS_DIRNAME
 
-        output = Output()
         token = os.environ.get("MSHIP_SERVE_TOKEN")
         loopback = {"127.0.0.1", "localhost", "::1"}
         if host not in loopback and not token:
@@ -33,14 +72,12 @@ def register(app: typer.Typer, get_container):
             )
             raise typer.Exit(1)
 
-        container = get_container()
-        workspace_root = Path(container.config_path()).parent
         api = create_app(
             specs_dir=workspace_root / SPECS_DIRNAME,
             state_manager=container.state_manager(),
             log_manager=container.log_manager(),
             workspace_root=workspace_root,
-            workspace_name=container.config().workspace,
+            workspace_name=config.workspace,
             auth_token=token,
             worktree_manager=container.worktree_manager(),
         )
@@ -48,3 +85,108 @@ def register(app: typer.Typer, get_container):
         docs_note = "docs: disabled (auth)" if token else "docs: /docs"
         output.print(f"mship serve → http://{host}:{port}  ({auth_note}; {docs_note})")
         uvicorn.run(api, host=host, port=port)
+
+
+def _serve_with_relay(
+    *,
+    container,
+    config,
+    workspace_root: Path,
+    output: Output,
+    relay_host_override: Optional[str],
+    port: int,
+    relay_tick: float,
+):
+    """Run uvicorn on loopback while supervising a reverse SSH tunnel to the relay.
+
+    Token is REQUIRED when relaying (the public URL is reachable from anywhere);
+    it is taken from MSHIP_SERVE_TOKEN if set, else auto-generated + persisted.
+    uvicorn blocks in the main thread; the tunnel supervisor is ticked from a
+    background daemon thread on an interval and torn down on shutdown.
+    """
+    import threading
+
+    import segno
+    import uvicorn
+
+    from mship.core.relay.config import RelayConfig
+    from mship.core.relay.keys import ensure_relay_key
+    from mship.core.relay.pairing import build_pair_link
+    from mship.core.relay.token import ensure_serve_token
+    from mship.core.relay.tunnel import (
+        TunnelSupervisor,
+        build_tunnel_argv,
+        subdomain_for,
+    )
+    from mship.core.serve import create_app
+    from mship.core.spec_store import SPECS_DIRNAME
+
+    # Resolve the relay config: an explicit --relay <host> overrides config.relay.host;
+    # otherwise fall back to the configured relay block entirely.
+    rc = config.relay
+    if relay_host_override:
+        if rc is not None:
+            rc = RelayConfig(host=relay_host_override, ssh_port=rc.ssh_port, user=rc.user)
+        else:
+            rc = RelayConfig(host=relay_host_override)
+    if rc is None:
+        output.error(
+            "--relay requires a relay host. Pass it (`mship serve --relay relay.example.com`) "
+            "or add a `relay:` block (host) to mothership.yaml. See docs/relay-hosting.md."
+        )
+        raise typer.Exit(1)
+
+    workspace = config.workspace
+
+    # Token is REQUIRED when relaying — the public URL is reachable from anywhere.
+    token = ensure_serve_token(workspace_root)
+
+    # serve stays bound to loopback; the tunnel is what exposes it.
+    host = "127.0.0.1"
+    api = create_app(
+        specs_dir=workspace_root / SPECS_DIRNAME,
+        state_manager=container.state_manager(),
+        log_manager=container.log_manager(),
+        workspace_root=workspace_root,
+        workspace_name=workspace,
+        auth_token=token,
+        worktree_manager=container.worktree_manager(),
+    )
+
+    subdomain = subdomain_for(workspace)
+    key_path = ensure_relay_key(home=Path.home())
+    argv = build_tunnel_argv(rc, subdomain=subdomain, local_port=port, key_path=key_path)
+
+    public_url = f"https://{subdomain}.{rc.host}"
+    link = build_pair_link(url=public_url, token=token, workspace=workspace)
+
+    sup = TunnelSupervisor(argv=argv)
+    sup.start()
+
+    # Background daemon thread ticks the supervisor (reconnect on drop) while
+    # uvicorn blocks the main thread. Daemon so it never blocks interpreter exit.
+    stop_event = threading.Event()
+
+    def _tick_loop():
+        while not stop_event.wait(relay_tick):
+            try:
+                sup.tick()
+            except Exception:
+                # Never let a tick error kill the supervisor thread; next tick retries.
+                pass
+
+    ticker = threading.Thread(target=_tick_loop, name="mship-relay-tick", daemon=True)
+    ticker.start()
+
+    output.print(f"mship serve → http://{host}:{port}  (auth: bearer token; docs: disabled)")
+    output.print(f"relay → {public_url}  (tunnel via ssh -R to {rc.host})")
+    output.print(link)
+    typer.echo(segno.make(link).terminal(compact=True))
+
+    try:
+        uvicorn.run(api, host=host, port=port)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_event.set()
+        sup.stop()
