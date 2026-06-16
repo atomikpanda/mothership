@@ -291,10 +291,23 @@ def register(app: typer.Typer, get_container):
         if name_or_path is None:
             if watch:
                 cli_task_for_view = task
-            else:
+            elif task is not None:
+                # Explicit --task: resolve or exit on unknown/ambiguous.
                 from mship.cli._resolve import resolve_or_exit
                 t = resolve_or_exit(state, task)
                 resolved_task_slug = t.slug
+            else:
+                # No explicit --task: try to resolve the active task, but fall
+                # back to newest spec in workspace if none is active (MOS-175).
+                try:
+                    t, _ = resolve_task(
+                        state, cli_task=None,
+                        env_task=os.environ.get("MSHIP_TASK"),
+                        cwd=_P.cwd(),
+                    )
+                    resolved_task_slug = t.slug
+                except (NoActiveTaskError, AmbiguousTaskError, UnknownTaskError):
+                    resolved_task_slug = None
 
         # --web still requires a resolvable spec path at request time.
         if web:

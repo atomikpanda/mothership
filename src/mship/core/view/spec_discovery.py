@@ -87,6 +87,11 @@ def find_spec(
     search_roots = _resolve_search_roots(workspace_root, task, state, spec_paths)
 
     if name_or_path is None:
+        if task is None:
+            # Also search the structured specs/ dir for newest-mtime lookup.
+            extra = workspace_root / SPECS_DIR
+            if extra not in search_roots:
+                search_roots = search_roots + [extra]
         return _newest_across(search_roots, task)
 
     # Try specs/ dir by frontmatter id before the legacy search-roots name loop.
