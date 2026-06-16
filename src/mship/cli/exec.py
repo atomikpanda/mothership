@@ -433,6 +433,93 @@ def register(app: typer.Typer, get_container):
 
         output.print("All background services have exited")
 
+    @app.command(name="build")
+    def build_cmd(
+        run_all: bool = typer.Option(False, "--all", help="Build all repos even if one fails"),
+        repos: Optional[str] = typer.Option(None, "--repos", help="Comma-separated repo names to filter"),
+        tag: Optional[list[str]] = typer.Option(None, "--tag", help="Filter repos by tag"),
+        task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
+    ):
+        """Build artifacts across repos in dependency order (runs `task build`)."""
+        import os as _os
+        from pathlib import Path as _P
+        from mship.core.task_resolver import (
+            AmbiguousTaskError,
+            NoActiveTaskError,
+            UnknownTaskError,
+            resolve_task,
+        )
+
+        container = get_container()
+        output = Output()
+        state_mgr = container.state_manager()
+        state = state_mgr.load()
+        config = container.config()
+
+        # Scope repos to a task if one resolves (cwd / MSHIP_TASK / --task);
+        # otherwise build the whole workspace. Mirrors `run`'s graceful
+        # fallback — an explicit unknown --task is still an error.
+        task_slug: str | None
+        fallback_repos: list[str]
+        try:
+            t, _ = resolve_task(
+                state, cli_task=task,
+                env_task=_os.environ.get("MSHIP_TASK"), cwd=_P.cwd(),
+            )
+            fallback_repos = t.affected_repos
+            task_slug = t.slug
+        except UnknownTaskError as e:
+            known = ", ".join(sorted(state.tasks.keys())) or "(none)"
+            output.error(f"Unknown task: {e.slug}. Known: {known}.")
+            raise typer.Exit(1)
+        except (NoActiveTaskError, AmbiguousTaskError):
+            fallback_repos = list(config.repos.keys())
+            task_slug = None
+
+        try:
+            target_repos = _resolve_repos(config, fallback_repos, repos, tag)
+        except ValueError as e:
+            output.error(str(e))
+            raise typer.Exit(code=1)
+
+        executor = container.executor()
+        result = executor.execute(
+            "build", repos=target_repos, run_all=run_all, task_slug=task_slug,
+        )
+
+        def _status(r) -> str:
+            return "skip" if r.skipped else ("pass" if r.success else "fail")
+
+        if output.is_tty:
+            output.print("[bold]Build[/bold]")
+            for r in sorted(result.results, key=lambda r: r.repo):
+                st = _status(r)
+                color = "green" if st == "pass" else "yellow" if st == "skip" else "red"
+                output.print(f"  {r.repo}: [{color}]{st}[/{color}]  ({r.duration_ms / 1000:.1f}s)")
+                if st == "fail":
+                    for line in (r.shell_result.stderr or "").splitlines()[-20:]:
+                        output.print(f"      {line}")
+            if result.success:
+                output.print("")
+                output.success("Build succeeded")
+        else:
+            output.json({
+                "command": "build",
+                "repos": {
+                    r.repo: {
+                        "status": _status(r),
+                        "duration_ms": r.duration_ms,
+                        "exit_code": r.shell_result.returncode,
+                    }
+                    for r in result.results
+                },
+                "success": result.success,
+                "resolved_task": task_slug,
+            })
+
+        if not result.success:
+            raise typer.Exit(code=1)
+
     @app.command()
     def logs(
         service: Optional[str] = typer.Argument(None, help="Service name (omit with --all)"),
