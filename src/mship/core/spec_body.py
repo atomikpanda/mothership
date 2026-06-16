@@ -3,12 +3,22 @@ from __future__ import annotations
 REQUIRED_SECTIONS: tuple[str, ...] = ("Problem", "User story", "Approach")
 
 
-def render_body(problem: str, user_story: str, approach: str) -> str:
-    return (
+def render_body(
+    problem: str,
+    user_story: str,
+    approach: str,
+    additional_sections: list[tuple[str, str]] | None = None,
+) -> str:
+    """Render the canonical three sections, then append any extra (heading, body)
+    sections after Approach — for design-heavy specs (Architecture, Testing, …)."""
+    body = (
         f"## Problem\n\n{problem.strip()}\n\n"
         f"## User story\n\n{user_story.strip()}\n\n"
         f"## Approach\n\n{approach.strip()}\n"
     )
+    for heading, text in additional_sections or []:
+        body += f"\n## {heading.strip()}\n\n{text.strip()}\n"
+    return body
 
 
 def parse_body_sections(body: str) -> dict[str, str]:

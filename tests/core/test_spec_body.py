@@ -34,3 +34,22 @@ def test_extra_headings_do_not_break_validation():
     from mship.core.spec_body import render_body, validate_body_structure
     body = render_body("p", "u", "a") + "\n## Extra\n\nbonus section\n"
     assert validate_body_structure(body) == []   # all required still present
+
+
+def test_render_body_appends_additional_sections_after_approach():
+    from mship.core.spec_body import render_body, parse_body_sections, validate_body_structure
+    body = render_body("p", "u", "a", additional_sections=[
+        ("Architecture", "the arch"),
+        ("Testing", "the tests"),
+    ])
+    sections = parse_body_sections(body)
+    assert sections["Problem"] == "p"
+    assert sections["Architecture"] == "the arch"
+    assert sections["Testing"] == "the tests"
+    assert validate_body_structure(body) == []                        # required gate still holds
+    assert body.index("## Approach") < body.index("## Architecture")  # extras come after Approach
+
+
+def test_render_body_without_additional_sections_unchanged():
+    from mship.core.spec_body import render_body
+    assert render_body("p", "u", "a") == render_body("p", "u", "a", additional_sections=[])
