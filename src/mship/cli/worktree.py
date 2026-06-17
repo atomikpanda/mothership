@@ -755,6 +755,19 @@ def register(app: typer.Typer, get_container):
                 output.print("Cancelled")
                 raise typer.Exit(code=0)
 
+        # Auto-advance bound spec dispatched→implemented when all PRs merged.
+        try:
+            from mship.core.spec_store import SPECS_DIRNAME
+            from mship.core.spec_lifecycle import advance_spec_on_close
+            advance_spec_on_close(
+                task=task,
+                specs_dir=Path(container.config_path()).parent / SPECS_DIRNAME,
+                merged_count=merged_count,
+                closed_count=closed_count,
+            )
+        except Exception:
+            pass
+
         wt_mgr = container.worktree_manager()
         wt_mgr.abort(task_slug)  # core method retains the name; only CLI verb changed
 

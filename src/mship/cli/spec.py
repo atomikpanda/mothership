@@ -551,4 +551,45 @@ def register(parent: typer.Typer, get_container):
         else:
             output.json(data)
 
+    def _simple_transition(target_status: str, spec_id: str) -> None:
+        """Shared logic for implemented/archive: validate transition and save."""
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from mship.core.spec import InvalidTransition, validate_transition
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+
+        output = Output()
+        container = get_container()
+        store = SpecStore(Path(container.config_path()).parent / SPECS_DIRNAME)
+        spec = store.find_by_id(spec_id)
+        if spec is None:
+            output.error(f"No spec with id {spec_id!r}.")
+            raise typer.Exit(1)
+        try:
+            validate_transition(spec.status, target_status)
+        except InvalidTransition as e:
+            output.error(str(e))
+            raise typer.Exit(1)
+        spec.status = target_status
+        spec.updated_at = datetime.now(timezone.utc)
+        store.save(spec)
+        if output.is_tty:
+            output.success(f"Spec {spec.id} → {target_status}")
+        else:
+            output.json({"id": spec.id, "status": spec.status})
+
+    @spec_app.command("implemented")
+    def mark_implemented(
+        spec_id: str = typer.Argument(..., help="Spec id to mark as implemented."),
+    ):
+        """Advance a dispatched spec to implemented."""
+        _simple_transition("implemented", spec_id)
+
+    @spec_app.command("archive")
+    def archive(
+        spec_id: str = typer.Argument(..., help="Spec id to archive."),
+    ):
+        """Advance an implemented spec to archived."""
+        _simple_transition("archived", spec_id)
+
     parent.add_typer(spec_app)
