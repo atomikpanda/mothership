@@ -11,11 +11,12 @@ def _repo(url=None):
 @pytest.mark.parametrize("url, default_remote, expected", [
     # full URL / SSH → as-is
     ("https://example.com/o/r.git", None, "https://example.com/o/r.git"),
+    ("  https://example.com/o/r.git  ", None, "https://example.com/o/r.git"),  # leading/trailing whitespace stripped
     ("git@github.com:o/r.git", None, "git@github.com:o/r.git"),
     ("file:///tmp/src", None, "file:///tmp/src"),
     # owner/repo → github
     ("atomikpanda/mothership", None, "https://github.com/atomikpanda/mothership"),
-    ("atomikpanda/mothership", "https://github.com/other", "https://github.com/atomikpanda/mothership"),
+    ("atomikpanda/mothership", "https://github.com/other", "https://github.com/atomikpanda/mothership"),  # default_remote ignored for owner/repo
     # bare repo → default_remote/repo
     ("mothership", "https://github.com/atomikpanda", "https://github.com/atomikpanda/mothership"),
     # trailing slash on default_remote normalized
