@@ -27,6 +27,12 @@ def register(app: typer.Typer, get_container):
 
         report = run_bootstrap(config_path, shell, state_dir=state_dir, repos=names)
 
+        warnings: list[str] = []
+        if report.doctor_ok is False:
+            warnings.append("doctor reported issues — run `mship doctor`")
+        elif report.doctor_ok is None and not report.has_errors:
+            warnings.append("doctor was not run")
+
         if output.is_tty:
             for m in report.members:
                 if m.status == "cloned":
@@ -35,10 +41,8 @@ def register(app: typer.Typer, get_container):
                     output.print(f"  {m.name}: {m.message}")
                 else:
                     output.print(f"  [red]{m.name}[/red]: {m.message}")
-            if report.doctor_ok is False:
-                output.warning("doctor reported issues — run `mship doctor`")
-            elif report.doctor_ok is None and not report.has_errors:
-                output.warning("doctor was not run")
+            for w in warnings:
+                output.warning(w)
         else:
             output.json({
                 "members": [
@@ -46,6 +50,7 @@ def register(app: typer.Typer, get_container):
                     for m in report.members
                 ],
                 "doctor_ok": report.doctor_ok,
+                "warnings": warnings,
                 "errors": sum(1 for m in report.members if m.status == "error"),
             })
 

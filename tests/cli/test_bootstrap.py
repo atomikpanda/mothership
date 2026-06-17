@@ -72,5 +72,7 @@ def test_bootstrap_exit_nonzero_on_member_error(tmp_path):
         data = json.loads(result.stdout)
         assert data["members"][0]["status"] == "error"
         assert result.exit_code == 1
+        assert data["errors"] == 1
+        assert data["warnings"] == []
     finally:
         _reset()
