@@ -243,7 +243,7 @@ class ConfigLoader:
     """Loads and validates mothership.yaml."""
 
     @staticmethod
-    def load(path: Path) -> WorkspaceConfig:
+    def load(path: Path, *, require_paths: bool = True) -> WorkspaceConfig:
         with open(path) as f:
             raw = yaml.safe_load(f)
 
@@ -251,33 +251,35 @@ class ConfigLoader:
 
         config = WorkspaceConfig(**raw)
 
-        # First pass: resolve paths and validate for repos WITHOUT git_root
+        # First pass: resolve paths and (when required) validate existence.
         for name, repo in config.repos.items():
             if repo.git_root is not None:
                 continue
             resolved = (workspace_root / repo.path).resolve()
             repo.path = resolved
-            if not resolved.is_dir():
-                raise ValueError(f"Repo '{name}' path does not exist: {resolved}")
-            if not (resolved / "Taskfile.yml").exists():
-                raise ValueError(
-                    f"Repo '{name}' at {resolved} has no Taskfile.yml"
-                )
+            if require_paths:
+                if not resolved.is_dir():
+                    raise ValueError(f"Repo '{name}' path does not exist: {resolved}")
+                if not (resolved / "Taskfile.yml").exists():
+                    raise ValueError(
+                        f"Repo '{name}' at {resolved} has no Taskfile.yml"
+                    )
 
-        # Second pass: validate git_root repos against their parent's resolved path
+        # Second pass: git_root repos validated against their parent's path.
         for name, repo in config.repos.items():
             if repo.git_root is None:
                 continue
             parent = config.repos[repo.git_root]
             effective = (parent.path / repo.path).resolve()
-            if not effective.is_dir():
-                raise ValueError(
-                    f"Repo '{name}' subdirectory does not exist: {effective}"
-                )
-            if not (effective / "Taskfile.yml").exists():
-                raise ValueError(
-                    f"Repo '{name}' at {effective} has no Taskfile.yml"
-                )
+            if require_paths:
+                if not effective.is_dir():
+                    raise ValueError(
+                        f"Repo '{name}' subdirectory does not exist: {effective}"
+                    )
+                if not (effective / "Taskfile.yml").exists():
+                    raise ValueError(
+                        f"Repo '{name}' at {effective} has no Taskfile.yml"
+                    )
 
         return config
 

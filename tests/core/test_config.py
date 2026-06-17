@@ -732,3 +732,37 @@ def test_repo_url_rejects_blank():
             workspace="w",
             repos={"lib": {"path": "lib", "type": "library", "url": "   "}},
         )
+
+
+def test_load_lenient_skips_missing_paths(tmp_path):
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: w\n"
+        "default_remote: https://github.com/atomikpanda\n"
+        "repos:\n"
+        "  lib:\n"
+        "    path: lib\n"
+        "    type: library\n"
+    )
+    cfg = ConfigLoader.load(tmp_path / "mothership.yaml", require_paths=False)
+    assert "lib" in cfg.repos
+    assert cfg.repos["lib"].path == (tmp_path / "lib").resolve()  # still resolved
+
+
+def test_load_lenient_still_raises_on_schema_error(tmp_path):
+    # Dependency cycle is a pure schema error — must raise even when lenient.
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: w\n"
+        "repos:\n"
+        "  a:\n    path: a\n    type: library\n    depends_on: [b]\n"
+        "  b:\n    path: b\n    type: library\n    depends_on: [a]\n"
+    )
+    with pytest.raises(ValueError):
+        ConfigLoader.load(tmp_path / "mothership.yaml", require_paths=False)
+
+
+def test_load_strict_still_raises_on_missing_path(tmp_path):
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: w\nrepos:\n  lib:\n    path: lib\n    type: library\n"
+    )
+    with pytest.raises(ValueError):
+        ConfigLoader.load(tmp_path / "mothership.yaml")  # default require_paths=True
