@@ -87,14 +87,18 @@ def register(parent: typer.Typer, get_container):
         from_text: Optional[str] = typer.Option(None, "--from-text", help="Inline intent text."),
         from_file: Optional[str] = typer.Option(None, "--from-file", help="Read intent from a file."),
     ):
-        """Emit a drafting prompt for `<id>` to stdout (run it through your agent, then `spec apply`)."""
+        """Emit a drafting prompt for `<id>` to stdout (run it through your agent, then `spec apply`).
+
+        Without --from-text / --from-file a generic drafting prompt is emitted.
+        Supply one of those options to embed your intent directly in the prompt.
+        """
         from pathlib import Path
         from mship.core.spec_store import SpecStore, SPECS_DIRNAME
         from mship.core.spec_draft import build_draft_prompt
 
         output = Output()
-        if (from_text is None) == (from_file is None):
-            output.error("Provide exactly one of --from-text or --from-file.")
+        if from_text is not None and from_file is not None:
+            output.error("Provide only one of --from-text or --from-file, not both.")
             raise typer.Exit(1)
 
         container = get_container()
@@ -106,12 +110,17 @@ def register(parent: typer.Typer, get_container):
 
         if from_text is not None:
             intent = from_text
-        else:
+        elif from_file is not None:
             try:
                 intent = Path(from_file).read_text()
             except OSError as e:
                 output.error(f"Cannot read --from-file {from_file!r}: {e}")
                 raise typer.Exit(1)
+        else:
+            intent = (
+                "<Describe your intent here: the problem to solve, who benefits, "
+                "and any constraints. Pass --from-text or --from-file to embed it automatically.>"
+            )
         typer.echo(build_draft_prompt(spec_id, intent))
 
     @spec_app.command("apply")
