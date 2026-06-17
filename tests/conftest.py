@@ -1,10 +1,25 @@
 import os
 import subprocess
+import sys
+import typing
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 import yaml
+
+# pydantic 2.13 calls typing._eval_type(prefer_fwd_module=True) which doesn't
+# exist until Python 3.14 final (rc2 lacks it). Shim the kwarg away.
+if sys.version_info >= (3, 14):
+    _orig_eval_type = typing._eval_type  # type: ignore[attr-defined]
+
+    def _patched_eval_type(t, globalns, localns, type_params=None, **kwargs):  # type: ignore[misc]
+        kwargs.pop("prefer_fwd_module", None)
+        if type_params is None:
+            return _orig_eval_type(t, globalns, localns, **kwargs)
+        return _orig_eval_type(t, globalns, localns, type_params, **kwargs)
+
+    typing._eval_type = _patched_eval_type  # type: ignore[attr-defined]
 
 
 @pytest.fixture
