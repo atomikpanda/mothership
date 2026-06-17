@@ -19,11 +19,17 @@
 
 workspace: example-workspace
 
+# Base prefix used to resolve a member's clone URL when its `url` is a bare repo
+# name or omitted (so `mship bootstrap` can clone missing members). Host-agnostic:
+# a member on a different host can instead give a full `url` (https://… or git@…).
+default_remote: https://github.com/your-org
+
 repos:
   # A shared library other repos compile against.
   shared:
     path: shared
     type: library
+    # url omitted -> default_remote/shared (i.e. https://github.com/your-org/shared)
     base_branch: main
     expected_branch: main
 
@@ -32,6 +38,7 @@ repos:
   api:
     path: api
     type: service
+    url: your-org/api   # owner/repo -> https://github.com/your-org/api (a full https://… or git@… URL also works)
     base_branch: main
     expected_branch: main
     depends_on: [shared]

@@ -23,3 +23,10 @@ def test_example_declares_a_compile_dependency():
     deps = config.repos["api"].depends_on
     names = [(d.repo if hasattr(d, "repo") else d) for d in deps]
     assert "shared" in names
+
+
+def test_example_declares_default_remote_and_member_url():
+    raw = yaml.safe_load(EXAMPLE.read_text())
+    config = WorkspaceConfig(**raw)
+    assert config.default_remote                       # a non-empty base prefix is set
+    assert any(r.url for r in config.repos.values())   # at least one member has a url

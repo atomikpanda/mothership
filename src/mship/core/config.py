@@ -46,8 +46,20 @@ class RepoConfig(BaseModel):
     healthcheck: Healthcheck | None = None
     base_branch: str | None = None
     expected_branch: str | None = None
+    url: str | None = None
     allow_dirty: bool = False
     allow_extra_worktrees: bool = False
+
+    @field_validator("url", mode="after")
+    @classmethod
+    def validate_url(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("url must be a non-empty string when provided")
+        # Normalize at parse time so any reader of repo.url sees the trimmed value.
+        return stripped
 
     @model_validator(mode="before")
     @classmethod
@@ -123,6 +135,11 @@ class WorkspaceConfig(BaseModel):
     # Does NOT affect canonical mship specs (always `specs/`) or the `spec_paths`
     # legacy spec-search default. Surfaced in `mship context` for skills.
     docs_dir: str = "docs"
+    # Host-agnostic base prefix used to resolve a member's clone URL when its
+    # `url` is a bare repo name or omitted (e.g. "https://github.com/atomikpanda").
+    # Deliberately not named after GitHub: non-GitHub members use a full `url`.
+    # See spec mship-bootstrap (MOS-180).
+    default_remote: str | None = None
     relay: RelayConfig | None = None
     repos: dict[str, RepoConfig]
 
@@ -228,7 +245,7 @@ class ConfigLoader:
     """Loads and validates mothership.yaml."""
 
     @staticmethod
-    def load(path: Path) -> WorkspaceConfig:
+    def load(path: Path, *, require_paths: bool = True) -> WorkspaceConfig:
         with open(path) as f:
             raw = yaml.safe_load(f)
 
@@ -236,33 +253,35 @@ class ConfigLoader:
 
         config = WorkspaceConfig(**raw)
 
-        # First pass: resolve paths and validate for repos WITHOUT git_root
+        # First pass: resolve paths and (when required) validate existence.
         for name, repo in config.repos.items():
             if repo.git_root is not None:
                 continue
             resolved = (workspace_root / repo.path).resolve()
             repo.path = resolved
-            if not resolved.is_dir():
-                raise ValueError(f"Repo '{name}' path does not exist: {resolved}")
-            if not (resolved / "Taskfile.yml").exists():
-                raise ValueError(
-                    f"Repo '{name}' at {resolved} has no Taskfile.yml"
-                )
+            if require_paths:
+                if not resolved.is_dir():
+                    raise ValueError(f"Repo '{name}' path does not exist: {resolved}")
+                if not (resolved / "Taskfile.yml").exists():
+                    raise ValueError(
+                        f"Repo '{name}' at {resolved} has no Taskfile.yml"
+                    )
 
-        # Second pass: validate git_root repos against their parent's resolved path
+        # Second pass: git_root repos validated against their parent's path.
         for name, repo in config.repos.items():
             if repo.git_root is None:
                 continue
             parent = config.repos[repo.git_root]
             effective = (parent.path / repo.path).resolve()
-            if not effective.is_dir():
-                raise ValueError(
-                    f"Repo '{name}' subdirectory does not exist: {effective}"
-                )
-            if not (effective / "Taskfile.yml").exists():
-                raise ValueError(
-                    f"Repo '{name}' at {effective} has no Taskfile.yml"
-                )
+            if require_paths:
+                if not effective.is_dir():
+                    raise ValueError(
+                        f"Repo '{name}' subdirectory does not exist: {effective}"
+                    )
+                if not (effective / "Taskfile.yml").exists():
+                    raise ValueError(
+                        f"Repo '{name}' at {effective} has no Taskfile.yml"
+                    )
 
         return config
 
@@ -303,3 +322,24 @@ class ConfigLoader:
                     "No mothership.yaml found in any parent directory"
                 )
             current = parent
+
+
+def unique_git_roots(
+    config: "WorkspaceConfig", names: list[str] | None = None
+) -> list[Path]:
+    """Resolved git-root path for each selected repo, de-duplicated, order-preserving.
+
+    A repo's git root is its parent repo's path when `git_root` is set (subdir
+    service), else its own path. `names=None` means all repos.
+    """
+    selected = names if names is not None else list(config.repos.keys())
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    for name in selected:
+        repo = config.repos[name]
+        root = config.repos[repo.git_root].path if repo.git_root else repo.path
+        root = Path(root).resolve()
+        if root not in seen:
+            seen.add(root)
+            roots.append(root)
+    return roots
