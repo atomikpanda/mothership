@@ -22,6 +22,37 @@ if sys.version_info >= (3, 14):
     typing._eval_type = _patched_eval_type  # type: ignore[attr-defined]
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _disable_git_signing_for_tests():
+    """Tests create throwaway git repos in tmp dirs and commit to them. In CI /
+    cloud containers with global commit-signing configured (e.g. a signing
+    server invoked via gpg.<fmt>.program), those tmp-dir commits are rejected
+    (signing server returns HTTP 400). Force-disable commit/tag signing for all
+    git subprocesses spawned by the suite via GIT_CONFIG_* env vars, which layer
+    on top of any global config at highest precedence without removing it. Local
+    runs are unaffected (signing is already off). See MOS-186.
+    """
+    keys = (
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+        "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1",
+    )
+    saved = {k: os.environ.get(k) for k in keys}
+    os.environ["GIT_CONFIG_COUNT"] = "2"
+    os.environ["GIT_CONFIG_KEY_0"] = "commit.gpgsign"
+    os.environ["GIT_CONFIG_VALUE_0"] = "false"
+    os.environ["GIT_CONFIG_KEY_1"] = "tag.gpgsign"
+    os.environ["GIT_CONFIG_VALUE_1"] = "false"
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
     """Create a minimal workspace with repos that have Taskfile.yml files."""
