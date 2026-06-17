@@ -46,8 +46,18 @@ class RepoConfig(BaseModel):
     healthcheck: Healthcheck | None = None
     base_branch: str | None = None
     expected_branch: str | None = None
+    url: str | None = None
     allow_dirty: bool = False
     allow_extra_worktrees: bool = False
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not v.strip():
+            raise ValueError("url must be a non-empty string when provided")
+        return v
 
     @model_validator(mode="before")
     @classmethod
@@ -123,6 +133,11 @@ class WorkspaceConfig(BaseModel):
     # Does NOT affect canonical mship specs (always `specs/`) or the `spec_paths`
     # legacy spec-search default. Surfaced in `mship context` for skills.
     docs_dir: str = "docs"
+    # Host-agnostic base prefix used to resolve a member's clone URL when its
+    # `url` is a bare repo name or omitted (e.g. "https://github.com/atomikpanda").
+    # Deliberately not named after GitHub: non-GitHub members use a full `url`.
+    # See spec mship-bootstrap (MOS-180).
+    default_remote: str | None = None
     relay: RelayConfig | None = None
     repos: dict[str, RepoConfig]
 

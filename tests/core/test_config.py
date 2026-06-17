@@ -710,3 +710,28 @@ def test_custom_docs_dir(workspace: Path):
     cfg.write_text(cfg.read_text() + 'docs_dir: "documentation"\n')
     config = ConfigLoader.load(cfg)
     assert config.docs_dir == "documentation"
+
+
+def test_repo_url_and_default_remote_parse(tmp_path):
+    from mship.core.config import WorkspaceConfig
+    cfg = WorkspaceConfig(
+        workspace="w",
+        default_remote="https://github.com/atomikpanda",
+        repos={
+            "lib": {"path": "lib", "type": "library", "url": "atomikpanda/lib"},
+            "svc": {"path": "svc", "type": "service"},  # url omitted is allowed
+        },
+    )
+    assert cfg.default_remote == "https://github.com/atomikpanda"
+    assert cfg.repos["lib"].url == "atomikpanda/lib"
+    assert cfg.repos["svc"].url is None
+
+
+def test_repo_url_rejects_blank():
+    from mship.core.config import WorkspaceConfig
+    import pytest
+    with pytest.raises(ValueError):
+        WorkspaceConfig(
+            workspace="w",
+            repos={"lib": {"path": "lib", "type": "library", "url": "   "}},
+        )
