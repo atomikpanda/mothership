@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from mship.core.clone_url import resolve_clone_url
-from mship.core.config import ConfigLoader, WorkspaceConfig, unique_git_roots
+from mship.core.config import ConfigLoader, RepoConfig, unique_git_roots
 from mship.util.shell import ShellRunner
 
 
@@ -31,7 +31,7 @@ class BootstrapReport:
 
 
 def _clone_one(
-    name: str, repo, default_remote: str | None,
+    name: str, repo: RepoConfig, default_remote: str | None,
     workspace_root: Path, shell: ShellRunner,
 ) -> MemberResult:
     path = Path(repo.path)
