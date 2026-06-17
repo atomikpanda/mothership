@@ -251,10 +251,13 @@ def test_spec_draft_emits_prompt(configured_app_with_task: Path):
     assert "mship spec apply dq --from-json" in result.output
 
 
-def test_spec_draft_requires_exactly_one_source(configured_app_with_task: Path):
+def test_spec_draft_bare_emits_generic_prompt_both_sources_error(configured_app_with_task: Path):
     runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
-    neither = runner.invoke(app, ["spec", "draft", "dq"])
-    assert neither.exit_code != 0
+    # Bare invocation now emits a generic drafting prompt (MOS-184).
+    bare = runner.invoke(app, ["spec", "draft", "dq"])
+    assert bare.exit_code == 0
+    assert "dq" in bare.output
+    # Supplying both sources at once is still rejected.
     both = runner.invoke(app, ["spec", "draft", "dq", "--from-text", "x", "--from-file", "f.md"])
     assert both.exit_code != 0
 
