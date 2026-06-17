@@ -4,18 +4,8 @@ from typing import Optional
 import typer
 
 from mship.cli.output import Output
+from mship.core.config import unique_git_roots
 from mship.core.init import WorkspaceInitializer, DetectedRepo
-
-
-def _unique_git_roots(config) -> list[Path]:
-    """Return deduplicated effective git roots for all repos in config."""
-    roots: set[Path] = set()
-    for name, repo in config.repos.items():
-        if repo.git_root is not None and repo.git_root in config.repos:
-            roots.add(Path(config.repos[repo.git_root].path).resolve())
-        else:
-            roots.add(Path(repo.path).resolve())
-    return sorted(roots)
 
 
 def register(app: typer.Typer, get_container):
@@ -46,7 +36,7 @@ def register(app: typer.Typer, get_container):
             config = container.config()
             installed_results: list[tuple[Path, dict[str, InstallOutcome]]] = []
             failed: list[tuple[Path, str]] = []
-            for root in _unique_git_roots(config):
+            for root in unique_git_roots(config):
                 try:
                     outcomes = install_hook(root)
                     installed_results.append((root, outcomes))
@@ -129,7 +119,7 @@ def register(app: typer.Typer, get_container):
 
         # Install pre-commit hooks on each effective git root
         from mship.core.hooks import install_hook
-        for root in _unique_git_roots(config):
+        for root in unique_git_roots(config):
             try:
                 install_hook(root)
             except Exception as e:
@@ -297,7 +287,7 @@ def _run_interactive(
 
     # Install pre-commit hooks on each effective git root
     from mship.core.hooks import install_hook
-    for root in _unique_git_roots(config):
+    for root in unique_git_roots(config):
         try:
             install_hook(root)
         except Exception as e:

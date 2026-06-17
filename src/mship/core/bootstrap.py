@@ -3,12 +3,13 @@ up, install git hooks, then run doctor. See spec mship-bootstrap (MOS-180)."""
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 from mship.core.clone_url import resolve_clone_url
-from mship.core.config import ConfigLoader, WorkspaceConfig
+from mship.core.config import ConfigLoader, WorkspaceConfig, unique_git_roots
 from mship.util.shell import ShellRunner
 
 
@@ -29,19 +30,6 @@ class BootstrapReport:
         return any(m.status == "error" for m in self.members)
 
 
-def _unique_git_roots(config: WorkspaceConfig, names: list[str]) -> list[Path]:
-    roots: list[Path] = []
-    seen: set[Path] = set()
-    for name in names:
-        repo = config.repos[name]
-        root = config.repos[repo.git_root].path if repo.git_root else repo.path
-        root = Path(root).resolve()
-        if root not in seen:
-            seen.add(root)
-            roots.append(root)
-    return roots
-
-
 def _clone_one(
     name: str, repo, default_remote: str | None,
     workspace_root: Path, shell: ShellRunner,
@@ -60,7 +48,7 @@ def _clone_one(
             "on the workspace",
         )
 
-    res = shell.run(f"git clone {url} {path}", cwd=workspace_root)
+    res = shell.run(f"git clone {shlex.quote(url)} {shlex.quote(str(path))}", cwd=workspace_root)
     if res.returncode != 0:
         return MemberResult(
             name, "error", f"clone failed: {res.stderr.strip()[:200] or 'unknown'}"
@@ -70,7 +58,7 @@ def _clone_one(
     if target:
         cur = shell.run("git rev-parse --abbrev-ref HEAD", cwd=path).stdout.strip()
         if cur != target:
-            co = shell.run(f"git checkout {target}", cwd=path)
+            co = shell.run(f"git checkout {shlex.quote(target)}", cwd=path)
             if co.returncode != 0:
                 return MemberResult(
                     name, "cloned",
@@ -99,7 +87,9 @@ def bootstrap(
 
     cloned = [r.name for r in results if r.status == "cloned"]
 
-    # task setup for freshly-cloned members (best-effort; failures are warnings).
+    # task setup for freshly-cloned members (best-effort; a failure only annotates
+    # the message — it must NOT change the member's "cloned" status).
+    setup_failures: dict[str, str] = {}
     if cloned and shutil.which("task") is not None:
         for name in cloned:
             repo = config.repos[name]
@@ -111,19 +101,20 @@ def bootstrap(
                 env_runner=repo.env_runner or config.env_runner,
             )
             if setup.returncode != 0:
-                results = [
-                    MemberResult(r.name, r.status,
-                                 f"{r.message}; setup failed: "
-                                 f"{setup.stderr.strip()[:120]}")
-                    if r.name == name else r
-                    for r in results
-                ]
+                setup_failures[name] = setup.stderr.strip()[:120]
+    if setup_failures:
+        results = [
+            MemberResult(r.name, r.status,
+                         f"{r.message}; setup failed: {setup_failures[r.name]}")
+            if r.name in setup_failures else r
+            for r in results
+        ]
 
     # Install git hooks on each unique git root that is now present.
     present = [r.name for r in results if r.status in ("cloned", "present")]
     if present:
         from mship.core.hooks import install_hook
-        for root in _unique_git_roots(config, present):
+        for root in unique_git_roots(config, present):
             try:
                 install_hook(root)
             except Exception:

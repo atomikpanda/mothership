@@ -320,3 +320,24 @@ class ConfigLoader:
                     "No mothership.yaml found in any parent directory"
                 )
             current = parent
+
+
+def unique_git_roots(
+    config: "WorkspaceConfig", names: list[str] | None = None
+) -> list[Path]:
+    """Resolved git-root path for each selected repo, de-duplicated, order-preserving.
+
+    A repo's git root is its parent repo's path when `git_root` is set (subdir
+    service), else its own path. `names=None` means all repos.
+    """
+    selected = names if names is not None else list(config.repos.keys())
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    for name in selected:
+        repo = config.repos[name]
+        root = config.repos[repo.git_root].path if repo.git_root else repo.path
+        root = Path(root).resolve()
+        if root not in seen:
+            seen.add(root)
+            roots.append(root)
+    return roots
