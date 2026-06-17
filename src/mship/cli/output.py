@@ -30,7 +30,11 @@ class Output:
         if self.is_tty:
             self._console.print(f"[yellow]WARNING:[/yellow] {message}")
         else:
-            self._stream.write(f"WARNING: {message}\n")
+            # Non-TTY: warnings go to stderr so they never corrupt the JSON
+            # payload on stdout (e.g. `mship phase dev | jq`). JSON-mode
+            # consumers that need the warnings get them in-band via the
+            # payload's `warnings` field. (MOS-177)
+            self._err_stream.write(f"WARNING: {message}\n")
 
     def error(self, message: str) -> None:
         if self.is_tty:

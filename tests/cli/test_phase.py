@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -47,8 +48,23 @@ def test_phase_transition(configured_app_with_task, workspace: Path):
 
 
 def test_phase_shows_warnings(configured_app_with_task):
+    # Non-TTY: warnings are carried in the JSON payload's `warnings` field, not
+    # printed onto stdout (MOS-177).
     result = runner.invoke(app, ["phase", "dev", "--task", "add-labels"])
-    assert "WARNING" in result.output or "spec" in result.output.lower()
+    data = json.loads(result.stdout)
+    assert data["warnings"]
+
+
+def test_phase_non_tty_stdout_is_pure_json_despite_warnings(configured_app_with_task):
+    # MOS-177: `mship phase dev | jq` must work even when the transition emits
+    # warnings (e.g. no spec found). stdout must be parseable JSON with the
+    # warnings carried in-band, and no "WARNING:" prefix leaking onto stdout
+    # (the warning text goes to stderr instead).
+    result = runner.invoke(app, ["phase", "dev", "--task", "add-labels"])
+    data = json.loads(result.stdout)
+    assert data["warnings"]
+    assert "WARNING" not in result.stdout
+    assert "WARNING" in result.stderr
 
 
 def test_phase_no_task(workspace: Path):
