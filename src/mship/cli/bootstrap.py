@@ -25,7 +25,11 @@ def register(app: typer.Typer, get_container):
             [n.strip() for n in repos.split(",") if n.strip()] if repos else None
         )
 
-        report = run_bootstrap(config_path, shell, state_dir=state_dir, repos=names)
+        try:
+            report = run_bootstrap(config_path, shell, state_dir=state_dir, repos=names)
+        except ValueError as e:
+            output.error(str(e))
+            raise typer.Exit(code=1)
 
         warnings: list[str] = []
         if report.doctor_ok is False:

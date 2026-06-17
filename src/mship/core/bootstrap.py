@@ -80,6 +80,15 @@ def bootstrap(
     config = ConfigLoader.load(config_path, require_paths=False)
 
     names = repos or list(config.repos.keys())
+    unknown = [n for n in names if n not in config.repos]
+    if unknown:
+        raise ValueError(
+            f"Unknown repo name(s): {sorted(unknown)}. "
+            f"Valid repos: {sorted(config.repos)}"
+        )
+    # git_root repos are subdirectories of their parent repo's checkout — they
+    # are materialized when the parent is cloned, never cloned independently.
+    names = [n for n in names if config.repos[n].git_root is None]
     results: list[MemberResult] = [
         _clone_one(n, config.repos[n], config.default_remote, workspace_root, shell)
         for n in names

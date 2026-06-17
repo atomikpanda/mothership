@@ -734,6 +734,14 @@ def test_repo_url_rejects_blank():
         )
 
 
+def test_repo_url_is_stripped_at_parse():
+    cfg = WorkspaceConfig(
+        workspace="w",
+        repos={"lib": {"path": "lib", "type": "library", "url": "  atomikpanda/lib  "}},
+    )
+    assert cfg.repos["lib"].url == "atomikpanda/lib"
+
+
 def test_load_lenient_skips_missing_paths(tmp_path):
     (tmp_path / "mothership.yaml").write_text(
         "workspace: w\n"

@@ -76,3 +76,19 @@ def test_bootstrap_exit_nonzero_on_member_error(tmp_path):
         assert data["warnings"] == []
     finally:
         _reset()
+
+
+def test_bootstrap_unknown_repo_filter_errors_cleanly(tmp_path):
+    src = _source_repo(tmp_path)
+    ws = _ws(tmp_path,
+             "workspace: w\nrepos:\n  lib:\n    path: lib\n    type: library\n"
+             f"    url: file://{src}\n")
+    _configure(ws)
+    try:
+        result = runner.invoke(app, ["bootstrap", "--repos", "typo,lib"])
+        # Actionable error, not a raw KeyError traceback.
+        assert result.exit_code == 1
+        assert "typo" in result.output
+        assert "Unknown repo" in result.output
+    finally:
+        _reset()

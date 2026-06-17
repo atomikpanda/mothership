@@ -55,9 +55,11 @@ class RepoConfig(BaseModel):
     def validate_url(cls, v: str | None) -> str | None:
         if v is None:
             return v
-        if not v.strip():
+        stripped = v.strip()
+        if not stripped:
             raise ValueError("url must be a non-empty string when provided")
-        return v
+        # Normalize at parse time so any reader of repo.url sees the trimmed value.
+        return stripped
 
     @model_validator(mode="before")
     @classmethod

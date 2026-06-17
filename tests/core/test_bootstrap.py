@@ -96,3 +96,32 @@ def test_bootstrap_repos_filter(tmp_path):
     report = bootstrap(ws / "mothership.yaml", ShellRunner(),
                        state_dir=ws / ".mothership", repos=["lib"])
     assert [m.name for m in report.members] == ["lib"]
+
+
+def test_bootstrap_skips_git_root_repos(tmp_path):
+    # A git_root repo is a subdirectory of its parent's checkout — it is
+    # materialized when the parent is cloned, never cloned independently.
+    src = _make_source_repo(tmp_path)
+    ws = tmp_path / "wsg"
+    ws.mkdir()
+    (ws / ".mothership").mkdir()
+    (ws / "mothership.yaml").write_text(
+        "workspace: w\n"
+        "repos:\n"
+        f"  svc:\n    path: svc\n    type: service\n    url: file://{src}\n"
+        "  svc_sub:\n    path: sub\n    type: library\n    git_root: svc\n"
+    )
+    report = bootstrap(ws / "mothership.yaml", ShellRunner(),
+                       state_dir=ws / ".mothership")
+    names = {m.name for m in report.members}
+    assert "svc" in names              # parent is cloned
+    assert "svc_sub" not in names      # git_root subdir is skipped, not cloned
+
+
+def test_bootstrap_unknown_repo_filter_raises(tmp_path):
+    src = _make_source_repo(tmp_path)
+    ws = _workspace(tmp_path, f"file://{src}", member="lib")
+    import pytest
+    with pytest.raises(ValueError, match="Unknown repo"):
+        bootstrap(ws / "mothership.yaml", ShellRunner(),
+                  state_dir=ws / ".mothership", repos=["typo"])
