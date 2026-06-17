@@ -50,7 +50,7 @@ class RepoConfig(BaseModel):
     allow_dirty: bool = False
     allow_extra_worktrees: bool = False
 
-    @field_validator("url")
+    @field_validator("url", mode="after")
     @classmethod
     def validate_url(cls, v: str | None) -> str | None:
         if v is None:

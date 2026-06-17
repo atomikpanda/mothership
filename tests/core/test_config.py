@@ -712,8 +712,7 @@ def test_custom_docs_dir(workspace: Path):
     assert config.docs_dir == "documentation"
 
 
-def test_repo_url_and_default_remote_parse(tmp_path):
-    from mship.core.config import WorkspaceConfig
+def test_repo_url_and_default_remote_parse():
     cfg = WorkspaceConfig(
         workspace="w",
         default_remote="https://github.com/atomikpanda",
@@ -728,8 +727,6 @@ def test_repo_url_and_default_remote_parse(tmp_path):
 
 
 def test_repo_url_rejects_blank():
-    from mship.core.config import WorkspaceConfig
-    import pytest
     with pytest.raises(ValueError):
         WorkspaceConfig(
             workspace="w",
