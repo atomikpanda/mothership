@@ -456,4 +456,90 @@ def register(parent: typer.Typer, get_container):
         else:
             output.json({"id": spec.id, "status": spec.status, "reason": reason})
 
+    @spec_app.command("list")
+    def list_specs():
+        """List all specs (TTY: table; non-TTY: JSON envelope)."""
+        from pathlib import Path
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+
+        output = Output()
+        container = get_container()
+        workspace_root = Path(container.config_path()).parent
+        store = SpecStore(workspace_root / SPECS_DIRNAME)
+        specs = store.list()
+        items = [
+            {
+                "id": s.id,
+                "title": s.title,
+                "status": s.status,
+                "task_slug": s.task_slug,
+                "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+            }
+            for s in specs
+        ]
+        if output.is_tty:
+            from rich.table import Table
+            from rich.console import Console
+            table = Table(title="Specs")
+            for col in ("id", "title", "status", "task_slug", "updated_at"):
+                table.add_column(col)
+            for item in items:
+                table.add_row(
+                    item["id"],
+                    item["title"],
+                    item["status"],
+                    item["task_slug"] or "",
+                    str(item["updated_at"] or ""),
+                )
+            Console().print(table)
+        else:
+            output.json({"specs": items})
+
+    @spec_app.command("show")
+    def show_spec(
+        spec_id: str = typer.Argument(..., help="Spec id to show."),
+    ):
+        """Show structured detail for a spec (non-TTY: pure JSON)."""
+        from pathlib import Path
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+
+        output = Output()
+        container = get_container()
+        workspace_root = Path(container.config_path()).parent
+        store = SpecStore(workspace_root / SPECS_DIRNAME)
+        spec = store.find_by_id(spec_id)
+        if spec is None:
+            output.error(f"No spec with id {spec_id!r}.")
+            raise typer.Exit(1)
+        data = {
+            "id": spec.id,
+            "title": spec.title,
+            "status": spec.status,
+            "task_slug": spec.task_slug,
+            "updated_at": spec.updated_at.isoformat() if spec.updated_at else None,
+            "created_at": spec.created_at.isoformat() if spec.created_at else None,
+            "affected_repos": spec.affected_repos,
+            "acceptance_criteria": [
+                {"id": ac.id, "text": ac.text, "done": ac.done}
+                for ac in (spec.acceptance_criteria or [])
+            ],
+            "open_questions": [
+                {"id": oq.id, "question": oq.question, "answer": oq.answer}
+                for oq in (spec.open_questions or [])
+            ],
+            "non_goals": spec.non_goals,
+            "risks": spec.risks,
+            "body": spec.body,
+        }
+        if output.is_tty:
+            from rich.console import Console
+            from rich.markdown import Markdown
+            console = Console()
+            console.print(f"[bold]{spec.title}[/bold]  ({spec.id})")
+            console.print(f"Status: {spec.status}  Task: {spec.task_slug or '—'}")
+            if spec.body:
+                console.print(Markdown(spec.body))
+        else:
+            output.json(data)
+
     parent.add_typer(spec_app)

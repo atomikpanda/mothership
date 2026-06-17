@@ -5,7 +5,7 @@ description = "Phase-based workflow engine for multi-repo AI development"
 requires-python = ">=3.14"
 dependencies = [
     "typer>=0.15",
-    "pydantic>=2.0",
+    "pydantic>=2.13",
     "rich>=13.0",
     "textual>=0.80",
     "InquirerPy>=0.3",
