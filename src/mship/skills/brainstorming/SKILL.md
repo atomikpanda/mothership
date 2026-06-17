@@ -27,7 +27,7 @@ You MUST create a task for each of these items and complete them in order:
 4. **Propose 2-3 approaches** — with trade-offs and your recommendation
 5. **Present design** — in sections scaled to their complexity, get user approval after each section
 6. **Capture the design** — dual-path on workspace detection (is there a `mothership.yaml` at/above cwd?):
-   - **In a mothership workspace:** the design becomes a structured **`mship spec`**, not a doc file. Run `mship spec new --title "<title>"`, then populate it (`mship spec draft <id>` → run the emitted prompt through an agent → `mship spec apply <id> --from-json <file>`), landing it in `needs_review`. This is the canonical artifact — it gets reviewed/approved (`mship spec review` / `verdict` / `approve`) and dispatched. See the `working-with-mothership` skill for the full lifecycle.
+   - **In a mothership workspace:** the design becomes a structured **`mship spec`**, not a doc file. Run `mship spec new --title "<title>"`, then populate it (`mship spec draft <id> [--from-text "..."]` → run the emitted prompt through an agent → `mship spec apply <id> --from-json <file>`), landing it in `needs_review`. This is the canonical artifact — it gets reviewed/approved (`mship spec review` / `verdict` / `approve`) and dispatched. See the `working-with-mothership` skill for the full lifecycle.
    - **Outside a workspace:** write a plain design doc to `docs/specs/YYYY-MM-DD-<topic>-design.md` and commit it.
 7. **Spec self-review** — quick inline check for placeholders, contradictions, ambiguity, scope (see below)
 8. **User reviews written spec** — ask user to review the spec file before proceeding
@@ -112,7 +112,7 @@ digraph brainstorming {
 
 Capture the design using the dual-path based on workspace detection (is there a `mothership.yaml` at/above cwd?):
 
-- **In a mothership workspace:** the design becomes a structured **`mship spec`**, not a doc file. Run `mship spec new --title "<title>"`, then populate it (`mship spec draft <id>` → run the emitted prompt through an agent → `mship spec apply <id> --from-json <file>`), landing it in `needs_review`. This is the canonical artifact — it gets reviewed/approved (`mship spec review` / `verdict` / `approve`) and dispatched. See the `working-with-mothership` skill for the full lifecycle.
+- **In a mothership workspace:** the design becomes a structured **`mship spec`**, not a doc file. Run `mship spec new --title "<title>"`, then populate it (`mship spec draft <id> [--from-text "..."]` → run the emitted prompt through an agent → `mship spec apply <id> --from-json <file>`), landing it in `needs_review`. This is the canonical artifact — it gets reviewed/approved (`mship spec review` / `verdict` / `approve`) and dispatched. See the `working-with-mothership` skill for the full lifecycle.
 - **Outside a workspace:** write the validated design to `docs/specs/YYYY-MM-DD-<topic>-design.md` and commit it.
   - (User preferences for spec location override this default)
   - Use elements-of-style:writing-clearly-and-concisely skill if available

@@ -91,7 +91,8 @@ The lifecycle, in order:
 
 ```bash
 mship spec new --title "<title>"            # create a stub (status: captured)
-mship spec draft <id>                        # emit a drafting prompt to stdout
+mship spec draft <id> [--from-text "..."|--from-file <path>]  # emit a drafting prompt to stdout
+#   bare `spec draft <id>` emits a generic prompt; supply intent via --from-text or --from-file
 #   → run that prompt through an agent to produce SpecDraft JSON, then:
 mship spec apply <id> --from-json <file>     # ingest the draft (→ needs_review)
 mship spec validate <id>                     # check body structure
