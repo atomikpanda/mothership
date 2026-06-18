@@ -842,6 +842,10 @@ def register(app: typer.Typer, get_container):
                  "Multi-repo tasks use the same title for every PR. See #45.",
         ),
         task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
+        token: Optional[str] = typer.Option(
+            None, "--token", help="GitHub token for push + PR creation in "
+            "credential-less environments (else GH_TOKEN / GITHUB_TOKEN).",
+        ),
     ):
         """Create PRs across repos in dependency order."""
         from pathlib import Path
@@ -1033,6 +1037,8 @@ def register(app: typer.Typer, get_container):
 
         # PR creation flow
         pr_mgr = container.pr_manager()
+        from mship.core.gh_auth import resolve_token
+        gh_token = resolve_token(token)
 
         # --push-only: push branches, stamp finished_at, skip gh entirely.
         if push_only:
@@ -1047,7 +1053,7 @@ def register(app: typer.Typer, get_container):
                     if wt_path.exists():
                         repo_path = wt_path
                 try:
-                    pr_mgr.push_branch(repo_path, task.branch)
+                    pr_mgr.push_branch(repo_path, task.branch, token=gh_token)
                 except RuntimeError as e:
                     output.error(f"{repo_name}: {e}")
                     raise typer.Exit(code=1)
@@ -1078,11 +1084,13 @@ def register(app: typer.Typer, get_container):
                 output.print("Branch pushed. After merge/review, run `mship close` to clean up.")
             return
 
-        try:
-            pr_mgr.check_gh_available()
-        except RuntimeError as e:
-            output.error(str(e))
-            raise typer.Exit(code=1)
+        if gh_token is None:
+            try:
+                pr_mgr.check_gh_available()
+            except RuntimeError as e:
+                output.error(str(e))
+                raise typer.Exit(code=1)
+        # else: a token is present; the httpx PR path covers gh absence.
 
         # --- Resolve + verify PR base branches up front ---
         from mship.core.base_resolver import (
@@ -1272,7 +1280,7 @@ def register(app: typer.Typer, get_container):
             # --- --force re-push path: branch exists on origin, push new commits.
             if all_members_have_url and force:
                 try:
-                    pr_mgr.push_branch(group.rep_path, task.branch)
+                    pr_mgr.push_branch(group.rep_path, task.branch, token=gh_token)
                 except RuntimeError as e:
                     output.error(f"{group.rep_name}: {e}")
                     raise typer.Exit(code=1)
@@ -1292,7 +1300,7 @@ def register(app: typer.Typer, get_container):
 
             # --- Fresh path: push, ensure_upstream, find-or-create PR.
             try:
-                pr_mgr.push_branch(group.rep_path, task.branch)
+                pr_mgr.push_branch(group.rep_path, task.branch, token=gh_token)
             except RuntimeError as e:
                 output.error(f"{group.rep_name}: {e}")
                 raise typer.Exit(code=1)
@@ -1357,6 +1365,7 @@ def register(app: typer.Typer, get_container):
                         title=title if title else task.description,
                         body=pr_body,
                         base=group.base,
+                        token=gh_token,
                     )
                 except RuntimeError as e:
                     output.error(f"{group.rep_name}: {e}")

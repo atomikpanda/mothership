@@ -62,7 +62,10 @@ def test_create_pr(mock_shell: MagicMock):
 
 
 def test_create_pr_failure(mock_shell: MagicMock):
-    mock_shell.run.return_value = ShellResult(returncode=1, stdout="", stderr="error")
+    mock_shell.run.side_effect = [
+        ShellResult(returncode=0, stdout="", stderr=""),   # gh auth status → gh_usable=True
+        ShellResult(returncode=1, stdout="", stderr="error"),  # gh pr create fails
+    ]
     mgr = PRManager(mock_shell)
     with pytest.raises(RuntimeError, match="Failed to create PR"):
         mgr.create_pr(Path("/tmp/repo"), "feat/test", "title", "body")
@@ -343,6 +346,7 @@ def test_list_pr_for_branch_returns_none_on_gh_failure(mock_shell: MagicMock):
 def test_create_pr_duplicate_harvests_existing_url(mock_shell: MagicMock):
     from mship.core.pr import PRManager
     mock_shell.run.side_effect = [
+        ShellResult(returncode=0, stdout="", stderr=""),  # gh auth status → gh_usable=True
         ShellResult(
             returncode=1,
             stdout="",
@@ -360,13 +364,14 @@ def test_create_pr_duplicate_harvests_existing_url(mock_shell: MagicMock):
         title="t", body="b", base="main",
     )
     assert url == "https://github.com/org/repo/pull/17"
-    assert "gh pr create" in mock_shell.run.call_args_list[0].args[0]
-    assert "gh pr list" in mock_shell.run.call_args_list[1].args[0]
+    assert "gh pr create" in mock_shell.run.call_args_list[1].args[0]
+    assert "gh pr list" in mock_shell.run.call_args_list[2].args[0]
 
 
 def test_create_pr_duplicate_but_list_fails_raises(mock_shell: MagicMock):
     from mship.core.pr import PRManager
     mock_shell.run.side_effect = [
+        ShellResult(returncode=0, stdout="", stderr=""),  # gh auth status → gh_usable=True
         ShellResult(returncode=1, stdout="", stderr="a pull request already exists"),
         ShellResult(returncode=1, stdout="", stderr="gh auth error"),
     ]
@@ -381,9 +386,10 @@ def test_create_pr_duplicate_but_list_fails_raises(mock_shell: MagicMock):
 def test_create_pr_non_duplicate_error_still_raises(mock_shell: MagicMock):
     """Regression: non-duplicate rc=1 errors still raise (existing behavior)."""
     from mship.core.pr import PRManager
-    mock_shell.run.return_value = ShellResult(
-        returncode=1, stdout="", stderr="fatal: some other error",
-    )
+    mock_shell.run.side_effect = [
+        ShellResult(returncode=0, stdout="", stderr=""),  # gh auth status → gh_usable=True
+        ShellResult(returncode=1, stdout="", stderr="fatal: some other error"),
+    ]
     pr_mgr = PRManager(mock_shell)
     with pytest.raises(RuntimeError, match="some other error"):
         pr_mgr.create_pr(
@@ -397,6 +403,8 @@ def test_create_pr_falls_back_to_rest_on_graphql_rate_limit(mock_shell: MagicMoc
     from mship.core.pr import PRManager
     import json
     mock_shell.run.side_effect = [
+        # 0. gh auth status → gh_usable=True
+        ShellResult(returncode=0, stdout="", stderr=""),
         # 1. gh pr create hits the rate limit.
         ShellResult(
             returncode=1, stdout="",
@@ -431,6 +439,7 @@ def test_create_pr_falls_back_on_secondary_rate_limit(mock_shell: MagicMock):
     from mship.core.pr import PRManager
     import json
     mock_shell.run.side_effect = [
+        ShellResult(returncode=0, stdout="", stderr=""),  # gh auth status → gh_usable=True
         ShellResult(
             returncode=1, stdout="",
             stderr="You have exceeded a secondary rate limit.",
@@ -454,6 +463,7 @@ def test_create_pr_rest_fallback_fails_surfaces_original_error(mock_shell: Magic
     """If REST also fails, surface the original GraphQL error, not the REST error."""
     from mship.core.pr import PRManager
     mock_shell.run.side_effect = [
+        ShellResult(returncode=0, stdout="", stderr=""),  # gh auth status → gh_usable=True
         ShellResult(
             returncode=1, stdout="",
             stderr="GraphQL: API rate limit already exceeded for user ID 1.",
@@ -476,6 +486,7 @@ def test_create_pr_rest_fallback_parses_ssh_remote_url(mock_shell: MagicMock):
     from mship.core.pr import PRManager
     import json
     mock_shell.run.side_effect = [
+        ShellResult(returncode=0, stdout="", stderr=""),  # gh auth status → gh_usable=True
         ShellResult(returncode=1, stdout="", stderr="GraphQL: API rate limit exceeded"),
         ShellResult(returncode=0, stdout="git@github.com:owner/repo.git\n", stderr=""),
         ShellResult(
@@ -499,6 +510,7 @@ def test_create_pr_rest_fallback_parses_https_without_git_suffix(mock_shell: Mag
     from mship.core.pr import PRManager
     import json
     mock_shell.run.side_effect = [
+        ShellResult(returncode=0, stdout="", stderr=""),  # gh auth status → gh_usable=True
         ShellResult(returncode=1, stdout="", stderr="GraphQL: API rate limit exceeded"),
         ShellResult(returncode=0, stdout="https://github.com/a/b\n", stderr=""),
         ShellResult(
@@ -574,3 +586,66 @@ def test_check_pr_state_unknown_rate_limit_surfaces_reason(mock_shell):
     result = PRManager(mock_shell).check_pr_state("https://x/1")
     assert result.state == "unknown"
     assert result.reason == "rate limited"
+
+
+# --- Task 4: token-authed push + gh-or-httpx PR (MOS-187) ---
+
+
+class _Shell:
+    def __init__(self, gh_returncode=0):
+        self.calls = []
+        self._gh_rc = gh_returncode
+    def run(self, command, cwd, env=None):
+        self.calls.append((command, env))
+        if command.startswith("gh auth status"):
+            return ShellResult(returncode=self._gh_rc, stdout="", stderr="")
+        if command.startswith("git remote get-url"):
+            return ShellResult(returncode=0, stdout="https://github.com/o/r\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+
+def test_push_branch_includes_cred_args_with_token():
+    sh = _Shell()
+    PRManager(sh).push_branch(Path("/x"), "feat/y", token="ghp_supersecrettoken99")
+    cmd, env = next((c, e) for c, e in sh.calls if "git" in c and "push" in c)
+    assert "credential.https://github.com.helper" in cmd
+    assert "ghp_supersecrettoken99" not in cmd
+    assert env and env["MSHIP_GH_TOKEN"] == "ghp_supersecrettoken99"
+
+
+def test_gh_usable_true_when_status_zero():
+    assert PRManager(_Shell(gh_returncode=0)).gh_usable() is True
+
+
+def test_gh_usable_false_when_not_installed():
+    assert PRManager(_Shell(gh_returncode=127)).gh_usable() is False
+
+
+def test_create_pr_uses_httpx_when_gh_absent(monkeypatch):
+    sh = _Shell(gh_returncode=127)
+    sent = {}
+    def fake_httpx(token, owner, repo, *, head, base, title, body, client=None):
+        sent.update(owner=owner, repo=repo, head=head, base=base, token=token)
+        return "https://github.com/o/r/pull/9"
+    monkeypatch.setattr("mship.core.pr.create_pr_via_httpx", fake_httpx)
+    url = PRManager(sh).create_pr(Path("/x"), "feat/y", "T", "B", base="main", token="tok")
+    assert url == "https://github.com/o/r/pull/9"
+    assert sent == {"owner": "o", "repo": "r", "head": "feat/y", "base": "main", "token": "tok"}
+
+
+def test_create_pr_uses_gh_when_available():
+    sh = _Shell(gh_returncode=0)
+    real_run = sh.run
+    def run(command, cwd, env=None):
+        if command.startswith("gh pr create"):
+            return ShellResult(returncode=0, stdout="https://github.com/o/r/pull/3\n", stderr="")
+        return real_run(command, cwd, env)
+    sh.run = run
+    url = PRManager(sh).create_pr(Path("/x"), "feat/y", "T", "B", base="main", token="tok")
+    assert url == "https://github.com/o/r/pull/3"
+
+
+def test_create_pr_no_gh_no_token_raises():
+    import pytest
+    with pytest.raises(RuntimeError):
+        PRManager(_Shell(gh_returncode=127)).create_pr(Path("/x"), "feat/y", "T", "B", base="main")

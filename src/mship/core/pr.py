@@ -4,6 +4,7 @@ import shlex
 from pathlib import Path
 from typing import NamedTuple
 
+from mship.core.gh_auth import git_cred_args, create_pr_via_httpx, get_default_branch_via_httpx
 from mship.util.shell import ShellRunner
 
 
@@ -89,14 +90,25 @@ class PRManager:
                 "gh CLI not authenticated. Run `gh auth login` first."
             )
 
-    def push_branch(self, repo_path: Path, branch: str) -> None:
+    def gh_usable(self) -> bool:
+        """True if gh is installed and authenticated (gh auth status returncode 0)."""
+        return self._shell.run("gh auth status", cwd=Path(".")).returncode == 0
+
+    def push_branch(self, repo_path: Path, branch: str, token: str | None = None) -> None:
+        prefix, env = "", None
+        if token:
+            args, env = git_cred_args(token)
+            prefix = " ".join(shlex.quote(a) for a in args) + " "
         result = self._shell.run(
-            f"git push -u origin {shlex.quote(branch)}",
-            cwd=repo_path,
+            f"git {prefix}push -u origin {shlex.quote(branch)}",
+            cwd=repo_path, env=env,
         )
         if result.returncode != 0:
+            hint = ""
+            if token is None and "could not read" in result.stderr.lower():
+                hint = " — set GH_TOKEN/GITHUB_TOKEN or pass --token"
             raise RuntimeError(
-                f"Failed to push branch '{branch}': {result.stderr.strip()}"
+                f"Failed to push branch '{branch}': {result.stderr.strip()}{hint}"
             )
 
     def ensure_upstream(self, repo_path: Path, branch: str) -> None:
@@ -124,8 +136,27 @@ class PRManager:
 
     def create_pr(
         self, repo_path: Path, branch: str, title: str, body: str,
-        base: str | None = None,
+        base: str | None = None, token: str | None = None,
     ) -> str:
+        if not self.gh_usable():
+            if not token:
+                raise RuntimeError(
+                    "gh CLI not available and no GH_TOKEN/GITHUB_TOKEN found. "
+                    "Install gh, or set a token (repo scope) / pass --token."
+                )
+            remote = self._shell.run("git remote get-url origin", cwd=repo_path)
+            slug = _parse_github_slug(remote.stdout) if remote.returncode == 0 else None
+            if slug is None:
+                raise RuntimeError(
+                    "Could not determine owner/repo from origin remote for REST PR creation."
+                )
+            owner, repo = slug
+            effective_base = base or get_default_branch_via_httpx(token, owner, repo)
+            return create_pr_via_httpx(
+                token, owner, repo, head=branch, base=effective_base,
+                title=title, body=body,
+            )
+        # --- existing gh pr create path stays here, unchanged ---
         safe_title = shlex.quote(title)
         safe_body = shlex.quote(body)
         cmd = (
