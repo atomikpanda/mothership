@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import os
 
+import httpx
+
 # Credential helper: on a `get` request, emit username/password reading the
 # token from the env var git inherits. Single-quote-safe (uses double quotes
 # internally) so callers can shlex.quote the whole `-c` value.
@@ -32,3 +34,58 @@ def git_cred_args(token: str) -> tuple[list[str], dict[str, str]]:
     The token appears only in the env, never in the args."""
     keyval = f"credential.https://github.com.helper={_CRED_HELPER}"
     return ["-c", keyval], {_TOKEN_ENV_VAR: token}
+
+
+_API = "https://api.github.com"
+_API_HEADERS = {"Accept": "application/vnd.github+json"}
+
+
+def _client(token: str, client: httpx.Client | None) -> tuple[httpx.Client, bool]:
+    if client is not None:
+        return client, False
+    return httpx.Client(timeout=30.0), True
+
+
+def create_pr_via_httpx(
+    token: str, owner: str, repo: str, *, head: str, base: str,
+    title: str, body: str, client: httpx.Client | None = None,
+) -> str:
+    """Open a PR via the GitHub REST API (no gh dependency). Returns html_url."""
+    c, owns = _client(token, client)
+    try:
+        resp = c.post(
+            f"{_API}/repos/{owner}/{repo}/pulls",
+            json={"title": title, "head": head, "base": base, "body": body},
+            headers={**_API_HEADERS, "Authorization": f"Bearer {token}"},
+        )
+    finally:
+        if owns:
+            c.close()
+    if resp.status_code >= 300:
+        raise RuntimeError(
+            f"GitHub PR creation failed ({resp.status_code}): {resp.text[:300]}"
+        )
+    url = resp.json().get("html_url")
+    if not isinstance(url, str) or not url:
+        raise RuntimeError("GitHub PR created but response had no html_url")
+    return url
+
+
+def get_default_branch_via_httpx(
+    token: str, owner: str, repo: str, *, client: httpx.Client | None = None,
+) -> str:
+    """Fetch the repo's default branch (used when no base is given)."""
+    c, owns = _client(token, client)
+    try:
+        resp = c.get(
+            f"{_API}/repos/{owner}/{repo}",
+            headers={**_API_HEADERS, "Authorization": f"Bearer {token}"},
+        )
+    finally:
+        if owns:
+            c.close()
+    if resp.status_code >= 300:
+        raise RuntimeError(
+            f"Could not fetch default branch ({resp.status_code}): {resp.text[:200]}"
+        )
+    return resp.json().get("default_branch") or "main"
