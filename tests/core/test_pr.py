@@ -643,9 +643,10 @@ def test_create_pr_uses_gh_when_available():
     sh.run = run
     url = PRManager(sh).create_pr(Path("/x"), "feat/y", "T", "B", base="main", token="tok")
     assert url == "https://github.com/o/r/pull/3"
+    assert any("gh auth status" in c for c, _ in sh.calls)
 
 
 def test_create_pr_no_gh_no_token_raises():
     import pytest
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="gh CLI not available"):
         PRManager(_Shell(gh_returncode=127)).create_pr(Path("/x"), "feat/y", "T", "B", base="main")

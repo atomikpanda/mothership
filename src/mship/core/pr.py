@@ -78,6 +78,7 @@ class PRManager:
 
     def __init__(self, shell: ShellRunner) -> None:
         self._shell = shell
+        self._gh_usable_cache: bool | None = None
 
     def check_gh_available(self) -> None:
         result = self._shell.run("gh auth status", cwd=Path("."))
@@ -91,8 +92,13 @@ class PRManager:
             )
 
     def gh_usable(self) -> bool:
-        """True if gh is installed and authenticated (gh auth status returncode 0)."""
-        return self._shell.run("gh auth status", cwd=Path(".")).returncode == 0
+        """True if gh is installed and authenticated. Cached per instance —
+        gh availability does not change within a single mship invocation."""
+        if self._gh_usable_cache is None:
+            self._gh_usable_cache = (
+                self._shell.run("gh auth status", cwd=Path(".")).returncode == 0
+            )
+        return self._gh_usable_cache
 
     def push_branch(self, repo_path: Path, branch: str, token: str | None = None) -> None:
         prefix, env = "", None
