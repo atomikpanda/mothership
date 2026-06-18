@@ -50,7 +50,11 @@ def create_pr_via_httpx(
     token: str, owner: str, repo: str, *, head: str, base: str,
     title: str, body: str, client: httpx.Client | None = None,
 ) -> str:
-    """Open a PR via the GitHub REST API (no gh dependency). Returns html_url."""
+    """Open a PR via the GitHub REST API (no gh dependency). Returns html_url.
+
+    Idempotent: if a PR already exists for the branch (GitHub 422), recover and
+    return the existing PR's URL instead of raising — so retrying `mship finish`
+    after a partial cloud run succeeds (mirrors the gh path)."""
     c, owns = _make_client(client)
     try:
         resp = c.post(
@@ -58,17 +62,40 @@ def create_pr_via_httpx(
             json={"title": title, "head": head, "base": base, "body": body},
             headers={**_API_HEADERS, "Authorization": f"Bearer {token}"},
         )
+        if resp.status_code == 422 and "already exist" in resp.text.lower():
+            existing = _find_open_pr_url(c, token, owner, repo, head)
+            if existing:
+                return existing
+        if resp.status_code >= 300:
+            raise RuntimeError(
+                f"GitHub PR creation failed ({resp.status_code}): {resp.text[:300]}"
+            )
+        url = resp.json().get("html_url")
+        if not isinstance(url, str) or not url:
+            raise RuntimeError("GitHub PR created but response had no html_url")
+        return url
     finally:
         if owns:
             c.close()
+
+
+def _find_open_pr_url(
+    client: httpx.Client, token: str, owner: str, repo: str, head: str,
+) -> str | None:
+    """Return the html_url of the open PR for `head` (same-repo branch), or None."""
+    resp = client.get(
+        f"{_API}/repos/{owner}/{repo}/pulls",
+        params={"head": f"{owner}:{head}", "state": "open"},
+        headers={**_API_HEADERS, "Authorization": f"Bearer {token}"},
+    )
     if resp.status_code >= 300:
-        raise RuntimeError(
-            f"GitHub PR creation failed ({resp.status_code}): {resp.text[:300]}"
-        )
-    url = resp.json().get("html_url")
-    if not isinstance(url, str) or not url:
-        raise RuntimeError("GitHub PR created but response had no html_url")
-    return url
+        return None
+    items = resp.json()
+    if isinstance(items, list) and items:
+        url = items[0].get("html_url")
+        if isinstance(url, str) and url:
+            return url
+    return None
 
 
 def get_default_branch_via_httpx(

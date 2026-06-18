@@ -650,3 +650,14 @@ def test_create_pr_no_gh_no_token_raises():
     import pytest
     with pytest.raises(RuntimeError, match="gh CLI not available"):
         PRManager(_Shell(gh_returncode=127)).create_pr(Path("/x"), "feat/y", "T", "B", base="main")
+
+
+def test_check_gh_available_populates_cache():
+    # check_gh_available() runs `gh auth status`; it should seed the cache so a
+    # later gh_usable() (e.g. inside create_pr) doesn't run it a second time.
+    sh = _Shell(gh_returncode=0)
+    mgr = PRManager(sh)
+    mgr.check_gh_available()
+    assert mgr.gh_usable() is True
+    gh_calls = [c for c, _ in sh.calls if c.startswith("gh auth status")]
+    assert len(gh_calls) == 1

@@ -70,6 +70,36 @@ def test_create_pr_via_httpx_raises_when_no_html_url():
                             title="T", body="B", client=client)
 
 
+def test_create_pr_via_httpx_recovers_existing_on_422_already_exists():
+    # Idempotency: GitHub returns 422 when a PR already exists for the branch;
+    # the httpx path must recover the existing PR URL (mirrors the gh path).
+    def handler(request):
+        if request.method == "POST":
+            return httpx.Response(422, json={
+                "message": "Validation Failed",
+                "errors": [{"message": "A pull request already exists for o:feat/x."}],
+            })
+        assert request.method == "GET"  # lookup of the existing open PR
+        return httpx.Response(200, json=[{"html_url": "https://github.com/o/r/pull/5"}])
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    url = create_pr_via_httpx("tok", "o", "r", head="feat/x", base="main",
+                              title="T", body="B", client=client)
+    assert url == "https://github.com/o/r/pull/5"
+
+
+def test_create_pr_via_httpx_422_non_existing_still_raises():
+    def handler(request):
+        return httpx.Response(422, json={
+            "message": "Validation Failed",
+            "errors": [{"message": "base is invalid"}],
+        })
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(RuntimeError):
+        create_pr_via_httpx("tok", "o", "r", head="h", base="bad",
+                            title="T", body="B", client=client)
+
+
 def test_get_default_branch_via_httpx():
     def handler(request):
         assert str(request.url) == "https://api.github.com/repos/o/r"

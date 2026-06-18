@@ -90,6 +90,9 @@ class PRManager:
             raise RuntimeError(
                 "gh CLI not authenticated. Run `gh auth login` first."
             )
+        # Seed the cache so a later gh_usable() (e.g. in create_pr) doesn't
+        # re-run `gh auth status` in the no-token path.
+        self._gh_usable_cache = True
 
     def gh_usable(self) -> bool:
         """True if gh is installed and authenticated. Cached per instance —
