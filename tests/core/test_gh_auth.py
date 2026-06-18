@@ -1,4 +1,5 @@
 import json
+
 import httpx
 import pytest
 
@@ -60,9 +61,19 @@ def test_create_pr_via_httpx_raises_on_error_status():
                             title="T", body="B", client=client)
 
 
+def test_create_pr_via_httpx_raises_when_no_html_url():
+    def handler(request):
+        return httpx.Response(201, json={"number": 7})  # 2xx but no html_url
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(RuntimeError):
+        create_pr_via_httpx("tok", "o", "r", head="h", base="main",
+                            title="T", body="B", client=client)
+
+
 def test_get_default_branch_via_httpx():
     def handler(request):
         assert str(request.url) == "https://api.github.com/repos/o/r"
+        assert request.headers.get("authorization") == "Bearer tok"
         return httpx.Response(200, json={"default_branch": "trunk"})
     client = httpx.Client(transport=httpx.MockTransport(handler))
     assert get_default_branch_via_httpx("tok", "o", "r", client=client) == "trunk"

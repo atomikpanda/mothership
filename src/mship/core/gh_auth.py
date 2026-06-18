@@ -40,7 +40,7 @@ _API = "https://api.github.com"
 _API_HEADERS = {"Accept": "application/vnd.github+json"}
 
 
-def _client(token: str, client: httpx.Client | None) -> tuple[httpx.Client, bool]:
+def _make_client(client: httpx.Client | None) -> tuple[httpx.Client, bool]:
     if client is not None:
         return client, False
     return httpx.Client(timeout=30.0), True
@@ -51,7 +51,7 @@ def create_pr_via_httpx(
     title: str, body: str, client: httpx.Client | None = None,
 ) -> str:
     """Open a PR via the GitHub REST API (no gh dependency). Returns html_url."""
-    c, owns = _client(token, client)
+    c, owns = _make_client(client)
     try:
         resp = c.post(
             f"{_API}/repos/{owner}/{repo}/pulls",
@@ -75,7 +75,7 @@ def get_default_branch_via_httpx(
     token: str, owner: str, repo: str, *, client: httpx.Client | None = None,
 ) -> str:
     """Fetch the repo's default branch (used when no base is given)."""
-    c, owns = _client(token, client)
+    c, owns = _make_client(client)
     try:
         resp = c.get(
             f"{_API}/repos/{owner}/{repo}",
@@ -88,4 +88,9 @@ def get_default_branch_via_httpx(
         raise RuntimeError(
             f"Could not fetch default branch ({resp.status_code}): {resp.text[:200]}"
         )
-    return resp.json().get("default_branch") or "main"
+    branch = resp.json().get("default_branch")
+    if not isinstance(branch, str) or not branch:
+        raise RuntimeError(
+            f"GitHub repo response for {owner}/{repo} had no default_branch"
+        )
+    return branch
