@@ -171,5 +171,6 @@ def test_bootstrap_clone_no_cred_args_without_token(tmp_path):
     )
     bmod.bootstrap(ws / "mothership.yaml", FakeShell(),
                    state_dir=ws / ".mothership")  # no token
-    clone = next(c for c, e in calls if "git" in c and "clone" in c)
+    clone, clone_env = next((c, e) for c, e in calls if "git" in c and "clone" in c)
     assert "credential.https://github.com.helper" not in clone
+    assert clone_env is None  # no token => no injected env at all
