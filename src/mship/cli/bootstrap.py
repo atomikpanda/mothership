@@ -11,6 +11,10 @@ def register(app: typer.Typer, get_container):
         repos: Optional[str] = typer.Option(
             None, "--repos", help="Comma-separated repo names (default: all)."
         ),
+        token: Optional[str] = typer.Option(
+            None, "--token", help="GitHub token for cloning private members "
+            "(else GH_TOKEN / GITHUB_TOKEN).",
+        ),
     ):
         """Clone missing workspace members so a fresh clone becomes a full workspace."""
         from mship.core.bootstrap import bootstrap as run_bootstrap
@@ -26,7 +30,8 @@ def register(app: typer.Typer, get_container):
         )
 
         try:
-            report = run_bootstrap(config_path, shell, state_dir=state_dir, repos=names)
+            report = run_bootstrap(config_path, shell, state_dir=state_dir,
+                                   repos=names, token=token)
         except ValueError as e:
             output.error(str(e))
             raise typer.Exit(code=1)

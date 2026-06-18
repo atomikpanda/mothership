@@ -10,7 +10,17 @@ from pathlib import Path
 
 from mship.core.clone_url import resolve_clone_url
 from mship.core.config import ConfigLoader, RepoConfig, unique_git_roots
+from mship.core.gh_auth import resolve_token, git_cred_args
 from mship.util.shell import ShellRunner
+
+
+def _looks_like_auth_failure(stderr: str) -> bool:
+    s = stderr.lower()
+    return any(k in s for k in (
+        "authentication failed", "could not read username",
+        "terminal prompts disabled", "permission denied", "403",
+        "fatal: could not read",
+    ))
 
 
 @dataclass(frozen=True)
@@ -32,7 +42,7 @@ class BootstrapReport:
 
 def _clone_one(
     name: str, repo: RepoConfig, default_remote: str | None,
-    workspace_root: Path, shell: ShellRunner,
+    workspace_root: Path, shell: ShellRunner, token: str | None = None,
 ) -> MemberResult:
     path = Path(repo.path)
     # No-clobber: lexists() is True for an existing dir OR a (possibly broken)
@@ -48,10 +58,23 @@ def _clone_one(
             "on the workspace",
         )
 
-    res = shell.run(f"git clone {shlex.quote(url)} {shlex.quote(str(path))}", cwd=workspace_root)
+    if token:
+        cred_args, cred_env = git_cred_args(token)
+        prefix = " ".join(shlex.quote(a) for a in cred_args) + " "
+    else:
+        prefix, cred_env = "", None
+    res = shell.run(
+        f"git {prefix}clone {shlex.quote(url)} {shlex.quote(str(path))}",
+        cwd=workspace_root, env=cred_env,
+    )
     if res.returncode != 0:
+        hint = ""
+        if token is None and _looks_like_auth_failure(res.stderr):
+            hint = (" — authentication failed and no GH_TOKEN/GITHUB_TOKEN found; "
+                    "set a token with repo scope or pass --token")
         return MemberResult(
-            name, "error", f"clone failed: {res.stderr.strip()[:200] or 'unknown'}"
+            name, "error",
+            f"clone failed: {res.stderr.strip()[:200] or 'unknown'}{hint}",
         )
 
     target = repo.expected_branch or repo.base_branch
@@ -74,10 +97,12 @@ def bootstrap(
     *,
     state_dir: Path,
     repos: list[str] | None = None,
+    token: str | None = None,
 ) -> BootstrapReport:
     config_path = Path(config_path)
     workspace_root = config_path.parent
     config = ConfigLoader.load(config_path, require_paths=False)
+    resolved_token = resolve_token(token)
 
     names = repos or list(config.repos.keys())
     unknown = [n for n in names if n not in config.repos]
@@ -90,7 +115,8 @@ def bootstrap(
     # are materialized when the parent is cloned, never cloned independently.
     names = [n for n in names if config.repos[n].git_root is None]
     results: list[MemberResult] = [
-        _clone_one(n, config.repos[n], config.default_remote, workspace_root, shell)
+        _clone_one(n, config.repos[n], config.default_remote, workspace_root, shell,
+                   resolved_token)
         for n in names
     ]
 
