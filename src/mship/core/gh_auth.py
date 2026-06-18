@@ -11,7 +11,8 @@ import os
 # token from the env var git inherits. Single-quote-safe (uses double quotes
 # internally) so callers can shlex.quote the whole `-c` value.
 _CRED_HELPER = (
-    '!f() { test "$1" = get && '
+    '!f() { test "$1" = get || exit 0; '
+    '[ -n "$MSHIP_GH_TOKEN" ] || { echo "MSHIP_GH_TOKEN unset" >&2; exit 1; }; '
     'printf "username=x-access-token\\npassword=%s\\n" "$MSHIP_GH_TOKEN"; }; f'
 )
 _TOKEN_ENV_VAR = "MSHIP_GH_TOKEN"
