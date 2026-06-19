@@ -185,11 +185,19 @@ mship switch <repo>                   # before starting work in a different repo
 mship phase plan|dev|review|run [-f]  # `-f` overrides blocked or finished-task guardrail
 mship block "reason" | mship unblock
 mship test [--all] [--repos|--tag] [--no-diff]
+mship capture [--repo R] [--platform P] [--kind image|layout|all] [--out DIR]
 mship journal "msg" [--action X] [--open Y] [--repo R] [--test-state pass|fail|mixed]
 mship journal --show-open                 # what am I blocked on across this task?
 mship finish [--base B] [--base-map ...] [--push-only] [--handoff] [--force-audit] [--body-file F | --body TEXT] [--force] [--require-tests] [--title T] [--body-map ...]
 mship close [--yes] [--abandon] [--force] [--skip-pr-check]
 ```
+
+**`capture` is the UI analog of `test`.** For UI work (mobile screens, web), run
+`mship capture` to grab the running app's rendered state — a screenshot (`image`)
+and/or a structured layout dump (`layout`) — into files you can read, then compare
+against intent and iterate. It delegates to the repo's `capture` go-task target
+(adb/simctl/etc.), so the app must already be running (`mship run`); it does not
+boot emulators/simulators. Use `--platform` when a repo targets more than one.
 
 **`spawn` order:** slugify → worktree per repo → symlink `symlink_dirs` → `task setup` (unless `--skip-setup`) → save state → enter `plan`. If a repo's setup fails, the task still spawns; fix and re-run setup manually.
 
