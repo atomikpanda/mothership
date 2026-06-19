@@ -34,12 +34,17 @@ def _block(body_sh: str) -> str:
 def _resolve_prelude(mship_bin: str) -> str:
     # Reliable resolution: install-time absolute path, then PATH fallback.
     # Enforcing hooks fail closed if mship can't be found (the gate must not
-    # silently no-op — that is the MOS-189 bug).
+    # silently no-op — the MOS-189 bug). When mship is missing we can't run the
+    # Python bypass/logging, so honor MSHIP_BYPASS_GATE here in the shell.
     return (
         f'MSHIP_BIN="{mship_bin}"\n'
         'if [ ! -x "$MSHIP_BIN" ]; then MSHIP_BIN="$(command -v mship 2>/dev/null || true)"; fi\n'
         'if [ -z "$MSHIP_BIN" ]; then\n'
-        '    echo "mship: cannot enforce task gate (mship not found). Reinstall hooks (mship init --install-hooks) or set MSHIP_BYPASS_GATE=1 to override." >&2\n'
+        '    case "$MSHIP_BYPASS_GATE" in\n'
+        '        ""|0|false|FALSE|no|NO) ;;\n'
+        '        *) exit 0 ;;\n'
+        '    esac\n'
+        '    echo "mship: cannot enforce task gate (mship not found). Reinstall hooks (mship init --install-hooks), or set MSHIP_BYPASS_GATE=1 / use git --no-verify to override." >&2\n'
         '    exit 1\n'
         'fi\n'
     )
@@ -80,7 +85,7 @@ def _post_checkout_body(mship_bin: str) -> str:
 def _post_commit_body(mship_bin: str) -> str:
     return (
         _advisory_prelude(mship_bin)
-        + '[ -n "$MSHIP_BIN" ] && "$MSHIP_BIN" _journal-commit || true\n'
+        + 'if [ -n "$MSHIP_BIN" ]; then "$MSHIP_BIN" _journal-commit || true; fi\n'
     )
 
 
