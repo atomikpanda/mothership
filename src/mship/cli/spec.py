@@ -381,6 +381,10 @@ def register(parent: typer.Typer, get_container):
     @spec_app.command("dispatch")
     def dispatch(
         spec_id: str = typer.Argument(..., help="Spec id to dispatch (must be approved)."),
+        task_slug: Optional[str] = typer.Option(
+            None, "--task",
+            help="Bind to this existing task slug instead of auto-spawning a slug==id task.",
+        ),
     ):
         """Dispatch an approved spec to its task.
 
@@ -418,6 +422,7 @@ def register(parent: typer.Typer, get_container):
                 store=store,
                 spawn_fn=_spawn,
                 now=datetime.now(timezone.utc),
+                task_slug=task_slug,
             )
         except DispatchError as e:
             output.error(str(e))
