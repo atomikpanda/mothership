@@ -125,3 +125,52 @@ def test_bootstrap_unknown_repo_filter_raises(tmp_path):
     with pytest.raises(ValueError, match="Unknown repo"):
         bootstrap(ws / "mothership.yaml", ShellRunner(),
                   state_dir=ws / ".mothership", repos=["typo"])
+
+
+def test_bootstrap_clone_includes_cred_args_when_token(tmp_path):
+    from mship.core import bootstrap as bmod
+    from mship.util.shell import ShellResult
+    calls = []
+
+    class FakeShell:
+        def run(self, command, cwd, env=None):
+            calls.append((command, env))
+            return ShellResult(returncode=0, stdout="", stderr="")
+        def run_task(self, *a, **k):
+            return ShellResult(returncode=0, stdout="", stderr="")
+
+    ws = tmp_path / "ws"; ws.mkdir(); (ws / ".mothership").mkdir()
+    (ws / "mothership.yaml").write_text(
+        "workspace: w\nrepos:\n  lib:\n    path: lib\n    type: library\n"
+        "    url: https://github.com/o/lib\n"
+    )
+    bmod.bootstrap(ws / "mothership.yaml", FakeShell(),
+                   state_dir=ws / ".mothership", token="tok123")
+    cmd, env = next((c, e) for c, e in calls if "git" in c and "clone" in c)
+    assert "credential.https://github.com.helper" in cmd
+    assert "tok123" not in cmd                 # token never in argv
+    assert env and env.get("MSHIP_GH_TOKEN") == "tok123"
+
+
+def test_bootstrap_clone_no_cred_args_without_token(tmp_path):
+    from mship.core import bootstrap as bmod
+    from mship.util.shell import ShellResult
+    calls = []
+
+    class FakeShell:
+        def run(self, command, cwd, env=None):
+            calls.append((command, env))
+            return ShellResult(returncode=0, stdout="", stderr="")
+        def run_task(self, *a, **k):
+            return ShellResult(returncode=0, stdout="", stderr="")
+
+    ws = tmp_path / "ws2"; ws.mkdir(); (ws / ".mothership").mkdir()
+    (ws / "mothership.yaml").write_text(
+        "workspace: w\nrepos:\n  lib:\n    path: lib\n    type: library\n"
+        "    url: https://github.com/o/lib\n"
+    )
+    bmod.bootstrap(ws / "mothership.yaml", FakeShell(),
+                   state_dir=ws / ".mothership")  # no token
+    clone, clone_env = next((c, e) for c, e in calls if "git" in c and "clone" in c)
+    assert "credential.https://github.com.helper" not in clone
+    assert clone_env is None  # no token => no injected env at all
