@@ -6,6 +6,15 @@ import typer
 from mship.cli.output import Output
 from mship.core.config import unique_git_roots
 from mship.core.init import WorkspaceInitializer, DetectedRepo
+from mship.core.claude_settings import install_session_hook
+
+
+def _install_session_hook_with_output(ws_root: Path, output: Output) -> None:
+    try:
+        outcome = install_session_hook(ws_root)
+        output.success(f"SessionStart hook @ {ws_root}/.claude/settings.json: {outcome}")
+    except Exception as e:
+        output.warning(f"SessionStart hook install skipped: {e}")
 
 
 def register(app: typer.Typer, get_container):
@@ -44,7 +53,7 @@ def register(app: typer.Typer, get_container):
                     failed.append((root, str(e)))
             for root, outcomes in installed_results:
                 hooks_dir = root / ".git" / "hooks"
-                for hook_name in ("pre-commit", "post-commit", "post-checkout"):
+                for hook_name in ("pre-commit", "pre-push", "post-commit", "post-checkout"):
                     outcome = outcomes.get(hook_name)
                     if outcome is None:
                         continue
@@ -57,6 +66,7 @@ def register(app: typer.Typer, get_container):
                         output.print(line)
             for r, err in failed:
                 output.error(f"hook install failed: {r}: {err}")
+            _install_session_hook_with_output(Path(container.config_path()).parent, output)
             raise typer.Exit(code=1 if failed else 0)
 
         # Check for existing config
@@ -124,6 +134,8 @@ def register(app: typer.Typer, get_container):
                 install_hook(root)
             except Exception as e:
                 output.print(f"[yellow]warning: could not install hook at {root}: {e}[/yellow]")
+
+        _install_session_hook_with_output(cwd, output)
 
         if output.is_tty:
             output.success(f"Created: {config_path}")
@@ -292,6 +304,8 @@ def _run_interactive(
             install_hook(root)
         except Exception as e:
             output.print(f"[yellow]warning: could not install hook at {root}: {e}[/yellow]")
+
+    _install_session_hook_with_output(cwd, output)
 
     output.print("")
     output.success(f"Created: {config_path}")

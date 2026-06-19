@@ -47,6 +47,28 @@ def register(app: typer.Typer, get_container):
 
         Fail-open on any exception (corrupt state, missing config, etc.) -> exit 0.
         """
+        from mship.core.gate import resolve_bypass, record_bypass
+        bypassed, reason = resolve_bypass()
+        if bypassed:
+            try:
+                _c = get_container(required=False)
+                if _c is not None:
+                    import subprocess as _sp
+                    _branch = ""
+                    try:
+                        _r = _sp.run(
+                            ["git", "-C", toplevel, "rev-parse", "--abbrev-ref", "HEAD"],
+                            capture_output=True, text=True, check=False, timeout=3,
+                        )
+                        if _r.returncode == 0:
+                            _branch = _r.stdout.strip()
+                    except Exception:
+                        pass
+                    record_bypass(Path(_c.config_path()).parent, op="commit", branch=_branch, reason=reason)
+            except Exception:
+                pass
+            raise typer.Exit(code=0)
+
         try:
             container = get_container(required=False)
             if container is None:
@@ -192,6 +214,70 @@ def register(app: typer.Typer, get_container):
             "\n   cd into a worktree, or use `git commit --no-verify` to override.\n"
         )
         raise typer.Exit(code=1)
+
+    @app.command(name="_check-push", hidden=True)
+    def check_push():
+        """Reject pushing a branch-pattern branch that is not a registered task
+        branch. Reads git pre-push ref lines from stdin. Fail-open on error."""
+        import sys
+        from mship.core.gate import resolve_bypass, record_bypass
+
+        try:
+            container = get_container(required=False)
+            if container is None:
+                raise typer.Exit(code=0)
+            config = container.config()
+            state = container.state_manager().load()
+        except typer.Exit:
+            raise
+        except Exception:
+            raise typer.Exit(code=0)
+
+        prefix = config.branch_pattern.split("{slug}", 1)[0]  # e.g. "feat/"
+        task_branches = {t.branch for t in state.tasks.values()}
+
+        offending: list[str] = []
+        for line in sys.stdin.read().splitlines():
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            local_ref, local_sha = parts[0], parts[1]
+            if set(local_sha) == {"0"}:           # delete — nothing pushed
+                continue
+            if not local_ref.startswith("refs/heads/"):
+                continue
+            branch = local_ref[len("refs/heads/"):]
+            if prefix and branch.startswith(prefix) and branch not in task_branches:
+                if branch not in offending:
+                    offending.append(branch)
+
+        if not offending:
+            raise typer.Exit(code=0)
+
+        bypassed, reason = resolve_bypass()
+        if bypassed:
+            ws_root = Path(container.config_path()).parent
+            for b in offending:
+                record_bypass(ws_root, op="push", branch=b, reason=reason)
+            raise typer.Exit(code=0)
+
+        sys.stderr.write(
+            "⛔ mship: refusing push — branch(es) not registered to a task: "
+            + ", ".join(offending) + "\n"
+            + "   Spawn a task (mship spawn) so the branch is tracked, or set "
+            + "MSHIP_BYPASS_GATE=1 (or `git push --no-verify`) to override.\n"
+        )
+        raise typer.Exit(code=1)
+
+    @app.command(name="_session-context", hidden=True)
+    def session_context():
+        """Print the no-active-task notice for the SessionStart hook (else nothing)."""
+        from mship.core.gate import no_task_notice
+        notice = no_task_notice(Path.cwd())
+        if notice:
+            import sys
+            sys.stdout.write(notice + "\n")
+        raise typer.Exit(code=0)
 
     @app.command(name="_post-checkout", hidden=True)
     def post_checkout(

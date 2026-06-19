@@ -103,15 +103,16 @@ def test_install_when_git_dir_missing_raises(tmp_path):
         install_hook(tmp_path)
 
 
-def test_install_creates_all_three_hook_files(tmp_path):
+def test_install_creates_all_hook_files(tmp_path):
     import subprocess
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
     install_hook(tmp_path)
     hooks = tmp_path / ".git" / "hooks"
     assert (hooks / "pre-commit").exists()
+    assert (hooks / "pre-push").exists()
     assert (hooks / "post-checkout").exists()
     assert (hooks / "post-commit").exists()
-    for name in ("pre-commit", "post-checkout", "post-commit"):
+    for name in ("pre-commit", "pre-push", "post-checkout", "post-commit"):
         content = (hooks / name).read_text()
         assert HOOK_MARKER_BEGIN in content
         assert HOOK_MARKER_END in content
@@ -123,14 +124,16 @@ def test_each_hook_has_distinct_body(tmp_path):
     install_hook(tmp_path)
     hooks = tmp_path / ".git" / "hooks"
     pre = (hooks / "pre-commit").read_text()
+    pre_push = (hooks / "pre-push").read_text()
     post_co = (hooks / "post-checkout").read_text()
     post_ci = (hooks / "post-commit").read_text()
-    assert "mship _check-commit" in pre
-    assert "mship _post-checkout" in post_co
-    assert "mship _journal-commit" in post_ci
+    assert "_check-commit" in pre
+    assert "_check-push" in pre_push
+    assert "_post-checkout" in post_co
+    assert "_journal-commit" in post_ci
 
 
-def test_is_installed_requires_all_three(tmp_path):
+def test_is_installed_requires_all_hooks(tmp_path):
     import subprocess
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
     install_hook(tmp_path)
@@ -141,16 +144,16 @@ def test_is_installed_requires_all_three(tmp_path):
     assert is_installed(tmp_path) is False
 
 
-def test_uninstall_strips_all_three(tmp_path):
+def test_uninstall_strips_all_hooks(tmp_path):
     import subprocess
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
     hooks = tmp_path / ".git" / "hooks"
     # Seed each hook file with user content first
-    for name in ("pre-commit", "post-checkout", "post-commit"):
+    for name in ("pre-commit", "pre-push", "post-checkout", "post-commit"):
         (hooks / name).write_text(f"#!/bin/sh\n# user {name}\n")
     install_hook(tmp_path)
     uninstall_hook(tmp_path)
-    for name in ("pre-commit", "post-checkout", "post-commit"):
+    for name in ("pre-commit", "pre-push", "post-checkout", "post-commit"):
         content = (hooks / name).read_text()
         assert f"user {name}" in content
         assert HOOK_MARKER_BEGIN not in content
@@ -172,6 +175,7 @@ def test_install_hook_fresh_returns_installed_for_each(tmp_path: Path):
     outcomes = install_hook(root)
     assert outcomes == {
         "pre-commit": InstallOutcome.installed,
+        "pre-push": InstallOutcome.installed,
         "post-commit": InstallOutcome.installed,
         "post-checkout": InstallOutcome.installed,
     }
@@ -182,15 +186,16 @@ def test_install_hook_second_run_is_up_to_date(tmp_path: Path):
     install_hook(root)
     hooks_dir = root / ".git" / "hooks"
     mtimes_before = {n: (hooks_dir / n).stat().st_mtime_ns
-                     for n in ("pre-commit", "post-commit", "post-checkout")}
+                     for n in ("pre-commit", "pre-push", "post-commit", "post-checkout")}
     outcomes = install_hook(root)
     assert outcomes == {
         "pre-commit": InstallOutcome.up_to_date,
+        "pre-push": InstallOutcome.up_to_date,
         "post-commit": InstallOutcome.up_to_date,
         "post-checkout": InstallOutcome.up_to_date,
     }
     mtimes_after = {n: (hooks_dir / n).stat().st_mtime_ns
-                    for n in ("pre-commit", "post-commit", "post-checkout")}
+                    for n in ("pre-commit", "pre-push", "post-commit", "post-checkout")}
     assert mtimes_before == mtimes_after, "up_to_date outcome must not touch file mtimes"
 
 
@@ -251,3 +256,64 @@ def test_install_hook_skips_corrupt_hook_missing_end_marker(tmp_path: Path):
     outcomes = install_hook(root)
     assert outcomes["post-commit"] == InstallOutcome.skipped_corrupt
     assert post_commit.read_text() == before
+
+
+# --- Task 2: builder bodies, pre-push, fail-closed enforcing hooks ---
+
+from mship.core.hooks import _HOOKS
+
+
+def test_pre_push_in_inventory():
+    assert "pre-push" in _HOOKS
+
+
+def test_enforcing_hook_body_resolves_and_fails_closed():
+    _header, builder = _HOOKS["pre-commit"]
+    body = builder("/abs/mship")
+    assert "/abs/mship" in body                   # install-time path baked
+    assert "command -v mship" in body             # PATH fallback present
+    assert "exit 1" in body                        # fail-closed when unresolved
+    assert "MSHIP_BYPASS_GATE" in body             # names the escape hatch
+    assert "_check-commit" in body
+
+
+def test_pre_push_body_calls_check_push_and_fails_closed():
+    _header, builder = _HOOKS["pre-push"]
+    body = builder("/abs/mship")
+    assert "_check-push" in body
+    assert "exit 1" in body
+    assert "MSHIP_BYPASS_GATE" in body
+
+
+def test_advisory_hooks_stay_no_op():
+    for name in ("post-commit", "post-checkout"):
+        _header, builder = _HOOKS[name]
+        body = builder("/abs/mship")
+        assert "|| true" in body
+        assert "exit 1" not in body
+
+
+def test_install_then_detected(tmp_path):
+    import subprocess
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    install_hook(tmp_path)
+    assert is_installed(tmp_path)
+    assert "_check-push" in (tmp_path / ".git" / "hooks" / "pre-push").read_text()
+    assert "_check-commit" in (tmp_path / ".git" / "hooks" / "pre-commit").read_text()
+
+
+def test_enforcing_prelude_honors_bypass_when_mship_missing():
+    from mship.core.hooks import _HOOKS
+    _h, builder = _HOOKS["pre-commit"]
+    body = builder("/abs/mship")
+    assert "MSHIP_BYPASS_GATE" in body
+    assert "exit 0" in body   # bypass path allows
+    assert "exit 1" in body   # fail-closed path still present
+
+
+def test_prelude_quotes_path_with_spaces():
+    from mship.core.hooks import _HOOKS
+    _h, builder = _HOOKS["pre-commit"]
+    body = builder("/weird path/mship")
+    # the space-containing path must be shell-quoted, not bare
+    assert "MSHIP_BIN='/weird path/mship'" in body
