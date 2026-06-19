@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 
 from mship.core.dispatch import BaseShaInfo, SkillRef, canonical_skills, collect_base_sha_info, resolve_repo, build_dispatch_prompt, extract_plan_task
+from mship.core.log import LogEntry
+from mship.core.state import Task
 
 
 PLAN = """\
@@ -74,8 +76,6 @@ def test_extract_unterminated_when_next_open_precedes_close():
     )
     with pytest.raises(ValueError, match="unterminated"):
         extract_plan_task(bad, "1")
-from mship.core.log import LogEntry
-from mship.core.state import Task
 
 
 def test_canonical_skills_returns_expected_four_in_order():

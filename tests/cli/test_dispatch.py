@@ -179,6 +179,22 @@ def test_dispatch_plan_task_without_plan_errors(tmp_path: Path):
         _reset()
 
 
+def test_dispatch_plan_without_plan_task_errors(tmp_path: Path):
+    # --plan is only meaningful with --plan-task; reject it rather than
+    # silently discarding the plan when paired with an inline instruction.
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    plan = tmp_path / "plan.md"
+    plan.write_text("<!-- mship:task id=1 -->\nx\n<!-- /mship:task -->\n")
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "inline", "--plan", str(plan)])
+        assert result.exit_code != 0
+        assert "--plan requires --plan-task" in result.output
+    finally:
+        _reset()
+
+
 def test_dispatch_instruction_dash_reads_stdin(tmp_path: Path):
     wt = tmp_path / "wt"; wt.mkdir()
     cfg, state_dir = _bootstrap(tmp_path, {"only": wt})

@@ -48,6 +48,12 @@ def register(app: typer.Typer, get_container):
             )
             raise typer.Exit(code=2)
 
+        # --plan is only meaningful with --plan-task; reject it rather than
+        # silently discarding the plan (e.g. `--plan x --instruction "..."`).
+        if plan is not None and plan_task is None:
+            output.error("--plan requires --plan-task <id>.")
+            raise typer.Exit(code=2)
+
         if plan_task is not None:
             if plan is None:
                 output.error("--plan-task requires --plan <path>.")
