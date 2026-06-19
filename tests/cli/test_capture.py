@@ -136,3 +136,14 @@ def test_capture_target_failure_surfaces_stderr(tmp_path):
         assert "adb: device offline" in result.output
     finally:
         _reset()
+
+
+def test_capture_invalid_kind_errors(tmp_path):
+    cfg, state_dir, wt = _bootstrap(tmp_path, ["android"])
+    _override(cfg, state_dir, _FakeShell())
+    try:
+        result = runner.invoke(app, ["capture", "--task", "t", "--repo", "app", "--kind", "video"])
+        assert result.exit_code == 2
+        assert "unknown kind" in result.output
+    finally:
+        _reset()
