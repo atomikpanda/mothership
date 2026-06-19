@@ -237,7 +237,8 @@ def register(app: typer.Typer, get_container):
                 continue
             branch = local_ref[len("refs/heads/"):]
             if prefix and branch.startswith(prefix) and branch not in task_branches:
-                offending.append(branch)
+                if branch not in offending:
+                    offending.append(branch)
 
         if not offending:
             raise typer.Exit(code=0)
@@ -252,8 +253,8 @@ def register(app: typer.Typer, get_container):
         sys.stderr.write(
             "⛔ mship: refusing push — branch(es) not registered to a task: "
             + ", ".join(offending) + "\n"
-            "   Spawn a task (mship spawn) so the branch is tracked, or set "
-            "MSHIP_BYPASS_GATE=1 (or `git push --no-verify`) to override.\n"
+            + "   Spawn a task (mship spawn) so the branch is tracked, or set "
+            + "MSHIP_BYPASS_GATE=1 (or `git push --no-verify`) to override.\n"
         )
         raise typer.Exit(code=1)
 

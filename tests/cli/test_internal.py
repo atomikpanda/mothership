@@ -197,6 +197,36 @@ def test_check_push_bypass_allows_and_logs(tmp_path, monkeypatch):
         _reset()
 
 
+def test_check_push_no_prefix_pattern_allows_all(tmp_path, monkeypatch):
+    ws = tmp_path
+    (ws / "mothership.yaml").write_text(
+        "workspace: w\nbranch_pattern: '{slug}'\n"
+        "repos:\n  lib:\n    path: lib\n    type: library\n"
+    )
+    (ws / "lib").mkdir(); (ws / "lib" / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    sd = ws / ".mothership"; sd.mkdir(); (sd / "state.yaml").write_text("tasks: {}\n")
+    container.config_path.override(ws / "mothership.yaml"); container.state_dir.override(sd)
+    container.config.reset(); container.state_manager.reset()
+    monkeypatch.chdir(ws)
+    try:
+        r = runner.invoke(app, ["_check-push"], input=_push("anything"))
+        assert r.exit_code == 0
+    finally:
+        _reset()
+
+
+def test_check_push_dedupes_repeated_branch(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MSHIP_BYPASS_GATE", "1")
+    try:
+        r = runner.invoke(app, ["_check-push"], input=_push("feat/x") + _push("feat/x"))
+        assert r.exit_code == 0
+        lines = (tmp_path / ".mothership" / "bypass-log.jsonl").read_text().splitlines()
+        assert sum(1 for ln in lines if "feat/x" in ln) == 1
+    finally:
+        _reset()
+
+
 def test_session_context_prints_notice_when_no_task(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
     try:
