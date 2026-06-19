@@ -774,3 +774,34 @@ def test_load_strict_still_raises_on_missing_path(tmp_path):
     )
     with pytest.raises(ValueError):
         ConfigLoader.load(tmp_path / "mothership.yaml")  # default require_paths=True
+
+
+def test_repo_capture_config_parses(tmp_path):
+    from mship.core.config import ConfigLoader
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  app:\n"
+        "    path: ./app\n"
+        "    type: service\n"
+        "    capture:\n"
+        "      platforms: [android, ios]\n"
+    )
+    config = ConfigLoader.load(cfg, require_paths=False)
+    assert config.repos["app"].capture is not None
+    assert config.repos["app"].capture.platforms == ["android", "ios"]
+
+
+def test_repo_without_capture_defaults_none(tmp_path):
+    from mship.core.config import ConfigLoader
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  app:\n"
+        "    path: ./app\n"
+        "    type: service\n"
+    )
+    config = ConfigLoader.load(cfg, require_paths=False)
+    assert config.repos["app"].capture is None
