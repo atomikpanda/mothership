@@ -252,11 +252,12 @@ wheels = [
 
 [[package]]
 name = "mothership"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "dependency-injector" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "inquirerpy" },
     { name = "pydantic" },
     { name = "pyyaml" },
@@ -270,7 +271,6 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "coverage" },
-    { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-tmp-files" },
@@ -280,6 +280,7 @@ dev = [
 requires-dist = [
     { name = "dependency-injector", specifier = ">=4.0" },
     { name = "fastapi", specifier = ">=0.110" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "inquirerpy", specifier = ">=0.3" },
     { name = "pydantic", specifier = ">=2.13" },
     { name = "pyyaml", specifier = ">=6.0" },
@@ -293,7 +294,6 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "coverage", specifier = ">=7.13.5" },
-    { name = "httpx", specifier = ">=0.27" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-asyncio", specifier = ">=0.23" },
     { name = "pytest-tmp-files", specifier = ">=0.0.2" },
