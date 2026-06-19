@@ -102,10 +102,14 @@ class SpecView(ViewApp):
 
         state = self._current_state()
 
-        # Per-tick resolver: only active when state_manager is set (watch
-        # mode wired with the new API). Legacy callers that pass state= and
-        # task= directly bypass this path.
-        if self._state_manager is not None:
+        # Per-tick resolver: only active in watch mode, where a task may be
+        # spawned/changed while the view is open and the "waiting for a task"
+        # placeholder is the right thing to show. In non-watch mode the command
+        # already resolved the task once (with the MOS-175 fall-back-to-newest
+        # when none is active), so trust `self._task_filter` and never override
+        # it with the placeholder. Legacy callers that pass state=/task= directly
+        # (state_manager is None) also bypass this path.
+        if self._state_manager is not None and self._watch:
             try:
                 slug_for_tick = self._resolve_task_slug(state)
             except (NoActiveTaskError, AmbiguousTaskError, UnknownTaskError) as err:
