@@ -145,6 +145,62 @@ def test_install_hooks_output_per_hook_per_root(tmp_path: Path, monkeypatch):
         container.state_manager.reset()
 
 
+def test_install_hooks_prepush_and_session_hook(tmp_path: Path, monkeypatch):
+    """--install-hooks installs pre-push and writes the SessionStart hook to .claude/settings.json."""
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  only:\n"
+        "    path: .\n"
+        "    type: service\n"
+    )
+    (tmp_path / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    (tmp_path / ".git" / "hooks").mkdir(parents=True)
+
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(cfg)
+    container.state_dir.override(tmp_path / ".mothership")
+    try:
+        result = runner.invoke(app, ["init", "--install-hooks"])
+        assert result.exit_code == 0, result.output
+
+        # pre-push hook file must exist
+        assert (tmp_path / ".git" / "hooks" / "pre-push").exists(), (
+            f"pre-push hook not created. Output: {result.output}"
+        )
+        # pre-push must appear in output
+        assert "pre-push" in result.output
+
+        # SessionStart hook must be written to .claude/settings.json
+        settings_path = tmp_path / ".claude" / "settings.json"
+        assert settings_path.exists(), f"settings.json not created. Output: {result.output}"
+        import json
+        data = json.loads(settings_path.read_text())
+        session_hooks = data.get("hooks", {}).get("SessionStart", [])
+        assert any(
+            h.get("command") == "mship _session-context"
+            for entry in session_hooks if isinstance(entry, dict)
+            for h in (entry.get("hooks") or []) if isinstance(h, dict)
+        ), f"mship _session-context not found in SessionStart hooks. settings.json: {data}"
+
+        # output must mention SessionStart
+        assert "SessionStart" in result.output
+        assert "installed" in result.output
+
+        # Second run: must report 'up to date' for session hook
+        result2 = runner.invoke(app, ["init", "--install-hooks"])
+        assert result2.exit_code == 0, result2.output
+        assert "up to date" in result2.output
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+
 def test_install_hooks_refreshed_vs_up_to_date_labels(tmp_path: Path, monkeypatch):
     """Test that second run shows 'refreshed' for modified hooks and 'up to date' for others."""
     monkeypatch.chdir(tmp_path)
