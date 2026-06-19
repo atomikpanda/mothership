@@ -337,6 +337,33 @@ async def test_spec_view_watch_transitions_to_fallback_when_task_appears(tmp_pat
         assert "My task description" in text or "No spec yet for task" in text
 
 
+# --- Non-watch TUI: no-active-task falls back to newest spec (MOS-175) ---
+
+
+@pytest.mark.asyncio
+async def test_spec_view_non_watch_no_active_task_renders_newest_spec(tmp_path):
+    """A plain (non-watch) `mship view spec` with no active task must fall back
+    to the newest spec — the watch-only 'No active task' placeholder is wrong
+    here. Regression for the interactive TUI path that bypassed MOS-175."""
+    specs_dir = tmp_path / "specs"
+    specs_dir.mkdir()
+    (specs_dir / "newest.md").write_text("# Newest Spec\n\nStructured spec body here.\n")
+    view = SpecView(
+        workspace_root=tmp_path,
+        name_or_path=None,
+        state_manager=_MutableSpecStateMgr(tasks_dict={}),
+        cli_task=None,
+        cwd=tmp_path,
+        watch=False,
+        interval=0.5,
+    )
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        text = view.rendered_text()
+        assert "No active task" not in text
+        assert "Structured spec body here." in text
+
+
 # --- Non-TTY short-circuit tests (#124) ---
 
 
