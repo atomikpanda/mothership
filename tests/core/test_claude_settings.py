@@ -1,3 +1,4 @@
+import json as _json
 import json
 from pathlib import Path
 
@@ -36,10 +37,29 @@ def test_install_preserves_existing(tmp_path):
     assert "echo hi" in cmds and SESSION_COMMAND in cmds
 
 
-def test_install_handles_malformed_json(tmp_path):
+def test_install_skips_malformed_json_without_destroying_it(tmp_path):
     cdir = tmp_path / ".claude"; cdir.mkdir()
     (cdir / "settings.json").write_text("{ not json")
-    # Should not crash; treats as empty and installs.
-    install_session_hook(tmp_path)
+    outcome = install_session_hook(tmp_path)
+    assert outcome.startswith("skipped")
+    # original content is preserved, not overwritten
+    assert (cdir / "settings.json").read_text() == "{ not json"
+
+
+def test_install_into_empty_file(tmp_path):
+    cdir = tmp_path / ".claude"; cdir.mkdir()
+    (cdir / "settings.json").write_text("")
+    assert install_session_hook(tmp_path) == "installed"
     cmds = [h["command"] for e in _hooks(tmp_path) for h in e["hooks"]]
+    assert SESSION_COMMAND in cmds
+
+
+def test_install_tolerates_null_hooks_entry(tmp_path):
+    cdir = tmp_path / ".claude"; cdir.mkdir()
+    (cdir / "settings.json").write_text(_json.dumps(
+        {"hooks": {"SessionStart": [{"hooks": None}]}}
+    ))
+    # must not raise; installs the hook
+    assert install_session_hook(tmp_path) == "installed"
+    cmds = [h["command"] for e in _hooks(tmp_path) for h in (e.get("hooks") or []) if isinstance(h, dict)]
     assert SESSION_COMMAND in cmds

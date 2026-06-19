@@ -18,12 +18,15 @@ def install_session_hook(workspace_root: Path) -> str:
 
     data: dict = {}
     if settings_path.is_file():
-        try:
-            loaded = json.loads(settings_path.read_text() or "{}")
-            if isinstance(loaded, dict):
-                data = loaded
-        except json.JSONDecodeError:
-            data = {}
+        raw = settings_path.read_text()
+        if raw.strip():
+            try:
+                loaded = json.loads(raw)
+            except json.JSONDecodeError:
+                return "skipped (settings.json is not valid JSON — fix it, then re-run)"
+            if not isinstance(loaded, dict):
+                return "skipped (settings.json is not a JSON object)"
+            data = loaded
 
     hooks = data.setdefault("hooks", {})
     if not isinstance(hooks, dict):
@@ -35,7 +38,7 @@ def install_session_hook(workspace_root: Path) -> str:
     already = any(
         h.get("command") == SESSION_COMMAND
         for entry in session if isinstance(entry, dict)
-        for h in entry.get("hooks", []) if isinstance(h, dict)
+        for h in (entry.get("hooks") or []) if isinstance(h, dict)
     )
     if already:
         return "up to date"
