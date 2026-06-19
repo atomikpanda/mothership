@@ -9,6 +9,7 @@ from __future__ import annotations
 import stat
 from enum import Enum
 from pathlib import Path
+from typing import Callable
 
 
 class InstallOutcome(str, Enum):
@@ -30,33 +31,65 @@ def _block(body_sh: str) -> str:
     )
 
 
-_PRE_COMMIT_BODY = """if command -v mship >/dev/null 2>&1; then
-    toplevel="$(git rev-parse --show-toplevel)"
-    mship _check-commit "$toplevel" || exit 1
-fi
-"""
-
-_POST_CHECKOUT_BODY = """if command -v mship >/dev/null 2>&1; then
-    prev_head="$1"
-    new_head="$2"
-    is_branch_checkout="$3"
-    if [ "$is_branch_checkout" = "1" ]; then
-        mship _post-checkout "$prev_head" "$new_head" || true
-    fi
-fi
-"""
-
-_POST_COMMIT_BODY = """if command -v mship >/dev/null 2>&1; then
-    mship _journal-commit || true
-fi
-"""
+def _resolve_prelude(mship_bin: str) -> str:
+    # Reliable resolution: install-time absolute path, then PATH fallback.
+    # Enforcing hooks fail closed if mship can't be found (the gate must not
+    # silently no-op — that is the MOS-189 bug).
+    return (
+        f'MSHIP_BIN="{mship_bin}"\n'
+        'if [ ! -x "$MSHIP_BIN" ]; then MSHIP_BIN="$(command -v mship 2>/dev/null || true)"; fi\n'
+        'if [ -z "$MSHIP_BIN" ]; then\n'
+        '    echo "mship: cannot enforce task gate (mship not found). Reinstall hooks (mship init --install-hooks) or set MSHIP_BYPASS_GATE=1 to override." >&2\n'
+        '    exit 1\n'
+        'fi\n'
+    )
 
 
-# Public hook inventory — name → (file header comment, body)
-_HOOKS: dict[str, tuple[str, str]] = {
-    "pre-commit": ("# git pre-commit hook", _PRE_COMMIT_BODY),
-    "post-checkout": ("# git post-checkout hook", _POST_CHECKOUT_BODY),
-    "post-commit": ("# git post-commit hook", _POST_COMMIT_BODY),
+def _advisory_prelude(mship_bin: str) -> str:
+    return (
+        f'MSHIP_BIN="{mship_bin}"\n'
+        'if [ ! -x "$MSHIP_BIN" ]; then MSHIP_BIN="$(command -v mship 2>/dev/null || true)"; fi\n'
+    )
+
+
+def _pre_commit_body(mship_bin: str) -> str:
+    return (
+        _resolve_prelude(mship_bin)
+        + 'toplevel="$(git rev-parse --show-toplevel)"\n'
+        + '"$MSHIP_BIN" _check-commit "$toplevel" || exit 1\n'
+    )
+
+
+def _pre_push_body(mship_bin: str) -> str:
+    # pre-push receives ref lines on stdin: <local_ref> <local_sha> <remote_ref> <remote_sha>
+    return _resolve_prelude(mship_bin) + '"$MSHIP_BIN" _check-push || exit 1\n'
+
+
+def _post_checkout_body(mship_bin: str) -> str:
+    return (
+        _advisory_prelude(mship_bin)
+        + 'if [ -n "$MSHIP_BIN" ]; then\n'
+        + '    prev_head="$1"; new_head="$2"; is_branch_checkout="$3"\n'
+        + '    if [ "$is_branch_checkout" = "1" ]; then\n'
+        + '        "$MSHIP_BIN" _post-checkout "$prev_head" "$new_head" || true\n'
+        + '    fi\n'
+        + 'fi\n'
+    )
+
+
+def _post_commit_body(mship_bin: str) -> str:
+    return (
+        _advisory_prelude(mship_bin)
+        + '[ -n "$MSHIP_BIN" ] && "$MSHIP_BIN" _journal-commit || true\n'
+    )
+
+
+# Public hook inventory — name → (file header comment, body builder)
+_HOOKS: dict[str, tuple[str, Callable[[str], str]]] = {
+    "pre-commit": ("# git pre-commit hook", _pre_commit_body),
+    "pre-push": ("# git pre-push hook", _pre_push_body),
+    "post-checkout": ("# git post-checkout hook", _post_checkout_body),
+    "post-commit": ("# git post-commit hook", _post_commit_body),
 }
 
 
@@ -144,25 +177,27 @@ def _one_is_installed(git_root: Path, name: str) -> bool:
 # --- Public API ---
 
 def is_installed(git_root: Path) -> bool:
-    """True if ALL three hooks contain our marker block."""
+    """True if ALL hooks contain our marker block."""
     return all(_one_is_installed(git_root, name) for name in _HOOKS)
 
 
 def install_hook(git_root: Path) -> dict[str, InstallOutcome]:
-    """Install or refresh pre-commit, post-checkout, and post-commit hooks.
+    """Install or refresh all hooks.
 
     Returns a mapping of hook name to install outcome so callers can render
     per-hook status. Idempotent: re-running on an up-to-date hook layout is a
     no-op (no file writes, mtimes preserved).
     """
+    import shutil
+    mship_bin = shutil.which("mship") or ""
     outcomes: dict[str, InstallOutcome] = {}
-    for name, (header, body) in _HOOKS.items():
-        outcomes[name] = _install_one(git_root, name, header, body)
+    for name, (header, builder) in _HOOKS.items():
+        outcomes[name] = _install_one(git_root, name, header, builder(mship_bin))
     return outcomes
 
 
 def uninstall_hook(git_root: Path) -> None:
-    """Remove our MSHIP block from all three hook files, preserving user content."""
+    """Remove our MSHIP block from all hook files, preserving user content."""
     for name in _HOOKS:
         _uninstall_one(git_root, name)
 
@@ -173,4 +208,4 @@ def _chmod_executable(path: Path) -> None:
 
 
 # Preserved for backward compat with any external caller of the old name.
-HOOK_BLOCK = _block(_PRE_COMMIT_BODY)
+HOOK_BLOCK = _block(_pre_commit_body(""))
