@@ -1,0 +1,55 @@
+"""Deterministic enforcement-gate helpers: bypass resolution + logging, and the
+session-start no-active-task notice. See spec enforcement-gate (MOS-189)."""
+from __future__ import annotations
+
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+NO_TASK_NOTICE = (
+    "mothership workspace with no active task. Run `mship spawn \"<description>\"` "
+    "before editing source files — commits/pushes of untasked feature work are gated."
+)
+
+_BYPASS_ENV = "MSHIP_BYPASS_GATE"
+
+
+def resolve_bypass() -> tuple[bool, str]:
+    """(bypassed, reason) from MSHIP_BYPASS_GATE. A bare/'1' value -> reason ''."""
+    val = os.environ.get(_BYPASS_ENV)
+    if not val or not val.strip():
+        return (False, "")
+    reason = val.strip()
+    return (True, "" if reason == "1" else reason)
+
+
+def record_bypass(workspace_root: Path, *, op: str, branch: str, reason: str) -> None:
+    """Append a bypass record to <workspace_root>/.mothership/bypass-log.jsonl."""
+    sd = Path(workspace_root) / ".mothership"
+    sd.mkdir(parents=True, exist_ok=True)
+    rec = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "op": op,
+        "branch": branch,
+        "reason": reason,
+        "cwd": str(Path.cwd()),
+    }
+    with (sd / "bypass-log.jsonl").open("a") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+def no_task_notice(cwd: Path) -> str | None:
+    """Return the notice when `cwd` is in a mship workspace with no active task,
+    else None. Fail-open (None) on any error — this is advisory context."""
+    try:
+        from mship.core.config import ConfigLoader
+        from mship.core.state import StateManager
+        try:
+            config_path = ConfigLoader.discover(Path(cwd))
+        except FileNotFoundError:
+            return None
+        state = StateManager(config_path.parent / ".mothership").load()
+        return None if state.tasks else NO_TASK_NOTICE
+    except Exception:
+        return None
