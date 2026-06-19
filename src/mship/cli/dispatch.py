@@ -4,6 +4,7 @@ See docs/superpowers/specs/2026-04-17-mship-dispatch-design.md.
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -20,10 +21,55 @@ def register(app: typer.Typer, get_container):
     def dispatch(
         task: Optional[str] = typer.Option(None, "--task", help="Target task slug (defaults to cwd-resolved)."),
         repo: Optional[str] = typer.Option(None, "--repo", help="Which repo's worktree to target (multi-repo tasks)."),
-        instruction: str = typer.Option(..., "--instruction", "-i", help="Instruction text passed verbatim to the subagent."),
+        instruction: Optional[str] = typer.Option(
+            None, "--instruction", "-i",
+            help='Instruction text passed verbatim. Use "-" to read it from stdin.',
+        ),
+        plan: Optional[Path] = typer.Option(
+            None, "--plan", help="Path to an implementation plan with anchored task blocks."
+        ),
+        plan_task: Optional[str] = typer.Option(
+            None, "--plan-task",
+            help="Anchor id in --plan to use as the instruction (mutually exclusive with --instruction).",
+        ),
     ):
-        """Emit a self-contained markdown subagent prompt to stdout."""
+        """Emit a self-contained markdown subagent prompt to stdout.
+
+        Exactly one instruction source is required: inline `--instruction "<text>"`,
+        stdin `--instruction -`, or `--plan-task <id>` (with `--plan <path>`).
+        """
         output = Output()
+
+        # --- resolve the instruction source (exactly one of) ---
+        if (instruction is not None) == (plan_task is not None):
+            output.error(
+                'provide exactly one instruction source: --instruction "<text>", '
+                "--instruction - (stdin), or --plan-task <id> (with --plan)."
+            )
+            raise typer.Exit(code=2)
+
+        if plan_task is not None:
+            if plan is None:
+                output.error("--plan-task requires --plan <path>.")
+                raise typer.Exit(code=2)
+            try:
+                plan_text = plan.read_text()
+            except OSError as e:
+                output.error(f"cannot read plan {str(plan)!r}: {e}")
+                raise typer.Exit(code=2)
+            try:
+                resolved_instruction = _d.extract_plan_task(plan_text, plan_task)
+            except ValueError as e:
+                output.error(str(e))
+                raise typer.Exit(code=2)
+        elif instruction == "-":
+            resolved_instruction = sys.stdin.read().strip()
+            if not resolved_instruction:
+                output.error("no instruction read from stdin.")
+                raise typer.Exit(code=2)
+        else:
+            resolved_instruction = instruction  # inline (guaranteed non-None here)
+
         container = get_container()
         state = container.state_manager().load()
         resolved = resolve_for_command("dispatch", state, task, output)
@@ -49,7 +95,7 @@ def register(app: typer.Typer, get_container):
         prompt = _d.build_dispatch_prompt(
             task=task_obj,
             repo=resolved_repo,
-            instruction=instruction,
+            instruction=resolved_instruction,
             journal_entries=journal_entries,
             base_sha_info=base_sha_info,
             agents_md_path=agents_md_path,

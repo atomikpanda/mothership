@@ -114,6 +114,83 @@ def test_dispatch_unknown_task_errors(tmp_path: Path):
         _reset()
 
 
+def _override(cfg, state_dir):
+    container.config.reset(); container.state_manager.reset(); container.log_manager.reset()
+    container.config_path.override(cfg)
+    container.state_dir.override(state_dir)
+
+
+def test_dispatch_plan_task_uses_extracted_section(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    plan = tmp_path / "plan.md"
+    plan.write_text(
+        "<!-- mship:task id=7 -->\n### Task 7\n\nwire the parser\n<!-- /mship:task -->\n"
+    )
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(
+            app, ["dispatch", "--task", "t", "--plan", str(plan), "--plan-task", "7"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "wire the parser" in result.output
+    finally:
+        _reset()
+
+
+def test_dispatch_requires_one_instruction_source(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t"])
+        assert result.exit_code != 0
+        assert "exactly one instruction source" in result.output
+    finally:
+        _reset()
+
+
+def test_dispatch_rejects_two_instruction_sources(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    plan = tmp_path / "plan.md"
+    plan.write_text("<!-- mship:task id=1 -->\nx\n<!-- /mship:task -->\n")
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(
+            app,
+            ["dispatch", "--task", "t", "-i", "inline", "--plan", str(plan), "--plan-task", "1"],
+        )
+        assert result.exit_code != 0
+        assert "exactly one instruction source" in result.output
+    finally:
+        _reset()
+
+
+def test_dispatch_plan_task_without_plan_errors(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code != 0
+        assert "--plan-task requires --plan" in result.output
+    finally:
+        _reset()
+
+
+def test_dispatch_instruction_dash_reads_stdin(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "-"], input="from stdin\n")
+        assert result.exit_code == 0, result.output
+        assert "> from stdin" in result.output
+    finally:
+        _reset()
+
+
 def test_dispatch_prompt_includes_dependencies_section(tmp_path: Path):
     now = datetime.now(timezone.utc)
     wt_a = tmp_path / "wt-a"; wt_a.mkdir()
