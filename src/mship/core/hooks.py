@@ -40,8 +40,8 @@ def _resolve_prelude(mship_bin: str) -> str:
         f'MSHIP_BIN="{mship_bin}"\n'
         'if [ ! -x "$MSHIP_BIN" ]; then MSHIP_BIN="$(command -v mship 2>/dev/null || true)"; fi\n'
         'if [ -z "$MSHIP_BIN" ]; then\n'
-        '    case "$MSHIP_BYPASS_GATE" in\n'
-        '        ""|0|false|FALSE|no|NO) ;;\n'
+        '    case "$(printf %s "$MSHIP_BYPASS_GATE" | tr A-Z a-z)" in\n'
+        '        ""|0|false|no) ;;\n'
         '        *) exit 0 ;;\n'
         '    esac\n'
         '    echo "mship: cannot enforce task gate (mship not found). Reinstall hooks (mship init --install-hooks), or set MSHIP_BYPASS_GATE=1 / use git --no-verify to override." >&2\n'
@@ -210,7 +210,3 @@ def uninstall_hook(git_root: Path) -> None:
 def _chmod_executable(path: Path) -> None:
     current = path.stat().st_mode
     path.chmod(current | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-
-# Preserved for backward compat with any external caller of the old name.
-HOOK_BLOCK = _block(_pre_commit_body(""))
