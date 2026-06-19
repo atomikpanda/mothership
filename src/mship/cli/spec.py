@@ -380,14 +380,21 @@ def register(parent: typer.Typer, get_container):
 
     @spec_app.command("dispatch")
     def dispatch(
-        spec_id: str = typer.Argument(..., help="Spec id to dispatch (must be approved)."),
+        spec_id: str = typer.Argument(..., help="Spec id to dispatch (approved, or already dispatched to re-emit)."),
+        task_slug: Optional[str] = typer.Option(
+            None, "--task",
+            help="Bind to this existing task slug instead of auto-spawning a slug==id task.",
+        ),
     ):
-        """Dispatch an approved spec to its task.
+        """Dispatch an approved spec to a task.
 
-        Binds the spec to a task whose slug == spec.id, auto-spawning that task
-        (worktrees per the spec's `affected_repos`) when none exists yet.
-        Transitions the spec to 'dispatched', sets task.spec_id, and prints a
-        handoff prompt with acceptance criteria + worktree paths.
+        Picks the task in this order: an explicit `--task <slug>` (must exist);
+        else the task this spec is already bound to (idempotent re-dispatch);
+        else a task whose slug == spec.id; else auto-spawns one (worktrees per
+        the spec's `affected_repos`). Errors if `--task` is unknown or would
+        rebind an already-bound spec. Transitions the spec to 'dispatched', sets
+        task.spec_id, and prints a handoff prompt with acceptance criteria +
+        worktree paths.
         """
         from datetime import datetime, timezone
         from pathlib import Path
@@ -418,6 +425,7 @@ def register(parent: typer.Typer, get_container):
                 store=store,
                 spawn_fn=_spawn,
                 now=datetime.now(timezone.utc),
+                task_slug=task_slug,
             )
         except DispatchError as e:
             output.error(str(e))

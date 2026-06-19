@@ -66,6 +66,7 @@ This structure informs the task decomposition. Each task should produce self-con
 ## Task Structure
 
 ````markdown
+<!-- mship:task id=N -->
 ### Task N: [Component Name]
 
 **Files:**
@@ -108,7 +109,10 @@ mship journal "implemented specific feature; tests passing" --action committed
 ```
 
 Pair the commit with a `mship journal` entry so other sessions can reconstruct progress without reading every commit diff.
+<!-- /mship:task -->
 ````
+
+Wrap each task in `<!-- mship:task id=N -->` … `<!-- /mship:task -->` anchors (id = the task number). A controller can then pull a single task's text with `mship dispatch --task <slug> --plan <plan-path> --plan-task <N>` instead of hand-assembling the prompt.
 
 ## No Placeholders
 
@@ -153,6 +157,7 @@ After saving the plan, offer execution choice:
 **If Subagent-Driven chosen:**
 - **REQUIRED SUB-SKILL:** Use subagent-driven-development
 - Fresh subagent per task + two-stage review
+- Build each implementer prompt with `mship dispatch --task <slug> --plan <plan-path> --plan-task <N>` (the anchored task text becomes the instruction); subagents run `mship test` so `mship finish` has its evidence trail.
 
 **If Inline Execution chosen:**
 - **REQUIRED SUB-SKILL:** Use executing-plans

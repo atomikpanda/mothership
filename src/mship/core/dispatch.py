@@ -7,6 +7,7 @@ See docs/superpowers/specs/2026-04-17-mship-dispatch-design.md.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,41 @@ _CANONICAL_SKILL_NAMES: tuple[str, ...] = (
     "finishing-a-development-branch",
     "verification-before-completion",
 )
+
+
+_TASK_OPEN_RE = re.compile(r"<!--\s*mship:task\s+id=([^\s>]+)\s*-->")
+_TASK_CLOSE_RE = re.compile(r"<!--\s*/mship:task\s*-->")
+
+
+def extract_plan_task(plan_text: str, task_id: str) -> str:
+    """Return the inner content of the anchored task block whose id matches.
+
+    A task block is delimited by `<!-- mship:task id=<task_id> -->` and the
+    next `<!-- /mship:task -->`. The returned text is the content between the
+    anchors, with surrounding whitespace stripped. Pure — no I/O.
+
+    Raises ValueError when the id is missing, appears more than once, or the
+    block is unterminated (no closing anchor before the next open anchor / EOF).
+    """
+    opens = [m for m in _TASK_OPEN_RE.finditer(plan_text) if m.group(1) == task_id]
+    if not opens:
+        raise ValueError(
+            f"no task with id {task_id!r} in plan "
+            f"(expected an anchor `<!-- mship:task id={task_id} -->`)"
+        )
+    if len(opens) > 1:
+        raise ValueError(
+            f"duplicate task id {task_id!r} in plan ({len(opens)} anchors)"
+        )
+    open_m = opens[0]
+    close_m = _TASK_CLOSE_RE.search(plan_text, open_m.end())
+    next_open = _TASK_OPEN_RE.search(plan_text, open_m.end())
+    if close_m is None or (next_open is not None and next_open.start() < close_m.start()):
+        raise ValueError(
+            f"unterminated task block for id {task_id!r} "
+            f"(missing closing `<!-- /mship:task -->`)"
+        )
+    return plan_text[open_m.end():close_m.start()].strip()
 
 
 @dataclass(frozen=True)

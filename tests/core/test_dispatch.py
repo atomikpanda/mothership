@@ -8,9 +8,74 @@ from pathlib import Path
 
 import pytest
 
-from mship.core.dispatch import BaseShaInfo, SkillRef, canonical_skills, collect_base_sha_info, resolve_repo, build_dispatch_prompt
+from mship.core.dispatch import BaseShaInfo, SkillRef, canonical_skills, collect_base_sha_info, resolve_repo, build_dispatch_prompt, extract_plan_task
 from mship.core.log import LogEntry
 from mship.core.state import Task
+
+
+PLAN = """\
+# Some plan
+
+intro text
+
+<!-- mship:task id=1 -->
+### Task 1: first
+
+do the first thing
+<!-- /mship:task -->
+
+middle text
+
+<!-- mship:task id=2 -->
+### Task 2: second
+
+do the second thing
+<!-- /mship:task -->
+"""
+
+
+def test_extract_returns_inner_block():
+    out = extract_plan_task(PLAN, "1")
+    assert "### Task 1: first" in out
+    assert "do the first thing" in out
+    assert "second thing" not in out
+    assert "mship:task" not in out
+
+
+def test_extract_picks_the_right_block_in_a_multi_task_plan():
+    out = extract_plan_task(PLAN, "2")
+    assert "### Task 2: second" in out
+    assert "do the second thing" in out
+    assert "first thing" not in out
+
+
+def test_extract_missing_id_raises():
+    with pytest.raises(ValueError, match="no task with id '99'"):
+        extract_plan_task(PLAN, "99")
+
+
+def test_extract_duplicate_id_raises():
+    dup = (
+        "<!-- mship:task id=1 -->\nA\n<!-- /mship:task -->\n"
+        "<!-- mship:task id=1 -->\nB\n<!-- /mship:task -->\n"
+    )
+    with pytest.raises(ValueError, match="duplicate task id '1'"):
+        extract_plan_task(dup, "1")
+
+
+def test_extract_unterminated_block_raises():
+    bad = "<!-- mship:task id=1 -->\nno closing anchor here\n"
+    with pytest.raises(ValueError, match="unterminated"):
+        extract_plan_task(bad, "1")
+
+
+def test_extract_unterminated_when_next_open_precedes_close():
+    bad = (
+        "<!-- mship:task id=1 -->\nA\n"
+        "<!-- mship:task id=2 -->\nB\n<!-- /mship:task -->\n"
+    )
+    with pytest.raises(ValueError, match="unterminated"):
+        extract_plan_task(bad, "1")
 
 
 def test_canonical_skills_returns_expected_four_in_order():

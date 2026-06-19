@@ -146,7 +146,18 @@ Implementer subagents report one of four statuses. Handle each appropriately:
 - `./spec-reviewer-prompt.md` - Dispatch spec compliance reviewer subagent
 - `./code-quality-reviewer-prompt.md` - Dispatch code quality reviewer subagent
 
-**Inside a mothership workspace:** prefer `mship dispatch --task <slug> -i "<implementer instruction>"` to build your implementer prompt. The `-i/--instruction` text is **required**; it is wrapped together with the task slug, worktree path, phase, recent journal entries, and per-repo bases into a self-contained Markdown block — handling multi-task disambiguation automatically. For a spec-driven kickoff, `mship spec dispatch <id>` binds an approved spec to its task and emits a handoff that includes the acceptance criteria — complementary to `mship dispatch -i`. See `working-with-mothership` for the full decision tree on `mship dispatch` vs. `mship context`.
+**Inside a mothership workspace:** build each implementer prompt with
+`mship dispatch --task <slug> --plan <plan-path> --plan-task <N>` and use its
+stdout as the subagent's prompt — the anchored task block from the plan becomes
+the instruction, wrapped with the worktree path, slug, phase, recent journal,
+and per-repo bases. (Use `-i "<text>"` or `-i -` for stdin when you need an
+ad-hoc instruction not in a plan; exactly one instruction source is allowed.)
+Dispatched subagents MUST run `mship test` (not a bare runner) so
+`mship finish` finds the passing-test evidence it gates on. For a spec-driven
+kickoff, `mship spec dispatch <id> [--task <slug>]` binds an approved spec to a
+task (existing or auto-spawned) and emits a handoff with the acceptance
+criteria. See `working-with-mothership` for the `mship dispatch` vs.
+`mship context` decision tree.
 
 ## Example Workflow
 

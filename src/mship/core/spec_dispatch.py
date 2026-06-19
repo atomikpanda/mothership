@@ -1,11 +1,17 @@
 """Dispatch an approved spec to a task (the A6/B4 dispatch path).
 
 `dispatch_spec` is the shared core behind `mship spec dispatch` (CLI) and the
-`POST /specs/{id}/dispatch` serve endpoint. It auto-spawns a task when none
-exists yet, via an injected `spawn_fn` — real callers pass a thunk over
-`WorktreeManager.spawn` (real git + state mutation); tests pass a fake. Keeping
-the spawn dependency injected is what makes this unit-testable, which is exactly
-what blocked auto-spawn in the original A6 fallback (see MOS-150 / MOS-171).
+`POST /specs/{id}/dispatch` serve endpoint. It binds an approved spec to a
+task and transitions it to 'dispatched'.  Task selection order:
+
+1. ``task_slug`` given → bind to that existing task (error if unknown, or if
+   the spec is already bound to a *different* task).
+2. Spec already bound (``spec.task_slug`` in state) → idempotent reuse.
+3. A task named ``spec.id`` exists → bind to it.
+4. Otherwise → auto-spawn via ``spawn_fn(spec)`` (requires ``affected_repos``).
+
+The ``spawn_fn`` dependency is injected so real callers pass a thunk over
+``WorktreeManager.spawn`` while tests use fakes (see MOS-150 / MOS-171).
 """
 from __future__ import annotations
 
@@ -70,24 +76,47 @@ def dispatch_spec(
     store,
     spawn_fn: Callable[[Spec], Task],
     now: datetime,
+    task_slug: str | None = None,
 ) -> DispatchResult:
-    """Bind an approved spec to its task (auto-spawning one if needed).
+    """Bind an approved (or already-dispatched) spec to a task.
 
-    - Requires `spec.status == "approved"` (else `DispatchError`).
-    - If a task with slug `spec.id` exists, binds to it; otherwise calls
-      `spawn_fn(spec)` to create the task + worktrees (requires non-empty
-      `affected_repos`).
-    - Sets `task.spec_id = spec.id`, transitions the spec to `dispatched`,
-      stamps `task_slug`/`updated_at`, and persists the spec.
+    Task selection, in order:
+    - `task_slug` given: bind to that existing task (error if unknown, or if the
+      spec is already bound to a *different* task).
+    - spec already bound (`spec.task_slug` exists in state): reuse it (idempotent).
+    - a task named `spec.id` exists: bind to it.
+    - otherwise: auto-spawn via `spawn_fn(spec)` (requires `affected_repos`).
     """
-    if spec.status != "approved":
+    if spec.status not in ("approved", "dispatched"):
         raise DispatchError(
             f"spec {spec.id!r} is {spec.status!r} — approve it first "
             f"(mship spec approve {spec.id})."
         )
 
     state = state_manager.load()
-    if spec.id in state.tasks:
+    bound_slug = (
+        spec.task_slug
+        if spec.task_slug and spec.task_slug in state.tasks
+        else None
+    )
+
+    if task_slug is not None:
+        if task_slug not in state.tasks:
+            raise DispatchError(
+                f"--task {task_slug!r} not found. "
+                f"Active tasks: {sorted(state.tasks)}."
+            )
+        if bound_slug is not None and bound_slug != task_slug:
+            raise DispatchError(
+                f"spec {spec.id!r} is already bound to task {bound_slug!r}; "
+                f"refusing to rebind to {task_slug!r}. Drop --task to reuse it."
+            )
+        task = state.tasks[task_slug]
+        spawned = False
+    elif bound_slug is not None:
+        task = state.tasks[bound_slug]
+        spawned = False
+    elif spec.id in state.tasks:
         task = state.tasks[spec.id]
         spawned = False
     else:
@@ -99,14 +128,17 @@ def dispatch_spec(
         task = spawn_fn(spec)
         spawned = True
 
-    # Bind the task to the spec under the state lock.
+    # Bind the chosen task to the spec under the state lock.
+    chosen_slug = task.slug
+
     def _bind(s):
-        if spec.id in s.tasks:
-            s.tasks[spec.id].spec_id = spec.id
+        if chosen_slug in s.tasks:
+            s.tasks[chosen_slug].spec_id = spec.id
+
     state_manager.mutate(_bind)
 
     spec.status = "dispatched"
-    spec.task_slug = spec.id
+    spec.task_slug = chosen_slug
     spec.updated_at = now
     store.save(spec)
 
