@@ -17,8 +17,8 @@ _BYPASS_ENV = "MSHIP_BYPASS_GATE"
 
 def resolve_bypass() -> tuple[bool, str]:
     """(bypassed, reason) from MSHIP_BYPASS_GATE. Unset/blank or an explicit
-    off-value (0/false/no, case-insensitive) -> (False, ""). A bare '1' (or any
-    other truthy value) -> (True, ''); any other string -> (True, reason)."""
+    off-value (0/false/no, case-insensitive) -> (False, ""). A bare "1" ->
+    (True, ""); any other value -> (True, <that value as the reason>)."""
     val = os.environ.get(_BYPASS_ENV)
     if not val or not val.strip():
         return (False, "")

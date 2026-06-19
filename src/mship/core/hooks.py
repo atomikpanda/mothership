@@ -6,6 +6,7 @@ strip our block as needed.
 """
 from __future__ import annotations
 
+import shlex
 import stat
 from enum import Enum
 from pathlib import Path
@@ -37,7 +38,7 @@ def _resolve_prelude(mship_bin: str) -> str:
     # silently no-op — the MOS-189 bug). When mship is missing we can't run the
     # Python bypass/logging, so honor MSHIP_BYPASS_GATE here in the shell.
     return (
-        f'MSHIP_BIN="{mship_bin}"\n'
+        f'MSHIP_BIN={shlex.quote(mship_bin)}\n'
         'if [ ! -x "$MSHIP_BIN" ]; then MSHIP_BIN="$(command -v mship 2>/dev/null || true)"; fi\n'
         'if [ -z "$MSHIP_BIN" ]; then\n'
         '    case "$(printf %s "$MSHIP_BYPASS_GATE" | tr A-Z a-z)" in\n'
@@ -52,7 +53,7 @@ def _resolve_prelude(mship_bin: str) -> str:
 
 def _advisory_prelude(mship_bin: str) -> str:
     return (
-        f'MSHIP_BIN="{mship_bin}"\n'
+        f'MSHIP_BIN={shlex.quote(mship_bin)}\n'
         'if [ ! -x "$MSHIP_BIN" ]; then MSHIP_BIN="$(command -v mship 2>/dev/null || true)"; fi\n'
     )
 

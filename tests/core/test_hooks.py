@@ -309,3 +309,11 @@ def test_enforcing_prelude_honors_bypass_when_mship_missing():
     assert "MSHIP_BYPASS_GATE" in body
     assert "exit 0" in body   # bypass path allows
     assert "exit 1" in body   # fail-closed path still present
+
+
+def test_prelude_quotes_path_with_spaces():
+    from mship.core.hooks import _HOOKS
+    _h, builder = _HOOKS["pre-commit"]
+    body = builder("/weird path/mship")
+    # the space-containing path must be shell-quoted, not bare
+    assert "MSHIP_BIN='/weird path/mship'" in body

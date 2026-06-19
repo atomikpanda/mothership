@@ -53,7 +53,18 @@ def register(app: typer.Typer, get_container):
             try:
                 _c = get_container(required=False)
                 if _c is not None:
-                    record_bypass(Path(_c.config_path()).parent, op="commit", branch="", reason=reason)
+                    import subprocess as _sp
+                    _branch = ""
+                    try:
+                        _r = _sp.run(
+                            ["git", "-C", toplevel, "rev-parse", "--abbrev-ref", "HEAD"],
+                            capture_output=True, text=True, check=False, timeout=3,
+                        )
+                        if _r.returncode == 0:
+                            _branch = _r.stdout.strip()
+                    except Exception:
+                        pass
+                    record_bypass(Path(_c.config_path()).parent, op="commit", branch=_branch, reason=reason)
             except Exception:
                 pass
             raise typer.Exit(code=0)
