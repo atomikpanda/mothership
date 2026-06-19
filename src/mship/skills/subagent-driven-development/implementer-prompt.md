@@ -55,7 +55,8 @@ Task tool (general-purpose):
     Once you're clear on requirements:
     1. Implement exactly what the task specifies
     2. Write tests (following TDD if task says to)
-    3. Verify implementation works
+    3. Verify implementation works — in a mothership workspace run `mship test`
+       (not a bare runner like `pytest`) so `mship finish` keeps the test-evidence trail
     4. Commit your work on the current feature branch (see "Where to work" below)
     5. Self-review (see below)
     6. Report back
