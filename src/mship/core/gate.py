@@ -16,11 +16,15 @@ _BYPASS_ENV = "MSHIP_BYPASS_GATE"
 
 
 def resolve_bypass() -> tuple[bool, str]:
-    """(bypassed, reason) from MSHIP_BYPASS_GATE. A bare/'1' value -> reason ''."""
+    """(bypassed, reason) from MSHIP_BYPASS_GATE. Unset/blank or an explicit
+    off-value (0/false/no, case-insensitive) -> (False, ""). A bare '1' (or any
+    other truthy value) -> (True, ''); any other string -> (True, reason)."""
     val = os.environ.get(_BYPASS_ENV)
     if not val or not val.strip():
         return (False, "")
     reason = val.strip()
+    if reason.lower() in ("0", "false", "no"):
+        return (False, "")
     return (True, "" if reason == "1" else reason)
 
 
@@ -46,10 +50,11 @@ def no_task_notice(cwd: Path) -> str | None:
         from mship.core.config import ConfigLoader
         from mship.core.state import StateManager
         try:
-            config_path = ConfigLoader.discover(Path(cwd))
+            config_path = ConfigLoader.discover(cwd)
         except FileNotFoundError:
             return None
         state = StateManager(config_path.parent / ".mothership").load()
-        return None if state.tasks else NO_TASK_NOTICE
+        active = [t for t in state.tasks.values() if t.finished_at is None]
+        return None if active else NO_TASK_NOTICE
     except Exception:
         return None

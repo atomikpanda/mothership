@@ -27,6 +27,8 @@ def test_record_bypass_appends_jsonl(tmp_path):
     line = json.loads(log.read_text().splitlines()[-1])
     assert line["op"] == "commit" and line["branch"] == "feat/x" and line["reason"] == "r"
     assert "ts" in line and "cwd" in line
+    record_bypass(ws, op="push", branch="feat/y", reason="r2")
+    assert len((ws / ".mothership" / "bypass-log.jsonl").read_text().splitlines()) == 2
 
 
 def _ws_with(tmp_path, tasks: bool):
@@ -57,3 +59,25 @@ def test_no_task_notice_with_task_is_none(tmp_path):
 
 def test_no_task_notice_outside_workspace_is_none(tmp_path):
     assert no_task_notice(tmp_path) is None
+
+
+def test_resolve_bypass_zero_is_off(monkeypatch):
+    monkeypatch.setenv("MSHIP_BYPASS_GATE", "0")
+    assert resolve_bypass() == (False, "")
+    monkeypatch.setenv("MSHIP_BYPASS_GATE", "false")
+    assert resolve_bypass() == (False, "")
+
+
+def test_no_task_notice_finished_task_still_notifies(tmp_path):
+    ws = tmp_path / "wsf"; ws.mkdir()
+    (ws / "mothership.yaml").write_text(
+        "workspace: w\nrepos:\n  lib:\n    path: lib\n    type: library\n"
+    )
+    (ws / "lib").mkdir(); (ws / "lib" / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    sd = ws / ".mothership"; sd.mkdir()
+    (sd / "state.yaml").write_text(
+        "tasks:\n  t:\n    slug: t\n    description: d\n    phase: dev\n"
+        "    created_at: 2026-01-01T00:00:00+00:00\n    affected_repos: [lib]\n"
+        "    branch: feat/t\n    finished_at: 2026-01-02T00:00:00+00:00\n"
+    )
+    assert no_task_notice(ws) == NO_TASK_NOTICE
