@@ -74,6 +74,11 @@ def create_pr_via_httpx(
         if not isinstance(url, str) or not url:
             raise RuntimeError("GitHub PR created but response had no html_url")
         return url
+    except httpx.HTTPError as e:
+        # Network/connectivity failures (ConnectError, TimeoutException, …) are
+        # httpx.HTTPError, not RuntimeError — re-raise so the finish caller's
+        # `except RuntimeError` handles them cleanly instead of crashing.
+        raise RuntimeError(f"GitHub PR creation request failed: {e}") from e
     finally:
         if owns:
             c.close()
@@ -108,6 +113,8 @@ def get_default_branch_via_httpx(
             f"{_API}/repos/{owner}/{repo}",
             headers={**_API_HEADERS, "Authorization": f"Bearer {token}"},
         )
+    except httpx.HTTPError as e:
+        raise RuntimeError(f"Could not fetch default branch: {e}") from e
     finally:
         if owns:
             c.close()

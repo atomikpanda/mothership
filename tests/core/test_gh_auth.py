@@ -100,6 +100,25 @@ def test_create_pr_via_httpx_422_non_existing_still_raises():
                             title="T", body="B", client=client)
 
 
+def test_create_pr_via_httpx_network_error_becomes_runtimeerror():
+    # Network failures (httpx.HTTPError) must surface as RuntimeError so the
+    # finish caller's `except RuntimeError` handles them, not as a traceback.
+    def handler(request):
+        raise httpx.ConnectError("connection refused")
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(RuntimeError):
+        create_pr_via_httpx("tok", "o", "r", head="h", base="main",
+                            title="T", body="B", client=client)
+
+
+def test_get_default_branch_via_httpx_network_error_becomes_runtimeerror():
+    def handler(request):
+        raise httpx.ConnectError("connection refused")
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(RuntimeError):
+        get_default_branch_via_httpx("tok", "o", "r", client=client)
+
+
 def test_get_default_branch_via_httpx():
     def handler(request):
         assert str(request.url) == "https://api.github.com/repos/o/r"
