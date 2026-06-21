@@ -45,8 +45,8 @@ def resolve_adhoc_repo(repo_names: list[str], repo_flag: str | None) -> str:
     if len(repo_names) == 1:
         return repo_names[0]
     raise CaptureError(
-        "no active task and the workspace has multiple repos; "
-        f"pass --repo <name> (one of: {sorted(repo_names)})."
+        "no active task and no single repo could be selected; "
+        f"pass --repo <name> (workspace repos: {sorted(repo_names)})."
     )
 
 

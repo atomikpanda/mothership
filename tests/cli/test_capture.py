@@ -151,7 +151,21 @@ def test_capture_ambiguous_task_still_errors(tmp_path):
     try:
         result = runner.invoke(app, ["capture", "--repo", "app", "--platform", "android"])
         assert result.exit_code != 0
-        assert "a" in result.output and "b" in result.output
+        # both task slugs surface so the user can disambiguate with --task
+        assert "Multiple active tasks" in result.output
+        assert "a, b" in result.output
+    finally:
+        _reset()
+
+
+def test_capture_unknown_task_errors(tmp_path):
+    # An explicit unknown --task must error, NOT silently fall back to adhoc.
+    cfg, state_dir = _bootstrap_no_task(tmp_path, {"app": ["android"]})
+    _override(cfg, state_dir, _FakeShell())
+    try:
+        result = runner.invoke(app, ["capture", "--task", "ghost"])
+        assert result.exit_code != 0
+        assert "ghost" in result.output
     finally:
         _reset()
 
@@ -167,6 +181,10 @@ def test_capture_single_platform_implicit(tmp_path):
         assert payload["platform"] == "android"
         assert payload["artifacts"][0]["kind"] == "image"
         assert shell.calls[0]["MSHIP_CAPTURE_PLATFORM"] == "android"
+        # task mode populates the resolution fields and files under the task slug
+        assert payload["resolved_task"] == "t"
+        assert payload["resolution_source"] == "--task"
+        assert "/captures/t/" in payload["artifacts"][0]["path"]
     finally:
         _reset()
 
