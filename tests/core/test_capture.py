@@ -8,7 +8,26 @@ import pytest
 
 from mship.core.capture import (
     Artifact, CaptureError, resolve_kinds, discover_artifacts, run_capture,
+    resolve_adhoc_repo,
 )
+
+
+def test_resolve_adhoc_repo_explicit_flag():
+    assert resolve_adhoc_repo(["app", "web"], "web") == "web"
+
+
+def test_resolve_adhoc_repo_sole_repo_implicit():
+    assert resolve_adhoc_repo(["only"], None) == "only"
+
+
+def test_resolve_adhoc_repo_unknown_flag_raises():
+    with pytest.raises(CaptureError, match="unknown repo"):
+        resolve_adhoc_repo(["app", "web"], "nope")
+
+
+def test_resolve_adhoc_repo_ambiguous_raises():
+    with pytest.raises(CaptureError, match="no active task"):
+        resolve_adhoc_repo(["app", "web"], None)
 
 
 def test_resolve_kinds_all_and_single():

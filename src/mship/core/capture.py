@@ -29,6 +29,27 @@ class Artifact:
     path: Path
 
 
+def resolve_adhoc_repo(repo_names: list[str], repo_flag: str | None) -> str:
+    """Pick a repo for an ad-hoc (no active task) capture.
+
+    Capture observes a running app, not worktree source, so it can run without a
+    task — against a repo's main checkout. Priority: --repo flag > sole repo >
+    CaptureError (ambiguous; caller must pass --repo).
+    """
+    if repo_flag is not None:
+        if repo_flag not in repo_names:
+            raise CaptureError(
+                f"unknown repo {repo_flag!r}. Workspace repos: {sorted(repo_names)}"
+            )
+        return repo_flag
+    if len(repo_names) == 1:
+        return repo_names[0]
+    raise CaptureError(
+        "no active task and no single repo could be selected; "
+        f"pass --repo <name> (workspace repos: {sorted(repo_names)})."
+    )
+
+
 def resolve_kinds(kind_flag: str) -> list[str]:
     """Map the --kind value ('all' | a single kind) to a concrete list."""
     if kind_flag == "all":
