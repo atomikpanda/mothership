@@ -198,6 +198,10 @@ and/or a structured layout dump (`layout`) — into files you can read, then com
 against intent and iterate. It delegates to the repo's `capture` go-task target
 (adb/simctl/etc.), so the app must already be running (`mship run`); it does not
 boot emulators/simulators. Use `--platform` when a repo targets more than one.
+It's task-aware but **not** task-required: with an active task it runs in that
+task's worktree and files captures under the task; with no task it runs an
+ad-hoc capture against the repo's main checkout (pass `--repo` if the workspace
+has more than one). Capture observes a *running app*, not worktree source.
 
 **`spawn` order:** slugify → worktree per repo → symlink `symlink_dirs` → `task setup` (unless `--skip-setup`) → save state → enter `plan`. If a repo's setup fails, the task still spawns; fix and re-run setup manually.
 
