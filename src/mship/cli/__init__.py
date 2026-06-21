@@ -73,6 +73,7 @@ def get_container(required: bool = True) -> "Container | None":
 # Register command modules
 from mship.cli import audit as _audit_mod
 from mship.cli import bind as _bind_mod
+from mship.cli import capture as _capture_mod
 from mship.cli import bootstrap as _bootstrap_mod
 from mship.cli import block as _block_mod
 from mship.cli import commit as _commit_mod
@@ -129,6 +130,7 @@ def run() -> None:
 
 _audit_mod.register(app, get_container)
 _bind_mod.register(app, get_container)
+_capture_mod.register(app, get_container)
 _bootstrap_mod.register(app, get_container)
 _block_mod.register(app, get_container)
 _commit_mod.register(app, get_container)

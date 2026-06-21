@@ -31,6 +31,10 @@ class Healthcheck(BaseModel):
         return self
 
 
+class CaptureConfig(BaseModel):
+    platforms: list[str] = []
+
+
 class RepoConfig(BaseModel):
     path: Path
     type: Literal["library", "service"]
@@ -49,6 +53,7 @@ class RepoConfig(BaseModel):
     url: str | None = None
     allow_dirty: bool = False
     allow_extra_worktrees: bool = False
+    capture: CaptureConfig | None = None
 
     @field_validator("url", mode="after")
     @classmethod
