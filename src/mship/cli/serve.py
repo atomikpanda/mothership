@@ -84,6 +84,22 @@ def register(app: typer.Typer, get_container):
         auth_note = "auth: bearer token" if token else "auth: none (loopback only)"
         docs_note = "docs: disabled (auth)" if token else "docs: /docs"
         output.print(f"mship serve → http://{host}:{port}  ({auth_note}; {docs_note})")
+
+        from mship.core.serve_pair import resolve_advertised_host, serve_pair_link
+        pair = serve_pair_link(host, port, token, config.workspace)
+        if pair is not None:
+            import segno
+            adv = resolve_advertised_host(host)
+            output.print(f"pair → {pair}")
+            output.print(f"  http://{adv}:{port}  (plain HTTP — fine on a trusted LAN or tailnet "
+                         "(WireGuard-encrypted); use --relay for untrusted networks)")
+            typer.echo(segno.make(pair).terminal(compact=True))
+        elif token and host in {"0.0.0.0", "::"}:
+            output.print(
+                "  (couldn't determine a LAN/tailnet IP for a pairing QR; "
+                "pass --host <your-ip> to print one)"
+            )
+
         uvicorn.run(api, host=host, port=port)
 
 

@@ -53,3 +53,32 @@ def test_serve_binds_nonloopback_with_token(_configured, monkeypatch):
     result = runner.invoke(app, ["serve", "--host", "0.0.0.0"])
     assert result.exit_code == 0, result.output
     assert seen.get("host") == "0.0.0.0"
+
+
+def test_serve_prints_pair_link_with_token_and_concrete_host(_configured, monkeypatch):
+    monkeypatch.setenv("MSHIP_SERVE_TOKEN", "secret")
+    import uvicorn
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    result = runner.invoke(app, ["serve", "--host", "192.168.1.50"])
+    assert result.exit_code == 0, result.output
+    assert "groundcontrol://add?" in result.output
+    assert "192.168.1.50" in result.output
+
+
+def test_serve_pair_link_uses_detected_ip_for_bind_all(_configured, monkeypatch):
+    monkeypatch.setenv("MSHIP_SERVE_TOKEN", "secret")
+    import uvicorn
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    monkeypatch.setattr("mship.core.serve_pair._primary_ipv4", lambda: "100.1.2.3")
+    result = runner.invoke(app, ["serve", "--host", "0.0.0.0"])
+    assert result.exit_code == 0, result.output
+    assert "http://100.1.2.3" in result.output
+
+
+def test_serve_no_pair_link_without_token(_configured, monkeypatch):
+    monkeypatch.delenv("MSHIP_SERVE_TOKEN", raising=False)
+    import uvicorn
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    result = runner.invoke(app, ["serve"])  # loopback default, no token
+    assert result.exit_code == 0, result.output
+    assert "groundcontrol://add" not in result.output
