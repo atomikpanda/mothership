@@ -7,9 +7,38 @@ tasks:
       - uv sync
 
   test:
-    desc: Run the test suite
+    desc: Run the test suite (runtime-deps guard, then pytest)
     cmds:
+      - task: check-runtime-deps
       - uv run pytest -q
+
+  check-runtime-deps:
+    desc: Import the CLI with runtime-only deps to catch a dev-only dep used at runtime (MOS-190)
+    # A `uv tool install` ships only `[project.dependencies]`, so a module-level
+    # `import <pkg>` of a dev-only dependency crashes the CLI for users on
+    # startup (MOS-187: `import httpx` in gh_auth.py while httpx was dev-only,
+    # fixed reactively in #219). pytest can't catch this — it always runs in the
+    # dev environment, so the dev dep is present.
+    #
+    # This builds + installs the project into a throwaway venv (exactly what
+    # `uv tool install` / `uv pip install` produce: runtime deps only, no dev
+    # group) and imports mship.cli, which walks the full runtime graph
+    # (cli -> container -> pr -> gh_auth -> import httpx). Any runtime module
+    # importing an undeclared dependency fails here with ModuleNotFoundError.
+    #
+    # Why a throwaway venv and not `uv run --no-dev`: a plain `uv run --no-dev`
+    # does a non-pruning sync, so a dev dep left in a warm .venv masks the
+    # regression; `uv run --no-dev --exact` fixes that but churns the dev's
+    # .venv on every run; `uv run --no-project --with .` reuses a stale built
+    # wheel and silently passes. A fresh venv is reliable AND leaves .venv alone.
+    cmds:
+      - |
+        set -eu
+        tmp="$(mktemp -d)"
+        trap 'rm -rf "$tmp"' EXIT
+        uv venv "$tmp/venv" >/dev/null
+        uv pip install --python "$tmp/venv/bin/python" --quiet .
+        "$tmp/venv/bin/python" -c "import mship.cli"
 
   lint:
     desc: Static checks (no linter wired yet)
