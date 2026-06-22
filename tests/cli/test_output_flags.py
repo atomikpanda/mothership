@@ -2,6 +2,12 @@
 precedence (explicit ctor arg > global settings from the CLI callback > env
 var > TTY auto-detection)."""
 import io
+import json
+import os
+import pty
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -64,6 +70,18 @@ def test_env_msship_json_falsey_forces_text_on_a_pipe(monkeypatch):
     monkeypatch.setenv("MSHIP_JSON", "0")
     o = pipe()
     assert o.json_mode is False
+
+
+def test_json_forced_off_on_pipe_renders_human_not_json():
+    # Forcing JSON off on a pipe must yield human output, not a silent JSON
+    # fallback — human_mode is the negation of json_mode, independent of is_tty.
+    o = pipe(force_json=False)
+    assert o.json_mode is False
+    assert o.human_mode is True
+    o.table("Repos", ["Repo"], [["mothership"]])
+    out = o._stream.getvalue()
+    assert '"rows"' not in out  # not the JSON fallback shape
+    assert "Repo" in out and "mothership" in out  # rendered as a table
 
 
 def test_callback_setting_beats_env(monkeypatch):
@@ -149,13 +167,6 @@ def test_forced_json_bytes_identical_tty_vs_pipe():
 
 # ---- end-to-end (AC): `mship --json <cmd>` over a real pty == over a pipe ----
 
-import json as _json
-import os
-import pty
-import subprocess
-import sys
-from pathlib import Path
-
 
 def _run_mship(args, cwd, *, use_pty: bool) -> str:
     """Run the real CLI in a subprocess, capturing stdout over a pty (so the CLI
@@ -203,7 +214,7 @@ def test_json_flag_pty_equals_pipe(workspace):
     over_pty = _run_mship(["--json", "graph"], workspace, use_pty=True)
     over_pipe = _run_mship(["--json", "graph"], workspace, use_pty=False)
     assert over_pty == over_pipe
-    parsed = _json.loads(over_pty)
+    parsed = json.loads(over_pty)
     assert "order" in parsed and "repos" in parsed
 
 
@@ -213,4 +224,4 @@ def test_json_flag_changes_pty_output(workspace):
     human = _run_mship(["graph"], workspace, use_pty=True)
     forced = _run_mship(["--json", "graph"], workspace, use_pty=True)
     assert human != forced
-    _json.loads(forced)  # forced output parses as JSON
+    json.loads(forced)  # forced output parses as JSON

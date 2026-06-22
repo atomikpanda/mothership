@@ -16,7 +16,6 @@ the fallback so interactive use and ``| jq`` keep working with no flags.
 import json
 import os
 import sys
-from functools import cached_property
 from typing import Any, Optional, TextIO
 
 from rich.console import Console
@@ -132,8 +131,14 @@ class Output:
 
     @property
     def human_mode(self) -> bool:
-        """True when output should be human/Rich rather than JSON."""
-        return self.is_tty and not self.json_mode
+        """True when output should be human/Rich rather than JSON.
+
+        Exactly the negation of json_mode: the TTY dependency already lives in
+        json_mode's default (a pipe defaults to JSON), so forcing JSON *off*
+        (e.g. MSHIP_JSON=0) yields human output even on a pipe rather than a
+        silent JSON fallback in table()/print().
+        """
+        return not self.json_mode
 
     @property
     def quiet(self) -> bool:
@@ -156,13 +161,14 @@ class Output:
     # Color follows Rich's own terminal detection (so it never injects ANSI into
     # a non-terminal capture / pipe); ``no_color`` force-strips it when the user
     # asked (--no-color / --json / NO_COLOR). We don't force_terminal: in real use
-    # human_mode already implies a real TTY, so Rich colorizes on its own. Built
-    # once per instance (state is stable within a single command invocation).
-    @cached_property
+    # human_mode already implies a real TTY, so Rich colorizes on its own. Plain
+    # (uncached) properties so the console always reflects the currently resolved
+    # color — no dependency on Output-construction vs. configure_output ordering.
+    @property
     def _console(self) -> Console:
         return Console(file=self._stream, no_color=not self.use_color)
 
-    @cached_property
+    @property
     def _err_console(self) -> Console:
         return Console(file=self._err_stream, stderr=True, no_color=not self.use_color)
 
