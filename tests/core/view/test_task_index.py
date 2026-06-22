@@ -142,3 +142,21 @@ def test_find_all_specs_sorted_flat_by_mtime_desc_across_tasks(tmp_path: Path):
     specs = find_all_specs(state, tmp_path)
     names = [s.path.name for s in specs]
     assert names.index("newer.md") < names.index("older.md")
+
+
+def test_build_task_index_includes_enriched_fields(tmp_path: Path):
+    from mship.core.state import DependencyEdge
+    now = datetime.now(timezone.utc)
+    t = _task(
+        "a",
+        description="Add the thing",
+        pr_urls={"mothership": "https://github.com/x/mothership/pull/1"},
+        test_results={"mothership": TestResult(status="pass", at=now)},
+        depends_on=[DependencyEdge(upstream_slug="up", created_at=now)],
+    )
+    state = WorkspaceState(tasks={"a": t})
+    [s] = build_task_index(state, tmp_path)
+    assert s.description == "Add the thing"
+    assert s.pr_urls == {"mothership": "https://github.com/x/mothership/pull/1"}
+    assert s.test_results == {"mothership": "pass"}
+    assert s.depends_on == ["up"]
