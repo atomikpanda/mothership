@@ -5,15 +5,43 @@ from pathlib import Path
 class GitRunner:
     """Git operations for worktree and branch management."""
 
-    def worktree_add(self, repo_path: Path, worktree_path: Path, branch: str) -> None:
+    def worktree_add(
+        self, repo_path: Path, worktree_path: Path, branch: str, start_point: str | None = None
+    ) -> None:
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            ["git", "worktree", "add", str(worktree_path), "-b", branch],
-            cwd=repo_path,
-            check=True,
-            capture_output=True,
-            text=True,
+        cmd = ["git", "worktree", "add", str(worktree_path), "-b", branch]
+        if start_point is not None:
+            cmd.append(start_point)
+        subprocess.run(cmd, cwd=repo_path, check=True, capture_output=True, text=True)
+
+    def has_remote(self, repo_path: Path, remote: str = "origin") -> bool:
+        """True if `remote` is configured for the repo."""
+        result = subprocess.run(
+            ["git", "remote", "get-url", remote],
+            cwd=repo_path, capture_output=True, text=True,
         )
+        return result.returncode == 0
+
+    def fast_forward_if_clean(self, repo_path: Path, base: str, remote: str = "origin") -> bool:
+        """Best-effort fast-forward of the canonical checkout's `base` to `<remote>/<base>`.
+
+        Only acts when the checkout is ON `base`, has no uncommitted changes, and a
+        fast-forward is possible. Returns whether it advanced. Never resets or forces;
+        a diverged/ahead/dirty/off-base checkout is left untouched.
+        """
+        cur = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_path, capture_output=True, text=True,
+        )
+        if cur.returncode != 0 or cur.stdout.strip() != base:
+            return False
+        if self.has_uncommitted_changes(repo_path):
+            return False
+        result = subprocess.run(
+            ["git", "merge", "--ff-only", f"{remote}/{base}"],
+            cwd=repo_path, capture_output=True, text=True,
+        )
+        return result.returncode == 0
 
     def worktree_add_detached(self, repo_path: Path, worktree_path: Path, ref: str) -> None:
         """Create a detached-HEAD worktree at `worktree_path` pointing at `ref`.

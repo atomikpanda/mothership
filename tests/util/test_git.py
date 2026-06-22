@@ -139,3 +139,85 @@ def test_fetch_remote_ref_returns_false_on_failure(tmp_path):
     subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
     git = GitRunner()
     assert git.fetch_remote_ref(repo_path=repo, ref="nonexistent") is False
+
+
+# ---------------------------------------------------------------------------
+# Task 1: GitRunner helpers — start-point, has_remote, fast_forward_if_clean
+# ---------------------------------------------------------------------------
+
+ENV = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t.com",
+       "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t.com"}
+
+
+def _run(args, cwd):
+    subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True, env=ENV)
+
+
+def _rev(cwd, ref="HEAD"):
+    return subprocess.run(["git", "rev-parse", ref], cwd=cwd,
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+
+def _repo_with_origin_ahead(tmp_path: Path):
+    """Return (repo, origin_tip) where `repo`'s local main is one commit behind origin/main."""
+    repo = tmp_path / "svc"
+    repo.mkdir()
+    _run(["git", "init", "-b", "main", str(repo)], tmp_path)
+    (repo / "a.txt").write_text("1")
+    _run(["git", "add", "-A"], repo)
+    _run(["git", "commit", "-m", "c1"], repo)
+    origin = tmp_path / "svc-origin.git"
+    _run(["git", "init", "--bare", "-b", "main", str(origin)], tmp_path)
+    _run(["git", "remote", "add", "origin", str(origin)], repo)
+    _run(["git", "push", "origin", "main"], repo)
+    clone = tmp_path / "svc-clone"
+    _run(["git", "clone", str(origin), str(clone)], tmp_path)
+    (clone / "b.txt").write_text("2")
+    _run(["git", "add", "-A"], clone)
+    _run(["git", "commit", "-m", "c2"], clone)
+    _run(["git", "push", "origin", "main"], clone)
+    # local `repo` still at c1; fetch so origin/main is known locally
+    _run(["git", "fetch", "origin", "main"], repo)
+    return repo, _rev(clone)
+
+
+def test_worktree_add_with_start_point_branches_from_ref(tmp_path):
+    repo, origin_tip = _repo_with_origin_ahead(tmp_path)
+    git = GitRunner()
+    wt = tmp_path / "wt"
+    git.worktree_add(repo, wt, "feat/x", start_point="origin/main")
+    assert _rev(wt) == origin_tip  # cut from origin tip, not local HEAD
+
+
+def test_worktree_add_without_start_point_uses_local_head(tmp_path):
+    repo, origin_tip = _repo_with_origin_ahead(tmp_path)
+    git = GitRunner()
+    wt = tmp_path / "wt"
+    git.worktree_add(repo, wt, "feat/x")
+    assert _rev(wt) == _rev(repo)   # local HEAD (behind)
+    assert _rev(wt) != origin_tip
+
+
+def test_has_remote(tmp_path):
+    repo, _ = _repo_with_origin_ahead(tmp_path)
+    git = GitRunner()
+    assert git.has_remote(repo) is True
+    bare = tmp_path / "no-remote"
+    bare.mkdir()
+    _run(["git", "init", "-b", "main", str(bare)], tmp_path)
+    assert git.has_remote(bare) is False
+
+
+def test_fast_forward_if_clean_advances_clean_behind_base(tmp_path):
+    repo, origin_tip = _repo_with_origin_ahead(tmp_path)
+    git = GitRunner()
+    assert git.fast_forward_if_clean(repo, "main") is True
+    assert _rev(repo, "main") == origin_tip
+
+
+def test_fast_forward_if_clean_skips_dirty_tree(tmp_path):
+    repo, origin_tip = _repo_with_origin_ahead(tmp_path)
+    (repo / "dirty.txt").write_text("uncommitted")
+    git = GitRunner()
+    assert git.fast_forward_if_clean(repo, "main") is False
+    assert _rev(repo, "main") != origin_tip   # untouched
