@@ -46,7 +46,7 @@ def register(app: typer.Typer, get_container):
 
         if clear_ignores:
             cache.clear_ignores()
-            if output.is_tty:
+            if output.human_mode:
                 output.success("Ignore list cleared.")
             else:
                 output.json({"cleared": True})
@@ -57,7 +57,7 @@ def register(app: typer.Typer, get_container):
                 output.error(f"Unknown task: {ignore!r}.")
                 raise typer.Exit(code=1)
             cache.add_ignore(ignore)
-            if output.is_tty:
+            if output.human_mode:
                 output.success(f"Ignoring drift for: {ignore}")
             else:
                 output.json({"ignored": ignore})
@@ -85,7 +85,7 @@ def register(app: typer.Typer, get_container):
 
 
 def _emit(output: Output, decisions: dict[str, Decision], json_out: bool, ignored: list[str]) -> None:
-    if json_out or not output.is_tty:
+    if json_out or not output.human_mode:
         output.json({
             "tasks": [
                 {

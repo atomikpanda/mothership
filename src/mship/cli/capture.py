@@ -123,7 +123,7 @@ def register(app: typer.Typer, get_container):
             output.error(str(e))
             raise typer.Exit(code=1)
 
-        if output.is_tty:
+        if output.human_mode:
             for a in artifacts:
                 output.success(f"captured {a.kind} → {a.path}")
         else:

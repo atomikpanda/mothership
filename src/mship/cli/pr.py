@@ -30,13 +30,13 @@ def register(app: typer.Typer, get_container):
             tasks_with_prs.append({"slug": slug, "prs": prs})
 
         if not tasks_with_prs:
-            if output.is_tty:
+            if output.human_mode:
                 output.print("No active tasks with recorded PRs.")
             else:
                 output.json({"tasks": []})
             return
 
-        if output.is_tty:
+        if output.human_mode:
             for t in tasks_with_prs:
                 output.print(f"[bold]{t['slug']}[/bold]")
                 for p in t["prs"]:

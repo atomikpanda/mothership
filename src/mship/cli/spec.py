@@ -72,7 +72,7 @@ def register(parent: typer.Typer, get_container):
             raise typer.Exit(1)
         store.save(spec)
 
-        if output.is_tty:
+        if output.human_mode:
             output.success(f"Created spec: {path}")
             output.print("[dim]Edit the prose; lifecycle commands (draft/review/approve) follow.[/dim]")
         else:
@@ -174,7 +174,7 @@ def register(parent: typer.Typer, get_container):
         spec.updated_at = datetime.now(timezone.utc)
         path = store.save(spec)
 
-        if output.is_tty:
+        if output.human_mode:
             output.success(f"Applied draft → {spec.status}: {path}")
         else:
             output.json({"id": spec.id, "status": spec.status, "path": str(path)})
@@ -198,7 +198,7 @@ def register(parent: typer.Typer, get_container):
             raise typer.Exit(1)
 
         payload = build_review(spec)
-        if output.is_tty:
+        if output.human_mode:
             output.print(f"[bold]{payload['id']}[/bold] ({payload['status']})")
             for c in payload["acceptance_criteria"]:
                 output.print(f"  [{c['verdict']}] {c['id']}: {c['text']}")
@@ -239,7 +239,7 @@ def register(parent: typer.Typer, get_container):
 
         spec.updated_at = datetime.now(timezone.utc)
         path = store.save(spec)
-        if output.is_tty:
+        if output.human_mode:
             output.success(f"{criterion_id} → {verdict_value}: {path}")
         else:
             output.json({"id": spec.id, "criterion": criterion_id, "verdict": verdict_value})
@@ -278,7 +278,7 @@ def register(parent: typer.Typer, get_container):
             output.error(f"{spec_id}: missing body section(s): {', '.join(missing)}")
             raise typer.Exit(1)
 
-        if output.is_tty:
+        if output.human_mode:
             output.success(f"{spec_id}: valid")
         else:
             output.json({"id": spec_id, "valid": True})
@@ -295,7 +295,7 @@ def register(parent: typer.Typer, get_container):
         if spec is None:
             output.error(f"No spec with id {spec_id!r}."); raise typer.Exit(1)
         qs = list_questions(spec)
-        if output.is_tty:
+        if output.human_mode:
             for q in qs:
                 output.print(f"  {q['id']}: {q['text']}" + (f"  → {q['answer']}" if q['answer'] else "  (unanswered)"))
         else:
@@ -315,7 +315,7 @@ def register(parent: typer.Typer, get_container):
             output.error(f"No spec with id {spec_id!r}."); raise typer.Exit(1)
         q = add_question(spec, text)
         spec.updated_at = datetime.now(timezone.utc); store.save(spec)
-        if output.is_tty:
+        if output.human_mode:
             output.success(f"Added {q.id}: {text}")
         else:
             output.json({"id": spec.id, "question_id": q.id})
@@ -337,7 +337,7 @@ def register(parent: typer.Typer, get_container):
         except ValueError as e:
             output.error(str(e)); raise typer.Exit(1)
         spec.updated_at = datetime.now(timezone.utc); store.save(spec)
-        if output.is_tty:
+        if output.human_mode:
             output.success(f"{q_id} answered.")
         else:
             output.json({"id": spec.id, "question_id": q_id})
@@ -373,7 +373,7 @@ def register(parent: typer.Typer, get_container):
         spec.status = "approved"
         spec.updated_at = datetime.now(timezone.utc)
         path = store.save(spec)
-        if output.is_tty:
+        if output.human_mode:
             output.success(f"Approved: {path}")
         else:
             output.json({"id": spec.id, "status": spec.status})
@@ -431,7 +431,7 @@ def register(parent: typer.Typer, get_container):
             output.error(str(e))
             raise typer.Exit(1)
 
-        if output.is_tty and result.spawned:
+        if output.human_mode and result.spawned:
             output.success(
                 f"Auto-spawned task {result.task.slug!r} "
                 f"({', '.join(result.task.affected_repos)})."
@@ -468,7 +468,7 @@ def register(parent: typer.Typer, get_container):
             container.log_manager().append(spec.id, f"spec request-changes: {reason}")
         except Exception:
             pass
-        if output.is_tty:
+        if output.human_mode:
             output.success(f"Requested changes ({spec.status}): {reason}")
         else:
             output.json({"id": spec.id, "status": spec.status, "reason": reason})
@@ -494,7 +494,7 @@ def register(parent: typer.Typer, get_container):
             }
             for s in specs
         ]
-        if output.is_tty:
+        if output.human_mode:
             from rich.table import Table
             from rich.console import Console
             table = Table(title="Specs")
@@ -548,7 +548,7 @@ def register(parent: typer.Typer, get_container):
             "risks": spec.risks,
             "body": spec.body,
         }
-        if output.is_tty:
+        if output.human_mode:
             from rich.console import Console
             from rich.markdown import Markdown
             console = Console()
@@ -581,7 +581,7 @@ def register(parent: typer.Typer, get_container):
         spec.status = target_status
         spec.updated_at = datetime.now(timezone.utc)
         store.save(spec)
-        if output.is_tty:
+        if output.human_mode:
             output.success(f"Spec {spec.id} → {target_status}")
         else:
             output.json({"id": spec.id, "status": spec.status})

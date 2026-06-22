@@ -110,7 +110,7 @@ def register(app: typer.Typer, get_container):
             entries = log_mgr.read(t.slug)
             opens = [e for e in entries if e.open_question]
             if not opens:
-                if output.is_tty:
+                if output.human_mode:
                     output.print("(no open questions)")
                 else:
                     output.json({
@@ -119,7 +119,7 @@ def register(app: typer.Typer, get_container):
                         "resolution_source": resolved.source,
                     })
                 return
-            if output.is_tty:
+            if output.human_mode:
                 output.print("[bold]Open questions:[/bold]")
                 for e in opens:
                     rel = format_relative(e.timestamp)
@@ -166,7 +166,7 @@ def register(app: typer.Typer, get_container):
                 action=action,
                 open_question=open_question,
             )
-            if output.is_tty:
+            if output.human_mode:
                 output.success("Logged")
             else:
                 output.json({
@@ -207,7 +207,7 @@ def register(app: typer.Typer, get_container):
         if not entries:
             output.print("No journal entries")
             return
-        if output.is_tty:
+        if output.human_mode:
             for entry in entries:
                 output.print(f"[dim]{entry.timestamp.strftime('%Y-%m-%d %H:%M:%S')}[/dim]")
                 extras = []

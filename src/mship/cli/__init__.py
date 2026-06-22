@@ -6,12 +6,49 @@ app = typer.Typer(
     name="mship",
     help=(
         "Cross-repo workflow engine. "
-        "Task-scoped commands resolve their target via --task flag -> MSHIP_TASK env -> cwd."
+        "Task-scoped commands resolve their target via --task flag -> MSHIP_TASK env -> cwd.\n\n"
+        "Output flags (place before the command, e.g. `mship --json status`):\n"
+        "  --json      force JSON output (implies --no-color)\n"
+        "  --quiet/-q  suppress advisory warnings + progress on stderr\n"
+        "  --no-color  strip ANSI color\n"
+        "Precedence: CLI flag > env var (MSHIP_JSON / MSHIP_QUIET / NO_COLOR) > TTY auto-detection."
     ),
     no_args_is_help=True,
 )
 
 container = Container()
+
+
+@app.callback()
+def _global_options(
+    json: bool = typer.Option(
+        False, "--json",
+        help="Force JSON output regardless of TTY (implies --no-color). "
+             "Overrides MSHIP_JSON.",
+    ),
+    quiet: bool = typer.Option(
+        False, "--quiet", "-q",
+        help="Suppress advisory warnings and progress lines on stderr "
+             "(errors and exit codes unchanged). Overrides MSHIP_QUIET.",
+    ),
+    no_color: bool = typer.Option(
+        False, "--no-color",
+        help="Strip ANSI color from all output (per no-color.org). Overrides NO_COLOR.",
+    ),
+) -> None:
+    """Resolve global output flags before any command runs.
+
+    These are recorded process-globally and consumed by ``mship.cli.output``;
+    a flag forces its setting on, while leaving a flag off defers to the env var
+    then TTY auto-detection (so plain ``mship status | jq`` still yields JSON).
+    """
+    from mship.cli.output import configure_output
+
+    configure_output(
+        json=True if json else None,
+        quiet=True if quiet else None,
+        no_color=True if no_color else None,
+    )
 
 
 def _resolve_state_dir(config_path):

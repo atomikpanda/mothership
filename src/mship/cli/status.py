@@ -156,7 +156,7 @@ def register(app: typer.Typer, get_container):
 
         # --- TTY rendering: unchanged. Workspace summary when no task resolves;
         # task-detail block when one does.
-        if output.is_tty:
+        if output.human_mode:
             if t is None:
                 if not active:
                     output.print("No active tasks. Run `mship spawn \"description\"`.")
@@ -255,7 +255,7 @@ def register(app: typer.Typer, get_container):
         graph_obj = container.graph()
         order = graph_obj.topo_sort()
 
-        if output.is_tty:
+        if output.human_mode:
             for repo_name in order:
                 repo = config.repos[repo_name]
                 deps = repo.depends_on

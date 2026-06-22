@@ -513,3 +513,24 @@ mship graph | jq '.order'
 ```
 
 This makes it easy to build automation on top of mship without scraping human-readable text.
+
+### Forcing output shape (CI / agents): `--json`, `--quiet`, `--no-color`
+
+TTY auto-detection is convenient interactively but non-deterministic at hand-off
+boundaries (a CI runner or an agent that captures over a pty looks like a TTY and
+gets human output instead of JSON). Three **global** flags — placed *before* the
+subcommand — make it explicit (MOS-103):
+
+```bash
+mship --json status      # force JSON regardless of TTY (implies --no-color)
+mship --quiet finish      # suppress advisory warnings + progress on stderr (errors unchanged)
+mship --no-color status   # strip ANSI color from all output
+```
+
+Equivalent env vars (for shell-profile / CI-job defaults): `MSHIP_JSON=1`,
+`MSHIP_QUIET=1`, `NO_COLOR=1` (per https://no-color.org/).
+
+**Precedence:** CLI flag > env var > TTY auto-detection. A flag forces its setting
+on; leaving it off defers to the env var, then to TTY detection — so plain
+`mship status | jq` still yields JSON with no flags. Prefer `MSHIP_JSON=1` in a CI
+job's environment so every `mship` call in the job is deterministic.

@@ -66,7 +66,7 @@ def register(app: typer.Typer, get_container):
 
         is_passive = target in t.passive_repos
 
-        if not output.is_tty:
+        if not output.human_mode:
             json_payload = handoff.to_json()
             json_payload["resolved_task"] = resolved.task.slug
             json_payload["resolution_source"] = resolved.source

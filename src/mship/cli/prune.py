@@ -16,14 +16,14 @@ def register(app: typer.Typer, get_container):
         orphans = prune_mgr.scan()
 
         if not orphans:
-            if output.is_tty:
+            if output.human_mode:
                 output.success("No orphaned worktrees found")
             else:
                 output.json({"orphans": [], "pruned": False})
             return
 
         if not force:
-            if output.is_tty:
+            if output.human_mode:
                 output.warning(f"Found {len(orphans)} orphaned worktree(s):")
                 for o in orphans:
                     output.print(f"  {o.repo}: {o.path} ({o.reason})")
@@ -39,7 +39,7 @@ def register(app: typer.Typer, get_container):
             return
 
         count = prune_mgr.prune(orphans)
-        if output.is_tty:
+        if output.human_mode:
             output.success(f"Pruned {count} item(s)")
         else:
             output.json({"pruned": True, "count": count})

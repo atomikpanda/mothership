@@ -73,7 +73,7 @@ def register(app: typer.Typer, get_container):
             )
 
         state_mgr.mutate(_mutate)
-        if output.is_tty:
+        if output.human_mode:
             output.success(f"{downstream} now depends on {upstream_slug}")
         else:
             output.json({"downstream": downstream, "upstream": upstream_slug, "added": True})
@@ -103,7 +103,7 @@ def register(app: typer.Typer, get_container):
             ]
 
         state_mgr.mutate(_mutate)
-        if output.is_tty:
+        if output.human_mode:
             output.success(f"{downstream} no longer depends on {upstream_slug}")
         else:
             output.json({"downstream": downstream, "upstream": upstream_slug, "removed": True})
@@ -126,7 +126,7 @@ def register(app: typer.Typer, get_container):
                     edges.append({"downstream": slug, "upstream": e.upstream_slug})
             edges.sort(key=lambda e: (e["downstream"], e["upstream"]))
             payload = {"nodes": nodes, "edges": edges}
-            if output.is_tty:
+            if output.human_mode:
                 _render_graph_tty(output, payload)
             else:
                 output.json(payload)
@@ -137,7 +137,7 @@ def register(app: typer.Typer, get_container):
         upstream = [{"slug": e.upstream_slug} for e in state.tasks[slug].depends_on]
         downstream = [{"slug": s} for s in sorted(downstream_of(state, slug))]
         payload = {"task": slug, "upstream": upstream, "downstream": downstream}
-        if output.is_tty:
+        if output.human_mode:
             _render_task_deps_tty(output, payload)
         else:
             output.json(payload)
