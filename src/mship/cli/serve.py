@@ -84,6 +84,23 @@ def register(app: typer.Typer, get_container):
         auth_note = "auth: bearer token" if token else "auth: none (loopback only)"
         docs_note = "docs: disabled (auth)" if token else "docs: /docs"
         output.print(f"mship serve → http://{host}:{port}  ({auth_note}; {docs_note})")
+
+        from mship.core.serve_pair import serve_pair_link
+        pair = serve_pair_link(host, port, token, config.workspace)
+        if pair is not None:
+            import segno
+            from mship.core.relay.pairing import parse_pair_link
+            advertised_url = parse_pair_link(pair)["url"]  # exactly what the QR encodes
+            output.print(f"pair → {pair}")
+            output.print(f"  {advertised_url}  (plain HTTP — fine on a trusted LAN or tailnet "
+                         "(WireGuard-encrypted); use --relay for untrusted networks)")
+            typer.echo(segno.make(pair).terminal(compact=True))
+        elif token and host in {"0.0.0.0", "::"}:
+            output.print(
+                "  (couldn't determine a LAN/tailnet IP for a pairing QR; "
+                "pass --host <your-ip> to print one)"
+            )
+
         uvicorn.run(api, host=host, port=port)
 
 
