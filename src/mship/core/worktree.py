@@ -437,6 +437,9 @@ class WorktreeManager:
                     frontier.append(dep)
         all_repos = self._graph.topo_sort(list(affected | passive))
 
+        # Resolve the workspace default branch once (used for base resolution + the Task).
+        default_base = workspace_default_branch_from_config(self._config)
+
         worktrees: dict[str, Path] = {}
         setup_warnings: list[str] = []
 
@@ -516,10 +519,22 @@ class WorktreeManager:
                     ref=target_ref,
                 )
             else:
+                start_point = None
+                base = repo_config.base_branch or default_base or "main"
+                if not offline and self._git.has_remote(repo_path):
+                    if self._git.fetch_remote_ref(repo_path=repo_path, ref=base):
+                        start_point = f"origin/{base}"            # cut from fetched tip
+                        self._git.fast_forward_if_clean(repo_path=repo_path, base=base)
+                    else:
+                        setup_warnings.append(
+                            f"{repo_name}: could not fetch origin/{base}; "
+                            f"cutting worktree from local {base}"
+                        )
                 self._git.worktree_add(
                     repo_path=repo_path,
                     worktree_path=wt_path,
                     branch=branch,
+                    start_point=start_point,
                 )
             worktrees[repo_name] = wt_path
 
@@ -554,7 +569,7 @@ class WorktreeManager:
             affected_repos=ordered,
             worktrees=worktrees,
             branch=branch,
-            base_branch=workspace_default_branch_from_config(self._config),
+            base_branch=default_base,
             passive_repos=passive,
             depends_on=depends_on or [],
         )

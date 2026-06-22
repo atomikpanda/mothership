@@ -1388,3 +1388,100 @@ def test_spawn_passive_skips_task_setup(worktree_deps):
     cwds = {Path(c.kwargs.get("cwd")).name for c in setup_calls}
     assert "auth-service" in cwds
     assert "shared" not in cwds
+
+
+# ---------------------------------------------------------------------------
+# Task 2: spawn() freshens the base before cutting active-repo worktrees
+# ---------------------------------------------------------------------------
+
+def _spawn_env():
+    import os
+    return {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t.com",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t.com"}
+
+
+def _g(args, cwd):
+    import subprocess
+    subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True, env=_spawn_env())
+
+
+def _sha(cwd, ref="HEAD"):
+    import subprocess
+    return subprocess.run(["git", "rev-parse", ref], cwd=cwd,
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+
+def _svc_with_origin_ahead(tmp_path):
+    """Build workspace/svc whose local main is 1 commit behind origin/main. Returns origin_tip."""
+    repo = tmp_path / "svc"
+    repo.mkdir()
+    _g(["git", "init", "-b", "main", str(repo)], tmp_path)
+    (repo / "a.txt").write_text("1"); _g(["git", "add", "-A"], repo); _g(["git", "commit", "-m", "c1"], repo)
+    origin = tmp_path / "svc-origin.git"
+    _g(["git", "init", "--bare", "-b", "main", str(origin)], tmp_path)
+    _g(["git", "remote", "add", "origin", str(origin)], repo); _g(["git", "push", "origin", "main"], repo)
+    clone = tmp_path / "svc-clone"
+    _g(["git", "clone", str(origin), str(clone)], tmp_path)
+    (clone / "b.txt").write_text("2"); _g(["git", "add", "-A"], clone); _g(["git", "commit", "-m", "c2"], clone)
+    _g(["git", "push", "origin", "main"], clone)
+    return _sha(clone)
+
+
+def _mgr(tmp_path):
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text("workspace: t\nrepos:\n  svc:\n    path: ./svc\n    type: service\n    base_branch: main\n")
+    config = ConfigLoader.load(cfg, require_paths=False)
+    graph = DependencyGraph(config)
+    state_dir = tmp_path / ".mothership"; state_dir.mkdir()
+    state_mgr = StateManager(state_dir)
+    git = GitRunner()
+    shell = MagicMock(spec=ShellRunner)
+    shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    log = MagicMock(spec=LogManager)
+    return WorktreeManager(config, graph, state_mgr, git, shell, log)
+
+
+def test_spawn_cuts_worktree_from_origin_when_local_behind(tmp_path):
+    origin_tip = _svc_with_origin_ahead(tmp_path)
+    repo = tmp_path / "svc"
+    assert _sha(repo) != origin_tip   # local behind
+    mgr = _mgr(tmp_path)
+    mgr.spawn("fresh base", repos=["svc"], workspace_root=tmp_path)
+    wt = tmp_path / ".worktrees" / "fresh-base" / "svc"
+    assert _sha(wt) == origin_tip                 # worktree cut from origin tip (ac1/ac2)
+    assert _sha(repo, "main") == origin_tip       # local base fast-forwarded (ac3)
+
+
+def test_spawn_offline_uses_local_base(tmp_path):
+    origin_tip = _svc_with_origin_ahead(tmp_path)
+    repo = tmp_path / "svc"
+    local_tip = _sha(repo)
+    mgr = _mgr(tmp_path)
+    mgr.spawn("offline test", repos=["svc"], workspace_root=tmp_path, offline=True)
+    wt = tmp_path / ".worktrees" / "offline-test" / "svc"
+    assert _sha(wt) == local_tip                  # local (stale) base, no fetch (ac5)
+    assert _sha(wt) != origin_tip
+    assert _sha(repo, "main") == local_tip        # local base untouched when offline
+
+
+def test_spawn_without_remote_falls_back_to_local_base(tmp_path):
+    # svc with NO origin remote -> silent local base, spawn still succeeds (ac4)
+    repo = tmp_path / "svc"; repo.mkdir()
+    _g(["git", "init", "-b", "main", str(repo)], tmp_path)
+    (repo / "a.txt").write_text("1"); _g(["git", "add", "-A"], repo); _g(["git", "commit", "-m", "c1"], repo)
+    mgr = _mgr(tmp_path)
+    result = mgr.spawn("no remote", repos=["svc"], workspace_root=tmp_path)
+    wt = tmp_path / ".worktrees" / "no-remote" / "svc"
+    assert _sha(wt) == _sha(repo)                 # local base, no error
+    assert result.task.slug == "no-remote"
+
+
+def test_spawn_dirty_canonical_base_not_fast_forwarded_but_worktree_fresh(tmp_path):
+    origin_tip = _svc_with_origin_ahead(tmp_path)
+    repo = tmp_path / "svc"
+    (repo / "dirty.txt").write_text("uncommitted")   # canonical checkout dirty
+    mgr = _mgr(tmp_path)
+    mgr.spawn("dirty base", repos=["svc"], workspace_root=tmp_path)
+    wt = tmp_path / ".worktrees" / "dirty-base" / "svc"
+    assert _sha(wt) == origin_tip                 # worktree still cut from origin (ac1)
+    assert _sha(repo, "main") != origin_tip       # dirty canonical base left untouched (ac3)
