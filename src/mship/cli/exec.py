@@ -243,7 +243,7 @@ def register(app: typer.Typer, get_container):
         }
         diff = None if no_diff else compute_diff(current_run, prev_run, pre_prev_run)
 
-        if output.is_tty:
+        if output.human_mode:
             output.print(f"[bold]Test run #{new_iter}[/bold]  ({run_duration_ms / 1000:.1f}s)")
             # Collapse path-share groups (#127): a set of repos that shared a
             # physical run renders as one line listing every member.
@@ -490,7 +490,7 @@ def register(app: typer.Typer, get_container):
         def _status(r) -> str:
             return "skip" if r.skipped else ("pass" if r.success else "fail")
 
-        if output.is_tty:
+        if output.human_mode:
             output.print("[bold]Build[/bold]")
             for r in sorted(result.results, key=lambda r: r.repo):
                 st = _status(r)

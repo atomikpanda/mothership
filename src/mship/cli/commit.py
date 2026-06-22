@@ -95,7 +95,7 @@ def register(app: typer.Typer, get_container):
             )
             raise typer.Exit(code=1)
 
-        if output.is_tty:
+        if output.human_mode:
             for r in results:
                 short = r["commit_sha"][:8] if r["commit_sha"] else "(no sha)"
                 base = f"  {r['repo']}: committed {short}"

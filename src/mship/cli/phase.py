@@ -63,7 +63,7 @@ def register(app: typer.Typer, get_container):
         for w in result.warnings:
             output.warning(w)
 
-        if output.is_tty:
+        if output.human_mode:
             output.success(f"Phase: {result.new_phase}")
         else:
             output.json({

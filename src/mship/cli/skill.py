@@ -85,7 +85,7 @@ def _install(output: Output, *, only: Optional[str], force: bool, yes: bool) -> 
             continue
         results.append(installer(force=force))
 
-    if output.is_tty:
+    if output.human_mode:
         for r in results:
             extras = []
             if r.replaced:

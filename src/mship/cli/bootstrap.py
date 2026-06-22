@@ -42,7 +42,7 @@ def register(app: typer.Typer, get_container):
         elif report.doctor_ok is None and not report.has_errors:
             warnings.append("doctor was not run")
 
-        if output.is_tty:
+        if output.human_mode:
             for m in report.members:
                 if m.status == "cloned":
                     output.print(f"  [green]{m.name}[/green]: {m.message}")

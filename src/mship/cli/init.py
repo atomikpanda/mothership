@@ -137,7 +137,7 @@ def register(app: typer.Typer, get_container):
 
         _install_session_hook_with_output(cwd, output)
 
-        if output.is_tty:
+        if output.human_mode:
             output.success(f"Created: {config_path}")
             for tf in created_taskfiles:
                 output.success(f"Created: {tf}/Taskfile.yml")

@@ -38,7 +38,7 @@ def register(app: typer.Typer, get_container):
         log_mgr = container.log_manager()
         log_mgr.append(t.slug, f"Blocked: {reason}")
 
-        if output.is_tty:
+        if output.human_mode:
             output.success(f"Task blocked: {reason}")
         else:
             output.json({
@@ -74,7 +74,7 @@ def register(app: typer.Typer, get_container):
         log_mgr = container.log_manager()
         log_mgr.append(t.slug, "Unblocked")
 
-        if output.is_tty:
+        if output.human_mode:
             output.success("Task unblocked")
         else:
             output.json({

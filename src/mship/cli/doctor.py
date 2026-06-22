@@ -22,7 +22,7 @@ def register(app: typer.Typer, get_container):
         )
         report = checker.run()
 
-        if output.is_tty:
+        if output.human_mode:
             output.print(f"[bold]Workspace:[/bold] {config.workspace}\n")
 
             current_repo = None

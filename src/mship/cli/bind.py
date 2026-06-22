@@ -81,7 +81,7 @@ def register(app: typer.Typer, get_container):
             if result["skipped"]:
                 any_skipped = True
 
-        if output.is_tty:
+        if output.human_mode:
             for row in per_repo:
                 output.print(f"[bold]{row['repo']}[/bold]")
                 for rel in row["copied"]:
