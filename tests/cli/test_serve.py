@@ -33,7 +33,12 @@ def test_serve_command_registered():
     assert "127.0.0.1" in result.output
 
 
-def test_serve_refuses_nonloopback_without_token(monkeypatch):
+def test_serve_refuses_nonloopback_without_token(_configured, monkeypatch):
+    # _configured overrides config_path so get_container() skips cwd-based
+    # workspace discovery (see mship.cli.get_container). Without it, serve hits
+    # "No mothership.yaml found" before the token check when pytest runs from a
+    # bare checkout with no workspace above cwd, masking the security assertion
+    # below (MOS-188).
     monkeypatch.delenv("MSHIP_SERVE_TOKEN", raising=False)
     result = runner.invoke(app, ["serve", "--host", "0.0.0.0"])
     assert result.exit_code != 0
