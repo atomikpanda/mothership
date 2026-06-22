@@ -40,3 +40,9 @@ def test_serve_pair_link_unspecified_uses_detected_ip():
     link = serve_pair_link("0.0.0.0", 47100, "secret", "ws", primary_ip=lambda: "100.1.2.3")
     assert parse_pair_link(link)["url"] == "http://100.1.2.3:47100"
     assert serve_pair_link("0.0.0.0", 47100, "secret", "ws", primary_ip=lambda: None) is None
+
+
+def test_serve_pair_link_brackets_ipv6_literal():
+    # A Tailscale IPv6 --host must be bracketed per RFC 3986.
+    link = serve_pair_link("fd7a:115c:a1e0::1", 47100, "secret", "ws")
+    assert parse_pair_link(link)["url"] == "http://[fd7a:115c:a1e0::1]:47100"

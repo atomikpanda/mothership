@@ -44,4 +44,6 @@ def serve_pair_link(
     adv = resolve_advertised_host(host, primary_ip=primary_ip)
     if adv is None:
         return None
-    return build_pair_link(url=f"http://{adv}:{port}", token=token, workspace=workspace)
+    # RFC 3986: IPv6 literals (e.g. a Tailscale fd7a:… address) must be bracketed.
+    host_part = f"[{adv}]" if ":" in adv else adv
+    return build_pair_link(url=f"http://{host_part}:{port}", token=token, workspace=workspace)
