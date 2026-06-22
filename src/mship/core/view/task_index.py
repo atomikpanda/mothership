@@ -1,7 +1,7 @@
 """Task-index data layer for the cross-task `mship view` God view."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -21,6 +21,10 @@ class TaskSummary:
     spec_count: int
     orphan: bool
     tests_failing: bool
+    description: str = ""
+    pr_urls: dict[str, str] = field(default_factory=dict)
+    test_results: dict[str, str] = field(default_factory=dict)
+    depends_on: list[str] = field(default_factory=list)
 
 
 def _summarize(task: Task) -> TaskSummary:
@@ -44,6 +48,10 @@ def _summarize(task: Task) -> TaskSummary:
         spec_count=spec_count,
         orphan=orphan,
         tests_failing=tests_failing,
+        description=task.description,
+        pr_urls=dict(task.pr_urls),
+        test_results={repo: tr.status for repo, tr in task.test_results.items()},
+        depends_on=[e.upstream_slug for e in task.depends_on],
     )
 
 
