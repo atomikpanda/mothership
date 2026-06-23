@@ -378,6 +378,38 @@ def register(parent: typer.Typer, get_container):
         else:
             output.json({"id": spec.id, "status": spec.status})
 
+    @spec_app.command("from-thread")
+    def from_thread(
+        thread_id: str = typer.Argument(..., help="Thread id to draft a spec from."),
+        title: Optional[str] = typer.Option(None, "--title", help="Spec title (default: the thread subject)."),
+    ):
+        """Create a spec seeded from a chat thread's transcript, linked to the thread."""
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from mship.core.message_store import MessageStore
+        from mship.core.spec_draft import build_draft_prompt, new_spec
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+
+        container = get_container()
+        output = Output()
+        workspace_root = Path(container.config_path()).parent
+        messages = MessageStore(Path(container.state_dir()) / "messages")
+        thread = messages.get(thread_id)
+        if thread is None:
+            output.error(f"no thread {thread_id!r}")
+            raise typer.Exit(1)
+
+        now = datetime.now(timezone.utc)
+        spec = new_spec(title or thread.subject.strip() or "captured note", now=now)
+        SpecStore(workspace_root / SPECS_DIRNAME).save(spec)
+        messages.link_spec(thread_id, spec.id)
+
+        transcript = "\n".join(f"{m.role}: {m.text}" for m in thread.messages)
+        output.print(f"created spec {spec.id!r} linked to thread {thread_id!r}. "
+                     f"Run the prompt below, then: mship spec apply {spec.id} --from-json <file>, "
+                     f"then mship reply {thread_id} \"drafted {spec.id}\".")
+        typer.echo(build_draft_prompt(spec.id, transcript))
+
     @spec_app.command("dispatch")
     def dispatch(
         spec_id: str = typer.Argument(..., help="Spec id to dispatch (approved, or already dispatched to re-emit)."),
