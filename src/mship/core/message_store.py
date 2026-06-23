@@ -58,6 +58,13 @@ class MessageStore:
         self.save(thread)
         return thread
 
+    def link_spec(self, thread_id: str, spec_id: str) -> None:
+        thread = self.get(thread_id)
+        if thread is None:
+            raise KeyError(thread_id)
+        thread.spec_id = spec_id
+        self.save(thread)
+
     def append(self, thread_id: str, role: Literal["human", "agent"], text: str, now: datetime) -> Message:
         thread = self.get(thread_id)
         if thread is None:

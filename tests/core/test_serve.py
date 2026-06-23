@@ -426,3 +426,11 @@ def test_threads_explicit_subject(tmp_path):
     client = TestClient(_app(tmp_path))
     t = client.post("/threads", json={"text": "body", "subject": "My subject"}).json()
     assert t["subject"] == "My subject"
+
+
+def test_thread_exposes_spec_id(tmp_path):
+    from mship.core.message_store import MessageStore
+    client = TestClient(_app(tmp_path))
+    tid = client.post("/threads", json={"text": "hi"}).json()["id"]
+    MessageStore(tmp_path / ".mothership" / "messages").link_spec(tid, "spec-1")
+    assert client.get(f"/threads/{tid}").json()["spec_id"] == "spec-1"

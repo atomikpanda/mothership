@@ -20,6 +20,7 @@ class Thread(BaseModel):
     created_at: datetime
     updated_at: datetime
     task_slug: str | None = None
+    spec_id: str | None = None
     messages: list[Message] = []
 
     @computed_field  # serialized into model_dump()/JSON (a plain @property is not)
