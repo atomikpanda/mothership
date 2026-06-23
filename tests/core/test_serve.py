@@ -384,3 +384,45 @@ def test_post_dispatch_auto_spawn_unavailable_409(tmp_path):
         workspace_root=tmp_path, workspace_name="t",
     )
     assert TestClient(app).post("/specs/cap/dispatch").status_code == 409
+
+
+# --- message mailbox endpoints ---
+
+
+def test_threads_create_append_list_get(tmp_path):
+    client = TestClient(_app(tmp_path))
+
+    # create a thread (derives subject from text when omitted)
+    r = client.post("/threads", json={"text": "build a thing that does X"})
+    assert r.status_code == 200
+    thread = r.json()
+    tid = thread["id"]
+    assert thread["subject"].startswith("build a thing")
+    assert [m["role"] for m in thread["messages"]] == ["human"]
+    assert thread["awaiting_reply"] is True   # computed_field serialized into the response
+
+    # list shows it, awaiting an agent
+    lst = client.get("/threads").json()
+    assert any(t["id"] == tid and t["awaiting_reply"] is True for t in lst)
+
+    # append a human message
+    r2 = client.post(f"/threads/{tid}/messages", json={"text": "second thought"})
+    assert r2.status_code == 200
+    assert len(r2.json()["messages"]) == 2
+
+    # get full thread
+    full = client.get(f"/threads/{tid}").json()
+    assert [m["text"] for m in full["messages"]] == ["build a thing that does X", "second thought"]
+    assert full["awaiting_reply"] is True
+
+
+def test_threads_404s(tmp_path):
+    client = TestClient(_app(tmp_path))
+    assert client.get("/threads/nope").status_code == 404
+    assert client.post("/threads/nope/messages", json={"text": "x"}).status_code == 404
+
+
+def test_threads_explicit_subject(tmp_path):
+    client = TestClient(_app(tmp_path))
+    t = client.post("/threads", json={"text": "body", "subject": "My subject"}).json()
+    assert t["subject"] == "My subject"
