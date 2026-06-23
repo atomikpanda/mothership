@@ -124,6 +124,7 @@ from mship.cli import init as _init_mod
 from mship.cli import internal as _internal_mod
 from mship.cli import layout as _layout_mod
 from mship.cli import log as _log_mod
+from mship.cli import message as _message_mod
 from mship.cli import pair as _pair_mod
 from mship.cli import phase as _phase_mod
 from mship.cli import pr as _pr_mod
@@ -181,6 +182,7 @@ _init_mod.register(app, get_container)
 _internal_mod.register(app, get_container)
 _layout_mod.register(app, get_container)
 _log_mod.register(app, get_container)
+_message_mod.register(app, get_container)
 _pair_mod.register(app, get_container)
 _phase_mod.register(app, get_container)
 _pr_mod.register(app, get_container)
