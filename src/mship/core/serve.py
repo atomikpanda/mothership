@@ -44,6 +44,15 @@ class ReasonBody(BaseModel):
     reason: str
 
 
+class NewThreadBody(BaseModel):
+    text: str
+    subject: str | None = None
+
+
+class NewMessageBody(BaseModel):
+    text: str
+
+
 def _make_auth_dependency(token: str):
     import hmac
     from fastapi import Header, HTTPException
@@ -280,5 +289,46 @@ def create_app(
             "spawned": result.spawned,
             "handoff": result.handoff,
         }
+
+    # --- message mailbox (phone <-> agent) ---
+    from mship.core.message_store import MessageStore
+
+    msgs = MessageStore(workspace_root / ".mothership" / "messages")
+
+    @app.post("/threads")
+    def post_thread(body: NewThreadBody):
+        now = datetime.now(timezone.utc)
+        text = body.text
+        subject = body.subject or (text.strip().splitlines()[0][:80] if text.strip() else "(no subject)")
+        return msgs.create_thread(subject=subject, text=text, now=now).model_dump(mode="json")
+
+    @app.post("/threads/{thread_id}/messages")
+    def post_message(thread_id: str, body: NewMessageBody):
+        now = datetime.now(timezone.utc)
+        try:
+            msgs.append(thread_id, "human", body.text, now)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
+        return msgs.get(thread_id).model_dump(mode="json")
+
+    @app.get("/threads")
+    def list_threads():
+        return [
+            {
+                "id": t.id, "subject": t.subject,
+                "updated_at": t.updated_at.isoformat(),
+                "awaiting_reply": t.awaiting_reply,
+                "last_message": (t.messages[-1].text[:120] if t.messages else ""),
+                "message_count": len(t.messages),
+            }
+            for t in msgs.list()
+        ]
+
+    @app.get("/threads/{thread_id}")
+    def get_thread(thread_id: str):
+        t = msgs.get(thread_id)
+        if t is None:
+            raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
+        return t.model_dump(mode="json")
 
     return app
