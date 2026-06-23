@@ -4,6 +4,7 @@ import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from mship.core.message import Message, Thread
 
@@ -57,7 +58,7 @@ class MessageStore:
         self.save(thread)
         return thread
 
-    def append(self, thread_id: str, role: str, text: str, now: datetime) -> Message:
+    def append(self, thread_id: str, role: Literal["human", "agent"], text: str, now: datetime) -> Message:
         thread = self.get(thread_id)
         if thread is None:
             raise KeyError(thread_id)

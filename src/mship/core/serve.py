@@ -309,7 +309,10 @@ def create_app(
             msgs.append(thread_id, "human", body.text, now)
         except KeyError:
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
-        return msgs.get(thread_id).model_dump(mode="json")
+        t = msgs.get(thread_id)
+        if t is None:
+            raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
+        return t.model_dump(mode="json")
 
     @app.get("/threads")
     def list_threads():

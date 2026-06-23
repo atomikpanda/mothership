@@ -57,3 +57,13 @@ def test_unsafe_thread_id_rejected(tmp_path):
     s = _store(tmp_path)
     with pytest.raises(ValueError):
         s._path("../escape")
+
+
+def test_awaiting_reply_is_serialized(tmp_path):
+    # @computed_field: awaiting_reply must appear in model_dump()/JSON, not just as a property.
+    now = datetime(2026, 6, 23, tzinfo=timezone.utc)
+    s = _store(tmp_path)
+    t = s.create_thread(subject="x", text="hi", now=now)
+    assert s.get(t.id).model_dump()["awaiting_reply"] is True
+    s.append(t.id, "agent", "done", now)
+    assert s.get(t.id).model_dump()["awaiting_reply"] is False

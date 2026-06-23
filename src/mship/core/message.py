@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 
 
 class Message(BaseModel):
@@ -22,6 +22,7 @@ class Thread(BaseModel):
     task_slug: str | None = None
     messages: list[Message] = []
 
+    @computed_field  # serialized into model_dump()/JSON (a plain @property is not)
     @property
     def awaiting_reply(self) -> bool:
         """A thread needs an agent iff its latest message is from a human."""

@@ -399,6 +399,7 @@ def test_threads_create_append_list_get(tmp_path):
     tid = thread["id"]
     assert thread["subject"].startswith("build a thing")
     assert [m["role"] for m in thread["messages"]] == ["human"]
+    assert thread["awaiting_reply"] is True   # computed_field serialized into the response
 
     # list shows it, awaiting an agent
     lst = client.get("/threads").json()
@@ -412,6 +413,7 @@ def test_threads_create_append_list_get(tmp_path):
     # get full thread
     full = client.get(f"/threads/{tid}").json()
     assert [m["text"] for m in full["messages"]] == ["build a thing that does X", "second thought"]
+    assert full["awaiting_reply"] is True
 
 
 def test_threads_404s(tmp_path):
