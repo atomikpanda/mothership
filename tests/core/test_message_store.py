@@ -80,3 +80,14 @@ def test_link_spec_sets_spec_id(tmp_path):
 def test_link_spec_unknown_thread_raises(tmp_path):
     with pytest.raises(KeyError):
         _store(tmp_path).link_spec("nope", "s")
+
+
+def test_link_spec_with_now_advances_updated_at(tmp_path):
+    created = datetime(2026, 6, 23, tzinfo=timezone.utc)
+    linked = datetime(2026, 6, 24, tzinfo=timezone.utc)
+    s = _store(tmp_path)
+    t = s.create_thread(subject="x", text="hi", now=created)
+    s.link_spec(t.id, "my-spec", now=linked)
+    refreshed = s.get(t.id)
+    assert refreshed.spec_id == "my-spec"
+    assert refreshed.updated_at == linked  # linking bubbles the thread up in list()

@@ -400,12 +400,22 @@ def register(parent: typer.Typer, get_container):
             raise typer.Exit(1)
 
         now = datetime.now(timezone.utc)
-        spec = new_spec(title or thread.subject.strip() or "captured note", now=now)
-        SpecStore(workspace_root / SPECS_DIRNAME).save(spec)
-        messages.link_spec(thread_id, spec.id)
+        spec_store = SpecStore(workspace_root / SPECS_DIRNAME)
+
+        # A thread spawns at most one spec. If from-thread runs again (agent
+        # retry, accidental re-invocation), reuse the already-linked spec rather
+        # than creating a second one that would orphan the first — there is no
+        # back-reference, so a silent overwrite would strand the original draft.
+        spec = spec_store.find_by_id(thread.spec_id) if thread.spec_id else None
+        reused = spec is not None
+        if spec is None:
+            spec = new_spec(title or thread.subject.strip() or "captured note", now=now)
+            spec_store.save(spec)
+            messages.link_spec(thread_id, spec.id, now=now)
 
         transcript = "\n".join(f"{m.role}: {m.text}" for m in thread.messages)
-        output.print(f"created spec {spec.id!r} linked to thread {thread_id!r}. "
+        verb = "reusing spec" if reused else "created spec"
+        output.print(f"{verb} {spec.id!r} linked to thread {thread_id!r}. "
                      f"Run the prompt below, then: mship spec apply {spec.id} --from-json <file>, "
                      f"then mship reply {thread_id} \"drafted {spec.id}\".")
         typer.echo(build_draft_prompt(spec.id, transcript))

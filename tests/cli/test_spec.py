@@ -632,3 +632,25 @@ def test_spec_from_thread_creates_links_and_prompts(_configured):
 
 def test_spec_from_thread_unknown_thread_errors(_configured):
     assert runner.invoke(app, ["spec", "from-thread", "nope"]).exit_code != 0
+
+
+def test_spec_from_thread_is_idempotent_and_does_not_orphan(_configured):
+    from datetime import datetime, timezone
+    from mship.core.message_store import MessageStore
+    from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+    ws = _configured
+    now = datetime(2026, 6, 23, tzinfo=timezone.utc)
+    mstore = MessageStore(ws / ".mothership" / "messages")
+    t = mstore.create_thread(subject="Add dark mode", text="we should add dark mode", now=now)
+
+    first = runner.invoke(app, ["spec", "from-thread", t.id])
+    assert first.exit_code == 0, first.output
+    linked = mstore.get(t.id).spec_id
+
+    # A second invocation must reuse the linked spec, not create a new one.
+    second = runner.invoke(app, ["spec", "from-thread", t.id])
+    assert second.exit_code == 0, second.output
+    assert mstore.get(t.id).spec_id == linked  # link unchanged
+    store = SpecStore(ws / SPECS_DIRNAME)
+    assert len(store.list()) == 1  # no orphaned spec
+    assert "reusing spec" in second.output
