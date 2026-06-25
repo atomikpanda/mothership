@@ -1,4 +1,6 @@
-from mship.core.relay.tunnel import device_id, device_subdomain, subdomain_for
+from pathlib import Path
+
+from mship.core.relay.tunnel import TunnelSupervisor, device_id, device_subdomain, subdomain_for
 
 _PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBodyAAAA mship-relay\n"
 
@@ -29,3 +31,39 @@ def test_device_subdomain_truncates_to_dns_limit():
     assert len(sd) <= 63
     assert sd.endswith("-abc123")
     assert not sd.startswith("-") and "--" not in sd
+
+
+# ---------------------------------------------------------------------------
+# TunnelSupervisor: log capture + accessors (Task 2)
+# ---------------------------------------------------------------------------
+
+class _FakeProc:
+    def __init__(self, exits_after=0):
+        self._polls = 0
+        self._exits_after = exits_after
+
+    def poll(self):
+        self._polls += 1
+        return None if self._polls <= self._exits_after else 1
+
+    def terminate(self): pass
+
+    def wait(self, timeout=None): return 0
+
+
+def test_supervisor_exposes_recent_output(tmp_path):
+    log = tmp_path / "tunnel.log"
+    log.write_text("Warning: remote port forwarding failed for listen port 80\n")
+    sup = TunnelSupervisor(argv=["ssh"], proc_factory=lambda a: _FakeProc(0), log_path=log)
+    sup.start()
+    assert "remote port forwarding failed" in sup.recent_output()
+
+
+def test_supervisor_counts_restarts(tmp_path):
+    # proc that is always "dead" → tick respawns once backoff elapses
+    sup = TunnelSupervisor(argv=["ssh"], proc_factory=lambda a: _FakeProc(0),
+                           backoff_delay=0.0, log_path=tmp_path / "t.log")
+    sup.start()
+    assert sup.restart_count == 0
+    sup.tick(); sup.tick()
+    assert sup.restart_count >= 1

@@ -62,12 +62,14 @@ def build_tunnel_argv(rc: RelayConfig, *, subdomain: str, local_port: int, key_p
     ]
 
 
-def _default_proc_factory(argv: list[str]):
-    """Launch argv as a background subprocess in its own process group."""
-    kwargs: dict = dict(
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+def _default_proc_factory(argv: list[str], log_path: Path | None = None):
+    """Launch argv in its own process group, capturing output to log_path
+    (so failures/assigned-URL are inspectable). Falls back to DEVNULL."""
+    if log_path is not None:
+        out = open(log_path, "ab", buffering=0)
+        kwargs: dict = dict(stdout=out, stderr=subprocess.STDOUT)
+    else:
+        kwargs: dict = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
@@ -100,9 +102,12 @@ class TunnelSupervisor:
         backoff_delay: float = 5.0,
         max_backoff_delay: float = 60.0,
         clock: Callable[[], float] | None = None,
+        log_path: Path | None = None,
     ) -> None:
         self._argv = argv
-        self._proc_factory = proc_factory if proc_factory is not None else _default_proc_factory
+        self._log_path = log_path
+        self._proc_factory = proc_factory if proc_factory is not None \
+            else (lambda a: _default_proc_factory(a, self._log_path))
         self._backoff_delay = backoff_delay
         self._max_backoff_delay = max_backoff_delay
         self._clock = clock if clock is not None else time.monotonic
@@ -176,6 +181,21 @@ class TunnelSupervisor:
         if self._proc is None:
             return False
         return self._proc.poll() is None
+
+    @property
+    def restart_count(self) -> int:
+        """Number of times the supervised process has been restarted."""
+        return self._restart_count
+
+    def recent_output(self, limit: int = 4000) -> str:
+        """Tail of the captured ssh output (empty if no log or file not yet written)."""
+        if self._log_path is None:
+            return ""
+        try:
+            data = Path(self._log_path).read_bytes()[-limit:]
+            return data.decode(errors="replace")
+        except FileNotFoundError:
+            return ""
 
     # ------------------------------------------------------------------
     # Internal helpers
