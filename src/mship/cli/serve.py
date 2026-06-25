@@ -225,6 +225,8 @@ def _serve_with_relay(
             output.error("✗ local server didn't come up within 30s; relay not verified")
             return
         ok, detail = verify_relay_reachable(public_url, token)
+        if stop_event.is_set():
+            return                      # shut down while the probe was in-flight — no spurious ✗
         if ok:
             output.success(f"✓ relay reachable: {public_url}")
         else:

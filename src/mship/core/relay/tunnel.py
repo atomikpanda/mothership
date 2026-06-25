@@ -35,13 +35,14 @@ def device_id(relay_public_key: str) -> str:
     return hashlib.sha256(body.encode()).hexdigest()[:6]
 
 
-def device_subdomain(workspace: str, device_id: str) -> str:
-    """Per-device relay subdomain: `<workspace-slug>-<device_id>`, DNS-label-safe.
+def device_subdomain(workspace: str, dev_id: str) -> str:
+    """Per-device relay subdomain: `<workspace-slug>-<dev_id>`, DNS-label-safe.
 
-    The workspace slug is truncated so the whole label (slug + '-' + id) fits the
-    63-char DNS limit, with any trailing '-' after truncation stripped.
+    `dev_id` is from device_id(). The workspace slug is truncated so the whole
+    label (slug + '-' + id) fits the 63-char DNS limit, with any trailing '-'
+    after truncation stripped.
     """
-    suffix = f"-{device_id}"
+    suffix = f"-{dev_id}"
     base = subdomain_for(workspace)[: 63 - len(suffix)].rstrip("-")
     return f"{base}{suffix}"
 
@@ -75,9 +76,11 @@ def _default_proc_factory(argv: list[str], log_path: Path | None = None):
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
-    proc = subprocess.Popen(argv, **kwargs)
-    if out is not None:
-        out.close()  # child inherited the fd; parent's handle is now redundant
+    try:
+        proc = subprocess.Popen(argv, **kwargs)
+    finally:
+        if out is not None:
+            out.close()  # child inherited the fd; parent's handle is now redundant (closed even if Popen raised)
     return proc
 
 
