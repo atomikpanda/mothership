@@ -125,6 +125,10 @@ def test_relay_setup_prints_public_key(tmp_path, monkeypatch):
     assert r.exit_code == 0, r.output
     assert "ssh-ed25519 " in r.output
     assert "pubkeys" in r.output  # the allow-list instruction
+    assert "scp " in r.output  # a ready-to-run remote enroll command, not just prose
+    assert "relay host itself" in r.output.lower()  # the local-copy shortcut (no ssh on the box)
+    assert "restart the relay" not in r.output  # the misleading step is gone
+    assert "no restart needed" in r.output.lower()  # sish reloads keys per connection
 
 
 def test_relay_setup_generates_key_when_absent(tmp_path, monkeypatch):

@@ -20,20 +20,41 @@ def register(parent: typer.Typer, get_container):
 
     @relay_app.command("setup")
     def setup():
-        """Generate the relay SSH key (if absent) and print its public key to allow-list."""
+        """Generate the relay SSH key (if absent) and print a ready-to-run enroll command."""
+        import socket
         from pathlib import Path
 
         from mship.core.relay.keys import ensure_relay_key, relay_public_key
 
         output = Output()
         key_path = ensure_relay_key(home=Path.home())
+        pub_path = Path(str(key_path) + ".pub")
         pub = relay_public_key(key_path).strip()
+
+        # Fill the relay host from config when available so the command is copy-paste ready;
+        # otherwise leave a placeholder (setup may run on a fresh device with no workspace).
+        relay_host = "<relay-host>"
+        try:
+            rc = get_container().config().relay
+            if rc is not None and getattr(rc, "host", None):
+                relay_host = rc.host
+        except Exception:
+            pass
+
+        label = (socket.gethostname() or "this-device") + ".pub"
 
         output.print(pub)
         output.print(
-            "\nAdd the line above to your relay's `docker/relay/pubkeys/` directory "
-            "(one file per key), then restart the relay, to allow this machine to "
-            "open tunnels."
+            f"\nEnroll this key so this machine can open relay tunnels — drop it in "
+            f"`docker/relay/pubkeys/` on the relay host (one file per key; no restart "
+            f"needed — sish re-reads the directory per connection):\n\n"
+            f"  • On the relay host itself, just copy it in:\n"
+            f"      cp {pub_path} <relay-dir>/docker/relay/pubkeys/{label}\n\n"
+            f"  • From another machine, scp it over (the tunnel auths by key, so there is\n"
+            f"    no \"relay user\" — <login> is just your normal SSH account on the relay box):\n"
+            f"      scp {pub_path} <login>@{relay_host}:<relay-dir>/docker/relay/pubkeys/{label}\n\n"
+            f"  <relay-dir> = where you deployed the docker/relay/ compose; the filename is "
+            f"just a unique label."
         )
 
     parent.add_typer(relay_app)
