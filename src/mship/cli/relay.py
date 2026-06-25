@@ -20,20 +20,37 @@ def register(parent: typer.Typer, get_container):
 
     @relay_app.command("setup")
     def setup():
-        """Generate the relay SSH key (if absent) and print its public key to allow-list."""
+        """Generate the relay SSH key (if absent) and print a ready-to-run enroll command."""
+        import socket
         from pathlib import Path
 
         from mship.core.relay.keys import ensure_relay_key, relay_public_key
 
         output = Output()
         key_path = ensure_relay_key(home=Path.home())
+        pub_path = Path(str(key_path) + ".pub")
         pub = relay_public_key(key_path).strip()
+
+        # Fill the relay host from config when available so the command is copy-paste ready;
+        # otherwise leave a placeholder (setup may run on a fresh device with no workspace).
+        relay_host = "<relay-host>"
+        try:
+            rc = get_container().config().relay
+            if rc is not None and getattr(rc, "host", None):
+                relay_host = rc.host
+        except Exception:
+            pass
+
+        label = (socket.gethostname() or "this-device") + ".pub"
 
         output.print(pub)
         output.print(
-            "\nAdd the line above to your relay's `docker/relay/pubkeys/` directory "
-            "(one file per key), then restart the relay, to allow this machine to "
-            "open tunnels."
+            f"\nTo allow this machine to open relay tunnels, enroll its key (one file per "
+            f"key in `docker/relay/pubkeys/`). From this device:\n\n"
+            f"  scp {pub_path} <user>@{relay_host}:<relay-dir>/docker/relay/pubkeys/{label}\n\n"
+            f"  • <relay-dir>: where you deployed the docker/relay/ compose on the relay host\n"
+            f"  • the filename is just a label — anything unique works\n\n"
+            f"No relay restart needed: sish re-reads the pubkeys directory on each connection."
         )
 
     parent.add_typer(relay_app)
