@@ -2,6 +2,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
 import secrets
 import time
@@ -185,7 +186,9 @@ class RequestStore:
         p = self._pending / f"{rid}.json"
         if not p.exists():
             raise NotPending(rid)
-        rec = json.loads(p.read_text())
+        rec = self._read_rec(p)
+        if rec is None:                       # corrupt/truncated → quarantined, treat as gone
+            raise NotPending(rid)
         dest = _unique_pub_path(Path(pubkeys_dir), sanitize_label(rec["hostname"]))
         # Atomic key write: sish re-reads pubkeys/ per connection and must never observe
         # a half-written key file mid-write.
@@ -203,7 +206,10 @@ class RequestStore:
         p = self._pending / f"{rid}.json"
         if not p.exists():
             raise NotPending(rid)
-        self._resolve(p, json.loads(p.read_text()), "denied")
+        rec = self._read_rec(p)
+        if rec is None:                       # corrupt/truncated → quarantined, treat as gone
+            raise NotPending(rid)
+        self._resolve(p, rec, "denied")
 
 
 # ---------------------------------------------------------------------------
@@ -212,13 +218,20 @@ class RequestStore:
 
 
 def _unique_pub_path(pubkeys_dir: Path, stem: str) -> Path:
-    """Return a Path that doesn't yet exist in pubkeys_dir, using stem with a counter suffix."""
+    """Atomically reserve a not-yet-existing `<stem>[-N].pub` in pubkeys_dir.
+
+    Uses O_CREAT|O_EXCL to claim the filename race-free — two concurrent approvals
+    for the same hostname get distinct files and neither silently overwrites the
+    other (an exists()-then-write check would have a TOCTOU window). The caller
+    overwrites the empty reserved file with the key content via tmp+replace."""
     pubkeys_dir.mkdir(parents=True, exist_ok=True)
-    cand = pubkeys_dir / f"{stem}.pub"
-    i = 2
-    while cand.exists():
-        if i > 1000:
-            raise RuntimeError("too many key files for this label")
-        cand = pubkeys_dir / f"{stem}-{i}.pub"
-        i += 1
-    return cand
+    i = 1
+    while True:
+        cand = pubkeys_dir / (f"{stem}.pub" if i == 1 else f"{stem}-{i}.pub")
+        try:
+            os.close(os.open(cand, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+            return cand
+        except FileExistsError:
+            i += 1
+            if i > 1000:
+                raise RuntimeError("too many key files for this label")

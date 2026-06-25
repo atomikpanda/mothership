@@ -156,3 +156,22 @@ def test_corrupt_pending_file_does_not_brick_store(tmp_path):
     s.approve(good, pubkeys)
     assert s.get(good) == "approved"
     assert list(pending_dir.glob("*.json.corrupt"))  # bad file moved aside
+
+
+def test_approve_and_deny_on_corrupt_own_record_raise_cleanly(tmp_path):
+    """A truncated/corrupt pending file at approve/deny time → NotPending, not a traceback."""
+    pubkeys = tmp_path / "pubkeys"
+    pubkeys.mkdir()
+    s = _store(tmp_path)
+    pending_dir = tmp_path / "store" / "pending"
+
+    rid = s.create(_PUB, "laptop")
+    (pending_dir / f"{rid}.json").write_text("{ truncated")
+    with pytest.raises(NotPending):
+        s.approve(rid, pubkeys)
+    assert list(pubkeys.glob("*.pub")) == []  # nothing written to the allowlist
+
+    rid2 = s.create(_PUB, "laptop2")
+    (pending_dir / f"{rid2}.json").write_text("not json at all")
+    with pytest.raises(NotPending):
+        s.deny(rid2)
