@@ -233,3 +233,214 @@ def test_serve_relay_requires_host(workspace_no_relay, tmp_path, monkeypatch):
     r = runner.invoke(app, ["serve", "--relay"])
     assert r.exit_code != 0
     assert "relay" in r.output.lower()
+
+
+# --- mship relay requests / approve / deny ---
+
+
+def test_relay_requests_approve_deny_roundtrip(tmp_path):
+    """Host-side roundtrip: create a pending request, list it, approve it.
+
+    Flags are per-command (not on the relay group), so --store-dir/--pubkeys-dir
+    are passed after the subcommand name.
+    """
+    from mship.core.relay.enroll import RequestStore
+
+    store_dir = tmp_path / "store"
+    pubkeys = tmp_path / "pubkeys"
+    pubkeys.mkdir()
+
+    # Seed a pending request directly via the store (simulates a device POSTing /enroll).
+    s = RequestStore(store_dir)
+    rid = s.create(
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBodyAAAAAAAAAAAAAAAAAAAA host",
+        "laptop",
+    )
+
+    # `mship relay requests --store-dir <dir>` should list the pending request.
+    r = runner.invoke(app, ["relay", "requests", "--store-dir", str(store_dir)])
+    assert r.exit_code == 0, r.output
+    assert rid in r.output
+    assert "laptop" in r.output
+
+    # `mship relay approve <id> --store-dir <dir> --pubkeys-dir <dir>` should
+    # write the key into pubkeys/ and mark the request as approved.
+    r = runner.invoke(
+        app,
+        ["relay", "approve", rid, "--store-dir", str(store_dir), "--pubkeys-dir", str(pubkeys)],
+    )
+    assert r.exit_code == 0, r.output
+    assert len(list(pubkeys.glob("*.pub"))) == 1  # key enrolled
+    assert RequestStore(store_dir).get(rid) == "approved"
+
+
+def test_relay_deny_resolves_without_enrolling(tmp_path):
+    """deny removes the request from pending but writes no key file."""
+    from mship.core.relay.enroll import RequestStore
+
+    store_dir = tmp_path / "store"
+    pubkeys = tmp_path / "pubkeys"
+    pubkeys.mkdir()
+
+    s = RequestStore(store_dir)
+    rid = s.create(
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBodyAAAAAAAAAAAAAAAAAAAA host",
+        "phone",
+    )
+
+    r = runner.invoke(app, ["relay", "deny", rid, "--store-dir", str(store_dir)])
+    assert r.exit_code == 0, r.output
+    assert len(list(pubkeys.glob("*.pub"))) == 0  # no key enrolled
+    assert RequestStore(store_dir).get(rid) == "denied"
+
+
+def test_relay_approve_unknown_id_exits_nonzero(tmp_path):
+    """approve on a non-existent id exits 1 with a clean error (no traceback)."""
+    store_dir = tmp_path / "store"
+    pubkeys = tmp_path / "pubkeys"
+    pubkeys.mkdir()
+
+    r = runner.invoke(
+        app,
+        ["relay", "approve", "doesnotexist", "--store-dir", str(store_dir), "--pubkeys-dir", str(pubkeys)],
+    )
+    assert r.exit_code == 1
+    # Output should mention the id, not a Python traceback.
+    assert "doesnotexist" in r.output
+
+
+def test_relay_deny_unknown_id_exits_nonzero(tmp_path):
+    """deny on a non-existent id exits 1 with a clean error (no traceback)."""
+    store_dir = tmp_path / "store"
+
+    r = runner.invoke(app, ["relay", "deny", "nope", "--store-dir", str(store_dir)])
+    assert r.exit_code == 1
+    assert "nope" in r.output
+
+
+def test_relay_requests_empty(tmp_path):
+    """`mship relay requests` with no pending requests exits 0 and says so."""
+    store_dir = tmp_path / "store"
+
+    r = runner.invoke(app, ["relay", "requests", "--store-dir", str(store_dir)])
+    assert r.exit_code == 0, r.output
+    assert "no pending" in r.output
+
+
+# --- mship relay enroll (requester) ---
+
+
+def _stub_relay_key(tmp_path, monkeypatch):
+    """Point HOME at a tmp dir with a pre-created relay key so `enroll` reads a
+    real pubkey without spawning ssh-keygen."""
+    fake_home = tmp_path / "home"
+    (fake_home / ".mothership").mkdir(parents=True)
+    key = fake_home / ".mothership" / "relay_ed25519"
+    key.write_text("PRIV\n")
+    (Path(str(key) + ".pub")).write_text("ssh-ed25519 AAAA mship-relay\n")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+
+def test_enroll_post_connection_error_is_clean(tmp_path, monkeypatch):
+    """A connection error on the initial POST exits 1 with a clean message, not a traceback."""
+    import httpx
+
+    _stub_relay_key(tmp_path, monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(httpx, "post", boom)
+
+    r = runner.invoke(app, ["relay", "enroll", "--enroll-url", "http://relay.example:47180"])
+    assert r.exit_code == 1
+    assert "could not reach enroll server" in r.output
+    # No traceback leaked.
+    assert "Traceback" not in r.output
+
+
+def test_enroll_poll_survives_transient_blip_then_approved(tmp_path, monkeypatch):
+    """A transient RequestError mid-poll is retried; the loop then sees 'approved' and exits 0."""
+    import httpx
+
+    _stub_relay_key(tmp_path, monkeypatch)
+
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp({"id": "rid123", "status": "pending"}))
+
+    calls = {"n": 0}
+
+    def fake_get(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("blip")  # transient — should be retried
+        return _Resp({"status": "approved"})
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    # No real sleeping between poll iterations.
+    import time as _time
+    monkeypatch.setattr(_time, "sleep", lambda *a, **k: None)
+
+    r = runner.invoke(app, ["relay", "enroll", "--enroll-url", "http://relay.example:47180"])
+    assert r.exit_code == 0, r.output
+    assert "approved" in r.output
+    assert calls["n"] == 2  # first call blipped, second succeeded
+
+
+def test_enroll_poll_denied_exits_nonzero(tmp_path, monkeypatch):
+    """A 'denied' status during polling exits 1 cleanly."""
+    import httpx
+
+    _stub_relay_key(tmp_path, monkeypatch)
+
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp({"id": "rid123", "status": "pending"}))
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp({"status": "denied"}))
+    import time as _time
+    monkeypatch.setattr(_time, "sleep", lambda *a, **k: None)
+
+    r = runner.invoke(app, ["relay", "enroll", "--enroll-url", "http://relay.example:47180"])
+    assert r.exit_code == 1
+    assert "denied" in r.output
+
+
+def test_enroll_no_wait_returns_after_post(tmp_path, monkeypatch):
+    """--no-wait POSTs and returns 0 without polling."""
+    import httpx
+
+    _stub_relay_key(tmp_path, monkeypatch)
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"id": "rid123", "status": "pending"}
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp())
+
+    def fail_get(*a, **k):
+        raise AssertionError("should not poll when --no-wait")
+
+    monkeypatch.setattr(httpx, "get", fail_get)
+
+    r = runner.invoke(
+        app, ["relay", "enroll", "--enroll-url", "http://relay.example:47180", "--no-wait"]
+    )
+    assert r.exit_code == 0, r.output
+    assert "rid123" in r.output
