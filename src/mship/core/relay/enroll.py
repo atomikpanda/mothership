@@ -12,8 +12,18 @@ def _b64decode_strict(body: str) -> bytes:
 
 
 def validate_pubkey(s: str) -> bool:
-    """True if `s` is a single ssh public-key line (key-type + valid base64 body)."""
-    parts = s.strip().split()
+    """True if `s` is a single ssh public-key line (key-type + decodable base64 body).
+
+    Checks *shape* only — a recognized key-type prefix plus a base64-decodable body
+    on a single line. It does not parse the SSH wire format or verify cryptographic
+    key structure; the real security boundary for enrollment is owner approval, not
+    this function. The single-line guard rejects multi-line / CRLF input so a crafted
+    second line cannot be smuggled into the authorized_keys allowlist on approval.
+    """
+    s = s.strip()
+    if "\n" in s or "\r" in s:  # reject multi-line / CRLF authorized_keys injection
+        return False
+    parts = s.split()
     if len(parts) < 2:
         return False
     ktype, body = parts[0], parts[1]
@@ -28,7 +38,10 @@ def validate_pubkey(s: str) -> bool:
 
 def fingerprint(pubkey: str) -> str:
     """ssh-keygen-style SHA256 fingerprint of the key body: `SHA256:<base64-no-pad>`."""
-    body = pubkey.strip().split()[1]
+    parts = pubkey.strip().split()
+    if len(parts) < 2:
+        raise ValueError("not an ssh public key")
+    body = parts[1]
     digest = hashlib.sha256(_b64decode_strict(body)).digest()
     return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
 

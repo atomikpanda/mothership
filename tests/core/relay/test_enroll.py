@@ -1,3 +1,5 @@
+import pytest
+
 from mship.core.relay.enroll import validate_pubkey, fingerprint, sanitize_label
 
 _PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBodyAAAAAAAAAAAAAAAAAAAAAAAA host"
@@ -15,10 +17,21 @@ def test_validate_rejects_junk():
     assert not validate_pubkey("rm -rf /")
 
 
+def test_validate_rejects_multiline_injection():
+    # A crafted second line must not be smuggled into the authorized_keys allowlist.
+    assert not validate_pubkey(_PUB + "\n" + _PUB.replace("host", "evil"))
+    assert not validate_pubkey(_PUB + "\r\n" + _PUB.replace("host", "evil"))
+
+
 def test_fingerprint_is_stable_sha256():
     fp = fingerprint(_PUB)
     assert fp.startswith("SHA256:")
     assert fp == fingerprint(_PUB + "  different-comment")  # body only
+
+
+def test_fingerprint_rejects_non_key():
+    with pytest.raises(ValueError):
+        fingerprint("ssh-ed25519")
 
 
 def test_sanitize_label_is_traversal_proof():
