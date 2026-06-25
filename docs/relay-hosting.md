@@ -114,6 +114,34 @@ echo "ssh-ed25519 AAAA... mship-relay" > docker/relay/pubkeys/my-laptop.pub
 
 One file per key; the filename does not matter. sish reads all files in the directory on each connection attempt — no container restart needed.
 
+### Enrolling a device that can't reach the relay box
+
+The manual copy above assumes you can write to `docker/relay/pubkeys/` on the relay host. When a *new device* (a laptop you can't SSH from into the relay box) needs access, use the **request → approve** flow instead — no shared secret, and a request can never enroll itself:
+
+**On the relay host**, run the enroll endpoint (public, beside sish; reads/writes a pending store, not the allowlist):
+
+```bash
+mship relay enroll-server --pubkeys-dir docker/relay/pubkeys --store-dir docker/relay/enroll-store
+# serves http://0.0.0.0:47180 ; pending requests expire after 30 min
+```
+
+**On the new device**, request access (it only needs the relay's public address — no filesystem/SSH access to the box):
+
+```bash
+mship relay enroll --enroll-url http://<relay-host>:47180
+# → requested (id a1c2…); waits for the owner to approve, then prints "✓ approved"
+```
+
+**Back on the relay host**, review and grant (or deny):
+
+```bash
+mship relay requests                 # id · hostname · key fingerprint
+mship relay approve a1c2 --store-dir docker/relay/enroll-store --pubkeys-dir docker/relay/pubkeys
+# writes the key into pubkeys/ → sish picks it up (no restart). `deny <id>` discards it.
+```
+
+A request only ever creates a *pending* entry — nothing reaches the allowlist until you `approve` it, and pending requests auto-expire after 30 minutes. The device can then `mship serve --relay`.
+
 ---
 
 ## Step 5 — Verify the Relay
