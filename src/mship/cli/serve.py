@@ -208,15 +208,22 @@ def _serve_with_relay(
 
     def _verify_loop():
         # wait for uvicorn to answer locally, then probe the PUBLIC url end-to-end.
+        import httpx
         local = f"http://{host}:{port}/health"
         deadline = time.monotonic() + 30
+        local_up = False
         while time.monotonic() < deadline and not stop_event.is_set():
             try:
-                import httpx
                 httpx.get(local, headers={"Authorization": f"Bearer {token}"}, timeout=2)
+                local_up = True
                 break
             except Exception:
                 time.sleep(0.5)
+        if stop_event.is_set():
+            return                      # clean shutdown — don't emit a spurious ✗
+        if not local_up:
+            output.error("✗ local server didn't come up within 30s; relay not verified")
+            return
         ok, detail = verify_relay_reachable(public_url, token)
         if ok:
             output.success(f"✓ relay reachable: {public_url}")
