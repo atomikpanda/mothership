@@ -1,4 +1,5 @@
 from __future__ import annotations
+import hashlib
 import os
 import re
 import subprocess
@@ -21,6 +22,28 @@ def subdomain_for(workspace: str) -> str:
     s = s.strip("-")
     s = s[:63].rstrip("-")
     return s
+
+
+def device_id(relay_public_key: str) -> str:
+    """Stable 6-char hex id for THIS machine, from its relay public key body.
+
+    Uses only the base64 key material (the 2nd whitespace-delimited field),
+    ignoring the trailing comment, so re-reading the key gives the same id.
+    """
+    parts = relay_public_key.split()
+    body = parts[1] if len(parts) >= 2 else relay_public_key.strip()
+    return hashlib.sha256(body.encode()).hexdigest()[:6]
+
+
+def device_subdomain(workspace: str, device_id: str) -> str:
+    """Per-device relay subdomain: `<workspace-slug>-<device_id>`, DNS-label-safe.
+
+    The workspace slug is truncated so the whole label (slug + '-' + id) fits the
+    63-char DNS limit, with any trailing '-' after truncation stripped.
+    """
+    suffix = f"-{device_id}"
+    base = subdomain_for(workspace)[: 63 - len(suffix)].rstrip("-")
+    return f"{base}{suffix}"
 
 
 def build_tunnel_argv(rc: RelayConfig, *, subdomain: str, local_port: int, key_path: Path) -> list[str]:
