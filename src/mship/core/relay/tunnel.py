@@ -69,12 +69,16 @@ def _default_proc_factory(argv: list[str], log_path: Path | None = None):
         out = open(log_path, "ab", buffering=0)
         kwargs: dict = dict(stdout=out, stderr=subprocess.STDOUT)
     else:
+        out = None
         kwargs: dict = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
-    return subprocess.Popen(argv, **kwargs)
+    proc = subprocess.Popen(argv, **kwargs)
+    if out is not None:
+        out.close()  # child inherited the fd; parent's handle is now redundant
+    return proc
 
 
 class TunnelSupervisor:
