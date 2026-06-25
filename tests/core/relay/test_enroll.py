@@ -1,6 +1,7 @@
 import pytest
 
 from mship.core.relay.enroll import validate_pubkey, fingerprint, sanitize_label
+from mship.core.relay.enroll import RequestStore, PendingCapReached, NotPending
 
 _PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBodyAAAAAAAAAAAAAAAAAAAAAAAA host"
 
@@ -40,3 +41,74 @@ def test_sanitize_label_is_traversal_proof():
     assert sanitize_label("") == "device"
     s = sanitize_label("a/" * 100)
     assert "/" not in s and ".." not in s and len(s) <= 40
+
+
+# ---------------------------------------------------------------------------
+# Task 2: RequestStore tests
+# ---------------------------------------------------------------------------
+
+
+class _Clock:
+    def __init__(self, t=1000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def _store(tmp_path, ttl=1800, clock=None, cap=50):
+    return RequestStore(tmp_path / "store", ttl_seconds=ttl, max_pending=cap, clock=clock or _Clock())
+
+
+def test_create_then_pending_then_approve_writes_allowlist(tmp_path):
+    pubkeys = tmp_path / "pubkeys"
+    pubkeys.mkdir()
+    s = _store(tmp_path)
+    rid = s.create(_PUB, "my-laptop")
+    assert s.get(rid) == "pending"
+    assert [r["id"] for r in s.list_pending()] == [rid]
+    s.approve(rid, pubkeys)
+    assert s.get(rid) == "approved"
+    written = list(pubkeys.glob("*.pub"))
+    assert len(written) == 1 and written[0].read_text().strip() == _PUB.strip()
+    assert s.list_pending() == []  # no longer pending
+
+
+def test_deny_resolves_without_touching_allowlist(tmp_path):
+    pubkeys = tmp_path / "pubkeys"
+    pubkeys.mkdir()
+    s = _store(tmp_path)
+    rid = s.create(_PUB, "h")
+    s.deny(rid)
+    assert s.get(rid) == "denied"
+    assert list(pubkeys.glob("*.pub")) == []
+
+
+def test_expiry_after_ttl(tmp_path):
+    clock = _Clock(1000.0)
+    s = _store(tmp_path, ttl=1800, clock=clock)
+    rid = s.create(_PUB, "h")
+    clock.t = 1000.0 + 1801  # past TTL
+    assert s.list_pending() == []
+    assert s.get(rid) == "expired"
+    with pytest.raises(NotPending):
+        s.approve(rid, tmp_path)
+
+
+def test_pending_cap_enforced(tmp_path):
+    s = _store(tmp_path, cap=2)
+    s.create(_PUB, "a")
+    s.create(_PUB, "b")
+    with pytest.raises(PendingCapReached):
+        s.create(_PUB, "c")
+
+
+def test_same_hostname_does_not_clobber(tmp_path):
+    pubkeys = tmp_path / "pubkeys"
+    pubkeys.mkdir()
+    s = _store(tmp_path)
+    r1 = s.create(_PUB, "laptop")
+    s.approve(r1, pubkeys)
+    r2 = s.create(_PUB, "laptop")
+    s.approve(r2, pubkeys)
+    assert len(list(pubkeys.glob("*.pub"))) == 2  # unique filenames
