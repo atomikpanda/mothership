@@ -1,13 +1,16 @@
 from __future__ import annotations
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from mship.core.relay.enroll import RequestStore, PendingCapReached, validate_pubkey
 
 
 class _EnrollBody(BaseModel):
-    pubkey: str
-    hostname: str = ""
+    # Bound the body: this endpoint is public, so cap the payload before we
+    # read+hash+store it. 1024 covers any real ssh key; 253 is the DNS hostname
+    # max. Over-length input is rejected by pydantic with a 422.
+    pubkey: str = Field(max_length=1024)
+    hostname: str = Field(default="", max_length=253)
 
 
 def build_enroll_app(store: RequestStore) -> FastAPI:
@@ -21,6 +24,10 @@ def build_enroll_app(store: RequestStore) -> FastAPI:
             rid = store.create(body.pubkey, body.hostname)
         except PendingCapReached:
             raise HTTPException(status_code=429, detail="too many pending requests; try later")
+        except ValueError:
+            # Store self-validates (belt-and-suspenders); surface its rejection
+            # as a clean 400 rather than letting it bubble up as a 500.
+            raise HTTPException(status_code=400, detail="invalid ssh public key")
         return {"id": rid, "status": "pending"}
 
     @app.get("/status/{rid}")

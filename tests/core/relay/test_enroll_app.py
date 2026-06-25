@@ -32,3 +32,12 @@ def test_enroll_over_cap_429(tmp_path):
 def test_status_unknown(tmp_path):
     c, _ = _client(tmp_path)
     assert c.get("/status/deadbeef").json()["status"] == "unknown"
+
+
+def test_enroll_rejects_oversized_pubkey(tmp_path):
+    c, _ = _client(tmp_path)
+    # A valid key-type prefix + an absurdly long body: the body bound must reject
+    # this before we read+hash+store it. 4xx (pydantic 422 or our 400), never 2xx/5xx.
+    oversized = "ssh-ed25519 " + "A" * 4096 + " host"
+    r = c.post("/enroll", json={"pubkey": oversized, "hostname": "x"})
+    assert 400 <= r.status_code < 500
