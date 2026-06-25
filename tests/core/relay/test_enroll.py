@@ -112,3 +112,47 @@ def test_same_hostname_does_not_clobber(tmp_path):
     r2 = s.create(_PUB, "laptop")
     s.approve(r2, pubkeys)
     assert len(list(pubkeys.glob("*.pub"))) == 2  # unique filenames
+
+
+# ---------------------------------------------------------------------------
+# Task 2 hardening (security review of commit 5886872)
+# ---------------------------------------------------------------------------
+
+
+def test_create_rejects_multiline_pubkey_and_writes_nothing(tmp_path):
+    # The store is the security boundary: a multi-line pubkey must be rejected at
+    # create() so a crafted second line can never reach the pubkeys allowlist.
+    pubkeys = tmp_path / "pubkeys"
+    pubkeys.mkdir()
+    s = _store(tmp_path)
+    evil = _PUB + "\n" + _PUB.replace("host", "evil")
+    with pytest.raises(ValueError):
+        s.create(evil, "h")
+    assert s.list_pending() == []
+    assert list((tmp_path / "store" / "pending").glob("*.json")) == []
+    assert list(pubkeys.glob("*.pub")) == []
+
+
+def test_deny_sweeps_so_expired_resolves_as_expired(tmp_path):
+    clock = _Clock(1000.0)
+    s = _store(tmp_path, ttl=1800, clock=clock)
+    rid = s.create(_PUB, "h")
+    clock.t = 1000.0 + 1801  # past TTL
+    with pytest.raises(NotPending):
+        s.deny(rid)
+    assert s.get(rid) == "expired"  # not "denied"
+
+
+def test_corrupt_pending_file_does_not_brick_store(tmp_path):
+    pubkeys = tmp_path / "pubkeys"
+    pubkeys.mkdir()
+    s = _store(tmp_path)
+    good = s.create(_PUB, "good")
+    pending_dir = tmp_path / "store" / "pending"
+    (pending_dir / "deadbeef.json").write_text("{ truncated not json")
+    # A corrupt sibling must not raise from list/get/approve; it is quarantined.
+    assert [r["id"] for r in s.list_pending()] == [good]
+    assert s.get(good) == "pending"
+    s.approve(good, pubkeys)
+    assert s.get(good) == "approved"
+    assert list(pending_dir.glob("*.json.corrupt"))  # bad file moved aside

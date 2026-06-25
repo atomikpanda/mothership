@@ -105,18 +105,43 @@ class RequestStore:
         self._write_atomic(self._resolved / p.name, rec)
         p.unlink(missing_ok=True)
 
+    def _read_rec(self, p: Path) -> dict | None:
+        """Load a pending record, quarantining a corrupt/truncated file instead of raising.
+
+        A hand-edited or partially-written `pending/*.json` must not brick the whole
+        store (one bad file would otherwise poison every sweep/list/get). On failure the
+        file is moved aside to `*.json.corrupt` and skipped."""
+        try:
+            rec = json.loads(p.read_text())
+            if "created_at" not in rec:
+                raise ValueError("missing created_at")
+            return rec
+        except (json.JSONDecodeError, OSError, ValueError):
+            try:
+                p.replace(p.with_suffix(".json.corrupt"))
+            except OSError:
+                p.unlink(missing_ok=True)
+            return None
+
     def _sweep(self) -> None:
         now = self._clock()
         for p in list(self._pending.glob("*.json")):
-            rec = json.loads(p.read_text())
+            rec = self._read_rec(p)
+            if rec is None:
+                continue
             if now - rec["created_at"] >= self._ttl:
                 self._resolve(p, rec, "expired")
 
     def create(self, pubkey: str, hostname: str) -> str:
+        # The store is the security boundary, not just the HTTP layer: self-protect.
+        # validate_pubkey rejects multi-line/CRLF input, so a crafted second line can't
+        # be smuggled in here and later written into the pubkeys allowlist on approve.
+        if not validate_pubkey(pubkey):
+            raise ValueError("invalid pubkey")
         self._sweep()
         if len(list(self._pending.glob("*.json"))) >= self._max_pending:
             raise PendingCapReached()
-        rid = secrets.token_hex(4)
+        rid = secrets.token_hex(16)
         self._write_atomic(
             self._pending / f"{rid}.json",
             {
@@ -132,7 +157,12 @@ class RequestStore:
 
     def list_pending(self) -> list[dict]:
         self._sweep()
-        return [json.loads(p.read_text()) for p in sorted(self._pending.glob("*.json"))]
+        out = []
+        for p in sorted(self._pending.glob("*.json")):
+            rec = self._read_rec(p)
+            if rec is not None:
+                out.append(rec)
+        return out
 
     def get(self, rid: str) -> str:
         self._sweep()
@@ -150,10 +180,17 @@ class RequestStore:
             raise NotPending(rid)
         rec = json.loads(p.read_text())
         dest = _unique_pub_path(Path(pubkeys_dir), sanitize_label(rec["hostname"]))
-        dest.write_text(rec["pubkey"] + "\n")
+        # Atomic key write: sish re-reads pubkeys/ per connection and must never observe
+        # a half-written key file mid-write.
+        tmp = dest.with_suffix(".pub.tmp")
+        tmp.write_text(rec["pubkey"] + "\n")
+        tmp.replace(dest)
         self._resolve(p, rec, "approved")
 
     def deny(self, rid: str) -> None:
+        # Sweep first so denying an already-expired request resolves it as `expired`,
+        # consistent with the other methods.
+        self._sweep()
         p = self._pending / f"{rid}.json"
         if not p.exists():
             raise NotPending(rid)
@@ -171,6 +208,8 @@ def _unique_pub_path(pubkeys_dir: Path, stem: str) -> Path:
     cand = pubkeys_dir / f"{stem}.pub"
     i = 2
     while cand.exists():
+        if i > 1000:
+            raise RuntimeError("too many key files for this label")
         cand = pubkeys_dir / f"{stem}-{i}.pub"
         i += 1
     return cand
