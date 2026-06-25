@@ -45,12 +45,16 @@ def register(parent: typer.Typer, get_container):
 
         output.print(pub)
         output.print(
-            f"\nTo allow this machine to open relay tunnels, enroll its key (one file per "
-            f"key in `docker/relay/pubkeys/`). From this device:\n\n"
-            f"  scp {pub_path} <user>@{relay_host}:<relay-dir>/docker/relay/pubkeys/{label}\n\n"
-            f"  • <relay-dir>: where you deployed the docker/relay/ compose on the relay host\n"
-            f"  • the filename is just a label — anything unique works\n\n"
-            f"No relay restart needed: sish re-reads the pubkeys directory on each connection."
+            f"\nEnroll this key so this machine can open relay tunnels — drop it in "
+            f"`docker/relay/pubkeys/` on the relay host (one file per key; no restart "
+            f"needed — sish re-reads the directory per connection):\n\n"
+            f"  • On the relay host itself, just copy it in:\n"
+            f"      cp {pub_path} <relay-dir>/docker/relay/pubkeys/{label}\n\n"
+            f"  • From another machine, scp it over (the tunnel auths by key, so there is\n"
+            f"    no \"relay user\" — <login> is just your normal SSH account on the relay box):\n"
+            f"      scp {pub_path} <login>@{relay_host}:<relay-dir>/docker/relay/pubkeys/{label}\n\n"
+            f"  <relay-dir> = where you deployed the docker/relay/ compose; the filename is "
+            f"just a unique label."
         )
 
     parent.add_typer(relay_app)
