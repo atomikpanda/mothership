@@ -229,3 +229,95 @@ def test_serve_relay_requires_host(workspace_no_relay, tmp_path, monkeypatch):
     r = runner.invoke(app, ["serve", "--relay"])
     assert r.exit_code != 0
     assert "relay" in r.output.lower()
+
+
+# --- mship relay requests / approve / deny ---
+
+
+def test_relay_requests_approve_deny_roundtrip(tmp_path):
+    """Host-side roundtrip: create a pending request, list it, approve it.
+
+    Flags are per-command (not on the relay group), so --store-dir/--pubkeys-dir
+    are passed after the subcommand name.
+    """
+    from mship.core.relay.enroll import RequestStore
+
+    store_dir = tmp_path / "store"
+    pubkeys = tmp_path / "pubkeys"
+    pubkeys.mkdir()
+
+    # Seed a pending request directly via the store (simulates a device POSTing /enroll).
+    s = RequestStore(store_dir)
+    rid = s.create(
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBodyAAAAAAAAAAAAAAAAAAAA host",
+        "laptop",
+    )
+
+    # `mship relay requests --store-dir <dir>` should list the pending request.
+    r = runner.invoke(app, ["relay", "requests", "--store-dir", str(store_dir)])
+    assert r.exit_code == 0, r.output
+    assert rid in r.output
+    assert "laptop" in r.output
+
+    # `mship relay approve <id> --store-dir <dir> --pubkeys-dir <dir>` should
+    # write the key into pubkeys/ and mark the request as approved.
+    r = runner.invoke(
+        app,
+        ["relay", "approve", rid, "--store-dir", str(store_dir), "--pubkeys-dir", str(pubkeys)],
+    )
+    assert r.exit_code == 0, r.output
+    assert len(list(pubkeys.glob("*.pub"))) == 1  # key enrolled
+    assert RequestStore(store_dir).get(rid) == "approved"
+
+
+def test_relay_deny_resolves_without_enrolling(tmp_path):
+    """deny removes the request from pending but writes no key file."""
+    from mship.core.relay.enroll import RequestStore
+
+    store_dir = tmp_path / "store"
+    pubkeys = tmp_path / "pubkeys"
+    pubkeys.mkdir()
+
+    s = RequestStore(store_dir)
+    rid = s.create(
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBodyAAAAAAAAAAAAAAAAAAAA host",
+        "phone",
+    )
+
+    r = runner.invoke(app, ["relay", "deny", rid, "--store-dir", str(store_dir)])
+    assert r.exit_code == 0, r.output
+    assert len(list(pubkeys.glob("*.pub"))) == 0  # no key enrolled
+    assert RequestStore(store_dir).get(rid) == "denied"
+
+
+def test_relay_approve_unknown_id_exits_nonzero(tmp_path):
+    """approve on a non-existent id exits 1 with a clean error (no traceback)."""
+    store_dir = tmp_path / "store"
+    pubkeys = tmp_path / "pubkeys"
+    pubkeys.mkdir()
+
+    r = runner.invoke(
+        app,
+        ["relay", "approve", "doesnotexist", "--store-dir", str(store_dir), "--pubkeys-dir", str(pubkeys)],
+    )
+    assert r.exit_code == 1
+    # Output should mention the id, not a Python traceback.
+    assert "doesnotexist" in r.output
+
+
+def test_relay_deny_unknown_id_exits_nonzero(tmp_path):
+    """deny on a non-existent id exits 1 with a clean error (no traceback)."""
+    store_dir = tmp_path / "store"
+
+    r = runner.invoke(app, ["relay", "deny", "nope", "--store-dir", str(store_dir)])
+    assert r.exit_code == 1
+    assert "nope" in r.output
+
+
+def test_relay_requests_empty(tmp_path):
+    """`mship relay requests` with no pending requests exits 0 and says so."""
+    store_dir = tmp_path / "store"
+
+    r = runner.invoke(app, ["relay", "requests", "--store-dir", str(store_dir)])
+    assert r.exit_code == 0, r.output
+    assert "no pending" in r.output
