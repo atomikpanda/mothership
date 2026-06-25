@@ -70,6 +70,11 @@ class NotPending(Exception):
     """No pending request with that id (unknown, already resolved, or expired)."""
 
 
+# Request ids are secrets.token_hex(16). Reject anything else before it touches a
+# filesystem path — defense-in-depth against a crafted id like "../../evil".
+_RID_RE = re.compile(r"\A[0-9a-f]{1,64}\Z")
+
+
 # ---------------------------------------------------------------------------
 # RequestStore
 # ---------------------------------------------------------------------------
@@ -165,15 +170,17 @@ class RequestStore:
         return out
 
     def get(self, rid: str) -> str:
+        if not _RID_RE.match(rid):
+            return "unknown"
         self._sweep()
         if (self._pending / f"{rid}.json").exists():
             return "pending"
-        r = self._resolved / f"{rid}.json"
-        if r.exists():
-            return json.loads(r.read_text())["status"]
-        return "unknown"
+        rec = self._read_rec(self._resolved / f"{rid}.json")
+        return rec.get("status", "unknown") if rec else "unknown"
 
     def approve(self, rid: str, pubkeys_dir) -> None:
+        if not _RID_RE.match(rid):
+            raise NotPending(rid)
         self._sweep()
         p = self._pending / f"{rid}.json"
         if not p.exists():
@@ -188,6 +195,8 @@ class RequestStore:
         self._resolve(p, rec, "approved")
 
     def deny(self, rid: str) -> None:
+        if not _RID_RE.match(rid):
+            raise NotPending(rid)
         # Sweep first so denying an already-expired request resolves it as `expired`,
         # consistent with the other methods.
         self._sweep()

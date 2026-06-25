@@ -172,7 +172,11 @@ def register(parent: typer.Typer, get_container):
         if r.status_code != 200:
             out.error(f"enroll request failed: HTTP {r.status_code} {r.text}")
             raise typer.Exit(1)
-        rid = r.json()["id"]
+        try:
+            rid = r.json()["id"]
+        except (ValueError, KeyError):
+            out.error("enroll server returned an unexpected response (no request id)")
+            raise typer.Exit(1)
         out.print(f"requested (id {rid}) — ask the relay owner to run: mship relay approve {rid}")
         if not wait:
             return
