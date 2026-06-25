@@ -47,7 +47,9 @@ def register(parent: typer.Typer, get_container):
     @relay_app.command("enroll-server")
     def enroll_server(
         pubkeys_dir: str = typer.Option("./pubkeys", "--pubkeys-dir",
-                                        help="Directory where approved keys are written (sish pubkeys/)."),
+                                        help="Allowlist dir used by 'mship relay approve' "
+                                             "(this server only creates pending requests; "
+                                             "it never writes keys)."),
         store_dir: str = typer.Option("./pending-store", "--store-dir",
                                       help="Directory for pending enroll request state."),
         port: int = typer.Option(47180, "--port", help="Port to listen on."),
@@ -155,11 +157,18 @@ def register(parent: typer.Typer, get_container):
         out = Output()
         pub = relay_public_key(ensure_relay_key(home=Path.home())).strip()
         base = enroll_url.rstrip("/")
-        r = httpx.post(
-            f"{base}/enroll",
-            json={"pubkey": pub, "hostname": socket.gethostname()},
-            timeout=10,
-        )
+        # The requester runs on a remote device hitting a public endpoint, so
+        # connection-refused / DNS / timeout are LIKELY: surface them cleanly
+        # rather than dumping an httpx traceback.
+        try:
+            r = httpx.post(
+                f"{base}/enroll",
+                json={"pubkey": pub, "hostname": socket.gethostname()},
+                timeout=10,
+            )
+        except httpx.RequestError as exc:
+            out.error(f"could not reach enroll server at {base}: {exc}")
+            raise typer.Exit(1)
         if r.status_code != 200:
             out.error(f"enroll request failed: HTTP {r.status_code} {r.text}")
             raise typer.Exit(1)
@@ -168,16 +177,30 @@ def register(parent: typer.Typer, get_container):
         if not wait:
             return
         deadline = time.monotonic() + 1800
-        while time.monotonic() < deadline:
-            resp = httpx.get(f"{base}/status/{rid}", timeout=10)
-            st = resp.json()["status"]
-            if st == "approved":
-                out.success("approved — you can now run `mship serve --relay`.")
-                return
-            if st in ("denied", "expired"):
-                out.error(f"{st}.")
-                raise typer.Exit(1)
-            time.sleep(3)
+        try:
+            while time.monotonic() < deadline:
+                # A transient blip or a non-JSON proxy page (e.g. a 502 error
+                # page) shouldn't kill the wait — back off and retry; the
+                # deadline still bounds the loop.
+                try:
+                    resp = httpx.get(f"{base}/status/{rid}", timeout=10)
+                    st = resp.json().get("status", "pending")
+                except (httpx.RequestError, ValueError):  # ValueError covers JSON decode
+                    time.sleep(3)
+                    continue
+                if st == "approved":
+                    out.success("approved — you can now run `mship serve --relay`.")
+                    return
+                if st in ("denied", "expired"):
+                    out.error(f"{st}.")
+                    raise typer.Exit(1)
+                time.sleep(3)
+        except KeyboardInterrupt:
+            out.print(
+                f"cancelled — your request {rid} is still pending; "
+                "the owner can still approve it."
+            )
+            raise typer.Exit(1)
         out.error("timed out waiting for approval.")
         raise typer.Exit(1)
 

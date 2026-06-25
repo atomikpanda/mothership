@@ -321,3 +321,122 @@ def test_relay_requests_empty(tmp_path):
     r = runner.invoke(app, ["relay", "requests", "--store-dir", str(store_dir)])
     assert r.exit_code == 0, r.output
     assert "no pending" in r.output
+
+
+# --- mship relay enroll (requester) ---
+
+
+def _stub_relay_key(tmp_path, monkeypatch):
+    """Point HOME at a tmp dir with a pre-created relay key so `enroll` reads a
+    real pubkey without spawning ssh-keygen."""
+    fake_home = tmp_path / "home"
+    (fake_home / ".mothership").mkdir(parents=True)
+    key = fake_home / ".mothership" / "relay_ed25519"
+    key.write_text("PRIV\n")
+    (Path(str(key) + ".pub")).write_text("ssh-ed25519 AAAA mship-relay\n")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+
+def test_enroll_post_connection_error_is_clean(tmp_path, monkeypatch):
+    """A connection error on the initial POST exits 1 with a clean message, not a traceback."""
+    import httpx
+
+    _stub_relay_key(tmp_path, monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(httpx, "post", boom)
+
+    r = runner.invoke(app, ["relay", "enroll", "--enroll-url", "http://relay.example:47180"])
+    assert r.exit_code == 1
+    assert "could not reach enroll server" in r.output
+    # No traceback leaked.
+    assert "Traceback" not in r.output
+
+
+def test_enroll_poll_survives_transient_blip_then_approved(tmp_path, monkeypatch):
+    """A transient RequestError mid-poll is retried; the loop then sees 'approved' and exits 0."""
+    import httpx
+
+    _stub_relay_key(tmp_path, monkeypatch)
+
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp({"id": "rid123", "status": "pending"}))
+
+    calls = {"n": 0}
+
+    def fake_get(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("blip")  # transient — should be retried
+        return _Resp({"status": "approved"})
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    # No real sleeping between poll iterations.
+    import time as _time
+    monkeypatch.setattr(_time, "sleep", lambda *a, **k: None)
+
+    r = runner.invoke(app, ["relay", "enroll", "--enroll-url", "http://relay.example:47180"])
+    assert r.exit_code == 0, r.output
+    assert "approved" in r.output
+    assert calls["n"] == 2  # first call blipped, second succeeded
+
+
+def test_enroll_poll_denied_exits_nonzero(tmp_path, monkeypatch):
+    """A 'denied' status during polling exits 1 cleanly."""
+    import httpx
+
+    _stub_relay_key(tmp_path, monkeypatch)
+
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp({"id": "rid123", "status": "pending"}))
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp({"status": "denied"}))
+    import time as _time
+    monkeypatch.setattr(_time, "sleep", lambda *a, **k: None)
+
+    r = runner.invoke(app, ["relay", "enroll", "--enroll-url", "http://relay.example:47180"])
+    assert r.exit_code == 1
+    assert "denied" in r.output
+
+
+def test_enroll_no_wait_returns_after_post(tmp_path, monkeypatch):
+    """--no-wait POSTs and returns 0 without polling."""
+    import httpx
+
+    _stub_relay_key(tmp_path, monkeypatch)
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"id": "rid123", "status": "pending"}
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp())
+
+    def fail_get(*a, **k):
+        raise AssertionError("should not poll when --no-wait")
+
+    monkeypatch.setattr(httpx, "get", fail_get)
+
+    r = runner.invoke(
+        app, ["relay", "enroll", "--enroll-url", "http://relay.example:47180", "--no-wait"]
+    )
+    assert r.exit_code == 0, r.output
+    assert "rid123" in r.output
