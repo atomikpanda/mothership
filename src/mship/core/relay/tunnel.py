@@ -1,4 +1,5 @@
 from __future__ import annotations
+import hashlib
 import os
 import re
 import subprocess
@@ -23,6 +24,29 @@ def subdomain_for(workspace: str) -> str:
     return s
 
 
+def device_id(relay_public_key: str) -> str:
+    """Stable 6-char hex id for THIS machine, from its relay public key body.
+
+    Uses only the base64 key material (the 2nd whitespace-delimited field),
+    ignoring the trailing comment, so re-reading the key gives the same id.
+    """
+    parts = relay_public_key.split()
+    body = parts[1] if len(parts) >= 2 else relay_public_key.strip()
+    return hashlib.sha256(body.encode()).hexdigest()[:6]
+
+
+def device_subdomain(workspace: str, dev_id: str) -> str:
+    """Per-device relay subdomain: `<workspace-slug>-<dev_id>`, DNS-label-safe.
+
+    `dev_id` is from device_id(). The workspace slug is truncated so the whole
+    label (slug + '-' + id) fits the 63-char DNS limit, with any trailing '-'
+    after truncation stripped.
+    """
+    suffix = f"-{dev_id}"
+    base = subdomain_for(workspace)[: 63 - len(suffix)].rstrip("-")
+    return f"{base}{suffix}"
+
+
 def build_tunnel_argv(rc: RelayConfig, *, subdomain: str, local_port: int, key_path: Path) -> list[str]:
     target = f"{rc.user}@{rc.host}" if rc.user else rc.host
     return [
@@ -39,17 +63,25 @@ def build_tunnel_argv(rc: RelayConfig, *, subdomain: str, local_port: int, key_p
     ]
 
 
-def _default_proc_factory(argv: list[str]):
-    """Launch argv as a background subprocess in its own process group."""
-    kwargs: dict = dict(
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+def _default_proc_factory(argv: list[str], log_path: Path | None = None):
+    """Launch argv in its own process group, capturing output to log_path
+    (so failures/assigned-URL are inspectable). Falls back to DEVNULL."""
+    if log_path is not None:
+        out = open(log_path, "ab", buffering=0)
+        kwargs: dict = dict(stdout=out, stderr=subprocess.STDOUT)
+    else:
+        out = None
+        kwargs: dict = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
-    return subprocess.Popen(argv, **kwargs)
+    try:
+        proc = subprocess.Popen(argv, **kwargs)
+    finally:
+        if out is not None:
+            out.close()  # child inherited the fd; parent's handle is now redundant (closed even if Popen raised)
+    return proc
 
 
 class TunnelSupervisor:
@@ -77,9 +109,12 @@ class TunnelSupervisor:
         backoff_delay: float = 5.0,
         max_backoff_delay: float = 60.0,
         clock: Callable[[], float] | None = None,
+        log_path: Path | None = None,
     ) -> None:
         self._argv = argv
-        self._proc_factory = proc_factory if proc_factory is not None else _default_proc_factory
+        self._log_path = log_path
+        self._proc_factory = proc_factory if proc_factory is not None \
+            else (lambda a: _default_proc_factory(a, self._log_path))
         self._backoff_delay = backoff_delay
         self._max_backoff_delay = max_backoff_delay
         self._clock = clock if clock is not None else time.monotonic
@@ -153,6 +188,21 @@ class TunnelSupervisor:
         if self._proc is None:
             return False
         return self._proc.poll() is None
+
+    @property
+    def restart_count(self) -> int:
+        """Number of times the supervised process has been restarted."""
+        return self._restart_count
+
+    def recent_output(self, limit: int = 4000) -> str:
+        """Tail of the captured ssh output (empty if no log or file not yet written)."""
+        if self._log_path is None:
+            return ""
+        try:
+            data = Path(self._log_path).read_bytes()[-limit:]
+            return data.decode(errors="replace")
+        except FileNotFoundError:
+            return ""
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -127,13 +127,15 @@ def _serve_with_relay(
     import uvicorn
 
     from mship.core.relay.config import RelayConfig
-    from mship.core.relay.keys import ensure_relay_key
+    from mship.core.relay.health import verify_relay_reachable
+    from mship.core.relay.keys import ensure_relay_key, relay_public_key
     from mship.core.relay.pairing import build_pair_link
     from mship.core.relay.token import ensure_serve_token
     from mship.core.relay.tunnel import (
         TunnelSupervisor,
         build_tunnel_argv,
-        subdomain_for,
+        device_id,
+        device_subdomain,
     )
     from mship.core.serve import create_app
     from mship.core.spec_store import SPECS_DIRNAME
@@ -170,33 +172,74 @@ def _serve_with_relay(
         worktree_manager=container.worktree_manager(),
     )
 
-    subdomain = subdomain_for(workspace)
     key_path = ensure_relay_key(home=Path.home())
+    dev = device_id(relay_public_key(key_path))
+    subdomain = device_subdomain(workspace, dev)          # was: subdomain_for(workspace)
     argv = build_tunnel_argv(rc, subdomain=subdomain, local_port=port, key_path=key_path)
 
     public_url = f"https://{subdomain}.{rc.host}"
     link = build_pair_link(url=public_url, token=token, workspace=workspace)
 
-    sup = TunnelSupervisor(argv=argv)
+    log_path = workspace_root / ".mothership" / "relay-tunnel.log"
+    log_path.unlink(missing_ok=True)                      # fresh per run
+    sup = TunnelSupervisor(argv=argv, log_path=log_path)
     sup.start()
 
     # Background daemon thread ticks the supervisor (reconnect on drop) while
     # uvicorn blocks the main thread. Daemon so it never blocks interpreter exit.
     stop_event = threading.Event()
 
+    import time
+
     def _tick_loop():
+        warned = False
         while not stop_event.wait(relay_tick):
             try:
                 sup.tick()
+                if sup.restart_count >= 3 and not warned:
+                    warned = True
+                    output.error(
+                        "relay tunnel keeps dropping (restarted "
+                        f"{sup.restart_count}×). Last ssh output:\n"
+                        + sup.recent_output().strip()
+                    )
             except Exception:
-                # Never let a tick error kill the supervisor thread; next tick retries.
                 pass
+
+    def _verify_loop():
+        # wait for uvicorn to answer locally, then probe the PUBLIC url end-to-end.
+        import httpx
+        local = f"http://{host}:{port}/health"
+        deadline = time.monotonic() + 30
+        local_up = False
+        while time.monotonic() < deadline and not stop_event.is_set():
+            try:
+                httpx.get(local, headers={"Authorization": f"Bearer {token}"}, timeout=2)
+                local_up = True
+                break
+            except Exception:
+                time.sleep(0.5)
+        if stop_event.is_set():
+            return                      # clean shutdown — don't emit a spurious ✗
+        if not local_up:
+            output.error("✗ local server didn't come up within 30s; relay not verified")
+            return
+        ok, detail = verify_relay_reachable(public_url, token)
+        if stop_event.is_set():
+            return                      # shut down while the probe was in-flight — no spurious ✗
+        if ok:
+            output.success(f"✓ relay reachable: {public_url}")
+        else:
+            tail = sup.recent_output().strip()
+            output.error(f"✗ relay NOT reachable: {detail}"
+                         + (f"\nssh tunnel output:\n{tail}" if tail else ""))
 
     ticker = threading.Thread(target=_tick_loop, name="mship-relay-tick", daemon=True)
     ticker.start()
+    threading.Thread(target=_verify_loop, name="mship-relay-verify", daemon=True).start()
 
     output.print(f"mship serve → http://{host}:{port}  (auth: bearer token; docs: disabled)")
-    output.print(f"relay → {public_url}  (tunnel via ssh -R to {rc.host})")
+    output.print(f"relay → {public_url}  (per-device; tunnel via ssh -R to {rc.host})")
     output.print(link)
     typer.echo(segno.make(link).terminal(compact=True))
 

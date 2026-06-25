@@ -19,9 +19,10 @@ def register(app: typer.Typer, get_container):
 
         import segno
 
+        from mship.core.relay.keys import ensure_relay_key, relay_public_key
         from mship.core.relay.pairing import build_pair_link
         from mship.core.relay.token import ensure_serve_token
-        from mship.core.relay.tunnel import subdomain_for
+        from mship.core.relay.tunnel import device_id, device_subdomain
 
         output = Output()
         container = get_container()
@@ -36,7 +37,9 @@ def register(app: typer.Typer, get_container):
 
         workspace = config.workspace
         workspace_root = Path(container.config_path()).parent
-        url = f"https://{subdomain_for(workspace)}.{rc.host}"
+        key_path = ensure_relay_key(home=Path.home())
+        subdomain = device_subdomain(workspace, device_id(relay_public_key(key_path)))
+        url = f"https://{subdomain}.{rc.host}"
         token = ensure_serve_token(workspace_root)
         link = build_pair_link(url=url, token=token, workspace=workspace)
 
