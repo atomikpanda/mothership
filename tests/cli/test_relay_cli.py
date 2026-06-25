@@ -152,6 +152,9 @@ def test_serve_relay_wires_tunnel_and_loopback(relay_configured_workspace, tmp_p
 
     No real uvicorn or ssh runs: uvicorn.run and TunnelSupervisor are faked.
     """
+    from mship.core.relay.tunnel import device_id, device_subdomain
+    from mship.core.relay.keys import relay_public_key
+
     # Pre-create the relay key under a fake HOME so no ssh-keygen subprocess runs.
     fake_home = tmp_path / "home"
     (fake_home / ".mothership").mkdir(parents=True)
@@ -159,6 +162,10 @@ def test_serve_relay_wires_tunnel_and_loopback(relay_configured_workspace, tmp_p
     key.write_text("PRIV\n")
     (Path(str(key) + ".pub")).write_text("ssh-ed25519 AAAA mship-relay\n")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    # Compute the expected per-device subdomain from the same stub key material.
+    expected_subdomain = device_subdomain("Mship Workspace", device_id(relay_public_key(key)))
+    expected_public_url = f"https://{expected_subdomain}.relay.example.com"
 
     seen: dict = {}
     fake_sup = MagicMock()
@@ -191,9 +198,10 @@ def test_serve_relay_wires_tunnel_and_loopback(relay_configured_workspace, tmp_p
     argv = seen["argv"]
     assert argv[0] == "ssh"
     assert "tunnel@relay.example.com" in argv
-    assert any("mship-workspace:80:localhost:47100" in a for a in argv)
+    # The per-device subdomain is used in the tunnel forward spec.
+    assert any(f"{expected_subdomain}:80:localhost:47100" in a for a in argv)
     # Output advertises the public URL + scannable deep-link.
-    assert "https://mship-workspace.relay.example.com" in r.output
+    assert expected_public_url in r.output
     assert "groundcontrol://add?" in r.output
 
 
