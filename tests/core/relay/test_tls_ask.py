@@ -45,3 +45,7 @@ def test_uppercase_host_is_normalized_and_allowed():
 
 def test_rejects_leading_hyphen_label():
     assert tls_ask_allowed(f"-abcdef.{RELAY}", RELAY) is False
+
+def test_rejects_double_leading_hyphen_label():
+    # base must start alphanumeric; a lone-hyphen base must not slip through
+    assert tls_ask_allowed(f"--abcdef.{RELAY}", RELAY) is False

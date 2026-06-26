@@ -3,7 +3,7 @@ import re
 
 # A serve per-device subdomain LABEL: <base>-<6 hex>, where base is the
 # DNS-safe workspace slug ([a-z0-9-]). Mirrors device_subdomain() in tunnel.py.
-_SERVE_LABEL = re.compile(r"[a-z0-9-]+-[0-9a-f]{6}")
+_SERVE_LABEL = re.compile(r"[a-z0-9][a-z0-9-]*-[0-9a-f]{6}")
 
 
 def tls_ask_allowed(domain: str, relay_domain: str) -> bool:

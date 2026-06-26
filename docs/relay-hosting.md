@@ -122,6 +122,33 @@ mship relay enroll-server \
 
 `--relay-domain` can also be set via the `RELAY_DOMAIN` environment variable. The enroll-server is reached from the internet only through Caddy at `https://enroll.<relay>` — the raw `:47180` port is not accessible externally.
 
+> **Important — keep the enroll-server supervised.** The enroll-server backs Caddy's on-demand TLS `ask` endpoint, which gates cert issuance **and renewal** for every relay subdomain — not just new enrollment requests. If the enroll-server is down, Caddy cannot renew existing certs and will refuse to issue new ones for serve subdomains. Unlike sish and Caddy (which Docker Compose restarts automatically), the enroll-server runs outside the compose stack and **must run under a supervisor so it survives reboots**.
+>
+> The bootstrap script installs a systemd unit automatically when run as root. To install it manually:
+>
+> ```ini
+> # /etc/systemd/system/mship-relay-enroll.service
+> [Unit]
+> Description=mship relay enroll-server (device enrollment + Caddy on-demand TLS ask)
+> After=network-online.target docker.service
+> Wants=network-online.target
+>
+> [Service]
+> ExecStart=<MSHIP_BIN> relay enroll-server --relay-domain <RELAY_DOMAIN> --pubkeys-dir <relay-dir>/pubkeys --store-dir <relay-dir>/pending-store
+> Restart=always
+> RestartSec=2
+>
+> [Install]
+> WantedBy=multi-user.target
+> ```
+>
+> Enable and start it:
+>
+> ```bash
+> systemctl daemon-reload
+> systemctl enable --now mship-relay-enroll.service
+> ```
+
 ---
 
 ## Step 5 — Add Client Public Keys
