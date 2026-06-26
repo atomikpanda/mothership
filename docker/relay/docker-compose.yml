@@ -1,25 +1,21 @@
 # Self-hosted sish relay for mship serve reverse tunnels.
+# Caddy owns public :80/:443 (on-demand TLS, enroll route hardened).
+# sish handles SSH tunnels (:2222) and serves HTTP internally (:8080 loopback).
 # Requires: a wildcard DNS record *.RELAY_DOMAIN -> this host, ports 80/443/2222 open.
 services:
   sish:
     image: antoniomika/sish:latest
     restart: unless-stopped
     ports:
-      - "2222:2222"   # SSH (clients open reverse tunnels here)
-      - "80:80"       # HTTP (ACME challenges + redirect)
-      - "443:443"     # HTTPS (public app traffic)
+      - "2222:2222"               # SSH (clients open reverse tunnels here)
+      - "127.0.0.1:8080:8080"    # HTTP internal (Caddy proxies to here)
     volumes:
       - ./pubkeys:/pubkeys:ro       # allow-listed client public keys
       - ./keys:/keys                # sish host keys (persisted)
-      - ./acme:/acme                # Let's Encrypt cert cache
     command:
       - --ssh-address=:2222
-      - --http-address=:80
-      - --https-address=:443
-      - --https=true
-      - --https-ondemand-certificate=true
-      - --https-ondemand-certificate-email=${ACME_EMAIL}
-      - --https-ondemand-certificate-accept-terms=true
+      - --http-address=:8080
+      - --https=false
       - --domain=${RELAY_DOMAIN}
       - --authentication=true
       - --authentication-keys-directory=/pubkeys
@@ -27,3 +23,15 @@ services:
       - --bind-random-subdomains=false      # honor the requested subdomain
       - --bind-random-ports=false
       - --idle-connection=false
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    network_mode: host          # owns host :80/:443; reaches enroll-server + sish on 127.0.0.1
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy-data:/data
+      - ./caddy-config:/config
+    environment:
+      - RELAY_DOMAIN=${RELAY_DOMAIN}
+      - ACME_EMAIL=${ACME_EMAIL}
