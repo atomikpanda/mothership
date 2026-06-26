@@ -251,4 +251,4 @@ Data directories (`keys/`, `pubkeys/`, `caddy-data/`, `caddy-config/`) are mount
 
 **Caddy container exits immediately** — check `docker compose logs caddy`. A malformed `Caddyfile` or a missing `RELAY_DOMAIN`/`ACME_EMAIL` variable is the usual cause.
 
-**Enroll request times out** — confirm the enroll-server process is running on the relay host (`curl http://127.0.0.1:47180/health` from the host should respond). Also check that Caddy is running and that `enroll.<relay>` resolves to the relay IP.
+**Enroll request times out** — confirm the enroll-server process is running on the relay host (`curl http://127.0.0.1:47180/status/x` from the host should return a JSON status). Also check that Caddy is running and that `enroll.<relay>` resolves to the relay IP.
