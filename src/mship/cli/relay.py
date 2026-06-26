@@ -17,6 +17,27 @@ import typer
 from mship.cli.output import Output
 
 
+def enroll_base_url(*, enroll_url, relay_host, config_host):
+    """Resolve the enroll endpoint base URL. Precedence:
+    explicit --enroll-url  >  --relay-host  >  configured relay.host.
+    A relay host derives https://enroll.<host>."""
+    if enroll_url:
+        return enroll_url.rstrip("/")
+    host = relay_host or config_host
+    if not host:
+        raise ValueError("provide --relay-host (or configure relay.host)")
+    return f"https://enroll.{host.strip().rstrip('.')}"
+
+
+def _configured_relay_host(get_container):
+    """Best-effort: the workspace's configured relay.host, or None outside a workspace."""
+    try:
+        rc = get_container().config().relay
+        return rc.host if rc else None
+    except Exception:
+        return None
+
+
 def _run_uvicorn(app, host, port):   # seam so tests don't boot a server
     import uvicorn
     uvicorn.run(app, host=host, port=port)
@@ -174,8 +195,10 @@ def register(parent: typer.Typer, get_container):
 
     @relay_app.command("enroll")
     def enroll_cmd(
-        enroll_url: str = typer.Option(..., "--enroll-url",
-                                       help="Base URL of the relay enroll server, e.g. http://<host>:47180."),
+        enroll_url: str = typer.Option(None, "--enroll-url",
+                                       help="Explicit enroll base URL (overrides --relay-host)."),
+        relay_host: str = typer.Option(None, "--relay-host",
+                                       help="Relay host, e.g. mship-relay.example.com (enroll URL is derived)."),
         wait: bool = typer.Option(True, "--wait/--no-wait",
                                   help="Poll until approved/denied (default) or return immediately."),
     ):
@@ -190,7 +213,11 @@ def register(parent: typer.Typer, get_container):
 
         out = Output()
         pub = relay_public_key(ensure_relay_key(home=Path.home())).strip()
-        base = enroll_url.rstrip("/")
+        try:
+            base = enroll_base_url(enroll_url=enroll_url, relay_host=relay_host,
+                                   config_host=_configured_relay_host(get_container))
+        except ValueError as e:
+            out.error(str(e)); raise typer.Exit(2)
         # The requester runs on a remote device hitting a public endpoint, so
         # connection-refused / DNS / timeout are LIKELY: surface them cleanly
         # rather than dumping an httpx traceback.
