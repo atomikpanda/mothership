@@ -1,0 +1,44 @@
+{
+	on_demand_tls {
+		ask http://127.0.0.1:47180/tls-check
+	}
+	email {$ACME_EMAIL}
+}
+
+# Enrollment — public but edge-hardened (only POST /enroll, GET /status/*).
+enroll.{$RELAY_DOMAIN} {
+	tls {
+		on_demand
+	}
+	@enroll {
+		method POST
+		path /enroll
+	}
+	@status {
+		method GET
+		path /status/*
+	}
+	handle @enroll {
+		request_body {
+			max_size 4KB
+		}
+		reverse_proxy 127.0.0.1:47180
+	}
+	handle @status {
+		reverse_proxy 127.0.0.1:47180
+	}
+	handle {
+		respond "not found" 404
+	}
+}
+
+# Per-device serve subdomains -> sish (Host preserved). The more-specific
+# enroll.<domain> site above takes precedence over this wildcard.
+*.{$RELAY_DOMAIN} {
+	tls {
+		on_demand
+	}
+	reverse_proxy 127.0.0.1:8080 {
+		header_up Host {host}
+	}
+}
