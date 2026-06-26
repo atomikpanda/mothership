@@ -82,6 +82,8 @@ def register(parent: typer.Typer, get_container):
         import uvicorn
         from pathlib import Path
 
+        import os
+
         from mship.core.relay.enroll import RequestStore
         from mship.core.relay.enroll_app import build_enroll_app
 
@@ -91,7 +93,7 @@ def register(parent: typer.Typer, get_container):
             f"enroll-server → http://{host}:{port}  "
             f"(pubkeys: {pubkeys_dir}, store: {store_dir}, ttl: {ttl}s)"
         )
-        uvicorn.run(build_enroll_app(store), host=host, port=port)
+        uvicorn.run(build_enroll_app(store, relay_domain=os.environ.get("RELAY_DOMAIN", "")), host=host, port=port)
 
     # -------------------------------------------------------------------------
     # Owner-side: list / approve / deny

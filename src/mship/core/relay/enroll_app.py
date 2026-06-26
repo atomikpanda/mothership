@@ -1,8 +1,9 @@
 from __future__ import annotations
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from mship.core.relay.enroll import RequestStore, PendingCapReached, validate_pubkey
+from mship.core.relay.tls_ask import tls_ask_allowed
 
 
 class _EnrollBody(BaseModel):
@@ -13,7 +14,7 @@ class _EnrollBody(BaseModel):
     hostname: str = Field(default="", max_length=253)
 
 
-def build_enroll_app(store: RequestStore) -> FastAPI:
+def build_enroll_app(store: RequestStore, *, relay_domain: str) -> FastAPI:
     app = FastAPI(title="mship relay enroll")
 
     @app.post("/enroll")
@@ -33,5 +34,12 @@ def build_enroll_app(store: RequestStore) -> FastAPI:
     @app.get("/status/{rid}")
     def status(rid: str):
         return {"id": rid, "status": store.get(rid)}
+
+    @app.get("/tls-check")
+    def tls_check(domain: str = Query(..., max_length=253)):
+        # Caddy on-demand TLS ask endpoint: 2xx => issue a cert for `domain`.
+        if not tls_ask_allowed(domain, relay_domain):
+            raise HTTPException(status_code=403, detail="host not allowed")
+        return Response(status_code=200)
 
     return app
