@@ -127,7 +127,7 @@ def _serve_with_relay(
     import uvicorn
 
     from mship.core.relay.config import RelayConfig
-    from mship.core.relay.health import verify_relay_reachable
+    from mship.core.relay.health import wait_until_reachable
     from mship.core.relay.keys import ensure_relay_key, relay_public_key
     from mship.core.relay.pairing import build_pair_link
     from mship.core.relay.token import ensure_serve_token
@@ -224,7 +224,9 @@ def _serve_with_relay(
         if not local_up:
             output.error("✗ local server didn't come up within 30s; relay not verified")
             return
-        ok, detail = verify_relay_reachable(public_url, token)
+        # The tunnel route, TLS cert, and DNS can take a few seconds after
+        # startup — retry transient failures before declaring the relay down.
+        ok, detail = wait_until_reachable(public_url, token)
         if stop_event.is_set():
             return                      # shut down while the probe was in-flight — no spurious ✗
         if ok:

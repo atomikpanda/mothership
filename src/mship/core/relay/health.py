@@ -25,3 +25,37 @@ def verify_relay_reachable(public_url: str, token: str, *, get: Callable | None 
         return False, (f"relay reachable but auth failed (HTTP {r.status_code}) — "
                        "the paired phone's token is stale; re-scan the QR")
     return False, f"relay returned HTTP {r.status_code}"
+
+
+# Phrase emitted by verify_relay_reachable on a 401/403. A stale token never
+# recovers by waiting, so wait_until_reachable treats this as terminal.
+_AUTH_FAILURE_MARKER = "auth failed"
+
+
+def wait_until_reachable(public_url: str, token: str, *, get: Callable | None = None,
+                         timeout: float = 30.0, interval: float = 3.0,
+                         clock: Callable | None = None,
+                         sleep: Callable | None = None) -> tuple[bool, str]:
+    """Poll `verify_relay_reachable` until reachable or `timeout` seconds elapse.
+
+    A single post-startup probe gives false negatives: after `mship serve --relay`
+    starts, the sish route registration, on-demand TLS cert provisioning, and DNS
+    propagation each take a few seconds, so the first probe often sees a transport
+    error / 404 / 5xx that clears on its own. We retry those transient failures
+    every `interval` seconds until the deadline, then return the last detail.
+
+    A 401/403 (stale token) is terminal — retrying can't fix the wrong token — so
+    we return immediately rather than burning the whole window.
+
+    `clock`/`sleep` are injectable (default time.monotonic / time.sleep) so tests
+    can drive the deadline without real waiting.
+    """
+    import time as _time
+    clock = clock or _time.monotonic
+    sleep = sleep or _time.sleep
+    deadline = clock() + timeout
+    ok, detail = verify_relay_reachable(public_url, token, get=get)
+    while not ok and _AUTH_FAILURE_MARKER not in detail and clock() < deadline:
+        sleep(interval)
+        ok, detail = verify_relay_reachable(public_url, token, get=get)
+    return ok, detail
