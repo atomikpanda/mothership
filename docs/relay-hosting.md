@@ -124,7 +124,7 @@ mship relay enroll-server \
 
 > **Important — keep the enroll-server supervised.** The enroll-server backs Caddy's on-demand TLS `ask` endpoint, which gates cert issuance **and renewal** for every relay subdomain — not just new enrollment requests. If the enroll-server is down, Caddy cannot renew existing certs and will refuse to issue new ones for serve subdomains. Unlike sish and Caddy (which Docker Compose restarts automatically), the enroll-server runs outside the compose stack and **must run under a supervisor so it survives reboots**.
 >
-> The bootstrap script installs a systemd unit automatically when run as root. To install it manually:
+> The bootstrap script installs a systemd unit automatically when run as root (it runs the service as the user that owns the relay dir, so `mship relay approve` can still read the pending store). To install it manually, set `User=` to the operator who owns `<relay-dir>` and runs `mship relay approve` — not root:
 >
 > ```ini
 > # /etc/systemd/system/mship-relay-enroll.service
@@ -134,6 +134,7 @@ mship relay enroll-server \
 > Wants=network-online.target
 >
 > [Service]
+> User=<relay-owner>
 > ExecStart=<MSHIP_BIN> relay enroll-server --relay-domain <RELAY_DOMAIN> --pubkeys-dir <relay-dir>/pubkeys --store-dir <relay-dir>/pending-store
 > Restart=always
 > RestartSec=2
