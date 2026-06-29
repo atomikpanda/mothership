@@ -3,11 +3,16 @@ from mship.core.relay.enroll import RequestStore
 from mship.core.relay.enroll_app import build_enroll_app
 
 _PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBodyAAAAAAAAAAAAAAAAAAAAAAAA host"
+RELAY = "mship-relay.atomikpanda.com"
 
 
 def _client(tmp_path, cap=50):
     store = RequestStore(tmp_path / "s", max_pending=cap)
-    return TestClient(build_enroll_app(store)), store
+    return TestClient(build_enroll_app(store, relay_domain=RELAY)), store
+
+
+def _ask_client(tmp_path):
+    return TestClient(build_enroll_app(RequestStore(tmp_path / "store"), relay_domain=RELAY))
 
 
 def test_enroll_creates_pending_and_status(tmp_path):
@@ -41,3 +46,19 @@ def test_enroll_rejects_oversized_pubkey(tmp_path):
     oversized = "ssh-ed25519 " + "A" * 4096 + " host"
     r = c.post("/enroll", json={"pubkey": oversized, "hostname": "x"})
     assert 400 <= r.status_code < 500
+
+
+def test_tls_check_allows_relay_owned_host(tmp_path):
+    c = _ask_client(tmp_path)
+    assert c.get("/tls-check", params={"domain": f"enroll.{RELAY}"}).status_code == 200
+    assert c.get("/tls-check", params={"domain": f"w-92bbb7.{RELAY}"}).status_code == 200
+
+
+def test_tls_check_rejects_foreign_host(tmp_path):
+    c = _ask_client(tmp_path)
+    assert c.get("/tls-check", params={"domain": "evil.com"}).status_code == 403
+
+
+def test_tls_check_requires_domain(tmp_path):
+    c = _ask_client(tmp_path)
+    assert c.get("/tls-check").status_code in (400, 422)
