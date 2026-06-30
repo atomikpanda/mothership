@@ -35,6 +35,22 @@ def _staged_source_paths(toplevel: str, container) -> list[str]:
         return []
 
 
+def _format_drain_reason(threads) -> str:
+    """Render awaiting threads as a Stop-hook block reason instructing the agent
+    to answer each and clear it with `mship reply`."""
+    n = len(threads)
+    lines = [
+        f"{n} message{'s' if n != 1 else ''} waiting in your inbox. Answer each, "
+        f"then post your answer with `mship reply <thread-id> \"<text>\"` "
+        f"(replying clears the thread):",
+        "",
+    ]
+    for t in threads:
+        pending = t.messages[-1].text if t.messages else ""
+        lines.append(f"- thread {t.id} ({t.subject}): {pending}")
+    return "\n".join(lines)
+
+
 def register(app: typer.Typer, get_container):
     @app.command(name="_check-commit", hidden=True)
     def check_commit(toplevel: str = typer.Argument(..., help="git rev-parse --show-toplevel value")):
@@ -303,6 +319,35 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=0)
         sys.stderr.write(decision.reason + "\n")
         raise typer.Exit(code=2)
+
+    @app.command(name="_drain", hidden=True)
+    def _drain():
+        """Stop hook: drain this workspace's message inbox at a turn boundary.
+        Reads the Claude Code Stop event JSON from stdin. If threads await an
+        agent reply, blocks the stop and injects them; otherwise allows the stop.
+        Also allows on stop_hook_active (loop safety) and on ANY error (fail
+        open) — a messaging glitch must never trap the agent."""
+        from mship.core.message_store import MessageStore
+
+        try:
+            raw = sys.stdin.read()
+            event = json.loads(raw) if raw.strip() else {}
+            if event.get("stop_hook_active"):
+                raise typer.Exit(code=0)  # already a stop-hook continuation; don't loop
+            container = get_container(required=False)
+            if container is None:
+                raise typer.Exit(code=0)
+            store = MessageStore(Path(container.state_dir()) / "messages")
+            awaiting = [t for t in store.list() if t.awaiting_reply]
+            if not awaiting:
+                raise typer.Exit(code=0)
+            reason = _format_drain_reason(awaiting)
+        except typer.Exit:
+            raise
+        except Exception:
+            raise typer.Exit(code=0)  # fail open
+        print(json.dumps({"decision": "block", "reason": reason}))
+        raise typer.Exit(code=0)
 
     @app.command(name="_session-context", hidden=True)
     def session_context():
