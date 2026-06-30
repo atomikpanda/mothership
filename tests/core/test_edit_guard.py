@@ -80,3 +80,36 @@ def test_blocks_new_file_that_does_not_exist_yet(tmp_path: Path):
     cfg = _Config({"repo": main})
     state = _state("t", "repo", wt)
     assert evaluate_edit(main / "src" / "brand_new.py", state, cfg).allowed is False
+
+
+def test_multi_task_block_lists_all_candidate_worktrees(tmp_path: Path):
+    from datetime import datetime, timezone
+    main = tmp_path / "main"; (main / "src").mkdir(parents=True)
+    wt1 = tmp_path / ".worktrees" / "t1" / "repo"; (wt1 / "src").mkdir(parents=True)
+    wt2 = tmp_path / ".worktrees" / "t2" / "repo"; (wt2 / "src").mkdir(parents=True)
+    cfg = _Config({"repo": main})
+    def _t(slug, wt):
+        return Task(slug=slug, description="d", phase="dev",
+                    created_at=datetime.now(timezone.utc),
+                    affected_repos=["repo"], worktrees={"repo": wt}, branch=f"feat/{slug}")
+    state = WorkspaceState(tasks={"t1": _t("t1", wt1), "t2": _t("t2", wt2)})
+    d = evaluate_edit(main / "src" / "x.py", state, cfg)
+    assert d.allowed is False
+    # Both task slugs and both worktree paths appear, not just the first.
+    assert "t1" in d.reason and "t2" in d.reason
+    assert str(wt1 / "src" / "x.py") in d.reason
+    assert str(wt2 / "src" / "x.py") in d.reason
+
+
+def test_multi_task_allows_edit_inside_one_of_the_worktrees(tmp_path: Path):
+    from datetime import datetime, timezone
+    main = tmp_path / "main"; (main / "src").mkdir(parents=True)
+    wt1 = tmp_path / ".worktrees" / "t1" / "repo"; (wt1 / "src").mkdir(parents=True)
+    wt2 = tmp_path / ".worktrees" / "t2" / "repo"; (wt2 / "src").mkdir(parents=True)
+    cfg = _Config({"repo": main})
+    def _t(slug, wt):
+        return Task(slug=slug, description="d", phase="dev",
+                    created_at=datetime.now(timezone.utc),
+                    affected_repos=["repo"], worktrees={"repo": wt}, branch=f"feat/{slug}")
+    state = WorkspaceState(tasks={"t1": _t("t1", wt1), "t2": _t("t2", wt2)})
+    assert evaluate_edit(wt2 / "src" / "x.py", state, cfg).allowed is True

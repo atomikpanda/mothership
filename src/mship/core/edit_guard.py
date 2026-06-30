@@ -38,6 +38,9 @@ def evaluate_edit(target, state, config) -> GuardDecision:
         main = _real(Path(repo.path))
         if not _within(rp, main):
             continue
+        # Collect every active task that owns a worktree for this repo. An edit
+        # inside ANY of those worktrees is legitimate, so allow it outright.
+        candidates = []  # list[(slug, worktree_realpath)]
         for slug, task in state.tasks.items():
             if name not in task.affected_repos:
                 continue
@@ -47,17 +50,32 @@ def evaluate_edit(target, state, config) -> GuardDecision:
             wt_real = _real(Path(wt))
             if _within(rp, wt_real):
                 return GuardDecision(allowed=True)
-            try:
-                rel = rp.relative_to(main)
-            except ValueError:
-                rel = None
-            suggest = wt_real / rel if rel is not None else wt_real
-            return GuardDecision(
-                allowed=False,
-                reason=(
-                    f"Editing the MAIN checkout of '{name}' while task "
-                    f"'{slug}' is active. Edit here instead:\n  {suggest}\n"
-                    f"(set MSHIP_ALLOW_MAIN_EDIT=1 to override.)"
-                ),
+            candidates.append((slug, wt_real))
+        if not candidates:
+            continue  # repo has no active task — not our concern
+        try:
+            rel = rp.relative_to(main)
+        except ValueError:
+            rel = None
+
+        def _suggest(wt_real):
+            return wt_real / rel if rel is not None else wt_real
+
+        if len(candidates) == 1:
+            slug, wt_real = candidates[0]
+            reason = (
+                f"Editing the MAIN checkout of '{name}' while task "
+                f"'{slug}' is active. Edit here instead:\n  {_suggest(wt_real)}\n"
+                f"(set MSHIP_ALLOW_MAIN_EDIT=1 to override.)"
             )
+        else:
+            listing = "\n".join(
+                f"  '{slug}': {_suggest(wt_real)}" for slug, wt_real in candidates
+            )
+            reason = (
+                f"Editing the MAIN checkout of '{name}' while multiple tasks are "
+                f"active for it. Edit in the appropriate task worktree:\n{listing}\n"
+                f"(set MSHIP_ALLOW_MAIN_EDIT=1 to override.)"
+            )
+        return GuardDecision(allowed=False, reason=reason)
     return GuardDecision(allowed=True)
