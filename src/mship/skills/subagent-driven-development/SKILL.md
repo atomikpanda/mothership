@@ -152,6 +152,11 @@ stdout as the subagent's prompt — the anchored task block from the plan become
 the instruction, wrapped with the worktree path, slug, phase, recent journal,
 and per-repo bases. (Use `-i "<text>"` or `-i -` for stdin when you need an
 ad-hoc instruction not in a plan; exactly one instruction source is allowed.)
+`mship dispatch` defaults to **implementer** framing — it scopes the subagent to
+the single task and tells it to report back, NOT open a PR. That's exactly what
+you want here: you (the orchestrator) own integration and run `mship finish`
+after reviewing. Don't reach for `--mode standalone` (which restores the
+open-your-own-PR contract) for plan-task execution.
 Dispatched subagents MUST run `mship test` (not a bare runner) so
 `mship finish` finds the passing-test evidence it gates on. For a spec-driven
 kickoff, `mship spec dispatch <id> [--task <slug>]` binds an approved spec to a

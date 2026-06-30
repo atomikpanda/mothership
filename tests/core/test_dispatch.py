@@ -291,16 +291,38 @@ def test_build_prompt_journal_renders_bulleted_list(tmp_path: Path):
     assert "2026-04-17T18:00:00" in out
 
 
-def test_build_prompt_contains_three_convention_bullets(tmp_path: Path):
+def test_build_prompt_conventions_common_bullets(tmp_path: Path):
+    """The main-checkout and bypass conventions appear in every mode."""
     task = _task({"repo": tmp_path / "wt"})
     out = build_dispatch_prompt(
         task=task, repo="repo", instruction="x",
         journal_entries=[], base_sha_info=_info_clean(),
         agents_md_path=None, pkg_skills_source=tmp_path / "skills",
     )
-    assert "mship finish --body-file" in out
     assert "main checkout" in out
     assert "--bypass-" in out
+
+
+def test_build_prompt_standalone_conventions_have_finish_bullet(tmp_path: Path):
+    task = _task({"repo": tmp_path / "wt"})
+    out = build_dispatch_prompt(
+        task=task, repo="repo", instruction="x", mode="standalone",
+        journal_entries=[], base_sha_info=_info_clean(),
+        agents_md_path=None, pkg_skills_source=tmp_path / "skills",
+    )
+    assert "mship finish --body-file" in out
+
+
+def test_build_prompt_implementer_conventions_drop_finish_bullet(tmp_path: Path):
+    """Default (implementer) conventions never tell the subagent to open a PR."""
+    task = _task({"repo": tmp_path / "wt"})
+    out = build_dispatch_prompt(
+        task=task, repo="repo", instruction="x",
+        journal_entries=[], base_sha_info=_info_clean(),
+        agents_md_path=None, pkg_skills_source=tmp_path / "skills",
+    )
+    assert "mship finish --body-file" not in out
+    assert "orchestrator" in out.lower()
 
 
 def test_build_prompt_lists_canonical_skills_with_paths(tmp_path: Path):
@@ -339,10 +361,10 @@ def test_build_prompt_omits_agents_md_line_when_absent(tmp_path: Path):
     assert "Full doc:" not in out
 
 
-def test_build_prompt_contains_finish_contract(tmp_path: Path):
+def test_build_prompt_standalone_mode_has_finish_contract(tmp_path: Path):
     task = _task({"repo": tmp_path / "wt"})
     out = build_dispatch_prompt(
-        task=task, repo="repo", instruction="x",
+        task=task, repo="repo", instruction="x", mode="standalone",
         journal_entries=[], base_sha_info=_info_clean(),
         agents_md_path=None, pkg_skills_source=tmp_path / "skills",
     )
@@ -350,3 +372,47 @@ def test_build_prompt_contains_finish_contract(tmp_path: Path):
     assert "mship test" in out
     assert "--body-file" in out
     assert "PR URL" in out
+
+
+def test_build_prompt_default_mode_is_implementer_report_back(tmp_path: Path):
+    """Default output reports back, scopes to one task, and never opens a PR."""
+    task = _task({"repo": tmp_path / "wt"})
+    out = build_dispatch_prompt(
+        task=task, repo="repo", instruction="x",
+        journal_entries=[], base_sha_info=_info_clean(),
+        agents_md_path=None, pkg_skills_source=tmp_path / "skills",
+    )
+    lower = out.lower()
+    # Reports back instead of finishing.
+    assert "report back" in lower
+    assert "status report" in lower
+    assert "clarifying question" in lower
+    assert "mship test" in out
+    # Single-task scope is stated explicitly.
+    assert "exactly the one task" in lower
+    # Does NOT instruct the subagent to open a PR.
+    assert "do not open a pr" in lower
+    assert "How to finish" not in out
+    assert "mship finish --body-file" not in out
+    assert "PR URL" not in out
+
+
+def test_build_prompt_implementer_mode_matches_default(tmp_path: Path):
+    """Explicit mode='implementer' is identical to the default."""
+    task = _task({"repo": tmp_path / "wt"})
+    common = dict(
+        task=task, repo="repo", instruction="x",
+        journal_entries=[], base_sha_info=_info_clean(),
+        agents_md_path=None, pkg_skills_source=tmp_path / "skills",
+    )
+    assert build_dispatch_prompt(**common, mode="implementer") == build_dispatch_prompt(**common)
+
+
+def test_build_prompt_unknown_mode_raises(tmp_path: Path):
+    task = _task({"repo": tmp_path / "wt"})
+    with pytest.raises(ValueError, match="mode"):
+        build_dispatch_prompt(
+            task=task, repo="repo", instruction="x", mode="bogus",
+            journal_entries=[], base_sha_info=_info_clean(),
+            agents_md_path=None, pkg_skills_source=tmp_path / "skills",
+        )
