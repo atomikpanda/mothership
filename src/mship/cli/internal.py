@@ -1,4 +1,7 @@
 """Hidden mship commands — used by hooks and other internal consumers."""
+import json
+import os
+import sys
 from pathlib import Path
 
 import typer
@@ -268,6 +271,38 @@ def register(app: typer.Typer, get_container):
             + "MSHIP_BYPASS_GATE=1 (or `git push --no-verify`) to override.\n"
         )
         raise typer.Exit(code=1)
+
+    @app.command(name="_guard-edit", hidden=True)
+    def _guard_edit():
+        """PreToolUse guard: refuse edits to a repo's MAIN checkout while a task
+        is active. Reads the Claude Code hook event JSON from stdin. Denies with
+        exit code 2 (stderr shown to the model); allows with exit 0. Fails OPEN
+        on any error — never block on uncertainty."""
+        from mship.core.edit_guard import evaluate_edit
+
+        if os.environ.get("MSHIP_ALLOW_MAIN_EDIT") == "1":
+            raise typer.Exit(code=0)
+        try:
+            raw = sys.stdin.read()
+            event = json.loads(raw) if raw.strip() else {}
+            tool_input = event.get("tool_input") or {}
+            target = tool_input.get("file_path") or tool_input.get("notebook_path")
+            if not target:
+                raise typer.Exit(code=0)
+            container = get_container(required=False)
+            if container is None:
+                raise typer.Exit(code=0)
+            state = container.state_manager().load()
+            config = container.config()
+            decision = evaluate_edit(target, state, config)
+        except typer.Exit:
+            raise
+        except Exception:
+            raise typer.Exit(code=0)  # fail open
+        if decision.allowed:
+            raise typer.Exit(code=0)
+        sys.stderr.write(decision.reason + "\n")
+        raise typer.Exit(code=2)
 
     @app.command(name="_session-context", hidden=True)
     def session_context():
