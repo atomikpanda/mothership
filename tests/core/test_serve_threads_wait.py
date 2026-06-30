@@ -61,3 +61,10 @@ def test_wait_requires_auth(tmp_path: Path):
     client, _ = _client(tmp_path, auth_token="secret")
     r = client.get("/threads", params={"wait": 1, "timeout": 0.1})
     assert r.status_code == 401
+
+
+def test_wait_invalid_since_returns_422(tmp_path: Path):
+    # A malformed ?since= must be a clean 422, not a 500 from an unhandled ValueError.
+    client, _ = _client(tmp_path)
+    r = client.get("/threads", params={"wait": 1, "since": "notadate", "timeout": 0.1})
+    assert r.status_code == 422

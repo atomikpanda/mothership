@@ -48,9 +48,14 @@ def register(parent: typer.Typer, get_container) -> None:
         """Block until a new awaiting (human) message arrives, or timeout. JSON only."""
         from mship.core.message_wait import wait_for_change
         store = _store()
-        since_dt = (
-            datetime.fromisoformat(since) if since else datetime.now(timezone.utc)
-        )
+        if since:
+            try:
+                since_dt = datetime.fromisoformat(since)
+            except ValueError:
+                typer.echo(f"invalid --since value: {since!r}", err=True)
+                raise typer.Exit(2)
+        else:
+            since_dt = datetime.now(timezone.utc)
         if since_dt.tzinfo is None:
             since_dt = since_dt.replace(tzinfo=timezone.utc)
         res = wait_for_change(

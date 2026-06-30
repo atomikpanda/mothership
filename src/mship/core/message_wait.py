@@ -44,7 +44,6 @@ def wait_for_change(
     satisfies `predicate` (default: any change), or `timeout` seconds elapse.
     The cursor always advances to the latest seen updated_at, even on timeout."""
     deadline = now_fn() + timeout
-    cursor = since
     while True:
         changed, cursor = changed_since(load_fn(), since)
         hits = [t for t in changed if predicate(t)] if predicate else changed

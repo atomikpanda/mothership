@@ -335,7 +335,10 @@ def create_app(
             return _summaries(msgs.list())
         from mship.core.message_wait import changed_since
         timeout = max(0.0, min(timeout, 30.0))  # cap for the relay idle-read timeout
-        since_dt = datetime.fromisoformat(since) if since else datetime.now(timezone.utc)
+        try:
+            since_dt = datetime.fromisoformat(since) if since else datetime.now(timezone.utc)
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"invalid since value: {since!r}")
         if since_dt.tzinfo is None:
             since_dt = since_dt.replace(tzinfo=timezone.utc)
         interval = 1.0

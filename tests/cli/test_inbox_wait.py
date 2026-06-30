@@ -87,3 +87,15 @@ def test_wait_outside_workspace_errors(tmp_path: Path, monkeypatch):
         assert result.exit_code != 0  # required container -> clear error outside a workspace
     finally:
         _reset()
+
+
+def test_wait_invalid_since_errors_cleanly(tmp_path: Path):
+    # A malformed --since must produce a clean error, not an unhandled traceback.
+    cfg, state_dir, store = _bootstrap(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["inbox", "wait", "--since", "notadate", "--timeout", "0.1"])
+        assert result.exit_code == 2
+        assert "invalid" in result.output.lower() and "since" in result.output.lower()
+    finally:
+        _reset()
