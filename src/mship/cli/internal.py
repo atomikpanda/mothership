@@ -35,7 +35,7 @@ def _staged_source_paths(toplevel: str, container) -> list[str]:
         return []
 
 
-def _format_drain_reason(threads) -> str:
+def _format_drain_reason(threads: list) -> str:
     """Render awaiting threads as a Stop-hook block reason instructing the agent
     to answer each and clear it with `mship reply`."""
     n = len(threads)
