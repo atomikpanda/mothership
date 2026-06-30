@@ -3,8 +3,9 @@
 Supports:
 - SessionStart hook: surfaces the no-active-task notice each session
 - PreToolUse guard hook: blocks edits to a repo's main checkout
+- Stop hook: drains the message inbox at each turn boundary (`mship _drain`)
 
-See spec enforcement-gate (MOS-189).
+See spec enforcement-gate (MOS-189) and stop-hook-inbox-drain (#239).
 """
 from __future__ import annotations
 
