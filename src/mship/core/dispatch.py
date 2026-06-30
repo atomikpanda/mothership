@@ -181,14 +181,28 @@ def _summarize_base_sha(
     return "; ".join(parts) if parts else "unknown"
 
 
-_CONVENTIONS_RECAP = """\
-These are strictly enforced in this workspace:
-
-- **Use `mship finish --body-file <path>` to open the PR.** Empty bodies are rejected by design. Write a real Summary and Test plan.
-- **Don't edit from the main checkout.** Only the worktree path above. The pre-commit hook refuses otherwise.
-- **Prefer `--bypass-<check>` over `--force-<check>`** on any mship command that takes one (e.g., `--bypass-reconcile`, `--bypass-audit`). Different flag name if you see `--force-<something>` in older docs; the bypass form is canonical."""
+DISPATCH_MODES: tuple[str, ...] = ("implementer", "standalone")
 
 
+_CONVENTIONS_INTRO = "These are strictly enforced in this workspace:"
+
+_CONV_NO_MAIN_CHECKOUT = "- **Don't edit from the main checkout.** Only the worktree path above. The pre-commit hook refuses otherwise."
+
+_CONV_BYPASS = "- **Prefer `--bypass-<check>` over `--force-<check>`** on any mship command that takes one (e.g., `--bypass-reconcile`, `--bypass-audit`). Different flag name if you see `--force-<something>` in older docs; the bypass form is canonical."
+
+# Standalone dispatches own their own finish: the subagent opens the PR.
+_CONV_OPEN_PR = "- **Use `mship finish --body-file <path>` to open the PR.** Empty bodies are rejected by design. Write a real Summary and Test plan."
+
+# Implementer dispatches hand back to an orchestrator that integrates and finishes.
+_CONV_NO_PR = "- **Don't open a PR or run `mship finish`.** The orchestrator integrates, reviews, and finishes after your hand-off — report back instead (see below)."
+
+
+def _conventions_recap(mode: str) -> str:
+    finish_bullet = _CONV_OPEN_PR if mode == "standalone" else _CONV_NO_PR
+    return "\n".join([_CONVENTIONS_INTRO, "", finish_bullet, _CONV_NO_MAIN_CHECKOUT, _CONV_BYPASS])
+
+
+# Standalone: the subagent finishes and opens the PR itself.
 _FINISH_CONTRACT = """\
 When the work is done:
 
@@ -199,6 +213,29 @@ When the work is done:
 
 If you get stuck or find the task is wrong-shaped, stop and report back with what you tried and where you're blocked. Don't guess.
 """
+
+
+# Implementer: scoped to a single task, hands control back without opening a PR.
+# This is the default — per-task implementers in an orchestrated flow let the
+# orchestrator own integration and PR creation (#234).
+_REPORT_CONTRACT = """\
+You are a **per-task implementer**: implement exactly the one task described above, then hand control back to the orchestrator. The orchestrator — not you — integrates, reviews, and opens the PR (`mship finish`). **Do not open a PR yourself.**
+
+1. **Before coding**, ask any clarifying questions if the task is ambiguous or underspecified — don't guess at intent.
+2. Implement only this one task. Don't pick up adjacent work or the rest of a plan.
+3. Run `mship test` until green (or confirm no test suite applies).
+4. Self-review your change against the instruction above.
+5. **Return a status report** as your final message: what changed (files/functions), what you verified (tests/commands run), and anything left or uncertain.
+
+If you get stuck or the task is wrong-shaped, stop and report what you tried and where you're blocked. Don't guess.
+"""
+
+
+def _closing_section(mode: str) -> tuple[str, str]:
+    """Return the (heading, body) for the prompt's closing section."""
+    if mode == "standalone":
+        return "How to finish", _FINISH_CONTRACT
+    return "Report back (do not open a PR)", _REPORT_CONTRACT
 
 
 def _render_base_sha_block(info: BaseShaInfo, base_branch: str) -> str:
@@ -263,14 +300,27 @@ def build_dispatch_prompt(
     agents_md_path: Path | None,
     pkg_skills_source: Path,
     state=None,
+    mode: str = "implementer",
 ) -> str:
-    """Return the full markdown dispatch prompt for a fresh subagent."""
+    """Return the full markdown dispatch prompt for a fresh subagent.
+
+    `mode` selects the closing framing (#234):
+    - "implementer" (default): scope to a single task, report back, do NOT open
+      a PR — for per-task execution where an orchestrator owns finishing.
+    - "standalone": the subagent finishes the work and opens its own PR.
+    """
+    if mode not in DISPATCH_MODES:
+        raise ValueError(
+            f"unknown dispatch mode {mode!r}; choose one of {', '.join(DISPATCH_MODES)}"
+        )
     worktree = task.worktrees[repo]
     base_branch = task.base_branch or "main"
     skills_block = _render_skills(canonical_skills(pkg_skills_source))
     journal_block = _render_journal(journal_entries)
     base_block = _render_base_sha_block(base_sha_info, base_branch)
     dependencies_block = _format_dependencies_section(task, state=state)
+    conventions_recap = _conventions_recap(mode)
+    closing_heading, closing_body = _closing_section(mode)
     agents_line = f"\nFull doc: `{agents_md_path}`." if agents_md_path else ""
 
     return f"""\
@@ -306,7 +356,7 @@ This is a git worktree checked out on branch `{task.branch}`. Every edit, test r
 
 ## Conventions (recap)
 
-{_CONVENTIONS_RECAP}{agents_line}
+{conventions_recap}{agents_line}
 
 ## Read these skills before starting
 
@@ -314,6 +364,6 @@ Invoke via your platform's skill tool if it has one. Direct read paths (always v
 
 {skills_block}
 
-## How to finish
+## {closing_heading}
 
-{_FINISH_CONTRACT}"""
+{closing_body}"""

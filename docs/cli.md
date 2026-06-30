@@ -30,7 +30,8 @@ mship close [--yes] [--abandon] [--force] [--skip-pr-check] [--bypass-reconcile]
 ```bash
 mship status                                        # task, phase, branch, drift, last log, finished warning
 mship context                                       # one-shot agent-readable JSON snapshot of workspace state
-mship dispatch --task <slug> -i "<instruction>"     # emit self-contained subagent prompt to stdout
+mship dispatch --task <slug> -i "<instruction>"     # emit self-contained subagent prompt to stdout (default: implementer framing — report back, no PR)
+mship dispatch --task <slug> --mode standalone -i "<instruction>"  # standalone framing — subagent finishes and opens its own PR
 mship audit [--repos r] [--json]
 mship reconcile [--json] [--ignore SLUG] [--clear-ignores] [--refresh]
 mship view status|logs|diff|spec [--watch]

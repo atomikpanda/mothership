@@ -32,6 +32,15 @@ def register(app: typer.Typer, get_container):
             None, "--plan-task",
             help="Anchor id in --plan to use as the instruction (mutually exclusive with --instruction).",
         ),
+        mode: str = typer.Option(
+            "implementer", "--mode",
+            help=(
+                "Closing framing. 'implementer' (default): scope to a single task, "
+                "report back, do not open a PR — for per-task execution under an "
+                "orchestrator that owns finishing. 'standalone': finish the work and "
+                "open the PR via `mship finish`."
+            ),
+        ),
     ):
         """Emit a self-contained markdown subagent prompt to stdout.
 
@@ -39,6 +48,12 @@ def register(app: typer.Typer, get_container):
         stdin `--instruction -`, or `--plan-task <id>` (with `--plan <path>`).
         """
         output = Output()
+
+        if mode not in _d.DISPATCH_MODES:
+            output.error(
+                f"--mode must be one of: {', '.join(_d.DISPATCH_MODES)} (got {mode!r})."
+            )
+            raise typer.Exit(code=2)
 
         # --- resolve the instruction source (exactly one of) ---
         if (instruction is not None) == (plan_task is not None):
@@ -107,6 +122,7 @@ def register(app: typer.Typer, get_container):
             agents_md_path=agents_md_path,
             pkg_skills_source=pkg_skills_source(),
             state=state,
+            mode=mode,
         )
         # Print directly to stdout (NOT via Output.json — this is meant to be piped).
         print(prompt)

@@ -76,7 +76,7 @@ For details, see `mship spawn --help`, [`docs/cli.md`](docs/cli.md), and the `wo
 
 **A phase lifecycle that keeps the whole feature honest.** `plan → dev → review → run` with soft gates on each transition — warns on moving to dev without a spec, to review with failing tests *in any affected repo*, to run with uncommitted changes *anywhere in the task*. The lifecycle is task-scoped, not repo-scoped, so a feature across five repos has one phase, not five.
 
-**A dispatch primitive for session handoff.** `mship dispatch --task <slug> -i "<instruction>"` prints a self-contained subagent prompt — cd directive, branch state, recent journal entries, finish contract — so a fresh agent session can pick up a multi-repo task without parent-held context.
+**A dispatch primitive for session handoff.** `mship dispatch --task <slug> -i "<instruction>"` prints a self-contained subagent prompt — cd directive, branch state, recent journal entries, and a closing contract — so a fresh agent session can pick up a multi-repo task without parent-held context. By default it emits **implementer** framing: scope to the single task, report back, don't open a PR (the orchestrator finishes). Pass `--mode standalone` for the older "finish and open the PR yourself" contract.
 
 ## How it works
 

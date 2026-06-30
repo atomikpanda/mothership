@@ -120,6 +120,8 @@ Two mship-native primitives for handing work to subagents. Use them instead of h
   mship dispatch --task my-task -i "implement the parser changes"   # prints a ready-to-use prompt to stdout
   ```
 
+  **Modes (`--mode`).** By default (`implementer`) the prompt scopes the subagent to the single task, tells it to ask clarifying questions, self-review, and report back — and explicitly **not** to open a PR, because the orchestrator owns integration and runs `mship finish` after review. This is what you want for per-task execution under an orchestrator. Pass `--mode standalone` for the alternative contract where the subagent finishes the work and opens its own PR (use it only for genuinely standalone, one-off dispatches).
+
 - **`mship context`** — emits structured JSON for programmatic consumers. Use when feeding state into a non-Claude-Code LLM, logging for audit, or scripting decisions. `jq`-friendly.
 
   ```bash

@@ -207,6 +207,47 @@ def test_dispatch_instruction_dash_reads_stdin(tmp_path: Path):
         _reset()
 
 
+def test_dispatch_default_mode_reports_back_no_pr(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "do the thing"])
+        assert result.exit_code == 0, result.output
+        assert "Report back" in result.output
+        assert "status report" in result.output.lower()
+        assert "How to finish" not in result.output
+        assert "mship finish --body-file" not in result.output
+    finally:
+        _reset()
+
+
+def test_dispatch_standalone_mode_has_finish_contract(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "standalone", "-i", "x"])
+        assert result.exit_code == 0, result.output
+        assert "How to finish" in result.output
+        assert "mship finish --body-file" in result.output
+    finally:
+        _reset()
+
+
+def test_dispatch_invalid_mode_errors(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "bogus", "-i", "x"])
+        assert result.exit_code == 2
+        assert "implementer" in result.output
+        assert "standalone" in result.output
+    finally:
+        _reset()
+
+
 def test_dispatch_prompt_includes_dependencies_section(tmp_path: Path):
     now = datetime.now(timezone.utc)
     wt_a = tmp_path / "wt-a"; wt_a.mkdir()
