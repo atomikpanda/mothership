@@ -56,6 +56,10 @@ class NewMessageBody(BaseModel):
     text: str
 
 
+class SeenBody(BaseModel):
+    seen_at: str | None = None
+
+
 def _make_auth_dependency(token: str):
     import hmac
     from fastapi import Header, HTTPException
@@ -317,12 +321,33 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
         return t.model_dump(mode="json")
 
+    @app.post("/threads/{thread_id}/seen")
+    def post_seen(thread_id: str, body: SeenBody):
+        # `is not None` (not truthiness): an empty string is a malformed timestamp
+        # (-> 422 below), distinct from an omitted seen_at (None -> "now").
+        if body.seen_at is not None:
+            try:
+                seen_dt = datetime.fromisoformat(body.seen_at)
+            except ValueError:
+                raise HTTPException(status_code=422, detail=f"invalid seen_at: {body.seen_at!r}")
+            if seen_dt.tzinfo is None:
+                seen_dt = seen_dt.replace(tzinfo=timezone.utc)
+        else:
+            seen_dt = datetime.now(timezone.utc)
+        try:
+            t = msgs.mark_seen(thread_id, seen_dt)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
+        return t.model_dump(mode="json")
+
     def _summaries(threads):
         return [
             {
                 "id": t.id, "subject": t.subject,
                 "updated_at": t.updated_at.isoformat(),
                 "awaiting_reply": t.awaiting_reply,
+                "needs_you": t.needs_you,
+                "unseen": t.unseen,
                 "last_message": (t.messages[-1].text[:120] if t.messages else ""),
                 "message_count": len(t.messages),
             }

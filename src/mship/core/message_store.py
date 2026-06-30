@@ -67,12 +67,26 @@ class MessageStore:
             thread.updated_at = now
         self.save(thread)
 
-    def append(self, thread_id: str, role: Literal["human", "agent"], text: str, now: datetime) -> Message:
+    def append(self, thread_id: str, role: Literal["human", "agent"], text: str,
+               now: datetime, kind: Literal["note", "needs_you"] = "note") -> Message:
         thread = self.get(thread_id)
         if thread is None:
             raise KeyError(thread_id)
-        msg = Message(id=_new_id(now), thread_id=thread_id, role=role, text=text, created_at=now)
+        msg = Message(id=_new_id(now), thread_id=thread_id, role=role, text=text,
+                      created_at=now, kind=kind)
         thread.messages.append(msg)
         thread.updated_at = now
         self.save(thread)
         return msg
+
+    def mark_seen(self, thread_id: str, seen_at: datetime) -> Thread:
+        """Advance the operator's read cursor (monotonic — never regresses).
+        Does not bump updated_at: reading is not a content change and must not
+        reorder the thread list."""
+        thread = self.get(thread_id)
+        if thread is None:
+            raise KeyError(thread_id)
+        if thread.seen_at is None or seen_at > thread.seen_at:
+            thread.seen_at = seen_at
+            self.save(thread)
+        return thread

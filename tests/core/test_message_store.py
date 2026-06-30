@@ -91,3 +91,51 @@ def test_link_spec_with_now_advances_updated_at(tmp_path):
     refreshed = s.get(t.id)
     assert refreshed.spec_id == "my-spec"
     assert refreshed.updated_at == linked  # linking bubbles the thread up in list()
+
+
+def test_append_defaults_to_note_kind(tmp_path):
+    now = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
+    s = _store(tmp_path)
+    t = s.create_thread(subject="x", text="q", now=now)
+    s.append(t.id, "agent", "fyi", now)
+    got = s.get(t.id)
+    assert got.messages[-1].kind == "note"
+    assert got.needs_you is False
+
+
+def test_append_needs_you_kind_flags_thread(tmp_path):
+    now = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
+    s = _store(tmp_path)
+    t = s.create_thread(subject="x", text="q", now=now)
+    s.append(t.id, "agent", "look at this", now, kind="needs_you")
+    got = s.get(t.id)
+    assert got.messages[-1].kind == "needs_you"
+    assert got.needs_you is True
+
+
+def test_mark_seen_advances_cursor_and_clears_unseen(tmp_path):
+    from datetime import timedelta
+    base = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
+    s = _store(tmp_path)
+    t = s.create_thread(subject="x", text="hi", now=base)
+    s.append(t.id, "agent", "fyi", base + timedelta(minutes=1))
+    assert s.get(t.id).unseen is True
+    s.mark_seen(t.id, base + timedelta(minutes=2))
+    assert s.get(t.id).unseen is False
+    assert s.get(t.id).seen_at == base + timedelta(minutes=2)
+
+
+def test_mark_seen_is_monotonic(tmp_path):
+    from datetime import timedelta
+    base = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
+    s = _store(tmp_path)
+    t = s.create_thread(subject="x", text="hi", now=base)
+    s.mark_seen(t.id, base + timedelta(minutes=5))
+    s.mark_seen(t.id, base + timedelta(minutes=1))  # older — must not regress
+    assert s.get(t.id).seen_at == base + timedelta(minutes=5)
+
+
+def test_mark_seen_unknown_thread_raises(tmp_path):
+    s = _store(tmp_path)
+    with pytest.raises(KeyError):
+        s.mark_seen("nope", datetime(2026, 6, 30, tzinfo=timezone.utc))

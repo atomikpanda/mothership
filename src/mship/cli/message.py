@@ -75,11 +75,20 @@ def register(parent: typer.Typer, get_container) -> None:
         typer.echo(json.dumps(out))
 
     @parent.command()
-    def reply(thread_id: str, text: str) -> None:
+    def reply(
+        thread_id: str,
+        text: str,
+        needs_you: bool = typer.Option(
+            False, "--needs-you",
+            help="Mark this reply as needing the operator's action "
+                 "(surfaces as a Home action card in Ground Control).",
+        ),
+    ) -> None:
         """Post an agent reply to a thread."""
         store = _store()
         try:
-            store.append(thread_id, "agent", text, datetime.now(timezone.utc))
+            store.append(thread_id, "agent", text, datetime.now(timezone.utc),
+                         kind="needs_you" if needs_you else "note")
         except KeyError:
             typer.echo(f"no thread {thread_id!r}", err=True)
             raise typer.Exit(1)

@@ -72,3 +72,25 @@ def test_messages_renders_thread(_configured):
     s.append(t.id, "agent", "second", now)
     out = json.loads(runner.invoke(app, ["messages", t.id]).output)
     assert [m["text"] for m in out["messages"]] == ["first", "second"]
+
+
+def test_reply_needs_you_marks_kind(_configured):
+    s = _seed(_configured)
+    now = datetime(2026, 6, 23, tzinfo=timezone.utc)
+    t = s.create_thread(subject="x", text="q", now=now)
+    r = runner.invoke(app, ["reply", t.id, "look at this", "--needs-you"])
+    assert r.exit_code == 0, r.output
+    got = s.get(t.id)
+    assert got.messages[-1].kind == "needs_you"
+    assert got.needs_you is True
+
+
+def test_reply_defaults_to_note(_configured):
+    s = _seed(_configured)
+    now = datetime(2026, 6, 23, tzinfo=timezone.utc)
+    t = s.create_thread(subject="x", text="q", now=now)
+    r = runner.invoke(app, ["reply", t.id, "just an fyi"])
+    assert r.exit_code == 0, r.output
+    got = s.get(t.id)
+    assert got.messages[-1].kind == "note"
+    assert got.needs_you is False
