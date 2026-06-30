@@ -29,8 +29,22 @@ def register(app: typer.Typer, get_container):
         except Exception:
             known = frozenset()
 
+        # Repos with an active task: a dirty *main checkout* for one of these
+        # almost always means edits landed in the main checkout instead of the
+        # task worktree, so enrich the dirty_worktree message to say so.
         try:
-            report = audit_repos(config, shell, names=names, known_worktree_paths=known)
+            state = container.state_manager().load()
+            active = frozenset(
+                r for task in state.tasks.values() for r in task.affected_repos
+            )
+        except Exception:
+            active = frozenset()
+
+        try:
+            report = audit_repos(
+                config, shell, names=names,
+                known_worktree_paths=known, repos_with_active_task=active,
+            )
         except ValueError as e:
             output.error(str(e))
             raise typer.Exit(code=1)

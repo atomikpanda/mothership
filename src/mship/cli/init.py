@@ -6,15 +6,19 @@ import typer
 from mship.cli.output import Output
 from mship.core.config import unique_git_roots
 from mship.core.init import WorkspaceInitializer, DetectedRepo
-from mship.core.claude_settings import install_session_hook
+from mship.core.claude_settings import install_session_hook, install_pretooluse_guard_hook
 
 
-def _install_session_hook_with_output(ws_root: Path, output: Output) -> None:
+def _install_agent_hooks_with_output(ws_root: Path, output: Output) -> None:
+    settings = f"{ws_root}/.claude/settings.json"
     try:
-        outcome = install_session_hook(ws_root)
-        output.success(f"SessionStart hook @ {ws_root}/.claude/settings.json: {outcome}")
+        output.success(f"SessionStart hook @ {settings}: {install_session_hook(ws_root)}")
     except Exception as e:
         output.warning(f"SessionStart hook install skipped: {e}")
+    try:
+        output.success(f"PreToolUse guard hook @ {settings}: {install_pretooluse_guard_hook(ws_root)}")
+    except Exception as e:
+        output.warning(f"PreToolUse guard hook install skipped: {e}")
 
 
 def register(app: typer.Typer, get_container):
@@ -66,7 +70,7 @@ def register(app: typer.Typer, get_container):
                         output.print(line)
             for r, err in failed:
                 output.error(f"hook install failed: {r}: {err}")
-            _install_session_hook_with_output(Path(container.config_path()).parent, output)
+            _install_agent_hooks_with_output(Path(container.config_path()).parent, output)
             raise typer.Exit(code=1 if failed else 0)
 
         # Check for existing config
@@ -135,7 +139,7 @@ def register(app: typer.Typer, get_container):
             except Exception as e:
                 output.print(f"[yellow]warning: could not install hook at {root}: {e}[/yellow]")
 
-        _install_session_hook_with_output(cwd, output)
+        _install_agent_hooks_with_output(cwd, output)
 
         if output.human_mode:
             output.success(f"Created: {config_path}")
@@ -305,7 +309,7 @@ def _run_interactive(
         except Exception as e:
             output.print(f"[yellow]warning: could not install hook at {root}: {e}[/yellow]")
 
-    _install_session_hook_with_output(cwd, output)
+    _install_agent_hooks_with_output(cwd, output)
 
     output.print("")
     output.success(f"Created: {config_path}")
