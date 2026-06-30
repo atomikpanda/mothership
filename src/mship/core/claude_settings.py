@@ -14,6 +14,7 @@ from pathlib import Path
 SESSION_COMMAND = "mship _session-context"
 GUARD_COMMAND = "mship _guard-edit"
 GUARD_MATCHER = "Edit|Write|MultiEdit|NotebookEdit"
+DRAIN_COMMAND = "mship _drain"
 
 
 def _install_hook_entry(workspace_root: Path, event_key: str, entry: dict, command: str) -> str:
@@ -73,4 +74,14 @@ def install_pretooluse_guard_hook(workspace_root: Path) -> str:
         workspace_root, "PreToolUse",
         {"matcher": GUARD_MATCHER, "hooks": [{"type": "command", "command": GUARD_COMMAND}]},
         GUARD_COMMAND,
+    )
+
+
+def install_stop_hook(workspace_root: Path) -> str:
+    """Idempotently add a Stop hook running `mship _drain` (drains the message
+    inbox at each turn boundary). Stop hooks carry no matcher."""
+    return _install_hook_entry(
+        workspace_root, "Stop",
+        {"hooks": [{"type": "command", "command": DRAIN_COMMAND}]},
+        DRAIN_COMMAND,
     )
