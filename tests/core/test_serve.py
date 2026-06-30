@@ -434,3 +434,52 @@ def test_thread_exposes_spec_id(tmp_path):
     tid = client.post("/threads", json={"text": "hi"}).json()["id"]
     MessageStore(tmp_path / ".mothership" / "messages").link_spec(tid, "spec-1")
     assert client.get(f"/threads/{tid}").json()["spec_id"] == "spec-1"
+
+
+def test_thread_summaries_expose_needs_you_and_unseen(tmp_path):
+    from mship.core.message_store import MessageStore
+    from datetime import datetime, timezone, timedelta
+    store = MessageStore(tmp_path / ".mothership" / "messages")
+    base = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
+    t = store.create_thread("s", "hi", base)
+    store.append(t.id, "agent", "need you", base + timedelta(minutes=1), kind="needs_you")
+
+    client = TestClient(_app(tmp_path))
+    summary = next(x for x in client.get("/threads").json() if x["id"] == t.id)
+    assert summary["needs_you"] is True
+    assert summary["unseen"] is True
+    assert summary["awaiting_reply"] is False
+
+
+def test_post_seen_marks_thread_and_clears_unseen(tmp_path):
+    from mship.core.message_store import MessageStore
+    from datetime import datetime, timezone, timedelta
+    store = MessageStore(tmp_path / ".mothership" / "messages")
+    base = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
+    t = store.create_thread("s", "hi", base)
+    store.append(t.id, "agent", "fyi", base + timedelta(minutes=1))
+
+    client = TestClient(_app(tmp_path))
+    assert next(x for x in client.get("/threads").json() if x["id"] == t.id)["unseen"] is True
+    r = client.post(f"/threads/{t.id}/seen", json={"seen_at": (base + timedelta(minutes=2)).isoformat()})
+    assert r.status_code == 200
+    assert next(x for x in client.get("/threads").json() if x["id"] == t.id)["unseen"] is False
+
+
+def test_post_seen_unknown_thread_404(tmp_path):
+    client = TestClient(_app(tmp_path))
+    r = client.post("/threads/nope/seen", json={"seen_at": "2026-06-30T12:00:00+00:00"})
+    assert r.status_code == 404
+
+
+def test_post_seen_defaults_to_now_when_omitted(tmp_path):
+    from mship.core.message_store import MessageStore
+    from datetime import datetime, timezone, timedelta
+    store = MessageStore(tmp_path / ".mothership" / "messages")
+    base = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
+    t = store.create_thread("s", "hi", base)
+    store.append(t.id, "agent", "fyi", base + timedelta(minutes=1))
+    client = TestClient(_app(tmp_path))
+    r = client.post(f"/threads/{t.id}/seen", json={})
+    assert r.status_code == 200
+    assert next(x for x in client.get("/threads").json() if x["id"] == t.id)["unseen"] is False
