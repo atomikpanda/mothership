@@ -6,7 +6,7 @@ import typer
 from mship.cli.output import Output
 from mship.core.config import unique_git_roots
 from mship.core.init import WorkspaceInitializer, DetectedRepo
-from mship.core.claude_settings import install_session_hook, install_pretooluse_guard_hook
+from mship.core.claude_settings import install_session_hook, install_pretooluse_guard_hook, install_stop_hook
 
 
 def _install_agent_hooks_with_output(ws_root: Path, output: Output) -> None:
@@ -19,6 +19,10 @@ def _install_agent_hooks_with_output(ws_root: Path, output: Output) -> None:
         output.success(f"PreToolUse guard hook @ {settings}: {install_pretooluse_guard_hook(ws_root)}")
     except Exception as e:
         output.warning(f"PreToolUse guard hook install skipped: {e}")
+    try:
+        output.success(f"Stop hook @ {settings}: {install_stop_hook(ws_root)}")
+    except Exception as e:
+        output.warning(f"Stop hook install skipped: {e}")
 
 
 def register(app: typer.Typer, get_container):
