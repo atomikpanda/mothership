@@ -59,6 +59,32 @@ def test_allows_when_repo_has_no_active_task(tmp_path: Path):
     assert evaluate_edit(main / "src" / "x.py", state, cfg).allowed is True
 
 
+def test_nested_repo_without_task_allowed_even_if_parent_has_task(tmp_path: Path):
+    # A child repo nested inside a parent repo's path: the parent has an active
+    # task, the child does not. Editing a child file must NOT be falsely denied
+    # as the parent's main checkout — the most-specific (deepest) repo owns the
+    # file, independent of config declaration order.
+    parent = tmp_path / "ws"; (parent / "src").mkdir(parents=True)
+    child = parent / "a"; (child / "src").mkdir(parents=True)
+    parent_wt = tmp_path / ".worktrees" / "p" / "parent"; parent_wt.mkdir(parents=True)
+    cfg = _Config({"parent": parent, "child": child})  # parent first = the failing order
+    state = _state("p", "parent", parent_wt)            # only parent has a task
+    assert evaluate_edit(child / "src" / "x.py", state, cfg).allowed is True
+
+
+def test_parent_repo_own_file_still_blocked_with_nested_child(tmp_path: Path):
+    # Editing the parent's OWN file (not inside the child) while the parent has a
+    # task is still blocked and names the parent.
+    parent = tmp_path / "ws"; (parent / "src").mkdir(parents=True)
+    child = parent / "a"; (child / "src").mkdir(parents=True)
+    parent_wt = tmp_path / ".worktrees" / "p" / "parent"; parent_wt.mkdir(parents=True)
+    cfg = _Config({"parent": parent, "child": child})
+    state = _state("p", "parent", parent_wt)
+    d = evaluate_edit(parent / "src" / "x.py", state, cfg)
+    assert d.allowed is False
+    assert "parent" in d.reason
+
+
 def test_allows_edit_outside_any_repo(tmp_path: Path):
     main, wt = _layout(tmp_path)
     cfg = _Config({"repo": main})

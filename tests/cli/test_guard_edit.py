@@ -55,7 +55,9 @@ def test_blocks_edit_in_main_checkout(tmp_path: Path):
     try:
         result = runner.invoke(app, ["_guard-edit"], input=_event(main / "src" / "x.py"))
         assert result.exit_code == 2
-        assert "MAIN checkout" in result.output
+        # The deny reason is written to stderr; assert on that stream directly
+        # rather than result.output (Click 8.2+ no longer folds stderr into it).
+        assert "MAIN checkout" in result.stderr
     finally:
         _reset()
 

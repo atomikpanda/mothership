@@ -34,48 +34,59 @@ def evaluate_edit(target, state, config) -> GuardDecision:
     repo has an active task and the path is not inside that task's worktree.
     Allows everything else (caller fails open on errors)."""
     rp = _real(Path(target))
+    # Among repos whose main checkout contains the target, the MOST-SPECIFIC one
+    # (deepest path) owns the file — so a nested repo (e.g. `web` inside
+    # `backend`'s tree) is judged by its OWN active-task state, not a parent
+    # repo's. This is independent of config declaration order.
+    owner_name = None
+    owner_main = None
     for name, repo in config.repos.items():
         main = _real(Path(repo.path))
         if not _within(rp, main):
             continue
-        # Collect every active task that owns a worktree for this repo. An edit
-        # inside ANY of those worktrees is legitimate, so allow it outright.
-        candidates = []  # list[(slug, worktree_realpath)]
-        for slug, task in state.tasks.items():
-            if name not in task.affected_repos:
-                continue
-            wt = task.worktrees.get(name)
-            if wt is None:
-                continue
-            wt_real = _real(Path(wt))
-            if _within(rp, wt_real):
-                return GuardDecision(allowed=True)
-            candidates.append((slug, wt_real))
-        if not candidates:
-            continue  # repo has no active task — not our concern
-        try:
-            rel = rp.relative_to(main)
-        except ValueError:
-            rel = None
+        if owner_main is None or len(main.parts) > len(owner_main.parts):
+            owner_name, owner_main = name, main
+    if owner_name is None:
+        return GuardDecision(allowed=True)  # not inside any repo's main checkout
 
-        def _suggest(wt_real):
-            return wt_real / rel if rel is not None else wt_real
+    # Collect every active task that owns a worktree for the owning repo. An edit
+    # inside ANY of those worktrees is legitimate, so allow it outright.
+    candidates = []  # list[(slug, worktree_realpath)]
+    for slug, task in state.tasks.items():
+        if owner_name not in task.affected_repos:
+            continue
+        wt = task.worktrees.get(owner_name)
+        if wt is None:
+            continue
+        wt_real = _real(Path(wt))
+        if _within(rp, wt_real):
+            return GuardDecision(allowed=True)
+        candidates.append((slug, wt_real))
+    if not candidates:
+        return GuardDecision(allowed=True)  # the owning repo has no active task
 
-        if len(candidates) == 1:
-            slug, wt_real = candidates[0]
-            reason = (
-                f"Editing the MAIN checkout of '{name}' while task "
-                f"'{slug}' is active. Edit here instead:\n  {_suggest(wt_real)}\n"
-                f"(set MSHIP_ALLOW_MAIN_EDIT=1 to override.)"
-            )
-        else:
-            listing = "\n".join(
-                f"  '{slug}': {_suggest(wt_real)}" for slug, wt_real in candidates
-            )
-            reason = (
-                f"Editing the MAIN checkout of '{name}' while multiple tasks are "
-                f"active for it. Edit in the appropriate task worktree:\n{listing}\n"
-                f"(set MSHIP_ALLOW_MAIN_EDIT=1 to override.)"
-            )
-        return GuardDecision(allowed=False, reason=reason)
-    return GuardDecision(allowed=True)
+    try:
+        rel = rp.relative_to(owner_main)
+    except ValueError:
+        rel = None
+
+    def _suggest(wt_real):
+        return wt_real / rel if rel is not None else wt_real
+
+    if len(candidates) == 1:
+        slug, wt_real = candidates[0]
+        reason = (
+            f"Editing the MAIN checkout of '{owner_name}' while task "
+            f"'{slug}' is active. Edit here instead:\n  {_suggest(wt_real)}\n"
+            f"(set MSHIP_ALLOW_MAIN_EDIT=1 to override.)"
+        )
+    else:
+        listing = "\n".join(
+            f"  '{slug}': {_suggest(wt_real)}" for slug, wt_real in candidates
+        )
+        reason = (
+            f"Editing the MAIN checkout of '{owner_name}' while multiple tasks are "
+            f"active for it. Edit in the appropriate task worktree:\n{listing}\n"
+            f"(set MSHIP_ALLOW_MAIN_EDIT=1 to override.)"
+        )
+    return GuardDecision(allowed=False, reason=reason)
