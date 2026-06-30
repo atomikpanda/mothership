@@ -58,3 +58,22 @@ def no_task_notice(cwd: Path) -> str | None:
         return None if active else NO_TASK_NOTICE
     except Exception:
         return None
+
+
+def messaging_notice(cwd: Path) -> str | None:
+    """A one-line nudge for the SessionStart hook: keep a background
+    `mship inbox wait` armed so this session wakes on a new phone message.
+    Returns None outside a workspace (fail-open advisory context)."""
+    try:
+        from mship.core.config import ConfigLoader
+        try:
+            ConfigLoader.discover(cwd)
+        except FileNotFoundError:
+            return None
+    except Exception:
+        return None
+    return (
+        "Phone messages may arrive mid-session. To answer them while idle, keep a "
+        "background `mship inbox wait` armed and re-arm after each reply — see the "
+        "`receiving-messages` skill. (Messages mid-turn are also caught by the Stop hook.)"
+    )

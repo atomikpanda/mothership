@@ -351,12 +351,13 @@ def register(app: typer.Typer, get_container):
 
     @app.command(name="_session-context", hidden=True)
     def session_context():
-        """Print the no-active-task notice for the SessionStart hook (else nothing)."""
-        from mship.core.gate import no_task_notice
-        notice = no_task_notice(Path.cwd())
-        if notice:
-            import sys
-            sys.stdout.write(notice + "\n")
+        """Print the no-active-task notice + messaging nudge for the SessionStart hook."""
+        import sys
+        from mship.core.gate import no_task_notice, messaging_notice
+        for fn in (no_task_notice, messaging_notice):
+            text = fn(Path.cwd())
+            if text:
+                sys.stdout.write(text + "\n")
         raise typer.Exit(code=0)
 
     @app.command(name="_post-checkout", hidden=True)
