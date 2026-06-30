@@ -13,6 +13,10 @@ With 0 active tasks the command errors with "no active task". With exactly 1 act
 ```bash
 mship init [--detect | --name N --repo PATH:TYPE]   # scaffold mothership.yaml
 mship init --install-hooks                          # (re)install pre-commit guard on every git root
+                                                    # also installs a Claude Code PreToolUse guard
+                                                    # (mship _guard-edit) that blocks edits to a repo's
+                                                    # main checkout while it has an active task.
+                                                    # Bypass: MSHIP_ALLOW_MAIN_EDIT=1.
 mship spawn "description" [--repos a,b] [--skip-setup] [--bypass-reconcile]
 mship switch <repo>                                 # cross-repo context switch
 mship phase plan|dev|review|run [-f]                # transition with soft-gate warnings
