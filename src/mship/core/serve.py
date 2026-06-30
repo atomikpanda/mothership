@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import time as _time
 from pathlib import Path
+from typing import Optional
 
 from pydantic import BaseModel
 
@@ -314,8 +317,7 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
         return t.model_dump(mode="json")
 
-    @app.get("/threads")
-    def list_threads():
+    def _summaries(threads):
         return [
             {
                 "id": t.id, "subject": t.subject,
@@ -324,8 +326,31 @@ def create_app(
                 "last_message": (t.messages[-1].text[:120] if t.messages else ""),
                 "message_count": len(t.messages),
             }
-            for t in msgs.list()
+            for t in threads
         ]
+
+    @app.get("/threads")
+    async def list_threads(wait: int = 0, since: Optional[str] = None, timeout: float = 25.0):
+        if not wait:
+            return _summaries(msgs.list())
+        from mship.core.message_wait import changed_since
+        timeout = max(0.0, min(timeout, 30.0))  # cap for the relay idle-read timeout
+        try:
+            since_dt = datetime.fromisoformat(since) if since else datetime.now(timezone.utc)
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"invalid since value: {since!r}")
+        if since_dt.tzinfo is None:
+            since_dt = since_dt.replace(tzinfo=timezone.utc)
+        interval = 1.0
+        deadline = _time.monotonic() + timeout
+        while True:
+            changed, cursor = changed_since(msgs.list(), since_dt)
+            if changed:
+                return {"threads": _summaries(changed), "cursor": cursor.isoformat(), "timed_out": False}
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                return {"threads": [], "cursor": cursor.isoformat(), "timed_out": True}
+            await asyncio.sleep(min(interval, remaining))
 
     @app.get("/threads/{thread_id}")
     def get_thread(thread_id: str):
