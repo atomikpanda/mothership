@@ -237,14 +237,11 @@ def test_session_context_prints_notice_when_no_task(tmp_path, monkeypatch):
         _reset()
 
 
-def test_session_context_no_task_notice_when_task_active(tmp_path, monkeypatch):
-    """With an active task, the no-task notice is suppressed but the messaging
-    nudge is still printed (it is workspace-level, not task-state-dependent)."""
+def test_session_context_silent_with_task(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch, tasks_yaml=_TASK_YAML)
     try:
         r = runner.invoke(app, ["_session-context"])
         assert r.exit_code == 0
-        assert "no active task" not in r.stdout.lower()
-        assert "inbox wait" in r.stdout
+        assert r.stdout.strip() == ""
     finally:
         _reset()

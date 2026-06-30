@@ -63,12 +63,17 @@ def no_task_notice(cwd: Path) -> str | None:
 def messaging_notice(cwd: Path) -> str | None:
     """A one-line nudge for the SessionStart hook: keep a background
     `mship inbox wait` armed so this session wakes on a new phone message.
-    Returns None outside a workspace (fail-open advisory context)."""
+    Returns None outside a workspace, or when the mailbox has no threads yet
+    (quiet until messaging is actually in use). Fail-open (None) on any error."""
     try:
         from mship.core.config import ConfigLoader
+        from mship.core.message_store import MessageStore
         try:
-            ConfigLoader.discover(cwd)
+            config_path = ConfigLoader.discover(cwd)
         except FileNotFoundError:
+            return None
+        ws_root = Path(config_path).parent
+        if not MessageStore(ws_root / ".mothership" / "messages").list():
             return None
     except Exception:
         return None
