@@ -337,7 +337,21 @@ def register(app: typer.Typer, get_container):
             known = collect_known_worktree_paths(container.state_manager())
         except Exception:
             known = frozenset()
-        report = audit_repos(config, shell, names=audit_names, known_worktree_paths=known)
+        # Enrich dirty_worktree on any repo with an active task: a dirty main
+        # checkout there usually means edits landed in the main checkout, not
+        # the worktree. Built from all active tasks (the gate's blocking is
+        # unchanged — it keys off the error code, not the message).
+        try:
+            spawn_state = container.state_manager().load()
+            active = frozenset(
+                r for task in spawn_state.tasks.values() for r in task.affected_repos
+            )
+        except Exception:
+            active = frozenset()
+        report = audit_repos(
+            config, shell, names=audit_names,
+            known_worktree_paths=known, repos_with_active_task=active,
+        )
 
         pending_bypass: list[list[str]] = []
 
@@ -969,7 +983,14 @@ def register(app: typer.Typer, get_container):
             known = collect_known_worktree_paths(container.state_manager())
         except Exception:
             known = frozenset()
-        report = audit_repos(config, shell, names=task.affected_repos, known_worktree_paths=known)
+        # The current task is active for its affected repos; enrich any
+        # dirty_worktree on a main checkout to point at the worktree. (Blocking
+        # is unchanged — keyed off the error code, not the message.)
+        active = frozenset(task.affected_repos)
+        report = audit_repos(
+            config, shell, names=task.affected_repos,
+            known_worktree_paths=known, repos_with_active_task=active,
+        )
 
         # finish is what creates the upstream via `git push -u` — so while the
         # task is still unfinished, `no_upstream` on the task's own branch is a

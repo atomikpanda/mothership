@@ -282,12 +282,41 @@ def _probe_dirty(
 # Public entry point
 # ---------------------------------------------------------------------------
 
+def _enrich_active_task(
+    issues: tuple[Issue, ...], has_active_task: bool
+) -> tuple[Issue, ...]:
+    """Append an active-task hint to any `dirty_worktree` issue.
+
+    When a repo has an active task, a dirty *main checkout* almost always means
+    the user edited the main checkout instead of the task's worktree. Point them
+    at the worktree. Only `dirty_worktree` (the tracked-file `error`) is
+    enriched — `dirty_untracked` (a `warn`) is left alone. The base message is
+    preserved (only a suffix is appended) so the gate and existing tests, which
+    key off the original code/message, are unaffected.
+    """
+    if not has_active_task:
+        return issues
+    out: list[Issue] = []
+    for i in issues:
+        if i.code == "dirty_worktree":
+            out.append(Issue(
+                i.code, i.severity,
+                i.message + " — a task is active for this repo; "
+                "edit in its worktree, not the main checkout "
+                "(see `mship worktrees`)",
+            ))
+        else:
+            out.append(i)
+    return tuple(out)
+
+
 def audit_repos(
     config,
     shell,
     names: Iterable[str] | None = None,
     known_worktree_paths: frozenset[Path] = frozenset(),
     local_only: bool = False,
+    repos_with_active_task: frozenset[str] = frozenset(),
 ) -> AuditReport:
     """Run drift audit across repos, grouping by git root for git-wide checks."""
     target_names = list(names) if names is not None else list(config.repos.keys())
@@ -352,7 +381,9 @@ def audit_repos(
             name=n,
             path=_effective_path(config, n),
             current_branch=per_repo_branch[n],
-            issues=tuple(per_repo_issues[n]),
+            issues=_enrich_active_task(
+                tuple(per_repo_issues[n]), n in repos_with_active_task
+            ),
         )
         for n in target_names
     )
