@@ -323,7 +323,9 @@ def create_app(
 
     @app.post("/threads/{thread_id}/seen")
     def post_seen(thread_id: str, body: SeenBody):
-        if body.seen_at:
+        # `is not None` (not truthiness): an empty string is a malformed timestamp
+        # (-> 422 below), distinct from an omitted seen_at (None -> "now").
+        if body.seen_at is not None:
             try:
                 seen_dt = datetime.fromisoformat(body.seen_at)
             except ValueError:

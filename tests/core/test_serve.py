@@ -483,3 +483,15 @@ def test_post_seen_defaults_to_now_when_omitted(tmp_path):
     r = client.post(f"/threads/{t.id}/seen", json={})
     assert r.status_code == 200
     assert next(x for x in client.get("/threads").json() if x["id"] == t.id)["unseen"] is False
+
+
+def test_post_seen_malformed_value_returns_422(tmp_path):
+    from mship.core.message_store import MessageStore
+    from datetime import datetime, timezone
+    store = MessageStore(tmp_path / ".mothership" / "messages")
+    t = store.create_thread("s", "hi", datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc))
+    client = TestClient(_app(tmp_path))
+    # a non-empty but unparseable timestamp -> 422
+    assert client.post(f"/threads/{t.id}/seen", json={"seen_at": "not-a-date"}).status_code == 422
+    # an empty string is malformed too (distinct from an omitted seen_at) -> 422
+    assert client.post(f"/threads/{t.id}/seen", json={"seen_at": ""}).status_code == 422
