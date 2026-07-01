@@ -48,7 +48,7 @@ def compute_attention(spec: Spec | None, tasks: list[Task], threads: list[Thread
     blocked_tasks = sum(1 for t in tasks if t.blocked_reason is not None)
     return Attention(
         needs_approval=spec is not None and spec.status == "needs_review",
-        needs_decision=any(t.needs_you for t in threads),
+        needs_decision=any(t.needs_you or t.needs_decision for t in threads),
         blocked=blocked_tasks > 0,
         needs_review=any(bool(t.pr_urls) for t in tasks),
         blocked_tasks=blocked_tasks,

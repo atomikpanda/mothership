@@ -451,6 +451,23 @@ def test_thread_summaries_expose_needs_you_and_unseen(tmp_path):
     assert summary["awaiting_reply"] is False
 
 
+def test_thread_summaries_expose_needs_decision(tmp_path):
+    from mship.core.message_store import MessageStore
+    from mship.core.message import DecisionPayload
+    from datetime import datetime, timezone, timedelta
+    store = MessageStore(tmp_path / ".mothership" / "messages")
+    base = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
+    t = store.create_thread("s", "hi", base)
+    store.append(
+        t.id, "agent", "pick one", base + timedelta(minutes=1),
+        kind="decision", decision=DecisionPayload(options=["a", "b"]),
+    )
+
+    client = TestClient(_app(tmp_path))
+    summary = next(x for x in client.get("/threads").json() if x["id"] == t.id)
+    assert summary["needs_decision"] is True
+
+
 def test_post_seen_marks_thread_and_clears_unseen(tmp_path):
     from mship.core.message_store import MessageStore
     from datetime import datetime, timezone, timedelta

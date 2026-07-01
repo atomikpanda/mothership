@@ -139,3 +139,16 @@ def test_mark_seen_unknown_thread_raises(tmp_path):
     s = _store(tmp_path)
     with pytest.raises(KeyError):
         s.mark_seen("nope", datetime(2026, 6, 30, tzinfo=timezone.utc))
+
+
+def test_append_decision_roundtrips(tmp_path):
+    from mship.core.message import DecisionPayload
+    s = _store(tmp_path)
+    now = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    th = s.create_thread("s", "hi", now)
+    s.append(th.id, "agent", "How to store?", now, kind="decision",
+              decision=DecisionPayload(options=["a", "b"], recommended=1))
+    got = s.get(th.id)
+    assert got.messages[-1].kind == "decision"
+    assert got.messages[-1].decision.options == ["a", "b"]
+    assert got.needs_decision is True
