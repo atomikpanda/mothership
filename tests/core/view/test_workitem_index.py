@@ -5,7 +5,13 @@ from mship.core.workitem import WorkItem
 from mship.core.spec import Spec
 from mship.core.state import Task
 from mship.core.message import Message, Thread
-from mship.core.view.workitem_index import Attention, compute_attention, compute_phase
+from mship.core.view.workitem_index import (
+    Attention,
+    WorkItemSummary,
+    build_workitem_index,
+    compute_attention,
+    compute_phase,
+)
 
 
 def _now():
@@ -95,3 +101,35 @@ def test_needs_review_when_a_task_has_a_pr():
 def test_needs_decision_from_thread_needs_you():
     assert compute_attention(None, [], [_thread(needs_you=True)]).needs_decision is True
     assert compute_attention(None, [], [_thread(needs_you=False)]).needs_decision is False
+
+
+def test_build_index_populates_phase_and_attention():
+    item = _wi(id="wi-1", spec_id="s", task_slugs=["s1"], thread_ids=["t1"])
+    summaries = build_workitem_index(
+        workitems=[item],
+        specs_by_id={"s": _spec("approved")},
+        tasks_by_slug={"s1": _task(blocked=True)},
+        threads_by_id={"t1": _thread(needs_you=True)},
+    )
+    assert len(summaries) == 1
+    s = summaries[0]
+    assert isinstance(s, WorkItemSummary)
+    assert s.id == "wi-1" and s.kind == "feature"
+    assert s.phase == "in_flight"
+    assert s.attention.blocked is True and s.attention.blocked_tasks == 1
+    assert s.attention.needs_decision is True
+
+
+def test_build_index_orders_active_before_done():
+    active = _wi(id="active", updated_at=datetime(2026, 6, 30, 9, 0, tzinfo=timezone.utc))
+    done = _wi(id="done", phase_override="done",
+               updated_at=datetime(2026, 6, 30, 13, 0, tzinfo=timezone.utc))
+    summaries = build_workitem_index([done, active], {}, {}, {})
+    assert [s.id for s in summaries] == ["active", "done"]
+
+
+def test_build_index_tolerates_missing_children():
+    item = _wi(id="wi-x", spec_id="ghost", task_slugs=["missing"], thread_ids=["gone"])
+    s = build_workitem_index([item], {}, {}, {})[0]
+    assert s.phase == "inbox"
+    assert s.attention.total_tasks == 0
