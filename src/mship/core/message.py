@@ -6,6 +6,12 @@ from typing import Literal
 from pydantic import BaseModel, computed_field
 
 
+class DecisionPayload(BaseModel):
+    options: list[str]
+    recommended: int | None = None
+    allow_free_text: bool = True
+
+
 class Message(BaseModel):
     id: str
     thread_id: str
@@ -13,8 +19,11 @@ class Message(BaseModel):
     text: str
     created_at: datetime
     # "needs_you" marks an agent message that needs the operator to act
-    # (surfaces as a Home action card in Ground Control). Default "note".
-    kind: Literal["note", "needs_you"] = "note"
+    # (surfaces as a Home action card in Ground Control).
+    # "decision" marks an agent message presenting a typed decision (see
+    # DecisionPayload / Thread.needs_decision). Default "note".
+    kind: Literal["note", "needs_you", "decision"] = "note"
+    decision: DecisionPayload | None = None
 
 
 class Thread(BaseModel):
@@ -45,6 +54,20 @@ class Thread(BaseModel):
                 last_human = i
         return any(
             m.role == "agent" and m.kind == "needs_you"
+            for m in self.messages[last_human + 1:]
+        )
+
+    @computed_field
+    @property
+    def needs_decision(self) -> bool:
+        """True iff an unanswered agent message with kind=decision exists after the
+        operator's last human message (mirrors needs_you)."""
+        last_human = -1
+        for i, m in enumerate(self.messages):
+            if m.role == "human":
+                last_human = i
+        return any(
+            m.role == "agent" and m.kind == "decision"
             for m in self.messages[last_human + 1:]
         )
 
