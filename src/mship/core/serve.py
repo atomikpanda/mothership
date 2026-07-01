@@ -384,4 +384,29 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
         return t.model_dump(mode="json")
 
+    # --- work items (phase-aware cockpit spine) ---
+    from mship.core.workitem_store import WorkItemStore
+    from mship.core.view.workitem_index import build_workitem_index
+
+    workitems = WorkItemStore(workspace_root / ".mothership" / "workitems")
+
+    def _workitem_index():
+        return build_workitem_index(
+            workitems.list(),
+            {s.id: s for s in store.list()},
+            dict(state_manager.load().tasks),
+            {t.id: t for t in msgs.list()},
+        )
+
+    @app.get("/items")
+    def list_items():
+        return jsonable_encoder(_workitem_index())
+
+    @app.get("/items/{item_id}")
+    def get_item(item_id: str):
+        for summary in _workitem_index():
+            if summary.id == item_id:
+                return jsonable_encoder(summary)
+        raise HTTPException(status_code=404, detail=f"no work item {item_id!r}")
+
     return app
