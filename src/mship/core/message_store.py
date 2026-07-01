@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from mship.core.message import Message, Thread
+from mship.core.message import DecisionPayload, Message, Thread
 
 
 def _new_id(now: datetime) -> str:
@@ -68,12 +68,13 @@ class MessageStore:
         self.save(thread)
 
     def append(self, thread_id: str, role: Literal["human", "agent"], text: str,
-               now: datetime, kind: Literal["note", "needs_you"] = "note") -> Message:
+               now: datetime, kind: Literal["note", "needs_you", "decision"] = "note",
+               decision: DecisionPayload | None = None) -> Message:
         thread = self.get(thread_id)
         if thread is None:
             raise KeyError(thread_id)
         msg = Message(id=_new_id(now), thread_id=thread_id, role=role, text=text,
-                      created_at=now, kind=kind)
+                      created_at=now, kind=kind, decision=decision)
         thread.messages.append(msg)
         thread.updated_at = now
         self.save(thread)
