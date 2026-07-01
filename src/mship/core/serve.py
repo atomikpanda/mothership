@@ -384,4 +384,39 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
         return t.model_dump(mode="json")
 
+    # --- work items (phase-aware cockpit spine) ---
+    from mship.core.workitem_store import WorkItemStore
+    from mship.core.view.workitem_index import build_workitem_index
+
+    workitems = WorkItemStore(workspace_root / ".mothership" / "workitems")
+
+    def _workitem_index():
+        return build_workitem_index(
+            workitems.list(),
+            {s.id: s for s in store.list()},
+            dict(state_manager.load().tasks),
+            {t.id: t for t in msgs.list()},
+        )
+
+    @app.get("/items")
+    def list_items():
+        return jsonable_encoder(_workitem_index())
+
+    @app.get("/items/{item_id}")
+    def get_item(item_id: str):
+        wi = workitems.get(item_id)
+        if wi is None:
+            raise HTTPException(status_code=404, detail=f"no work item {item_id!r}")
+        # Summarize just this item via per-id child lookups (no full list() scans),
+        # mirroring the direct-get short-circuit of GET /threads/{id}, /specs/{id}.
+        spec = store.find_by_id(wi.spec_id) if wi.spec_id else None
+        tasks = state_manager.load().tasks
+        summary = build_workitem_index(
+            [wi],
+            {spec.id: spec} if spec else {},
+            {s: tasks[s] for s in wi.task_slugs if s in tasks},
+            {tid: t for tid in wi.thread_ids if (t := msgs.get(tid))},
+        )[0]
+        return jsonable_encoder(summary)
+
     return app

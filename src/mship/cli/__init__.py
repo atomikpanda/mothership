@@ -139,6 +139,7 @@ from mship.cli import serve as _serve_mod
 from mship.cli import sync as _sync_mod
 from mship.cli import view as _view_mod
 from mship.cli import worktree as _worktree_mod
+from mship.cli import workitem as _workitem_mod
 
 def _should_silent_exit(argv: list[str]) -> bool:
     """True if argv is invoking an unknown `_`-prefixed internal command.
@@ -197,3 +198,4 @@ _serve_mod.register(app, get_container)
 _sync_mod.register(app, get_container)
 _view_mod.register(app, get_container)
 _worktree_mod.register(app, get_container)
+_workitem_mod.register(app, get_container)

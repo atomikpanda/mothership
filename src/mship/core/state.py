@@ -42,6 +42,7 @@ class Task(BaseModel):
     passive_repos: set[str] = set()
     spec_id: str | None = None
     depends_on: list[DependencyEdge] = []
+    work_item_id: str | None = None
 
 
 class WorkspaceState(BaseModel):
