@@ -347,6 +347,7 @@ def create_app(
                 "updated_at": t.updated_at.isoformat(),
                 "awaiting_reply": t.awaiting_reply,
                 "needs_you": t.needs_you,
+                "needs_decision": t.needs_decision,
                 "unseen": t.unseen,
                 "last_message": (t.messages[-1].text[:120] if t.messages else ""),
                 "message_count": len(t.messages),
