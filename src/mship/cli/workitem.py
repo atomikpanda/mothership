@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import json
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import get_args
 
 import typer
 
+from mship.cli.output import Output
 from mship.core.message_store import MessageStore
 from mship.core.spec_store import SPECS_DIRNAME, SpecStore
-from mship.core.workitem import ExternalLink
+from mship.core.workitem import ExternalLink, Kind, Phase
 from mship.core.workitem_store import WorkItemStore
 from mship.core.view.workitem_index import build_workitem_index
 
@@ -33,6 +34,10 @@ def register(parent: typer.Typer, get_container) -> None:
     @item_app.command("new")
     def new(title: str, kind: str = typer.Option("feature", "--kind",
             help="feature | bug | chore | question")):
+        valid_kinds = get_args(Kind)
+        if kind not in valid_kinds:
+            typer.echo(f"invalid kind: {kind!r} (choose from {', '.join(valid_kinds)})", err=True)
+            raise typer.Exit(1)
         items, _, _, _, workspace = _ctx()
         wi = items.create(title=title, kind=kind, workspace=workspace,
                           now=datetime.now(timezone.utc))
@@ -52,7 +57,10 @@ def register(parent: typer.Typer, get_container) -> None:
                  "needs_decision": s.attention.needs_decision,
                  "blocked": s.attention.blocked, "needs_review": s.attention.needs_review}
                 for s in summaries]
-        if sys.stdout.isatty():
+        output = Output()
+        if output.json_mode:
+            typer.echo(json.dumps(rows))
+        else:
             for r in rows:
                 flags = "".join(k[0].upper() for k in
                                 ("needs_approval", "needs_decision", "blocked", "needs_review")
@@ -60,8 +68,6 @@ def register(parent: typer.Typer, get_container) -> None:
                 typer.echo(f"{r['id']}  [{r['phase']}]  {r['title']}  {flags}")
             if not rows:
                 typer.echo("(no work items)")
-        else:
-            typer.echo(json.dumps(rows))
 
     @item_app.command("show")
     def show(item_id: str):
@@ -98,6 +104,10 @@ def register(parent: typer.Typer, get_container) -> None:
 
     @item_app.command("phase")
     def phase(item_id: str, phase: str):
+        valid_phases = get_args(Phase)
+        if phase not in valid_phases:
+            typer.echo(f"invalid phase: {phase!r} (choose from {', '.join(valid_phases)})", err=True)
+            raise typer.Exit(1)
         items, _, _, _, _ = _ctx()
         _guard(items, item_id)
         items.set_phase_override(item_id, phase, now=datetime.now(timezone.utc))

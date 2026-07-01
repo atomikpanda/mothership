@@ -51,3 +51,25 @@ def test_link_missing_item_raises(tmp_path):
     store = WorkItemStore(tmp_path / "workitems")
     with pytest.raises(KeyError):
         store.link_spec("nope", "spec-1")
+
+
+def test_redundant_add_task_does_not_bump_updated_at(tmp_path):
+    store = WorkItemStore(tmp_path / "workitems")
+    wi = store.create(title="t", kind="feature", workspace="ws", now=_now())
+    store.add_task(wi.id, "task-a", now=_now())
+    later = datetime(2026, 6, 30, 13, 0, tzinfo=timezone.utc)
+    store.add_task(wi.id, "task-a", now=later)  # already present: no-op
+    got = store.get(wi.id)
+    assert got.task_slugs == ["task-a"]
+    assert got.updated_at == _now()
+
+
+def test_redundant_add_thread_does_not_bump_updated_at(tmp_path):
+    store = WorkItemStore(tmp_path / "workitems")
+    wi = store.create(title="t", kind="feature", workspace="ws", now=_now())
+    store.add_thread(wi.id, "thread-x", now=_now())
+    later = datetime(2026, 6, 30, 13, 0, tzinfo=timezone.utc)
+    store.add_thread(wi.id, "thread-x", now=later)  # already present: no-op
+    got = store.get(wi.id)
+    assert got.thread_ids == ["thread-x"]
+    assert got.updated_at == _now()

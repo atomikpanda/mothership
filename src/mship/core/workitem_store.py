@@ -69,15 +69,25 @@ class WorkItemStore:
         self.save(item)
 
     def add_task(self, item_id: str, task_slug: str, now: datetime | None = None) -> None:
-        item = self._mutate(item_id, now)
-        if task_slug not in item.task_slugs:
-            item.task_slugs.append(task_slug)
+        item = self.get(item_id)
+        if item is None:
+            raise KeyError(item_id)
+        if task_slug in item.task_slugs:
+            return
+        item.task_slugs.append(task_slug)
+        if now is not None:
+            item.updated_at = now
         self.save(item)
 
     def add_thread(self, item_id: str, thread_id: str, now: datetime | None = None) -> None:
-        item = self._mutate(item_id, now)
-        if thread_id not in item.thread_ids:
-            item.thread_ids.append(thread_id)
+        item = self.get(item_id)
+        if item is None:
+            raise KeyError(item_id)
+        if thread_id in item.thread_ids:
+            return
+        item.thread_ids.append(thread_id)
+        if now is not None:
+            item.updated_at = now
         self.save(item)
 
     def add_external_link(self, item_id: str, link: ExternalLink, now: datetime | None = None) -> None:

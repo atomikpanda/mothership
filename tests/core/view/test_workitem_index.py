@@ -51,7 +51,9 @@ def test_spec_status_maps_to_phase():
     assert compute_phase(_wi(), _spec("captured"), []) == "inbox"
     assert compute_phase(_wi(), _spec("drafting"), []) == "shaping"
     assert compute_phase(_wi(), _spec("needs_review"), []) == "shaping"
+    assert compute_phase(_wi(), _spec("needs_clarification"), []) == "shaping"
     assert compute_phase(_wi(), _spec("approved"), []) == "ready"
+    assert compute_phase(_wi(), _spec("dispatched"), []) == "in_flight"
     assert compute_phase(_wi(), _spec("implemented"), []) == "done"
     assert compute_phase(_wi(), _spec("archived"), []) == "done"
 

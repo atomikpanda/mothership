@@ -1,4 +1,3 @@
-# src/mship/core/workitem.py
 from __future__ import annotations
 
 from datetime import datetime
