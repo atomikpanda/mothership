@@ -9,11 +9,10 @@ from mship.core.workitem_store import WorkItemStore
 
 
 def wrap_existing(items: WorkItemStore, specs: SpecStore, state: StateManager,
-                  msgs: MessageStore, now: datetime) -> list[str]:
+                  msgs: MessageStore, now: datetime, workspace: str) -> list[str]:
     """Idempotently wrap every spec/task lacking a work_item_id in a WorkItem.
     Returns the ids of newly created items."""
     created: list[str] = []
-    workspace = "mothership"
 
     state_now = state.load()
     task_by_slug = dict(state_now.tasks)

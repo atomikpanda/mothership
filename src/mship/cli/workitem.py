@@ -106,8 +106,9 @@ def register(parent: typer.Typer, get_container) -> None:
     @item_app.command("migrate")
     def migrate():
         from mship.core.workitem_migrate import wrap_existing
-        items, specs, state_manager, msgs, _ = _ctx()
-        created = wrap_existing(items, specs, state_manager, msgs, now=datetime.now(timezone.utc))
+        items, specs, state_manager, msgs, workspace = _ctx()
+        created = wrap_existing(items, specs, state_manager, msgs,
+                                now=datetime.now(timezone.utc), workspace=workspace)
         typer.echo(f"created {len(created)} work item(s)")
 
     def _guard(items: WorkItemStore, item_id: str) -> None:
