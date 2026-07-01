@@ -95,6 +95,33 @@ def register(parent: typer.Typer, get_container) -> None:
         typer.echo(f"replied to {thread_id}")
 
     @parent.command()
+    def ask(
+        thread_id: str,
+        question: str,
+        option: list[str] = typer.Option(..., "--option", help="A choice (repeat for each; >=2)."),
+        recommend: int = typer.Option(None, "--recommend", help="0-based index of the recommended option."),
+        no_free_text: bool = typer.Option(False, "--no-free-text", help="Disallow a free-text reply."),
+    ) -> None:
+        """Post an agent DECISION: a question + tappable options (surfaces as a decision card)."""
+        from mship.core.message import DecisionPayload
+        if len(option) < 2:
+            typer.echo("a decision needs at least two --option values", err=True)
+            raise typer.Exit(2)
+        if recommend is not None and not (0 <= recommend < len(option)):
+            typer.echo(f"--recommend {recommend} out of range for {len(option)} options", err=True)
+            raise typer.Exit(2)
+        store = _store()
+        try:
+            store.append(thread_id, "agent", question, datetime.now(timezone.utc),
+                         kind="decision",
+                         decision=DecisionPayload(options=option, recommended=recommend,
+                                                  allow_free_text=not no_free_text))
+        except KeyError:
+            typer.echo(f"no thread {thread_id!r}", err=True)
+            raise typer.Exit(1)
+        typer.echo(f"asked {thread_id}: {len(option)} options")
+
+    @parent.command()
     def messages(thread_id: str) -> None:
         """Print a thread's conversation in order."""
         store = _store()

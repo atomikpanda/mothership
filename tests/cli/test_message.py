@@ -94,3 +94,56 @@ def test_reply_defaults_to_note(_configured):
     got = s.get(t.id)
     assert got.messages[-1].kind == "note"
     assert got.needs_you is False
+
+
+def test_ask_emits_decision(_configured):
+    s = _seed(_configured)
+    now = datetime(2026, 6, 23, tzinfo=timezone.utc)
+    t = s.create_thread(subject="x", text="q", now=now)
+    r = runner.invoke(app, ["ask", t.id, "How to store?",
+                            "--option", "File-per-thread", "--option", "SQLite",
+                            "--recommend", "0"])
+    assert r.exit_code == 0, r.output
+    got = s.get(t.id)
+    last = got.messages[-1]
+    assert last.role == "agent"
+    assert last.kind == "decision"
+    assert last.decision.options == ["File-per-thread", "SQLite"]
+    assert last.decision.recommended == 0
+    assert last.decision.allow_free_text is True
+    assert got.needs_decision is True
+
+
+def test_ask_requires_at_least_two_options(_configured):
+    s = _seed(_configured)
+    now = datetime(2026, 6, 23, tzinfo=timezone.utc)
+    t = s.create_thread(subject="x", text="q", now=now)
+    r = runner.invoke(app, ["ask", t.id, "How to store?", "--option", "only-one"])
+    assert r.exit_code != 0
+    assert s.get(t.id).messages[-1].kind != "decision"
+
+
+def test_ask_recommend_out_of_range_errors(_configured):
+    s = _seed(_configured)
+    now = datetime(2026, 6, 23, tzinfo=timezone.utc)
+    t = s.create_thread(subject="x", text="q", now=now)
+    r = runner.invoke(app, ["ask", t.id, "How to store?",
+                            "--option", "a", "--option", "b", "--recommend", "5"])
+    assert r.exit_code != 0
+    assert s.get(t.id).messages[-1].kind != "decision"
+
+
+def test_ask_no_free_text(_configured):
+    s = _seed(_configured)
+    now = datetime(2026, 6, 23, tzinfo=timezone.utc)
+    t = s.create_thread(subject="x", text="q", now=now)
+    r = runner.invoke(app, ["ask", t.id, "How to store?",
+                            "--option", "a", "--option", "b", "--no-free-text"])
+    assert r.exit_code == 0, r.output
+    got = s.get(t.id)
+    assert got.messages[-1].decision.allow_free_text is False
+
+
+def test_ask_unknown_thread_errors(_configured):
+    r = runner.invoke(app, ["ask", "nope", "q", "--option", "a", "--option", "b"])
+    assert r.exit_code != 0
