@@ -1,5 +1,8 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
+from pydantic import ValidationError
+
 from mship.core.message import DecisionPayload, Message, Thread
 
 BASE = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
@@ -103,3 +106,15 @@ def test_needs_decision_false_after_human_reply():
                 messages=[_dm("agent", "decision", "pick", DecisionPayload(options=["a", "b"])),
                           _dm("human", "note", "a")])
     assert th.needs_decision is False
+
+
+def test_decision_kind_requires_decision_payload():
+    with pytest.raises(ValidationError):
+        _dm("agent", "decision", "pick", decision=None)
+
+
+def test_decision_kind_with_payload_still_constructs():
+    d = DecisionPayload(options=["a", "b"])
+    m = _dm("agent", "decision", "pick", decision=d)
+    assert m.kind == "decision"
+    assert m.decision is d

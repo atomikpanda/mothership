@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, computed_field
+from pydantic import BaseModel, computed_field, model_validator
 
 
 class DecisionPayload(BaseModel):
@@ -24,6 +24,12 @@ class Message(BaseModel):
     # DecisionPayload / Thread.needs_decision). Default "note".
     kind: Literal["note", "needs_you", "decision"] = "note"
     decision: DecisionPayload | None = None
+
+    @model_validator(mode="after")
+    def decision_kind_requires_payload(self) -> "Message":
+        if self.kind == "decision" and self.decision is None:
+            raise ValueError("kind='decision' requires a decision payload")
+        return self
 
 
 class Thread(BaseModel):
