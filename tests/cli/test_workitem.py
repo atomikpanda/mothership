@@ -57,3 +57,18 @@ def test_phase_with_invalid_value_errors_cleanly(tmp_path):
         container.config_path.reset_override()
         container.state_dir.reset_override()
         container.config.reset()
+
+
+def test_link_url_with_invalid_provider_errors_cleanly(tmp_path):
+    _isolate(tmp_path)
+    try:
+        res = runner.invoke(app, ["item", "new", "Title", "--kind", "feature"])
+        assert res.exit_code == 0, res.output
+        item_id = res.output.strip()
+        res = runner.invoke(app, ["item", "link-url", item_id, "https://x", "--provider", "slack"])
+        assert res.exit_code == 1
+        assert "invalid provider" in res.output
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()

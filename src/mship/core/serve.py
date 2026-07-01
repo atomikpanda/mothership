@@ -404,9 +404,19 @@ def create_app(
 
     @app.get("/items/{item_id}")
     def get_item(item_id: str):
-        for summary in _workitem_index():
-            if summary.id == item_id:
-                return jsonable_encoder(summary)
-        raise HTTPException(status_code=404, detail=f"no work item {item_id!r}")
+        wi = workitems.get(item_id)
+        if wi is None:
+            raise HTTPException(status_code=404, detail=f"no work item {item_id!r}")
+        # Summarize just this item via per-id child lookups (no full list() scans),
+        # mirroring the direct-get short-circuit of GET /threads/{id}, /specs/{id}.
+        spec = store.find_by_id(wi.spec_id) if wi.spec_id else None
+        tasks = state_manager.load().tasks
+        summary = build_workitem_index(
+            [wi],
+            {spec.id: spec} if spec else {},
+            {s: tasks[s] for s in wi.task_slugs if s in tasks},
+            {tid: t for tid in wi.thread_ids if (t := msgs.get(tid))},
+        )[0]
+        return jsonable_encoder(summary)
 
     return app

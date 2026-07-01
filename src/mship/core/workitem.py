@@ -7,12 +7,13 @@ from pydantic import BaseModel
 
 Kind = Literal["feature", "bug", "chore", "question"]
 Phase = Literal["inbox", "shaping", "ready", "in_flight", "review", "done"]
+Provider = Literal["github", "linear", "notion", "jira", "url"]
 
 PHASE_ORDER: tuple[Phase, ...] = ("inbox", "shaping", "ready", "in_flight", "review", "done")
 
 
 class ExternalLink(BaseModel):
-    provider: Literal["github", "linear", "notion", "jira", "url"]
+    provider: Provider
     url: str
     title: str = ""
 

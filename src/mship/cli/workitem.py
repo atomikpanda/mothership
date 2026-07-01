@@ -10,7 +10,7 @@ import typer
 from mship.cli.output import Output
 from mship.core.message_store import MessageStore
 from mship.core.spec_store import SPECS_DIRNAME, SpecStore
-from mship.core.workitem import ExternalLink, Kind, Phase
+from mship.core.workitem import ExternalLink, Kind, Phase, Provider
 from mship.core.workitem_store import WorkItemStore
 from mship.core.view.workitem_index import build_workitem_index
 
@@ -96,6 +96,10 @@ def register(parent: typer.Typer, get_container) -> None:
     def link_url(item_id: str, url: str,
                  provider: str = typer.Option("url", "--provider"),
                  title: str = typer.Option("", "--title")):
+        valid_providers = get_args(Provider)
+        if provider not in valid_providers:
+            typer.echo(f"invalid provider: {provider!r} (choose from {', '.join(valid_providers)})", err=True)
+            raise typer.Exit(1)
         items, _, _, _, _ = _ctx()
         _guard(items, item_id)
         items.add_external_link(item_id, ExternalLink(provider=provider, url=url, title=title),

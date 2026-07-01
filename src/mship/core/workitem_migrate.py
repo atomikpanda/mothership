@@ -49,8 +49,9 @@ def wrap_existing(items: WorkItemStore, specs: SpecStore, state: StateManager,
         state.mutate(_set)
 
     # 3) Threads -> attach to the item their spec/task already belongs to.
-    item_by_spec = {w.spec_id: w.id for w in items.list() if w.spec_id}
-    item_by_task = {slug: w.id for w in items.list() for slug in w.task_slugs}
+    all_items = items.list()
+    item_by_spec = {w.spec_id: w.id for w in all_items if w.spec_id}
+    item_by_task = {slug: w.id for w in all_items for slug in w.task_slugs}
     for thread in msgs.list():
         target = (item_by_spec.get(thread.spec_id) if thread.spec_id else None) \
             or (item_by_task.get(thread.task_slug) if thread.task_slug else None)
