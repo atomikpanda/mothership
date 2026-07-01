@@ -105,6 +105,17 @@ def test_needs_decision_from_thread_needs_you():
     assert compute_attention(None, [], [_thread(needs_you=False)]).needs_decision is False
 
 
+def test_attention_needs_decision_from_a_real_decision():
+    from mship.core.message import DecisionPayload, Message, Thread
+    from datetime import datetime, timezone
+    now = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    th = Thread(id="t1", subject="s", created_at=now, updated_at=now,
+                messages=[Message(id="m", thread_id="t1", role="agent", text="?", created_at=now,
+                                  kind="decision", decision=DecisionPayload(options=["a", "b"]))])
+    att = compute_attention(None, [], [th])
+    assert att.needs_decision is True
+
+
 def test_build_index_populates_phase_and_attention():
     item = _wi(id="wi-1", spec_id="s", task_slugs=["s1"], thread_ids=["t1"])
     summaries = build_workitem_index(
