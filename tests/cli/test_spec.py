@@ -173,7 +173,9 @@ def test_gate_dev_satisfied_by_blessed_path(tmp_path: Path):
         mgr, MagicMock(spec=LogManager),
         config=config, workspace_root=tmp_path,
     )
-    result = pm.transition("add-labels", "dev")
+    # Task has no WorkItem; bypass the (unrelated) WorkItem gate to isolate
+    # the blessed-spec-path warning behavior under test.
+    result = pm.transition("add-labels", "dev", bypass_spec_gate=True)
     assert not any("spec" in w.lower() for w in result.warnings), result.warnings
 
 
@@ -237,7 +239,9 @@ def test_gate_dev_hint_mentions_spec_new(tmp_path: Path):
         mgr, MagicMock(spec=LogManager),
         config=config, workspace_root=tmp_path,
     )
-    result = pm.transition("add-labels", "dev")
+    # Task has no WorkItem; bypass the (unrelated) WorkItem gate to isolate
+    # the missing-spec warning hint under test.
+    result = pm.transition("add-labels", "dev", bypass_spec_gate=True)
     spec_warn = next((w for w in result.warnings if "spec" in w.lower()), None)
     assert spec_warn is not None, result.warnings
     assert "mship spec new" in spec_warn

@@ -53,7 +53,9 @@ def _parse_json_or_skip(text: str) -> dict:
 
 
 def test_phase_emits_resolution_fields(ws_with_task: Path):
-    result = runner.invoke(app, ["phase", "dev", "--task", "breadcrumb-test"])
+    # Task was spawned with --hotfix (no WorkItem); phase→dev needs its own
+    # bypass now that the WorkItem gate is checked there too.
+    result = runner.invoke(app, ["phase", "dev", "--task", "breadcrumb-test", "--bypass-spec-gate"])
     assert result.exit_code == 0, result.output
     payload = _parse_json_or_skip(result.output)
     assert payload.get("resolved_task") == "breadcrumb-test"

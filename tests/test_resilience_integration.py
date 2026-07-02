@@ -59,7 +59,9 @@ def test_agent_resilience_lifecycle(full_workspace: Path):
     assert result.exit_code == 0
 
     # 3. Phase to dev
-    result = runner.invoke(app, ["phase", "dev", "--task", slug])
+    # Task was spawned with --hotfix (no WorkItem); phase→dev needs its own
+    # bypass now that the WorkItem gate is checked there too.
+    result = runner.invoke(app, ["phase", "dev", "--task", slug, "--bypass-spec-gate"])
     assert result.exit_code == 0
 
     # 4. Block

@@ -62,7 +62,9 @@ def test_full_lifecycle(full_workspace: Path):
     assert "plan" in result.output
 
     # 3. Transition to dev
-    result = runner.invoke(app, ["phase", "dev", "--task", "add-labels"])
+    # Task was spawned with --hotfix (no WorkItem); phase→dev needs its own
+    # bypass now that the WorkItem gate is checked there too.
+    result = runner.invoke(app, ["phase", "dev", "--task", "add-labels", "--bypass-spec-gate"])
     assert result.exit_code == 0
 
     # 4. Check status shows dev
