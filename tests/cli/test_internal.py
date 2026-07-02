@@ -142,11 +142,34 @@ def _push(branch, sha="a" * 40):
     return f"refs/heads/{branch} {sha} refs/heads/{branch} {'0'*40}\n"
 
 
+_KNOWN_WORK_ITEM_ID = "wi-test-known"
+
+# A bug WorkItem is attached (via `work_item_id:`) so `known` clears the
+# WorkItem gate (core/workitem_gate.py::check_task_gate) without needing an
+# approved spec — see spec workitem-mandatory-kind-gated-approval, task 5/6.
 _TASK_YAML = (
+    "tasks:\n  known:\n    slug: known\n    description: d\n    phase: dev\n"
+    "    created_at: 2026-01-01T00:00:00+00:00\n    affected_repos: [lib]\n"
+    "    branch: feat/known\n    work_item_id: wi-test-known\n"
+)
+
+# Same task, but with no WorkItem at all — for the WorkItem-gate tests below.
+_TASK_YAML_NO_WORKITEM = (
     "tasks:\n  known:\n    slug: known\n    description: d\n    phase: dev\n"
     "    created_at: 2026-01-01T00:00:00+00:00\n    affected_repos: [lib]\n"
     "    branch: feat/known\n"
 )
+
+
+def _seed_bug_workitem(state_dir, item_id: str = _KNOWN_WORK_ITEM_ID) -> None:
+    from datetime import datetime, timezone
+    from mship.core.workitem import WorkItem
+    from mship.core.workitem_store import WorkItemStore
+    now = datetime.now(timezone.utc)
+    WorkItemStore(state_dir / "workitems").save(
+        WorkItem(id=item_id, title="t", workspace="w", kind="bug",
+                 created_at=now, updated_at=now)
+    )
 
 
 def test_check_push_rejects_unregistered_feat_branch(tmp_path, monkeypatch):
@@ -160,6 +183,7 @@ def test_check_push_rejects_unregistered_feat_branch(tmp_path, monkeypatch):
 
 def test_check_push_allows_registered_task_branch(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch, tasks_yaml=_TASK_YAML)
+    _seed_bug_workitem(tmp_path / ".mothership")
     try:
         r = runner.invoke(app, ["_check-push"], input=_push("feat/known"))
         assert r.exit_code == 0
@@ -223,6 +247,36 @@ def test_check_push_dedupes_repeated_branch(tmp_path, monkeypatch):
         assert r.exit_code == 0
         lines = (tmp_path / ".mothership" / "bypass-log.jsonl").read_text().splitlines()
         assert sum(1 for ln in lines if "feat/x" in ln) == 1
+    finally:
+        _reset()
+
+
+# ---------------------------------------------------------------------------
+# WorkItem gate (task 5/6): pushing a REGISTERED task branch is still refused
+# when that task has no WorkItem — core/workitem_gate.py::check_task_gate.
+# MSHIP_BYPASS_GATE is the hotfix escape (same env var used for the
+# unregistered-branch case above, and logged the same way).
+# ---------------------------------------------------------------------------
+
+def test_check_push_refuses_registered_branch_without_workitem(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch, tasks_yaml=_TASK_YAML_NO_WORKITEM)
+    try:
+        r = runner.invoke(app, ["_check-push"], input=_push("feat/known"))
+        assert r.exit_code == 1
+        assert "WorkItem" in r.output or "WorkItem" in (r.stderr or "")
+    finally:
+        _reset()
+
+
+def test_check_push_bypass_allows_registered_branch_without_workitem(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch, tasks_yaml=_TASK_YAML_NO_WORKITEM)
+    monkeypatch.setenv("MSHIP_BYPASS_GATE", "intentional")
+    try:
+        r = runner.invoke(app, ["_check-push"], input=_push("feat/known"))
+        assert r.exit_code == 0
+        log = tmp_path / ".mothership" / "bypass-log.jsonl"
+        assert log.exists() and "intentional" in log.read_text()
+        assert "feat/known" in log.read_text()
     finally:
         _reset()
 

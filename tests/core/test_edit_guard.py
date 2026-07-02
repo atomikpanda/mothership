@@ -139,3 +139,115 @@ def test_multi_task_allows_edit_inside_one_of_the_worktrees(tmp_path: Path):
                     affected_repos=["repo"], worktrees={"repo": wt}, branch=f"feat/{slug}")
     state = WorkspaceState(tasks={"t1": _t("t1", wt1), "t2": _t("t2", wt2)})
     assert evaluate_edit(wt2 / "src" / "x.py", state, cfg).allowed is True
+
+
+# ---------------------------------------------------------------------------
+# WorkItem gate: an edit inside the task's OWN worktree is the legitimate
+# location, but must still carry a WorkItem (feature ⇒ approved spec) — see
+# core/workitem_gate.py::check_task_gate and spec
+# workitem-mandatory-kind-gated-approval, task 5/6. Only enforced when the
+# caller supplies `workspace_root` (production always does, via
+# `_guard-edit`); omitting it (as every test above does) preserves the old,
+# location-only behavior so those tests are unaffected.
+# ---------------------------------------------------------------------------
+
+def _workitem(workspace_root: Path, *, kind: str = "bug", spec_approved: bool = False):
+    from mship.core.workitem_store import WorkItemStore
+    items = WorkItemStore(workspace_root / ".mothership" / "workitems")
+    wi = items.create(title="thing", kind=kind, workspace="ws",
+                       now=datetime.now(timezone.utc))
+    if spec_approved:
+        from mship.core.spec import Spec
+        from mship.core.spec_store import SpecStore
+        specs = SpecStore(workspace_root / "specs")
+        now = datetime.now(timezone.utc)
+        specs.save(Spec(id="spec-1", title="Spec", status="approved",
+                        created_at=now, updated_at=now))
+        items.link_spec(wi.id, "spec-1", now=now)
+    return wi
+
+
+def test_blocks_worktree_edit_when_task_has_no_workitem(tmp_path: Path):
+    main, wt = _layout(tmp_path)
+    cfg = _Config({"repo": main})
+    state = _state("t", "repo", wt)
+    d = evaluate_edit(wt / "src" / "x.py", state, cfg, workspace_root=tmp_path)
+    assert d.allowed is False
+    assert "WorkItem" in d.reason
+    assert "MSHIP_BYPASS_GATE" in d.reason
+
+
+def test_allows_worktree_edit_when_task_has_bug_workitem(tmp_path: Path):
+    """bug/chore/question WorkItems satisfy the gate without any spec."""
+    main, wt = _layout(tmp_path)
+    cfg = _Config({"repo": main})
+    wi = _workitem(tmp_path, kind="bug")
+    t = Task(slug="t", description="d", phase="dev",
+             created_at=datetime.now(timezone.utc),
+             affected_repos=["repo"], worktrees={"repo": wt}, branch="feat/t",
+             work_item_id=wi.id)
+    state = WorkspaceState(tasks={"t": t})
+    assert evaluate_edit(wt / "src" / "x.py", state, cfg, workspace_root=tmp_path).allowed is True
+
+
+def test_blocks_worktree_edit_when_feature_workitem_has_no_approved_spec(tmp_path: Path):
+    main, wt = _layout(tmp_path)
+    cfg = _Config({"repo": main})
+    wi = _workitem(tmp_path, kind="feature")
+    t = Task(slug="t", description="d", phase="dev",
+             created_at=datetime.now(timezone.utc),
+             affected_repos=["repo"], worktrees={"repo": wt}, branch="feat/t",
+             work_item_id=wi.id)
+    state = WorkspaceState(tasks={"t": t})
+    d = evaluate_edit(wt / "src" / "x.py", state, cfg, workspace_root=tmp_path)
+    assert d.allowed is False
+    assert "approved spec" in d.reason
+
+
+def test_allows_worktree_edit_when_feature_workitem_has_approved_spec(tmp_path: Path):
+    main, wt = _layout(tmp_path)
+    cfg = _Config({"repo": main})
+    wi = _workitem(tmp_path, kind="feature", spec_approved=True)
+    t = Task(slug="t", description="d", phase="dev",
+             created_at=datetime.now(timezone.utc),
+             affected_repos=["repo"], worktrees={"repo": wt}, branch="feat/t",
+             work_item_id=wi.id)
+    state = WorkspaceState(tasks={"t": t})
+    assert evaluate_edit(wt / "src" / "x.py", state, cfg, workspace_root=tmp_path).allowed is True
+
+
+def test_bypass_workitem_gate_allows_edit_without_workitem(tmp_path: Path):
+    main, wt = _layout(tmp_path)
+    cfg = _Config({"repo": main})
+    state = _state("t", "repo", wt)
+    d = evaluate_edit(
+        wt / "src" / "x.py", state, cfg,
+        workspace_root=tmp_path, bypass_workitem_gate=True,
+    )
+    assert d.allowed is True
+
+
+def test_omitting_workspace_root_skips_workitem_gate(tmp_path: Path):
+    """Callers that don't pass workspace_root (e.g. every other test in this
+    file) keep the old, location-only behavior — the WorkItem gate is opt-in
+    via the new parameter, not a silent breaking change."""
+    main, wt = _layout(tmp_path)
+    cfg = _Config({"repo": main})
+    state = _state("t", "repo", wt)
+    assert evaluate_edit(wt / "src" / "x.py", state, cfg).allowed is True
+
+
+def test_fails_open_when_workitem_store_is_corrupt(tmp_path: Path):
+    """A malformed WorkItem gate lookup must never block an edit — fail OPEN."""
+    main, wt = _layout(tmp_path)
+    cfg = _Config({"repo": main})
+    wi_dir = tmp_path / ".mothership" / "workitems"
+    wi_dir.mkdir(parents=True)
+    t = Task(slug="t", description="d", phase="dev",
+             created_at=datetime.now(timezone.utc),
+             affected_repos=["repo"], worktrees={"repo": wt}, branch="feat/t",
+             work_item_id="does-not-exist")
+    (wi_dir / "does-not-exist.json").write_text("not valid json{{{")
+    state = WorkspaceState(tasks={"t": t})
+    d = evaluate_edit(wt / "src" / "x.py", state, cfg, workspace_root=tmp_path)
+    assert d.allowed is True

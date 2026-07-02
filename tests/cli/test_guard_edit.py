@@ -14,17 +14,25 @@ runner = CliRunner()
 
 
 def _bootstrap(tmp_path: Path) -> tuple[Path, Path, Path]:
-    """Workspace with one active task; returns (cfg, state_dir, main_repo)."""
+    """Workspace with one active task (linked to a bug WorkItem, so it clears
+    the WorkItem gate without needing an approved spec); returns
+    (cfg, state_dir, main_repo)."""
+    from mship.core.workitem_store import WorkItemStore
+
     main = tmp_path / "main"; (main / "src").mkdir(parents=True)
     (main / "Taskfile.yml").write_text("version: '3'\n")
     wt = tmp_path / ".worktrees" / "t" / "repo"; (wt / "src").mkdir(parents=True)
     state_dir = tmp_path / ".mothership"; state_dir.mkdir()
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text(f"workspace: t\nrepos:\n  repo:\n    path: {main}\n    type: library\n")
+    wi = WorkItemStore(state_dir / "workitems").create(
+        title="thing", kind="bug", workspace="t", now=datetime.now(timezone.utc),
+    )
     task = Task(
         slug="t", description="d", phase="dev",
         created_at=datetime.now(timezone.utc),
         affected_repos=["repo"], worktrees={"repo": wt}, branch="feat/t",
+        work_item_id=wi.id,
     )
     StateManager(state_dir).save(WorkspaceState(tasks={"t": task}))
     return cfg, state_dir, main
@@ -100,5 +108,67 @@ def test_no_file_path_fails_open(tmp_path: Path):
     try:
         result = runner.invoke(app, ["_guard-edit"], input=json.dumps({"tool_input": {}}))
         assert result.exit_code == 0
+    finally:
+        _reset()
+
+
+# ---------------------------------------------------------------------------
+# WorkItem gate (task 5/6): an edit inside the task's OWN worktree is still
+# blocked if the task fails core/workitem_gate.py::check_task_gate (no
+# WorkItem, or a feature WorkItem without an approved spec). MSHIP_BYPASS_GATE
+# is the hotfix escape — distinct from MSHIP_ALLOW_MAIN_EDIT above.
+# ---------------------------------------------------------------------------
+
+def _bootstrap_no_workitem(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Like _bootstrap, but the task has no WorkItem at all."""
+    main = tmp_path / "main"; (main / "src").mkdir(parents=True)
+    (main / "Taskfile.yml").write_text("version: '3'\n")
+    wt = tmp_path / ".worktrees" / "t" / "repo"; (wt / "src").mkdir(parents=True)
+    state_dir = tmp_path / ".mothership"; state_dir.mkdir()
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(f"workspace: t\nrepos:\n  repo:\n    path: {main}\n    type: library\n")
+    task = Task(
+        slug="t", description="d", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["repo"], worktrees={"repo": wt}, branch="feat/t",
+    )
+    StateManager(state_dir).save(WorkspaceState(tasks={"t": task}))
+    return cfg, state_dir, main
+
+
+def test_blocks_worktree_edit_when_task_has_no_workitem(tmp_path: Path):
+    cfg, state_dir, _ = _bootstrap_no_workitem(tmp_path)
+    wt_file = tmp_path / ".worktrees" / "t" / "repo" / "src" / "x.py"
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["_guard-edit"], input=_event(wt_file))
+        assert result.exit_code == 2
+        assert "WorkItem" in result.stderr
+    finally:
+        _reset()
+
+
+def test_bypass_gate_env_allows_worktree_edit_without_workitem(tmp_path: Path, monkeypatch):
+    cfg, state_dir, _ = _bootstrap_no_workitem(tmp_path)
+    wt_file = tmp_path / ".worktrees" / "t" / "repo" / "src" / "x.py"
+    monkeypatch.setenv("MSHIP_BYPASS_GATE", "1")
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["_guard-edit"], input=_event(wt_file))
+        assert result.exit_code == 0
+    finally:
+        _reset()
+
+
+def test_bypass_gate_does_not_lift_main_checkout_block(tmp_path: Path, monkeypatch):
+    """MSHIP_BYPASS_GATE is the WorkItem-gate escape only — it must not also
+    reopen the (separately-gated) main-checkout block."""
+    cfg, state_dir, main = _bootstrap_no_workitem(tmp_path)
+    monkeypatch.setenv("MSHIP_BYPASS_GATE", "1")
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["_guard-edit"], input=_event(main / "src" / "x.py"))
+        assert result.exit_code == 2
+        assert "MAIN checkout" in result.stderr
     finally:
         _reset()
