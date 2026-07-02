@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time as _time
 from pathlib import Path
 from typing import Optional
@@ -390,6 +391,11 @@ def create_app(
     from mship.core.view.workitem_index import build_workitem_index
 
     workitems = WorkItemStore(workspace_root / ".mothership" / "workitems")
+    # Serializes the lazy read-decide-create-link in POST /items/{id}/messages. Sync
+    # endpoints run in Starlette's threadpool, so two concurrent first-steers on a
+    # threadless item could otherwise both create a thread (orphaning one message) or
+    # lose the add_thread update. threading.Lock is the right primitive for that pool.
+    _item_msg_lock = threading.Lock()
 
     def _workitem_index():
         return build_workitem_index(
@@ -419,5 +425,38 @@ def create_app(
             {tid: t for tid in wi.thread_ids if (t := msgs.get(tid))},
         )[0]
         return jsonable_encoder(summary)
+
+    @app.post("/items/{item_id}/messages")
+    def post_item_message(item_id: str, body: NewMessageBody):
+        """Steer a work item: append a human message to its conversation thread,
+        lazily creating+linking a thread the first time. In-flight items created
+        from specs/tasks have no thread yet, so posting to POST /threads/{id} has
+        nothing to target — the phone would silently drop the message. Item id is
+        always present, so this is the send path the console uses. Returns the
+        thread, mirroring POST /threads/{thread_id}/messages. The read-decide-create
+        section is serialized (_item_msg_lock) so concurrent first-steers can't each
+        create a thread and orphan a message."""
+        now = datetime.now(timezone.utc)
+        with _item_msg_lock:
+            wi = workitems.get(item_id)
+            if wi is None:
+                raise HTTPException(status_code=404, detail=f"no work item {item_id!r}")
+            tid = wi.thread_ids[0] if wi.thread_ids else None
+            if tid is None:
+                subject = wi.title.strip() or (
+                    body.text.strip().splitlines()[0][:80] if body.text.strip() else "(no subject)"
+                )
+                task_slug = wi.task_slugs[0] if wi.task_slugs else None
+                thread = msgs.create_thread(subject=subject, text=body.text, now=now, task_slug=task_slug)
+                workitems.add_thread(item_id, thread.id, now=now)
+                return thread.model_dump(mode="json")
+            try:
+                msgs.append(tid, "human", body.text, now)
+            except KeyError:
+                raise HTTPException(status_code=404, detail=f"no thread {tid!r}")
+            t = msgs.get(tid)
+            if t is None:
+                raise HTTPException(status_code=404, detail=f"no thread {tid!r}")
+            return t.model_dump(mode="json")
 
     return app
