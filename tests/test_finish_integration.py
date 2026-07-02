@@ -265,6 +265,53 @@ def test_finish_passes_base_from_config(finish_workspace, tmp_path):
     assert "release/7" in create_calls[0]
 
 
+def test_finish_uses_spawn_base_override(finish_workspace):
+    """`spawn --base <branch>` flows into `gh pr create --base` without repeating it. See #42."""
+    import subprocess
+
+    workspace, mock_shell = finish_workspace
+
+    # A base branch must exist for spawn's preflight; create it at HEAD (no
+    # checkout, so the fixture's untracked Taskfile.yml is left in place).
+    subprocess.run(["git", "branch", "feat/upstream"], cwd=workspace / "shared",
+                   check=True, capture_output=True)
+
+    result = runner.invoke(
+        app, ["spawn", "stacked", "--repos", "shared", "--slug", "stacked",
+              "--base", "feat/upstream", "--skip-setup"],
+    )
+    assert result.exit_code == 0, result.output
+    # The chosen base is recorded on the task, not just used for the cut.
+    assert StateManager(workspace / ".mothership").load().tasks["stacked"].base_override == "feat/upstream"
+
+    call_log: list[str] = []
+
+    def mock_run(cmd, cwd, env=None):
+        call_log.append(cmd)
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "git ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc\trefs/heads/feat/upstream\n", stderr="")
+        if "git rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "git rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://github.com/org/shared/pull/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    # No --base at finish: the base must come from the task's spawn-time override.
+    result = runner.invoke(app, ["finish", "--task", "stacked"])
+    assert result.exit_code == 0, result.output
+
+    create_calls = [c for c in call_log if "gh pr create" in c]
+    assert len(create_calls) == 1
+    assert "--base" in create_calls[0]
+    assert "feat/upstream" in create_calls[0]
+
+
 def test_finish_fails_when_base_missing_on_remote(finish_workspace):
     import yaml
 

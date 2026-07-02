@@ -43,10 +43,16 @@ def resolve_base(
     cli_base: str | None,
     base_map: dict[str, str],
     known_repos: Iterable[str],
+    task_base: str | None = None,
 ) -> str | None:
     """Return the effective base branch for a repo or None for gh default.
 
-    Precedence (most-specific wins): base_map entry > cli_base > repo_config.base_branch > None.
+    Precedence (most-specific wins):
+        base_map entry > cli_base > task_base > repo_config.base_branch > None.
+
+    `task_base` is the base pinned at spawn time via `--base` (Task.base_override,
+    #42); it is None for ordinary tasks, so it never overrides a repo's configured
+    base unless the operator explicitly stacked the task on another branch.
     Raises UnknownRepoInBaseMapError if base_map references a repo not in known_repos.
     """
     known = set(known_repos)
@@ -60,4 +66,6 @@ def resolve_base(
         return base_map[repo_name]
     if cli_base is not None:
         return cli_base
+    if task_base is not None:
+        return task_base
     return getattr(repo_config, "base_branch", None)
