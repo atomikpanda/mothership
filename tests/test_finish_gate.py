@@ -155,3 +155,72 @@ def test_finish_hotfix_warns_and_proceeds_and_logs_bypass(finish_gate_workspace)
         entry["op"] == "finish" and entry["branch"] == "hotfix-finish-task" and entry["reason"] == "hotfix"
         for entry in lines
     ), lines
+
+
+# ---------------------------------------------------------------------------
+# PR review fix: corrupt/unreadable WorkItem store must not raise a raw
+# exception out of `finish` — that would skip the --hotfix rescue entirely.
+# ---------------------------------------------------------------------------
+
+def test_finish_blocks_cleanly_on_corrupt_workitem_store(finish_gate_workspace):
+    """Without --hotfix: a corrupt store degrades to a clean, actionable
+    `output.error` + exit 1 — never a traceback."""
+    workspace, _ = finish_gate_workspace
+    items = WorkItemStore(workspace / ".mothership" / "workitems")
+    wi = items.create(title="add thing", kind="bug", workspace="ws",
+                       now=datetime.now(timezone.utc))
+
+    result = runner.invoke(
+        app, ["spawn", "--work-item", wi.id, "corrupt store task", "--repos", "shared"],
+    )
+    assert result.exit_code == 0, result.output
+
+    # Corrupt the WorkItem's JSON file on disk (spawn already validated it
+    # while it was still well-formed).
+    wi_path = workspace / ".mothership" / "workitems" / f"{wi.id}.json"
+    wi_path.write_text("{not valid json")
+
+    result = runner.invoke(app, ["finish", "--task", "corrupt-store-task"])
+    assert result.exit_code == 1, result.output
+    assert "Cannot finish" in result.output
+    assert "Traceback" not in result.output
+
+    state = StateManager(workspace / ".mothership").load()
+    assert state.tasks["corrupt-store-task"].pr_urls == {}
+
+
+def test_finish_hotfix_survives_corrupt_workitem_store(finish_gate_workspace):
+    """With --hotfix: the gate-evaluation exception is caught and downgraded
+    to a failing GateResult, so the pre-existing --hotfix → warn + proceed
+    path still rescues the task."""
+    workspace, _ = finish_gate_workspace
+    items = WorkItemStore(workspace / ".mothership" / "workitems")
+    wi = items.create(title="add thing", kind="bug", workspace="ws",
+                       now=datetime.now(timezone.utc))
+
+    result = runner.invoke(
+        app, ["spawn", "--work-item", wi.id, "corrupt store hotfix task", "--repos", "shared"],
+    )
+    assert result.exit_code == 0, result.output
+
+    wi_path = workspace / ".mothership" / "workitems" / f"{wi.id}.json"
+    wi_path.write_text("{not valid json")
+
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "corrupt-store-hotfix-task"])
+    assert result.exit_code == 0, result.output
+    assert "WorkItem gate bypassed" in result.output
+    assert "corrupt store" in result.output.lower()
+
+    # PR still gets opened — hotfix downgrades the block to a warning.
+    state = StateManager(workspace / ".mothership").load()
+    assert state.tasks["corrupt-store-hotfix-task"].pr_urls.get("shared") == \
+        "https://github.com/org/shared/pull/1"
+
+    bypass_log = workspace / ".mothership" / "bypass-log.jsonl"
+    assert bypass_log.is_file()
+    lines = [json.loads(line) for line in bypass_log.read_text().splitlines()]
+    assert any(
+        entry["op"] == "finish" and entry["branch"] == "corrupt-store-hotfix-task"
+        and entry["reason"] == "hotfix"
+        for entry in lines
+    ), lines

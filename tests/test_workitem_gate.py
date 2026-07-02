@@ -115,3 +115,22 @@ def test_log_hotfix_appends_bypass_log(tmp_path):
     assert line["reason"] == "hotfix"
     assert line["op"] == "dev"
     assert line["branch"] == "some-task"
+
+
+# ---------------------------------------------------------------------------
+# PR review fix: consolidate the "approved or beyond" status set. workitem_gate
+# is the single source of truth (APPROVED_STATUSES); workitem_migrate and
+# PhaseManager._has_approved_spec must not keep their own hardcoded copies.
+# ---------------------------------------------------------------------------
+
+def test_approved_statuses_is_the_expected_set():
+    from mship.core.workitem_gate import APPROVED_STATUSES
+    assert APPROVED_STATUSES == {"approved", "dispatched", "implemented"}
+
+
+def test_workitem_migrate_shares_the_same_approved_statuses_object():
+    """workitem_migrate must import (not redefine) workitem_gate's set —
+    an identity check, not just an equality check, so a stray local copy
+    can't silently drift out of sync."""
+    from mship.core import workitem_gate, workitem_migrate
+    assert workitem_migrate.APPROVED_STATUSES is workitem_gate.APPROVED_STATUSES

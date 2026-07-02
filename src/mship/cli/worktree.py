@@ -1005,9 +1005,21 @@ def register(app: typer.Typer, get_container):
         # before any push/PR work. --hotfix downgrades the block to a
         # warning and records a bypass-log entry, mirroring the spawn/
         # phase-dev gates. See spec workitem-mandatory-kind-gated-approval.
+        #
+        # check_task_gate reads the WorkItem store (and specs), so a corrupt
+        # store file must not throw an unhandled exception here — that would
+        # skip the --hotfix rescue entirely (the branch below never runs).
+        # Treat any read/parse failure as a failing gate result instead, so
+        # --hotfix can still override it, and the non-hotfix path still exits
+        # cleanly via output.error rather than a traceback.
         from mship.core import workitem_gate
         workspace_root = container.config_path().parent
-        gate_result = workitem_gate.check_task_gate(task, workspace_root)
+        try:
+            gate_result = workitem_gate.check_task_gate(task, workspace_root)
+        except Exception as e:
+            gate_result = workitem_gate.GateResult(
+                False, f"couldn't evaluate WorkItem gate (corrupt store?): {e}"
+            )
         if not gate_result.ok:
             if hotfix:
                 output.warning(f"WorkItem gate bypassed (--hotfix): {gate_result.reason}")

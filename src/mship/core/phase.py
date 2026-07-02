@@ -81,7 +81,17 @@ class PhaseManager:
             else:
                 if self._workspace_root is not None:
                     from mship.core.workitem_gate import check_task_gate
-                    gate_result = check_task_gate(task, self._workspace_root)
+                    # A corrupt/unreadable WorkItem store must not propagate a
+                    # raw exception out of transition() — --bypass-spec-gate
+                    # already skips this call entirely as the escape hatch;
+                    # without --bypass-spec-gate we still want a clean,
+                    # actionable SpecGateError instead of a traceback.
+                    try:
+                        gate_result = check_task_gate(task, self._workspace_root)
+                    except Exception as e:
+                        raise SpecGateError(
+                            f"couldn't evaluate WorkItem gate (corrupt store?): {e}"
+                        ) from e
                     if not gate_result.ok:
                         raise SpecGateError(gate_result.reason)
 
@@ -196,15 +206,15 @@ class PhaseManager:
             return False
         # Import inside method to avoid potential import cycles at module load.
         from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+        from mship.core.workitem_gate import APPROVED_STATUSES
 
         specs_dir = self._workspace_root / SPECS_DIRNAME
         try:
             specs = SpecStore(specs_dir).list()
         except Exception:
             return False
-        approved_statuses = {"approved", "dispatched", "implemented"}
         return any(
-            s.task_slug == task_slug and s.status in approved_statuses
+            s.task_slug == task_slug and s.status in APPROVED_STATUSES
             for s in specs
         )
 

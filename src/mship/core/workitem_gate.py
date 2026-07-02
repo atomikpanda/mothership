@@ -11,8 +11,10 @@ from mship.core.spec_store import SpecStore
 from mship.core.workitem import WorkItem
 from mship.core.workitem_store import WorkItemStore
 
-# "approved or beyond" — matches PhaseManager._has_approved_spec (phase.py:174-190)
-_APPROVED = {"approved", "dispatched", "implemented"}
+# "approved or beyond" — the single source of truth for this status set.
+# Imported by workitem_migrate.wrap_existing and PhaseManager._has_approved_spec
+# so all three enforcement sites agree on what counts as approved.
+APPROVED_STATUSES = {"approved", "dispatched", "implemented"}
 
 
 @dataclass(frozen=True)
@@ -41,9 +43,9 @@ def _feature_has_approved_spec(wi: WorkItem, task, workspace_root: Path) -> bool
     specs = SpecStore(Path(workspace_root) / "specs")
     if wi.spec_id:
         s = specs.find_by_id(wi.spec_id)
-        if s is not None and s.status in _APPROVED:
+        if s is not None and s.status in APPROVED_STATUSES:
             return True
-    return any(s.task_slug == task.slug and s.status in _APPROVED for s in specs.list())
+    return any(s.task_slug == task.slug and s.status in APPROVED_STATUSES for s in specs.list())
 
 
 def log_hotfix(workspace_root: Path, where: str, task_slug: str) -> None:

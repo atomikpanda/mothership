@@ -370,6 +370,35 @@ def test_a7_plan_to_dev_default_off_no_spec_still_succeeds(
     assert result.new_phase == "dev"
 
 
+def test_has_approved_spec_uses_shared_workitem_gate_approved_statuses(
+    tmp_path: Path, monkeypatch,
+):
+    """PR review fix: PhaseManager._has_approved_spec must consult the single
+    shared workitem_gate.APPROVED_STATUSES rather than a hardcoded local
+    copy. Proven behaviorally: patching the shared set changes what counts
+    as approved here too."""
+    from mship.core import workitem_gate
+    from mship.core.spec import Spec
+    from mship.core.spec_store import SpecStore
+
+    now = datetime(2026, 4, 10, tzinfo=timezone.utc)
+    SpecStore(tmp_path / "specs").save(Spec(
+        id="s1", title="S", status="drafting",
+        created_at=now, updated_at=now, task_slug="t",
+    ))
+    pm = PhaseManager(
+        StateManager(tmp_path / ".mothership"), MagicMock(spec=LogManager),
+        workspace_root=tmp_path,
+    )
+
+    # "drafting" isn't approved-or-beyond by the real, shared set.
+    assert pm._has_approved_spec("t") is False
+
+    # Patching the SHARED set (not a local copy) must change the outcome.
+    monkeypatch.setattr(workitem_gate, "APPROVED_STATUSES", {"drafting"})
+    assert pm._has_approved_spec("t") is True
+
+
 def test_a7_dispatched_spec_also_satisfies_gate(
     state_with_task: StateManager, tmp_path: Path
 ):
@@ -489,3 +518,46 @@ def test_plan_to_dev_bypass_spec_gate_allows_and_logs_hotfix(tmp_path: Path):
     assert line["reason"] == "hotfix"
     assert line["op"] == "phase-dev"
     assert line["branch"] == "wi-task"
+
+
+# ---------------------------------------------------------------------------
+# PR review fix: corrupt/unreadable WorkItem store must not raise a raw
+# exception out of transition() — --bypass-spec-gate already skips the call
+# entirely as the intended escape hatch; without it we still want a clean
+# SpecGateError instead of a traceback.
+# ---------------------------------------------------------------------------
+
+def test_plan_to_dev_corrupt_workitem_store_raises_clean_spec_gate_error(tmp_path: Path):
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(
+        title="add thing", kind="feature", workspace="test",
+        now=datetime(2026, 4, 10, tzinfo=timezone.utc),
+    )
+    # Corrupt the WorkItem's JSON file on disk after it's been created.
+    wi_path = tmp_path / ".mothership" / "workitems" / f"{wi.id}.json"
+    wi_path.write_text("{not valid json")
+
+    sm, pm = _workitem_gate_env(tmp_path)
+    sm.save(WorkspaceState(tasks={"wi-task": _plan_task(work_item_id=wi.id)}))
+
+    with pytest.raises(SpecGateError) as excinfo:
+        pm.transition("wi-task", "dev")
+    assert "corrupt store" in str(excinfo.value).lower()
+
+
+def test_plan_to_dev_bypass_spec_gate_skips_corrupt_workitem_store(tmp_path: Path):
+    """--bypass-spec-gate never calls check_task_gate, so a corrupt store
+    doesn't matter — the escape hatch still works."""
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(
+        title="add thing", kind="feature", workspace="test",
+        now=datetime(2026, 4, 10, tzinfo=timezone.utc),
+    )
+    wi_path = tmp_path / ".mothership" / "workitems" / f"{wi.id}.json"
+    wi_path.write_text("{not valid json")
+
+    sm, pm = _workitem_gate_env(tmp_path)
+    sm.save(WorkspaceState(tasks={"wi-task": _plan_task(work_item_id=wi.id)}))
+
+    result = pm.transition("wi-task", "dev", bypass_spec_gate=True)
+    assert result.new_phase == "dev"
