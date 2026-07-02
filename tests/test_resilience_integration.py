@@ -88,7 +88,7 @@ def test_agent_resilience_lifecycle(full_workspace: Path):
     assert "BLOCKED" not in result.output
 
     # 9. Generate handoff
-    result = runner.invoke(app, ["finish", "--handoff", "--task", slug])
+    result = runner.invoke(app, ["finish", "--hotfix", "--handoff", "--task", slug])
     assert result.exit_code == 0
     handoff_file = full_workspace / ".mothership" / "handoffs" / "resilience-test.yaml"
     assert handoff_file.exists()

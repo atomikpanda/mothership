@@ -910,6 +910,12 @@ def register(app: typer.Typer, get_container):
             None, "--token", help="GitHub token for push + PR creation in "
             "credential-less environments (else GH_TOKEN / GITHUB_TOKEN).",
         ),
+        hotfix: bool = typer.Option(
+            False, "--hotfix",
+            help="Bypass the WorkItem gate for this finish (no WorkItem, or a "
+                 "feature WorkItem without an approved spec). Downgrades the "
+                 "block to a warning and records a bypass-log entry.",
+        ),
     ):
         """Create PRs across repos in dependency order."""
         from pathlib import Path
@@ -991,6 +997,25 @@ def register(app: typer.Typer, get_container):
         resolved_finish = resolve_for_command("finish", state, task, output)
         t = resolved_finish.task
         task = t
+
+        # --- WorkItem gate: every task must be linked to a WorkItem, and a
+        # feature-kind WorkItem additionally needs an approved spec
+        # (core/workitem_gate.py::check_task_gate). Placed as early as
+        # possible — right after resolving the task — so finish fails fast
+        # before any push/PR work. --hotfix downgrades the block to a
+        # warning and records a bypass-log entry, mirroring the spawn/
+        # phase-dev gates. See spec workitem-mandatory-kind-gated-approval.
+        from mship.core import workitem_gate
+        workspace_root = container.config_path().parent
+        gate_result = workitem_gate.check_task_gate(task, workspace_root)
+        if not gate_result.ok:
+            if hotfix:
+                output.warning(f"WorkItem gate bypassed (--hotfix): {gate_result.reason}")
+                workitem_gate.log_hotfix(workspace_root, "finish", task.slug)
+            else:
+                output.error(f"Cannot finish: {gate_result.reason}")
+                raise typer.Exit(code=1)
+
         graph = container.graph()
         config = container.config()
         ordered = graph.topo_sort(task.affected_repos)

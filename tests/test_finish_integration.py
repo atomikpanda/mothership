@@ -62,7 +62,7 @@ def test_finish_single_repo_no_coordination_block(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish", "--task", "single-repo-test"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "single-repo-test"])
     assert result.exit_code == 0, result.output
 
     mgr = StateManager(workspace / ".mothership")
@@ -104,7 +104,7 @@ def test_finish_multi_repo_adds_coordination(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish", "--task", "multi-repo-test"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "multi-repo-test"])
     assert result.exit_code == 0, result.output
 
     # Verify 2 PRs created
@@ -137,7 +137,7 @@ def test_finish_idempotent_rerun(finish_workspace):
         return ShellResult(returncode=0, stdout="", stderr="")
     mock_shell.run.side_effect = _first_finish_run
 
-    result = runner.invoke(app, ["finish", "--task", "idempotent-test"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "idempotent-test"])
     assert result.exit_code == 0, result.output
 
     # Second finish — should skip existing PR
@@ -151,7 +151,7 @@ def test_finish_idempotent_rerun(finish_workspace):
 
     mock_shell.run.side_effect = tracking_run
 
-    result = runner.invoke(app, ["finish", "--task", "idempotent-test"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "idempotent-test"])
     assert result.exit_code == 0, result.output
 
     # No gh pr create on second run
@@ -215,7 +215,7 @@ def test_finish_not_blocked_by_own_worktree(finish_workspace):
     from mship.cli import container
     container.state_manager.reset()
 
-    result = runner.invoke(app, ["finish", "--task", slug])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", slug])
     assert result.exit_code == 0, result.output
     assert "extra_worktrees" not in result.output
 
@@ -256,7 +256,7 @@ def test_finish_passes_base_from_config(finish_workspace, tmp_path):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish", "--task", "base-test"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "base-test"])
     assert result.exit_code == 0, result.output
 
     create_calls = [c for c in call_log if "gh pr create" in c]
@@ -303,7 +303,7 @@ def test_finish_uses_spawn_base_override(finish_workspace):
     mock_shell.run.side_effect = mock_run
 
     # No --base at finish: the base must come from the task's spawn-time override.
-    result = runner.invoke(app, ["finish", "--task", "stacked"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "stacked"])
     assert result.exit_code == 0, result.output
 
     create_calls = [c for c in call_log if "gh pr create" in c]
@@ -341,7 +341,7 @@ def test_finish_fails_when_base_missing_on_remote(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish", "--task", "missing-base"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "missing-base"])
     assert result.exit_code != 0
     assert "nope" in result.output.lower() or "base" in result.output.lower()
     assert pushed == [], "no repo should be pushed when a base is missing"
@@ -378,7 +378,7 @@ def test_finish_blocks_when_affected_repo_is_dirty(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish", "--task", "finish-gate"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "finish-gate"])
     assert result.exit_code == 1
     assert "dirty_worktree" in result.output
 
@@ -421,7 +421,7 @@ def test_finish_unrelated_dirty_repo_does_not_block(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish", "--task", "unrelated-test"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "unrelated-test"])
     assert result.exit_code == 0, result.output
 
 
@@ -471,7 +471,7 @@ def test_finish_skips_untouched_repos_in_multi_repo_task(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish", "--task", "partial-work", "--force-audit"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "partial-work", "--force-audit"])
     assert result.exit_code == 0, result.output
     # auth-service was untouched → no PR created there.
     assert not any("auth-service" in c for c in create_calls), create_calls
@@ -517,7 +517,7 @@ def test_finish_fails_when_branch_has_no_commits(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish", "--task", "empty-branch"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "empty-branch"])
     assert result.exit_code != 0
     assert "no commits" in result.output.lower() or "No commits to push" in result.output
     assert pushed == [], "no repo should be pushed when a branch is empty"
@@ -546,7 +546,7 @@ def test_finish_stamps_finished_at(finish_workspace):
     result = runner.invoke(app, ["spawn", "--hotfix", "stamp test", "--repos", "shared", "--force-audit"])
     assert result.exit_code == 0, result.output
 
-    result = runner.invoke(app, ["finish", "--task", "stamp-test"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "stamp-test"])
     assert result.exit_code == 0, result.output
     assert "mship close" in result.output
 
@@ -579,7 +579,7 @@ def test_finish_push_only_skips_gh_pr_create(finish_workspace):
     result = runner.invoke(app, ["spawn", "--hotfix", "push only", "--repos", "shared", "--force-audit"])
     assert result.exit_code == 0, result.output
 
-    result = runner.invoke(app, ["finish", "--push-only", "--task", "push-only"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--push-only", "--task", "push-only"])
     assert result.exit_code == 0, result.output
     assert len(push_calls) == 1
     assert pr_calls == []
@@ -599,7 +599,7 @@ def test_finish_push_only_rejects_base_flags(finish_workspace):
     result = runner.invoke(app, ["spawn", "--hotfix", "conflict flags", "--repos", "shared", "--force-audit"])
     assert result.exit_code == 0
 
-    result = runner.invoke(app, ["finish", "--push-only", "--base", "main"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--push-only", "--base", "main"])
     assert result.exit_code != 0
     assert "push-only" in result.output.lower()
 
@@ -648,7 +648,7 @@ def test_finish_suppresses_no_upstream_for_task_branch(finish_workspace):
     mock_shell.run.side_effect = mock_run
 
     # NO --force-audit — this is the whole point of the fix.
-    result = runner.invoke(app, ["finish", "--task", "noupstream-fix"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "noupstream-fix"])
     assert result.exit_code == 0, result.output
     assert "BYPASSED AUDIT" not in result.output
 
@@ -687,7 +687,7 @@ def test_finish_still_blocks_other_audit_errors(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish", "--task", "still-blocks"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "still-blocks"])
     assert result.exit_code != 0
     assert "dirty_worktree" in result.output
 
@@ -745,7 +745,7 @@ def test_finish_does_not_block_on_drift_in_unrelated_repo(finish_workspace):
 
     result = runner.invoke(
         app,
-        ["finish", "--task", "scoped-finish", "--body", "## Summary\nx\n## Test plan\n- [x] manual"],
+        ["finish", "--hotfix", "--task", "scoped-finish", "--body", "## Summary\nx\n## Test plan\n- [x] manual"],
     )
     # Tailrd's dirty_worktree is out of scope (no commits) → does not block.
     # Shared has commits and clean state → finish proceeds.
@@ -797,7 +797,7 @@ def test_finish_auto_links_issue_refs_in_description(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish", "--task", "fix-42-something-important"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "fix-42-something-important"])
     assert result.exit_code == 0, result.output
     assert captured_body, "expected gh pr create to be invoked"
     assert "Closes #42" in captured_body[0]
@@ -836,7 +836,7 @@ def test_finish_pr_body_unchanged_when_no_issue_refs(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish", "--force-audit", "--task", "ordinary-task-description"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--force-audit", "--task", "ordinary-task-description"])
     assert result.exit_code == 0, result.output
     assert captured_body
     assert "Closes" not in captured_body[0]
@@ -865,7 +865,7 @@ def test_finish_warns_when_no_test_evidence_default(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish", "--task", "no-evidence", "--force-audit"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "no-evidence", "--force-audit"])
     # Finish still succeeds; the warning is advisory.
     assert result.exit_code == 0, result.output
     # Warning text references the evidence gap.
@@ -901,7 +901,7 @@ def test_finish_blocks_when_require_tests_and_no_evidence(finish_workspace):
     mock_shell.run.side_effect = mock_run
 
     result = runner.invoke(
-        app, ["finish", "--task", "require-block", "--force-audit", "--require-tests"]
+        app, ["finish", "--hotfix", "--task", "require-block", "--force-audit", "--require-tests"]
     )
     assert result.exit_code != 0
     assert pushed == [], "finish must block before pushing when --require-tests"
@@ -936,7 +936,7 @@ def test_finish_evidence_via_journal_suppresses_warning(finish_workspace, tmp_pa
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish", "--task", "journal-evidence", "--force-audit"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "journal-evidence", "--force-audit"])
     assert result.exit_code == 0, result.output
     # No "not run" / "missing" / "evidence" warning.
     lower = result.output.lower()
