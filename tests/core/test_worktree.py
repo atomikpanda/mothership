@@ -179,6 +179,34 @@ def test_spawn_base_missing_branch_raises_before_creating_state(worktree_deps):
     assert not (workspace / ".worktrees" / "bad-base").exists()
 
 
+def test_spawn_base_origin_only_survives_flapping_in_loop_fetch(worktree_deps, tmp_path):
+    """Origin-only stacked base must cut from origin/<base>, never silently HEAD,
+    even if the in-loop fetch fails after preflight materialised it. Regression, #42."""
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    shared = workspace / "shared"
+    head_before = _head(shared)
+
+    # Put feat/upstream ONLY on origin: create locally, push, materialise the
+    # remote-tracking ref, delete the local branch. Then break the remote so any
+    # further fetch fails — simulating a flap after preflight already fetched.
+    origin = tmp_path / "shared-origin.git"
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+    _git_run(shared, "remote", "add", "origin", str(origin))
+    base_tip = _make_base_branch(shared, "feat/upstream")   # local branch at base_tip
+    _git_run(shared, "push", "origin", "feat/upstream")
+    _git_run(shared, "fetch", "origin", "feat/upstream")     # materialise origin/feat/upstream
+    _git_run(shared, "branch", "-D", "feat/upstream")        # now origin-only
+    _git_run(shared, "remote", "set-url", "origin", str(tmp_path / "gone.git"))  # fetch will fail
+
+    assert base_tip != head_before  # the base really is ahead of HEAD
+
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("stacked task", repos=["shared"], workspace_root=workspace, base="feat/upstream")
+    wt = Path(state_mgr.load().tasks["stacked-task"].worktrees["shared"])
+    assert _head(wt) == base_tip        # cut from origin/feat/upstream, NOT HEAD
+    assert _head(wt) != head_before
+
+
 def test_abort_succeeds_even_if_branch_delete_fails(worktree_deps):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)

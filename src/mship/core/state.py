@@ -41,9 +41,11 @@ class Task(BaseModel):
     base_branch: str | None = None
     # Non-default base pinned at spawn time via `--base` (stacked PRs, #42).
     # None for ordinary tasks; when set, `finish` targets it as the PR base and
-    # base-relative checks (close/context) compare against it. Kept distinct
-    # from `base_branch` (which is always populated with the workspace default)
-    # so a plain spawn never overrides a repo's configured base.
+    # base-relative checks (close/context) compare against it. Kept distinct from
+    # `base_branch` (which records the effective base — the stacked branch when
+    # `--base` is given, else the workspace default): resolve_base only consults
+    # base_override, so a plain spawn (None here) never overrides a repo's
+    # configured base.
     base_override: str | None = None
     passive_repos: set[str] = set()
     spec_id: str | None = None
