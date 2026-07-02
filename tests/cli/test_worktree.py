@@ -89,6 +89,56 @@ def test_spawn_all_repos(configured_git_app: Path):
     assert set(task.affected_repos) == {"shared", "auth-service", "api-gateway"}
 
 
+def _commit_base_branch(repo: Path, branch: str) -> str:
+    """Create `branch` in `repo` with an extra commit; restore prior branch. Return tip sha."""
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t.com",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t.com"}
+
+    def g(*a):
+        subprocess.run(["git", *a], cwd=repo, check=True, capture_output=True, text=True, env=env)
+
+    orig = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo,
+                          capture_output=True, text=True, check=True).stdout.strip()
+    g("checkout", "-b", branch)
+    (repo / "upstream.txt").write_text("base task work")
+    g("add", "upstream.txt")  # only our file — the fixture's Taskfile.yml is untracked
+    g("commit", "-m", "base")
+    tip = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                         capture_output=True, text=True, check=True).stdout.strip()
+    g("checkout", orig)
+    return tip
+
+
+def test_spawn_base_stacks_on_branch(configured_git_app: Path):
+    """spawn --base <branch> cuts the worktree from that branch and records it. See #42."""
+    base_tip = _commit_base_branch(configured_git_app / "shared", "feat/upstream")
+    result = runner.invoke(
+        app,
+        ["spawn", "stacked task", "--repos", "shared", "--slug", "stacked",
+         "--base", "feat/upstream", "--skip-setup"],
+    )
+    assert result.exit_code == 0, result.output
+    state = StateManager(configured_git_app / ".mothership").load()
+    task = state.tasks["stacked"]
+    assert task.base_override == "feat/upstream"
+    wt = task.worktrees["shared"]
+    wt_tip = subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt,
+                            capture_output=True, text=True, check=True).stdout.strip()
+    assert wt_tip == base_tip
+
+
+def test_spawn_base_unknown_branch_errors_cleanly(configured_git_app: Path):
+    """spawn --base <missing> fails with a clean message and creates no task. See #42."""
+    result = runner.invoke(
+        app,
+        ["spawn", "x", "--repos", "shared", "--slug", "xbase",
+         "--base", "feat/nope", "--skip-setup"],
+    )
+    assert result.exit_code != 0
+    assert "feat/nope" in result.output
+    assert "xbase" not in StateManager(configured_git_app / ".mothership").load().tasks
+
+
 def test_spawn_records_base_branch(configured_git_app: Path):
     """Spawn records base_branch from workspace config if available, else None."""
     result = runner.invoke(app, ["spawn", "record base", "--repos", "shared"])

@@ -221,3 +221,26 @@ def test_fast_forward_if_clean_skips_dirty_tree(tmp_path):
     git = GitRunner()
     assert git.fast_forward_if_clean(repo, "main") is False
     assert _rev(repo, "main") != origin_tip   # untouched
+
+
+# ---------------------------------------------------------------------------
+# ref_exists — used by `spawn --base` to validate the base branch (#42)
+# ---------------------------------------------------------------------------
+
+def test_ref_exists_true_for_existing_branch(git_repo: Path):
+    git = GitRunner()
+    _run(["git", "branch", "feat/base"], git_repo)
+    assert git.ref_exists(git_repo, "feat/base") is True
+
+
+def test_ref_exists_false_for_missing_branch(git_repo: Path):
+    git = GitRunner()
+    assert git.ref_exists(git_repo, "feat/nope") is False
+
+
+def test_ref_exists_true_for_remote_tracking_ref(tmp_path):
+    repo, _ = _repo_with_origin_ahead(tmp_path)
+    git = GitRunner()
+    # origin/main was fetched by the fixture
+    assert git.ref_exists(repo, "origin/main") is True
+    assert git.ref_exists(repo, "origin/does-not-exist") is False

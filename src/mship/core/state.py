@@ -39,6 +39,12 @@ class Task(BaseModel):
     last_switched_at_sha: dict[str, dict[str, str]] = {}
     test_iteration: int = 0
     base_branch: str | None = None
+    # Non-default base pinned at spawn time via `--base` (stacked PRs, #42).
+    # None for ordinary tasks; when set, `finish` targets it as the PR base and
+    # base-relative checks (close/context) compare against it. Kept distinct
+    # from `base_branch` (which is always populated with the workspace default)
+    # so a plain spawn never overrides a repo's configured base.
+    base_override: str | None = None
     passive_repos: set[str] = set()
     spec_id: str | None = None
     depends_on: list[DependencyEdge] = []

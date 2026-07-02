@@ -83,3 +83,40 @@ def test_resolve_rejects_unknown_repo_in_map():
     with pytest.raises(UnknownRepoInBaseMapError) as exc:
         resolve_base("cli", KNOWN["cli"], cli_base=None, base_map={"nope": "main"}, known_repos=KNOWN.keys())
     assert "nope" in str(exc.value)
+
+
+# --- resolve_base: task_base (spawn --base override, #42) ---
+
+def test_resolve_task_base_overrides_config():
+    # A base pinned at spawn time beats the repo's configured default.
+    result = resolve_base(
+        "cli", KNOWN["cli"], cli_base=None, base_map={},
+        known_repos=KNOWN.keys(), task_base="feat/upstream",
+    )
+    assert result == "feat/upstream"
+
+
+def test_resolve_cli_base_overrides_task_base():
+    # An explicit finish-time --base beats the spawn-time base.
+    result = resolve_base(
+        "cli", KNOWN["cli"], cli_base="develop", base_map={},
+        known_repos=KNOWN.keys(), task_base="feat/upstream",
+    )
+    assert result == "develop"
+
+
+def test_resolve_base_map_overrides_task_base():
+    result = resolve_base(
+        "cli", KNOWN["cli"], cli_base=None, base_map={"cli": "release/7"},
+        known_repos=KNOWN.keys(), task_base="feat/upstream",
+    )
+    assert result == "release/7"
+
+
+def test_resolve_task_base_none_falls_through_to_config():
+    # The common case: no override → unchanged behavior.
+    result = resolve_base(
+        "cli", KNOWN["cli"], cli_base=None, base_map={},
+        known_repos=KNOWN.keys(), task_base=None,
+    )
+    assert result == "main"

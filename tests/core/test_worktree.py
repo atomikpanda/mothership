@@ -120,6 +120,65 @@ def test_spawn_duplicate_slug_raises(worktree_deps):
         mgr.spawn("duplicate test", repos=["shared"], workspace_root=workspace)
 
 
+# ---------------------------------------------------------------------------
+# spawn --base: cut the new worktree from another branch (stacked PRs, #42)
+# ---------------------------------------------------------------------------
+
+_GENV = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t.com",
+         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t.com"}
+
+
+def _git_run(repo: Path, *args):
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True, env=_GENV)
+
+
+def _head(repo: Path, ref="HEAD") -> str:
+    return subprocess.run(["git", "rev-parse", ref], cwd=repo,
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+
+def _make_base_branch(repo: Path, branch: str) -> str:
+    """Create `branch` in `repo` with an extra commit; restore original branch. Return tip sha."""
+    orig = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo,
+                          capture_output=True, text=True, check=True).stdout.strip()
+    _git_run(repo, "checkout", "-b", branch)
+    (repo / "base.txt").write_text("from base task")
+    _git_run(repo, "add", "base.txt")  # only our file — the fixture's Taskfile.yml is untracked
+    _git_run(repo, "commit", "-m", "base task commit")
+    tip = _head(repo)
+    _git_run(repo, "checkout", orig)
+    return tip
+
+
+def test_spawn_base_cuts_worktree_from_given_branch(worktree_deps):
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    base_tip = _make_base_branch(workspace / "shared", "feat/upstream")
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("stacked task", repos=["shared"], workspace_root=workspace, base="feat/upstream")
+    task = state_mgr.load().tasks["stacked-task"]
+    wt = Path(task.worktrees["shared"])
+    assert _head(wt) == base_tip                     # cut from the base branch tip
+    assert task.base_branch == "feat/upstream"       # readouts compare against the stacked base
+    assert task.base_override == "feat/upstream"      # finish targets it
+
+
+def test_spawn_without_base_leaves_override_none(worktree_deps):
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("normal task", repos=["shared"], workspace_root=workspace)
+    assert state_mgr.load().tasks["normal-task"].base_override is None
+
+
+def test_spawn_base_missing_branch_raises_before_creating_state(worktree_deps):
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    with pytest.raises(ValueError, match="feat/nope"):
+        mgr.spawn("bad base", repos=["shared"], workspace_root=workspace, base="feat/nope")
+    # fail-fast: no task registered, no worktree hub left behind
+    assert "bad-base" not in state_mgr.load().tasks
+    assert not (workspace / ".worktrees" / "bad-base").exists()
+
+
 def test_abort_succeeds_even_if_branch_delete_fails(worktree_deps):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)

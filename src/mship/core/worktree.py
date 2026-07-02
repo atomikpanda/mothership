@@ -15,6 +15,14 @@ from mship.util.shell import ShellRunner
 from mship.util.slug import slugify
 
 
+class BaseBranchNotFoundError(ValueError):
+    """`spawn --base <branch>` was given a branch that doesn't exist in a target repo.
+
+    A ValueError subclass so callers that already handle spawn ValueErrors keep
+    working; the CLI catches this type specifically to print a clean message.
+    """
+
+
 @dataclass
 class SpawnResult:
     task: Task
@@ -402,6 +410,7 @@ class WorktreeManager:
         workspace_root: Path | None = None,
         offline: bool = False,
         depends_on: list[DependencyEdge] | None = None,
+        base: str | None = None,
     ) -> SpawnResult:
         slug = slug if slug is not None else slugify(description)
         branch = self._config.branch_pattern.replace("{slug}", slug)
@@ -448,6 +457,33 @@ class WorktreeManager:
                 "workspace_root required for hub layout spawn; "
                 "callers must pass container.config_path().parent"
             )
+
+        # --- #42 `--base`: validate the requested base exists in every active
+        #     (non-passive) target repo BEFORE creating any worktree, so a
+        #     missing/typo'd branch fails fast with no partial state. Fetch first
+        #     so an origin-only base (the common stacked-PR case) is recognized.
+        if base is not None:
+            missing_base: list[str] = []
+            for repo_name in all_repos:
+                if repo_name in passive:
+                    continue
+                repo_config = self._config.repos[repo_name]
+                if repo_config.git_root is not None:
+                    continue  # subdirectory child shares its parent's checkout + branch
+                repo_path = repo_config.path
+                if not offline and self._git.has_remote(repo_path):
+                    self._git.fetch_remote_ref(repo_path=repo_path, ref=base)
+                if not (
+                    self._git.ref_exists(repo_path, base)
+                    or self._git.ref_exists(repo_path, f"origin/{base}")
+                ):
+                    missing_base.append(repo_name)
+            if missing_base:
+                raise BaseBranchNotFoundError(
+                    f"--base {base!r}: branch not found locally or on origin in "
+                    f"repo(s): {', '.join(missing_base)}. Push the base branch first, "
+                    f"or check the name."
+                )
 
         hub = workspace_root / ".worktrees" / slug
         hub.mkdir(parents=True, exist_ok=True)
@@ -520,16 +556,23 @@ class WorktreeManager:
                 )
             else:
                 start_point = None
-                base = repo_config.base_branch or default_base or "main"
+                # `--base` (stacked PRs, #42) overrides the configured base per repo.
+                cut_base = base or repo_config.base_branch or default_base or "main"
                 if not offline and self._git.has_remote(repo_path):
-                    if self._git.fetch_remote_ref(repo_path=repo_path, ref=base):
-                        start_point = f"origin/{base}"            # cut from fetched tip
-                        self._git.fast_forward_if_clean(repo_path=repo_path, base=base)
+                    if self._git.fetch_remote_ref(repo_path=repo_path, ref=cut_base):
+                        start_point = f"origin/{cut_base}"        # cut from fetched tip
+                        self._git.fast_forward_if_clean(repo_path=repo_path, base=cut_base)
+                    elif base is not None and self._git.ref_exists(repo_path, cut_base):
+                        # explicit --base not on origin but present locally — cut from it
+                        start_point = cut_base
                     else:
                         setup_warnings.append(
-                            f"{repo_name}: could not fetch origin/{base}; "
-                            f"cutting worktree from local {base}"
+                            f"{repo_name}: could not fetch origin/{cut_base}; "
+                            f"cutting worktree from local {cut_base}"
                         )
+                elif base is not None and self._git.ref_exists(repo_path, cut_base):
+                    # offline / no remote, but the explicit --base exists locally
+                    start_point = cut_base
                 self._git.worktree_add(
                     repo_path=repo_path,
                     worktree_path=wt_path,
@@ -569,7 +612,8 @@ class WorktreeManager:
             affected_repos=ordered,
             worktrees=worktrees,
             branch=branch,
-            base_branch=default_base,
+            base_branch=base or default_base,
+            base_override=base,
             passive_repos=passive,
             depends_on=depends_on or [],
         )

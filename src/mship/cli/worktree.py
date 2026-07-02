@@ -256,6 +256,12 @@ def register(app: typer.Typer, get_container):
             None, "--depends-on",
             help="Comma-separated upstream task slugs this task depends on. See #104.",
         ),
+        base: Optional[str] = typer.Option(
+            None, "--base",
+            help="Cut the worktree from <branch> instead of the configured base "
+                 "(stacked PRs: base a task on another task's feat/* branch). "
+                 "`mship finish` then targets it as the PR base. See #42.",
+        ),
     ):
         """Create coordinated worktrees across repos for a new task."""
         import re as _re
@@ -433,12 +439,18 @@ def register(app: typer.Typer, get_container):
             now = datetime.now(timezone.utc)
             dep_edges = [DependencyEdge(upstream_slug=s, created_at=now) for s in requested]
 
-        result = wt_mgr.spawn(
-            description, repos=repo_list, skip_setup=skip_setup, slug=slug,
-            workspace_root=container.config_path().parent,
-            offline=offline,
-            depends_on=dep_edges,
-        )
+        from mship.core.worktree import BaseBranchNotFoundError
+        try:
+            result = wt_mgr.spawn(
+                description, repos=repo_list, skip_setup=skip_setup, slug=slug,
+                workspace_root=container.config_path().parent,
+                offline=offline,
+                depends_on=dep_edges,
+                base=base,
+            )
+        except BaseBranchNotFoundError as e:
+            output.error(str(e))
+            raise typer.Exit(code=1)
         task = result.task
 
         if pending_bypass:
@@ -575,6 +587,7 @@ def register(app: typer.Typer, get_container):
                 eff_base = resolve_base(
                     repo_name, config.repos[repo_name],
                     cli_base=None, base_map={}, known_repos=config.repos.keys(),
+                    task_base=task.base_override,
                 )
                 if eff_base is None:
                     eff_base = "main"  # fall back to main when no base_branch configured
@@ -709,6 +722,7 @@ def register(app: typer.Typer, get_container):
                 eff_base = resolve_base(
                     repo_name, config.repos[repo_name],
                     cli_base=None, base_map={}, known_repos=config.repos.keys(),
+                    task_base=task.base_override,
                 )
                 if eff_base is None:
                     eff_base = "main"
@@ -1135,6 +1149,7 @@ def register(app: typer.Typer, get_container):
                     cli_base=base,
                     base_map=parsed_map,
                     known_repos=config.repos.keys(),
+                    task_base=task.base_override,
                 )
                 for repo_name in ordered
             }

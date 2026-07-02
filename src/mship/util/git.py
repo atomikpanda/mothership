@@ -57,6 +57,19 @@ class GitRunner:
             text=True,
         )
 
+    def ref_exists(self, repo_path: Path, ref: str) -> bool:
+        """True if `ref` resolves to a commit in the repo.
+
+        Works for local branches (`feat/x`), remote-tracking refs
+        (`origin/feat/x`, only after a fetch), tags, and SHAs. Used by
+        `spawn --base` to validate the requested base before cutting worktrees.
+        """
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            cwd=repo_path, capture_output=True, text=True,
+        )
+        return result.returncode == 0
+
     def fetch_remote_ref(self, repo_path: Path, ref: str, remote: str = "origin") -> bool:
         """Fetch a single ref from `remote`. Returns True on success, False on any failure.
 

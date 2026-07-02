@@ -182,7 +182,7 @@ mship doctor                          # always run after init
 ### Working on a task
 
 ```bash
-mship spawn "description" [--repos a,b] [--skip-setup]
+mship spawn "description" [--repos a,b] [--skip-setup] [--base <branch>] [--depends-on a,b]
 mship switch <repo>                   # before starting work in a different repo
 mship phase plan|dev|review|run [-f]  # `-f` overrides blocked or finished-task guardrail
 mship block "reason" | mship unblock
@@ -223,7 +223,7 @@ If you don't, your edits in the shell affect the main checkout, not the feature 
 
 **Structured debugging entries.** `mship debug hypothesis|rule-out|resolved` records structured debugging entries into the task journal. `mship test` auto-attaches to the open hypothesis if one exists. See the `systematic-debugging` skill for the full workflow.
 
-**`finish`:** PR base resolves as `--base-map` entry > `--base` > `repo.base_branch` in config > gh default. Every base is verified on origin before any push; empty branches and missing bases fail fast with no partial state. `--require-tests` blocks (not just warns) when no passing test evidence exists for the task. `--title` overrides the PR title; `--body-map` sets per-repo bodies when repos need different PR descriptions. `--force`/`-f` re-pushes new commits to an already-finished task's existing PR (useful when iterating post-finish without opening a new task).
+**`finish`:** PR base resolves as `--base-map` entry > `--base` > the task's spawn-time `--base` (see stacked PRs below) > `repo.base_branch` in config > gh default. Every base is verified on origin before any push; empty branches and missing bases fail fast with no partial state. `--require-tests` blocks (not just warns) when no passing test evidence exists for the task. `--title` overrides the PR title; `--body-map` sets per-repo bodies when repos need different PR descriptions. `--force`/`-f` re-pushes new commits to an already-finished task's existing PR (useful when iterating post-finish without opening a new task).
 
 **`finish` PR body — write a real one.** By default the PR body is just the task description plus a `Closes #N` footer for any issue refs found in the description, journal, and commit subjects. That's a placeholder, not a body. For agent-driven finishes, pass `--body-file <path>` (or `--body '<inline>'`, or `--body -` for stdin) with a real Summary and Test plan. Empty bodies are rejected — that's deliberate. If you forgot at finish time, follow up immediately with `gh pr edit <url> --body-file <path>`. A bare task-description PR is treated as incomplete.
 
@@ -240,6 +240,23 @@ mship finish --bypass-deps                              # override the readiness
 mship close --cascade        # also remove downstream from state
 mship close --detach-downstream   # clear inbound edges, leave downstream alive
 ```
+
+### Stacked PRs (`spawn --base`)
+
+To stack a task on top of another open task's branch instead of `main`, pass
+`--base <branch>` at spawn:
+
+```bash
+mship spawn "follow-up fix" --base feat/auth-middleware-refactor --repos api
+```
+
+The worktree is cut from `<branch>` (verified to exist locally or on origin —
+fails fast otherwise, no partial state), and the base is recorded on the task so
+`mship finish` targets it as the PR base automatically (no need to repeat `--base`
+at finish). Base-relative checks (`close` recovery/ancestry, `context` commits-ahead)
+also compare against the stacked base. This differs from `--depends-on`, which
+records an ordering/readiness edge but still cuts from the configured base. Combine
+them when a task both stacks on and depends on the upstream. (#42)
 
 `mship status` exposes the graph under `.resolved_task.dependencies`:
 
