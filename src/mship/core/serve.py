@@ -420,4 +420,34 @@ def create_app(
         )[0]
         return jsonable_encoder(summary)
 
+    @app.post("/items/{item_id}/messages")
+    def post_item_message(item_id: str, body: NewMessageBody):
+        """Steer a work item: append a human message to its conversation thread,
+        lazily creating+linking a thread the first time. In-flight items created
+        from specs/tasks have no thread yet, so posting to POST /threads/{id} has
+        nothing to target — the phone would silently drop the message. Item id is
+        always present, so this is the send path the console uses. Returns the
+        thread, mirroring POST /threads/{thread_id}/messages."""
+        now = datetime.now(timezone.utc)
+        wi = workitems.get(item_id)
+        if wi is None:
+            raise HTTPException(status_code=404, detail=f"no work item {item_id!r}")
+        tid = wi.thread_ids[0] if wi.thread_ids else None
+        if tid is None:
+            subject = wi.title.strip() or (
+                body.text.strip().splitlines()[0][:80] if body.text.strip() else "(no subject)"
+            )
+            task_slug = wi.task_slugs[0] if wi.task_slugs else None
+            thread = msgs.create_thread(subject=subject, text=body.text, now=now, task_slug=task_slug)
+            workitems.add_thread(item_id, thread.id, now=now)
+            return thread.model_dump(mode="json")
+        try:
+            msgs.append(tid, "human", body.text, now)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"no thread {tid!r}")
+        t = msgs.get(tid)
+        if t is None:
+            raise HTTPException(status_code=404, detail=f"no thread {tid!r}")
+        return t.model_dump(mode="json")
+
     return app
