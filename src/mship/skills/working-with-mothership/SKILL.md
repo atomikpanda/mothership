@@ -119,7 +119,8 @@ A work item's **phase is derived** from the state of its linked children — `in
 ```bash
 mship item new "<title>" [--kind feature|bug|chore|question]   # prints the new id (wi-<ts>-<hex>)
 mship item list                    # one line per item: `<id>  [phase]  <title>  <flags>`  (--json for agents)
-mship item show <id>               # full JSON: linked spec/tasks/threads/links + derived phase
+mship item show <id>               # full JSON: linked spec/tasks/threads/links + phase_override
+                                   #   (use `mship item list --json` for the live derived phase)
 mship item link-spec <id> <spec-id>        # bind the design artifact
 mship item link-task <id> <task-slug>      # bind an execution worktree (repeatable)
 mship item link-url  <id> <url> [--provider github|linear|notion|jira|url] [--title T]
