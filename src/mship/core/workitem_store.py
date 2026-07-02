@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from mship.core.state import StateManager
 from mship.core.workitem import ExternalLink, Kind, Phase, WorkItem
 
 
@@ -68,7 +69,8 @@ class WorkItemStore:
         item.spec_id = spec_id
         self.save(item)
 
-    def add_task(self, item_id: str, task_slug: str, now: datetime | None = None) -> None:
+    def add_task(self, item_id: str, task_slug: str, now: datetime | None = None,
+                state: StateManager | None = None) -> None:
         item = self.get(item_id)
         if item is None:
             raise KeyError(item_id)
@@ -78,6 +80,13 @@ class WorkItemStore:
         if now is not None:
             item.updated_at = now
         self.save(item)
+        if state is not None:
+            # Reverse link: task.work_item_id, mirroring workitem_migrate.wrap_existing's
+            # pass-2 mutation (workitem_migrate.py:46-49).
+            def _set(s, _slug=task_slug, _wid=item_id):
+                if _slug in s.tasks:
+                    s.tasks[_slug].work_item_id = _wid
+            state.mutate(_set)
 
     def add_thread(self, item_id: str, thread_id: str, now: datetime | None = None) -> None:
         item = self.get(item_id)
