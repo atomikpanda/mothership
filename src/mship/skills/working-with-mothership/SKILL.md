@@ -110,6 +110,27 @@ Review a spec without the CLI via `mship view spec [--web]`, or over HTTP via `m
 
 **The approval gate.** With `require_approved_spec: true` in `mothership.yaml`, `mship phase dev` is **hard-blocked** until a bound, approved spec exists — escape with `mship phase dev --bypass-spec-gate`. **This is opt-in: the default is OFF**, so by default `phase dev` only warns when no spec is found. Spec-first is the recommended methodology regardless of the gate.
 
+## Work items: the cross-artifact spine (`mship item`)
+
+A **work item** is the durable unit of intent that outlives any single spec, task, or thread. Where a `spec` is the design and a `task` is one worktree of execution, a work item groups everything about one piece of work — its spec, its task(s), the phone thread(s) discussing it, and external links (GitHub/Linear/Notion/Jira/url) — so it can drive a phase-aware cockpit (the Ground Control home). Use it when a piece of work spans more than one of those artifacts, or when you want a stable id to hang external tracker links off.
+
+A work item's **phase is derived** from the state of its linked children — `inbox → shaping → ready → in_flight → review → done` — with an optional manual override. `mship item list` surfaces attention flags per item: **A** needs-approval, **D** needs-decision, **B** blocked, **R** needs-review.
+
+```bash
+mship item new "<title>" [--kind feature|bug|chore|question]   # prints the new id (wi-<ts>-<hex>)
+mship item list                    # one line per item: `<id>  [phase]  <title>  <flags>`  (--json for agents)
+mship item show <id>               # full JSON: linked spec/tasks/threads/links + derived phase
+mship item link-spec <id> <spec-id>        # bind the design artifact
+mship item link-task <id> <task-slug>      # bind an execution worktree (repeatable)
+mship item link-url  <id> <url> [--provider github|linear|notion|jira|url] [--title T]
+mship item phase <id> <phase>      # manual override ("nudge") when the derived phase is wrong
+mship item migrate                 # backfill items from existing specs/tasks (one-time)
+```
+
+Typical flow: `item new` at intake → `link-spec` once a spec exists → `link-task` when you `spawn` → the phase advances as those children move, so the cockpit reshapes without manual bookkeeping. Reach for `item phase` only to correct a wrong derivation, not as the normal way to move work forward.
+
+**Raising the attention flags — escalating to the operator.** When you need the human (a decision, an approval, an action), don't just block silently — escalate on the relevant phone thread: `mship ask <thread> "<question>" --option A --option B` posts a tappable decision card, and `mship reply --needs-you <thread> "<ask>"` posts a Home action card. Both are replies into an operator-opened thread; see the `receiving-messages` skill for the full messaging loop.
+
 ## Delegating to subagents: `mship context` and `mship dispatch`
 
 Two mship-native primitives for handing work to subagents. Use them instead of hand-rolling task context:
@@ -187,6 +208,7 @@ mship switch <repo>                   # before starting work in a different repo
 mship phase plan|dev|review|run [-f]  # `-f` overrides blocked or finished-task guardrail
 mship block "reason" | mship unblock
 mship test [--all] [--repos|--tag] [--no-diff]
+mship build [--all] [--repos|--tag]   # runs `task build` across repos in dep order
 mship capture [--repo R] [--platform P] [--kind image|layout|all] [--out DIR]
 mship journal "msg" [--action X] [--open Y] [--repo R] [--test-state pass|fail|mixed]
 mship journal --show-open                 # what am I blocked on across this task?
@@ -218,6 +240,8 @@ If you don't, your edits in the shell affect the main checkout, not the feature 
 `mship journal` and `mship test` will warn when run from outside the active worktree.
 
 **`test` writes a numbered iteration file** under `.mothership/test-runs/<task>/`. The next run shows tags per repo (`new failure`, `fix`, `regression`, `still passing`, `still failing`). Auto-appends a structured log entry with `iteration`, `test_state`, `action="ran tests"`. Iterate until clean before transitioning to `review`.
+
+**`build` is the compile/artifact analog of `test`.** It runs each affected repo's `task build` in dependency order; `--all` continues past a failing repo (default stops at the first), and `--repos`/`--tag` scope it. Run it before `finish` when a repo has a build step CI will run, so you catch breakage locally rather than in review.
 
 **Always log structured.** `--action` makes session resume actually work. `--open` flags blockers you'll come back to. `--show-open` lists them. The `repo` field is auto-inferred from `mship switch`'s active repo.
 
