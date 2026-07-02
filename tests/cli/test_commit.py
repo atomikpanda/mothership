@@ -26,7 +26,7 @@ def _set_finished(workspace: Path, slug: str, pr_urls: dict[str, str]) -> None:
 
 def test_commit_pre_finish_single_repo(configured_git_app: Path):
     """Stage in one worktree pre-finish → commit + journal, no push."""
-    runner.invoke(app, ["spawn", "pre finish commit", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "pre finish commit", "--repos", "shared"])
     slug = "pre-finish-commit"
 
     commits: list[str] = []
@@ -65,7 +65,7 @@ def test_commit_pre_finish_single_repo(configured_git_app: Path):
 
 def test_commit_pre_finish_multi_repo(configured_git_app: Path):
     """Stage in two worktrees → both commit, no push, two journal entries."""
-    runner.invoke(app, ["spawn", "multi pre", "--repos", "shared,auth-service"])
+    runner.invoke(app, ["spawn", "--hotfix", "multi pre", "--repos", "shared,auth-service"])
     slug = "multi-pre"
 
     commits: list[str] = []
@@ -102,7 +102,7 @@ def test_commit_pre_finish_multi_repo(configured_git_app: Path):
 
 def test_commit_post_finish_single_repo(configured_git_app: Path):
     """Finished task + PR → commit + push + journal."""
-    runner.invoke(app, ["spawn", "post single", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "post single", "--repos", "shared"])
     slug = "post-single"
     _set_finished(configured_git_app, slug, {"shared": "https://github.com/o/r/pull/7"})
 
@@ -136,7 +136,7 @@ def test_commit_post_finish_single_repo(configured_git_app: Path):
 
 def test_commit_post_finish_multi_repo(configured_git_app: Path):
     """Finished multi-repo task → both commit + push."""
-    runner.invoke(app, ["spawn", "post multi", "--repos", "shared,auth-service"])
+    runner.invoke(app, ["spawn", "--hotfix", "post multi", "--repos", "shared,auth-service"])
     slug = "post-multi"
     _set_finished(configured_git_app, slug, {
         "shared": "https://github.com/o/r/pull/1",
@@ -173,7 +173,7 @@ def test_commit_post_finish_multi_repo(configured_git_app: Path):
 
 def test_commit_skips_repos_without_staged_changes(configured_git_app: Path):
     """Partial staging: one repo staged, one not → only first commits."""
-    runner.invoke(app, ["spawn", "partial", "--repos", "shared,auth-service"])
+    runner.invoke(app, ["spawn", "--hotfix", "partial", "--repos", "shared,auth-service"])
     slug = "partial"
 
     commits: list[str] = []
@@ -205,7 +205,7 @@ def test_commit_skips_repos_without_staged_changes(configured_git_app: Path):
 
 def test_commit_errors_when_nothing_staged_anywhere(configured_git_app: Path):
     """No staged changes in any worktree → exit 1 with clear message."""
-    runner.invoke(app, ["spawn", "nothing", "--repos", "shared,auth-service"])
+    runner.invoke(app, ["spawn", "--hotfix", "nothing", "--repos", "shared,auth-service"])
     slug = "nothing"
 
     def mock_run(cmd, cwd, env=None):
@@ -227,7 +227,7 @@ def test_commit_errors_when_nothing_staged_anywhere(configured_git_app: Path):
 
 def test_commit_git_commit_failure_surfaces(configured_git_app: Path):
     """Hook rejection during git commit → exit 1, error message surfaces stderr."""
-    runner.invoke(app, ["spawn", "hook fail", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "hook fail", "--repos", "shared"])
     slug = "hook-fail"
 
     def mock_run(cmd, cwd, env=None):
@@ -254,7 +254,7 @@ def test_commit_git_commit_failure_surfaces(configured_git_app: Path):
 
 def test_commit_push_failure_surfaces_post_finish(configured_git_app: Path):
     """Push fails post-finish → exit 1, but journal DOES record the commit."""
-    runner.invoke(app, ["spawn", "push fail", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "push fail", "--repos", "shared"])
     slug = "push-fail"
     _set_finished(configured_git_app, slug, {"shared": "https://github.com/o/r/pull/1"})
 

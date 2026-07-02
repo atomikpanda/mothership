@@ -40,7 +40,7 @@ def finish_workspace(workspace_with_git: Path):
 def test_finish_single_repo_no_coordination_block(finish_workspace):
     workspace, mock_shell = finish_workspace
 
-    result = runner.invoke(app, ["spawn", "single repo test", "--repos", "shared"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "single repo test", "--repos", "shared"])
     assert result.exit_code == 0, result.output
 
     pr_url = "https://github.com/org/shared/pull/99"
@@ -77,7 +77,7 @@ def test_finish_single_repo_no_coordination_block(finish_workspace):
 def test_finish_multi_repo_adds_coordination(finish_workspace):
     workspace, mock_shell = finish_workspace
 
-    result = runner.invoke(app, ["spawn", "multi repo test", "--repos", "shared,auth-service"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "multi repo test", "--repos", "shared,auth-service"])
     assert result.exit_code == 0, result.output
 
     pr_counter = [0]
@@ -119,7 +119,7 @@ def test_finish_multi_repo_adds_coordination(finish_workspace):
 def test_finish_idempotent_rerun(finish_workspace):
     workspace, mock_shell = finish_workspace
 
-    result = runner.invoke(app, ["spawn", "idempotent test", "--repos", "shared"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "idempotent test", "--repos", "shared"])
     assert result.exit_code == 0, result.output
 
     # First finish
@@ -165,7 +165,7 @@ def test_finish_not_blocked_by_own_worktree(finish_workspace):
 
     # Spawn normally (with --force-audit since the mock shell doesn't actually
     # make audits clean, the point of this test is what finish does).
-    result = runner.invoke(app, ["spawn", "own wt", "--repos", "shared", "--force-audit"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "own wt", "--repos", "shared", "--force-audit"])
     assert result.exit_code == 0, result.output
 
     # Simulate audit returning extra_worktrees iff the worktree is not known.
@@ -233,7 +233,7 @@ def test_finish_passes_base_from_config(finish_workspace, tmp_path):
     cfg_path.write_text(yaml.safe_dump(cfg))
     container.config.reset()
 
-    result = runner.invoke(app, ["spawn", "base test", "--repos", "shared"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "base test", "--repos", "shared"])
     assert result.exit_code == 0, result.output
 
     call_log: list[str] = []
@@ -277,7 +277,7 @@ def test_finish_uses_spawn_base_override(finish_workspace):
                    check=True, capture_output=True)
 
     result = runner.invoke(
-        app, ["spawn", "stacked", "--repos", "shared", "--slug", "stacked",
+        app, ["spawn", "--hotfix", "stacked", "--repos", "shared", "--slug", "stacked",
               "--base", "feat/upstream", "--skip-setup"],
     )
     assert result.exit_code == 0, result.output
@@ -322,7 +322,7 @@ def test_finish_fails_when_base_missing_on_remote(finish_workspace):
     cfg_path.write_text(yaml.safe_dump(cfg))
     container.config.reset()
 
-    result = runner.invoke(app, ["spawn", "missing base", "--repos", "shared"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "missing base", "--repos", "shared"])
     assert result.exit_code == 0, result.output
 
     pushed: list[str] = []
@@ -355,7 +355,7 @@ def test_finish_blocks_when_affected_repo_is_dirty(finish_workspace):
     """
     workspace, mock_shell = finish_workspace
 
-    result = runner.invoke(app, ["spawn", "finish gate", "--repos", "shared", "--force-audit"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "finish gate", "--repos", "shared", "--force-audit"])
     assert result.exit_code == 0, result.output
 
     def mock_run(cmd, cwd, env=None):
@@ -387,7 +387,7 @@ def test_finish_unrelated_dirty_repo_does_not_block(finish_workspace):
     """Drift in a repo not in task.affected_repos must not block finish."""
     workspace, mock_shell = finish_workspace
 
-    result = runner.invoke(app, ["spawn", "unrelated test", "--repos", "shared", "--force-audit"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "unrelated test", "--repos", "shared", "--force-audit"])
     assert result.exit_code == 0
 
     dirty_repos = {"auth-service"}  # NOT in affected_repos
@@ -439,7 +439,7 @@ def test_finish_skips_untouched_repos_in_multi_repo_task(finish_workspace):
     container.config.reset()
 
     result = runner.invoke(
-        app, ["spawn", "partial work", "--repos", "shared,auth-service", "--force-audit"]
+        app, ["spawn", "--hotfix", "partial work", "--repos", "shared,auth-service", "--force-audit"]
     )
     assert result.exit_code == 0, result.output
 
@@ -495,7 +495,7 @@ def test_finish_fails_when_branch_has_no_commits(finish_workspace):
     from mship.cli import container
     container.config.reset()
 
-    result = runner.invoke(app, ["spawn", "empty branch", "--repos", "shared", "--force-audit"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "empty branch", "--repos", "shared", "--force-audit"])
     assert result.exit_code == 0, result.output
 
     pushed: list[str] = []
@@ -543,7 +543,7 @@ def test_finish_stamps_finished_at(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["spawn", "stamp test", "--repos", "shared", "--force-audit"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "stamp test", "--repos", "shared", "--force-audit"])
     assert result.exit_code == 0, result.output
 
     result = runner.invoke(app, ["finish", "--task", "stamp-test"])
@@ -576,7 +576,7 @@ def test_finish_push_only_skips_gh_pr_create(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["spawn", "push only", "--repos", "shared", "--force-audit"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "push only", "--repos", "shared", "--force-audit"])
     assert result.exit_code == 0, result.output
 
     result = runner.invoke(app, ["finish", "--push-only", "--task", "push-only"])
@@ -596,7 +596,7 @@ def test_finish_push_only_rejects_base_flags(finish_workspace):
     workspace, mock_shell = finish_workspace
     mock_shell.run.side_effect = lambda cmd, cwd, env=None: ShellResult(returncode=0, stdout="", stderr="")
 
-    result = runner.invoke(app, ["spawn", "conflict flags", "--repos", "shared", "--force-audit"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "conflict flags", "--repos", "shared", "--force-audit"])
     assert result.exit_code == 0
 
     result = runner.invoke(app, ["finish", "--push-only", "--base", "main"])
@@ -611,7 +611,7 @@ def test_finish_suppresses_no_upstream_for_task_branch(finish_workspace):
 
     # Spawn without audit gate interference (the repo has no origin configured
     # in the fixture, so audit would fire no_upstream at spawn time too).
-    result = runner.invoke(app, ["spawn", "noupstream fix", "--repos", "shared", "--force-audit"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "noupstream fix", "--repos", "shared", "--force-audit"])
     assert result.exit_code == 0, result.output
 
     # Mock shell to simulate a clean worktree on the task branch with no
@@ -661,7 +661,7 @@ def test_finish_still_blocks_other_audit_errors(finish_workspace):
     """
     workspace, mock_shell = finish_workspace
 
-    result = runner.invoke(app, ["spawn", "still blocks", "--repos", "shared", "--force-audit"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "still blocks", "--repos", "shared", "--force-audit"])
     assert result.exit_code == 0
 
     def mock_run(cmd, cwd, env=None):
@@ -705,7 +705,7 @@ def test_finish_does_not_block_on_drift_in_unrelated_repo(finish_workspace):
     # Spawn affecting shared (will have commits) and api-gateway (untouched).
     # api-gateway depends on shared, but shared has no upstream deps so the
     # scope of "shared has commits" is just {shared} — api-gateway is excluded.
-    result = runner.invoke(app, ["spawn", "scoped finish", "--repos", "shared,auth-service,api-gateway", "--force-audit"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "scoped finish", "--repos", "shared,auth-service,api-gateway", "--force-audit"])
     assert result.exit_code == 0
 
     def mock_run(cmd, cwd, env=None):
@@ -757,7 +757,7 @@ def test_finish_auto_links_issue_refs_in_description(finish_workspace):
     """Regression for #8: task description containing `#N` should produce PR body with `Closes #N`."""
     workspace, mock_shell = finish_workspace
 
-    result = runner.invoke(app, ["spawn", "fix #42 something important", "--repos", "shared", "--force-audit"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "fix #42 something important", "--repos", "shared", "--force-audit"])
     assert result.exit_code == 0, result.output
 
     captured_body: list[str] = []
@@ -807,7 +807,7 @@ def test_finish_pr_body_unchanged_when_no_issue_refs(finish_workspace):
     """Task description without `#N` → PR body is just the description."""
     workspace, mock_shell = finish_workspace
 
-    result = runner.invoke(app, ["spawn", "ordinary task description", "--repos", "shared", "--force-audit"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "ordinary task description", "--repos", "shared", "--force-audit"])
     assert result.exit_code == 0, result.output
 
     captured_body: list[str] = []
@@ -847,7 +847,7 @@ def test_finish_warns_when_no_test_evidence_default(finish_workspace):
     """Default: missing test evidence is a WARNING (not a block). See #81."""
     workspace, mock_shell = finish_workspace
 
-    result = runner.invoke(app, ["spawn", "no evidence", "--repos", "shared", "--force-audit"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "no evidence", "--repos", "shared", "--force-audit"])
     assert result.exit_code == 0, result.output
 
     def mock_run(cmd, cwd, env=None):
@@ -877,7 +877,7 @@ def test_finish_blocks_when_require_tests_and_no_evidence(finish_workspace):
     """--require-tests escalates missing evidence to a BLOCK. See #81."""
     workspace, mock_shell = finish_workspace
 
-    result = runner.invoke(app, ["spawn", "require block", "--repos", "shared", "--force-audit"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "require block", "--repos", "shared", "--force-audit"])
     assert result.exit_code == 0, result.output
 
     pushed: list[str] = []
@@ -913,7 +913,7 @@ def test_finish_evidence_via_journal_suppresses_warning(finish_workspace, tmp_pa
     """Journal `test-state=pass` counts as evidence — no warning. See #81."""
     workspace, mock_shell = finish_workspace
 
-    result = runner.invoke(app, ["spawn", "journal evidence", "--repos", "shared", "--force-audit"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "journal evidence", "--repos", "shared", "--force-audit"])
     assert result.exit_code == 0, result.output
 
     # Record journal evidence for the task (global scope — applies to all repos).

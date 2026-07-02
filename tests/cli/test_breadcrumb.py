@@ -25,7 +25,7 @@ def ws_with_task(workspace_with_git: Path):
     mock_shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     container.shell.override(mock_shell)
-    runner.invoke(app, ["spawn", "breadcrumb test", "--repos", "shared", "--force-audit"])
+    runner.invoke(app, ["spawn", "--hotfix", "breadcrumb test", "--repos", "shared", "--force-audit"])
     yield workspace_with_git
     container.config_path.reset_override()
     container.state_dir.reset_override()
@@ -92,7 +92,7 @@ def test_ambiguity_lists_candidates(ws_with_task: Path):
     """Second task + running from outside both worktrees → ambiguity error with
     `--task <slug>` hints for BOTH tasks."""
     runner.invoke(
-        app, ["spawn", "second task", "--repos", "shared", "--force-audit"],
+        app, ["spawn", "--hotfix", "second task", "--repos", "shared", "--force-audit"],
     )
     import os
     prev = os.getcwd()

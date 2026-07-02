@@ -97,7 +97,7 @@ repos:
 def test_monorepo_spawn_shares_worktree(monorepo_workspace):
     tmp_path, mock_shell = monorepo_workspace
 
-    result = runner.invoke(app, ["spawn", "add feature"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "add feature"])
     assert result.exit_code == 0, result.output
 
     mgr = StateManager(tmp_path / ".mothership")
@@ -116,7 +116,7 @@ def test_monorepo_spawn_shares_worktree(monorepo_workspace):
 def test_monorepo_close_cleans_up(monorepo_workspace):
     tmp_path, mock_shell = monorepo_workspace
 
-    runner.invoke(app, ["spawn", "cleanup test"])
+    runner.invoke(app, ["spawn", "--hotfix", "cleanup test"])
     mgr = StateManager(tmp_path / ".mothership")
     state = mgr.load()
     root_wt = Path(state.tasks["cleanup-test"].worktrees["tailrd"])
@@ -135,7 +135,7 @@ def test_monorepo_run_uses_background(monorepo_workspace):
     """mship run should launch both services in background."""
     tmp_path, mock_shell = monorepo_workspace
 
-    runner.invoke(app, ["spawn", "run test"])
+    runner.invoke(app, ["spawn", "--hotfix", "run test"])
 
     # Set up Popen mocks that exit immediately
     popen_mocks = []
@@ -159,7 +159,7 @@ def test_monorepo_run_uses_process_group(monorepo_workspace):
     """Background services should be launched in their own process group."""
     tmp_path, mock_shell = monorepo_workspace
 
-    runner.invoke(app, ["spawn", "group test", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "group test", "--skip-setup"])
 
     popen_mocks = []
     def make_popen(*args, **kwargs):
@@ -208,7 +208,7 @@ repos:
 """
     )
 
-    runner.invoke(app, ["spawn", "hc integration", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "hc integration", "--skip-setup"])
 
     popen_mocks = []
     def make_popen(*args, **kwargs):

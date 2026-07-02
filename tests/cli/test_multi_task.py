@@ -53,7 +53,7 @@ def workspace(tmp_path, monkeypatch):
 
 
 def _spawn(runner, desc):
-    result = runner.invoke(app, ["spawn", desc, "--skip-setup", "--force-audit", "--bypass-reconcile"])
+    result = runner.invoke(app, ["spawn", "--hotfix", desc, "--skip-setup", "--force-audit", "--bypass-reconcile"])
     assert result.exit_code == 0, result.output
     return json.loads(result.stdout)
 

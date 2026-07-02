@@ -41,7 +41,7 @@ def patch_refresh(monkeypatch):
 
 
 def test_bind_refresh_reports_copied(configured_git_app: Path, patch_refresh):
-    runner.invoke(app, ["spawn", "copied test", "--repos", "shared", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "copied test", "--repos", "shared", "--skip-setup"])
     patch_refresh("shared", copied=[".env"])
     result = runner.invoke(app, ["bind", "refresh", "--task", "copied-test"])
     assert result.exit_code == 0, result.output
@@ -51,14 +51,14 @@ def test_bind_refresh_reports_copied(configured_git_app: Path, patch_refresh):
 
 
 def test_bind_refresh_exits_nonzero_on_skipped_without_overwrite(configured_git_app: Path, patch_refresh):
-    runner.invoke(app, ["spawn", "skip test", "--repos", "shared", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "skip test", "--repos", "shared", "--skip-setup"])
     patch_refresh("shared", skipped=[".env"])
     result = runner.invoke(app, ["bind", "refresh", "--task", "skip-test"])
     assert result.exit_code != 0
 
 
 def test_bind_refresh_overwrite_flag_passed_through(configured_git_app: Path, patch_refresh):
-    runner.invoke(app, ["spawn", "ow test", "--repos", "shared", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "ow test", "--repos", "shared", "--skip-setup"])
     patch_refresh("shared", updated=[".env"])
     result = runner.invoke(app, ["bind", "refresh", "--task", "ow-test", "--overwrite"])
     assert result.exit_code == 0, result.output
@@ -67,7 +67,7 @@ def test_bind_refresh_overwrite_flag_passed_through(configured_git_app: Path, pa
 
 
 def test_bind_refresh_unknown_repo_errors(configured_git_app: Path, patch_refresh):
-    runner.invoke(app, ["spawn", "unk", "--repos", "shared", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "unk", "--repos", "shared", "--skip-setup"])
     result = runner.invoke(
         app, ["bind", "refresh", "--task", "unk", "--repos", "not-a-repo"],
     )
@@ -77,7 +77,7 @@ def test_bind_refresh_unknown_repo_errors(configured_git_app: Path, patch_refres
 
 def test_bind_refresh_repos_filter_scopes(configured_git_app: Path, patch_refresh):
     runner.invoke(
-        app, ["spawn", "multi", "--repos", "shared,auth-service", "--skip-setup"],
+        app, ["spawn", "--hotfix", "multi", "--repos", "shared,auth-service", "--skip-setup"],
     )
     result = runner.invoke(
         app, ["bind", "refresh", "--task", "multi", "--repos", "shared"],
@@ -88,7 +88,7 @@ def test_bind_refresh_repos_filter_scopes(configured_git_app: Path, patch_refres
 
 
 def test_bind_refresh_surfaces_warnings(configured_git_app: Path, patch_refresh):
-    runner.invoke(app, ["spawn", "warn", "--repos", "shared", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "warn", "--repos", "shared", "--skip-setup"])
     patch_refresh("shared", warnings=["shared: bind_files source missing: .absent"])
     result = runner.invoke(app, ["bind", "refresh", "--task", "warn"])
     assert result.exit_code == 0, result.output

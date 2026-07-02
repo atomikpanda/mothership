@@ -51,7 +51,7 @@ def full_workspace(workspace_with_git: Path):
 
 def test_full_lifecycle(full_workspace: Path):
     # 1. Spawn
-    result = runner.invoke(app, ["spawn", "add labels", "--repos", "shared,auth-service"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "add labels", "--repos", "shared,auth-service"])
     assert result.exit_code == 0, result.output
     assert "add-labels" in result.output
 
@@ -119,7 +119,7 @@ def test_spawn_blocks_when_affected_repo_is_dirty(audit_workspace):
     container.log_manager.reset()
     try:
         (audit_workspace / "cli" / "README.md").write_text("modified\n")
-        result = runner.invoke(app, ["spawn", "dirty test", "--repos", "cli"])
+        result = runner.invoke(app, ["spawn", "--hotfix", "dirty test", "--repos", "cli"])
         assert result.exit_code == 1
         assert "dirty_worktree" in result.output
     finally:
@@ -136,7 +136,7 @@ def test_spawn_force_audit_bypasses_and_logs(audit_workspace):
     container.log_manager.reset()
     try:
         (audit_workspace / "cli" / "README.md").write_text("modified\n")
-        result = runner.invoke(app, ["spawn", "force test", "--repos", "cli", "--force-audit"])
+        result = runner.invoke(app, ["spawn", "--hotfix", "force test", "--repos", "cli", "--force-audit"])
         assert result.exit_code == 0, result.output
 
         log_mgr = LogManager(state_dir / "logs")
@@ -180,7 +180,7 @@ def test_full_hub_layout_e2e(tmp_path, monkeypatch):
     try:
         runner = CliRunner()
         # Spawn affected=api, expect shared to be passive
-        result = runner.invoke(app, ["spawn", "feature", "--repos", "api",
+        result = runner.invoke(app, ["spawn", "--hotfix", "feature", "--repos", "api",
                                      "--skip-setup", "--force-audit", "--offline"])
         assert result.exit_code == 0, result.output
 

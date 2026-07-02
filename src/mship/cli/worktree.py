@@ -262,6 +262,16 @@ def register(app: typer.Typer, get_container):
                  "(stacked PRs: base a task on another task's feat/* branch). "
                  "`mship finish` then targets it as the PR base. See #42.",
         ),
+        work_item: Optional[str] = typer.Option(
+            None, "--work-item", "--item",
+            help="WorkItem id this task implements. Required unless --hotfix is "
+                 "passed. Create one with `mship item new`.",
+        ),
+        hotfix: bool = typer.Option(
+            False, "--hotfix",
+            help="Bypass the WorkItem requirement for this spawn. Recorded to "
+                 "the bypass log.",
+        ),
     ):
         """Create coordinated worktrees across repos for a new task."""
         import re as _re
@@ -283,6 +293,31 @@ def register(app: typer.Typer, get_container):
                 raise typer.Exit(code=1)
 
         _run_gate(get_container, command="spawn", bypass=bypass_reconcile, output=output)
+
+        # --- WorkItem gate: every task must be linked to a WorkItem, unless
+        #     --hotfix explicitly overrides it (logged to the bypass log).
+        #     See spec workitem-mandatory-kind-gated-approval.
+        from mship.core.workitem_gate import log_hotfix
+        from mship.core.workitem_store import WorkItemStore
+        from mship.util.slug import slugify as _slugify
+
+        workspace_root = container.config_path().parent
+        if work_item is None:
+            if hotfix:
+                effective_slug = slug if slug is not None else _slugify(description)
+                log_hotfix(workspace_root, "spawn", effective_slug)
+            else:
+                output.error(
+                    "mship spawn requires a WorkItem: create one with "
+                    "`mship item new` and pass --work-item <id> (or --hotfix)"
+                )
+                raise typer.Exit(code=1)
+        else:
+            items = WorkItemStore(workspace_root / ".mothership" / "workitems")
+            if items.get(work_item) is None:
+                output.error(f"WorkItem {work_item!r} not found")
+                raise typer.Exit(code=1)
+
         wt_mgr = container.worktree_manager()
         config = container.config()
         shell = container.shell()
@@ -447,6 +482,7 @@ def register(app: typer.Typer, get_container):
                 offline=offline,
                 depends_on=dep_edges,
                 base=base,
+                work_item_id=work_item,
             )
         except BaseBranchNotFoundError as e:
             output.error(str(e))

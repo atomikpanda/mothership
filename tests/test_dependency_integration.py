@@ -64,13 +64,13 @@ def test_dependency_flow(dep_workspace):
     workspace_root = dep_workspace
 
     # 1. Spawn task-a (no deps).
-    r1 = runner.invoke(app, ["spawn", "task a", "--slug", "a", "--skip-setup", "--force-audit"])
+    r1 = runner.invoke(app, ["spawn", "--hotfix", "task a", "--slug", "a", "--skip-setup", "--force-audit"])
     assert r1.exit_code == 0, r1.output
 
     # 2. Spawn task-b depending on a.
     r2 = runner.invoke(
         app,
-        ["spawn", "task b", "--slug", "b", "--depends-on", "a", "--skip-setup", "--force-audit"],
+        ["spawn", "--hotfix", "task b", "--slug", "b", "--depends-on", "a", "--skip-setup", "--force-audit"],
     )
     assert r2.exit_code == 0, r2.output
 

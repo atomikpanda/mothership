@@ -92,7 +92,7 @@ repos:
 def test_metarepo_spawn_and_test_all(metarepo_workspace):
     workspace, mock_shell = metarepo_workspace
 
-    result = runner.invoke(app, ["spawn", "add user feed"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "add user feed"])
     assert result.exit_code == 0, result.output
 
     result = runner.invoke(app, ["test", "--task", "add-user-feed"])
@@ -104,7 +104,7 @@ def test_metarepo_spawn_and_test_all(metarepo_workspace):
 def test_metarepo_test_tag_apple(metarepo_workspace):
     workspace, mock_shell = metarepo_workspace
 
-    runner.invoke(app, ["spawn", "apple only test"])
+    runner.invoke(app, ["spawn", "--hotfix", "apple only test"])
     mock_shell.run_task.reset_mock()
 
     result = runner.invoke(app, ["test", "--tag", "apple", "--task", "apple-only-test"])
@@ -126,7 +126,7 @@ def test_metarepo_test_tag_apple(metarepo_workspace):
 def test_metarepo_test_repos_filter(metarepo_workspace):
     workspace, mock_shell = metarepo_workspace
 
-    runner.invoke(app, ["spawn", "repos filter test"])
+    runner.invoke(app, ["spawn", "--hotfix", "repos filter test"])
     mock_shell.run_task.reset_mock()
 
     result = runner.invoke(app, ["test", "--repos", "backend", "--task", "repos-filter-test"])

@@ -95,7 +95,7 @@ def _teardown():
 def test_log_with_action_and_open_flags(workspace_with_git):
     _setup(workspace_with_git)
     try:
-        runner.invoke(app, ["spawn", "flags test", "--repos", "shared", "--force-audit"])
+        runner.invoke(app, ["spawn", "--hotfix", "flags test", "--repos", "shared", "--force-audit"])
         result = runner.invoke(
             app, ["journal", "stuck",
                     "--action", "debugging middleware",
@@ -121,7 +121,7 @@ def test_log_with_action_and_open_flags(workspace_with_git):
 def test_log_infers_repo_from_active_repo(workspace_with_git, monkeypatch):
     _setup(workspace_with_git)
     try:
-        runner.invoke(app, ["spawn", "infer test", "--repos", "shared", "--force-audit"])
+        runner.invoke(app, ["spawn", "--hotfix", "infer test", "--repos", "shared", "--force-audit"])
         runner.invoke(app, ["switch", "shared", "--task", "infer-test"])
         # cd into the worktree so the cwd check passes
         from mship.core.state import StateManager
@@ -140,7 +140,7 @@ def test_log_infers_repo_from_active_repo(workspace_with_git, monkeypatch):
 def test_log_show_open_lists_open_questions(workspace_with_git):
     _setup(workspace_with_git)
     try:
-        runner.invoke(app, ["spawn", "open test", "--repos", "shared", "--force-audit"])
+        runner.invoke(app, ["spawn", "--hotfix", "open test", "--repos", "shared", "--force-audit"])
         runner.invoke(
             app, ["journal", "stuck", "--open", "how to handle nulls", "--repo", "shared",
                   "--task", "open-test"],
@@ -160,7 +160,7 @@ def test_log_show_open_lists_open_questions(workspace_with_git):
 def test_log_show_open_empty_exits_zero(workspace_with_git):
     _setup(workspace_with_git)
     try:
-        runner.invoke(app, ["spawn", "nothing open", "--repos", "shared", "--force-audit"])
+        runner.invoke(app, ["spawn", "--hotfix", "nothing open", "--repos", "shared", "--force-audit"])
         result = runner.invoke(app, ["journal", "--show-open", "--task", "nothing-open"])
         assert result.exit_code == 0
     finally:
@@ -175,7 +175,7 @@ def test_log_refuses_when_cwd_outside_active_worktree(workspace_with_git, tmp_pa
     container.config_path.override(workspace_with_git / "mothership.yaml")
     container.state_dir.override(workspace_with_git / ".mothership")
     try:
-        r.invoke(app, ["spawn", "refuse test", "--repos", "shared", "--force-audit"])
+        r.invoke(app, ["spawn", "--hotfix", "refuse test", "--repos", "shared", "--force-audit"])
         r.invoke(app, ["switch", "shared", "--task", "refuse-test"])
         monkeypatch.chdir(tmp_path)
         result = r.invoke(app, ["journal", "should fail", "--task", "refuse-test"])
@@ -197,7 +197,7 @@ def test_log_force_writes_entry_with_bypass_tag(workspace_with_git, tmp_path, mo
     container.config_path.override(workspace_with_git / "mothership.yaml")
     container.state_dir.override(workspace_with_git / ".mothership")
     try:
-        r.invoke(app, ["spawn", "bypass test", "--repos", "shared", "--force-audit"])
+        r.invoke(app, ["spawn", "--hotfix", "bypass test", "--repos", "shared", "--force-audit"])
         r.invoke(app, ["switch", "shared", "--task", "bypass-test"])
         monkeypatch.chdir(tmp_path)
         result = r.invoke(app, ["journal", "force msg", "--force", "--task", "bypass-test"])
@@ -222,7 +222,7 @@ def test_log_silent_when_cwd_inside_active_worktree(workspace_with_git, monkeypa
     container.config_path.override(workspace_with_git / "mothership.yaml")
     container.state_dir.override(workspace_with_git / ".mothership")
     try:
-        _runner.invoke(app, ["spawn", "cwd test2", "--repos", "shared", "--force-audit"])
+        _runner.invoke(app, ["spawn", "--hotfix", "cwd test2", "--repos", "shared", "--force-audit"])
         _runner.invoke(app, ["switch", "shared", "--task", "cwd-test2"])
 
         # cd into the actual worktree

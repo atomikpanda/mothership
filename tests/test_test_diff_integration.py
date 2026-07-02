@@ -27,7 +27,7 @@ def test_workspace(workspace_with_git):
 
 def _spawn(description="first"):
     result = runner.invoke(
-        app, ["spawn", description, "--repos", "shared", "--force-audit"],
+        app, ["spawn", "--hotfix", description, "--repos", "shared", "--force-audit"],
     )
     assert result.exit_code == 0, result.output
 
