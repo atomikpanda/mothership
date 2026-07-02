@@ -25,7 +25,7 @@ def ws_with_task(workspace_with_git: Path):
     mock_shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     container.shell.override(mock_shell)
-    runner.invoke(app, ["spawn", "breadcrumb test", "--repos", "shared", "--force-audit"])
+    runner.invoke(app, ["spawn", "--hotfix", "breadcrumb test", "--repos", "shared", "--force-audit"])
     yield workspace_with_git
     container.config_path.reset_override()
     container.state_dir.reset_override()
@@ -53,7 +53,9 @@ def _parse_json_or_skip(text: str) -> dict:
 
 
 def test_phase_emits_resolution_fields(ws_with_task: Path):
-    result = runner.invoke(app, ["phase", "dev", "--task", "breadcrumb-test"])
+    # Task was spawned with --hotfix (no WorkItem); phase→dev needs its own
+    # bypass now that the WorkItem gate is checked there too.
+    result = runner.invoke(app, ["phase", "dev", "--task", "breadcrumb-test", "--bypass-spec-gate"])
     assert result.exit_code == 0, result.output
     payload = _parse_json_or_skip(result.output)
     assert payload.get("resolved_task") == "breadcrumb-test"
@@ -92,7 +94,7 @@ def test_ambiguity_lists_candidates(ws_with_task: Path):
     """Second task + running from outside both worktrees → ambiguity error with
     `--task <slug>` hints for BOTH tasks."""
     runner.invoke(
-        app, ["spawn", "second task", "--repos", "shared", "--force-audit"],
+        app, ["spawn", "--hotfix", "second task", "--repos", "shared", "--force-audit"],
     )
     import os
     prev = os.getcwd()

@@ -411,6 +411,7 @@ class WorktreeManager:
         offline: bool = False,
         depends_on: list[DependencyEdge] | None = None,
         base: str | None = None,
+        work_item_id: str | None = None,
     ) -> SpawnResult:
         slug = slug if slug is not None else slugify(description)
         branch = self._config.branch_pattern.replace("{slug}", slug)
@@ -622,11 +623,12 @@ class WorktreeManager:
         # Single .mship-workspace marker at the hub root.
         write_marker(hub, workspace_root)
 
+        now = datetime.now(timezone.utc)
         task = Task(
             slug=slug,
             description=description,
             phase="plan",
-            created_at=datetime.now(timezone.utc),
+            created_at=now,
             affected_repos=ordered,
             worktrees=worktrees,
             branch=branch,
@@ -634,6 +636,7 @@ class WorktreeManager:
             base_override=base,
             passive_repos=passive,
             depends_on=depends_on or [],
+            work_item_id=work_item_id,
         )
 
         def _apply(s: WorkspaceState) -> None:
@@ -647,6 +650,15 @@ class WorktreeManager:
                 )
             s.tasks[slug] = task
         self._state_manager.mutate(_apply)
+
+        if work_item_id is not None:
+            # Forward link (task_slugs) on the WorkItem. The reverse link
+            # (task.work_item_id) is already set atomically on the Task above;
+            # add_task's state=... mutate is a harmless no-op re-set of the
+            # same value (see WorkItemStore.add_task).
+            from mship.core.workitem_store import WorkItemStore
+            items = WorkItemStore(workspace_root / ".mothership" / "workitems")
+            items.add_task(work_item_id, slug, now=now, state=self._state_manager)
 
         self._log.create(slug)
         log_msg = f"Task spawned. Repos: {', '.join(ordered)}. Branch: {branch}"

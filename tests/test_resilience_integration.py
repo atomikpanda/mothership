@@ -51,7 +51,7 @@ def full_workspace(workspace_with_git: Path):
 def test_agent_resilience_lifecycle(full_workspace: Path):
     slug = "resilience-test"
     # 1. Spawn task
-    result = runner.invoke(app, ["spawn", "resilience test", "--repos", "shared,auth-service"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "resilience test", "--repos", "shared,auth-service"])
     assert result.exit_code == 0, result.output
 
     # 2. Log context
@@ -59,7 +59,9 @@ def test_agent_resilience_lifecycle(full_workspace: Path):
     assert result.exit_code == 0
 
     # 3. Phase to dev
-    result = runner.invoke(app, ["phase", "dev", "--task", slug])
+    # Task was spawned with --hotfix (no WorkItem); phase→dev needs its own
+    # bypass now that the WorkItem gate is checked there too.
+    result = runner.invoke(app, ["phase", "dev", "--task", slug, "--bypass-spec-gate"])
     assert result.exit_code == 0
 
     # 4. Block
@@ -86,7 +88,7 @@ def test_agent_resilience_lifecycle(full_workspace: Path):
     assert "BLOCKED" not in result.output
 
     # 9. Generate handoff
-    result = runner.invoke(app, ["finish", "--handoff", "--task", slug])
+    result = runner.invoke(app, ["finish", "--hotfix", "--handoff", "--task", slug])
     assert result.exit_code == 0
     handoff_file = full_workspace / ".mothership" / "handoffs" / "resilience-test.yaml"
     assert handoff_file.exists()

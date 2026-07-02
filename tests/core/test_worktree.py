@@ -1099,7 +1099,7 @@ def test_spawn_writes_workspace_marker_in_each_worktree(workspace_with_git: Path
 
     try:
         result = runner.invoke(
-            app, ["spawn", "marker test", "--repos", "shared", "--skip-setup", "--force-audit"]
+            app, ["spawn", "--hotfix", "marker test", "--repos", "shared", "--skip-setup", "--force-audit"]
         )
         assert result.exit_code == 0, result.output
         hub = workspace_with_git / ".worktrees" / "marker-test"

@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 
 from mship.cli import app, container
 from mship.core.state import StateManager, Task, WorkspaceState
+from mship.core.workitem_store import WorkItemStore
 
 runner = CliRunner()
 
@@ -20,6 +21,15 @@ def configured_app_with_task(workspace: Path):
     container.config_path.override(workspace / "mothership.yaml")
     container.state_dir.override(state_dir)
 
+    # A bug WorkItem is attached so phase→dev's universal WorkItem gate
+    # (core/phase.py::transition → workitem_gate.check_task_gate) doesn't
+    # block these tests. See spec workitem-mandatory-kind-gated-approval.
+    items = WorkItemStore(state_dir / "workitems")
+    wi = items.create(
+        title="Add labels", kind="bug", workspace="test",
+        now=datetime(2026, 4, 10, tzinfo=timezone.utc),
+    )
+
     mgr = StateManager(state_dir)
     task = Task(
         slug="add-labels",
@@ -28,6 +38,7 @@ def configured_app_with_task(workspace: Path):
         created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
         affected_repos=["shared"],
         branch="feat/add-labels",
+        work_item_id=wi.id,
     )
     mgr.save(WorkspaceState(tasks={"add-labels": task}))
     yield

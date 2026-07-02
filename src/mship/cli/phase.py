@@ -13,7 +13,7 @@ def register(app: typer.Typer, get_container):
         target: str,
         force: bool = typer.Option(False, "--force", "-f", help="Force transition even if task is blocked or finished"),
         task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
-        bypass_spec_gate: bool = typer.Option(False, "--bypass-spec-gate", help="Skip the approved-spec requirement for plan→dev (requires require_approved_spec: true in mothership.yaml)."),
+        bypass_spec_gate: bool = typer.Option(False, "--bypass-spec-gate", help="Skip the plan→dev gate: the universal WorkItem requirement, the feature-kind approved-spec requirement, and (if require_approved_spec: true in mothership.yaml) the legacy task-scoped approved-spec check. Recorded to the bypass log (--hotfix equivalent)."),
     ):
         """Transition a task to a new phase."""
         container = get_container()

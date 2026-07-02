@@ -66,20 +66,49 @@ class PhaseManager:
                 f"the next task. Use --force to override."
             )
 
-        # Approved-spec gate: opt-in via require_approved_spec in mothership.yaml.
-        if (
-            task.phase == "plan"
-            and target == "dev"
-            and self._config is not None
-            and self._config.require_approved_spec
-            and not bypass_spec_gate
-            and not self._has_approved_spec(task_slug)
-        ):
-            raise SpecGateError(
-                f"Task '{task_slug}' has no bound approved spec. "
-                f"Create and approve one (`mship spec approve`) or pass "
-                f"--bypass-spec-gate to skip this check."
-            )
+        # WorkItem gate: universal — every task entering dev must be linked to
+        # a WorkItem, and a feature-kind WorkItem additionally needs an
+        # approved spec (core/workitem_gate.py::check_task_gate, authoritative
+        # for WorkItem-linked tasks). --bypass-spec-gate is the --hotfix
+        # equivalent for this gate: it skips both checks below and instead
+        # records a bypass-log entry. See spec
+        # workitem-mandatory-kind-gated-approval.
+        if task.phase == "plan" and target == "dev":
+            if bypass_spec_gate:
+                if self._workspace_root is not None:
+                    from mship.core.workitem_gate import log_hotfix
+                    log_hotfix(self._workspace_root, "phase-dev", task_slug)
+            else:
+                if self._workspace_root is not None:
+                    from mship.core.workitem_gate import check_task_gate
+                    # A corrupt/unreadable WorkItem store must not propagate a
+                    # raw exception out of transition() — --bypass-spec-gate
+                    # already skips this call entirely as the escape hatch;
+                    # without --bypass-spec-gate we still want a clean,
+                    # actionable SpecGateError instead of a traceback.
+                    try:
+                        gate_result = check_task_gate(task, self._workspace_root)
+                    except Exception as e:
+                        raise SpecGateError(
+                            f"couldn't evaluate WorkItem gate (corrupt store?): {e}"
+                        ) from e
+                    if not gate_result.ok:
+                        raise SpecGateError(gate_result.reason)
+
+                # Approved-spec gate: opt-in via require_approved_spec in
+                # mothership.yaml. Older, task-slug-based and kind-agnostic —
+                # kept as a fallback alongside the WorkItem-kind gate above,
+                # which is authoritative for tasks that have a WorkItem.
+                if (
+                    self._config is not None
+                    and self._config.require_approved_spec
+                    and not self._has_approved_spec(task_slug)
+                ):
+                    raise SpecGateError(
+                        f"Task '{task_slug}' has no bound approved spec. "
+                        f"Create and approve one (`mship spec approve`) or pass "
+                        f"--bypass-spec-gate to skip this check."
+                    )
 
         old_phase = task.phase
         warnings = self._check_gates(task_slug, task.phase, target)
@@ -177,15 +206,15 @@ class PhaseManager:
             return False
         # Import inside method to avoid potential import cycles at module load.
         from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+        from mship.core.workitem_gate import APPROVED_STATUSES
 
         specs_dir = self._workspace_root / SPECS_DIRNAME
         try:
             specs = SpecStore(specs_dir).list()
         except Exception:
             return False
-        approved_statuses = {"approved", "dispatched", "implemented"}
         return any(
-            s.task_slug == task_slug and s.status in approved_statuses
+            s.task_slug == task_slug and s.status in APPROVED_STATUSES
             for s in specs
         )
 

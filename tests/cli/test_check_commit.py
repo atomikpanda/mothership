@@ -49,17 +49,26 @@ def test_check_commit_no_active_tasks_exits_zero(tmp_path):
 
 
 def test_check_commit_matching_worktree_exits_zero(tmp_path):
+    from mship.core.workitem_store import WorkItemStore
+
     container.config_path.override(tmp_path / "mothership.yaml")
     container.state_dir.override(tmp_path / ".mothership")
     (tmp_path / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
     (tmp_path / ".mothership").mkdir()
     wt = tmp_path / "wt"
     wt.mkdir()
+    # A bug WorkItem is attached so this task clears the WorkItem gate
+    # (core/workitem_gate.py::check_task_gate) without needing an approved
+    # spec — see spec workitem-mandatory-kind-gated-approval, task 5/6.
+    wi = WorkItemStore(tmp_path / ".mothership" / "workitems").create(
+        title="thing", kind="bug", workspace="t", now=datetime.now(timezone.utc),
+    )
     task = Task(
         slug="t", description="d", phase="dev",
         created_at=datetime.now(timezone.utc),
         affected_repos=["cli"], branch="feat/t",
         worktrees={"cli": wt},
+        work_item_id=wi.id,
     )
     _seed(tmp_path / ".mothership", task)
     try:
@@ -384,6 +393,98 @@ def test_check_commit_fails_open_on_corrupt_state(tmp_path):
     try:
         result = runner.invoke(app, ["_check-commit", str(tmp_path)])
         assert result.exit_code == 0, result.output  # fail-open
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+
+# -----------------------------------------------------------------------------
+# WorkItem gate (task 5/6): a commit into a registered worktree is refused
+# when the task has no WorkItem (or a feature WorkItem without an approved
+# spec) — core/workitem_gate.py::check_task_gate. MSHIP_BYPASS_GATE is the
+# hotfix escape (already short-circuits at the very top of _check-commit,
+# before state is even loaded).
+# -----------------------------------------------------------------------------
+
+def test_check_commit_refuses_task_without_workitem(tmp_path):
+    container.config_path.override(tmp_path / "mothership.yaml")
+    container.state_dir.override(tmp_path / ".mothership")
+    (tmp_path / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    (tmp_path / ".mothership").mkdir()
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    task = Task(
+        slug="no-workitem", description="d", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["cli"], branch="feat/no-workitem",
+        worktrees={"cli": wt},
+    )
+    _seed(tmp_path / ".mothership", task)
+    try:
+        result = runner.invoke(app, ["_check-commit", str(wt)])
+        assert result.exit_code == 1, result.output
+        assert "no WorkItem" in result.output
+        assert "no-workitem" in result.output
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+
+def test_check_commit_refuses_feature_workitem_without_approved_spec(tmp_path):
+    from mship.core.workitem_store import WorkItemStore
+
+    container.config_path.override(tmp_path / "mothership.yaml")
+    container.state_dir.override(tmp_path / ".mothership")
+    (tmp_path / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    (tmp_path / ".mothership").mkdir()
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    wi = WorkItemStore(tmp_path / ".mothership" / "workitems").create(
+        title="feature thing", kind="feature", workspace="t",
+        now=datetime.now(timezone.utc),
+    )
+    task = Task(
+        slug="feature-task", description="d", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["cli"], branch="feat/feature-task",
+        worktrees={"cli": wt}, work_item_id=wi.id,
+    )
+    _seed(tmp_path / ".mothership", task)
+    try:
+        result = runner.invoke(app, ["_check-commit", str(wt)])
+        assert result.exit_code == 1, result.output
+        assert "approved spec" in result.output
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+
+def test_check_commit_bypass_gate_env_allows_task_without_workitem(tmp_path, monkeypatch):
+    container.config_path.override(tmp_path / "mothership.yaml")
+    container.state_dir.override(tmp_path / ".mothership")
+    (tmp_path / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    (tmp_path / ".mothership").mkdir()
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    task = Task(
+        slug="no-workitem", description="d", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["cli"], branch="feat/no-workitem",
+        worktrees={"cli": wt},
+    )
+    _seed(tmp_path / ".mothership", task)
+    monkeypatch.setenv("MSHIP_BYPASS_GATE", "1")
+    try:
+        result = runner.invoke(app, ["_check-commit", str(wt)])
+        assert result.exit_code == 0, result.output
+        log = tmp_path / ".mothership" / "bypass-log.jsonl"
+        assert log.exists() and "commit" in log.read_text()
     finally:
         container.config_path.reset_override()
         container.state_dir.reset_override()

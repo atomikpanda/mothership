@@ -64,13 +64,13 @@ def test_dependency_flow(dep_workspace):
     workspace_root = dep_workspace
 
     # 1. Spawn task-a (no deps).
-    r1 = runner.invoke(app, ["spawn", "task a", "--slug", "a", "--skip-setup", "--force-audit"])
+    r1 = runner.invoke(app, ["spawn", "--hotfix", "task a", "--slug", "a", "--skip-setup", "--force-audit"])
     assert r1.exit_code == 0, r1.output
 
     # 2. Spawn task-b depending on a.
     r2 = runner.invoke(
         app,
-        ["spawn", "task b", "--slug", "b", "--depends-on", "a", "--skip-setup", "--force-audit"],
+        ["spawn", "--hotfix", "task b", "--slug", "b", "--depends-on", "a", "--skip-setup", "--force-audit"],
     )
     assert r2.exit_code == 0, r2.output
 
@@ -83,14 +83,14 @@ def test_dependency_flow(dep_workspace):
     assert deps["blocked_by"] == ["a"]
 
     # 4. finish task-b is blocked by the dependency gate.
-    r4 = runner.invoke(app, ["finish", "--task", "b"])
+    r4 = runner.invoke(app, ["finish", "--hotfix", "--task", "b"])
     err = (r4.output or "").lower()
     assert ("upstream" in err) or ("blocked" in err), (
         f"Expected 'upstream' or 'blocked' in output; got: {r4.output!r}"
     )
 
     # 5. --bypass-deps clears the deps gate (finish may still fail for other reasons).
-    r5 = runner.invoke(app, ["finish", "--task", "b", "--bypass-deps"])
+    r5 = runner.invoke(app, ["finish", "--hotfix", "--task", "b", "--bypass-deps"])
     out5 = (r5.output or "").lower()
     # The specific deps-blocked message must not appear.
     assert "finish blocked: upstream" not in out5, (

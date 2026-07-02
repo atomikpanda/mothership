@@ -262,6 +262,16 @@ def register(app: typer.Typer, get_container):
                  "(stacked PRs: base a task on another task's feat/* branch). "
                  "`mship finish` then targets it as the PR base. See #42.",
         ),
+        work_item: Optional[str] = typer.Option(
+            None, "--work-item", "--item",
+            help="WorkItem id this task implements. Required unless --hotfix is "
+                 "passed. Create one with `mship item new`.",
+        ),
+        hotfix: bool = typer.Option(
+            False, "--hotfix",
+            help="Bypass the WorkItem requirement for this spawn. Recorded to "
+                 "the bypass log.",
+        ),
     ):
         """Create coordinated worktrees across repos for a new task."""
         import re as _re
@@ -283,6 +293,31 @@ def register(app: typer.Typer, get_container):
                 raise typer.Exit(code=1)
 
         _run_gate(get_container, command="spawn", bypass=bypass_reconcile, output=output)
+
+        # --- WorkItem gate: every task must be linked to a WorkItem, unless
+        #     --hotfix explicitly overrides it (logged to the bypass log).
+        #     See spec workitem-mandatory-kind-gated-approval.
+        from mship.core.workitem_gate import log_hotfix
+        from mship.core.workitem_store import WorkItemStore
+        from mship.util.slug import slugify as _slugify
+
+        workspace_root = container.config_path().parent
+        if work_item is None:
+            if hotfix:
+                effective_slug = slug if slug is not None else _slugify(description)
+                log_hotfix(workspace_root, "spawn", effective_slug)
+            else:
+                output.error(
+                    "mship spawn requires a WorkItem: create one with "
+                    "`mship item new` and pass --work-item <id> (or --hotfix)"
+                )
+                raise typer.Exit(code=1)
+        else:
+            items = WorkItemStore(workspace_root / ".mothership" / "workitems")
+            if items.get(work_item) is None:
+                output.error(f"WorkItem {work_item!r} not found")
+                raise typer.Exit(code=1)
+
         wt_mgr = container.worktree_manager()
         config = container.config()
         shell = container.shell()
@@ -447,6 +482,7 @@ def register(app: typer.Typer, get_container):
                 offline=offline,
                 depends_on=dep_edges,
                 base=base,
+                work_item_id=work_item,
             )
         except BaseBranchNotFoundError as e:
             output.error(str(e))
@@ -874,6 +910,12 @@ def register(app: typer.Typer, get_container):
             None, "--token", help="GitHub token for push + PR creation in "
             "credential-less environments (else GH_TOKEN / GITHUB_TOKEN).",
         ),
+        hotfix: bool = typer.Option(
+            False, "--hotfix",
+            help="Bypass the WorkItem gate for this finish (no WorkItem, or a "
+                 "feature WorkItem without an approved spec). Downgrades the "
+                 "block to a warning and records a bypass-log entry.",
+        ),
     ):
         """Create PRs across repos in dependency order."""
         from pathlib import Path
@@ -955,6 +997,37 @@ def register(app: typer.Typer, get_container):
         resolved_finish = resolve_for_command("finish", state, task, output)
         t = resolved_finish.task
         task = t
+
+        # --- WorkItem gate: every task must be linked to a WorkItem, and a
+        # feature-kind WorkItem additionally needs an approved spec
+        # (core/workitem_gate.py::check_task_gate). Placed as early as
+        # possible — right after resolving the task — so finish fails fast
+        # before any push/PR work. --hotfix downgrades the block to a
+        # warning and records a bypass-log entry, mirroring the spawn/
+        # phase-dev gates. See spec workitem-mandatory-kind-gated-approval.
+        #
+        # check_task_gate reads the WorkItem store (and specs), so a corrupt
+        # store file must not throw an unhandled exception here — that would
+        # skip the --hotfix rescue entirely (the branch below never runs).
+        # Treat any read/parse failure as a failing gate result instead, so
+        # --hotfix can still override it, and the non-hotfix path still exits
+        # cleanly via output.error rather than a traceback.
+        from mship.core import workitem_gate
+        workspace_root = container.config_path().parent
+        try:
+            gate_result = workitem_gate.check_task_gate(task, workspace_root)
+        except Exception as e:
+            gate_result = workitem_gate.GateResult(
+                False, f"couldn't evaluate WorkItem gate (corrupt store?): {e}"
+            )
+        if not gate_result.ok:
+            if hotfix:
+                output.warning(f"WorkItem gate bypassed (--hotfix): {gate_result.reason}")
+                workitem_gate.log_hotfix(workspace_root, "finish", task.slug)
+            else:
+                output.error(f"Cannot finish: {gate_result.reason}")
+                raise typer.Exit(code=1)
+
         graph = container.graph()
         config = container.config()
         ordered = graph.topo_sort(task.affected_repos)

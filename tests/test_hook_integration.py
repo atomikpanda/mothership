@@ -66,7 +66,7 @@ def test_commit_outside_task_worktree_refused(workspace_for_hooks):
     """End-to-end: spawn creates a worktree; a commit in the main checkout is refused."""
     tmp_path, repo = workspace_for_hooks
     runner.invoke(app, ["init", "--install-hooks"])
-    r = runner.invoke(app, ["spawn", "add avatars", "--repos", "cli", "--force-audit", "--skip-setup"])
+    r = runner.invoke(app, ["spawn", "--hotfix", "add avatars", "--repos", "cli", "--force-audit", "--skip-setup"])
     assert r.exit_code == 0, r.output
 
     # Make a change in the main checkout (wrong place)
@@ -88,7 +88,7 @@ def test_commit_outside_task_worktree_refused(workspace_for_hooks):
 def test_commit_inside_worktree_succeeds(workspace_for_hooks):
     tmp_path, repo = workspace_for_hooks
     runner.invoke(app, ["init", "--install-hooks"])
-    r = runner.invoke(app, ["spawn", "inside ok", "--repos", "cli", "--force-audit", "--skip-setup"])
+    r = runner.invoke(app, ["spawn", "--hotfix", "inside ok", "--repos", "cli", "--force-audit", "--skip-setup"])
     assert r.exit_code == 0, r.output
 
     from mship.core.state import StateManager
@@ -96,11 +96,14 @@ def test_commit_inside_worktree_succeeds(workspace_for_hooks):
     wt = Path(state.tasks["inside-ok"].worktrees["cli"])
     assert wt.exists()
 
-    # Commit in the worktree — hook should pass
+    # Commit in the worktree — hook should pass. Spawned with --hotfix, so the
+    # task has no WorkItem; bypass that (unrelated) gate here — this test is
+    # about the worktree-location check, not the WorkItem gate.
     (wt / "new.py").write_text("print('hi')\n")
     env = {**os.environ,
            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+           "MSHIP_BYPASS_GATE": "1"}
     subprocess.run(["git", "add", "new.py"], cwd=wt, check=True, capture_output=True, env=env)
     result = subprocess.run(
         ["git", "commit", "-m", "from worktree"],
@@ -112,7 +115,7 @@ def test_commit_inside_worktree_succeeds(workspace_for_hooks):
 def test_no_verify_bypasses_hook(workspace_for_hooks):
     tmp_path, repo = workspace_for_hooks
     runner.invoke(app, ["init", "--install-hooks"])
-    runner.invoke(app, ["spawn", "bypass test", "--repos", "cli", "--force-audit", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "bypass test", "--repos", "cli", "--force-audit", "--skip-setup"])
 
     (repo / "new.py").write_text("x\n")
     env = {**os.environ,
@@ -158,7 +161,7 @@ def test_post_commit_auto_logs_in_worktree(workspace_for_hooks):
     tmp_path, repo = workspace_for_hooks
     runner.invoke(app, ["init", "--install-hooks"])
     spawn_result = runner.invoke(
-        app, ["spawn", "auto log test", "--repos", "cli", "--force-audit", "--skip-setup"],
+        app, ["spawn", "--hotfix", "auto log test", "--repos", "cli", "--force-audit", "--skip-setup"],
     )
     assert spawn_result.exit_code == 0, spawn_result.output
 
@@ -167,10 +170,13 @@ def test_post_commit_auto_logs_in_worktree(workspace_for_hooks):
     wt = Path(state.tasks["auto-log-test"].worktrees["cli"])
     assert wt.exists()
 
+    # Spawned with --hotfix, so the task has no WorkItem; bypass that
+    # (unrelated) gate here — this test is about the auto-log side effect.
     (wt / "file.txt").write_text("hello\n")
     env = {**os.environ,
            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+           "MSHIP_BYPASS_GATE": "1"}
     subprocess.run(["git", "add", "."], cwd=wt, check=True, capture_output=True, env=env)
     result = subprocess.run(
         ["git", "commit", "-m", "auto logged"],
@@ -194,11 +200,11 @@ def _spawn_two_tasks(tmp_path: Path, repo: Path):
 
     runner.invoke(app, ["init", "--install-hooks"])
     r1 = runner.invoke(
-        app, ["spawn", "task a", "--repos", "cli", "--force-audit", "--skip-setup"],
+        app, ["spawn", "--hotfix", "task a", "--repos", "cli", "--force-audit", "--skip-setup"],
     )
     assert r1.exit_code == 0, r1.output
     r2 = runner.invoke(
-        app, ["spawn", "task b", "--repos", "cli", "--force-audit", "--skip-setup"],
+        app, ["spawn", "--hotfix", "task b", "--repos", "cli", "--force-audit", "--skip-setup"],
     )
     assert r2.exit_code == 0, r2.output
 
@@ -216,10 +222,13 @@ def test_commit_in_task_a_worktree_allowed_with_two_tasks(workspace_for_hooks):
     tmp_path, repo = workspace_for_hooks
     wt_a, _wt_b = _spawn_two_tasks(tmp_path, repo)
 
+    # Spawned with --hotfix, so neither task has a WorkItem; bypass that
+    # (unrelated) gate here — this test is about multi-task worktree isolation.
     (wt_a / "a.py").write_text("a\n")
     env = {**os.environ,
            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+           "MSHIP_BYPASS_GATE": "1"}
     subprocess.run(["git", "add", "a.py"], cwd=wt_a, check=True, capture_output=True, env=env)
     result = subprocess.run(
         ["git", "commit", "-m", "from task a"],
@@ -235,7 +244,8 @@ def test_commit_in_task_b_worktree_allowed_with_two_tasks(workspace_for_hooks):
     (wt_b / "b.py").write_text("b\n")
     env = {**os.environ,
            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+           "MSHIP_BYPASS_GATE": "1"}
     subprocess.run(["git", "add", "b.py"], cwd=wt_b, check=True, capture_output=True, env=env)
     result = subprocess.run(
         ["git", "commit", "-m", "from task b"],

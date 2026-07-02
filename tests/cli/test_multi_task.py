@@ -53,7 +53,7 @@ def workspace(tmp_path, monkeypatch):
 
 
 def _spawn(runner, desc):
-    result = runner.invoke(app, ["spawn", desc, "--skip-setup", "--force-audit", "--bypass-reconcile"])
+    result = runner.invoke(app, ["spawn", "--hotfix", desc, "--skip-setup", "--force-audit", "--bypass-reconcile"])
     assert result.exit_code == 0, result.output
     return json.loads(result.stdout)
 
@@ -91,7 +91,9 @@ def test_phase_with_task_flag_transitions_correct_task(workspace):
     runner = CliRunner()
     a = _spawn(runner, "first")
     b = _spawn(runner, "second")
-    result = runner.invoke(app, ["phase", "dev", "--task", a["slug"]])
+    # Tasks were spawned with --hotfix (no WorkItem); phase→dev needs its own
+    # bypass now that the WorkItem gate is checked there too.
+    result = runner.invoke(app, ["phase", "dev", "--task", a["slug"], "--bypass-spec-gate"])
     assert result.exit_code == 0, result.output
     state = StateManager(workspace / ".mothership").load()
     assert state.tasks[a["slug"]].phase == "dev"
@@ -103,7 +105,7 @@ def test_env_anchor_scopes_session(workspace, monkeypatch):
     a = _spawn(runner, "first")
     _spawn(runner, "second")
     monkeypatch.setenv("MSHIP_TASK", a["slug"])
-    result = runner.invoke(app, ["phase", "dev"])
+    result = runner.invoke(app, ["phase", "dev", "--bypass-spec-gate"])
     assert result.exit_code == 0, result.output
     state = StateManager(workspace / ".mothership").load()
     assert state.tasks[a["slug"]].phase == "dev"
@@ -115,7 +117,7 @@ def test_cwd_inside_worktree_resolves(workspace, monkeypatch):
     _spawn(runner, "second")
     a_wt = Path(a["worktrees"]["r"])
     monkeypatch.chdir(a_wt)
-    result = runner.invoke(app, ["phase", "dev"])
+    result = runner.invoke(app, ["phase", "dev", "--bypass-spec-gate"])
     assert result.exit_code == 0, result.output
     state = StateManager(workspace / ".mothership").load()
     assert state.tasks[a["slug"]].phase == "dev"

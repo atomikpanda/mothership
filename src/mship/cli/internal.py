@@ -152,6 +152,30 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=1)
 
         if matched_task is not None:
+            # WorkItem gate: every task must be linked to a WorkItem, and a
+            # feature-kind WorkItem additionally needs an approved spec
+            # (core/workitem_gate.py::check_task_gate). Placed as early as
+            # possible in the matched-task branch, before the reconcile gate,
+            # so a missing WorkItem fails fast. MSHIP_BYPASS_GATE already
+            # short-circuited (exit 0) at the very top of this command,
+            # before state was even loaded, so a bypassed commit never
+            # reaches this check. Fails OPEN on any unexpected error — never
+            # block a commit over a gate bug.
+            try:
+                from mship.core import workitem_gate
+                workspace_root = Path(container.config_path()).parent
+                gate_result = workitem_gate.check_task_gate(matched_task, workspace_root)
+            except Exception:
+                gate_result = None
+            if gate_result is not None and not gate_result.ok:
+                import sys
+                sys.stderr.write(
+                    f"⛔ mship: refusing commit — task '{matched_task.slug}': "
+                    f"{gate_result.reason}\n"
+                    f"   (or `git commit --no-verify` to override).\n"
+                )
+                raise typer.Exit(code=1)
+
             # Reconcile gate (per-task, unchanged behavior)
             try:
                 from mship.core.reconcile.cache import ReconcileCache
@@ -237,8 +261,12 @@ def register(app: typer.Typer, get_container):
     @app.command(name="_check-push", hidden=True)
     def check_push():
         """Reject pushing a branch-pattern branch that is not a registered task
-        branch. Reads git pre-push ref lines from stdin. Fail-open on error."""
+        branch, or a registered task branch whose task fails the WorkItem gate
+        (no WorkItem, or a feature WorkItem without an approved spec —
+        core/workitem_gate.py::check_task_gate). Reads git pre-push ref lines
+        from stdin. Fail-open on error."""
         import sys
+        from mship.core import workitem_gate
         from mship.core.gate import resolve_bypass, record_bypass
 
         try:
@@ -253,9 +281,12 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=0)
 
         prefix = config.branch_pattern.split("{slug}", 1)[0]  # e.g. "feat/"
-        task_branches = {t.branch for t in state.tasks.values()}
+        task_by_branch = {t.branch: t for t in state.tasks.values()}
+        workspace_root = Path(container.config_path()).parent
 
-        offending: list[str] = []
+        offending: list[str] = []           # unregistered branch-pattern branches
+        gate_blocked: list[tuple[str, str]] = []  # (branch, reason) — registered but no WorkItem clearance
+        gate_checked: set[str] = set()
         for line in sys.stdin.read().splitlines():
             parts = line.split()
             if len(parts) < 2:
@@ -266,35 +297,62 @@ def register(app: typer.Typer, get_container):
             if not local_ref.startswith("refs/heads/"):
                 continue
             branch = local_ref[len("refs/heads/"):]
-            if prefix and branch.startswith(prefix) and branch not in task_branches:
+            if prefix and branch.startswith(prefix) and branch not in task_by_branch:
                 if branch not in offending:
                     offending.append(branch)
+                continue
+            task = task_by_branch.get(branch)
+            if task is None or branch in gate_checked:
+                continue
+            gate_checked.add(branch)
+            try:
+                gate_result = workitem_gate.check_task_gate(task, workspace_root)
+            except Exception:
+                gate_result = None  # fail open on gate errors
+            if gate_result is not None and not gate_result.ok:
+                gate_blocked.append((branch, gate_result.reason))
 
-        if not offending:
+        if not offending and not gate_blocked:
             raise typer.Exit(code=0)
 
         bypassed, reason = resolve_bypass()
         if bypassed:
-            ws_root = Path(container.config_path()).parent
             for b in offending:
-                record_bypass(ws_root, op="push", branch=b, reason=reason)
+                record_bypass(workspace_root, op="push", branch=b, reason=reason)
+            for b, _msg in gate_blocked:
+                record_bypass(workspace_root, op="push", branch=b, reason=reason)
             raise typer.Exit(code=0)
 
-        sys.stderr.write(
-            "⛔ mship: refusing push — branch(es) not registered to a task: "
-            + ", ".join(offending) + "\n"
-            + "   Spawn a task (mship spawn) so the branch is tracked, or set "
-            + "MSHIP_BYPASS_GATE=1 (or `git push --no-verify`) to override.\n"
-        )
+        if offending:
+            sys.stderr.write(
+                "⛔ mship: refusing push — branch(es) not registered to a task: "
+                + ", ".join(offending) + "\n"
+                + "   Spawn a task (mship spawn) so the branch is tracked, or set "
+                + "MSHIP_BYPASS_GATE=1 (or `git push --no-verify`) to override.\n"
+            )
+        for branch, msg in gate_blocked:
+            sys.stderr.write(
+                f"⛔ mship: refusing push — branch '{branch}': {msg}\n"
+                f"   Set MSHIP_BYPASS_GATE=1 (or `git push --no-verify`) to override.\n"
+            )
         raise typer.Exit(code=1)
 
     @app.command(name="_guard-edit", hidden=True)
     def _guard_edit():
         """PreToolUse guard: refuse edits to a repo's MAIN checkout while a task
-        is active. Reads the Claude Code hook event JSON from stdin. Denies with
-        exit code 2 (stderr shown to the model); allows with exit 0. Fails OPEN
-        on any error — never block on uncertainty."""
+        is active, and refuse edits inside a task's OWN worktree when that task
+        fails the WorkItem gate (no WorkItem, or a feature WorkItem without an
+        approved spec — core/workitem_gate.py::check_task_gate). Reads the
+        Claude Code hook event JSON from stdin. Denies with exit code 2 (stderr
+        shown to the model); allows with exit 0. Fails OPEN on any error — never
+        block on uncertainty.
+
+        MSHIP_ALLOW_MAIN_EDIT=1 bypasses the main-checkout block entirely
+        (short-circuits below, unchanged). MSHIP_BYPASS_GATE is the hotfix
+        escape for the newer WorkItem gate only — it does not affect the
+        main-checkout block."""
         from mship.core.edit_guard import evaluate_edit
+        from mship.core.gate import resolve_bypass
 
         if os.environ.get("MSHIP_ALLOW_MAIN_EDIT") == "1":
             raise typer.Exit(code=0)
@@ -310,7 +368,13 @@ def register(app: typer.Typer, get_container):
                 raise typer.Exit(code=0)
             state = container.state_manager().load()
             config = container.config()
-            decision = evaluate_edit(target, state, config)
+            workspace_root = Path(container.config_path()).parent
+            bypassed, _reason = resolve_bypass()
+            decision = evaluate_edit(
+                target, state, config,
+                workspace_root=workspace_root,
+                bypass_workitem_gate=bypassed,
+            )
         except typer.Exit:
             raise
         except Exception:

@@ -33,7 +33,7 @@ def _audit_ok_run(cmd, cwd, env=None):
 
 
 def test_spawn(configured_git_app: Path):
-    result = runner.invoke(app, ["spawn", "add labels to tasks", "--repos", "shared"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "add labels to tasks", "--repos", "shared"])
     assert result.exit_code == 0, result.output
     mgr = StateManager(configured_git_app / ".mothership")
     state = mgr.load()
@@ -43,7 +43,7 @@ def test_spawn(configured_git_app: Path):
 def test_spawn_slug_override(configured_git_app: Path):
     """--slug overrides auto-generated slug. See #59."""
     result = runner.invoke(
-        app, ["spawn", "a very long description for a simple task",
+        app, ["spawn", "--hotfix", "a very long description for a simple task",
               "--repos", "shared", "--slug", "short"],
     )
     assert result.exit_code == 0, result.output
@@ -59,7 +59,7 @@ def test_spawn_slug_rejects_invalid_chars(configured_git_app: Path):
     """Reject uppercase / underscores / spaces / empty. See #59."""
     for bad in ["UPPER", "has_underscore", "with space", "", "-leading", "trailing-"]:
         result = runner.invoke(
-            app, ["spawn", "d", "--repos", "shared", "--slug", bad],
+            app, ["spawn", "--hotfix", "d", "--repos", "shared", "--slug", bad],
         )
         assert result.exit_code != 0, f"expected rejection for slug={bad!r}: {result.output}"
 
@@ -67,11 +67,11 @@ def test_spawn_slug_rejects_invalid_chars(configured_git_app: Path):
 def test_spawn_slug_collision_errors(configured_git_app: Path):
     """Two spawns with the same --slug → second fails with a clear error."""
     first = runner.invoke(
-        app, ["spawn", "first", "--repos", "shared", "--slug", "dupe"],
+        app, ["spawn", "--hotfix", "first", "--repos", "shared", "--slug", "dupe"],
     )
     assert first.exit_code == 0, first.output
     second = runner.invoke(
-        app, ["spawn", "second", "--repos", "shared", "--slug", "dupe"],
+        app, ["spawn", "--hotfix", "second", "--repos", "shared", "--slug", "dupe"],
     )
     assert second.exit_code != 0
     # Collision ValueError bubbles up through the CLI (existing behavior for
@@ -81,7 +81,7 @@ def test_spawn_slug_collision_errors(configured_git_app: Path):
 
 
 def test_spawn_all_repos(configured_git_app: Path):
-    result = runner.invoke(app, ["spawn", "big change"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "big change"])
     assert result.exit_code == 0, result.output
     mgr = StateManager(configured_git_app / ".mothership")
     state = mgr.load()
@@ -114,7 +114,7 @@ def test_spawn_base_stacks_on_branch(configured_git_app: Path):
     base_tip = _commit_base_branch(configured_git_app / "shared", "feat/upstream")
     result = runner.invoke(
         app,
-        ["spawn", "stacked task", "--repos", "shared", "--slug", "stacked",
+        ["spawn", "--hotfix", "stacked task", "--repos", "shared", "--slug", "stacked",
          "--base", "feat/upstream", "--skip-setup"],
     )
     assert result.exit_code == 0, result.output
@@ -131,7 +131,7 @@ def test_spawn_base_unknown_branch_errors_cleanly(configured_git_app: Path):
     """spawn --base <missing> fails with a clean message and creates no task. See #42."""
     result = runner.invoke(
         app,
-        ["spawn", "x", "--repos", "shared", "--slug", "xbase",
+        ["spawn", "--hotfix", "x", "--repos", "shared", "--slug", "xbase",
          "--base", "feat/nope", "--skip-setup"],
     )
     assert result.exit_code != 0
@@ -141,7 +141,7 @@ def test_spawn_base_unknown_branch_errors_cleanly(configured_git_app: Path):
 
 def test_spawn_records_base_branch(configured_git_app: Path):
     """Spawn records base_branch from workspace config if available, else None."""
-    result = runner.invoke(app, ["spawn", "record base", "--repos", "shared"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "record base", "--repos", "shared"])
     assert result.exit_code == 0, result.output
     mgr = StateManager(configured_git_app / ".mothership")
     state = mgr.load()
@@ -156,7 +156,7 @@ def test_spawn_tty_prints_cd_hint(configured_git_app: Path, monkeypatch):
     from mship.cli.output import Output
     monkeypatch.setattr(Output, "is_tty", property(lambda self: True))
 
-    result = runner.invoke(app, ["spawn", "cd hint", "--repos", "shared"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "cd hint", "--repos", "shared"])
     assert result.exit_code == 0, result.output
 
     mgr = StateManager(configured_git_app / ".mothership")
@@ -172,7 +172,7 @@ def test_spawn_tty_prints_cd_hint(configured_git_app: Path, monkeypatch):
 def test_spawn_non_tty_json_omits_cd_hint(configured_git_app: Path):
     """Non-TTY spawn output is JSON only — no cd hint mixed in. See #129."""
     import json as _json
-    result = runner.invoke(app, ["spawn", "json hint", "--repos", "shared"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "json hint", "--repos", "shared"])
     assert result.exit_code == 0, result.output
     # Parses as JSON — proves no hint text was appended.
     payload = _json.loads(result.output)
@@ -197,7 +197,7 @@ def test_spawn_with_depends_on_persists_edges(configured_git_app: Path):
 
     result = runner.invoke(
         app,
-        ["spawn", "downstream task", "--repos", "shared", "--slug", "down",
+        ["spawn", "--hotfix", "downstream task", "--repos", "shared", "--slug", "down",
          "--depends-on", "a", "--skip-setup"],
     )
     assert result.exit_code == 0, result.stderr or result.output
@@ -210,7 +210,7 @@ def test_spawn_with_unknown_depends_on_errors(configured_git_app: Path):
     """spawn --depends-on <unknown> errors before creating the task. See #104."""
     result = runner.invoke(
         app,
-        ["spawn", "x", "--repos", "shared", "--slug", "x",
+        ["spawn", "--hotfix", "x", "--repos", "shared", "--slug", "x",
          "--depends-on", "nope", "--skip-setup"],
     )
     assert result.exit_code != 0
@@ -218,7 +218,7 @@ def test_spawn_with_unknown_depends_on_errors(configured_git_app: Path):
 
 
 def test_worktrees_list(configured_git_app: Path):
-    runner.invoke(app, ["spawn", "test list", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "test list", "--repos", "shared"])
     result = runner.invoke(app, ["worktrees"])
     assert result.exit_code == 0
     assert "test-list" in result.output
@@ -483,8 +483,8 @@ def test_close_merged_pr_with_unverified_merge_commit_warns_but_proceeds(configu
 
 
 def test_finish_handoff(configured_git_app: Path):
-    runner.invoke(app, ["spawn", "handoff test", "--repos", "shared,auth-service"])
-    result = runner.invoke(app, ["finish", "--handoff", "--task", "handoff-test"])
+    runner.invoke(app, ["spawn", "--hotfix", "handoff test", "--repos", "shared,auth-service"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--handoff", "--task", "handoff-test"])
     assert result.exit_code == 0
     handoff_file = configured_git_app / ".mothership" / "handoffs" / "handoff-test.yaml"
     assert handoff_file.exists()
@@ -494,7 +494,7 @@ def test_finish_creates_prs(configured_git_app: Path):
     from mship.cli import container as cli_container
 
     # Spawn a task first
-    runner.invoke(app, ["spawn", "test prs", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "test prs", "--repos", "shared"])
 
     # Mock shell for finish operations
     def mock_run(cmd, cwd, env=None):
@@ -519,7 +519,7 @@ def test_finish_creates_prs(configured_git_app: Path):
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["finish", "--task", "test-prs"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "test-prs"])
     assert result.exit_code == 0, result.output
 
     # Verify PR URL stored in state
@@ -536,7 +536,7 @@ def test_finish_body_file_passed_to_gh_pr_create(configured_git_app: Path):
     """--body-file contents must land in the gh pr create invocation."""
     from mship.cli import container as cli_container
 
-    runner.invoke(app, ["spawn", "body test", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "body test", "--repos", "shared"])
 
     body_path = configured_git_app / "body.md"
     body_path.write_text(
@@ -565,7 +565,7 @@ def test_finish_body_file_passed_to_gh_pr_create(configured_git_app: Path):
     cli_container.shell.override(mock_shell)
     try:
         result = runner.invoke(
-            app, ["finish", "--task", "body-test", "--body-file", str(body_path)]
+            app, ["finish", "--hotfix", "--task", "body-test", "--body-file", str(body_path)]
         )
         assert result.exit_code == 0, result.output
         assert "create_cmd" in captured
@@ -582,7 +582,7 @@ def test_finish_body_map_per_repo_bodies(configured_git_app: Path):
     for repos not in the map. See #114."""
     from mship.cli import container as cli_container
 
-    runner.invoke(app, ["spawn", "body map", "--repos", "shared,auth-service,api-gateway"])
+    runner.invoke(app, ["spawn", "--hotfix", "body map", "--repos", "shared,auth-service,api-gateway"])
 
     shared_body = configured_git_app / "shared.md"
     shared_body.write_text("## Shared\n- lib change\n\n## Test plan\n- [ ] unit\n")
@@ -618,7 +618,7 @@ def test_finish_body_map_per_repo_bodies(configured_git_app: Path):
     try:
         result = runner.invoke(
             app, [
-                "finish",
+                "finish", "--hotfix",
                 "--task", "body-map",
                 "--body-map", f"shared={shared_body}",
                 "--body-file", str(fallback_body),
@@ -639,7 +639,7 @@ def test_finish_body_map_unknown_repo_rejected(configured_git_app: Path):
     """--body-map referencing a repo NOT in task.affected_repos errors clearly."""
     from mship.cli import container as cli_container
 
-    runner.invoke(app, ["spawn", "unknown body", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "unknown body", "--repos", "shared"])
 
     body_path = configured_git_app / "ghost.md"
     body_path.write_text("## body\n- noop\n\n## Test plan\n- [ ] x\n")
@@ -651,7 +651,7 @@ def test_finish_body_map_unknown_repo_rejected(configured_git_app: Path):
     try:
         result = runner.invoke(
             app, [
-                "finish",
+                "finish", "--hotfix",
                 "--task", "unknown-body",
                 "--body-map", f"ghost={body_path}",
             ],
@@ -666,7 +666,7 @@ def test_finish_body_map_empty_body_rejected(configured_git_app: Path):
     """An empty file in --body-map is rejected (consistent with --body-file rule)."""
     from mship.cli import container as cli_container
 
-    runner.invoke(app, ["spawn", "empty body", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "empty body", "--repos", "shared"])
 
     body_path = configured_git_app / "empty.md"
     body_path.write_text("   \n\n  \n")
@@ -678,7 +678,7 @@ def test_finish_body_map_empty_body_rejected(configured_git_app: Path):
     try:
         result = runner.invoke(
             app, [
-                "finish",
+                "finish", "--hotfix",
                 "--task", "empty-body",
                 "--body-map", f"shared={body_path}",
             ],
@@ -691,7 +691,7 @@ def test_finish_body_map_empty_body_rejected(configured_git_app: Path):
 
 def test_close_accepts_positional_slug(configured_git_app: Path):
     """`mship close <slug>` is an alternative to `--task <slug>`. See #40."""
-    runner.invoke(app, ["spawn", "positional close", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "positional close", "--repos", "shared"])
     result = runner.invoke(app, ["close", "positional-close", "-y", "--abandon"])
     assert result.exit_code == 0, result.output
     mgr = StateManager(configured_git_app / ".mothership")
@@ -700,8 +700,8 @@ def test_close_accepts_positional_slug(configured_git_app: Path):
 
 def test_close_positional_and_task_flag_conflict(configured_git_app: Path):
     """Conflicting positional + --task values fail loudly."""
-    runner.invoke(app, ["spawn", "conflict a", "--repos", "shared"])
-    runner.invoke(app, ["spawn", "conflict b", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "conflict a", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "conflict b", "--repos", "shared"])
     result = runner.invoke(
         app, ["close", "conflict-a", "--task", "conflict-b", "-y", "--abandon"],
     )
@@ -711,7 +711,7 @@ def test_close_positional_and_task_flag_conflict(configured_git_app: Path):
 
 def test_close_positional_equal_to_task_flag_is_ok(configured_git_app: Path):
     """Same value in both is not an error."""
-    runner.invoke(app, ["spawn", "equal case", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "equal case", "--repos", "shared"])
     result = runner.invoke(
         app, ["close", "equal-case", "--task", "equal-case", "-y", "--abandon"],
     )
@@ -722,7 +722,7 @@ def test_finish_title_override_passed_to_gh_pr_create(configured_git_app: Path):
     """--title replaces task.description in the gh pr create invocation. See #45."""
     from mship.cli import container as cli_container
 
-    runner.invoke(app, ["spawn", "a long verbose description that shouldnt be the PR title", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "a long verbose description that shouldnt be the PR title", "--repos", "shared"])
 
     captured: dict[str, str] = {}
 
@@ -747,7 +747,7 @@ def test_finish_title_override_passed_to_gh_pr_create(configured_git_app: Path):
     try:
         result = runner.invoke(
             app, [
-                "finish",
+                "finish", "--hotfix",
                 "--task", "a-long-verbose-description-that-shouldnt",
                 "--title", "feat(spawn): concise PR title",
             ],
@@ -765,47 +765,47 @@ def test_finish_title_override_passed_to_gh_pr_create(configured_git_app: Path):
 
 def test_finish_title_rejected_with_force(configured_git_app: Path):
     """--force won't rewrite existing PR titles; conflict rejected like --body."""
-    runner.invoke(app, ["spawn", "force title mutex", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "force title mutex", "--repos", "shared"])
     result = runner.invoke(
-        app, ["finish", "--task", "force-title-mutex", "--force", "--title", "t"]
+        app, ["finish", "--hotfix", "--task", "force-title-mutex", "--force", "--title", "t"]
     )
     assert result.exit_code != 0
     assert "title" in result.output.lower()
 
 
 def test_finish_title_incompatible_with_push_only(configured_git_app: Path):
-    runner.invoke(app, ["spawn", "po title mutex", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "po title mutex", "--repos", "shared"])
     result = runner.invoke(
-        app, ["finish", "--task", "po-title-mutex", "--push-only", "--title", "t"]
+        app, ["finish", "--hotfix", "--task", "po-title-mutex", "--push-only", "--title", "t"]
     )
     assert result.exit_code != 0
 
 
 def test_finish_body_and_body_file_mutually_exclusive(configured_git_app: Path):
-    runner.invoke(app, ["spawn", "mutex test", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "mutex test", "--repos", "shared"])
     result = runner.invoke(
-        app, ["finish", "--task", "mutex-test", "--body", "x", "--body-file", "/tmp/y"]
+        app, ["finish", "--hotfix", "--task", "mutex-test", "--body", "x", "--body-file", "/tmp/y"]
     )
     assert result.exit_code != 0
     assert "mutually exclusive" in result.output
 
 
 def test_finish_rejects_empty_body_file(configured_git_app: Path, tmp_path: Path):
-    runner.invoke(app, ["spawn", "empty body test", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "empty body test", "--repos", "shared"])
     empty = tmp_path / "empty.md"
     empty.write_text("   \n\n")
     result = runner.invoke(
-        app, ["finish", "--task", "empty-body-test", "--body-file", str(empty)]
+        app, ["finish", "--hotfix", "--task", "empty-body-test", "--body-file", str(empty)]
     )
     assert result.exit_code != 0
     assert "empty" in result.output.lower()
 
 
 def test_finish_body_incompatible_with_push_only(configured_git_app: Path):
-    runner.invoke(app, ["spawn", "po mutex test", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "po mutex test", "--repos", "shared"])
     result = runner.invoke(
         app,
-        ["finish", "--task", "po-mutex-test", "--push-only", "--body", "x"],
+        ["finish", "--hotfix", "--task", "po-mutex-test", "--push-only", "--body", "x"],
     )
     assert result.exit_code != 0
     assert "no effect" in result.output.lower() or "push-only" in result.output.lower()
@@ -814,14 +814,14 @@ def test_finish_body_incompatible_with_push_only(configured_git_app: Path):
 def test_finish_gh_not_available(configured_git_app: Path):
     from mship.cli import container as cli_container
 
-    runner.invoke(app, ["spawn", "test no gh", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "test no gh", "--repos", "shared"])
 
     mock_shell = MagicMock(spec=ShellRunner)
     mock_shell.run.return_value = ShellResult(returncode=127, stdout="", stderr="command not found")
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["finish", "--task", "test-no-gh"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "test-no-gh"])
     assert result.exit_code != 0 or "gh" in result.output.lower()
 
     cli_container.shell.reset_override()
@@ -914,7 +914,7 @@ def test_finish_force_repushes_to_existing_pr(configured_git_app: Path):
     try:
         import time
         time.sleep(0.01)  # ensure a new finished_at timestamp differs from `before`
-        result = runner.invoke(app, ["finish", "--force", "--task", "rp"])
+        result = runner.invoke(app, ["finish", "--hotfix", "--force", "--task", "rp"])
         assert result.exit_code == 0, result.output
         assert len(captured["push"]) == 1, f"expected one push, got {captured['push']}"
         assert captured["pr_create"] == [], "should NOT create a new PR under --force"
@@ -937,7 +937,7 @@ def test_finish_without_force_warns_about_unpushed_commits(configured_git_app: P
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
     try:
-        result = runner.invoke(app, ["finish", "--task", "warn"])
+        result = runner.invoke(app, ["finish", "--hotfix", "--task", "warn"])
         assert result.exit_code == 0, result.output
         assert "unpushed commits" in result.output
         assert "--force" in result.output
@@ -950,7 +950,7 @@ def test_finish_without_force_warns_about_unpushed_commits(configured_git_app: P
 def test_finish_force_incompatible_with_body_file(configured_git_app: Path):
     _make_finished_task_with_existing_pr(configured_git_app, slug="bf")
     result = runner.invoke(
-        app, ["finish", "--force", "--task", "bf", "--body", "hi"]
+        app, ["finish", "--hotfix", "--force", "--task", "bf", "--body", "hi"]
     )
     assert result.exit_code != 0
     assert "gh pr edit" in result.output
@@ -958,7 +958,7 @@ def test_finish_force_incompatible_with_body_file(configured_git_app: Path):
 
 def test_finish_force_incompatible_with_handoff(configured_git_app: Path):
     _make_finished_task_with_existing_pr(configured_git_app, slug="ho")
-    result = runner.invoke(app, ["finish", "--force", "--task", "ho", "--handoff"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--force", "--task", "ho", "--handoff"])
     assert result.exit_code != 0
     assert "handoff" in result.output.lower()
 
@@ -972,7 +972,7 @@ def test_spawn_skip_setup_flag(configured_git_app: Path):
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["spawn", "skip flag test", "--repos", "shared", "--skip-setup"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "skip flag test", "--repos", "shared", "--skip-setup"])
     assert result.exit_code == 0, result.output
     # run_task should not have been called for setup
     mock_shell.run_task.assert_not_called()
@@ -991,7 +991,7 @@ def test_spawn_shows_setup_warnings(configured_git_app: Path):
     )
     cli_container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["spawn", "warning flag test", "--repos", "shared"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "warning flag test", "--repos", "shared"])
     assert result.exit_code == 0, result.output
     # Setup failure should appear in output as a warning
     assert "setup failed" in result.output.lower() or "pnpm install failed" in result.output
@@ -1183,7 +1183,7 @@ def test_spawn_refuses_when_git_root_missing_from_repos(workspace_monorepo_app):
     """spawn --repos pkg_a where pkg_a.git_root=mono must refuse if mono not included."""
     from typer.testing import CliRunner
     from mship.cli import app as _app
-    r = CliRunner().invoke(_app, ["spawn", "validate test", "--repos", "pkg_a", "--force-audit"])
+    r = CliRunner().invoke(_app, ["spawn", "--hotfix", "validate test", "--repos", "pkg_a", "--force-audit"])
     assert r.exit_code != 0
     assert "pkg_a" in r.output
     assert "mono" in r.output
@@ -1193,7 +1193,7 @@ def test_spawn_refuses_when_git_root_missing_from_repos(workspace_monorepo_app):
 def test_spawn_succeeds_when_git_root_present(workspace_monorepo_app):
     from typer.testing import CliRunner
     from mship.cli import app as _app
-    r = CliRunner().invoke(_app, ["spawn", "validate good", "--repos", "mono,pkg_a", "--force-audit"])
+    r = CliRunner().invoke(_app, ["spawn", "--hotfix", "validate good", "--repos", "mono,pkg_a", "--force-audit"])
     assert r.exit_code == 0, r.output
 
 
@@ -1201,7 +1201,7 @@ def test_spawn_plain_repo_unaffected(configured_git_app):
     """spawn with a repo that has no git_root still works without changes."""
     from typer.testing import CliRunner
     from mship.cli import app as _app
-    r = CliRunner().invoke(_app, ["spawn", "plain", "--repos", "shared", "--force-audit"])
+    r = CliRunner().invoke(_app, ["spawn", "--hotfix", "plain", "--repos", "shared", "--force-audit"])
     assert r.exit_code == 0, r.output
 
 
@@ -1248,7 +1248,7 @@ def test_finish_body_file_dash_reads_stdin(configured_git_app: Path):
     from unittest.mock import patch
     from mship.cli import container as cli_container
 
-    runner.invoke(app, ["spawn", "stdin test", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "stdin test", "--repos", "shared"])
 
     def mock_run(cmd, cwd, env=None):
         if "symbolic-ref" in cmd:
@@ -1278,7 +1278,7 @@ def test_finish_body_file_dash_reads_stdin(configured_git_app: Path):
     try:
         with patch("sys.stdin.isatty", return_value=False):
             result = runner.invoke(
-                app, ["finish", "--task", "stdin-test", "--body-file", "-"],
+                app, ["finish", "--hotfix", "--task", "stdin-test", "--body-file", "-"],
                 input="Summary\n\nTest plan\n",
             )
         # Finish may fail downstream (audit/gh/etc.) — we only assert the
@@ -1293,7 +1293,7 @@ def test_finish_body_file_dash_tty_errors(configured_git_app: Path):
     """--body-file - should error if stdin is a TTY."""
     from unittest.mock import patch, MagicMock
 
-    runner.invoke(app, ["spawn", "tty test", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "tty test", "--repos", "shared"])
 
     # Mock the _read_stdin_body_or_exit function to simulate TTY behavior
     with patch('mship.cli.worktree._read_stdin_body_or_exit') as mock_read:
@@ -1305,7 +1305,7 @@ def test_finish_body_file_dash_tty_errors(configured_git_app: Path):
         mock_read.side_effect = raise_tty_error
         
         result = runner.invoke(
-            app, ["finish", "--task", "tty-test", "--body-file", "-"]
+            app, ["finish", "--hotfix", "--task", "tty-test", "--body-file", "-"]
         )
     assert result.exit_code == 1, result.output
     assert "refusing to read body from an interactive TTY" in result.output
@@ -1314,7 +1314,7 @@ def test_finish_body_dash_tty_also_errors(configured_git_app: Path):
     """--body - should error if stdin is a TTY (symmetry)."""
     from unittest.mock import patch
 
-    runner.invoke(app, ["spawn", "body tty test", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "body tty test", "--repos", "shared"])
 
     # Mock the _read_stdin_body_or_exit function to simulate TTY behavior
     with patch('mship.cli.worktree._read_stdin_body_or_exit') as mock_read:
@@ -1326,7 +1326,7 @@ def test_finish_body_dash_tty_also_errors(configured_git_app: Path):
         mock_read.side_effect = raise_tty_error
         
         result = runner.invoke(
-            app, ["finish", "--task", "body-tty-test", "--body", "-"]
+            app, ["finish", "--hotfix", "--task", "body-tty-test", "--body", "-"]
         )
     assert result.exit_code == 1, result.output
     assert "refusing to read body from an interactive TTY" in result.output
@@ -1335,11 +1335,11 @@ def test_finish_body_file_dash_empty_stdin_rejected(configured_git_app: Path):
     """--body-file - with empty stdin should error."""
     from unittest.mock import patch
 
-    runner.invoke(app, ["spawn", "empty stdin test", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "empty stdin test", "--repos", "shared"])
 
     with patch("sys.stdin.isatty", return_value=False):
         result = runner.invoke(
-            app, ["finish", "--task", "empty-stdin-test", "--body-file", "-"],
+            app, ["finish", "--hotfix", "--task", "empty-stdin-test", "--body-file", "-"],
             input="",
         )
     assert result.exit_code == 1
@@ -1360,7 +1360,7 @@ def test_finish_shared_git_root_creates_one_pr_records_on_all(configured_git_app
     base_branch: main
 """)
 
-    runner.invoke(app, ["spawn", "group prs", "--repos", "shared,infra", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "group prs", "--repos", "shared,infra", "--skip-setup"])
 
     create_pr_call_count = 0
 
@@ -1396,7 +1396,7 @@ def test_finish_shared_git_root_creates_one_pr_records_on_all(configured_git_app
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["finish", "--task", "group-prs"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "group-prs"])
     assert result.exit_code == 0, result.output
     assert create_pr_call_count == 1, f"Expected 1 gh pr create call, got {create_pr_call_count}"
 
@@ -1415,7 +1415,7 @@ def test_finish_harvests_existing_pr_instead_of_creating(configured_git_app: Pat
     finish harvests it via `gh pr list --head` without calling `gh pr create`."""
     from mship.cli import container as cli_container
 
-    runner.invoke(app, ["spawn", "reuse pr", "--repos", "shared", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "reuse pr", "--repos", "shared", "--skip-setup"])
 
     create_pr_called = False
 
@@ -1443,7 +1443,7 @@ def test_finish_harvests_existing_pr_instead_of_creating(configured_git_app: Pat
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["finish", "--task", "reuse-pr"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "reuse-pr"])
     assert result.exit_code == 0, result.output
     assert create_pr_called is False, "gh pr create should not be called when PR already exists"
 
@@ -1460,7 +1460,7 @@ def test_finish_harvests_on_create_pr_duplicate_stderr(configured_git_app: Path)
     'already exists' (race), finish harvests via a second list call."""
     from mship.cli import container as cli_container
 
-    runner.invoke(app, ["spawn", "race pr", "--repos", "shared", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "race pr", "--repos", "shared", "--skip-setup"])
 
     list_call_count = 0
 
@@ -1500,7 +1500,7 @@ def test_finish_harvests_on_create_pr_duplicate_stderr(configured_git_app: Path)
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["finish", "--task", "race-pr"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "race-pr"])
     assert result.exit_code == 0, result.output
     assert list_call_count == 2, "Expected pre-check + fallback list calls"
 
@@ -1516,7 +1516,7 @@ def test_finish_calls_ensure_upstream_after_push(configured_git_app: Path):
     """ensure_upstream fires after push; if @{u} fails, set-upstream-to runs."""
     from mship.cli import container as cli_container
 
-    runner.invoke(app, ["spawn", "upstream check", "--repos", "shared", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "upstream check", "--repos", "shared", "--skip-setup"])
 
     set_upstream_called = False
     ensure_upstream_probe_count = 0
@@ -1561,7 +1561,7 @@ def test_finish_calls_ensure_upstream_after_push(configured_git_app: Path):
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["finish", "--task", "upstream-check"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "upstream-check"])
     assert result.exit_code == 0, result.output
     assert set_upstream_called, "ensure_upstream should have run set-upstream-to"
 
@@ -1574,7 +1574,7 @@ def test_finish_captures_diagnostic_when_main_is_dirty_post_op(configured_git_ap
     from mship.util.shell import ShellResult, ShellRunner
     from unittest.mock import MagicMock
 
-    runner.invoke(app, ["spawn", "dirty diag", "--repos", "shared", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "dirty diag", "--repos", "shared", "--skip-setup"])
 
     # Pre-dirty the main repo's shared/ working tree by writing an extra
     # file directly to simulate whatever causes the bug.
@@ -1612,7 +1612,7 @@ def test_finish_captures_diagnostic_when_main_is_dirty_post_op(configured_git_ap
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["finish", "--task", "dirty-diag", "--force-audit"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "dirty-diag", "--force-audit"])
     # Finish succeeds (diagnostic is silent).
     assert result.exit_code == 0, result.output
 
@@ -1633,7 +1633,7 @@ def test_finish_does_not_capture_diagnostic_when_main_is_clean(configured_git_ap
     from mship.util.shell import ShellResult, ShellRunner
     from unittest.mock import MagicMock
 
-    runner.invoke(app, ["spawn", "clean diag", "--repos", "shared", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "clean diag", "--repos", "shared", "--skip-setup"])
 
     def mock_run(cmd, cwd, env=None):
         if "gh auth status" in cmd:
@@ -1659,7 +1659,7 @@ def test_finish_does_not_capture_diagnostic_when_main_is_clean(configured_git_ap
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["finish", "--task", "clean-diag"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "clean-diag"])
     assert result.exit_code == 0, result.output
 
     diag_dir = configured_git_app / ".mothership" / "diagnostics"
@@ -1675,7 +1675,7 @@ def test_close_logs_rate_limit_reason_when_pr_state_unknown(configured_git_app: 
     from mship.util.shell import ShellResult, ShellRunner
     from unittest.mock import MagicMock
 
-    runner.invoke(app, ["spawn", "rate-limit close", "--repos", "shared"])
+    runner.invoke(app, ["spawn", "--hotfix", "rate-limit close", "--repos", "shared"])
     # Set a pr_url manually so close actually calls gh pr view.
     import yaml
     state_path = configured_git_app / ".mothership" / "state.yaml"
@@ -1728,7 +1728,7 @@ def test_spawn_default_scope_none_requires_explicit_repos(configured_git_app: Pa
     from mship.cli import container as cli_container
     cli_container.config.reset()
 
-    result = runner.invoke(app, ["spawn", "no scope"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "no scope"])
     assert result.exit_code != 0
     assert "default_scope" in result.output
     assert "--repos" in result.output
@@ -1744,7 +1744,7 @@ def test_spawn_default_scope_list_selects_repos(configured_git_app: Path):
     from mship.cli import container as cli_container
     cli_container.config.reset()
 
-    result = runner.invoke(app, ["spawn", "scoped default"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "scoped default"])
     assert result.exit_code == 0, result.output
     mgr = StateManager(configured_git_app / ".mothership")
     state = mgr.load()
@@ -1762,7 +1762,7 @@ def test_spawn_threshold_non_tty_requires_yes(configured_git_app: Path):
     cli_container.config.reset()
 
     # CliRunner is non-TTY by default.
-    result = runner.invoke(app, ["spawn", "big fan out"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "big fan out"])
     assert result.exit_code != 0
     assert "spawn_confirm_threshold" in result.output
     assert "--yes" in result.output
@@ -1777,7 +1777,7 @@ def test_spawn_threshold_bypassed_with_yes(configured_git_app: Path):
     from mship.cli import container as cli_container
     cli_container.config.reset()
 
-    result = runner.invoke(app, ["spawn", "confirmed fan out", "--yes"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "confirmed fan out", "--yes"])
     assert result.exit_code == 0, result.output
 
 
@@ -1791,7 +1791,7 @@ def test_spawn_threshold_not_triggered_with_explicit_repos(configured_git_app: P
     from mship.cli import container as cli_container
     cli_container.config.reset()
 
-    result = runner.invoke(app, ["spawn", "explicit scope", "--repos", "shared,auth-service"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "explicit scope", "--repos", "shared,auth-service"])
     assert result.exit_code == 0, result.output
 
 
@@ -1822,7 +1822,7 @@ def test_spawn_cli_passes_offline_flag(workspace_with_git, tmp_path, monkeypatch
                 ),
             )
             result = runner.invoke(
-                app, ["spawn", "x", "--repos", "shared",
+                app, ["spawn", "--hotfix", "x", "--repos", "shared",
                       "--skip-setup", "--force-audit", "--offline"],
             )
             assert result.exit_code == 0, result.output
@@ -1866,7 +1866,7 @@ def test_spawn_cli_writes_offline_journal_entry(workspace_with_git, monkeypatch)
                 ),
             )
             result = runner.invoke(
-                app, ["spawn", "off", "--repos", "shared",
+                app, ["spawn", "--hotfix", "off", "--repos", "shared",
                       "--skip-setup", "--force-audit", "--offline"],
             )
             assert result.exit_code == 0, result.output
@@ -1912,7 +1912,7 @@ def test_finish_blocked_by_unready_upstream(configured_git_app: Path, monkeypatc
 
     monkeypatch.setattr("mship.cli.worktree._dependency_decisions", _fake_decisions)
 
-    result = runner.invoke(app, ["finish", "--task", "b"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "b"])
     assert result.exit_code != 0
     err = (result.output or "").lower()
     assert "a" in err
@@ -1946,7 +1946,7 @@ def test_finish_bypass_deps(configured_git_app: Path, monkeypatch):
 
     monkeypatch.setattr("mship.cli.worktree._dependency_decisions", _fake_decisions)
 
-    result = runner.invoke(app, ["finish", "--task", "b", "--bypass-deps"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "b", "--bypass-deps"])
     out = (result.output or "").lower()
     # The deps gate must NOT have fired; finish may fail for unrelated reasons
     # (no actual PR infra) but the blocked-upstream message must be absent.

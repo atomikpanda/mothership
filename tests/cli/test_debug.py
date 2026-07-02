@@ -10,7 +10,7 @@ runner = CliRunner()
 
 
 def test_debug_hypothesis_writes_journal_entry(configured_git_app: Path):
-    runner.invoke(app, ["spawn", "hypo test", "--repos", "shared", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "hypo test", "--repos", "shared", "--skip-setup"])
     result = runner.invoke(
         app, ["debug", "hypothesis", "test is flaky",
               "--evidence", "test-runs/5", "--task", "hypo-test"],
@@ -24,7 +24,7 @@ def test_debug_hypothesis_writes_journal_entry(configured_git_app: Path):
 
 
 def test_debug_hypothesis_honors_explicit_id(configured_git_app: Path):
-    runner.invoke(app, ["spawn", "id test", "--repos", "shared", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "id test", "--repos", "shared", "--skip-setup"])
     result = runner.invoke(
         app, ["debug", "hypothesis", "H1", "--id", "h1", "--task", "id-test"],
     )
@@ -34,7 +34,7 @@ def test_debug_hypothesis_honors_explicit_id(configured_git_app: Path):
 
 
 def test_debug_rule_out_writes_parent_kv(configured_git_app: Path):
-    runner.invoke(app, ["spawn", "ro test", "--repos", "shared", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "ro test", "--repos", "shared", "--skip-setup"])
     runner.invoke(
         app, ["debug", "hypothesis", "H1", "--id", "h1", "--task", "ro-test"],
     )
@@ -48,7 +48,7 @@ def test_debug_rule_out_writes_parent_kv(configured_git_app: Path):
 
 
 def test_debug_rule_out_with_category(configured_git_app: Path):
-    runner.invoke(app, ["spawn", "cat test", "--repos", "shared", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "cat test", "--repos", "shared", "--skip-setup"])
     runner.invoke(app, ["debug", "hypothesis", "H", "--id", "h", "--task", "cat-test"])
     result = runner.invoke(
         app, ["debug", "rule-out", "R", "--parent", "h",
@@ -60,7 +60,7 @@ def test_debug_rule_out_with_category(configured_git_app: Path):
 
 
 def test_debug_resolved_writes_entry(configured_git_app: Path):
-    runner.invoke(app, ["spawn", "res test", "--repos", "shared", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "res test", "--repos", "shared", "--skip-setup"])
     runner.invoke(app, ["debug", "hypothesis", "H", "--id", "h", "--task", "res-test"])
     result = runner.invoke(
         app, ["debug", "resolved", "fixed by commit abc", "--task", "res-test"],
@@ -73,7 +73,7 @@ def test_debug_resolved_writes_entry(configured_git_app: Path):
 
 def test_debug_resolved_without_hypothesis_warns(configured_git_app: Path):
     """Advisory stderr warning when closing without any prior hypothesis."""
-    runner.invoke(app, ["spawn", "warn test", "--repos", "shared", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "warn test", "--repos", "shared", "--skip-setup"])
     result = runner.invoke(
         app, ["debug", "resolved", "no thread", "--task", "warn-test"],
     )
@@ -89,7 +89,7 @@ def test_debug_resolved_without_hypothesis_warns(configured_git_app: Path):
 def test_debug_auto_id_is_8_char_hex(configured_git_app: Path):
     """Auto-generated id is 8 lowercase-hex chars."""
     import re as _re
-    runner.invoke(app, ["spawn", "auto id", "--repos", "shared", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "auto id", "--repos", "shared", "--skip-setup"])
     runner.invoke(app, ["debug", "hypothesis", "H", "--task", "auto-id"])
     log = (configured_git_app / ".mothership" / "logs" / "auto-id.md").read_text()
     m = _re.search(r"id=([a-f0-9]+)", log)

@@ -51,8 +51,8 @@ def test_pr_empty_when_no_tasks(configured_git_app: Path):
 
 
 def test_pr_lists_tasks_with_pr_urls(configured_git_app: Path):
-    runner.invoke(app, ["spawn", "first", "--repos", "shared", "--skip-setup"])
-    runner.invoke(app, ["spawn", "second", "--repos", "shared", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "first", "--repos", "shared", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "second", "--repos", "shared", "--skip-setup"])
     _set_pr_urls(configured_git_app, "first", {"shared": "https://github.com/o/r/pull/1"})
     _set_pr_urls(configured_git_app, "second", {"shared": "https://github.com/o/r/pull/2"})
 
@@ -77,7 +77,7 @@ def test_pr_lists_tasks_with_pr_urls(configured_git_app: Path):
 
 
 def test_pr_skips_tasks_without_pr_urls(configured_git_app: Path):
-    runner.invoke(app, ["spawn", "no pr", "--repos", "shared", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "no pr", "--repos", "shared", "--skip-setup"])
     # Don't set pr_urls.
     result = runner.invoke(app, ["pr"])
     assert result.exit_code == 0, result.output
@@ -86,7 +86,7 @@ def test_pr_skips_tasks_without_pr_urls(configured_git_app: Path):
 
 
 def test_pr_gh_failure_shows_unknown(configured_git_app: Path):
-    runner.invoke(app, ["spawn", "fail", "--repos", "shared", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "fail", "--repos", "shared", "--skip-setup"])
     _set_pr_urls(configured_git_app, "fail", {"shared": "https://github.com/o/r/pull/9"})
 
     mock_shell = MagicMock(spec=ShellRunner)
@@ -110,7 +110,7 @@ def test_pr_gh_failure_shows_unknown(configured_git_app: Path):
 
 
 def test_pr_multiple_repos_per_task(configured_git_app: Path):
-    runner.invoke(app, ["spawn", "multi", "--repos", "shared,auth-service", "--skip-setup"])
+    runner.invoke(app, ["spawn", "--hotfix", "multi", "--repos", "shared,auth-service", "--skip-setup"])
     _set_pr_urls(configured_git_app, "multi", {
         "shared": "https://github.com/o/r/pull/1",
         "auth-service": "https://github.com/o/r/pull/2",
