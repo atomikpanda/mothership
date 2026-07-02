@@ -61,6 +61,56 @@ def test_idempotent(tmp_path):
     assert len(items.list()) == 1
 
 
+def test_orphan_task_with_approved_spec_becomes_feature_item(tmp_path):
+    # spec has no task_slug back-reference, so pass 1 wraps it but does not
+    # attach "orphan" — the task's own spec_id must still resolve it in pass 2.
+    specs, state, msgs, items = _setup(tmp_path)
+    specs.save(Spec(id="alpha", title="Alpha", status="approved",
+                    created_at=_now(), updated_at=_now()))
+    state.save(WorkspaceState(tasks={"orphan": Task(
+        slug="orphan", description="d", phase="dev", created_at=_now(),
+        affected_repos=["mothership"], branch="b", spec_id="alpha")}))
+
+    wrap_existing(items, specs, state, msgs, now=_now(), workspace="testws")
+
+    task_wi = next(w for w in items.list() if "orphan" in w.task_slugs)
+    assert task_wi.kind == "feature"
+    assert task_wi.spec_id == "alpha"
+    assert state.load().tasks["orphan"].work_item_id == task_wi.id
+
+
+def test_orphan_task_with_unapproved_spec_stays_chore_item(tmp_path):
+    specs, state, msgs, items = _setup(tmp_path)
+    specs.save(Spec(id="beta", title="Beta", status="drafting",
+                    created_at=_now(), updated_at=_now()))
+    state.save(WorkspaceState(tasks={"orphan2": Task(
+        slug="orphan2", description="d", phase="dev", created_at=_now(),
+        affected_repos=["mothership"], branch="b", spec_id="beta")}))
+
+    wrap_existing(items, specs, state, msgs, now=_now(), workspace="testws")
+
+    task_wi = next(w for w in items.list() if "orphan2" in w.task_slugs)
+    assert task_wi.kind == "chore"
+    assert task_wi.spec_id is None
+    assert state.load().tasks["orphan2"].work_item_id == task_wi.id
+
+
+def test_pass2_feature_link_is_idempotent(tmp_path):
+    specs, state, msgs, items = _setup(tmp_path)
+    specs.save(Spec(id="alpha", title="Alpha", status="approved",
+                    created_at=_now(), updated_at=_now()))
+    state.save(WorkspaceState(tasks={"orphan": Task(
+        slug="orphan", description="d", phase="dev", created_at=_now(),
+        affected_repos=["mothership"], branch="b", spec_id="alpha")}))
+
+    wrap_existing(items, specs, state, msgs, now=_now(), workspace="testws")
+    count_after_first = len(items.list())
+    wrap_existing(items, specs, state, msgs, now=_now(), workspace="testws")
+    count_after_second = len(items.list())
+
+    assert count_after_first == count_after_second
+
+
 def test_thread_attaches_via_spec(tmp_path):
     specs, state, msgs, items = _setup(tmp_path)
     specs.save(Spec(id="alpha", title="Alpha", status="approved",

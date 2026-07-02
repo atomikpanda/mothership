@@ -7,6 +7,9 @@ from mship.core.spec_store import SpecStore
 from mship.core.state import StateManager
 from mship.core.workitem_store import WorkItemStore
 
+# "approved or beyond" — matches workitem_gate._APPROVED / PhaseManager._has_approved_spec.
+_APPROVED = {"approved", "dispatched", "implemented"}
+
 
 def wrap_existing(items: WorkItemStore, specs: SpecStore, state: StateManager,
                   msgs: MessageStore, now: datetime, workspace: str) -> list[str]:
@@ -34,13 +37,30 @@ def wrap_existing(items: WorkItemStore, specs: SpecStore, state: StateManager,
                     s.tasks[_slug].work_item_id = _wid
             state.mutate(_set)
 
-    # 2) Orphan tasks (no spec, no work_item_id) -> chore items.
+    # 2) Orphan tasks (no work_item_id yet) -> feature or chore items. A task
+    # whose spec_id (or a reverse task_slug match) resolves to an
+    # approved-or-beyond spec gets its own feature item linked to that spec;
+    # otherwise it gets a plain chore item, same as a task with no spec at
+    # all. Tasks pass 1 already linked (forward spec.task_slug match) already
+    # carry work_item_id by the time state is reloaded below, so they're
+    # skipped here — no double-creation.
+    all_specs = specs.list()
+    spec_by_id = {s.id: s for s in all_specs}
+    spec_by_task_slug = {s.task_slug: s for s in all_specs if s.task_slug}
     for slug, task in state.load().tasks.items():
-        if task.work_item_id or task.spec_id:
+        if task.work_item_id:
             continue
-        wi = items.create(title=task.description or slug, kind="chore",
-                          workspace=workspace, now=now)
-        created.append(wi.id)
+        spec = (spec_by_id.get(task.spec_id) if task.spec_id else None) \
+            or spec_by_task_slug.get(slug)
+        if spec is not None and spec.status in _APPROVED:
+            wi = items.create(title=task.description or slug, kind="feature",
+                              workspace=workspace, now=now)
+            created.append(wi.id)
+            items.link_spec(wi.id, spec.id, now=now)
+        else:
+            wi = items.create(title=task.description or slug, kind="chore",
+                              workspace=workspace, now=now)
+            created.append(wi.id)
         items.add_task(wi.id, slug, now=now)
 
         def _set(s, _slug=slug, _wid=wi.id):
