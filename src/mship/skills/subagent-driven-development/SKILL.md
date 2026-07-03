@@ -21,7 +21,10 @@ every active task, and `.resolved_task` is the resolved task's full detail
 resolves from context (cwd / `MSHIP_TASK` / `--task`).
 
 - If `.active_tasks` is empty (`mship status | jq '.active_tasks'` → `[]`), no
-  tasks exist — stop and tell the user to `mship spawn "<description>"` first.
+  tasks exist — stop. Every task needs a WorkItem: tell the user to create one
+  (`mship item new "<title>" --kind <feature|bug|chore|question>`) then spawn
+  against it (`mship spawn "<description>" --work-item <id>`) before you
+  dispatch anything.
 - If `.active_tasks` is non-empty but `.resolved_task` is `null`, multiple
   tasks are active and no single one is anchored. Pick one with the user and
   pass `--task <slug>` (or set `MSHIP_TASK=<slug>`) on every subsequent mship

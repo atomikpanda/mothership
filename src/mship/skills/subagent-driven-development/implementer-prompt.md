@@ -8,8 +8,9 @@ Use this template when dispatching an implementer subagent.
 1. There MUST be a single, anchored mship task before you dispatch implementer
    subagents. Run `mship status` — it always returns an envelope shape:
    - If `.active_tasks` is empty (`mship status | jq '.active_tasks'` → `[]`),
-     refuse to dispatch and tell the user to `mship spawn "<description>"`
-     first.
+     refuse to dispatch. Every task needs a WorkItem: tell the user to run
+     `mship item new "<title>" --kind <feature|bug|chore|question>` then
+     `mship spawn "<description>" --work-item <id>` first.
    - If `.active_tasks` is non-empty but `.resolved_task` is `null`, multiple
      tasks are active with no anchor — refuse to dispatch, pick one with the
      user, then set `MSHIP_TASK=<slug>` (or pass `--task <slug>`) and re-run

@@ -4,12 +4,18 @@ This repo is its own product — dogfood it.
 
 ## Use `mship` for every task
 
-Before editing files, start a task in an isolated worktree:
+Before editing files, start a task in an isolated worktree. Every task needs a
+WorkItem — create one, then spawn against it:
 
 ```
-mship spawn '<short description>' --repos mothership
+mship item new '<title>' --kind <feature|bug|chore|question>   # prints wi-<id>
+mship spawn '<short description>' --work-item <id> --repos mothership
 cd <printed worktree path>
 ```
+
+`spawn` refuses without `--work-item` (`--hotfix` overrides in emergencies,
+logged). **feature**-kind work also needs an **approved spec** before
+`mship phase dev`/`finish`; **bug/chore/question** need only the WorkItem.
 
 Don't edit `main` directly. You lose state isolation, skip the audit/reconcile
 gates, and don't exercise the workflow this repo exists to enable. Single-repo
