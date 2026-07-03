@@ -15,7 +15,7 @@ Git worktrees create isolated workspaces sharing the same repository, allowing w
 
 ## In a mothership workspace
 
-If a `mothership.yaml` is present at any ancestor directory, use `mship spawn '<description>'` instead of the steps below. `mship spawn` creates the worktree, registers it in workspace state, runs per-repo `task setup`, and (where configured) symlinks heavy directories. The Directory Selection, Safety Verification, and Creation Steps sections below apply only when you're not spawning a mship task (e.g., quick read-only exploration or a non-mship repo).
+If a `mothership.yaml` is present at any ancestor directory, use `mship spawn` instead of the steps below — but every task needs a WorkItem first: `mship item new "<title>" --kind <feature|bug|chore|question>` (prints an id), then `mship spawn '<description>' --work-item <id>`. `spawn` refuses without `--work-item` (`--hotfix` overrides, logged). `mship spawn` creates the worktree, registers it in workspace state, runs per-repo `task setup`, and (where configured) symlinks heavy directories. The Directory Selection, Safety Verification, and Creation Steps sections below apply only when you're not spawning a mship task (e.g., quick read-only exploration or a non-mship repo).
 
 ## Directory Selection Process
 
@@ -177,7 +177,8 @@ Ready to implement <feature-name>
 You: I'm using the using-git-worktrees skill to set up an isolated workspace.
 
 [Detect: mothership.yaml found at /abs/workspace — routing through mship spawn]
-[Run: mship spawn "implement auth middleware" --repos auth-service]
+[Run: mship item new "auth middleware" --kind feature]   # → wi-20260703-a1b2c3
+[Run: mship spawn "implement auth middleware" --work-item wi-20260703-a1b2c3 --repos auth-service]
 [mship creates worktree at .worktrees/implement-auth-middleware/auth-service, runs task setup]
 [Run: mship test (baseline check)]
 

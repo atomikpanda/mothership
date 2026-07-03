@@ -204,7 +204,7 @@ mship doctor                          # always run after init
 ### Working on a task
 
 ```bash
-mship spawn "description" [--repos a,b] [--skip-setup] [--base <branch>] [--depends-on a,b]
+mship spawn "description" --work-item <id> [--repos a,b] [--skip-setup] [--base <branch>] [--depends-on a,b]
 mship switch <repo>                   # before starting work in a different repo
 mship phase plan|dev|review|run [-f]  # `-f` overrides blocked or finished-task guardrail
 mship block "reason" | mship unblock
@@ -216,6 +216,22 @@ mship journal --show-open                 # what am I blocked on across this tas
 mship finish [--base B] [--base-map ...] [--push-only] [--handoff] [--force-audit] [--body-file F | --body TEXT] [--force] [--require-tests] [--title T] [--body-map ...]
 mship close [--yes] [--abandon] [--force] [--skip-pr-check]
 ```
+
+### Every task needs a WorkItem
+
+`mship spawn` **requires** `--work-item <id>` — create the WorkItem first, then spawn against it:
+
+```bash
+mship item new "<title>" --kind feature|bug|chore|question   # prints wi-<id>
+mship spawn "<description>" --work-item <id> [--repos a,b]
+```
+
+`spawn` refuses without `--work-item`; `--hotfix` overrides it for emergencies and the override is recorded to `.mothership/bypass-log.jsonl`. Kind controls what's required downstream:
+
+- **feature**-kind WorkItems also need an **approved spec** before `mship phase dev` or `mship finish` will proceed — bind and approve one (`mship spec …`, approved in Ground Control or via the CLI), or skip the check with `mship phase dev --bypass-spec-gate` / `mship finish --hotfix` (both logged).
+- **bug/chore/question**-kind WorkItems need only the linked WorkItem — no spec required.
+
+This is enforced everywhere a task's identity matters, not just at `spawn`: the `git commit`/`git push` hooks and the PreToolUse edit-guard hook all check that the active task carries a passing WorkItem gate, and refuse (with an actionable message) if it doesn't. Their escape hatch is `MSHIP_BYPASS_GATE=1` (or `git commit`/`push --no-verify`), which is also bypass-logged. See [Work items: the cross-artifact spine](#work-items-the-cross-artifact-spine-mship-item) above for the full WorkItem model.
 
 **`capture` is the UI analog of `test`.** For UI work (mobile screens, web), run
 `mship capture` to grab the running app's rendered state — a screenshot (`image`)
@@ -257,7 +273,7 @@ If you don't, your edits in the shell affect the main checkout, not the feature 
 Express that task B depends on task A. `finish` refuses to ship B until every upstream is merged.
 
 ```bash
-mship spawn "downstream work" --depends-on a,b          # declare at spawn
+mship spawn "downstream work" --work-item <id> --depends-on a,b   # declare at spawn
 mship depends add <upstream-slug> [--task <slug>]       # retrofit on an existing task
 mship depends remove <upstream-slug> [--task <slug>]
 mship depends list [--task <slug>] [--graph]            # --graph = full workspace DAG
@@ -272,7 +288,7 @@ To stack a task on top of another open task's branch instead of `main`, pass
 `--base <branch>` at spawn:
 
 ```bash
-mship spawn "follow-up fix" --base feat/auth-middleware-refactor --repos api
+mship spawn "follow-up fix" --work-item <id> --base feat/auth-middleware-refactor --repos api
 ```
 
 The worktree is cut from `<branch>` (verified to exist locally or on origin —
