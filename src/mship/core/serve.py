@@ -288,6 +288,7 @@ def create_app(
             result = dispatch_spec(
                 spec, state_manager=state_manager, store=store,
                 spawn_fn=_serve_spawn, now=datetime.now(timezone.utc),
+                workitems=workitems, workspace=workspace_name,
             )
         except DispatchError as e:
             raise HTTPException(status_code=409, detail=str(e))

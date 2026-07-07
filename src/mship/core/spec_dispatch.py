@@ -76,6 +76,8 @@ def dispatch_spec(
     store,
     spawn_fn: Callable[[Spec], Task],
     now: datetime,
+    workitems,
+    workspace: str,
     task_slug: str | None = None,
 ) -> DispatchResult:
     """Bind an approved (or already-dispatched) spec to a task.
@@ -86,6 +88,11 @@ def dispatch_spec(
     - spec already bound (`spec.task_slug` exists in state): reuse it (idempotent).
     - a task named `spec.id` exists: bind to it.
     - otherwise: auto-spawn via `spawn_fn(spec)` (requires `affected_repos`).
+
+    Either way, the chosen task is attached to a feature WorkItem (created if
+    the spec doesn't already have one, reused otherwise) so the WorkItem-required
+    enforcement gate doesn't block the dispatched task — mirrors
+    `workitem_migrate.wrap_existing` pass 1.
     """
     if spec.status not in ("approved", "dispatched"):
         raise DispatchError(
@@ -130,6 +137,17 @@ def dispatch_spec(
 
     # Bind the chosen task to the spec under the state lock.
     chosen_slug = task.slug
+
+    # Attach the chosen task to the spec's feature WorkItem — create-or-reuse,
+    # same as workitem_migrate.wrap_existing pass 1 — so the spawned/bound task
+    # carries a work_item_id and clears the enforcement gate.
+    if spec.work_item_id:
+        workitems.add_task(spec.work_item_id, chosen_slug, now=now, state=state_manager)
+    else:
+        wi = workitems.create(title=spec.title, kind="feature", workspace=workspace, now=now)
+        workitems.link_spec(wi.id, spec.id, now=now)
+        spec.work_item_id = wi.id
+        workitems.add_task(wi.id, chosen_slug, now=now, state=state_manager)
 
     def _bind(s):
         if chosen_slug in s.tasks:

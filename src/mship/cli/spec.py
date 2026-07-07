@@ -442,11 +442,13 @@ def register(parent: typer.Typer, get_container):
         from pathlib import Path
         from mship.core.spec_store import SpecStore, SPECS_DIRNAME
         from mship.core.spec_dispatch import DispatchError, dispatch_spec
+        from mship.core.workitem_store import WorkItemStore
 
         output = Output()
         container = get_container()
         workspace_root = Path(container.config_path()).parent
         store = SpecStore(workspace_root / SPECS_DIRNAME)
+        workitems = WorkItemStore(workspace_root / ".mothership" / "workitems")
         spec = store.find_by_id(spec_id)
         if spec is None:
             output.error(f"No spec with id {spec_id!r}.")
@@ -467,6 +469,8 @@ def register(parent: typer.Typer, get_container):
                 store=store,
                 spawn_fn=_spawn,
                 now=datetime.now(timezone.utc),
+                workitems=workitems,
+                workspace=container.config().workspace,
                 task_slug=task_slug,
             )
         except DispatchError as e:
