@@ -8,9 +8,11 @@ from mship.core.spec_body import render_body
 from mship.core.spec_store import SpecStore
 from mship.core.state import StateManager, Task, WorkspaceState
 from mship.core.spec_dispatch import DispatchError, build_dispatch_handoff, dispatch_spec
+from mship.core.workitem_store import WorkItemStore
 
 
 NOW = datetime(2026, 6, 14, tzinfo=timezone.utc)
+WORKSPACE = "testws"
 
 
 def _approved_spec(**over) -> Spec:
@@ -34,6 +36,10 @@ def _sm(tmp_path) -> StateManager:
     return StateManager(d)
 
 
+def _items(tmp_path) -> WorkItemStore:
+    return WorkItemStore(tmp_path / "workitems")
+
+
 def _task(slug="dq", repos=("mothership",)) -> Task:
     return Task(
         slug=slug, description="d", phase="plan", created_at=NOW,
@@ -54,7 +60,7 @@ def test_build_dispatch_handoff_contains_key_facts():
 
 
 def test_dispatch_spec_binds_existing_task_without_spawning(tmp_path):
-    sm, store = _sm(tmp_path), _store(tmp_path)
+    sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
     sm.save(WorkspaceState(tasks={"dq": _task()}))
     spec = _approved_spec()
     store.save(spec)
@@ -62,7 +68,10 @@ def test_dispatch_spec_binds_existing_task_without_spawning(tmp_path):
     def spawn_fn(_s):
         raise AssertionError("must not auto-spawn when the task already exists")
 
-    result = dispatch_spec(spec, state_manager=sm, store=store, spawn_fn=spawn_fn, now=NOW)
+    result = dispatch_spec(
+        spec, state_manager=sm, store=store, spawn_fn=spawn_fn, now=NOW,
+        workitems=items, workspace=WORKSPACE,
+    )
 
     assert result.spawned is False
     assert result.spec.status == "dispatched"
@@ -72,7 +81,7 @@ def test_dispatch_spec_binds_existing_task_without_spawning(tmp_path):
 
 
 def test_dispatch_spec_auto_spawns_when_no_task(tmp_path):
-    sm, store = _sm(tmp_path), _store(tmp_path)
+    sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
     sm.save(WorkspaceState(tasks={}))
     spec = _approved_spec()
     store.save(spec)
@@ -85,7 +94,10 @@ def test_dispatch_spec_auto_spawns_when_no_task(tmp_path):
         sm.mutate(lambda st: st.tasks.__setitem__(s.id, task))
         return task
 
-    result = dispatch_spec(spec, state_manager=sm, store=store, spawn_fn=spawn_fn, now=NOW)
+    result = dispatch_spec(
+        spec, state_manager=sm, store=store, spawn_fn=spawn_fn, now=NOW,
+        workitems=items, workspace=WORKSPACE,
+    )
 
     assert result.spawned is True
     assert calls == [("dq", ("mothership",))]              # spawn_fn got the spec
@@ -95,24 +107,30 @@ def test_dispatch_spec_auto_spawns_when_no_task(tmp_path):
 
 
 def test_dispatch_spec_requires_approved(tmp_path):
-    sm, store = _sm(tmp_path), _store(tmp_path)
+    sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
     spec = _approved_spec(status="needs_review")
     store.save(spec)
     with pytest.raises(DispatchError):
-        dispatch_spec(spec, state_manager=sm, store=store, spawn_fn=lambda s: None, now=NOW)
+        dispatch_spec(
+            spec, state_manager=sm, store=store, spawn_fn=lambda s: None, now=NOW,
+            workitems=items, workspace=WORKSPACE,
+        )
 
 
 def test_dispatch_spec_auto_spawn_requires_affected_repos(tmp_path):
-    sm, store = _sm(tmp_path), _store(tmp_path)
+    sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
     sm.save(WorkspaceState(tasks={}))
     spec = _approved_spec(affected_repos=[])
     store.save(spec)
     with pytest.raises(DispatchError):
-        dispatch_spec(spec, state_manager=sm, store=store, spawn_fn=lambda s: None, now=NOW)
+        dispatch_spec(
+            spec, state_manager=sm, store=store, spawn_fn=lambda s: None, now=NOW,
+            workitems=items, workspace=WORKSPACE,
+        )
 
 
 def test_dispatch_spec_binds_existing_differently_slugged_task(tmp_path):
-    sm, store = _sm(tmp_path), _store(tmp_path)
+    sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
     sm.save(WorkspaceState(tasks={"other": _task(slug="other")}))
     spec = _approved_spec()  # id == "dq", no task named "dq"
     store.save(spec)
@@ -121,7 +139,8 @@ def test_dispatch_spec_binds_existing_differently_slugged_task(tmp_path):
         raise AssertionError("must not auto-spawn when --task binds an existing task")
 
     result = dispatch_spec(
-        spec, state_manager=sm, store=store, spawn_fn=spawn_fn, now=NOW, task_slug="other"
+        spec, state_manager=sm, store=store, spawn_fn=spawn_fn, now=NOW, task_slug="other",
+        workitems=items, workspace=WORKSPACE,
     )
 
     assert result.spawned is False
@@ -132,7 +151,7 @@ def test_dispatch_spec_binds_existing_differently_slugged_task(tmp_path):
 
 
 def test_dispatch_spec_unknown_task_errors(tmp_path):
-    sm, store = _sm(tmp_path), _store(tmp_path)
+    sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
     sm.save(WorkspaceState(tasks={}))
     spec = _approved_spec()
     store.save(spec)
@@ -140,11 +159,12 @@ def test_dispatch_spec_unknown_task_errors(tmp_path):
         dispatch_spec(
             spec, state_manager=sm, store=store,
             spawn_fn=lambda s: None, now=NOW, task_slug="ghost",
+            workitems=items, workspace=WORKSPACE,
         )
 
 
 def test_dispatch_spec_is_idempotent_when_already_bound(tmp_path):
-    sm, store = _sm(tmp_path), _store(tmp_path)
+    sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
     sm.save(WorkspaceState(tasks={"other": _task(slug="other")}))
     spec = _approved_spec()
     store.save(spec)
@@ -153,11 +173,13 @@ def test_dispatch_spec_is_idempotent_when_already_bound(tmp_path):
         spec, state_manager=sm, store=store,
         spawn_fn=lambda s: (_ for _ in ()).throw(AssertionError("no spawn")),
         now=NOW, task_slug="other",
+        workitems=items, workspace=WORKSPACE,
     )
     result = dispatch_spec(
         spec, state_manager=sm, store=store,
         spawn_fn=lambda s: (_ for _ in ()).throw(AssertionError("no spawn")),
         now=NOW,
+        workitems=items, workspace=WORKSPACE,
     )
     assert result.spawned is False
     assert result.task.slug == "other"
@@ -165,7 +187,7 @@ def test_dispatch_spec_is_idempotent_when_already_bound(tmp_path):
 
 
 def test_dispatch_spec_rebind_conflict_errors(tmp_path):
-    sm, store = _sm(tmp_path), _store(tmp_path)
+    sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
     sm.save(WorkspaceState(tasks={
         "other": _task(slug="other"),
         "another": _task(slug="another"),
@@ -175,9 +197,69 @@ def test_dispatch_spec_rebind_conflict_errors(tmp_path):
     dispatch_spec(
         spec, state_manager=sm, store=store,
         spawn_fn=lambda s: None, now=NOW, task_slug="other",
+        workitems=items, workspace=WORKSPACE,
     )
     with pytest.raises(DispatchError, match="already bound"):
         dispatch_spec(
             spec, state_manager=sm, store=store,
             spawn_fn=lambda s: None, now=NOW, task_slug="another",
+            workitems=items, workspace=WORKSPACE,
         )
+
+
+# --- MOS-213: dispatch attaches a feature WorkItem to the spawned/bound task ---
+
+def test_dispatch_spec_auto_spawn_creates_and_links_feature_workitem(tmp_path):
+    sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
+    sm.save(WorkspaceState(tasks={}))
+    spec = _approved_spec()
+    store.save(spec)
+
+    def spawn_fn(s):
+        task = _task(slug=s.id, repos=s.affected_repos)
+        sm.mutate(lambda st: st.tasks.__setitem__(s.id, task))
+        return task
+
+    result = dispatch_spec(
+        spec, state_manager=sm, store=store, spawn_fn=spawn_fn, now=NOW,
+        workitems=items, workspace=WORKSPACE,
+    )
+
+    chosen_slug = result.task.slug
+    assert sm.load().tasks[chosen_slug].work_item_id is not None   # reverse link on the task
+
+    all_items = items.list()
+    assert len(all_items) == 1
+    wi = all_items[0]
+    assert wi.kind == "feature"
+    assert wi.workspace == WORKSPACE
+    assert wi.spec_id == spec.id
+    assert chosen_slug in wi.task_slugs
+
+    assert result.spec.work_item_id == wi.id
+    assert store.find_by_id(spec.id).work_item_id == wi.id         # persisted
+
+
+def test_dispatch_spec_reuses_existing_workitem_when_spec_already_has_one(tmp_path):
+    sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
+    sm.save(WorkspaceState(tasks={"dq": _task()}))
+    existing = items.create(title="Decision Queue", kind="feature", workspace=WORKSPACE, now=NOW)
+    items.link_spec(existing.id, "dq", now=NOW)
+    spec = _approved_spec(work_item_id=existing.id)
+    store.save(spec)
+
+    def spawn_fn(_s):
+        raise AssertionError("must not auto-spawn when the task already exists")
+
+    result = dispatch_spec(
+        spec, state_manager=sm, store=store, spawn_fn=spawn_fn, now=NOW,
+        workitems=items, workspace=WORKSPACE,
+    )
+
+    all_items = items.list()
+    assert len(all_items) == 1                                     # no new item created
+    wi = all_items[0]
+    assert wi.id == existing.id
+    assert "dq" in wi.task_slugs
+    assert result.spec.work_item_id == existing.id
+    assert sm.load().tasks["dq"].work_item_id == existing.id

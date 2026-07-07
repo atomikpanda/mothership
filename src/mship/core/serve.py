@@ -283,12 +283,21 @@ def create_app(
 
     @app.post("/specs/{spec_id}/dispatch")
     def post_dispatch(spec_id: str):
-        spec = _load_or_404(spec_id)
+        # Serialized end-to-end (_dispatch_lock): two concurrent dispatches of the
+        # same spec both run in Starlette's sync threadpool, and when
+        # spec.work_item_id is still None, dispatch_spec's create-or-reuse branch
+        # can't tell the second caller apart from the first until store.save(spec)
+        # lands. Re-loading the spec inside the lock (rather than reusing the copy
+        # loaded before it) means the second caller sees the first's work_item_id
+        # already set and reuses it instead of creating a duplicate WorkItem.
         try:
-            result = dispatch_spec(
-                spec, state_manager=state_manager, store=store,
-                spawn_fn=_serve_spawn, now=datetime.now(timezone.utc),
-            )
+            with _dispatch_lock:
+                spec = _load_or_404(spec_id)
+                result = dispatch_spec(
+                    spec, state_manager=state_manager, store=store,
+                    spawn_fn=_serve_spawn, now=datetime.now(timezone.utc),
+                    workitems=workitems, workspace=workspace_name,
+                )
         except DispatchError as e:
             raise HTTPException(status_code=409, detail=str(e))
         return {
@@ -396,6 +405,11 @@ def create_app(
     # threadless item could otherwise both create a thread (orphaning one message) or
     # lose the add_thread update. threading.Lock is the right primitive for that pool.
     _item_msg_lock = threading.Lock()
+    # Serializes POST /specs/{id}/dispatch. Same threadpool hazard as above: two
+    # concurrent dispatches of the same spec (spec.work_item_id still None) could
+    # otherwise both take dispatch_spec's create branch before either store.save(spec)
+    # lands, producing a duplicate/orphaned WorkItem. See post_dispatch for the re-load.
+    _dispatch_lock = threading.Lock()
 
     def _workitem_index():
         return build_workitem_index(
