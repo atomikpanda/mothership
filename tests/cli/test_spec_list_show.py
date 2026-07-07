@@ -8,6 +8,7 @@ from pathlib import Path
 import typer
 from typer.testing import CliRunner
 
+from mship.core.spec import AcceptanceCriterion, OpenQuestion
 from mship.core.spec_draft import new_spec
 from mship.core.spec_store import SpecStore
 
@@ -145,3 +146,33 @@ class TestSpecShow:
         runner = CliRunner()
         result = runner.invoke(app, ["spec", "show", ids[0]])
         assert result.exit_code == 0
+
+    def test_show_reports_criterion_verdict_and_derived_done(self, tmp_path):
+        """Regression for MOS-214: AcceptanceCriterion carries a `verdict`
+        (unreviewed/approved/flagged), not a `done` boolean. `spec show` used
+        to crash with AttributeError as soon as a spec had real acceptance
+        criteria, because it read `ac.done`. Also covers the sibling
+        `oq.question` typo (OpenQuestion only has `text`), which crashes the
+        same command as soon as a spec has open questions."""
+        store, ids = _make_store(tmp_path, count=1)
+        spec = store.find_by_id(ids[0])
+        spec.acceptance_criteria = [
+            AcceptanceCriterion(id="ac1", text="works", verdict="approved"),
+            AcceptanceCriterion(id="ac2", text="also works", verdict="flagged"),
+        ]
+        spec.open_questions = [OpenQuestion(id="q1", text="Android too?", answer="yes")]
+        store.save(spec)
+        app = _app(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(app, ["spec", "show", ids[0]])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["acceptance_criteria"][0] == {
+            "id": "ac1", "text": "works", "verdict": "approved", "done": True,
+        }
+        assert data["acceptance_criteria"][1] == {
+            "id": "ac2", "text": "also works", "verdict": "flagged", "done": False,
+        }
+        assert data["open_questions"][0] == {
+            "id": "q1", "text": "Android too?", "answer": "yes",
+        }

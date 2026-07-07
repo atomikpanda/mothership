@@ -583,11 +583,16 @@ def register(parent: typer.Typer, get_container):
             "created_at": spec.created_at.isoformat() if spec.created_at else None,
             "affected_repos": spec.affected_repos,
             "acceptance_criteria": [
-                {"id": ac.id, "text": ac.text, "done": ac.done}
+                {
+                    "id": ac.id,
+                    "text": ac.text,
+                    "verdict": ac.verdict,
+                    "done": ac.verdict == "approved",
+                }
                 for ac in (spec.acceptance_criteria or [])
             ],
             "open_questions": [
-                {"id": oq.id, "question": oq.question, "answer": oq.answer}
+                {"id": oq.id, "text": oq.text, "answer": oq.answer}
                 for oq in (spec.open_questions or [])
             ],
             "non_goals": spec.non_goals,
