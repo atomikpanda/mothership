@@ -25,3 +25,11 @@ def test_selects_only_eligible_oldest_first():
 def test_excludes_claimed_and_unapproved_spec():
     items = [_wi("wi-1"), _wi("wi-2", spec="unapproved")]
     assert [c.item.id for c in select_runnable(items, {"s": True, "unapproved": False}, {"wi-1"})] == []
+
+
+def test_excludes_blocked_items():
+    # A bailed item (its linked task carries a blocked_reason) must NOT be re-picked
+    # forever — selection excludes ids in the `blocked` set. #unattended-runner FIX#1
+    items = [_wi("wi-1"), _wi("wi-2")]
+    out = select_runnable(items, {"s": True}, claimed=set(), blocked={"wi-1"})
+    assert [c.item.id for c in out] == ["wi-2"]

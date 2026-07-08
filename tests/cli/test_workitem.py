@@ -1,18 +1,33 @@
 import json
 import subprocess
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
 from mship.cli import app, container
+from mship.cli.workitem import _branch_state_for
 from mship.core.run_state import RunStateRepo
 from mship.core.spec import Spec
 from mship.core.spec_store import SpecStore
-from mship.core.state import StateManager, Task
+from mship.core.state import StateManager, Task, WorkspaceState
 
 runner = CliRunner()
 
 _NOW = datetime(2026, 7, 8, tzinfo=timezone.utc)
+
+_GIT_ENV = {
+    "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+}
+
+
+def _git(cwd, *args):
+    import os
+    r = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
+                       text=True, env={**os.environ, **_GIT_ENV})
+    assert r.returncode == 0, r.stderr or r.stdout
+    return r
 
 
 def _isolate(tmp_path):
@@ -114,6 +129,126 @@ def test_item_bail_logs_reason_and_releases(tmp_path):
         assert sm.load().tasks["t-1"].blocked_reason == "fork on auth"     # item blocked
     finally:
         _reset()
+
+
+def test_item_run_next_skips_blocked_item(tmp_path):
+    # FIX#1: an item whose linked task is blocked (a prior bail) must not be re-offered.
+    _isolate(tmp_path)
+    _make_origin(tmp_path)
+    try:
+        item_id = _eligible_item(tmp_path)
+        sm = StateManager(tmp_path / ".mothership")
+        sm.mutate(lambda s: s.tasks.__setitem__("t-1", Task(
+            slug="t-1", description="d", phase="dev", created_at=_NOW,
+            affected_repos=["mothership"], branch="feat/t-1",
+            blocked_reason="fork on auth", blocked_at=_NOW)))
+        assert runner.invoke(app, ["item", "link-task", item_id, "t-1"]).exit_code == 0
+
+        res = runner.invoke(app, ["--json", "item", "run-next"])
+        assert res.exit_code == 0, res.output
+        assert json.loads(res.output) == {"runnable": False}   # blocked → not offered
+    finally:
+        _reset()
+
+
+def test_item_bail_releases_cross_process_claim(tmp_path):
+    # FIX#2 end-to-end: the claim was minted by ANOTHER process (a different holder
+    # token, as run-next on a separate host/pid would). `mship item bail` must still
+    # release it (authoritative release reads the recorded holder off the ref).
+    _isolate(tmp_path)
+    origin = _make_origin(tmp_path)
+    try:
+        item_id = _eligible_item(tmp_path)
+        # Simulate run-next having claimed under a foreign holder (different pid/host):
+        RunStateRepo(origin, tmp_path / "otherhost").try_claim(
+            item_id, holder="otherhost:99999", now=_NOW)
+        assert RunStateRepo(origin, tmp_path / "v0").read_claim(item_id) is not None
+
+        res = runner.invoke(app, ["item", "bail", item_id, "--reason", "fork"])
+        assert res.exit_code == 0, res.output
+        assert RunStateRepo(origin, tmp_path / "verify").read_claim(item_id) is None
+    finally:
+        _reset()
+
+
+def test_item_heartbeat_keeps_claim(tmp_path):
+    # FIX#3b: `mship item heartbeat` advances a live claim's heartbeat (authoritatively
+    # across processes) so a long run isn't reclaimed. Here it keeps the claim present.
+    _isolate(tmp_path)
+    origin = _make_origin(tmp_path)
+    try:
+        item_id = _eligible_item(tmp_path)
+        assert runner.invoke(app, ["--json", "item", "run-next"]).exit_code == 0
+        before = RunStateRepo(origin, tmp_path / "v0").read_claim(item_id)
+        assert before is not None
+
+        res = runner.invoke(app, ["item", "heartbeat", item_id])
+        assert res.exit_code == 0, res.output
+
+        after = RunStateRepo(origin, tmp_path / "verify").read_claim(item_id)
+        assert after is not None
+        assert after.holder == before.holder                  # same holder, not stolen
+        assert after.heartbeat_at >= before.heartbeat_at      # heartbeat advanced
+    finally:
+        _reset()
+
+
+def test_branch_state_reads_commits_ahead_from_remote(tmp_path):
+    # FIX#4b: a fresh clone (no task worktree on disk) must still detect prior work by
+    # reading commits-ahead from the REMOTE branch a prior bail pushed.
+    member_origin = tmp_path / "member.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(member_origin)],
+                   check=True, capture_output=True)
+    work = tmp_path / "member-work"
+    _git(tmp_path, "clone", "-q", str(member_origin), str(work))
+    (work / "base.txt").write_text("base")
+    _git(work, "add", "-A"); _git(work, "commit", "-m", "base")
+    _git(work, "push", "-q", "-u", "origin", "main")
+    _git(work, "checkout", "-q", "-b", "feat/wi-1")
+    (work / "one.txt").write_text("1"); _git(work, "add", "-A"); _git(work, "commit", "-m", "c1")
+    (work / "two.txt").write_text("2"); _git(work, "add", "-A"); _git(work, "commit", "-m", "c2")
+    _git(work, "push", "-q", "-u", "origin", "feat/wi-1")
+
+    # A pristine clone: main is checked out, the feature branch exists only on origin.
+    fresh = tmp_path / "fresh"
+    _git(tmp_path, "clone", "-q", str(member_origin), str(fresh))
+
+    task = Task(slug="t-1", description="d", phase="dev", created_at=_NOW,
+                affected_repos=["member"], branch="feat/wi-1", base_branch="main")
+    state = WorkspaceState(tasks={"t-1": task})
+    item = SimpleNamespace(id="wi-1", task_slugs=["t-1"])
+    config = SimpleNamespace(branch_pattern="feat/{slug}",
+                             repos={"member": SimpleNamespace(path=fresh)})
+    log_mgr = SimpleNamespace(read=lambda slug, last=None: [])
+
+    bs = _branch_state_for(item, state, log_mgr, config)
+    assert bs.branch == "feat/wi-1"
+    assert bs.commits_ahead == 2   # counted from origin, not a local worktree
+
+
+def test_branch_state_fresh_start_when_branch_absent_on_remote(tmp_path):
+    # No remote branch yet ⇒ a truly fresh start (commits_ahead=0, no RESUMING wrap).
+    member_origin = tmp_path / "member.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(member_origin)],
+                   check=True, capture_output=True)
+    work = tmp_path / "member-work"
+    _git(tmp_path, "clone", "-q", str(member_origin), str(work))
+    (work / "base.txt").write_text("base")
+    _git(work, "add", "-A"); _git(work, "commit", "-m", "base")
+    _git(work, "push", "-q", "-u", "origin", "main")
+    fresh = tmp_path / "fresh"
+    _git(tmp_path, "clone", "-q", str(member_origin), str(fresh))
+
+    task = Task(slug="t-1", description="d", phase="dev", created_at=_NOW,
+                affected_repos=["member"], branch="feat/never-pushed", base_branch="main")
+    state = WorkspaceState(tasks={"t-1": task})
+    item = SimpleNamespace(id="wi-1", task_slugs=["t-1"])
+    config = SimpleNamespace(branch_pattern="feat/{slug}",
+                             repos={"member": SimpleNamespace(path=fresh)})
+    log_mgr = SimpleNamespace(read=lambda slug, last=None: [])
+
+    bs = _branch_state_for(item, state, log_mgr, config)
+    assert bs.commits_ahead == 0
 
 
 def test_new_then_list_roundtrip(tmp_path):

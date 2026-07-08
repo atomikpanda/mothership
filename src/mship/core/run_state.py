@@ -94,8 +94,8 @@ class RunStateRepo:
         workdir,
         *,
         branch: str = _BRANCH_DEFAULT,
-        ttl_seconds: float = 1800,
-    ) -> None:
+        ttl_seconds: float = 14400,  # 4h: overnight builds must not expire mid-run
+    ) -> None:                       # (heartbeat via `mship item heartbeat` still advances it). FIX#3a
         self._origin = str(origin)
         self._workdir = Path(workdir)
         self._branch = branch

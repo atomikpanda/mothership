@@ -11,7 +11,6 @@ from typing import get_args
 import typer
 
 from mship.cli.output import Output
-from mship.core.dispatch import collect_base_sha_info
 from mship.core.message_store import MessageStore
 from mship.core.run_state import RunStateRepo
 from mship.core.runner import BranchState, RunDeps, checkpoint_bail, run_once
@@ -72,24 +71,66 @@ def _base_prompt_for(item, spec) -> str:
     return "\n".join(lines)
 
 
+def _remote_commits_ahead(task, config) -> int:
+    """How many commits the task's branch is ahead of its base ON ORIGIN.
+
+    A resumed unattended run is often a fresh clone with no task worktree on disk
+    (AC4, ephemeral hosts), so commits-ahead must come from the *remote* branch a
+    prior bail pushed (FIX#4b) — not a local worktree that may not exist. For each
+    affected repo's checkout, if origin has the branch, fetch the branch + base into
+    throwaway probe refs and count ``base..branch``. Returns the max across repos
+    (any repo with prior commits ⇒ resume); 0 when the branch isn't on origin yet
+    (a truly fresh start ⇒ no RESUMING preamble). Best-effort: git failures ⇒ 0."""
+    base = task.base_branch or "main"
+    repos = getattr(config, "repos", {}) or {}
+    ahead = 0
+    for name in task.affected_repos:
+        repo = repos.get(name)
+        if repo is None:
+            continue
+        repo_dir = Path(repo.path)
+        if not repo_dir.exists():
+            continue
+        ls = subprocess.run(
+            ["git", "ls-remote", "--heads", "origin", task.branch],
+            cwd=str(repo_dir), capture_output=True, text=True,
+        )
+        if ls.returncode != 0 or not ls.stdout.strip():
+            continue  # branch not on origin for this repo (yet)
+        br_ref, base_ref = "refs/mship-probe/branch", "refs/mship-probe/base"
+        fetch = subprocess.run(
+            ["git", "fetch", "-q", "origin",
+             f"+{task.branch}:{br_ref}", f"+{base}:{base_ref}"],
+            cwd=str(repo_dir), capture_output=True, text=True,
+        )
+        if fetch.returncode == 0:
+            out = subprocess.run(
+                ["git", "rev-list", "--count", f"{base_ref}..{br_ref}"],
+                cwd=str(repo_dir), capture_output=True, text=True,
+            )
+            if out.returncode == 0 and out.stdout.strip().isdigit():
+                ahead = max(ahead, int(out.stdout.strip()))
+        for ref in (br_ref, base_ref):  # clean up the throwaway probe refs
+            subprocess.run(["git", "update-ref", "-d", ref], cwd=str(repo_dir),
+                           capture_output=True, text=True)
+    return ahead
+
+
 def _branch_state_for(item, state, log_mgr, config) -> BranchState:
     """Per-item git/branch facts ``run_once`` needs for the resumable wrap.
 
     Uses the item's first linked task when present (its branch + recent journal, plus
-    a git probe for commits-ahead when a worktree exists on disk); otherwise a fresh
-    start on the configured branch pattern (commits_ahead=0 ⇒ no RESUMING preamble)."""
+    commits-ahead read from the *remote* branch so a fresh clone still resumes —
+    ``_remote_commits_ahead``); otherwise a fresh start on the configured branch
+    pattern (commits_ahead=0 ⇒ no RESUMING preamble)."""
     task = next((state.tasks[s] for s in item.task_slugs if s in state.tasks), None)
     if task is None:
         return BranchState(branch=config.branch_pattern.format(slug=item.id),
                            commits_ahead=0, recent_journal=[])
     journal = [e.message.splitlines()[0]
                for e in log_mgr.read(task.slug, last=5) if e.message]
-    commits_ahead = 0
-    worktree = next((Path(p) for p in task.worktrees.values() if Path(p).is_dir()), None)
-    if worktree is not None:
-        commits_ahead = collect_base_sha_info(
-            worktree, task.base_branch or "main").ahead_of_base or 0
-    return BranchState(branch=task.branch, commits_ahead=commits_ahead,
+    return BranchState(branch=task.branch,
+                       commits_ahead=_remote_commits_ahead(task, config),
                        recent_journal=journal)
 
 
@@ -210,8 +251,11 @@ def register(parent: typer.Typer, get_container) -> None:
         The impure edges: run_state → a git-backed RunStateRepo on the workspace
         origin (workdir under the state dir); build_base_prompt → spec-first prompt;
         branch_state → the item's task branch/journal facts; mark_blocked → set the
-        item's task(s) blocked_reason (the existing, derived block mechanism). The
-        pure ``claimed`` snapshot is empty — ``try_claim`` is the authoritative gate
+        item's task(s) blocked_reason (the existing, derived block mechanism);
+        push_branch → push the item's task branch to origin so a bail survives for a
+        later resume. The ``blocked`` set (item-ids with a blocked task) is excluded
+        by the selector so a bailed item isn't re-picked every tick (FIX#1). The pure
+        ``claimed`` snapshot is empty — ``try_claim`` is the authoritative gate
         (RunStateRepo has no all-claims listing)."""
         container = get_container()
         state_dir = Path(container.state_dir())
@@ -226,6 +270,14 @@ def register(parent: typer.Typer, get_container) -> None:
         spec_approved = {sid: (s.status == "approved") for sid, s in specs_by_id.items()}
         run_state = RunStateRepo(_workspace_origin(workspace_root), state_dir / "run-state")
 
+        item_list = items.list()
+        snapshot = state_manager.load()
+        blocked = {
+            it.id for it in item_list
+            if any(snapshot.tasks[s].blocked_reason
+                   for s in it.task_slugs if s in snapshot.tasks)
+        }
+
         def mark_blocked(item, reason):
             stamp = now()
 
@@ -236,16 +288,35 @@ def register(parent: typer.Typer, get_container) -> None:
                         s.tasks[slug].blocked_at = stamp
             state_manager.mutate(_apply)
 
+        def push_branch(item):
+            """Push the item's task branch to origin from each existing worktree, so
+            a later (possibly fresh-clone) run can resume it. Best-effort: no commits,
+            no creds, or offline must not strand the bail (checkpoint_bail guards it)."""
+            task = next((snapshot.tasks[s] for s in item.task_slugs
+                         if s in snapshot.tasks), None)
+            if task is None:
+                return
+            for wt in task.worktrees.values():
+                wt = Path(wt)
+                if not wt.is_dir():
+                    continue
+                subprocess.run(
+                    ["git", "push", "origin", f"HEAD:{task.branch}"],
+                    cwd=str(wt), capture_output=True, text=True,
+                )
+
         return RunDeps(
-            items=items.list(),
+            items=item_list,
             spec_approved=spec_approved,
             claimed=set(),
+            blocked=blocked,
             run_state=run_state,
             build_base_prompt=lambda it: _base_prompt_for(
                 it, specs_by_id.get(it.spec_id) if it.spec_id else None),
             branch_state=lambda it: _branch_state_for(
                 it, state_manager.load(), log_mgr, config),
             mark_blocked=mark_blocked,
+            push_branch=push_branch,
             holder=holder,
             now=now,
         )
@@ -295,6 +366,32 @@ def register(parent: typer.Typer, get_container) -> None:
             output.json({"item_id": item_id, "bailed": True, "reason": reason})
         else:
             typer.echo(f"bailed {item_id}: {reason}")
+
+    @item_app.command("heartbeat")
+    def heartbeat(item_id: str):
+        """Advance a claimed item's run-heartbeat so a long unattended run isn't
+        reclaimed mid-flight (the host calls this periodically during a run).
+
+        Authoritative across processes: run-next claimed under a different process's
+        holder token, so we read the claim's RECORDED holder off the ref and refresh
+        as it (a fresh token would no-op). No live claim ⇒ nothing to do. FIX#3b."""
+        items, _, _, _, _ = _ctx()
+        item = items.get(item_id)
+        if item is None:
+            typer.echo(f"no work item {item_id!r}", err=True)
+            raise typer.Exit(1)
+        deps = _build_run_deps(holder=_run_holder(), now=_utcnow)
+        claim = deps.run_state.read_claim(item_id)
+        beat = claim is not None
+        if beat:
+            deps.run_state.refresh(item_id, claim.holder, _utcnow())
+        output = Output()
+        if output.json_mode:
+            output.json({"item_id": item_id, "heartbeat": beat})
+        elif beat:
+            typer.echo(f"heartbeat {item_id} (holder {claim.holder})")
+        else:
+            typer.echo(f"no live claim for {item_id}")
 
     @item_app.command("migrate")
     def migrate():

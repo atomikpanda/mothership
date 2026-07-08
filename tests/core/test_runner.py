@@ -35,6 +35,7 @@ class FakeRunState:
         self.releases: list[tuple[str, str]] = []
         self.logs: list[tuple[str, str]] = []
         self.blocked: list[tuple[str, str]] = []   # spy for the injected mark_blocked
+        self.pushed: list[str] = []                # spy for the injected push_branch
 
     def try_claim(self, item_id, holder, now):
         if item_id in self._held:
@@ -42,6 +43,10 @@ class FakeRunState:
         self._held[item_id] = holder
         self.claims.append((item_id, holder))
         return None
+
+    def read_claim(self, item_id):
+        holder = self._held.get(item_id)
+        return None if holder is None else ClaimInfo(holder=holder, heartbeat_at=NOW)
 
     def release(self, item_id, holder):
         if self._held.get(item_id) == holder:
@@ -53,12 +58,13 @@ class FakeRunState:
 
 
 def _deps(items, *, spec_approved=None, held=None, commits_ahead=0,
-          recent_journal=None, claimed=None):
+          recent_journal=None, claimed=None, blocked=None, holder="runX"):
     rs = FakeRunState(held=held)
     return RunDeps(
         items=items,
         spec_approved=spec_approved if spec_approved is not None else {"s": True},
         claimed=claimed if claimed is not None else set(),
+        blocked=blocked if blocked is not None else set(),
         run_state=rs,
         build_base_prompt=lambda it: f"BASE:{it.id}",
         branch_state=lambda it: BranchState(
@@ -67,7 +73,8 @@ def _deps(items, *, spec_approved=None, held=None, commits_ahead=0,
             recent_journal=recent_journal or [],
         ),
         mark_blocked=lambda it, reason: rs.blocked.append((it.id, reason)),
-        holder="runX",
+        push_branch=lambda it: rs.pushed.append(it.id),
+        holder=holder,
         now=lambda: NOW,
     )
 
@@ -96,6 +103,13 @@ def test_run_once_noop_when_nothing_eligible():
     assert deps.run_state.claims == []
 
 
+def test_run_once_skips_blocked_item():
+    # A previously-bailed item (blocked) must not be re-picked → no claim. FIX#1
+    deps = _deps([_wi("wi-1")], blocked={"wi-1"})
+    assert run_once(deps) is None
+    assert deps.run_state.claims == []
+
+
 def test_bail_releases_claim_and_logs_reason(fake_ctx):
     run_once(fake_ctx)                                  # claim wi-1 first
     item = fake_ctx.items[0]
@@ -109,6 +123,25 @@ def test_bail_releases_claim_and_logs_reason(fake_ctx):
     assert ("wi-1", "fork on auth approach") in fake_ctx.run_state.blocked
     # branch reference is still recorded (claim-time log survives the bail)
     assert any(i == "wi-1" and "feat/wi-1" in t for i, t in fake_ctx.run_state.logs)
+
+
+def test_bail_releases_cross_process_claim():
+    # FIX#2: run-next claimed under another process's holder (runA); bail runs as a
+    # different process (runB). Release must clear the claim by reading the RECORDED
+    # holder off the ref, not this process's fresh token — otherwise it no-ops.
+    deps = _deps([_wi("wi-1")], held={"wi-1": "runA"}, holder="runB")
+    item = deps.items[0]
+    checkpoint_bail(deps, item, "cross-process bail")
+    assert ("wi-1", "runA") in deps.run_state.releases   # released the recorded holder
+    assert "wi-1" not in deps.run_state._held            # claim actually cleared
+
+
+def test_bail_pushes_branch_for_resume(fake_ctx):
+    # FIX#4a: the branch must be pushed on bail so a later (fresh-clone) run resumes.
+    run_once(fake_ctx)
+    item = fake_ctx.items[0]
+    checkpoint_bail(fake_ctx, item, "fork")
+    assert "wi-1" in fake_ctx.run_state.pushed
 
 
 def test_run_once_skips_item_already_claimed():

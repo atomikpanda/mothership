@@ -154,12 +154,16 @@ non-goal, not a bug. `mship finish` opens PRs; nothing in this loop calls
 `git merge`, `gh pr merge`, or pushes to the base branch.
 
 **Bail, don't block.** `mship item bail <id> --reason "<reason>"`
-(`checkpoint_bail`, `src/mship/core/runner.py`) does three things in this
-order: logs the reason to the item's run-log (durable even if the next two
-steps race), marks the item's linked task(s) `blocked_reason` (so the
-selector's *human-facing* "blocked" flag lights up), then releases the
-claim. The branch is left intact — a bail is a checkpoint, not a rollback;
-a later tick (or an attended human) can resume off exactly where it stopped.
+(`checkpoint_bail`, `src/mship/core/runner.py`) does four things in this
+order: logs the reason to the item's run-log (durable even if later steps
+race), pushes the task branch to origin (best-effort, so the work survives
+for a later resume — even if this host is ephemeral), marks the item's linked
+task(s) `blocked_reason`, then releases the claim (authoritatively — see
+"Long runs and cross-process claim ownership"). A blocked item is excluded
+from `run-next` selection until the block is cleared, so a bailed item is not
+re-picked every tick. The branch is left intact — a bail is a checkpoint, not
+a rollback; a later tick (or an attended human) can resume off exactly where
+it stopped.
 
 **One item per tick.** The routine calls `mship item run-next` exactly once
 per invocation. It does not loop internally to drain the backlog — draining
@@ -167,25 +171,38 @@ N eligible items takes N scheduled ticks. This is deliberate for v1 (no
 parallel runs, see the spec's non-goals); a farm/concurrency model is future
 work.
 
-## Known limitation: `bail`'s claim release is cross-process best-effort
+## Long runs and cross-process claim ownership
 
-The run-state claim's holder token is `hostname:pid`
-(`_run_holder()`, `src/mship/cli/workitem.py`), minted fresh by *each* CLI
-invocation. `mship item run-next` and `mship item bail` are always separate
-`mship` process invocations in real use — there is no way to invoke both
-from the same OS process outside of a test harness. That means the `pid` in
-`bail`'s holder token never matches the `pid` that made the original claim,
-so `RunStateRepo.release()`'s holder-identity check (`existing.holder ==
-holder`) does not match and the release is a silent no-op — verified during
-the smoke test below (the claim file was still present after `bail`
-completed). The reason is still logged and the item is still marked blocked,
-so the operator sees a bailed item — but the run-state claim itself only
-clears once its TTL (`RunStateRepo`'s default 1800s / 30 minutes) elapses.
-Practically: an item bailed by this adapter won't be pick-able by
-`run-next` again for up to 30 minutes, even though it isn't actually held by
-a live run. This doesn't threaten correctness (a stale claim just delays a
-retry it currently wouldn't need to survive), but it's worth knowing before
-assuming an immediate re-tick will pick a just-bailed item back up.
+The run-state claim's holder token is `hostname:pid` (`_run_holder()`,
+`src/mship/cli/workitem.py`), minted fresh by *each* CLI invocation.
+`mship item run-next`, `mship item heartbeat`, and `mship item bail` are
+always separate `mship` process invocations in real use, so a later
+invocation's `pid` never matches the `pid` that made the original claim. Both
+the release and the heartbeat handle this by acting **authoritatively** —
+they read the claim's recorded holder off the run-state ref and act as that
+holder rather than as this process's fresh token:
+
+- **`bail` releases the claim immediately.** `checkpoint_bail`
+  (`src/mship/core/runner.py`) logs the reason, pushes the task branch to
+  origin, marks the item blocked, then reads the recorded holder and releases
+  the claim as it. The claim is gone the moment `bail` returns — no TTL wait.
+  (Independently, a bailed item carries a `blocked_reason` on its task, and
+  `run-next`'s selector excludes blocked items, so a just-bailed item is not
+  re-offered until a human/decision clears the block — regardless of the
+  claim.)
+
+- **Long runs stay claimed.** The claim TTL defaults to 4 hours
+  (`RunStateRepo`, was 30 minutes), so a typical overnight build does not
+  expire and get double-run mid-flight. For runs that may exceed that, the
+  host calls `mship item heartbeat <id>` periodically — it reads the recorded
+  holder and advances the heartbeat as that holder, resetting the TTL window.
+
+- **Resume survives ephemeral hosts.** Because `bail` pushes the branch to
+  origin, a later tick — even a fresh clone on a brand-new host with no local
+  worktree — detects the prior work: `run-next` reads commits-ahead from the
+  *remote* branch (`_remote_commits_ahead`, `src/mship/cli/workitem.py`) and
+  wraps the prompt with the `## RESUMING` preamble so the agent continues
+  instead of restarting.
 
 ## Smoke test checklist
 
@@ -234,16 +251,28 @@ needs somewhere to push to — even a local bare repo works for this check).
    instead returns the same item again, the claim isn't being honored and
    something regressed.
 
-4. **Bail releases (eventually) and records the reason.**
+4. **Bail releases immediately and records the reason.**
    ```bash
    mship item bail "$ITEM_ID" --reason "smoke test"
    # {"item_id": "<ITEM_ID>", "bailed": true, "reason": "smoke test"}
    ```
    Confirm the item shows as blocked (if it has a linked task,
    `blocked_reason` is set on that task) and the reason string appears
-   somewhere retrievable for the operator. Per the known limitation above,
-   don't expect `run-next` to immediately re-offer this item — that's
-   correct, not a bug, until the claim TTL elapses.
+   somewhere retrievable for the operator. The run-state claim is released
+   the moment `bail` returns — even though `bail` runs in a different process
+   from the original `run-next` (the release is authoritative; see "Long runs
+   and cross-process claim ownership" above). `run-next` still won't re-offer
+   this item, but now because it is **blocked**, not because of a lingering
+   claim — the selector excludes blocked items until the block is cleared.
+
+5. **Heartbeat keeps a long-running claim alive** (optional).
+   ```bash
+   mship item heartbeat "$ITEM_ID"
+   # {"item_id": "<ITEM_ID>", "heartbeat": true}
+   ```
+   Run against a live claim, it advances the claim's `heartbeat_at` (as the
+   recorded holder) so the run isn't reclaimed at the 4h TTL. `{"heartbeat":
+   false}` means there was no live claim to advance.
 
 This exact sequence (minus the throwaway IDs) was run against this branch's
 CLI while writing this doc and produced the outputs shown above.

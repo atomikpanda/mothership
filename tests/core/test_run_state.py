@@ -78,6 +78,32 @@ def test_refresh_advances_heartbeat_only_for_holder(tmp_origin, tmp_path):
     assert a.read_claim("wi-1").holder == "runA"
 
 
+def test_default_ttl_keeps_long_run_claimed_past_old_ttl(tmp_origin, tmp_path):
+    """FIX#3a: the default TTL is 4h, so an overnight run isn't reclaimed mid-flight.
+    A claim 2h old (> the old 1800s TTL, < the new 14400s) is still live."""
+    a = _repo(tmp_origin, tmp_path, "a")               # default ttl (now 4h)
+    assert a.try_claim("wi-1", holder="runA", now=T0) is None
+    b = _repo(tmp_origin, tmp_path, "b")
+    refused = b.try_claim("wi-1", holder="runB", now=T0 + timedelta(hours=2))
+    assert refused is not None and refused.holder == "runA"   # still held, not reclaimed
+
+
+def test_cross_process_heartbeat_via_recorded_holder(tmp_origin, tmp_path):
+    """FIX#3b: `mship item heartbeat` runs in a separate process from run-next, so it
+    advances the heartbeat by reading the RECORDED holder and refreshing as it. Here
+    a fresh clone does exactly that; the claim then survives past the TTL."""
+    a = _repo(tmp_origin, tmp_path, "a", ttl_seconds=30)
+    assert a.try_claim("wi-1", holder="runA", now=T0) is None
+    hb = _repo(tmp_origin, tmp_path, "hb", ttl_seconds=30)   # a different "process"
+    holder = hb.read_claim("wi-1").holder
+    hb.refresh("wi-1", holder, now=T0 + timedelta(seconds=25))
+    # at T0+40 the heartbeat is 15s old (< 30 ttl) → still live despite the original
+    # claim being 40s old (which without a heartbeat would be reclaimable)
+    c = _repo(tmp_origin, tmp_path, "c", ttl_seconds=30)
+    refused = c.try_claim("wi-1", holder="runC", now=T0 + timedelta(seconds=40))
+    assert refused is not None and refused.holder == "runA"
+
+
 def test_run_log_appends_and_persists(tmp_origin, tmp_path):
     r = _repo(tmp_origin, tmp_path, "a")
     r.append_log("wi-1", "run started", now=T0)
