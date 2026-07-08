@@ -60,8 +60,10 @@ def test_spec_status_maps_to_phase():
 
 def test_tasks_dominate_spec():
     assert compute_phase(_wi(), _spec("approved"), [_task(finished=False)]) == "in_flight"
+    # gc32 ac2 backstop: once every linked task is finished the work has landed,
+    # so the item is done even when a PR is still recorded (spec status may lag).
     assert compute_phase(_wi(), _spec("approved"),
-                         [_task(finished=True, pr=True)]) == "review"
+                         [_task(finished=True, pr=True)]) == "done"
     assert compute_phase(_wi(), _spec("approved"),
                          [_task(finished=True, pr=False)]) == "done"
 
@@ -69,6 +71,36 @@ def test_tasks_dominate_spec():
 def test_mixed_tasks_one_running_is_in_flight():
     assert compute_phase(_wi(), None,
                          [_task(finished=True, pr=True), _task(finished=False)]) == "in_flight"
+
+
+# --- gc32 ac2: derivation backstop (all linked tasks finished/merged -> done) ---
+
+def test_backstop_all_finished_derives_done_even_when_spec_lags():
+    """The unattended-run case: PR merged directly (no `mship close`), so the task
+    lingers finished with a PR while the spec is still `dispatched`. The item must
+    still derive to `done` from the task-level landed signal, not sit in review."""
+    tasks = [_task(finished=True, pr=True)]
+    assert compute_phase(_wi(), _spec("dispatched"), tasks) == "done"
+
+
+def test_backstop_multiple_tasks_all_finished_is_done():
+    a = _task(finished=True, pr=True)
+    b = _task(finished=True, pr=False)
+    assert compute_phase(_wi(), _spec("dispatched"), [a, b]) == "done"
+
+
+def test_backstop_does_not_fire_when_any_task_unfinished():
+    """CRITICAL (top risk): a single still-in-progress task keeps the item out of
+    done — the existing in_flight derivation is unchanged."""
+    a = _task(finished=True, pr=True)
+    b = _task(finished=False)
+    assert compute_phase(_wi(), _spec("dispatched"), [a, b]) == "in_flight"
+
+
+def test_backstop_requires_at_least_one_task():
+    """No tasks -> the backstop cannot fire; derivation falls back to the spec."""
+    assert compute_phase(_wi(), _spec("dispatched"), []) == "in_flight"
+    assert compute_phase(_wi(), _spec("approved"), []) == "ready"
 
 
 def _thread(*, needs_you=False):

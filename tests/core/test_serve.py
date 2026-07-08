@@ -537,3 +537,47 @@ def test_post_item_unattended_404_for_unknown_item(tmp_path):
     client = TestClient(_app(tmp_path))
     r = client.post("/items/nope/unattended", json={"on": True})
     assert r.status_code == 404
+
+
+# --- gc32 ac4: POST /specs/{id}/archive (swipe-to-archive) ---
+
+def _seed_status_spec(tmp_path: Path, status: str, spec_id="ar"):
+    now = datetime(2026, 6, 14, tzinfo=timezone.utc)
+    SpecStore(tmp_path / "specs").save(Spec(
+        id=spec_id, title="Archive me", status=status,
+        created_at=now, updated_at=now,
+    ))
+
+
+def test_post_archive_from_implemented(tmp_path):
+    _seed_status_spec(tmp_path, "implemented")
+    client = TestClient(_app(tmp_path))
+    r = client.post("/specs/ar/archive")
+    assert r.status_code == 200
+    assert r.json() == {"id": "ar", "status": "archived"}
+    assert SpecStore(tmp_path / "specs").find_by_id("ar").status == "archived"
+
+
+def test_post_archive_from_any_non_terminal_state(tmp_path):
+    # Decluttering: archive is reachable from any non-terminal status, not only
+    # implemented -> archived.
+    for i, status in enumerate(
+        ["captured", "drafting", "needs_review", "approved", "dispatched"]
+    ):
+        sid = f"s{i}"
+        _seed_status_spec(tmp_path, status, spec_id=sid)
+        client = TestClient(_app(tmp_path))
+        r = client.post(f"/specs/{sid}/archive")
+        assert r.status_code == 200, (status, r.text)
+        assert r.json() == {"id": sid, "status": "archived"}
+
+
+def test_post_archive_unknown_spec_404(tmp_path):
+    client = TestClient(_app(tmp_path))
+    assert client.post("/specs/nope/archive").status_code == 404
+
+
+def test_post_archive_already_archived_409(tmp_path):
+    _seed_status_spec(tmp_path, "archived")
+    client = TestClient(_app(tmp_path))
+    assert client.post("/specs/ar/archive").status_code == 409

@@ -24,10 +24,14 @@ def compute_phase(item: WorkItem, spec: Spec | None, tasks: list[Task]) -> Phase
     if item.phase_override is not None:
         return item.phase_override
     if tasks:
+        # Any still-running task keeps the item in flight (unchanged derivation).
         if any(t.finished_at is None for t in tasks):
             return "in_flight"
-        if any(t.pr_urls for t in tasks):
-            return "review"
+        # Backstop (gc32 ac2): every linked task is finished — the work has landed,
+        # so the item is done even if its spec status lags (e.g. an unattended run
+        # whose PR was merged directly, without `mship close` advancing the spec).
+        # `finished_at` is the offline task-level "finished/merged" signal; a live
+        # PR check is intentionally avoided so the derivation stays fast/offline.
         return "done"
     if spec is not None:
         return _SPEC_PHASE.get(spec.status, "shaping")
