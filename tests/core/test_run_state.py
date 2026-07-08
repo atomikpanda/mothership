@@ -4,6 +4,7 @@ The "origin" is a local bare repo (mirrors tests/util/test_git.py fixtures); eac
 RunStateRepo gets its own workdir so we exercise real clone/fetch/push sharing
 through git rather than a shared in-process object.
 """
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -93,6 +94,101 @@ def test_read_log_empty_for_unknown_item(tmp_origin, tmp_path):
 
 def test_read_claim_none_for_unknown_item(tmp_origin, tmp_path):
     assert _repo(tmp_origin, tmp_path, "a").read_claim("nope") is None
+
+
+def test_try_claim_stands_down_on_same_item_conflict(tmp_origin, tmp_path):
+    """Deterministic same-item race: B syncs an empty base and is about to push its
+    own claim when A claims first. B's push is a non-fast-forward, its rebase hits an
+    add/add conflict on the claim file — B must STAND DOWN (return A's ClaimInfo),
+    not raise. Contract: None == you won; ClaimInfo == someone else holds it."""
+    a = _repo(tmp_origin, tmp_path, "a", ttl_seconds=30)
+    b = _repo(tmp_origin, tmp_path, "b", ttl_seconds=30)
+
+    real_push = b._push
+    fired = {"n": 0}
+
+    def racing_push(*args, **kwargs):
+        # right before B's first push, A grabs the item -> forces B's non-ff + conflict
+        if fired["n"] == 0:
+            fired["n"] += 1
+            assert a.try_claim("wi-1", holder="runA", now=T0) is None
+        return real_push(*args, **kwargs)
+
+    b._push = racing_push
+    got = b.try_claim("wi-1", holder="runB", now=T0)
+    assert got is not None and got.holder == "runA"          # B stood down, no exception
+    assert _repo(tmp_origin, tmp_path, "c").read_claim("wi-1").holder == "runA"  # single claim
+
+
+def test_concurrent_same_item_claim_has_single_winner(tmp_origin, tmp_path):
+    """Two runs (separate workdirs, unrelated roots) race the same item. Exactly one
+    gets None (winner); the other gets the winner's ClaimInfo — never an exception —
+    and origin ends with a single claim."""
+    import threading
+
+    a = _repo(tmp_origin, tmp_path, "a", ttl_seconds=30)
+    b = _repo(tmp_origin, tmp_path, "b", ttl_seconds=30)
+    barrier = threading.Barrier(2)
+    results: dict[str, object] = {}
+
+    def claim(repo, holder):
+        barrier.wait()
+        try:
+            results[holder] = repo.try_claim("wi-1", holder=holder, now=T0)
+        except Exception as exc:  # noqa: BLE001
+            results[holder] = exc
+
+    ta = threading.Thread(target=claim, args=(a, "runA"))
+    tb = threading.Thread(target=claim, args=(b, "runB"))
+    ta.start(); tb.start(); ta.join(); tb.join()
+
+    assert not any(isinstance(v, Exception) for v in results.values()), results
+    nones = [h for h, v in results.items() if v is None]
+    infos = [(h, v) for h, v in results.items() if v is not None]
+    assert len(nones) == 1 and len(infos) == 1
+    winner = nones[0]
+    assert infos[0][1].holder == winner                       # loser sees the winner
+    assert _repo(tmp_origin, tmp_path, "c").read_claim("wi-1").holder == winner
+
+
+def test_concurrent_different_items_both_succeed(tmp_origin, tmp_path):
+    """Concurrent first-writers on unrelated roots but DIFFERENT items must both win
+    (per-item files → the bounded fetch+rebase+re-push merges cleanly)."""
+    import threading
+
+    a = _repo(tmp_origin, tmp_path, "a", ttl_seconds=30)
+    b = _repo(tmp_origin, tmp_path, "b", ttl_seconds=30)
+    barrier = threading.Barrier(2)
+    results: dict[str, object] = {}
+
+    def claim(repo, holder, item):
+        barrier.wait()
+        try:
+            results[holder] = repo.try_claim(item, holder=holder, now=T0)
+        except Exception as exc:  # noqa: BLE001
+            results[holder] = exc
+
+    ta = threading.Thread(target=claim, args=(a, "runA", "wi-1"))
+    tb = threading.Thread(target=claim, args=(b, "runB", "wi-2"))
+    ta.start(); tb.start(); ta.join(); tb.join()
+
+    assert results == {"runA": None, "runB": None}, results     # both claimed, no exception
+    c = _repo(tmp_origin, tmp_path, "c")
+    assert c.read_claim("wi-1").holder == "runA"
+    assert c.read_claim("wi-2").holder == "runB"
+
+
+def test_read_log_skips_corrupt_line(tmp_origin, tmp_path):
+    """A corrupt/partial JSONL line is skipped, mirroring read_claim's tolerance."""
+    r = _repo(tmp_origin, tmp_path, "a")
+    r.append_log("wi-1", "first", now=T0)
+    # corrupt the persisted log directly on the ref, then commit+push the damage
+    r._sync()
+    log = r._log_path("wi-1")
+    log.write_text(log.read_text() + "{not json\n" + json.dumps({"text": "second", "at": T0.isoformat()}) + "\n")
+    r._commit_and_push("corrupt the log")
+    entries = _repo(tmp_origin, tmp_path, "b").read_log("wi-1")
+    assert [e.text for e in entries] == ["first", "second"]     # bad line dropped, good ones kept
 
 
 def test_push_retries_on_non_fast_forward(tmp_origin, tmp_path):
