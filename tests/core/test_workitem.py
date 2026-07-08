@@ -28,3 +28,16 @@ def test_external_link_and_links_list():
 
 def test_phase_order_is_the_pipeline():
     assert PHASE_ORDER == ("inbox", "shaping", "ready", "in_flight", "review", "done")
+
+
+def test_workitem_unattended_defaults_false_and_roundtrips():
+    from mship.core.workitem import WorkItem
+    from datetime import datetime, timezone
+    now = datetime(2026, 7, 8, tzinfo=timezone.utc)
+    wi = WorkItem(id="wi-1", title="t", workspace="ws", kind="feature",
+                  created_at=now, updated_at=now)
+    assert wi.unattended is False
+    dumped = wi.model_dump_json()
+    assert WorkItem.model_validate_json(dumped).unattended is False
+    wi2 = wi.model_copy(update={"unattended": True})
+    assert WorkItem.model_validate_json(wi2.model_dump_json()).unattended is True

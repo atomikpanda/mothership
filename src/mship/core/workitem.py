@@ -31,3 +31,5 @@ class WorkItem(BaseModel):
     external_links: list[ExternalLink] = []
     # Manual nudge: when set, overrides the phase derived from child state.
     phase_override: Phase | None = None
+    # Opt-in: this item is eligible for unattended (cloud-runner) execution. #unattended-runner
+    unattended: bool = False
