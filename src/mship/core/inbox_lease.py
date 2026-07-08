@@ -19,6 +19,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -75,35 +76,46 @@ class InboxLease:
         return not self._pid_alive(info.pid)
 
     def _write(self, pid: int, now: datetime) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_name(self._path.name + ".tmp")
         tmp.write_text(json.dumps({"pid": pid, "heartbeat_at": now.isoformat()}))
         tmp.replace(self._path)
 
-    def try_acquire(self, pid: int, now: datetime) -> LeaseInfo | None:
-        """Take the lease (or take over a dead/stale one). Returns None on
-        success, or the live holder's LeaseInfo if another agent holds it."""
+    @contextmanager
+    def _critical(self):
+        """Advisory-flock the read-decide-write section (mirrors state.lock). ALL
+        mutations — acquire, refresh, release — run under this so a concurrent
+        reclaim can't interleave between a caller's read and its write/unlink."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         guard = self._path.with_name(self._path.name + ".flock")
         with open(guard, "w") as lf:
             fcntl.flock(lf, fcntl.LOCK_EX)
             try:
-                info = self.read()
-                if not self._reclaimable(info, pid, now):
-                    return info  # live, fresh, different holder → caller stands down
-                self._write(pid, now)
-                return None
+                yield
             finally:
                 fcntl.flock(lf, fcntl.LOCK_UN)
 
-    def refresh(self, pid: int, now: datetime) -> None:
-        """Heartbeat while we still hold it (no-op if another holder took over)."""
-        info = self.read()
-        if info is None or info.pid == pid:
+    def try_acquire(self, pid: int, now: datetime) -> LeaseInfo | None:
+        """Take the lease (or take over a dead/stale one). Returns None on
+        success, or the live holder's LeaseInfo if another agent holds it."""
+        with self._critical():
+            info = self.read()
+            if not self._reclaimable(info, pid, now):
+                return info  # live, fresh, different holder → caller stands down
             self._write(pid, now)
+            return None
+
+    def refresh(self, pid: int, now: datetime) -> None:
+        """Heartbeat while we still hold it (no-op if another holder took over).
+        Under the flock so it can't clobber a takeover that raced our read."""
+        with self._critical():
+            info = self.read()
+            if info is None or info.pid == pid:
+                self._write(pid, now)
 
     def release(self, pid: int) -> None:
-        """Best-effort release on exit; only removes our own lease."""
-        info = self.read()
-        if info is not None and info.pid == pid:
-            self._path.unlink(missing_ok=True)
+        """Best-effort release on exit; only removes our own lease. Under the flock
+        so it can't delete a lease a new holder reclaimed after our read."""
+        with self._critical():
+            info = self.read()
+            if info is not None and info.pid == pid:
+                self._path.unlink(missing_ok=True)
