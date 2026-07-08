@@ -117,6 +117,15 @@ def register(parent: typer.Typer, get_container) -> None:
         items.set_phase_override(item_id, phase, now=datetime.now(timezone.utc))
         typer.echo(f"set phase_override={phase} on {item_id}")
 
+    @item_app.command("unattended")
+    def unattended(item_id: str,
+                   on: bool = typer.Option(True, "--on/--off",
+                       help="Opt this item into (or out of) unattended runs.")):
+        items, _, _, _, _ = _ctx()
+        _guard(items, item_id)
+        items.set_unattended(item_id, on, now=datetime.now(timezone.utc))
+        typer.echo(f"{item_id}: unattended={on}")
+
     @item_app.command("migrate")
     def migrate():
         from mship.core.workitem_migrate import wrap_existing
