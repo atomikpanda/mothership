@@ -155,6 +155,25 @@ def test_bail_releases_claim_even_when_mark_blocked_raises(fake_ctx):
                for i, t in fake_ctx.run_state.logs)
 
 
+def test_bail_releases_claim_even_when_append_log_raises(fake_ctx):
+    # Greptile (re-review): checkpoint_bail's own bail-reason append_log can raise
+    # (git contention exhausts retries) just like the claim-time write in run_once.
+    # It must be best-effort — like push_branch / mark_blocked — so a log-write
+    # failure never strands the claim for the full TTL.
+    run_once(fake_ctx)                                  # claim wi-1 first (claim-log ok)
+    item = fake_ctx.items[0]
+
+    def _boom(item_id, text, now):
+        raise RuntimeError("git log contention")
+
+    fake_ctx.run_state.append_log = _boom
+    checkpoint_bail(fake_ctx, item, "fork on auth approach")
+    # release still runs despite the bail-reason log write raising
+    assert ("wi-1", "runX") in fake_ctx.run_state.releases
+    # the reason still lands on the task via mark_blocked, so it is not lost
+    assert ("wi-1", "fork on auth approach") in fake_ctx.run_state.blocked
+
+
 def test_bail_pushes_branch_for_resume(fake_ctx):
     # FIX#4a: the branch must be pushed on bail so a later (fresh-clone) run resumes.
     run_once(fake_ctx)

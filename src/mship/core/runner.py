@@ -130,22 +130,27 @@ def checkpoint_bail(deps: RunDeps, item, reason: str) -> None:
     Called by the host when the run cannot make progress (an exception, a fork in the
     approach, a needed decision). Order matters:
 
-    1. the reason is logged first so it is durable even if later steps race;
+    1. the reason is logged first so it is durable if later steps race (best-effort —
+       the reason also lands on the task via mark_blocked, so a log-write failure is
+       survivable);
     2. the task branch is pushed to origin (best-effort) so the work survives for a
        later resume — even on an ephemeral host that will be torn down (AC6/FIX#4a);
     3. the item is marked blocked (best-effort, so the selector won't re-pick it,
        FIX#1) — a failure here (e.g. a state I/O error) must not strand the claim;
     4. the claim is released so the backlog can move on.
 
-    Steps 2 and 3 are both best-effort: either can fail without stopping the release
+    Steps 1, 2, and 3 are all best-effort: any can fail without stopping the release
     that follows, since a stranded claim (held for the full TTL) is worse than a
-    missed push or a missed block. Release is *authoritative*: run-next and bail are
+    missed log, push, or block. Release is *authoritative*: run-next and bail are
     separate processes with different holder tokens, so releasing under
     ``deps.holder`` would no-op. We read the claim's RECORDED holder off the ref and
     release as that (FIX#2). Never merges — the branch is left intact for a later
     resume.
     """
-    deps.run_state.append_log(item.id, f"bailed: {reason}", deps.now())
+    try:
+        deps.run_state.append_log(item.id, f"bailed: {reason}", deps.now())
+    except Exception:  # noqa: BLE001 — a log-write failure must not strand the release below
+        pass
     try:
         deps.push_branch(item)  # best-effort: a push failure must not strand the bail
     except Exception:  # noqa: BLE001 — the block/release below must still run
