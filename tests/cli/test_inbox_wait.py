@@ -77,6 +77,26 @@ def test_wait_ignores_agent_reply(tmp_path: Path):
         _reset()
 
 
+def test_wait_stands_down_when_another_listener_holds_lease(tmp_path: Path):
+    import os
+    from mship.core.inbox_lease import InboxLease
+    cfg, state_dir, store = _bootstrap(tmp_path)
+    store.create_thread("idea", "shape this", datetime.now(timezone.utc))  # awaiting (human)
+    # Another live listener already holds the lease (parent pid is alive and != ours).
+    InboxLease(state_dir / "inbox-listener.lock").try_acquire(
+        pid=os.getppid(), now=datetime.now(timezone.utc))
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["inbox", "wait", "--since", PAST, "--timeout", "5"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["skipped_duplicate_listener"] is True
+        assert payload["holder_pid"] == os.getppid()
+        assert payload["threads"] == []          # did NOT drain despite an awaiting thread
+    finally:
+        _reset()
+
+
 def test_wait_outside_workspace_errors(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     container.config_path.reset_override(); container.state_dir.reset_override()

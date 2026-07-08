@@ -46,7 +46,9 @@ def register(parent: typer.Typer, get_container) -> None:
         timeout: float = typer.Option(50.0, "--timeout", help="Max seconds to block before returning timed_out."),
     ) -> None:
         """Block until a new awaiting (human) message arrives, or timeout. JSON only."""
+        import os
         from mship.core.message_wait import wait_for_change
+        from mship.core.inbox_lease import InboxLease
         store = _store()
         if since:
             try:
@@ -58,10 +60,34 @@ def register(parent: typer.Typer, get_container) -> None:
             since_dt = datetime.now(timezone.utc)
         if since_dt.tzinfo is None:
             since_dt = since_dt.replace(tzinfo=timezone.utc)
-        res = wait_for_change(
-            store.list, since_dt, timeout,
-            predicate=lambda t: t.awaiting_reply,
-        )
+
+        # One-listener lease: if another agent in this workspace already holds it,
+        # stand down instead of double-draining the shared mailbox (every armed
+        # listener would otherwise answer the same message). The caller treats a
+        # `skipped_duplicate_listener` result as "don't re-arm". See core/inbox_lease.
+        pid = os.getpid()
+        lease = InboxLease(Path(get_container().state_dir()) / "inbox-listener.lock")
+        holder = lease.try_acquire(pid, datetime.now(timezone.utc))
+        if holder is not None:
+            typer.echo(json.dumps({
+                "threads": [], "cursor": since_dt.isoformat(), "timed_out": False,
+                "skipped_duplicate_listener": True, "holder_pid": holder.pid,
+            }))
+            return
+
+        def _load_and_heartbeat():
+            # Refresh the lease each poll so a concurrent reclaim can't steal it
+            # mid-wait; the poll loop already ticks ~1s, so no extra thread needed.
+            lease.refresh(pid, datetime.now(timezone.utc))
+            return store.list()
+
+        try:
+            res = wait_for_change(
+                _load_and_heartbeat, since_dt, timeout,
+                predicate=lambda t: t.awaiting_reply,
+            )
+        finally:
+            lease.release(pid)
         out = {
             "threads": [
                 {"id": t.id, "subject": t.subject,
