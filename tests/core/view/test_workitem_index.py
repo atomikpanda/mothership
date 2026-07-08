@@ -146,3 +146,15 @@ def test_build_index_tolerates_missing_children():
     s = build_workitem_index([item], {}, {}, {})[0]
     assert s.phase == "inbox"
     assert s.attention.total_tasks == 0
+
+
+def test_build_index_populates_unattended_true():
+    item = _wi(id="wi-u", unattended=True)
+    s = build_workitem_index([item], {}, {}, {})[0]
+    assert s.unattended is True
+
+
+def test_build_index_unattended_defaults_false():
+    item = _wi(id="wi-default")
+    s = build_workitem_index([item], {}, {}, {})[0]
+    assert s.unattended is False
