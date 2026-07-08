@@ -147,3 +147,25 @@ def test_ask_no_free_text(_configured):
 def test_ask_unknown_thread_errors(_configured):
     r = runner.invoke(app, ["ask", "nope", "q", "--option", "a", "--option", "b"])
     assert r.exit_code != 0
+
+
+def test_ask_multi_sets_multiselect(_configured):
+    s = _seed(_configured)
+    now = datetime(2026, 6, 23, tzinfo=timezone.utc)
+    t = s.create_thread(subject="x", text="q", now=now)
+    r = runner.invoke(app, ["ask", t.id, "Which apply?",
+                            "--option", "a", "--option", "b", "--multi"])
+    assert r.exit_code == 0, r.output
+    got = s.get(t.id)
+    assert got.messages[-1].decision.multi is True
+
+
+def test_ask_defaults_to_single_select(_configured):
+    s = _seed(_configured)
+    now = datetime(2026, 6, 23, tzinfo=timezone.utc)
+    t = s.create_thread(subject="x", text="q", now=now)
+    r = runner.invoke(app, ["ask", t.id, "How to store?",
+                            "--option", "a", "--option", "b"])
+    assert r.exit_code == 0, r.output
+    got = s.get(t.id)
+    assert got.messages[-1].decision.multi is False

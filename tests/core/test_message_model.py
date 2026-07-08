@@ -118,3 +118,26 @@ def test_decision_kind_with_payload_still_constructs():
     m = _dm("agent", "decision", "pick", decision=d)
     assert m.kind == "decision"
     assert m.decision is d
+
+
+def test_decision_payload_multi_defaults_false():
+    d = DecisionPayload(options=["a", "b"])
+    assert d.multi is False
+
+
+def test_decision_payload_multi_round_trips():
+    d = DecisionPayload(options=["a", "b"], multi=True)
+    m = _dm("agent", "decision", "pick any", decision=d)
+    back = Message.model_validate_json(m.model_dump_json())
+    assert back.decision.multi is True
+
+
+def test_decision_payload_legacy_json_without_multi_defaults_false():
+    # Older clients (or payloads captured before this field existed) omit
+    # "multi" entirely -- must not break, and must be treated as single-select.
+    legacy = (
+        '{"id":"m1","thread_id":"x","role":"agent","text":"pick","kind":"decision",'
+        '"created_at":"2026-06-30T12:01:00+00:00",'
+        '"decision":{"options":["a","b"],"recommended":null,"allow_free_text":true}}'
+    )
+    assert Message.model_validate_json(legacy).decision.multi is False

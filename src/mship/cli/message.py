@@ -127,6 +127,7 @@ def register(parent: typer.Typer, get_container) -> None:
         option: list[str] = typer.Option(..., "--option", help="A choice (repeat for each; >=2)."),
         recommend: int = typer.Option(None, "--recommend", help="0-based index of the recommended option."),
         no_free_text: bool = typer.Option(False, "--no-free-text", help="Disallow a free-text reply."),
+        multi: bool = typer.Option(False, "--multi", help="Allow selecting more than one option."),
     ) -> None:
         """Post an agent DECISION: a question + tappable options (surfaces as a decision card)."""
         from mship.core.message import DecisionPayload
@@ -141,7 +142,8 @@ def register(parent: typer.Typer, get_container) -> None:
             store.append(thread_id, "agent", question, datetime.now(timezone.utc),
                          kind="decision",
                          decision=DecisionPayload(options=option, recommended=recommend,
-                                                  allow_free_text=not no_free_text))
+                                                  allow_free_text=not no_free_text,
+                                                  multi=multi))
         except KeyError:
             typer.echo(f"no thread {thread_id!r}", err=True)
             raise typer.Exit(1)
