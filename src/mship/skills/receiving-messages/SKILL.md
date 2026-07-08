@@ -25,6 +25,12 @@ mechanisms surface them to a live agent (one serve + one agent per workspace):
    The `--since` cursor means you never re-wake for a message you already handled
    (or for your own reply).
 4. On `timed_out: true`, just re-arm again.
+5. If the result has `"skipped_duplicate_listener": true` (with a `holder_pid`),
+   **another agent in this workspace already holds the inbox lease — do NOT
+   re-arm.** Stand down; that other session is the listener. (One agent per
+   workspace: two armed listeners would each answer every message.) The lease is
+   reclaimable, so if that holder later exits, your next `mship inbox wait` will
+   acquire it cleanly.
 
 Never spawn a new agent / `claude -p` — this is all in your existing session.
 
