@@ -10,6 +10,9 @@ class DecisionPayload(BaseModel):
     options: list[str]
     recommended: int | None = None
     allow_free_text: bool = True
+    # Default False so existing/older clients and payloads captured before
+    # this field existed are treated as single-select (no breakage).
+    multi: bool = False
 
 
 class Message(BaseModel):
