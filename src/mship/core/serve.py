@@ -61,6 +61,10 @@ class SeenBody(BaseModel):
     seen_at: str | None = None
 
 
+class UnattendedBody(BaseModel):
+    on: bool = True
+
+
 def _make_auth_dependency(token: str):
     import hmac
     from fastapi import Header, HTTPException
@@ -472,5 +476,19 @@ def create_app(
             if t is None:
                 raise HTTPException(status_code=404, detail=f"no thread {tid!r}")
             return t.model_dump(mode="json")
+
+    @app.post("/items/{item_id}/unattended")
+    def post_item_unattended(item_id: str, body: UnattendedBody):
+        """Toggle a work item's eligibility for unattended (cloud-runner) execution.
+        Shares _item_msg_lock with POST /items/{id}/messages: both mutate the same
+        on-disk WorkItem file, and serializing writes avoids a lost-update race if a
+        steer and a toggle land in the same instant."""
+        now = datetime.now(timezone.utc)
+        with _item_msg_lock:
+            try:
+                workitems.set_unattended(item_id, body.on, now=now)
+            except KeyError:
+                raise HTTPException(status_code=404, detail=f"no work item {item_id!r}")
+        return {"id": item_id, "unattended": body.on}
 
     return app

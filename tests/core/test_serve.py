@@ -512,3 +512,28 @@ def test_post_seen_malformed_value_returns_422(tmp_path):
     assert client.post(f"/threads/{t.id}/seen", json={"seen_at": "not-a-date"}).status_code == 422
     # an empty string is malformed too (distinct from an omitted seen_at) -> 422
     assert client.post(f"/threads/{t.id}/seen", json={"seen_at": ""}).status_code == 422
+
+
+def test_post_item_unattended_toggles_flag(tmp_path):
+    from mship.core.workitem_store import WorkItemStore
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="t", kind="feature", workspace="test-ws",
+                      now=datetime(2026, 7, 8, tzinfo=timezone.utc))
+    assert wi.unattended is False
+    client = TestClient(_app(tmp_path))
+
+    r = client.post(f"/items/{wi.id}/unattended", json={"on": True})
+    assert r.status_code == 200
+    assert r.json() == {"id": wi.id, "unattended": True}
+    assert items.get(wi.id).unattended is True
+
+    r = client.post(f"/items/{wi.id}/unattended", json={"on": False})
+    assert r.status_code == 200
+    assert r.json() == {"id": wi.id, "unattended": False}
+    assert items.get(wi.id).unattended is False
+
+
+def test_post_item_unattended_404_for_unknown_item(tmp_path):
+    client = TestClient(_app(tmp_path))
+    r = client.post("/items/nope/unattended", json={"on": True})
+    assert r.status_code == 404

@@ -25,6 +25,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from mship.core.lease_common import is_reclaimable
+
 
 @dataclass(frozen=True)
 class LeaseInfo:
@@ -69,11 +71,15 @@ class InboxLease:
             return None  # missing or corrupt → treat as unheld
 
     def _reclaimable(self, info: LeaseInfo | None, me: int, now: datetime) -> bool:
-        if info is None or info.pid == me:
-            return True
-        if (now - info.heartbeat_at).total_seconds() > self._ttl:
-            return True  # heartbeat went stale → holder is gone or wedged
-        return not self._pid_alive(info.pid)
+        # Shared with the git-backed run-claim via lease_common.is_reclaimable.
+        return is_reclaimable(
+            holder_identity=None if info is None else info.pid,
+            heartbeat_at=None if info is None else info.heartbeat_at,
+            me=me,
+            now=now,
+            ttl_seconds=self._ttl,
+            is_alive=self._pid_alive,
+        )
 
     def _write(self, pid: int, now: datetime) -> None:
         tmp = self._path.with_name(self._path.name + ".tmp")

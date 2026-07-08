@@ -53,6 +53,16 @@ def test_link_missing_item_raises(tmp_path):
         store.link_spec("nope", "spec-1")
 
 
+def test_set_unattended_toggles(tmp_path):
+    store = WorkItemStore(tmp_path / "workitems")
+    wi = store.create(title="t", kind="feature", workspace="ws",
+                      now=datetime(2026, 7, 8, tzinfo=timezone.utc))
+    store.set_unattended(wi.id, True, now=datetime(2026, 7, 8, 1, tzinfo=timezone.utc))
+    assert store.get(wi.id).unattended is True
+    store.set_unattended(wi.id, False, now=datetime(2026, 7, 8, 2, tzinfo=timezone.utc))
+    assert store.get(wi.id).unattended is False
+
+
 def test_redundant_add_task_does_not_bump_updated_at(tmp_path):
     store = WorkItemStore(tmp_path / "workitems")
     wi = store.create(title="t", kind="feature", workspace="ws", now=_now())

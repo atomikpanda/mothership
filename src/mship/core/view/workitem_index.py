@@ -70,6 +70,7 @@ class WorkItemSummary:
     task_slugs: list[str] = field(default_factory=list)
     thread_ids: list[str] = field(default_factory=list)
     external_links: list[ExternalLink] = field(default_factory=list)
+    unattended: bool = False
 
 
 def _summarize(
@@ -88,6 +89,7 @@ def _summarize(
         created_at=item.created_at, updated_at=item.updated_at,
         spec_id=item.spec_id, task_slugs=list(item.task_slugs),
         thread_ids=list(item.thread_ids), external_links=list(item.external_links),
+        unattended=item.unattended,
     )
 
 

@@ -108,3 +108,8 @@ class WorkItemStore:
         item = self._mutate(item_id, now)
         item.phase_override = phase
         self.save(item)
+
+    def set_unattended(self, item_id: str, on: bool, now: datetime | None = None) -> None:
+        item = self._mutate(item_id, now)
+        item.unattended = on
+        self.save(item)
