@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from mship.core.run_state import ClaimInfo
+from mship.core.run_state import ClaimInfo, RunStateError
 from mship.core.runner import BranchState, RunDeps, checkpoint_bail, run_once
 
 NOW = datetime(2026, 7, 8, tzinfo=timezone.utc)
@@ -136,6 +136,25 @@ def test_bail_releases_cross_process_claim():
     assert "wi-1" not in deps.run_state._held            # claim actually cleared
 
 
+def test_bail_releases_claim_even_when_mark_blocked_raises(fake_ctx):
+    # Greptile #1: mark_blocked is a state-I/O seam and can raise (e.g. a state
+    # write error). It must be best-effort — like push_branch already is — so a
+    # failure there never strands the claim for the full TTL.
+    run_once(fake_ctx)                                  # claim wi-1 first
+    item = fake_ctx.items[0]
+
+    def _boom(it, reason):
+        raise RuntimeError("state I/O error")
+
+    fake_ctx.mark_blocked = _boom
+    checkpoint_bail(fake_ctx, item, "fork on auth approach")
+    # release still runs despite mark_blocked raising
+    assert ("wi-1", "runX") in fake_ctx.run_state.releases
+    # the bail reason is still recorded on the log
+    assert any(i == "wi-1" and "fork on auth approach" in t
+               for i, t in fake_ctx.run_state.logs)
+
+
 def test_bail_pushes_branch_for_resume(fake_ctx):
     # FIX#4a: the branch must be pushed on bail so a later (fresh-clone) run resumes.
     run_once(fake_ctx)
@@ -153,6 +172,22 @@ def test_run_once_skips_item_already_claimed():
     assert result is not None and result.item.id == "wi-new"   # skipped the held one
     assert ("wi-new", "runX") in deps.run_state.claims
     assert ("wi-old", "runX") not in deps.run_state.claims     # never claimed by us
+
+
+def test_run_once_returns_result_when_claim_log_write_fails(fake_ctx):
+    # Greptile #2: the claim-time append_log can raise RunStateError on contention.
+    # It's a best-effort audit trail, not the claim itself, so a write failure here
+    # must not strand the (already-won) claim — run_once should still hand the host
+    # the claimed item + prompt, consistent with push_branch's best-effort treatment.
+    def _boom(item_id, text, now):
+        raise RunStateError("append_log contention for 'wi-1' exceeded rounds")
+
+    fake_ctx.run_state.append_log = _boom
+    result = run_once(fake_ctx)
+    assert result is not None
+    assert result.item.id == "wi-1"
+    assert result.holder == "runX"
+    assert ("wi-1", "runX") in fake_ctx.run_state.claims  # claim held, not stranded
 
 
 def test_run_once_wraps_resuming_prompt_for_prior_work():

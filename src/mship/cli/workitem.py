@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import subprocess
 from datetime import datetime, timezone
@@ -71,6 +72,33 @@ def _base_prompt_for(item, spec) -> str:
     return "\n".join(lines)
 
 
+_REF_UNSAFE = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def _sanitize_ref_token(token: str) -> str:
+    """Make an arbitrary string safe to embed as one git ref path component.
+
+    Collapses any run of characters that aren't ``[A-Za-z0-9_-]`` (``/``,
+    whitespace, ``.``, ``~^:?*[]`` etc.) to a single ``-`` and trims leading/
+    trailing ``-``. Dots are deliberately excluded from the allowed set too —
+    keeping them would let a slug like ``a..b`` survive verbatim, and ``..``
+    is itself invalid inside a git ref."""
+    return _REF_UNSAFE.sub("-", token).strip("-") or "x"
+
+
+def _probe_ref_names(task) -> tuple[str, str]:
+    """Unique throwaway probe ref names for one ``_remote_commits_ahead`` call.
+
+    Greptile #3: the ref names were hardcoded (``refs/mship-probe/branch`` and
+    ``.../base``), so two concurrent probes writing into the same clone — two
+    tasks sharing an affected repo, or two runner processes racing ``item
+    run-next`` — could collide mid-fetch and read/delete each other's refs.
+    Namespacing by the task's (sanitized) slug plus this process's pid keeps
+    concurrent probes disjoint without needing any external locking."""
+    ns = f"{_sanitize_ref_token(task.slug)}-{os.getpid()}"
+    return f"refs/mship-probe/{ns}/branch", f"refs/mship-probe/{ns}/base"
+
+
 def _remote_commits_ahead(task, config) -> int:
     """How many commits the task's branch is ahead of its base ON ORIGIN.
 
@@ -97,7 +125,7 @@ def _remote_commits_ahead(task, config) -> int:
         )
         if ls.returncode != 0 or not ls.stdout.strip():
             continue  # branch not on origin for this repo (yet)
-        br_ref, base_ref = "refs/mship-probe/branch", "refs/mship-probe/base"
+        br_ref, base_ref = _probe_ref_names(task)
         fetch = subprocess.run(
             ["git", "fetch", "-q", "origin",
              f"+{task.branch}:{br_ref}", f"+{base}:{base_ref}"],

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from typer.testing import CliRunner
 
 from mship.cli import app, container
-from mship.cli.workitem import _branch_state_for
+from mship.cli.workitem import _branch_state_for, _probe_ref_names
 from mship.core.run_state import RunStateRepo
 from mship.core.spec import Spec
 from mship.core.spec_store import SpecStore
@@ -249,6 +249,48 @@ def test_branch_state_fresh_start_when_branch_absent_on_remote(tmp_path):
 
     bs = _branch_state_for(item, state, log_mgr, config)
     assert bs.commits_ahead == 0
+
+
+def test_probe_ref_names_differ_across_tasks(monkeypatch):
+    # Greptile #3: refs/mship-probe/branch and .../base were hardcoded, so two
+    # tasks' _remote_commits_ahead calls sharing one clone (or two concurrent
+    # runner processes) could collide on the same probe ref mid-fetch. Namespace
+    # by the (sanitized) task slug so distinct tasks never collide.
+    monkeypatch.setattr("os.getpid", lambda: 4242)
+    task_a = SimpleNamespace(slug="t-1")
+    task_b = SimpleNamespace(slug="t-2")
+    br_a, base_a = _probe_ref_names(task_a)
+    br_b, base_b = _probe_ref_names(task_b)
+    assert {br_a, base_a}.isdisjoint({br_b, base_b})
+    assert br_a != base_a
+    for ref in (br_a, base_a, br_b, base_b):
+        assert ref.startswith("refs/mship-probe/")
+
+
+def test_probe_ref_names_include_pid_for_cross_process_uniqueness(monkeypatch):
+    # Two concurrent processes probing the SAME task (e.g. two runner hosts
+    # racing item run-next) must still get distinct refs.
+    task = SimpleNamespace(slug="t-1")
+    monkeypatch.setattr("os.getpid", lambda: 111)
+    br_1, base_1 = _probe_ref_names(task)
+    monkeypatch.setattr("os.getpid", lambda: 222)
+    br_2, base_2 = _probe_ref_names(task)
+    assert {br_1, base_1}.isdisjoint({br_2, base_2})
+
+
+def test_probe_ref_names_sanitize_unsafe_slug_chars(monkeypatch):
+    # A task slug is expected to be simple, but the probe-ref builder must not
+    # produce an invalid/ambiguous git ref if it ever contains ref-hostile chars.
+    monkeypatch.setattr("os.getpid", lambda: 1)
+    task = SimpleNamespace(slug="wi/1..2~x?*[y]: z")
+    br, base = _probe_ref_names(task)
+    for ref in (br, base):
+        assert " " not in ref
+        assert ".." not in ref
+        for bad in ("~", "^", ":", "?", "*", "[", "]"):
+            assert bad not in ref
+        # exactly the 3 fixed separators (mship-probe/<ns>/branch|base)
+        assert ref.count("/") == 3
 
 
 def test_new_then_list_roundtrip(tmp_path):
