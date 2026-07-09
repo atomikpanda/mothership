@@ -436,6 +436,62 @@ def test_thread_exposes_spec_id(tmp_path):
     assert client.get(f"/threads/{tid}").json()["spec_id"] == "spec-1"
 
 
+def test_thread_detail_exposes_related_work_item(tmp_path):
+    from mship.core.message_store import MessageStore
+    from mship.core.workitem_store import WorkItemStore
+
+    _seed_spec(tmp_path)  # spec id "dq", status "needs_review" -> phase "shaping"
+    now = datetime(2026, 7, 8, tzinfo=timezone.utc)
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="Decision queue", kind="feature", workspace="test-ws", now=now)
+    items.link_spec(wi.id, "dq", now=now)
+
+    client = TestClient(_app(tmp_path))
+    tid = client.post("/threads", json={"text": "hi"}).json()["id"]
+    MessageStore(tmp_path / ".mothership" / "messages").link_spec(tid, "dq")
+
+    body = client.get(f"/threads/{tid}").json()
+    assert body["work_item_id"] == wi.id
+    assert body["work_item"] == {
+        "id": wi.id, "title": "Decision queue", "kind": "feature", "phase": "shaping",
+    }
+
+
+def test_thread_detail_null_work_item_when_unrelated(tmp_path):
+    from mship.core.workitem_store import WorkItemStore
+
+    now = datetime(2026, 7, 8, tzinfo=timezone.utc)
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    items.create(title="Unrelated", kind="feature", workspace="test-ws", now=now)
+
+    client = TestClient(_app(tmp_path))
+    tid = client.post("/threads", json={"text": "hi"}).json()["id"]
+
+    body = client.get(f"/threads/{tid}").json()
+    assert body["work_item_id"] is None
+    assert body["work_item"] is None
+
+
+def test_thread_detail_linkifies_spec_ref_in_agent_message_only(tmp_path):
+    from mship.core.message_store import MessageStore
+    from datetime import datetime, timezone, timedelta
+
+    _seed_spec(tmp_path)  # spec id "dq"
+    client = TestClient(_app(tmp_path))
+    tid = client.post("/threads", json={"text": "hi"}).json()["id"]
+
+    store = MessageStore(tmp_path / ".mothership" / "messages")
+    base = datetime(2026, 7, 8, 12, 0, tzinfo=timezone.utc)
+    store.append(tid, "agent", "see spec dq for details", base)
+    store.append(tid, "human", "spec dq mentioned again", base + timedelta(minutes=1))
+
+    messages = client.get(f"/threads/{tid}").json()["messages"]
+    agent_msg = next(m for m in messages if m["role"] == "agent")
+    human_msg = next(m for m in messages if m["text"].startswith("spec dq mentioned"))
+    assert agent_msg["text"] == "see spec [dq](groundcontrol://spec?id=dq) for details"
+    assert human_msg["text"] == "spec dq mentioned again"
+
+
 def test_thread_summaries_expose_needs_you_and_unseen(tmp_path):
     from mship.core.message_store import MessageStore
     from datetime import datetime, timezone, timedelta
