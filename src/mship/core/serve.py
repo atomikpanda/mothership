@@ -1,15 +1,31 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
+import os
 import threading
 import time as _time
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from pydantic import BaseModel
 
+from mship.core.pr import PRManager
+from mship.core.pr_watcher import PrWatcher
 from mship.core.spec import SpecDraft
 from mship.core.workitem import Phase
+from mship.util.shell import ShellRunner
+
+logger = logging.getLogger(__name__)
+
+# Default interval (seconds) between `PrWatcher` sweeps in `mship serve`'s
+# background loop (see `_lifespan` in `create_app`). Overridable via
+# MSHIP_PR_WATCH_INTERVAL so tests can shrink it (fast, deterministic) or
+# disable the loop entirely (<= 0 => no watcher task is created at all).
+PR_WATCH_INTERVAL_SECONDS = 45
 
 
 class VerdictBody(BaseModel):
@@ -86,6 +102,28 @@ def _make_auth_dependency(token: str):
     return _require_token
 
 
+async def _pr_watch_loop(watcher: PrWatcher, stop: asyncio.Event, interval: float) -> None:
+    """Runs `watcher.check_once()` off the event loop (it shells out to `gh`)
+    every `interval` seconds until `stop` is set. The first sweep happens
+    immediately on entry rather than after the first interval, and the loop
+    wakes promptly (not after a full interval) once `stop` is set, since it
+    waits on `stop.wait()` itself rather than sleeping blindly.
+
+    A failed sweep is logged and swallowed rather than killing the loop —
+    `PrWatcher.check_once` already isolates failures per-PR, but this is a
+    second, coarser layer of defense in case something outside that (e.g.
+    `state_manager.load()`) raises."""
+    while not stop.is_set():
+        try:
+            await asyncio.to_thread(watcher.check_once)
+        except Exception:
+            logger.exception("pr-watch tick failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            pass
+
+
 def create_app(
     specs_dir: Path,
     state_manager,
@@ -103,6 +141,47 @@ def create_app(
     from fastapi import Depends, FastAPI, HTTPException
 
     from mship.core.spec_store import SpecStore
+    from mship.core.message_store import MessageStore
+    from mship.core.workitem_store import WorkItemStore
+
+    store = SpecStore(specs_dir)
+    pr_manager = PRManager(ShellRunner())
+
+    # `msgs` and `workitems` back both the mailbox/work-item routes below and
+    # the `PrWatcher` started by `_lifespan`; defined here (rather than next
+    # to the routes that use them) so `_lifespan` doesn't forward-reference
+    # them. `_item_msg_lock` serializes the lazy read-decide-create-link in
+    # POST /items/{id}/messages: sync endpoints run in Starlette's
+    # threadpool, so two concurrent first-steers on a threadless item could
+    # otherwise both create a thread (orphaning one message) or lose the
+    # add_thread update. threading.Lock is the right primitive for that pool.
+    msgs = MessageStore(workspace_root / ".mothership" / "messages")
+    workitems = WorkItemStore(workspace_root / ".mothership" / "workitems")
+    _item_msg_lock = threading.Lock()
+
+    @asynccontextmanager
+    async def _lifespan(_app):
+        """Runs a `PrWatcher` sweep on an interval for the app's lifetime,
+        started on ASGI startup and cancelled cleanly on shutdown."""
+        interval = float(os.environ.get("MSHIP_PR_WATCH_INTERVAL", PR_WATCH_INTERVAL_SECONDS))
+        if interval <= 0:
+            yield
+            return
+        watcher = PrWatcher(
+            msgs, workitems, state_manager,
+            check_state=lambda u: pr_manager.check_pr_state(u).state,
+            now_fn=lambda: datetime.now(timezone.utc),
+            lock=_item_msg_lock,
+        )
+        stop = asyncio.Event()
+        task = asyncio.create_task(_pr_watch_loop(watcher, stop, interval))
+        try:
+            yield
+        finally:
+            stop.set()
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
 
     if auth_token:
         dependencies = [Depends(_make_auth_dependency(auth_token))]
@@ -111,10 +190,10 @@ def create_app(
         app = FastAPI(
             title="mship serve", version="0", dependencies=dependencies,
             docs_url=None, redoc_url=None, openapi_url=None,
+            lifespan=_lifespan,
         )
     else:
-        app = FastAPI(title="mship serve", version="0")
-    store = SpecStore(specs_dir)
+        app = FastAPI(title="mship serve", version="0", lifespan=_lifespan)
 
     @app.get("/health")
     def health():
@@ -167,7 +246,7 @@ def create_app(
 
     # --- write endpoints ---
 
-    from datetime import datetime, timezone
+    # datetime/timezone are imported at module top (needed earlier by _lifespan).
     from mship.core.spec_review import set_criterion_verdict
     from mship.core.spec_questions import add_question, answer_question
 
@@ -336,9 +415,7 @@ def create_app(
         }
 
     # --- message mailbox (phone <-> agent) ---
-    from mship.core.message_store import MessageStore
-
-    msgs = MessageStore(workspace_root / ".mothership" / "messages")
+    # `msgs` is defined earlier (see comment above `_lifespan`).
 
     @app.post("/threads")
     def post_thread(body: NewThreadBody):
@@ -424,17 +501,12 @@ def create_app(
         return _thread_payload(t)
 
     # --- work items (phase-aware cockpit spine) ---
-    from mship.core.workitem_store import WorkItemStore
+    # `workitems` and `_item_msg_lock` are defined earlier (see comment above
+    # `_lifespan`).
     from mship.core.view.workitem_index import build_workitem_index
     from mship.core.view.thread_links import resolve_thread_work_item
     from mship.core.view.entity_links import linkify_entities
 
-    workitems = WorkItemStore(workspace_root / ".mothership" / "workitems")
-    # Serializes the lazy read-decide-create-link in POST /items/{id}/messages. Sync
-    # endpoints run in Starlette's threadpool, so two concurrent first-steers on a
-    # threadless item could otherwise both create a thread (orphaning one message) or
-    # lose the add_thread update. threading.Lock is the right primitive for that pool.
-    _item_msg_lock = threading.Lock()
     # Serializes POST /specs/{id}/dispatch. Same threadpool hazard as above: two
     # concurrent dispatches of the same spec (spec.work_item_id still None) could
     # otherwise both take dispatch_spec's create branch before either store.save(spec)

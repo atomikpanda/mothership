@@ -24,8 +24,12 @@ class Message(BaseModel):
     # "needs_you" marks an agent message that needs the operator to act
     # (surfaces as a Home action card in Ground Control).
     # "decision" marks an agent message presenting a typed decision (see
-    # DecisionPayload / Thread.needs_decision). Default "note".
-    kind: Literal["note", "needs_you", "decision"] = "note"
+    # DecisionPayload / Thread.needs_decision).
+    # "event" marks an agent-posted signal (e.g. a PR merge/close) that the
+    # owning agent should notice and act on, but that must not nag the phone
+    # (see Thread.awaiting_agent_event; does not set needs_you/needs_decision).
+    # Default "note".
+    kind: Literal["note", "needs_you", "decision", "event"] = "note"
     decision: DecisionPayload | None = None
 
     @model_validator(mode="after")
@@ -77,6 +81,20 @@ class Thread(BaseModel):
                 last_human = i
         return any(
             m.role == "agent" and m.kind == "decision"
+            for m in self.messages[last_human + 1:]
+        )
+
+    @computed_field
+    @property
+    def awaiting_agent_event(self) -> bool:
+        """True iff there's an agent message with kind=='event' after the last human
+        message — a PR-merge/close signal the owning agent hasn't handled yet."""
+        last_human = -1
+        for i, m in enumerate(self.messages):
+            if m.role == "human":
+                last_human = i
+        return any(
+            m.role == "agent" and m.kind == "event"
             for m in self.messages[last_human + 1:]
         )
 

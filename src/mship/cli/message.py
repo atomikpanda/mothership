@@ -84,7 +84,7 @@ def register(parent: typer.Typer, get_container) -> None:
         try:
             res = wait_for_change(
                 _load_and_heartbeat, since_dt, timeout,
-                predicate=lambda t: t.awaiting_reply,
+                predicate=lambda t: t.awaiting_reply or t.awaiting_agent_event,
             )
         finally:
             lease.release(pid)
