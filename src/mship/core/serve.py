@@ -474,7 +474,8 @@ def create_app(
         returns a full thread: GET /threads/{id}, POST /threads, POST /threads/{id}/messages,
         POST /threads/{id}/seen. The GET /threads list/summary endpoint is unaffected."""
         data = t.model_dump(mode="json")
-        wi_id = resolve_thread_work_item(t.id, t.spec_id, t.task_slug, workitems.list())
+        all_items = list(workitems.list())  # single store scan, reused below
+        wi_id = resolve_thread_work_item(t.id, t.spec_id, t.task_slug, all_items)
         data["work_item_id"] = wi_id
         if wi_id is None:
             data["work_item"] = None
@@ -483,7 +484,7 @@ def create_app(
             data["work_item"] = None if summ is None else {
                 "id": summ.id, "title": summ.title, "kind": summ.kind, "phase": summ.phase,
             }
-        item_ids = {w.id for w in workitems.list()}
+        item_ids = {w.id for w in all_items}
         spec_ids = {s.id for s in store.list()}
         task_slugs = set(state_manager.load().tasks.keys())
         for msg in data.get("messages", []):
