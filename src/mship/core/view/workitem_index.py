@@ -20,19 +20,37 @@ _SPEC_PHASE: dict[str, Phase] = {
 }
 
 
+_TERMINAL_SPEC_STATUSES: frozenset[str] = frozenset({"implemented", "archived"})
+
+
 def compute_phase(item: WorkItem, spec: Spec | None, tasks: list[Task]) -> Phase:
     if item.phase_override is not None:
         return item.phase_override
+    # Finding 2 (archived-spec-stays-active): a terminal spec status
+    # (implemented/archived) is only ever reached at close/merge or an explicit
+    # abandon, so it is authoritative — derive `done` BEFORE the task-state checks.
+    # Otherwise an item whose spec is archived but whose linked task is still
+    # unfinished would be wrongly held in_flight.
+    if spec is not None and spec.status in _TERMINAL_SPEC_STATUSES:
+        return "done"
     if tasks:
         # Any still-running task keeps the item in flight (unchanged derivation).
         if any(t.finished_at is None for t in tasks):
             return "in_flight"
-        # Backstop (gc32 ac2): every linked task is finished — the work has landed,
-        # so the item is done even if its spec status lags (e.g. an unattended run
-        # whose PR was merged directly, without `mship close` advancing the spec).
-        # `finished_at` is the offline task-level "finished/merged" signal; a live
-        # PR check is intentionally avoided so the derivation stays fast/offline.
-        return "done"
+        # Finding 1 (premature-done): `mship finish` stamps finished_at + pr_urls
+        # TOGETHER when it OPENS the PR — not when it merges — so a finished task
+        # with a live, unmerged PR is awaiting review, not done. `done` comes ONLY
+        # from a terminal spec (checked above, set by `mship close`/merge);
+        # `finished_at` alone never means done.
+        #
+        # NOTE: auto-advancing to `done` WITHOUT `mship close` — an operator who
+        # merged the unattended PR directly, bypassing close — would need a merge
+        # signal we don't have offline (the Task carries no `merged` flag). That's
+        # a follow-up, out of scope here.
+        if any(t.pr_urls for t in tasks):
+            return "review"
+        # Finished but no PR recorded: still not `done` (done is spec-driven).
+        # Fall through to the spec-derived phase below.
     if spec is not None:
         return _SPEC_PHASE.get(spec.status, "shaping")
     return "inbox"

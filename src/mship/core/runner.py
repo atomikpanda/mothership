@@ -69,6 +69,10 @@ class RunDeps:
     holder: str                                     # opaque run token used for the claim
     now: Callable[[], datetime]                     # injected clock
     blocked: set[str] = field(default_factory=set)  # item ids with a bailed/blocked task (FIX#1 exclusion)
+    # Child state the selector's compute_phase needs to resolve each item's DERIVED
+    # phase (Finding 3). Default-empty: items that pin phase_override select without them.
+    specs_by_id: dict = field(default_factory=dict)         # spec_id -> Spec (for derived phase)
+    tasks_by_slug: dict = field(default_factory=dict)       # task slug -> Task (for derived phase)
 
 
 @dataclass(frozen=True)
@@ -92,7 +96,10 @@ def run_once(deps: RunDeps) -> RunOnceResult | None:
     a ``ClaimInfo`` return means another run won the race, so we stand down and try
     the next candidate rather than error. Never merges.
     """
-    candidates = select_runnable(deps.items, deps.spec_approved, deps.claimed, deps.blocked)
+    candidates = select_runnable(
+        deps.items, deps.spec_approved, deps.claimed, deps.blocked,
+        specs_by_id=deps.specs_by_id, tasks_by_slug=deps.tasks_by_slug,
+    )
     for cand in candidates:
         item = cand.item
         existing = deps.run_state.try_claim(item.id, deps.holder, deps.now())

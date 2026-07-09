@@ -554,7 +554,11 @@ def test_post_archive_from_implemented(tmp_path):
     client = TestClient(_app(tmp_path))
     r = client.post("/specs/ar/archive")
     assert r.status_code == 200
-    assert r.json() == {"id": "ar", "status": "archived"}
+    # Finding 4: archive returns the same fuller review payload as approve/apply (not
+    # just {id,status}) so a client cache isn't degraded on the round-trip.
+    body = r.json()
+    assert body["id"] == "ar" and body["status"] == "archived"
+    assert "acceptance_criteria" in body and "summary" in body and "context" in body
     assert SpecStore(tmp_path / "specs").find_by_id("ar").status == "archived"
 
 
@@ -569,7 +573,9 @@ def test_post_archive_from_any_non_terminal_state(tmp_path):
         client = TestClient(_app(tmp_path))
         r = client.post(f"/specs/{sid}/archive")
         assert r.status_code == 200, (status, r.text)
-        assert r.json() == {"id": sid, "status": "archived"}
+        body = r.json()
+        assert body["id"] == sid and body["status"] == "archived"
+        assert "acceptance_criteria" in body and "summary" in body
 
 
 def test_post_archive_unknown_spec_404(tmp_path):

@@ -243,16 +243,18 @@ def create_app(
     def post_archive(spec_id: str):
         """Archive a spec (swipe-to-archive, gc32 ac4). Reachable from any
         non-terminal status via the `can_transition` abandon rule; re-archiving an
-        already-archived spec is rejected (409)."""
+        already-archived spec is rejected (409).
+
+        Finding 4: returns the same fuller review payload as approve/request-changes
+        (via `_save_and_review`) rather than a bare `{id,status}`, so a client cache
+        isn't degraded on the round-trip."""
         spec = _load_or_404(spec_id)
         try:
             validate_transition(spec.status, "archived")
         except InvalidTransition as e:
             raise HTTPException(status_code=409, detail=str(e))
         spec.status = "archived"
-        spec.updated_at = datetime.now(timezone.utc)
-        store.save(spec)
-        return {"id": spec.id, "status": "archived"}
+        return _save_and_review(spec)
 
     # --- capture-write endpoints (B3): the phone Capture path over HTTP ---
 
