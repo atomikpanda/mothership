@@ -1,15 +1,31 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
+import os
 import threading
 import time as _time
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from pydantic import BaseModel
 
+from mship.core.pr import PRManager
+from mship.core.pr_watcher import PrWatcher
 from mship.core.spec import SpecDraft
 from mship.core.workitem import Phase
+from mship.util.shell import ShellRunner
+
+logger = logging.getLogger(__name__)
+
+# Default interval (seconds) between `PrWatcher` sweeps in `mship serve`'s
+# background loop (see `_lifespan` in `create_app`). Overridable via
+# MSHIP_PR_WATCH_INTERVAL so tests can shrink it (fast, deterministic) or
+# disable the loop entirely (<= 0 => no watcher task is created at all).
+PR_WATCH_INTERVAL_SECONDS = 45
 
 
 class VerdictBody(BaseModel):
@@ -86,6 +102,28 @@ def _make_auth_dependency(token: str):
     return _require_token
 
 
+async def _pr_watch_loop(watcher: PrWatcher, stop: asyncio.Event, interval: float) -> None:
+    """Runs `watcher.check_once()` off the event loop (it shells out to `gh`)
+    every `interval` seconds until `stop` is set. The first sweep happens
+    immediately on entry rather than after the first interval, and the loop
+    wakes promptly (not after a full interval) once `stop` is set, since it
+    waits on `stop.wait()` itself rather than sleeping blindly.
+
+    A failed sweep is logged and swallowed rather than killing the loop —
+    `PrWatcher.check_once` already isolates failures per-PR, but this is a
+    second, coarser layer of defense in case something outside that (e.g.
+    `state_manager.load()`) raises."""
+    while not stop.is_set():
+        try:
+            await asyncio.to_thread(watcher.check_once)
+        except Exception:
+            logger.exception("pr-watch tick failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            pass
+
+
 def create_app(
     specs_dir: Path,
     state_manager,
@@ -104,6 +142,39 @@ def create_app(
 
     from mship.core.spec_store import SpecStore
 
+    store = SpecStore(specs_dir)
+    pr_manager = PRManager(ShellRunner())
+
+    @asynccontextmanager
+    async def _lifespan(_app):
+        """Runs a `PrWatcher` sweep on an interval for the app's lifetime,
+        started on ASGI startup and cancelled cleanly on shutdown.
+
+        `msgs`, `workitems`, and `_item_msg_lock` are defined further down in
+        `create_app`'s body (after this closure). That's safe: this coroutine
+        body only runs once uvicorn/TestClient drives the lifespan — always
+        after `create_app` has returned and therefore already finished
+        assigning them. Attached to both `FastAPI(...)` constructors below."""
+        interval = float(os.environ.get("MSHIP_PR_WATCH_INTERVAL", PR_WATCH_INTERVAL_SECONDS))
+        if interval <= 0:
+            yield
+            return
+        watcher = PrWatcher(
+            msgs, workitems, state_manager,
+            check_state=lambda u: pr_manager.check_pr_state(u).state,
+            now_fn=lambda: datetime.now(timezone.utc),
+            lock=_item_msg_lock,
+        )
+        stop = asyncio.Event()
+        task = asyncio.create_task(_pr_watch_loop(watcher, stop, interval))
+        try:
+            yield
+        finally:
+            stop.set()
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
     if auth_token:
         dependencies = [Depends(_make_auth_dependency(auth_token))]
         # Auth covers user routes but NOT FastAPI's built-in docs/openapi routes,
@@ -111,10 +182,10 @@ def create_app(
         app = FastAPI(
             title="mship serve", version="0", dependencies=dependencies,
             docs_url=None, redoc_url=None, openapi_url=None,
+            lifespan=_lifespan,
         )
     else:
-        app = FastAPI(title="mship serve", version="0")
-    store = SpecStore(specs_dir)
+        app = FastAPI(title="mship serve", version="0", lifespan=_lifespan)
 
     @app.get("/health")
     def health():
