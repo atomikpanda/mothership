@@ -141,20 +141,28 @@ def create_app(
     from fastapi import Depends, FastAPI, HTTPException
 
     from mship.core.spec_store import SpecStore
+    from mship.core.message_store import MessageStore
+    from mship.core.workitem_store import WorkItemStore
 
     store = SpecStore(specs_dir)
     pr_manager = PRManager(ShellRunner())
 
+    # `msgs` and `workitems` back both the mailbox/work-item routes below and
+    # the `PrWatcher` started by `_lifespan`; defined here (rather than next
+    # to the routes that use them) so `_lifespan` doesn't forward-reference
+    # them. `_item_msg_lock` serializes the lazy read-decide-create-link in
+    # POST /items/{id}/messages: sync endpoints run in Starlette's
+    # threadpool, so two concurrent first-steers on a threadless item could
+    # otherwise both create a thread (orphaning one message) or lose the
+    # add_thread update. threading.Lock is the right primitive for that pool.
+    msgs = MessageStore(workspace_root / ".mothership" / "messages")
+    workitems = WorkItemStore(workspace_root / ".mothership" / "workitems")
+    _item_msg_lock = threading.Lock()
+
     @asynccontextmanager
     async def _lifespan(_app):
         """Runs a `PrWatcher` sweep on an interval for the app's lifetime,
-        started on ASGI startup and cancelled cleanly on shutdown.
-
-        `msgs`, `workitems`, and `_item_msg_lock` are defined further down in
-        `create_app`'s body (after this closure). That's safe: this coroutine
-        body only runs once uvicorn/TestClient drives the lifespan — always
-        after `create_app` has returned and therefore already finished
-        assigning them. Attached to both `FastAPI(...)` constructors below."""
+        started on ASGI startup and cancelled cleanly on shutdown."""
         interval = float(os.environ.get("MSHIP_PR_WATCH_INTERVAL", PR_WATCH_INTERVAL_SECONDS))
         if interval <= 0:
             yield
@@ -238,7 +246,7 @@ def create_app(
 
     # --- write endpoints ---
 
-    from datetime import datetime, timezone
+    # datetime/timezone are imported at module top (needed earlier by _lifespan).
     from mship.core.spec_review import set_criterion_verdict
     from mship.core.spec_questions import add_question, answer_question
 
@@ -407,9 +415,7 @@ def create_app(
         }
 
     # --- message mailbox (phone <-> agent) ---
-    from mship.core.message_store import MessageStore
-
-    msgs = MessageStore(workspace_root / ".mothership" / "messages")
+    # `msgs` is defined earlier (see comment above `_lifespan`).
 
     @app.post("/threads")
     def post_thread(body: NewThreadBody):
@@ -495,17 +501,12 @@ def create_app(
         return _thread_payload(t)
 
     # --- work items (phase-aware cockpit spine) ---
-    from mship.core.workitem_store import WorkItemStore
+    # `workitems` and `_item_msg_lock` are defined earlier (see comment above
+    # `_lifespan`).
     from mship.core.view.workitem_index import build_workitem_index
     from mship.core.view.thread_links import resolve_thread_work_item
     from mship.core.view.entity_links import linkify_entities
 
-    workitems = WorkItemStore(workspace_root / ".mothership" / "workitems")
-    # Serializes the lazy read-decide-create-link in POST /items/{id}/messages. Sync
-    # endpoints run in Starlette's threadpool, so two concurrent first-steers on a
-    # threadless item could otherwise both create a thread (orphaning one message) or
-    # lose the add_thread update. threading.Lock is the right primitive for that pool.
-    _item_msg_lock = threading.Lock()
     # Serializes POST /specs/{id}/dispatch. Same threadpool hazard as above: two
     # concurrent dispatches of the same spec (spec.work_item_id still None) could
     # otherwise both take dispatch_spec's create branch before either store.save(spec)

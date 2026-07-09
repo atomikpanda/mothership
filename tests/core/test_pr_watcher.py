@@ -147,6 +147,37 @@ def test_fresh_watcher_thread_scan_idempotency():
     assert len(msgs.append_calls) == 1  # no duplicate
 
 
+def test_thread_scan_does_not_false_dedup_on_state_word_in_url():
+    """A repo/url containing a state word (e.g. `merged-pr-archive`) must not
+    make the substring scan confuse a `closed` event for a `merged` one.
+    A thread already carrying a `closed` event for such a url must still get
+    a fresh `merged` event posted when that transition is observed."""
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    url = "https://github.com/org/merged-pr-archive/pull/1"
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    # Simulate a prior process having already posted the `closed` event for
+    # this url — note the url itself contains the substring "merged".
+    msgs.append(
+        thread.id, "agent",
+        f"\U0001f500 PR closed: {url} (task task-1) — ready to close out.",
+        NOW, kind="event",
+    )
+    task = FakeTask(pr_urls={"repo1": url}, work_item_id="wi-1")
+    state = FakeStateManager({"task-1": task})
+
+    watcher = PrWatcher(msgs, workitems, state, lambda u: "merged", now_fn)
+    watcher.check_once()
+
+    # The closed-event append plus a new merged-event append.
+    assert len(msgs.append_calls) == 2
+    merged_call = msgs.append_calls[-1]
+    assert merged_call["kind"] == "event"
+    assert merged_call["thread_id"] == thread.id
+    assert f"PR merged: {url}" in merged_call["text"]
+
+
 @pytest.mark.parametrize("pr_state", ["open", "unknown"])
 def test_open_or_unknown_state_no_event(pr_state):
     msgs = FakeMessageStore()

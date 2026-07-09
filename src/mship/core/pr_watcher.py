@@ -93,8 +93,9 @@ class PrWatcher:
         tid, wi = self._resolve_thread(slug, task, now)
 
         thread = self.msgs.get(tid)
+        marker = f"PR {st}: {url}"
         if thread is not None and any(
-            m.kind == "event" and url in m.text and st in m.text
+            m.kind == "event" and marker in m.text
             for m in thread.messages
         ):
             # Already posted (prior process) — record it so this process's
