@@ -8,11 +8,16 @@ from __future__ import annotations
 
 import re
 
-# a run of alnum groups optionally joined by hyphens, matched on word boundaries
-# so "mos-2240" is NOT split into "mos-224" + "0" (greedy quantifier eats the
-# whole run, then a whole-token lookup either hits or misses). Zero hyphens is
-# allowed so bare alnum slugs like "gc31" are still eligible tokens.
-_TOKEN = re.compile(r"(?<![A-Za-z0-9-])[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*")
+# a run of alnum groups optionally joined by hyphens, matched on identifier
+# boundaries so "mos-2240" is NOT split into "mos-224" + "0" (greedy quantifier
+# eats the whole run, then a whole-token lookup either hits or misses). Zero
+# hyphens is allowed so bare alnum slugs like "gc31" are still eligible tokens.
+# `_` counts as an identifier char on both sides (leading lookbehind + trailing
+# lookahead) so a ref glued into a snake_case name like "some_gc31_thing" is left
+# untouched. Hyphen handling is unchanged.
+_TOKEN = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*(?![A-Za-z0-9_])")
+# KNOWN LIMITATION (do not fix): this is regex-based, not a real markdown parser, so
+# unpaired single backticks and GFM double-backtick (``) code spans aren't perfectly protected.
 _PROTECTED = re.compile(r"```.*?```|`[^`]*`|\[[^\]]*\]\([^)]*\)", re.DOTALL)
 
 

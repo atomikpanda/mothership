@@ -35,5 +35,11 @@ def test_trailing_punctuation_not_swallowed():
 def test_longer_token_containing_ref_untouched():
     assert L("gc31-x not gc31") == "gc31-x not [gc31](groundcontrol://spec?id=gc31)"
 
+def test_snake_case_embedded_ref_untouched():
+    # a ref glued into a snake_case identifier is part of a larger token -> leave it alone
+    assert L("some_gc31_thing") == "some_gc31_thing"
+    # but the standalone ref still linkifies
+    assert L("gc31") == "[gc31](groundcontrol://spec?id=gc31)"
+
 def test_empty_text():
     assert L("") == ""
