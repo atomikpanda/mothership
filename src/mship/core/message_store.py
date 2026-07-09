@@ -68,7 +68,7 @@ class MessageStore:
         self.save(thread)
 
     def append(self, thread_id: str, role: Literal["human", "agent"], text: str,
-               now: datetime, kind: Literal["note", "needs_you", "decision"] = "note",
+               now: datetime, kind: Literal["note", "needs_you", "decision", "event"] = "note",
                decision: DecisionPayload | None = None) -> Message:
         thread = self.get(thread_id)
         if thread is None:
