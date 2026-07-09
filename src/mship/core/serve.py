@@ -9,6 +9,7 @@ from typing import Optional
 from pydantic import BaseModel
 
 from mship.core.spec import SpecDraft
+from mship.core.workitem import Phase
 
 
 class VerdictBody(BaseModel):
@@ -63,6 +64,12 @@ class SeenBody(BaseModel):
 
 class UnattendedBody(BaseModel):
     on: bool = True
+
+
+class PhaseOverrideBody(BaseModel):
+    # `null` clears the override (Reopen -> derived phase); a Phase value pins it
+    # (Mark done -> "done"). The Phase Literal gives 422 on an unknown phase.
+    phase: Phase | None = None
 
 
 def _make_auth_dependency(token: str):
@@ -231,6 +238,23 @@ def create_app(
             except Exception:
                 pass
         return review
+
+    @app.post("/specs/{spec_id}/archive")
+    def post_archive(spec_id: str):
+        """Archive a spec (swipe-to-archive, gc32 ac4). Reachable from any
+        non-terminal status via the `can_transition` abandon rule; re-archiving an
+        already-archived spec is rejected (409).
+
+        Finding 4: returns the same fuller review payload as approve/request-changes
+        (via `_save_and_review`) rather than a bare `{id,status}`, so a client cache
+        isn't degraded on the round-trip."""
+        spec = _load_or_404(spec_id)
+        try:
+            validate_transition(spec.status, "archived")
+        except InvalidTransition as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        spec.status = "archived"
+        return _save_and_review(spec)
 
     # --- capture-write endpoints (B3): the phone Capture path over HTTP ---
 
@@ -490,5 +514,18 @@ def create_app(
             except KeyError:
                 raise HTTPException(status_code=404, detail=f"no work item {item_id!r}")
         return {"id": item_id, "unattended": body.on}
+
+    @app.post("/items/{item_id}/phase")
+    def post_item_phase(item_id: str, body: PhaseOverrideBody):
+        """Set (Mark done) or clear (Reopen) a work item's phase override. `null`
+        returns the item to its derived phase. Shares _item_msg_lock with the other
+        item writers to avoid a lost update if a steer/toggle lands concurrently."""
+        now = datetime.now(timezone.utc)
+        with _item_msg_lock:
+            try:
+                workitems.set_phase_override(item_id, body.phase, now=now)
+            except KeyError:
+                raise HTTPException(status_code=404, detail=f"no work item {item_id!r}")
+        return {"id": item_id, "phase_override": body.phase}
 
     return app

@@ -104,7 +104,9 @@ class WorkItemStore:
         item.external_links.append(link)
         self.save(item)
 
-    def set_phase_override(self, item_id: str, phase: Phase, now: datetime | None = None) -> None:
+    def set_phase_override(self, item_id: str, phase: Phase | None, now: datetime | None = None) -> None:
+        """Set the manual phase override, or clear it (return to derived phase) when
+        `phase` is None. Raises KeyError if the item does not exist."""
         item = self._mutate(item_id, now)
         item.phase_override = phase
         self.save(item)

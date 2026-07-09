@@ -60,15 +60,85 @@ def test_spec_status_maps_to_phase():
 
 def test_tasks_dominate_spec():
     assert compute_phase(_wi(), _spec("approved"), [_task(finished=False)]) == "in_flight"
+    # Finding 1 (premature-done): `mship finish` stamps finished_at + pr_urls TOGETHER
+    # when it OPENS the PR (not at merge), so a finished task with a live PR is
+    # awaiting review, not done.
     assert compute_phase(_wi(), _spec("approved"),
                          [_task(finished=True, pr=True)]) == "review"
+    # Re-review ("Finished Tasks Rerun"): a finished task with NO PR must also be
+    # `review`, NOT fall through to the spec's `ready` — otherwise run-next would
+    # re-select the already-finished item and run it a second time.
     assert compute_phase(_wi(), _spec("approved"),
-                         [_task(finished=True, pr=False)]) == "done"
+                         [_task(finished=True, pr=False)]) == "review"
 
 
 def test_mixed_tasks_one_running_is_in_flight():
     assert compute_phase(_wi(), None,
                          [_task(finished=True, pr=True), _task(finished=False)]) == "in_flight"
+
+
+# --- gc32 re-review Finding 1: finished + open PR is review, not done ---
+
+def test_finished_task_with_open_pr_is_review_not_done():
+    """Finding 1: `mship finish` stamps finished_at + pr_urls together at PR-OPEN
+    (not merge), so a finished task with a live, unmerged PR must derive to `review`
+    — NOT `done` — so the review work stays visible. `done` comes only from a
+    terminal spec (set by `mship close`/merge)."""
+    assert compute_phase(_wi(), _spec("dispatched"),
+                         [_task(finished=True, pr=True)]) == "review"
+
+
+def test_finished_tasks_review_when_any_has_open_pr():
+    a = _task(finished=True, pr=True)
+    b = _task(finished=True, pr=False)
+    assert compute_phase(_wi(), _spec("dispatched"), [a, b]) == "review"
+
+
+def test_finished_task_without_pr_is_review_not_ready():
+    """Re-review ("Finished Tasks Rerun"): a finished task with NO recorded PR, under
+    an APPROVED spec, must derive to `review` — not `ready`. If it fell through to the
+    spec's `ready`, run-next (which selects derived-ready items, Finding 3) would
+    re-pick the already-finished item and run it a SECOND time. A finished task waits
+    in review for merge/close; `done` still comes only from a terminal spec."""
+    assert compute_phase(_wi(), _spec("approved"),
+                         [_task(finished=True, pr=False)]) == "review"
+
+
+def test_implemented_spec_is_done_regardless_of_task_pr_state():
+    """Finding 1: `done` is spec-driven — an `implemented` spec (set at close/merge)
+    derives to done even while a finished task still carries a live PR."""
+    assert compute_phase(_wi(), _spec("implemented"),
+                         [_task(finished=True, pr=True)]) == "done"
+
+
+def test_in_progress_task_is_in_flight():
+    """Finding 1: a still-running task keeps the item in_flight (unchanged)."""
+    assert compute_phase(_wi(), _spec("dispatched"), [_task(finished=False)]) == "in_flight"
+
+
+def test_unfinished_task_keeps_in_flight_even_beside_a_finished_pr():
+    a = _task(finished=True, pr=True)
+    b = _task(finished=False)
+    assert compute_phase(_wi(), _spec("dispatched"), [a, b]) == "in_flight"
+
+
+# --- gc32 re-review Finding 2: a terminal spec status wins over task state ---
+
+def test_archived_spec_is_done_even_with_unfinished_task():
+    """Finding 2: an `archived` spec is terminal (only reached at close/abandon), so
+    it must derive to `done` BEFORE the task-state checks — otherwise an unfinished
+    linked task would wrongly keep the item in_flight."""
+    assert compute_phase(_wi(), _spec("archived"), [_task(finished=False)]) == "done"
+
+
+def test_implemented_spec_is_done_even_with_unfinished_task():
+    assert compute_phase(_wi(), _spec("implemented"), [_task(finished=False)]) == "done"
+
+
+def test_no_tasks_falls_back_to_spec_phase():
+    """No tasks -> derivation falls back to the (non-terminal) spec phase."""
+    assert compute_phase(_wi(), _spec("dispatched"), []) == "in_flight"
+    assert compute_phase(_wi(), _spec("approved"), []) == "ready"
 
 
 def _thread(*, needs_you=False):

@@ -20,15 +20,37 @@ _SPEC_PHASE: dict[str, Phase] = {
 }
 
 
+_TERMINAL_SPEC_STATUSES: frozenset[str] = frozenset({"implemented", "archived"})
+
+
 def compute_phase(item: WorkItem, spec: Spec | None, tasks: list[Task]) -> Phase:
     if item.phase_override is not None:
         return item.phase_override
+    # Finding 2 (archived-spec-stays-active): a terminal spec status
+    # (implemented/archived) is only ever reached at close/merge or an explicit
+    # abandon, so it is authoritative — derive `done` BEFORE the task-state checks.
+    # Otherwise an item whose spec is archived but whose linked task is still
+    # unfinished would be wrongly held in_flight.
+    if spec is not None and spec.status in _TERMINAL_SPEC_STATUSES:
+        return "done"
     if tasks:
+        # Any still-running task keeps the item in flight (unchanged derivation).
         if any(t.finished_at is None for t in tasks):
             return "in_flight"
-        if any(t.pr_urls for t in tasks):
-            return "review"
-        return "done"
+        # Every linked task is finished. `mship finish` stamps finished_at (+ pr_urls)
+        # when it OPENS the PR — not when it merges — so a finished task is awaiting
+        # review/merge, NOT done. Map ANY finished task to `review`, whether or not a
+        # PR URL is recorded: a finished no-PR task must not fall through to the
+        # spec-derived `ready` phase, or run-next would re-select and run it a SECOND
+        # time ("Finished Tasks Rerun"). `done` comes ONLY from a terminal spec
+        # (checked above, set by `mship close`/merge); `finished_at` alone never
+        # means done.
+        #
+        # NOTE: auto-advancing to `done` WITHOUT `mship close` — an operator who
+        # merged the unattended PR directly, bypassing close — would need a merge
+        # signal we don't have offline (the Task carries no `merged` flag). That's
+        # a follow-up, out of scope here.
+        return "review"
     if spec is not None:
         return _SPEC_PHASE.get(spec.status, "shaping")
     return "inbox"

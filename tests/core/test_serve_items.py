@@ -83,3 +83,46 @@ def test_post_item_message_appends_to_existing_thread(tmp_path):
 def test_post_item_message_404_for_unknown_item(tmp_path):
     client = _app(tmp_path)
     assert client.post("/items/nope/messages", json={"text": "hi"}).status_code == 404
+
+
+# --- gc32 ac3: POST /items/{id}/phase (Mark done / Reopen) ---
+
+def test_post_item_phase_sets_override(tmp_path):
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="Stuck item", kind="feature", workspace="testws", now=_now())
+    client = _app(tmp_path)
+
+    resp = client.post(f"/items/{wi.id}/phase", json={"phase": "done"})
+    assert resp.status_code == 200
+    assert resp.json() == {"id": wi.id, "phase_override": "done"}
+
+    # Persisted, and reflected in the derived summary.
+    assert items.get(wi.id).phase_override == "done"
+    assert client.get(f"/items/{wi.id}").json()["phase"] == "done"
+
+
+def test_post_item_phase_clears_override_when_null(tmp_path):
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="Reopen me", kind="feature", workspace="testws", now=_now())
+    items.set_phase_override(wi.id, "done", now=_now())
+    client = _app(tmp_path)
+
+    resp = client.post(f"/items/{wi.id}/phase", json={"phase": None})
+    assert resp.status_code == 200
+    assert resp.json() == {"id": wi.id, "phase_override": None}
+
+    # Override cleared -> item returns to its derived phase (inbox, no children).
+    assert items.get(wi.id).phase_override is None
+    assert client.get(f"/items/{wi.id}").json()["phase"] == "inbox"
+
+
+def test_post_item_phase_404_for_unknown_item(tmp_path):
+    client = _app(tmp_path)
+    assert client.post("/items/nope/phase", json={"phase": "done"}).status_code == 404
+
+
+def test_post_item_phase_rejects_invalid_phase(tmp_path):
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="Item", kind="feature", workspace="testws", now=_now())
+    client = _app(tmp_path)
+    assert client.post(f"/items/{wi.id}/phase", json={"phase": "bogus"}).status_code == 422

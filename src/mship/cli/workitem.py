@@ -338,6 +338,11 @@ def register(parent: typer.Typer, get_container) -> None:
             spec_approved=spec_approved,
             claimed=set(),
             blocked=blocked,
+            # Child state so the selector resolves each item's DERIVED phase — an item
+            # whose override was cleared (Reopen) but whose spec is approved still
+            # derives to `ready` and stays selectable (Finding 3).
+            specs_by_id=specs_by_id,
+            tasks_by_slug=dict(snapshot.tasks),
             run_state=run_state,
             build_base_prompt=lambda it: _base_prompt_for(
                 it, specs_by_id.get(it.spec_id) if it.spec_id else None),
