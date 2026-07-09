@@ -132,6 +132,23 @@ def test_decision_payload_multi_round_trips():
     assert back.decision.multi is True
 
 
+def test_message_kind_event_accepted():
+    assert _m("agent", 1, kind="event").kind == "event"
+
+
+def test_awaiting_agent_event_true_for_trailing_event():
+    t = _thread(_m("human", 0), _m("agent", 1, kind="event"))
+    assert t.awaiting_agent_event is True
+    assert t.needs_you is False
+    assert t.needs_decision is False
+
+
+def test_awaiting_agent_event_reset_by_later_human():
+    t = _thread(_m("agent", 0, kind="event"), _m("human", 1))
+    assert t.awaiting_agent_event is False
+    assert t.awaiting_reply is True
+
+
 def test_decision_payload_legacy_json_without_multi_defaults_false():
     # Older clients (or payloads captured before this field existed) omit
     # "multi" entirely -- must not break, and must be treated as single-select.
