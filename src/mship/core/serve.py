@@ -345,7 +345,7 @@ def create_app(
         now = datetime.now(timezone.utc)
         text = body.text
         subject = body.subject or (text.strip().splitlines()[0][:80] if text.strip() else "(no subject)")
-        return msgs.create_thread(subject=subject, text=text, now=now).model_dump(mode="json")
+        return _thread_payload(msgs.create_thread(subject=subject, text=text, now=now))
 
     @app.post("/threads/{thread_id}/messages")
     def post_message(thread_id: str, body: NewMessageBody):
@@ -357,7 +357,7 @@ def create_app(
         t = msgs.get(thread_id)
         if t is None:
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
-        return t.model_dump(mode="json")
+        return _thread_payload(t)
 
     @app.post("/threads/{thread_id}/seen")
     def post_seen(thread_id: str, body: SeenBody):
@@ -376,7 +376,7 @@ def create_app(
             t = msgs.mark_seen(thread_id, seen_dt)
         except KeyError:
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
-        return t.model_dump(mode="json")
+        return _thread_payload(t)
 
     def _summaries(threads):
         return [
@@ -421,11 +421,12 @@ def create_app(
         t = msgs.get(thread_id)
         if t is None:
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
-        return t.model_dump(mode="json")
+        return _thread_payload(t)
 
     # --- work items (phase-aware cockpit spine) ---
     from mship.core.workitem_store import WorkItemStore
     from mship.core.view.workitem_index import build_workitem_index
+    from mship.core.view.thread_links import resolve_thread_work_item
 
     workitems = WorkItemStore(workspace_root / ".mothership" / "workitems")
     # Serializes the lazy read-decide-create-link in POST /items/{id}/messages. Sync
@@ -447,25 +448,49 @@ def create_app(
             {t.id: t for t in msgs.list()},
         )
 
+    def _summarize_item(item_id: str):
+        """Summarize a single work item by id via per-id child lookups (no full
+        list() scans), mirroring the direct-get short-circuit of GET /threads/{id},
+        /specs/{id}. Returns None if the item does not exist."""
+        wi = workitems.get(item_id)
+        if wi is None:
+            return None
+        spec = store.find_by_id(wi.spec_id) if wi.spec_id else None
+        tasks = state_manager.load().tasks
+        return build_workitem_index(
+            [wi],
+            {spec.id: spec} if spec else {},
+            {s: tasks[s] for s in wi.task_slugs if s in tasks},
+            {tid: t for tid in wi.thread_ids if (t := msgs.get(tid))},
+        )[0]
+
+    def _thread_payload(t):
+        """Enrich a thread's dumped dict with the WorkItem it's related to (read-time
+        inversion of the WorkItem link graph — see thread_links.resolve_thread_work_item).
+        Shared by every handler that returns a full thread: GET /threads/{id},
+        POST /threads, POST /threads/{id}/messages, POST /threads/{id}/seen. The
+        GET /threads list/summary endpoint is unaffected."""
+        data = t.model_dump(mode="json")
+        wi_id = resolve_thread_work_item(t.id, t.spec_id, t.task_slug, workitems.list())
+        data["work_item_id"] = wi_id
+        if wi_id is None:
+            data["work_item"] = None
+        else:
+            summ = _summarize_item(wi_id)
+            data["work_item"] = None if summ is None else {
+                "id": summ.id, "title": summ.title, "kind": summ.kind, "phase": summ.phase,
+            }
+        return data
+
     @app.get("/items")
     def list_items():
         return jsonable_encoder(_workitem_index())
 
     @app.get("/items/{item_id}")
     def get_item(item_id: str):
-        wi = workitems.get(item_id)
-        if wi is None:
+        summary = _summarize_item(item_id)
+        if summary is None:
             raise HTTPException(status_code=404, detail=f"no work item {item_id!r}")
-        # Summarize just this item via per-id child lookups (no full list() scans),
-        # mirroring the direct-get short-circuit of GET /threads/{id}, /specs/{id}.
-        spec = store.find_by_id(wi.spec_id) if wi.spec_id else None
-        tasks = state_manager.load().tasks
-        summary = build_workitem_index(
-            [wi],
-            {spec.id: spec} if spec else {},
-            {s: tasks[s] for s in wi.task_slugs if s in tasks},
-            {tid: t for tid in wi.thread_ids if (t := msgs.get(tid))},
-        )[0]
         return jsonable_encoder(summary)
 
     @app.post("/items/{item_id}/messages")
