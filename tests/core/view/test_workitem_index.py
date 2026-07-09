@@ -65,10 +65,11 @@ def test_tasks_dominate_spec():
     # awaiting review, not done.
     assert compute_phase(_wi(), _spec("approved"),
                          [_task(finished=True, pr=True)]) == "review"
-    # finished but no PR recorded -> not done (done is spec-driven); falls through to
-    # the spec-derived phase (approved -> ready).
+    # Re-review ("Finished Tasks Rerun"): a finished task with NO PR must also be
+    # `review`, NOT fall through to the spec's `ready` — otherwise run-next would
+    # re-select the already-finished item and run it a second time.
     assert compute_phase(_wi(), _spec("approved"),
-                         [_task(finished=True, pr=False)]) == "ready"
+                         [_task(finished=True, pr=False)]) == "review"
 
 
 def test_mixed_tasks_one_running_is_in_flight():
@@ -91,6 +92,16 @@ def test_finished_tasks_review_when_any_has_open_pr():
     a = _task(finished=True, pr=True)
     b = _task(finished=True, pr=False)
     assert compute_phase(_wi(), _spec("dispatched"), [a, b]) == "review"
+
+
+def test_finished_task_without_pr_is_review_not_ready():
+    """Re-review ("Finished Tasks Rerun"): a finished task with NO recorded PR, under
+    an APPROVED spec, must derive to `review` — not `ready`. If it fell through to the
+    spec's `ready`, run-next (which selects derived-ready items, Finding 3) would
+    re-pick the already-finished item and run it a SECOND time. A finished task waits
+    in review for merge/close; `done` still comes only from a terminal spec."""
+    assert compute_phase(_wi(), _spec("approved"),
+                         [_task(finished=True, pr=False)]) == "review"
 
 
 def test_implemented_spec_is_done_regardless_of_task_pr_state():

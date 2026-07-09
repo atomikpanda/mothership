@@ -37,20 +37,20 @@ def compute_phase(item: WorkItem, spec: Spec | None, tasks: list[Task]) -> Phase
         # Any still-running task keeps the item in flight (unchanged derivation).
         if any(t.finished_at is None for t in tasks):
             return "in_flight"
-        # Finding 1 (premature-done): `mship finish` stamps finished_at + pr_urls
-        # TOGETHER when it OPENS the PR — not when it merges — so a finished task
-        # with a live, unmerged PR is awaiting review, not done. `done` comes ONLY
-        # from a terminal spec (checked above, set by `mship close`/merge);
-        # `finished_at` alone never means done.
+        # Every linked task is finished. `mship finish` stamps finished_at (+ pr_urls)
+        # when it OPENS the PR — not when it merges — so a finished task is awaiting
+        # review/merge, NOT done. Map ANY finished task to `review`, whether or not a
+        # PR URL is recorded: a finished no-PR task must not fall through to the
+        # spec-derived `ready` phase, or run-next would re-select and run it a SECOND
+        # time ("Finished Tasks Rerun"). `done` comes ONLY from a terminal spec
+        # (checked above, set by `mship close`/merge); `finished_at` alone never
+        # means done.
         #
         # NOTE: auto-advancing to `done` WITHOUT `mship close` — an operator who
         # merged the unattended PR directly, bypassing close — would need a merge
         # signal we don't have offline (the Task carries no `merged` flag). That's
         # a follow-up, out of scope here.
-        if any(t.pr_urls for t in tasks):
-            return "review"
-        # Finished but no PR recorded: still not `done` (done is spec-driven).
-        # Fall through to the spec-derived phase below.
+        return "review"
     if spec is not None:
         return _SPEC_PHASE.get(spec.status, "shaping")
     return "inbox"
