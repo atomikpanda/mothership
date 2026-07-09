@@ -427,6 +427,7 @@ def create_app(
     from mship.core.workitem_store import WorkItemStore
     from mship.core.view.workitem_index import build_workitem_index
     from mship.core.view.thread_links import resolve_thread_work_item
+    from mship.core.view.entity_links import linkify_entities
 
     workitems = WorkItemStore(workspace_root / ".mothership" / "workitems")
     # Serializes the lazy read-decide-create-link in POST /items/{id}/messages. Sync
@@ -466,10 +467,12 @@ def create_app(
 
     def _thread_payload(t):
         """Enrich a thread's dumped dict with the WorkItem it's related to (read-time
-        inversion of the WorkItem link graph — see thread_links.resolve_thread_work_item).
-        Shared by every handler that returns a full thread: GET /threads/{id},
-        POST /threads, POST /threads/{id}/messages, POST /threads/{id}/seen. The
-        GET /threads list/summary endpoint is unaffected."""
+        inversion of the WorkItem link graph — see thread_links.resolve_thread_work_item)
+        and auto-linkify native entity refs (wi-/spec/task ids) in agent message text
+        (see entity_links.linkify_entities). Human messages are left untouched — the
+        linkifier only rewrites text the agent produced. Shared by every handler that
+        returns a full thread: GET /threads/{id}, POST /threads, POST /threads/{id}/messages,
+        POST /threads/{id}/seen. The GET /threads list/summary endpoint is unaffected."""
         data = t.model_dump(mode="json")
         wi_id = resolve_thread_work_item(t.id, t.spec_id, t.task_slug, workitems.list())
         data["work_item_id"] = wi_id
@@ -480,6 +483,12 @@ def create_app(
             data["work_item"] = None if summ is None else {
                 "id": summ.id, "title": summ.title, "kind": summ.kind, "phase": summ.phase,
             }
+        item_ids = {w.id for w in workitems.list()}
+        spec_ids = {s.id for s in store.list()}
+        task_slugs = set(state_manager.load().tasks.keys())
+        for msg in data.get("messages", []):
+            if msg.get("role") == "agent" and msg.get("text"):
+                msg["text"] = linkify_entities(msg["text"], item_ids, spec_ids, task_slugs)
         return data
 
     @app.get("/items")
