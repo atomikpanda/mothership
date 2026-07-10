@@ -8,3 +8,14 @@ build/
 .claude/
 .worktrees
 .mship-workspace
+
+# Relay runtime state + secrets (docker/relay/). The relay's Caddyfile and
+# docker-compose.yml ARE tracked; everything below is a local secret or is
+# generated at runtime (Caddy volumes, issued TLS certs, enrollment store,
+# per-device SSH keys/allowlist) and must never be committed.
+docker/relay/.env
+docker/relay/keys/
+docker/relay/pubkeys/
+docker/relay/pending-store/
+docker/relay/caddy-config/
+docker/relay/caddy-data/
