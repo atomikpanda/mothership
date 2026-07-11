@@ -13,6 +13,7 @@ import typer
 from mship.cli._resolve import resolve_for_command
 from mship.cli.output import Output
 from mship.core import dispatch as _d
+from mship.core.base_resolver import resolve_base
 from mship.core.skill_install import pkg_skills_source
 
 
@@ -103,7 +104,14 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=1)
 
         worktree = Path(task_obj.worktrees[resolved_repo])
-        base_sha_info = _d.collect_base_sha_info(worktree, task_obj.base_branch or "main")
+
+        config = container.config()
+        repo_config = config.repos.get(resolved_repo)
+        effective_base = resolve_base(
+            resolved_repo, repo_config, cli_base=None, base_map={},
+            known_repos=config.repos.keys(), task_base=task_obj.base_override,
+        ) or "main"
+        base_sha_info = _d.collect_base_sha_info(worktree, effective_base)
 
         log_mgr = container.log_manager()
         journal_entries = log_mgr.read(task_obj.slug, last=10)
@@ -119,6 +127,7 @@ def register(app: typer.Typer, get_container):
             instruction=resolved_instruction,
             journal_entries=journal_entries,
             base_sha_info=base_sha_info,
+            base_branch=effective_base,
             agents_md_path=agents_md_path,
             pkg_skills_source=pkg_skills_source(),
             state=state,

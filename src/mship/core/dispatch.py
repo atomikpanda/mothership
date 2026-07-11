@@ -297,6 +297,7 @@ def build_dispatch_prompt(
     *,
     journal_entries: list[LogEntry],
     base_sha_info: BaseShaInfo,
+    base_branch: str,
     agents_md_path: Path | None,
     pkg_skills_source: Path,
     state=None,
@@ -308,13 +309,17 @@ def build_dispatch_prompt(
     - "implementer" (default): scope to a single task, report back, do NOT open
       a PR — for per-task execution where an orchestrator owns finishing.
     - "standalone": the subagent finishes the work and opens its own PR.
+
+    `base_branch` is the effective base for `repo`, already resolved by the
+    caller via `mship.core.base_resolver.resolve_base` (MOS-229: this used to
+    fall back to `task.base_branch or "main"` here, bypassing repo config and
+    the `--base` override entirely).
     """
     if mode not in DISPATCH_MODES:
         raise ValueError(
             f"unknown dispatch mode {mode!r}; choose one of {', '.join(DISPATCH_MODES)}"
         )
     worktree = task.worktrees[repo]
-    base_branch = task.base_branch or "main"
     skills_block = _render_skills(canonical_skills(pkg_skills_source))
     journal_block = _render_journal(journal_entries)
     base_block = _render_base_sha_block(base_sha_info, base_branch)

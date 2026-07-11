@@ -131,6 +131,71 @@ def test_ahead_of_base_is_null_when_base_branch_unset(tmp_path: Path):
     assert task["ahead_of_origin"] == {"repo": 1}
 
 
+def _config_with_base(tmp_path: Path, base_branch: Optional[str]) -> WorkspaceConfig:
+    """Like `_config` but the repo declares `base_branch` in mothership.yaml."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir(exist_ok=True)
+    (repo_dir / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    return WorkspaceConfig(
+        workspace="t",
+        repos={"repo": RepoConfig(path=repo_dir, type="library", base_branch=base_branch)},
+    )
+
+
+def test_task_payload_uses_repo_config_base_branch_not_task_field(tmp_path: Path):
+    """repo_config.base_branch="dev" (no override) drives both the top-level
+    base_branch field and the ahead_of_base count — not task.base_branch,
+    which dispatch/context used to read directly (MOS-229)."""
+    wt = tmp_path / "wt-foo"
+    wt.mkdir()
+    log_mgr = LogManager(tmp_path / "logs")
+    state = WorkspaceState(tasks={"foo": _task(
+        "foo", worktrees={"repo": wt}, active_repo="repo", base_branch="staging",
+    )})
+    cfg = _config_with_base(tmp_path, "dev")
+    git = _fake_git_count({(wt.name, "dev..HEAD"): 4})
+    out = _build(state, cfg, log_mgr, tmp_path, git_count=git)
+    task = out["active_tasks"][0]
+    assert task["base_branch"] == "dev"
+    assert task["ahead_of_base"] == {"repo": 4}
+
+
+def test_task_payload_base_override_wins_over_repo_config(tmp_path: Path):
+    """task.base_override (the --base pin) beats repo_config.base_branch."""
+    wt = tmp_path / "wt-bar"
+    wt.mkdir()
+    log_mgr = LogManager(tmp_path / "logs")
+    state = WorkspaceState(tasks={"bar": _task(
+        "bar", worktrees={"repo": wt}, active_repo="repo",
+        base_branch="main", base_override="stacked",
+    )})
+    cfg = _config_with_base(tmp_path, "dev")
+    git = _fake_git_count({(wt.name, "stacked..HEAD"): 2})
+    out = _build(state, cfg, log_mgr, tmp_path, git_count=git)
+    task = out["active_tasks"][0]
+    assert task["base_branch"] == "stacked"
+    assert task["ahead_of_base"] == {"repo": 2}
+
+
+def test_task_payload_repo_missing_from_config_falls_back_without_error(tmp_path: Path):
+    """A repo referenced by the task but absent from mothership.yaml must not
+    crash — resolve_base tolerates a missing repo_config and context falls
+    back to task.base_branch, same as before this fix."""
+    wt = tmp_path / "wt-baz"
+    wt.mkdir()
+    log_mgr = LogManager(tmp_path / "logs")
+    state = WorkspaceState(tasks={"baz": _task(
+        "baz", worktrees={"missing-repo": wt}, active_repo="missing-repo",
+        base_branch="main",
+    )})
+    cfg = _config(tmp_path)  # only declares "repo", not "missing-repo"
+    git = _fake_git_count({(wt.name, "main..HEAD"): 1})
+    out = _build(state, cfg, log_mgr, tmp_path, git_count=git)
+    task = out["active_tasks"][0]
+    assert task["base_branch"] == "main"
+    assert task["ahead_of_base"] == {"missing-repo": 1}
+
+
 def test_cwd_inside_worktree_populates_match_fields(tmp_path: Path):
     wt = tmp_path / "wt-match"
     (wt / "src").mkdir(parents=True)

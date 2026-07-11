@@ -209,7 +209,7 @@ def test_build_prompt_contains_worktree_path_cd_directive(tmp_path: Path):
     task = _task({"repo": worktree})
     out = build_dispatch_prompt(
         task=task, repo="repo", instruction="do X",
-        journal_entries=[], base_sha_info=_info_clean(),
+        journal_entries=[], base_sha_info=_info_clean(), base_branch="main",
         agents_md_path=tmp_path / "AGENTS.md",
         pkg_skills_source=tmp_path / "skills",
     )
@@ -222,7 +222,7 @@ def test_build_prompt_embeds_instruction_verbatim(tmp_path: Path):
     task = _task({"repo": tmp_path / "wt"})
     out = build_dispatch_prompt(
         task=task, repo="repo", instruction="implement the --title flag from #45",
-        journal_entries=[], base_sha_info=_info_clean(),
+        journal_entries=[], base_sha_info=_info_clean(), base_branch="main",
         agents_md_path=None, pkg_skills_source=tmp_path / "skills",
     )
     assert "> implement the --title flag from #45" in out
@@ -238,7 +238,7 @@ def test_build_prompt_contains_task_facts(tmp_path: Path):
     )
     out = build_dispatch_prompt(
         task=task, repo="repo", instruction="x",
-        journal_entries=[], base_sha_info=_info_clean(),
+        journal_entries=[], base_sha_info=_info_clean(), base_branch="main",
         agents_md_path=None, pkg_skills_source=tmp_path / "skills",
     )
     assert "my-task" in out
@@ -251,7 +251,7 @@ def test_build_prompt_contains_base_sha_block(tmp_path: Path):
     task = _task({"repo": tmp_path / "wt"})
     out = build_dispatch_prompt(
         task=task, repo="repo", instruction="x",
-        journal_entries=[], base_sha_info=_info_clean(),
+        journal_entries=[], base_sha_info=_info_clean(), base_branch="main",
         agents_md_path=None, pkg_skills_source=tmp_path / "skills",
     )
     assert "abc1234" in out
@@ -263,7 +263,7 @@ def test_build_prompt_journal_empty_state_when_no_entries(tmp_path: Path):
     task = _task({"repo": tmp_path / "wt"})
     out = build_dispatch_prompt(
         task=task, repo="repo", instruction="x",
-        journal_entries=[], base_sha_info=_info_clean(),
+        journal_entries=[], base_sha_info=_info_clean(), base_branch="main",
         agents_md_path=None, pkg_skills_source=tmp_path / "skills",
     )
     assert "No entries yet" in out
@@ -283,7 +283,7 @@ def test_build_prompt_journal_renders_bulleted_list(tmp_path: Path):
     ]
     out = build_dispatch_prompt(
         task=task, repo="repo", instruction="x",
-        journal_entries=entries, base_sha_info=_info_clean(),
+        journal_entries=entries, base_sha_info=_info_clean(), base_branch="main",
         agents_md_path=None, pkg_skills_source=tmp_path / "skills",
     )
     assert "first commit done" in out
@@ -296,7 +296,7 @@ def test_build_prompt_conventions_common_bullets(tmp_path: Path):
     task = _task({"repo": tmp_path / "wt"})
     out = build_dispatch_prompt(
         task=task, repo="repo", instruction="x",
-        journal_entries=[], base_sha_info=_info_clean(),
+        journal_entries=[], base_sha_info=_info_clean(), base_branch="main",
         agents_md_path=None, pkg_skills_source=tmp_path / "skills",
     )
     assert "main checkout" in out
@@ -307,7 +307,7 @@ def test_build_prompt_standalone_conventions_have_finish_bullet(tmp_path: Path):
     task = _task({"repo": tmp_path / "wt"})
     out = build_dispatch_prompt(
         task=task, repo="repo", instruction="x", mode="standalone",
-        journal_entries=[], base_sha_info=_info_clean(),
+        journal_entries=[], base_sha_info=_info_clean(), base_branch="main",
         agents_md_path=None, pkg_skills_source=tmp_path / "skills",
     )
     assert "mship finish --body-file" in out
@@ -318,7 +318,7 @@ def test_build_prompt_implementer_conventions_drop_finish_bullet(tmp_path: Path)
     task = _task({"repo": tmp_path / "wt"})
     out = build_dispatch_prompt(
         task=task, repo="repo", instruction="x",
-        journal_entries=[], base_sha_info=_info_clean(),
+        journal_entries=[], base_sha_info=_info_clean(), base_branch="main",
         agents_md_path=None, pkg_skills_source=tmp_path / "skills",
     )
     assert "mship finish --body-file" not in out
@@ -329,7 +329,7 @@ def test_build_prompt_lists_canonical_skills_with_paths(tmp_path: Path):
     task = _task({"repo": tmp_path / "wt"})
     out = build_dispatch_prompt(
         task=task, repo="repo", instruction="x",
-        journal_entries=[], base_sha_info=_info_clean(),
+        journal_entries=[], base_sha_info=_info_clean(), base_branch="main",
         agents_md_path=None, pkg_skills_source=tmp_path / "skills",
     )
     for name in [
@@ -345,7 +345,7 @@ def test_build_prompt_includes_agents_md_path_when_present(tmp_path: Path):
     agents = tmp_path / "AGENTS.md"
     out = build_dispatch_prompt(
         task=task, repo="repo", instruction="x",
-        journal_entries=[], base_sha_info=_info_clean(),
+        journal_entries=[], base_sha_info=_info_clean(), base_branch="main",
         agents_md_path=agents, pkg_skills_source=tmp_path / "skills",
     )
     assert str(agents) in out
@@ -355,7 +355,7 @@ def test_build_prompt_omits_agents_md_line_when_absent(tmp_path: Path):
     task = _task({"repo": tmp_path / "wt"})
     out = build_dispatch_prompt(
         task=task, repo="repo", instruction="x",
-        journal_entries=[], base_sha_info=_info_clean(),
+        journal_entries=[], base_sha_info=_info_clean(), base_branch="main",
         agents_md_path=None, pkg_skills_source=tmp_path / "skills",
     )
     assert "Full doc:" not in out
@@ -365,7 +365,7 @@ def test_build_prompt_standalone_mode_has_finish_contract(tmp_path: Path):
     task = _task({"repo": tmp_path / "wt"})
     out = build_dispatch_prompt(
         task=task, repo="repo", instruction="x", mode="standalone",
-        journal_entries=[], base_sha_info=_info_clean(),
+        journal_entries=[], base_sha_info=_info_clean(), base_branch="main",
         agents_md_path=None, pkg_skills_source=tmp_path / "skills",
     )
     assert "How to finish" in out
@@ -379,7 +379,7 @@ def test_build_prompt_default_mode_is_implementer_report_back(tmp_path: Path):
     task = _task({"repo": tmp_path / "wt"})
     out = build_dispatch_prompt(
         task=task, repo="repo", instruction="x",
-        journal_entries=[], base_sha_info=_info_clean(),
+        journal_entries=[], base_sha_info=_info_clean(), base_branch="main",
         agents_md_path=None, pkg_skills_source=tmp_path / "skills",
     )
     lower = out.lower()
@@ -402,10 +402,31 @@ def test_build_prompt_implementer_mode_matches_default(tmp_path: Path):
     task = _task({"repo": tmp_path / "wt"})
     common = dict(
         task=task, repo="repo", instruction="x",
-        journal_entries=[], base_sha_info=_info_clean(),
+        journal_entries=[], base_sha_info=_info_clean(), base_branch="main",
         agents_md_path=None, pkg_skills_source=tmp_path / "skills",
     )
     assert build_dispatch_prompt(**common, mode="implementer") == build_dispatch_prompt(**common)
+
+
+def test_build_prompt_uses_passed_base_branch_not_task_field(tmp_path: Path):
+    """The rendered base branch must come from the `base_branch` param — the
+    caller's resolve_base result — not task.base_branch. Dispatch used to
+    bypass the canonical resolver and always show `task.base_branch or "main"`
+    (MOS-229)."""
+    task = Task(
+        slug="t", description="d", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["repo"], worktrees={"repo": tmp_path / "wt"},
+        branch="feat/t", base_branch="staging", active_repo="repo",
+    )
+    out = build_dispatch_prompt(
+        task=task, repo="repo", instruction="x",
+        journal_entries=[], base_sha_info=_info_clean(), base_branch="dev",
+        agents_md_path=None, pkg_skills_source=tmp_path / "skills",
+    )
+    assert "- **base branch:** dev" in out
+    assert "base (dev)" in out
+    assert "staging" not in out
 
 
 def test_build_prompt_unknown_mode_raises(tmp_path: Path):
@@ -413,6 +434,6 @@ def test_build_prompt_unknown_mode_raises(tmp_path: Path):
     with pytest.raises(ValueError, match="mode"):
         build_dispatch_prompt(
             task=task, repo="repo", instruction="x", mode="bogus",
-            journal_entries=[], base_sha_info=_info_clean(),
+            journal_entries=[], base_sha_info=_info_clean(), base_branch="main",
             agents_md_path=None, pkg_skills_source=tmp_path / "skills",
         )
