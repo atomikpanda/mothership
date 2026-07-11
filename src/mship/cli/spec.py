@@ -169,8 +169,14 @@ def register(parent: typer.Typer, get_container):
                 output.error(f"{e}. Use --bypass-status-gate to override.")
                 raise typer.Exit(1)
 
+        # MOS-215: applying a revised draft is how a needs_clarification spec
+        # moves forward — clear the stale reason so it doesn't linger once
+        # addressed. (Capture the prior status before overwriting it below.)
+        was_needs_clarification = spec.status == "needs_clarification"
         apply_draft(spec, draft)
         spec.status = "needs_review"
+        if was_needs_clarification:
+            spec.clarification_reason = None
         spec.updated_at = datetime.now(timezone.utc)
         path = store.save(spec)
 
@@ -200,6 +206,8 @@ def register(parent: typer.Typer, get_container):
         payload = build_review(spec)
         if output.human_mode:
             output.print(f"[bold]{payload['id']}[/bold] ({payload['status']})")
+            if payload["status"] == "needs_clarification" and payload["clarification_reason"]:
+                output.print(f"  [bold yellow]Requested changes:[/bold yellow] {payload['clarification_reason']}")
             for c in payload["acceptance_criteria"]:
                 output.print(f"  [{c['verdict']}] {c['id']}: {c['text']}")
             s = payload["summary"]
@@ -507,9 +515,11 @@ def register(parent: typer.Typer, get_container):
             output.error(str(e))
             raise typer.Exit(1)
         spec.status = "needs_clarification"
+        spec.clarification_reason = reason
         spec.updated_at = datetime.now(timezone.utc)
         store.save(spec)
-        # Reason is echoed + journaled, not persisted on the spec (see design A5).
+        # MOS-215: the reason is persisted on the spec (surfaced by `spec
+        # show`/`review`) in addition to being journaled to the task log.
         try:
             container.log_manager().append(spec.id, f"spec request-changes: {reason}")
         except Exception:
@@ -578,6 +588,7 @@ def register(parent: typer.Typer, get_container):
             "id": spec.id,
             "title": spec.title,
             "status": spec.status,
+            "clarification_reason": spec.clarification_reason,
             "task_slug": spec.task_slug,
             "updated_at": spec.updated_at.isoformat() if spec.updated_at else None,
             "created_at": spec.created_at.isoformat() if spec.created_at else None,
@@ -605,6 +616,8 @@ def register(parent: typer.Typer, get_container):
             console = Console()
             console.print(f"[bold]{spec.title}[/bold]  ({spec.id})")
             console.print(f"Status: {spec.status}  Task: {spec.task_slug or '—'}")
+            if spec.status == "needs_clarification" and spec.clarification_reason:
+                console.print(f"[bold yellow]Requested changes:[/bold yellow] {spec.clarification_reason}")
             if spec.body:
                 console.print(Markdown(spec.body))
         else:

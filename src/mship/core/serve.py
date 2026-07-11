@@ -438,6 +438,7 @@ def create_app(
         except InvalidTransition as e:
             raise HTTPException(status_code=409, detail=str(e))
         spec.status = "needs_clarification"
+        spec.clarification_reason = body.reason
         review = _save_and_review(spec)
         if log_manager is not None:
             try:
@@ -495,8 +496,14 @@ def create_app(
                 validate_transition(spec.status, "needs_review")
             except InvalidTransition as e:
                 raise HTTPException(status_code=409, detail=str(e))
+        # MOS-215: applying a revised draft is how a needs_clarification spec
+        # moves forward — clear the stale reason so it doesn't linger once
+        # addressed. (Capture the prior status before overwriting it below.)
+        was_needs_clarification = spec.status == "needs_clarification"
         apply_draft(spec, body.draft)
         spec.status = "needs_review"
+        if was_needs_clarification:
+            spec.clarification_reason = None
         spec.updated_at = datetime.now(timezone.utc)
         store.save(spec)
         return spec.model_dump(mode="json")

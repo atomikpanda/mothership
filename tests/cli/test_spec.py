@@ -18,6 +18,7 @@ def configured_app_with_task(workspace: Path):
     state_dir.mkdir(exist_ok=True)
     container.config.reset()
     container.state_manager.reset()
+    container.log_manager.reset()
     container.config_path.override(workspace / "mothership.yaml")
     container.state_dir.override(state_dir)
 
@@ -39,6 +40,7 @@ def configured_app_with_task(workspace: Path):
     container.config.reset()
     container.state_manager.reset_override()
     container.state_manager.reset()
+    container.log_manager.reset()
 
 
 @pytest.fixture
@@ -48,6 +50,7 @@ def configured_app_git_no_task(workspace_with_git: Path):
     state_dir.mkdir(exist_ok=True)
     container.config.reset()
     container.state_manager.reset()
+    container.log_manager.reset()
     container.config_path.override(workspace_with_git / "mothership.yaml")
     container.state_dir.override(state_dir)
     StateManager(state_dir).save(WorkspaceState(tasks={}))
@@ -58,6 +61,7 @@ def configured_app_git_no_task(workspace_with_git: Path):
     container.config.reset()
     container.state_manager.reset_override()
     container.state_manager.reset()
+    container.log_manager.reset()
 
 
 def _store(workspace: Path) -> SpecStore:
@@ -494,6 +498,57 @@ def test_spec_request_changes(configured_app_with_task: Path, tmp_path):
     result = runner.invoke(app, ["spec", "request-changes", "dq", "--reason", "tighten scope"])
     assert result.exit_code == 0, result.output
     assert _store(configured_app_with_task).find_by_id("dq").status == "needs_clarification"
+
+
+def test_spec_request_changes_persists_reason_and_logs(configured_app_with_task: Path, tmp_path):
+    """MOS-215: the reason must land on the spec itself (not just the task
+    log), so `spec show`/`review` can surface it without digging into logs."""
+    from mship.core.log import LogManager
+
+    _apply_dq(tmp_path)
+    result = runner.invoke(app, ["spec", "request-changes", "dq", "--reason", "tighten scope"])
+    assert result.exit_code == 0, result.output
+    spec = _store(configured_app_with_task).find_by_id("dq")
+    assert spec.clarification_reason == "tighten scope"
+
+    # The log entry is still written alongside the persisted field.
+    log = LogManager(configured_app_with_task / ".mothership" / "logs")
+    entries = log.read("dq", last=50)
+    assert any("tighten scope" in e.message for e in entries)
+
+
+def test_spec_apply_revising_clears_clarification_reason(configured_app_with_task: Path, tmp_path):
+    """Applying a revised draft moves needs_clarification -> needs_review; the
+    stale reason from the earlier request-changes must not linger."""
+    _apply_dq(tmp_path)
+    runner.invoke(app, ["spec", "request-changes", "dq", "--reason", "tighten scope"])
+    assert _store(configured_app_with_task).find_by_id("dq").clarification_reason == "tighten scope"
+
+    jf = tmp_path / "revised.json"
+    jf.write_text(_draft_json())
+    result = runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf)])
+    assert result.exit_code == 0, result.output
+    spec = _store(configured_app_with_task).find_by_id("dq")
+    assert spec.status == "needs_review"
+    assert spec.clarification_reason is None
+
+
+def test_spec_show_includes_clarification_reason(configured_app_with_task: Path, tmp_path):
+    _apply_dq(tmp_path)
+    runner.invoke(app, ["spec", "request-changes", "dq", "--reason", "tighten scope"])
+    result = runner.invoke(app, ["spec", "show", "dq"])
+    assert result.exit_code == 0, result.output
+    payload = _json.loads(result.output)
+    assert payload["clarification_reason"] == "tighten scope"
+
+
+def test_spec_review_includes_clarification_reason(configured_app_with_task: Path, tmp_path):
+    _apply_dq(tmp_path)
+    runner.invoke(app, ["spec", "request-changes", "dq", "--reason", "tighten scope"])
+    result = runner.invoke(app, ["spec", "review", "dq"])
+    assert result.exit_code == 0, result.output
+    payload = _json.loads(result.output)
+    assert payload["clarification_reason"] == "tighten scope"
 
 
 # --- spec dispatch (A6 + B4 auto-spawn) ---
