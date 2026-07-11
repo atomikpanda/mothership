@@ -110,7 +110,7 @@ def register(app: typer.Typer, get_container):
         effective_base = resolve_base(
             resolved_repo, repo_config, cli_base=None, base_map={},
             known_repos=config.repos.keys(), task_base=task_obj.base_override,
-        ) or "main"
+        ) or task_obj.base_branch or "main"
         base_sha_info = _d.collect_base_sha_info(worktree, effective_base)
 
         log_mgr = container.log_manager()

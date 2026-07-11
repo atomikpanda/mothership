@@ -218,7 +218,12 @@ def _task_payload(
         else:
             ahead_of_base[repo] = None
 
-    active_repo = task.active_repo or next(iter(task.worktrees), None)
+    # Only the explicitly-active repo drives the scalar base_branch. Falling
+    # back to the first inserted worktree would make a user-facing value depend
+    # on dict order and could report one repo's base while the agent/UI is
+    # focused on another (Greptile, MOS-229) — task.base_branch is the honest
+    # task-level answer when no repo is active.
+    active_repo = task.active_repo
     base_branch = (
         _effective_base_for_repo(task, active_repo, config)
         if active_repo is not None

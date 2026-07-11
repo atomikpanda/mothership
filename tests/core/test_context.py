@@ -196,6 +196,25 @@ def test_task_payload_repo_missing_from_config_falls_back_without_error(tmp_path
     assert task["ahead_of_base"] == {"missing-repo": 1}
 
 
+def test_task_payload_scalar_base_uses_task_base_when_no_active_repo(tmp_path: Path):
+    """With no active_repo, the scalar base_branch is the task's own base, NOT
+    the first inserted worktree's repo config (Greptile, MOS-229: avoids a
+    user-facing value depending on dict order). Per-repo ahead_of_base still
+    resolves against each repo's configured base."""
+    wt = tmp_path / "wt-none"
+    wt.mkdir()
+    log_mgr = LogManager(tmp_path / "logs")
+    state = WorkspaceState(tasks={"none": _task(
+        "none", worktrees={"repo": wt}, active_repo=None, base_branch="staging",
+    )})
+    cfg = _config_with_base(tmp_path, "dev")
+    git = _fake_git_count({(wt.name, "dev..HEAD"): 3})
+    out = _build(state, cfg, log_mgr, tmp_path, git_count=git)
+    task = out["active_tasks"][0]
+    assert task["base_branch"] == "staging"          # task base, not repo's "dev"
+    assert task["ahead_of_base"] == {"repo": 3}       # per-repo still uses "dev"
+
+
 def test_cwd_inside_worktree_populates_match_fields(tmp_path: Path):
     wt = tmp_path / "wt-match"
     (wt / "src").mkdir(parents=True)
