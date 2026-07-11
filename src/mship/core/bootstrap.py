@@ -10,7 +10,7 @@ from pathlib import Path
 
 from mship.core.clone_url import resolve_clone_url
 from mship.core.config import ConfigLoader, RepoConfig, unique_git_roots
-from mship.core.gh_auth import resolve_token, git_cred_args
+from mship.core.gh_auth import broker_config_from_env, resolve_token, git_cred_args
 from mship.util.shell import ShellRunner
 
 
@@ -102,7 +102,16 @@ def bootstrap(
     config_path = Path(config_path)
     workspace_root = config_path.parent
     config = ConfigLoader.load(config_path, require_paths=False)
-    resolved_token = resolve_token(token)
+
+    # Repo set for the broker-pull fallback: every repo in the workspace config
+    # that is its own GitHub repo (git_root repos are subdirectories of their
+    # parent's checkout, not independently-installed repos — excluded so a
+    # broker mint request never names a repo the App can't see).
+    all_repo_names = [n for n, r in config.repos.items() if r.git_root is None]
+    broker_url, broker_bearer = broker_config_from_env()
+    resolved_token = resolve_token(
+        token, broker_url=broker_url, broker_bearer=broker_bearer, repos=all_repo_names,
+    )
 
     names = repos or list(config.repos.keys())
     unknown = [n for n in names if n not in config.repos]

@@ -3,7 +3,13 @@ import json
 import httpx
 import pytest
 
-from mship.core.gh_auth import resolve_token, git_cred_args, create_pr_via_httpx, get_default_branch_via_httpx
+from mship.core.gh_auth import (
+    broker_config_from_env,
+    create_pr_via_httpx,
+    get_default_branch_via_httpx,
+    git_cred_args,
+    resolve_token,
+)
 
 
 def test_resolve_token_precedence(monkeypatch):
@@ -21,6 +27,139 @@ def test_resolve_token_blank_is_none(monkeypatch):
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     assert resolve_token("   ") is None                      # blank flag ignored
+
+
+def test_resolve_token_no_broker_configured_is_backward_compatible(monkeypatch):
+    # No broker_url passed (the zero-arg-broker call shape) -> identical to the
+    # pre-broker behavior even with a client available, since the broker leg
+    # must never trigger without a broker_url.
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    def handler(request):
+        raise AssertionError("broker must not be called when broker_url is None")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    assert resolve_token(None, client=client) is None
+    assert resolve_token("explicit", client=client) == "explicit"
+
+
+def test_resolve_token_broker_pull_returns_token(monkeypatch):
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json={
+            "token": "brokered-tok", "expires_at": "2026-01-01T00:00:00Z",
+            "repositories": ["mothership", "ground-control"],
+        })
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    token = resolve_token(
+        None,
+        broker_url="http://127.0.0.1:9999",
+        broker_bearer="serve-secret",
+        repos=["mothership", "ground-control"],
+        client=client,
+    )
+    assert token == "brokered-tok"
+    assert captured["url"].startswith("http://127.0.0.1:9999/gh-token")
+    assert "mothership" in captured["url"]
+    assert "ground-control" in captured["url"]
+    assert captured["auth"] == "Bearer serve-secret"
+
+
+def test_resolve_token_explicit_wins_over_broker(monkeypatch):
+    def handler(request):
+        raise AssertionError("broker must not be called when an explicit token is given")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    token = resolve_token(
+        "explicit-tok", broker_url="http://broker", broker_bearer="b",
+        repos=["r"], client=client,
+    )
+    assert token == "explicit-tok"
+
+
+def test_resolve_token_gh_token_env_wins_over_broker(monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", "gh_env")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    def handler(request):
+        raise AssertionError("broker must not be called when GH_TOKEN is set")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    token = resolve_token(
+        None, broker_url="http://broker", broker_bearer="b", client=client,
+    )
+    assert token == "gh_env"
+
+
+def test_resolve_token_broker_5xx_returns_none(monkeypatch):
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    def handler(request):
+        return httpx.Response(500, text="internal error")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    assert resolve_token(
+        None, broker_url="http://broker", broker_bearer="b", client=client,
+    ) is None
+
+
+def test_resolve_token_broker_timeout_returns_none(monkeypatch):
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    def handler(request):
+        raise httpx.TimeoutException("timed out")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    assert resolve_token(
+        None, broker_url="http://broker", broker_bearer="b", client=client,
+    ) is None
+
+
+def test_resolve_token_broker_connect_error_returns_none(monkeypatch):
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    def handler(request):
+        raise httpx.ConnectError("connection refused")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    assert resolve_token(
+        None, broker_url="http://broker", broker_bearer="b", client=client,
+    ) is None
+
+
+def test_resolve_token_broker_malformed_body_returns_none(monkeypatch):
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    def handler(request):
+        return httpx.Response(200, json={"expires_at": "x"})  # no "token" key
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    assert resolve_token(
+        None, broker_url="http://broker", broker_bearer="b", client=client,
+    ) is None
+
+
+def test_broker_config_from_env_reads_expected_keys(monkeypatch):
+    monkeypatch.setenv("MSHIP_GH_BROKER_URL", "http://broker.example")
+    monkeypatch.setenv("MSHIP_SERVE_TOKEN", "the-bearer")
+    assert broker_config_from_env() == ("http://broker.example", "the-bearer")
+
+
+def test_broker_config_from_env_defaults_to_none(monkeypatch):
+    monkeypatch.delenv("MSHIP_GH_BROKER_URL", raising=False)
+    monkeypatch.delenv("MSHIP_SERVE_TOKEN", raising=False)
+    assert broker_config_from_env() == (None, None)
 
 
 def test_git_cred_args_token_only_in_env_not_args():
