@@ -409,9 +409,21 @@ def build_export_bundle(
     # files this run no longer writes (e.g. a diff for a repo no longer
     # ahead of base). The zip path stages into a fresh tempdir, so this is a
     # no-op there. See MOS-102 Greptile fix.
+    #
+    # BUT only ever delete a directory WE created: gate the rmtree on our
+    # `.mship-export` marker. If `dest_dir` exists without the marker it's an
+    # unrelated directory the user happened to have at this path — refuse
+    # rather than silently `rmtree` their data (Greptile).
+    marker = dest_dir / ".mship-export"
     if dest_dir.exists():
+        if not marker.exists():
+            raise ValueError(
+                f"refusing to overwrite {dest_dir}: it exists and is not a prior "
+                f"mship export (no .mship-export marker). Remove it or export elsewhere."
+            )
         shutil.rmtree(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
+    marker.write_text("")  # tag this dir as an mship export bundle (safe to clear next time)
     warnings: list[str] = []
 
     patterns: list[RedactionPattern] = []

@@ -515,6 +515,7 @@ def test_bundle_clears_stale_files_from_a_prior_export(bundle_env, tmp_path):
     Greptile fix)."""
     dest = tmp_path / "out"
     dest.mkdir(parents=True)
+    (dest / ".mship-export").write_text("")  # a genuine prior export carries this marker
     stale = dest / "stale-leftover.txt"
     stale.write_text("from a previous export run")
     stale_diff = dest / "diffs" / "some-old-repo.diff"
@@ -531,6 +532,26 @@ def test_bundle_clears_stale_files_from_a_prior_export(bundle_env, tmp_path):
     assert not stale_diff.exists()
     # This run's own artifacts still land normally.
     assert (dest / "journal.md").is_file()
+
+
+def test_bundle_refuses_to_overwrite_non_export_dir(bundle_env, tmp_path):
+    """The stale-clear must never rmtree a directory mship didn't create: if
+    `dest_dir` exists WITHOUT the `.mship-export` marker (an unrelated dir the
+    user happened to have at this path), refuse rather than delete their data
+    (Greptile)."""
+    dest = tmp_path / "out"
+    dest.mkdir(parents=True)
+    precious = dest / "precious.txt"
+    precious.write_text("do not delete me")
+
+    with pytest.raises(ValueError, match="refusing to overwrite"):
+        build_export_bundle(
+            task=bundle_env["task"], config=bundle_env["config"],
+            workspace_root=bundle_env["workspace_root"],
+            log_manager=bundle_env["log_manager"], spec_store=bundle_env["spec_store"],
+            dest_dir=dest, redacted=False,
+        )
+    assert precious.exists()  # the user's data is untouched
 
 
 def test_unredacted_export_is_faithful(bundle_env, tmp_path):

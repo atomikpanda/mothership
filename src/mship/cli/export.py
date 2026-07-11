@@ -49,15 +49,19 @@ def register(app: typer.Typer, get_container):
         workspace_root = Path(container.config_path()).parent
         spec_store = SpecStore(workspace_root / SPECS_DIRNAME)
 
-        result = export_task(
-            task=task,
-            config=container.config(),
-            workspace_root=workspace_root,
-            log_manager=container.log_manager(),
-            spec_store=spec_store,
-            redacted=redacted,
-            format=fmt,
-        )
+        try:
+            result = export_task(
+                task=task,
+                config=container.config(),
+                workspace_root=workspace_root,
+                log_manager=container.log_manager(),
+                spec_store=spec_store,
+                redacted=redacted,
+                format=fmt,
+            )
+        except ValueError as e:
+            output.error(str(e))
+            raise typer.Exit(1)
 
         for warning in result.warnings:
             output.warning(warning)
