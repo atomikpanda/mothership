@@ -87,6 +87,8 @@ In a mothership workspace the **canonical design artifact is a structured `mship
 A spec lives at `<workspace>/specs/<date>-<id>.md` — frontmatter (id, title, status, acceptance criteria, open questions, non-goals, risks, bound task) + a body with `Problem` / `User story` / `Approach` sections. Status flows:
 `captured → drafting → needs_review → needs_clarification → approved → dispatched → implemented → archived`.
 
+**Specs are workspace-level and branch-stable.** The `specs/` directory lives at the workspace root — not inside a member repo's feature branch — so a spec resolves the same way no matter which task/branch is checked out, and `mship view spec` always finds it. Author the spec (during `plan`) **before** `mship spec dispatch` spawns/binds the task; the task then consumes it. **Never hand-edit a spec file inside a task worktree** — that copy would diverge from the canonical one and be invisible to `mship view spec`. Mutate specs only through the `mship spec` commands below. (This is why the old "which branch do I commit the design doc on?" question doesn't arise: `mship spec`s aren't branch-scoped.)
+
 The lifecycle, in order:
 
 ```bash
