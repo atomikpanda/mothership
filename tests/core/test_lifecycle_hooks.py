@@ -227,22 +227,27 @@ def test_non_required_failure_logs_warning(caplog):
 
 
 def test_required_failure_raises_hook_required_error():
+    # `required: true` is only accepted (at config-load time) on the
+    # pre-mutation events — phase.entered.*/workitem.phase.* — so this
+    # generic run_hooks()-mechanics test uses one of those rather than
+    # task.finished (which now rejects `required: true` at config-load time;
+    # see test_config.py's post-hoc-events coverage).
     shell = RecordingShell()
     shell.queue_result("task notify", ShellResult(returncode=1, stdout="", stderr="boom"))
-    config = _config(hooks=[HookConfig(on="task.finished", run="task notify", required=True)])
+    config = _config(hooks=[HookConfig(on="phase.entered.dev", run="task notify", required=True)])
     with pytest.raises(HookRequiredError):
-        run_hooks("task.finished", config=config, workspace_root=Path("/ws"), shell=shell)
+        run_hooks("phase.entered.dev", config=config, workspace_root=Path("/ws"), shell=shell)
 
 
 def test_required_failure_stops_subsequent_hooks():
     shell = RecordingShell()
     shell.queue_result("task fails", ShellResult(returncode=1, stdout="", stderr="boom"))
     config = _config(hooks=[
-        HookConfig(on="task.finished", run="task fails", required=True),
-        HookConfig(on="task.finished", run="task never-runs"),
+        HookConfig(on="phase.entered.dev", run="task fails", required=True),
+        HookConfig(on="phase.entered.dev", run="task never-runs"),
     ])
     with pytest.raises(HookRequiredError):
-        run_hooks("task.finished", config=config, workspace_root=Path("/ws"), shell=shell)
+        run_hooks("phase.entered.dev", config=config, workspace_root=Path("/ws"), shell=shell)
     assert len(shell.calls) == 1
 
 
@@ -287,13 +292,15 @@ def test_timeout_falls_back_to_workspace_default_when_hook_omits_it():
 
 
 def test_required_timeout_raises_hook_required_error():
+    # See test_required_failure_raises_hook_required_error above — required:
+    # true is only config-load-valid on a pre-mutation event.
     shell = RecordingShell()
     shell.queue_raise("task slow", subprocess.TimeoutExpired(cmd="task slow", timeout=1))
     config = _config(hooks=[
-        HookConfig(on="task.finished", run="task slow", required=True, timeout=1),
+        HookConfig(on="phase.entered.dev", run="task slow", required=True, timeout=1),
     ])
     with pytest.raises(HookRequiredError):
-        run_hooks("task.finished", config=config, workspace_root=Path("/ws"), shell=shell)
+        run_hooks("phase.entered.dev", config=config, workspace_root=Path("/ws"), shell=shell)
 
 
 # --- real ShellRunner end-to-end (no mocking of subprocess) ------------------

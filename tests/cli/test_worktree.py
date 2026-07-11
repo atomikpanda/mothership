@@ -2056,8 +2056,14 @@ def test_close_fires_task_closed_hook_on_abandon(configured_git_app):
         container.shell.reset_override()
 
 
-def test_close_required_hook_failure_blocks_close(configured_git_app):
-    from mship.core.state import StateManager, WorkspaceState
+def test_close_required_hook_on_task_closed_rejected_at_config_load(configured_git_app):
+    """`required: true` on `task.closed` is rejected at config-load time (see
+    config.py's `_POST_HOC_EVENTS`) rather than allowed to block the close
+    mid-flow: by the time `task.closed` fires, `advance_spec_on_close` may
+    already have committed a spec-status mutation, so a required failure
+    here could only ever leave the spec advanced while the task stays open
+    — the Greptile "Spec State Advances Before Hook" finding this fixes."""
+    from mship.core.config import ConfigLoader
 
     cfg_path = configured_git_app / "mothership.yaml"
     cfg_path.write_text(
@@ -2066,6 +2072,23 @@ def test_close_required_hook_failure_blocks_close(configured_git_app):
         + "  - on: task.closed\n"
         + "    run: notify-closed-fails\n"
         + "    required: true\n"
+    )
+    with pytest.raises(ValueError, match="required"):
+        ConfigLoader.load(cfg_path)
+
+
+def test_close_non_required_hook_failure_never_blocks_close(configured_git_app):
+    """A failing `task.closed` hook (non-required — the only kind config-load
+    accepts for this event now) is fail-open: close still proceeds and the
+    task is torn down regardless."""
+    from mship.core.state import StateManager, WorkspaceState
+
+    cfg_path = configured_git_app / "mothership.yaml"
+    cfg_path.write_text(
+        cfg_path.read_text()
+        + "hooks:\n"
+        + "  - on: task.closed\n"
+        + "    run: notify-closed-fails\n"
     )
     container.config.reset()
 
@@ -2087,8 +2110,8 @@ def test_close_required_hook_failure_blocks_close(configured_git_app):
     container.shell.override(mock_shell)
     try:
         r = CliRunner().invoke(app, ["close", "--yes", "--abandon", "--task", "t"])
-        assert r.exit_code != 0
-        # Never committed — the worktree teardown/state removal never ran.
-        assert "t" in sm.load().tasks
+        assert r.exit_code == 0, r.output
+        # Fail-open: close proceeds despite the failing hook.
+        assert "t" not in sm.load().tasks
     finally:
         container.shell.reset_override()

@@ -54,11 +54,25 @@ LIFECYCLE_EVENTS: frozenset[str] = frozenset(
     | _WORKITEM_PHASE_EVENTS
 )
 
-# `pr.merged`/`pr.closed` are polling-derived (PrWatcher's sweep cadence) —
-# by the time the transition is observed it has already happened, so
-# `required: true` can't block anything there. Rejected at config-load time
-# rather than silently accepted-but-meaningless. See spec open question q5.
-_NON_BLOCKING_EVENTS: frozenset[str] = frozenset({"pr.merged", "pr.closed"})
+# `required: true` is only meaningful on events that fire BEFORE their state
+# mutation commits — a required hook's failure can then genuinely abort the
+# transition. That's true of `phase.entered.*` and `workitem.phase.*` only.
+# Every other event in the v1 catalog fires *after* its transition's
+# side effects already landed, so a required failure there can't block or roll
+# anything back — it just leaves partial state:
+#   - `pr.merged`/`pr.closed` are polling-derived (PrWatcher's sweep cadence) —
+#     the merge/close already happened by the time the sweep observes it.
+#   - `task.finished` fires after PRs/branches are already created and pushed
+#     (a required failure would only block the local finished_at stamp, not
+#     the already-visible remote PRs).
+#   - `task.closed` fires after the bound spec has already been advanced (and
+#     before worktree teardown) — a required failure blocks the teardown but
+#     leaves the spec advanced while the task stays open.
+# Rejected at config-load time rather than silently accepted-but-meaningless.
+# See spec open question q5 and the MOS-220 PR review follow-up.
+_POST_HOC_EVENTS: frozenset[str] = frozenset(
+    {"task.finished", "task.closed", "pr.merged", "pr.closed"}
+)
 
 
 class HookConfig(BaseModel):
@@ -104,13 +118,23 @@ class HookConfig(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def validate_required_not_on_polling_events(self) -> "HookConfig":
-        if self.required and self.on in _NON_BLOCKING_EVENTS:
+    def validate_required_only_on_pre_mutation_events(self) -> "HookConfig":
+        """`required: true` is only accepted on the pre-mutation events —
+        `phase.entered.*` / `workitem.phase.*` — which fire before their state
+        mutation commits, so a required failure can genuinely abort the
+        transition. Every other v1 event (`task.finished`, `task.closed`,
+        `pr.merged`, `pr.closed`) fires after its own irreversible side
+        effects already landed, so `required: true` there can't block or roll
+        anything back. See `_POST_HOC_EVENTS` above."""
+        if self.required and self.on in _POST_HOC_EVENTS:
             raise ValueError(
                 f"hooks: `required: true` is not meaningful on {self.on!r} — "
-                f"pr.merged/pr.closed are detected after the fact by "
-                f"PrWatcher's poll, so a hook here cannot block a transition "
-                f"that already happened. Remove `required: true` for this hook."
+                f"this event fires only after its transition's side effects "
+                f"(PR/branch creation, spec advance, polling-observed "
+                f"merge/close, etc.) already happened, so a hook here cannot "
+                f"block a transition that's already committed. `required: "
+                f"true` is only valid on phase.entered.*/workitem.phase.* "
+                f"(pre-mutation events). Remove `required: true` for this hook."
             )
         return self
 

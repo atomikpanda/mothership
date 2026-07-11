@@ -943,10 +943,16 @@ def test_hooks_empty_run_rejected(tmp_path):
         ConfigLoader.load(cfg, require_paths=False)
 
 
-@pytest.mark.parametrize("event", ["pr.merged", "pr.closed"])
-def test_hooks_required_true_rejected_on_polling_events(tmp_path, event):
-    """required: true can't block anything on pr.merged/pr.closed — the merge/close
-    already happened by the time PrWatcher's poll observes it. See spec q5."""
+@pytest.mark.parametrize("event", ["task.finished", "task.closed", "pr.merged", "pr.closed"])
+def test_hooks_required_true_rejected_on_post_hoc_events(tmp_path, event):
+    """`required: true` can't block anything on task.finished/task.closed/
+    pr.merged/pr.closed — each of these fires only AFTER its own irreversible
+    side effects already landed (PRs/branches pushed, spec state advanced,
+    worktree torn down, or simply observed after the fact by PrWatcher's
+    poll), so a hook here can never abort the transition. See spec q5 and the
+    MOS-220 PR review follow-up (required close/finish hooks leaving spec
+    state advanced or PRs already created while the local transition is
+    blocked)."""
     from mship.core.config import ConfigLoader
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text(
@@ -964,7 +970,16 @@ def test_hooks_required_true_rejected_on_polling_events(tmp_path, event):
         ConfigLoader.load(cfg, require_paths=False)
 
 
-def test_hooks_required_true_accepted_on_blocking_events(tmp_path):
+@pytest.mark.parametrize("event", [
+    "phase.entered.plan", "phase.entered.dev", "phase.entered.review", "phase.entered.run",
+    "workitem.phase.inbox", "workitem.phase.shaping", "workitem.phase.ready",
+    "workitem.phase.in_flight", "workitem.phase.review", "workitem.phase.done",
+])
+def test_hooks_required_true_accepted_on_pre_mutation_events(tmp_path, event):
+    """`required: true` IS meaningful on phase.entered.*/workitem.phase.* — both
+    fire before their state mutation commits, so a required failure can
+    genuinely abort the transition. These are the only event families where
+    `required: true` is accepted."""
     from mship.core.config import ConfigLoader
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text(
@@ -974,7 +989,7 @@ def test_hooks_required_true_accepted_on_blocking_events(tmp_path):
         "    path: ./app\n"
         "    type: service\n"
         "hooks:\n"
-        "  - on: task.finished\n"
+        f"  - on: {event}\n"
         "    run: some-task\n"
         "    required: true\n"
     )

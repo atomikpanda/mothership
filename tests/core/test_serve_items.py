@@ -230,3 +230,37 @@ def test_post_item_phase_non_required_hook_failure_still_sets_override(tmp_path)
     resp = client.post(f"/items/{wi.id}/phase", json={"phase": "done"})
     assert resp.status_code == 200
     assert items.get(wi.id).phase_override == "done"
+
+
+def test_post_item_phase_hook_fires_iff_config_present(tmp_path):
+    """MOS-220 Greptile fix ("Server Can Bypass Phase Hooks"): the endpoint
+    must fire configured hooks whenever `config` IS present, and the skip
+    must be strictly BECAUSE `config is None` — not some other code path
+    that happens to drop hooks even when a config (with a matching hook)
+    exists. Same hook definition, same WorkItemStore dir; the only variable
+    between the two calls below is whether `config` is wired into
+    `create_app` at all."""
+    from mship.core.config import HookConfig, WorkspaceConfig
+
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi_no_config = items.create(title="No config", kind="feature", workspace="testws", now=_now())
+    wi_with_config = items.create(title="With config", kind="feature", workspace="testws", now=_now())
+
+    marker = tmp_path / "hook-fired.txt"
+    hooks = [HookConfig(on="workitem.phase.done", run=f"touch {marker}")]
+
+    # No config wired into create_app at all -> genuinely nothing to fire,
+    # but the override must still apply cleanly (no crash).
+    client_no_config = _app(tmp_path)
+    resp = client_no_config.post(f"/items/{wi_no_config.id}/phase", json={"phase": "done"})
+    assert resp.status_code == 200
+    assert not marker.exists()
+    assert items.get(wi_no_config.id).phase_override == "done"
+
+    # Same hook definition, config now wired in -> it must fire.
+    config = WorkspaceConfig(workspace="testws", repos={}, hooks=hooks)
+    client_with_config = _app_with_config(tmp_path, config)
+    resp = client_with_config.post(f"/items/{wi_with_config.id}/phase", json={"phase": "done"})
+    assert resp.status_code == 200
+    assert marker.exists()
+    assert items.get(wi_with_config.id).phase_override == "done"

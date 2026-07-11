@@ -16,12 +16,19 @@ or times out is caught, logged as a warning, and reported back via its
 HookResult — but does NOT raise, so a bad hook can never wedge a task/WorkItem
 transition. `required: true` (mship.core.config.HookConfig.required) opts a
 specific hook into blocking behavior: its failure raises HookRequiredError
-instead, which callers at blocking-capable wire points (task.finished,
-task.closed, phase.entered.*, workitem.phase.*) should let propagate to abort
-the transition *before* it commits. `required: true` is rejected at
-config-load time for pr.merged/pr.closed (see config.py) since those are
-polling-derived — the transition already happened by the time PrWatcher
-observes it, so there is nothing left to block.
+instead, which callers at blocking-capable wire points (phase.entered.*,
+workitem.phase.*) should let propagate to abort the transition *before* it
+commits — those are the only two event families that fire BEFORE their state
+mutation commits, so a required failure there can genuinely block it.
+
+`required: true` is rejected at config-load time (see config.py) for every
+other v1 event — task.finished, task.closed, pr.merged, pr.closed — because
+each of those fires only AFTER its own irreversible side effects already
+landed (PRs/branches pushed, spec state advanced, worktree torn down, or
+simply observed well after the fact by PrWatcher's poll). A required failure
+there can't cleanly abort/roll back anything; it would just leave partial
+state (e.g. a spec already advanced while the task stays open). So those four
+events are always fail-open, regardless of `required:`.
 
 A hook's `run` executes through the exact same env_runner-wrapped shell path
 executor.py uses for go-task targets (ShellRunner.build_command +
@@ -50,10 +57,13 @@ log = logging.getLogger(__name__)
 class HookRequiredError(RuntimeError):
     """Raised when a `required: true` hook fails (nonzero exit or timeout).
 
-    Callers at blocking-capable wire points (task.finished, task.closed,
-    phase.entered.*, workitem.phase.*) should let this propagate to abort the
-    transition before it commits. Never raised for pr.merged/pr.closed —
-    `required: true` is rejected for those events at config-load time."""
+    Callers at blocking-capable wire points (phase.entered.*,
+    workitem.phase.*) should let this propagate to abort the transition
+    before it commits. Never raised for task.finished, task.closed,
+    pr.merged, or pr.closed — `required: true` is rejected for those
+    post-hoc events at config-load time (see config.py's `_POST_HOC_EVENTS`),
+    since each fires only after its own irreversible side effects already
+    landed, so there is nothing left to block."""
 
 
 @dataclass

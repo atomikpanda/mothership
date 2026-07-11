@@ -794,21 +794,38 @@ def create_app(
         one concrete "WorkItem phase-change" call site today (phase is
         otherwise derived on read via compute_phase, not mutated anywhere
         else). A `required: true` hook's failure blocks the override (422); a
-        non-required failure is fail-open — logged, override still proceeds."""
+        non-required failure is fail-open — logged, override still proceeds.
+
+        The ONLY reason this skips firing hooks is `config is None` — this
+        serve instance has no workspace config wired in at all (see
+        `create_app`'s docstring), so there is structurally nothing to
+        evaluate. That check is deliberately its own `if`, nested below
+        `body.phase is not None`, rather than folded into one combined
+        condition — so a config that DOES exist can never be silently
+        dropped by an unrelated branch here matching the CLI's own
+        `workitem phase` command (mship.cli.workitem), which always has a
+        config and always fires hooks when `body.phase is not None`."""
         now = datetime.now(timezone.utc)
         with _item_msg_lock:
             if workitems.get(item_id) is None:
                 raise HTTPException(status_code=404, detail=f"no work item {item_id!r}")
-            if body.phase is not None and config is not None:
-                from mship.core.lifecycle_hooks import HookContext, HookRequiredError, run_hooks
-                try:
-                    run_hooks(
-                        f"workitem.phase.{body.phase}", HookContext(workitem_id=item_id),
-                        config=config, workspace_root=workspace_root,
-                        shell=ShellRunner(), state_manager=state_manager,
+            if body.phase is not None:
+                if config is not None:
+                    from mship.core.lifecycle_hooks import HookContext, HookRequiredError, run_hooks
+                    try:
+                        run_hooks(
+                            f"workitem.phase.{body.phase}", HookContext(workitem_id=item_id),
+                            config=config, workspace_root=workspace_root,
+                            shell=ShellRunner(), state_manager=state_manager,
+                        )
+                    except HookRequiredError as e:
+                        raise HTTPException(status_code=422, detail=str(e))
+                else:
+                    logger.debug(
+                        "post_item_phase: no workspace config wired into this "
+                        "serve instance — workitem.phase.%s hooks not evaluated "
+                        "for %s", body.phase, item_id,
                     )
-                except HookRequiredError as e:
-                    raise HTTPException(status_code=422, detail=str(e))
             try:
                 workitems.set_phase_override(item_id, body.phase, now=now)
             except KeyError:

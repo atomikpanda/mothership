@@ -832,20 +832,21 @@ def register(app: typer.Typer, get_container):
         except Exception:
             pass
 
-        # Lifecycle hooks (MOS-220): `task.closed` fires here, before the
-        # worktree teardown/state-removal mutation below, so a `required: true`
-        # hook's failure aborts the close entirely. A non-required hook's
-        # failure is fail-open: warned, close proceeds.
-        from mship.core.lifecycle_hooks import HookContext, HookRequiredError, run_hooks
-        try:
-            hook_results = run_hooks(
-                "task.closed", HookContext(task_slug=task_slug),
-                config=config, workspace_root=Path(container.config_path()).parent,
-                shell=container.shell(), state_manager=state_mgr,
-            )
-        except HookRequiredError as e:
-            output.error(f"blocked by required lifecycle hook: {e}")
-            raise typer.Exit(code=1)
+        # Lifecycle hooks (MOS-220): `task.closed` fires here, after the
+        # spec-advance above (which may have already committed a spec-status
+        # mutation) and before the worktree teardown/state-removal below.
+        # Because the spec advance is already an irreversible, already-applied
+        # side effect by this point, `required: true` is rejected for
+        # `task.closed` at config-load time (see config.py) — a required
+        # failure here couldn't cleanly abort the close, it would just leave
+        # the spec advanced while the task stays open. So this hook is always
+        # fail-open: a failure is warned and the close still proceeds.
+        from mship.core.lifecycle_hooks import HookContext, run_hooks
+        hook_results = run_hooks(
+            "task.closed", HookContext(task_slug=task_slug),
+            config=config, workspace_root=Path(container.config_path()).parent,
+            shell=container.shell(), state_manager=state_mgr,
+        )
         for hr in hook_results:
             if not hr.ok:
                 output.warning(f"lifecycle hook '{hr.hook_name}' for task.closed failed: {hr.error}")
@@ -1556,21 +1557,20 @@ def register(app: typer.Typer, get_container):
                     f"PR created for {pr_info['repo']}: {pr_info['url']}",
                 )
 
-        # Lifecycle hooks (MOS-220): `task.finished` fires here, before the
-        # finished_at mutation below commits, so a `required: true` hook's
-        # failure aborts the stamp (the PRs above are already created by this
-        # point — see spec's own caveat re: mid-flow blocking value). A
-        # non-required hook's failure is fail-open: warned, finish proceeds.
-        from mship.core.lifecycle_hooks import HookContext, HookRequiredError, run_hooks
-        try:
-            hook_results = run_hooks(
-                "task.finished", HookContext(task_slug=t.slug),
-                config=config, workspace_root=workspace_root, shell=shell,
-                state_manager=state_mgr,
-            )
-        except HookRequiredError as e:
-            output.error(f"blocked by required lifecycle hook: {e}")
-            raise typer.Exit(code=1)
+        # Lifecycle hooks (MOS-220): `task.finished` fires here, after the
+        # PRs above are already created/pushed — an irreversible,
+        # already-applied side effect. `required: true` is rejected for
+        # `task.finished` at config-load time (see config.py): a required
+        # failure here could only ever block the local finished_at stamp
+        # below, while the remote PRs/branches are already visible, so it
+        # can't cleanly abort the finish. This hook is always fail-open: a
+        # failure is warned and finish still proceeds to stamp finished_at.
+        from mship.core.lifecycle_hooks import HookContext, run_hooks
+        hook_results = run_hooks(
+            "task.finished", HookContext(task_slug=t.slug),
+            config=config, workspace_root=workspace_root, shell=shell,
+            state_manager=state_mgr,
+        )
         for hr in hook_results:
             if not hr.ok:
                 output.warning(f"lifecycle hook '{hr.hook_name}' for task.finished failed: {hr.error}")

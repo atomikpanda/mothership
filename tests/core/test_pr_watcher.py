@@ -449,3 +449,75 @@ def test_pr_hook_not_refired_on_second_sweep():
     watcher.check_once()
 
     assert len(shell.calls) == 1
+
+
+def test_pr_hook_not_refired_on_restart_dedup():
+    """A brand-new watcher (empty `notified` set) whose target thread already
+    carries the event from a prior process must not refire the hook — only a
+    genuinely NEW post (not a restart-dedup skip) may trigger it. Guards the
+    `_check_one`/`_resolve_and_post` refactor that moved the hook call outside
+    the lock: the dedup signal must still gate it correctly."""
+    from mship.core.config import HookConfig
+
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    url = "https://github.com/org/repo1/pull/1"
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    # Simulate a prior process having already posted the event.
+    msgs.append(
+        thread.id, "agent",
+        f"\U0001f500 PR merged: {url} (task task-1) — ready to close out.",
+        NOW, kind="event",
+    )
+    task = FakeTask(pr_urls={"repo1": url}, work_item_id="wi-1")
+    state = FakeStateManager({"task-1": task})
+
+    shell = _RecordingShell()
+    config = _hooks_config([HookConfig(on="pr.merged", run="task notify-merge")])
+
+    watcher = PrWatcher(
+        msgs, workitems, state, lambda u: "merged", now_fn,
+        config=config, workspace_root=Path("/ws"), shell=shell,
+    )
+    watcher.check_once()
+
+    assert shell.calls == []  # dedup-skipped post must not fire the hook
+
+
+def test_pr_hook_fires_outside_the_lock():
+    """MOS-220 Greptile fix ("PR Hook Holds Item Lock"): the lifecycle hook
+    must run AFTER the watcher releases its lock. In `serve` this lock is the
+    same `_item_msg_lock` guarding POST /items/{id}/messages, /unattended, and
+    /phase — a slow hook holding it would stall unrelated item/message HTTP
+    requests for up to the hook's timeout."""
+    import threading
+
+    from mship.core.config import HookConfig
+
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    task = FakeTask(pr_urls={"repo1": "https://github.com/org/repo1/pull/1"}, work_item_id="wi-1")
+    state = FakeStateManager({"task-1": task})
+
+    lock = threading.Lock()
+    observed_locked: list[bool] = []
+
+    class _AssertingShell(_RecordingShell):
+        def run(self, command, cwd, env=None, timeout=None):
+            observed_locked.append(lock.locked())
+            return super().run(command, cwd, env=env, timeout=timeout)
+
+    shell = _AssertingShell()
+    config = _hooks_config([HookConfig(on="pr.merged", run="task notify-merge")])
+
+    watcher = PrWatcher(
+        msgs, workitems, state, lambda url: "merged", now_fn,
+        lock=lock, config=config, workspace_root=Path("/ws"), shell=shell,
+    )
+    watcher.check_once()
+
+    assert len(shell.calls) == 1
+    assert observed_locked == [False]  # the lock was free while the hook ran

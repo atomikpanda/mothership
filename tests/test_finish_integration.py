@@ -1014,8 +1014,16 @@ def test_finish_fires_task_finished_hook(finish_workspace):
     assert any("notify-finished" in c for c in call_log)
 
 
-def test_finish_required_hook_failure_blocks_finished_stamp(finish_workspace):
-    workspace, mock_shell = finish_workspace
+def test_finish_required_hook_on_task_finished_rejected_at_config_load(finish_workspace):
+    """`required: true` on `task.finished` is rejected at config-load time
+    (see config.py's `_POST_HOC_EVENTS`) rather than allowed to block the
+    finished_at stamp mid-flow: by the time `task.finished` fires, the PRs
+    above are already created and pushed — an irreversible, already-visible
+    side effect — so a required failure here could never cleanly abort the
+    finish. The Greptile "PRs Escape Required Hook" finding this fixes."""
+    from mship.core.config import ConfigLoader
+
+    workspace, _mock_shell = finish_workspace
 
     cfg_path = workspace / "mothership.yaml"
     cfg_path.write_text(
@@ -1025,9 +1033,26 @@ def test_finish_required_hook_failure_blocks_finished_stamp(finish_workspace):
         + "    run: notify-finished-fails\n"
         + "    required: true\n"
     )
+    with pytest.raises(ValueError, match="required"):
+        ConfigLoader.load(cfg_path)
+
+
+def test_finish_non_required_hook_failure_never_blocks_finished_stamp(finish_workspace):
+    """A failing `task.finished` hook (non-required — the only kind
+    config-load accepts for this event now) is fail-open: finish still stamps
+    finished_at despite the failure."""
+    workspace, mock_shell = finish_workspace
+
+    cfg_path = workspace / "mothership.yaml"
+    cfg_path.write_text(
+        cfg_path.read_text()
+        + "hooks:\n"
+        + "  - on: task.finished\n"
+        + "    run: notify-finished-fails\n"
+    )
     container.config.reset()
 
-    result = runner.invoke(app, ["spawn", "--hotfix", "hook required test", "--repos", "shared"])
+    result = runner.invoke(app, ["spawn", "--hotfix", "hook non required test", "--repos", "shared"])
     assert result.exit_code == 0, result.output
 
     pr_url = "https://github.com/org/shared/pull/2"
@@ -1052,9 +1077,9 @@ def test_finish_required_hook_failure_blocks_finished_stamp(finish_workspace):
         lambda command, env_runner=None: f"{env_runner} {command}" if env_runner else command
     )
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "hook-required-test"])
-    assert result.exit_code != 0
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "hook-non-required-test"])
+    assert result.exit_code == 0, result.output
 
     mgr = StateManager(workspace / ".mothership")
     state = mgr.load()
-    assert state.tasks["hook-required-test"].finished_at is None
+    assert state.tasks["hook-non-required-test"].finished_at is not None

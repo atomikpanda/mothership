@@ -87,16 +87,33 @@ class PrWatcher:
         key = (slug, repo, url, st)
         if key in self.notified:
             return
+        # `_resolve_and_post` does all the dedup/posting bookkeeping under the
+        # lock (when one is given) and reports back whether a NEW event was
+        # posted this call. The lifecycle hook itself fires AFTER the lock is
+        # released (see `_fire_lifecycle_hook`'s docstring) — a slow hook must
+        # not hold up unrelated item/message operations (serve's
+        # `_item_msg_lock` also guards POST /items/{id}/messages, /unattended,
+        # and /phase). Only fire on a genuinely new post: a restart-dedup
+        # skip (thread already carried the event from a prior process) must
+        # not refire the hook.
         if self.lock is not None:
             with self.lock:
-                self._resolve_and_post(slug, task, repo, url, st, key)
+                newly_posted = self._resolve_and_post(slug, task, repo, url, st, key)
         else:
-            self._resolve_and_post(slug, task, repo, url, st, key)
+            newly_posted = self._resolve_and_post(slug, task, repo, url, st, key)
+        if newly_posted:
+            self._fire_lifecycle_hook(st, slug, repo)
 
     def _resolve_and_post(
         self, slug: str, task: Any, repo: str, url: str, st: str,
         key: tuple[str, str, str, str],
-    ) -> None:
+    ) -> bool:
+        """Post the mailbox event (if not already posted) and record dedup
+        state. Everything here runs under the lock — it must stay cheap.
+        Returns True iff a NEW event was posted this call (the signal the
+        caller uses to decide whether to fire the lifecycle hook, outside the
+        lock); False on a restart-dedup skip (already posted by a prior
+        process) — never refire the hook in that case."""
         now = self.now_fn()
         text = f"\U0001f500 PR {st}: {url} (task {slug}) — ready to close out."
 
@@ -111,15 +128,20 @@ class PrWatcher:
             # Already posted (prior process) — record it so this process's
             # in-memory set short-circuits future checks too.
             self.notified.add(key)
-            return
+            return False
 
         self.msgs.append(tid, "agent", text, now, kind="event")
         self.notified.add(key)
-        self._fire_lifecycle_hook(st, slug, repo)
+        return True
 
     def _fire_lifecycle_hook(self, st: str, slug: str, repo: str) -> None:
         """Fire the `pr.merged`/`pr.closed` lifecycle hook (MOS-220), once,
-        the same time the mailbox event is posted above. Polling-derived —
+        right after the mailbox event is posted — but, deliberately, OUTSIDE
+        `self.lock`. A hook shells out and is bounded by its own (possibly
+        generous) timeout; running it while holding `self.lock` (in `serve`,
+        the same `_item_msg_lock` guarding POST /items/{id}/messages,
+        /unattended, and /phase) would let one slow PR hook stall unrelated
+        item/message HTTP requests for up to that timeout. Polling-derived —
         the merge/close already happened by the time this sweep observes it,
         so `required: true` is rejected for these events at config-load time
         (nothing left to block). Never lets a hook failure escape: this
