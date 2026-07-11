@@ -199,6 +199,10 @@ def register(parent: typer.Typer, get_container) -> None:
             {s.id: s for s in specs.list()},
             dict(state_manager.load().tasks),
             {t.id: t for t in msgs.list()},
+            # build_workitem_index now also defaults to excluding archived items
+            # (MOS-228 T3); without this the store's own include_archived=all_items
+            # fetch above would be silently re-filtered back out for `--all`.
+            include_archived=all_items,
         )
         rows = [{"id": s.id, "title": s.title, "kind": s.kind, "phase": s.phase,
                  "needs_approval": s.attention.needs_approval,

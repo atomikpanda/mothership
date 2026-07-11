@@ -120,8 +120,16 @@ def build_workitem_index(
     specs_by_id: dict[str, Spec],
     tasks_by_slug: dict[str, Task],
     threads_by_id: dict[str, Thread],
+    include_archived: bool = False,
 ) -> list[WorkItemSummary]:
-    """Non-done items first (updated_at desc), then done (also desc). Shared by serve + CLI."""
+    """Non-done items first (updated_at desc), then done (also desc). Shared by serve + CLI.
+
+    Archived items are excluded by default, mirroring WorkItemStore.list's own
+    include_archived default (MOS-228 T3) — pass include_archived=True to include
+    them (e.g. a caller that already fetched a specific item directly and wants it
+    summarized regardless of its archived state)."""
+    if not include_archived:
+        workitems = [w for w in workitems if not w.archived]
     summaries = [_summarize(w, specs_by_id, tasks_by_slug, threads_by_id) for w in workitems]
     active = sorted([s for s in summaries if s.phase != "done"],
                     key=lambda s: s.updated_at, reverse=True)
