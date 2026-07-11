@@ -404,31 +404,59 @@ def run_verb_stream(
     materialized: dict[str, Path] = {}
     exit_code = 0
 
+    def _ensure_materialized(top_repo: str) -> Iterator[bytes]:
+        """Materialize a TOP-LEVEL repo's task-branch worktree at
+        `<hub>/<repo>`, recording it in `materialized`. A generator so it can
+        yield the base-freshness warning (see `check_base_freshness`) and, on
+        failure, the error line + trailing exit sentinel straight into the
+        stream. Its `yield from` value (PEP 380) is True on success, False if
+        the materialize failed — in which case the exit sentinel has ALREADY
+        been emitted and the caller MUST `return` to abort the whole request.
+
+        Idempotent: a repo already in `materialized` (e.g. a parent brought in
+        while resolving an earlier `git_root` child, then reached again in the
+        loop, or a parent also listed explicitly in `repos`) is a no-op — it is
+        never re-fetched/reset."""
+        if top_repo in materialized:
+            return True
+        rc = config.repos[top_repo]
+        repo_path = rc.path
+        worktree_path = hub / top_repo
+
+        warning = check_base_freshness(shell, repo_path, rc.base_branch)
+        if warning is not None:
+            yield f"{warning}\n".encode("utf-8")
+
+        try:
+            materialize_worktree(shell, repo_path, worktree_path, branch, repo_name=top_repo)
+        except MaterializeError as exc:
+            yield f"error: {exc}\n".encode("utf-8")
+            yield f"{EXIT_MARKER}:{nonce} 1\n".encode("utf-8")
+            return False
+
+        materialized[top_repo] = worktree_path
+        return True
+
     for repo_name in repos:
         repo_config = config.repos[repo_name]
 
         if repo_config.git_root is not None:
-            # Subdirectory child (mirrors WorktreeManager.spawn): its git
-            # tree is the parent's, already fetched/checked-out above (or
-            # by a prior remote run) — no independent fetch/worktree-add.
-            parent_wt = materialized.get(repo_config.git_root, hub / repo_config.git_root)
-            worktree_path = parent_wt / repo_config.path
-        else:
-            repo_path = repo_config.path
-            worktree_path = hub / repo_name
-
-            warning = check_base_freshness(shell, repo_path, repo_config.base_branch)
-            if warning is not None:
-                yield f"{warning}\n".encode("utf-8")
-
-            try:
-                materialize_worktree(shell, repo_path, worktree_path, branch, repo_name=repo_name)
-            except MaterializeError as exc:
-                yield f"error: {exc}\n".encode("utf-8")
-                yield f"{EXIT_MARKER}:{nonce} 1\n".encode("utf-8")
+            # Subdirectory child (mirrors WorktreeManager.spawn): its git tree
+            # IS the parent's worktree. Guarantee the PARENT is materialized
+            # first (parent-first) — even when this request lists only the
+            # child, or lists it before its parent — then resolve the child's
+            # path UNDER the materialized parent worktree. Previously this fell
+            # back to a never-fetched `hub / git_root` dir, so the task could
+            # run against the serve host's stale/source tree.
+            if not (yield from _ensure_materialized(repo_config.git_root)):
                 return
-
-        materialized[repo_name] = worktree_path
+            parent_wt = materialized[repo_config.git_root]
+            worktree_path = parent_wt / repo_config.path
+            materialized[repo_name] = worktree_path
+        else:
+            if not (yield from _ensure_materialized(repo_name)):
+                return
+            worktree_path = materialized[repo_name]
 
         actual_task_name = repo_config.tasks.get(verb, verb)
         env_runner = repo_config.env_runner or config.env_runner

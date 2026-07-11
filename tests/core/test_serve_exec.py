@@ -115,6 +115,29 @@ def _config(tmp_path: Path, *, base_branch: str | None = None) -> WorkspaceConfi
     )
 
 
+def _config_with_child(tmp_path: Path) -> WorkspaceConfig:
+    """A parent service ('app') plus a `git_root` subdirectory child
+    ('server') nested under it — the shape FIX A guards: a child's worktree
+    is its parent's worktree, so the parent MUST be materialized (parent-
+    first, mirroring WorktreeManager.spawn) before the child's path is
+    resolved, even when only the child is requested or it's listed first."""
+    parent_dir = tmp_path / "app"
+    (parent_dir / "server").mkdir(parents=True, exist_ok=True)
+    return WorkspaceConfig(
+        workspace="t",
+        repos={
+            "app": RepoConfig(
+                path=parent_dir, type="service",
+                tasks={"run": "start", "capture": "capture", "build": "build"},
+            ),
+            "server": RepoConfig(
+                path=Path("server"), type="service", git_root="app",
+                tasks={"run": "start", "capture": "capture", "build": "build"},
+            ),
+        },
+    )
+
+
 def _app(tmp_path: Path, *, auth_token: str | None = None, config: WorkspaceConfig | None = None):
     return create_app(
         specs_dir=tmp_path / "specs",
@@ -341,6 +364,108 @@ def test_run_verb_stream_materialize_failure_surfaces_repo_and_stops(tmp_path, m
     assert lines[-1] != _exit_line(nonce, 0)
     assert any("api" in ln and "fatal: could not create worktree" in ln for ln in lines[:-1])
     assert not fake.streaming_calls, "the task must not run once materialize fails"
+
+
+# --- FIX A: git_root child must materialize its PARENT first (parent-first) ---
+
+
+class _SnapshotShellRunner(_FakeShellRunner):
+    """Records a snapshot of the git commands issued SO FAR at the moment
+    each task launch (`run_streaming`) happens — lets a test prove ordering
+    (e.g. the parent's `git worktree add` ran BEFORE the child's task) from a
+    single synchronous generator drain, without wall-clock timing."""
+
+    def run_streaming(self, command, cwd, env=None):
+        self.streaming_calls.append({
+            "command": command, "cwd": Path(cwd), "env": env,
+            "git_at_launch": [c for c, _ in self.run_calls],
+        })
+        return self._streaming_proc
+
+
+def test_run_verb_stream_git_root_child_only_materializes_parent(tmp_path):
+    """FIX A: a request naming ONLY a `git_root` child must still materialize
+    the PARENT top-level repo (fetch + worktree-add) — the child's git tree
+    IS the parent's worktree. Without parent-first materialization the parent
+    hub worktree was never fetched/created, so the task ran against the serve
+    host's stale/source tree."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ran\n"], returncode=0))
+    deps = remote_exec.RemoteExecDeps(
+        config=_config_with_child(tmp_path), shell=fake, workspace_root=tmp_path
+    )
+
+    lines = list(remote_exec.run_verb_stream("run", "t1", ["server"], None, deps=deps, nonce=_TEST_NONCE))
+    text = [l.decode() for l in lines]
+
+    commands = [c for c, _ in fake.run_calls]
+    # The PARENT ('app') was materialized: its branch fetched and its hub
+    # worktree added — none of which happens for a git_root child on its own.
+    assert "git fetch origin feat/t1" in commands
+    parent_hub = str(tmp_path / ".worktrees" / "t1" / "app")
+    assert any(
+        c.startswith("git worktree add -B feat/t1 ")
+        and parent_hub in c
+        and c.endswith(" origin/feat/t1")
+        for c in commands
+    ), commands
+
+    # The child task ran UNDER the materialized parent hub worktree
+    # (<hub>/app/server), not the serve host's source checkout (<tmp>/app/server).
+    assert len(fake.streaming_calls) == 1
+    assert fake.streaming_calls[0]["cwd"] == tmp_path / ".worktrees" / "t1" / "app" / "server"
+    assert text[-1] == f"__MSHIP_EXIT__:{_TEST_NONCE} 0\n"
+
+
+def test_run_verb_stream_git_root_child_before_parent_materializes_parent_first(tmp_path):
+    """FIX A: even when the child is listed BEFORE its parent, the parent is
+    materialized before the child's task runs (parent-first), and the parent
+    is not re-fetched when the loop later reaches it (idempotent)."""
+    fake = _SnapshotShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"], returncode=0))
+    deps = remote_exec.RemoteExecDeps(
+        config=_config_with_child(tmp_path), shell=fake, workspace_root=tmp_path
+    )
+
+    list(remote_exec.run_verb_stream("run", "t1", ["server", "app"], None, deps=deps, nonce=_TEST_NONCE))
+
+    # Child ran first; at that instant the parent's worktree-add had already run.
+    child_call = fake.streaming_calls[0]
+    assert child_call["cwd"] == tmp_path / ".worktrees" / "t1" / "app" / "server"
+    assert any(
+        c.startswith("git worktree add -B feat/t1 ") for c in child_call["git_at_launch"]
+    ), child_call["git_at_launch"]
+
+    # Parent materialized exactly once (idempotent): a single worktree-add total.
+    all_cmds = [c for c, _ in fake.run_calls]
+    assert sum(c.startswith("git worktree add") for c in all_cmds) == 1, all_cmds
+
+
+def test_run_verb_stream_git_root_child_parent_materialize_failure_stops_cleanly(tmp_path):
+    """FIX A: if materializing the PARENT (while resolving a git_root child)
+    fails, the request fails the same clean way a top-level materialize
+    failure does — an error line naming the parent + a non-zero exit — and no
+    task runs."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["should not run\n"], returncode=0))
+
+    def _failing_run(command, cwd, env=None):
+        fake.run_calls.append((command, Path(cwd)))
+        if command.startswith("git worktree add"):
+            return ShellResult(returncode=128, stdout="", stderr="fatal: could not create worktree")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    fake.run = _failing_run
+    deps = remote_exec.RemoteExecDeps(
+        config=_config_with_child(tmp_path), shell=fake, workspace_root=tmp_path
+    )
+
+    lines = list(remote_exec.run_verb_stream("run", "t1", ["server"], None, deps=deps, nonce=_TEST_NONCE))
+    text = [l.decode() for l in lines]
+
+    assert text[-1].startswith(f"{remote_exec.EXIT_MARKER}:{_TEST_NONCE} ")
+    exit_code = int(text[-1].split(" ", 1)[1].strip())
+    assert exit_code != 0
+    # Error names the PARENT repo (the one whose materialize failed).
+    assert any("app" in l and "fatal: could not create worktree" in l for l in text[:-1])
+    assert not fake.streaming_calls, "no task must run once the parent materialize fails"
 
 
 # --- POST /exec/{verb} -------------------------------------------------------

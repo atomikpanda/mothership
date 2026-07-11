@@ -330,6 +330,29 @@ def test_exec_remote_over_cap_artifact_count_errors_without_reading(tmp_path):
     assert not out_dir.exists()  # nothing was extracted
 
 
+def test_exec_remote_negative_artifact_count_errors_without_reading(tmp_path):
+    """FIX B: a remote advertising a NEGATIVE artifact byte count must be
+    rejected BEFORE any read — otherwise `read_exact(-1)` desyncs the stream
+    (a negative slice length reads nothing yet advances past nothing, leaving
+    the exit sentinel unparsed / the buffer corrupt). We advertise -1 and
+    supply none of the bytes; nothing is read or extracted."""
+    body = (
+        b"working\n"
+        + f"{ARTIFACT_MARKER}:{NONCE} -1\n".encode()
+        + f"{EXIT_MARKER}:{NONCE} 0\n".encode()
+    )
+    conn = RunHostConnection(url="http://h", token="t")
+    out_dir = tmp_path / "captures"
+    with pytest.raises(remote_client.RemoteExecError) as exc:
+        remote_client.exec_remote(
+            verb="capture", conn=conn, task="t1", repos=["app"],
+            captures_dir_for=out_dir, print_fn=lambda _l: None,
+            transport=_mock_transport(_recording_handler({}, body)),
+        )
+    assert "negative" in str(exc.value).lower()
+    assert not out_dir.exists()  # nothing was extracted
+
+
 def test_exec_remote_compressed_tar_is_rejected(tmp_path):
     """FIX 4: the server only ever writes an UNCOMPRESSED tar (mode="w"); the
     client opens mode="r:" so a gzip/xz "tar bomb" raises tarfile.ReadError,
@@ -610,6 +633,34 @@ def test_cli_capture_remote_extracts_artifacts_into_exact_local_captures_path(tm
         assert '"resolved_task"' in result.output
 
         # The local capture target never ran.
+        mock_shell.run_task.assert_not_called()
+    finally:
+        _reset()
+
+
+def test_cli_capture_remote_exit0_but_no_artifact_is_hard_error(tmp_path, monkeypatch):
+    """FIX C (defense-in-depth): a stale/older remote may return exit 0 with
+    NO artifact block. Local capture treats "success with no recognized
+    artifact" as a HARD error; the client must enforce the same INDEPENDENTLY
+    (on top of the server-side check) rather than exiting success. So a code-0
+    remote capture whose landing dir has no artifacts fails non-zero with the
+    same no-artifact message."""
+    wt = _write_capture_workspace(tmp_path, run_hosts=["role-x"], platforms=["android"])
+    _seed_task(tmp_path, slug="t1", repos=["app"], worktrees={"app": str(wt)})
+    mock_shell = _configure(tmp_path)
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+    # Exit 0 with NO artifact tar block — the failure mode this guards.
+    body = _frame(["captured\n"], exit_code=0)
+    try:
+        with _ClientPatch(monkeypatch, _recording_handler({}, body)):
+            result = runner.invoke(
+                app, ["capture", "--task", "t1", "--repo", "app", "--remote=role-x"]
+            )
+        assert result.exit_code != 0, result.output
+        assert "no recognized artifact" in result.output.lower()
+        assert "Traceback" not in (result.output or "")
         mock_shell.run_task.assert_not_called()
     finally:
         _reset()

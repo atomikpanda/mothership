@@ -190,6 +190,14 @@ def _drive(
 
         if text.startswith(artifact_prefix):
             n = _control_count(text)
+            if n < 0:
+                # A negative count would slip past the cap check below and reach
+                # read_exact(-1), which reads nothing yet leaves the buffer /
+                # stream desynced (the exit sentinel never gets parsed). Refuse.
+                raise RemoteExecError(
+                    f"remote advertised negative artifact byte count {n}; "
+                    f"refusing to read"
+                )
             if n > MAX_ARTIFACT_BYTES:
                 # Refuse BEFORE reading — no unbounded allocation / tar-bomb.
                 raise RemoteExecError(

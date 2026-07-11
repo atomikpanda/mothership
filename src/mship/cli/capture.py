@@ -181,6 +181,17 @@ def register(app: typer.Typer, get_container):
             # extracted files (exec_remote returns only the exit code).
             if code == 0:
                 landed = _cap.discover_artifacts(out_dir, kinds)
+                if not landed:
+                    # Defense-in-depth: a stale/older remote may return exit 0
+                    # with no artifact block. Local capture treats "success
+                    # with no recognized artifact" as a hard error — enforce
+                    # the same here INDEPENDENTLY of the server-side check
+                    # (don't trust a bare exit 0), with the same message/exit.
+                    output.error(
+                        f"capture target produced no recognized artifact in "
+                        f"{out_dir} for kinds {kinds}."
+                    )
+                    raise typer.Exit(code=1)
                 if output.human_mode:
                     for a in landed:
                         output.success(f"captured {a.kind} → {a.path}")
