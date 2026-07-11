@@ -595,9 +595,13 @@ class WorktreeManager:
                         )
                 # When we didn't cut from origin's tip (offline / no remote / fetch
                 # failed), cut from the local base branch explicitly rather than the
-                # checkout's HEAD.
+                # checkout's HEAD. If there's no local base branch either (only a
+                # stale remote-tracking ref from an earlier fetch), fall back to
+                # that rather than silently defaulting to HEAD.
                 if start_point is None and self._git.ref_exists(repo_path, cut_base):
                     start_point = cut_base
+                elif start_point is None and self._git.ref_exists(repo_path, f"origin/{cut_base}"):
+                    start_point = f"origin/{cut_base}"
                 self._git.worktree_add(
                     repo_path=repo_path,
                     worktree_path=wt_path,

@@ -269,6 +269,54 @@ def test_spawn_default_base_cuts_from_local_base_not_checkout_head_when_fetch_fa
     assert _head(wt) != unrelated_tip
 
 
+def test_spawn_default_base_cuts_from_origin_when_no_local_base_and_fetch_fails(
+    worktree_deps, tmp_path
+):
+    """MOS-203 (Greptile, worktree.py ~600): when the default (non --base) cut
+    can't fetch origin/<base> AND there is no local <base> branch at all (only
+    a stale remote-tracking origin/<base> from an earlier fetch), it must cut
+    the new worktree from origin/<base> — NOT silently fall through to the
+    checkout's HEAD. Regression for "no local base ref means ref_exists(base)
+    is False and start_point stays None"."""
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    shared = workspace / "shared"
+
+    # Normalize the fixture's default branch to literally "main" regardless of
+    # the host's git init.defaultBranch, so `cut_base` ("main") is unambiguous.
+    _git_run(shared, "branch", "-m", "main")
+    main_tip = _head(shared)
+
+    # Materialize origin/main (push + explicit fetch), so it exists as a
+    # remote-tracking ref, then break the remote so the in-spawn fetch fails.
+    origin = tmp_path / "shared-origin.git"
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+    _git_run(shared, "remote", "add", "origin", str(origin))
+    _git_run(shared, "push", "origin", "main")
+    _git_run(shared, "fetch", "origin", "main")
+
+    # Move HEAD off main onto an unrelated commit (also required to delete the
+    # local main branch below), so a HEAD-based cut would silently pick up the
+    # wrong tip.
+    _git_run(shared, "checkout", "-b", "unrelated-work")
+    (shared / "unrelated.txt").write_text("unrelated work in progress")
+    _git_run(shared, "add", "unrelated.txt")
+    _git_run(shared, "commit", "-m", "unrelated work commit")
+    unrelated_tip = _head(shared)
+    assert unrelated_tip != main_tip  # sanity: HEAD really is ahead of, and distinct from, main
+
+    # Delete the local main branch entirely — main now exists ONLY as
+    # origin/main — then break the remote so any further fetch fails.
+    _git_run(shared, "branch", "-D", "main")
+    _git_run(shared, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("no local base test", repos=["shared"], workspace_root=workspace)
+    wt = Path(state_mgr.load().tasks["no-local-base-test"].worktrees["shared"])
+
+    assert _head(wt) == main_tip        # cut from origin/main, not the checkout's HEAD
+    assert _head(wt) != unrelated_tip
+
+
 def test_abort_succeeds_even_if_branch_delete_fails(worktree_deps):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
