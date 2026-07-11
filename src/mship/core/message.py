@@ -87,15 +87,17 @@ class Thread(BaseModel):
     @computed_field
     @property
     def awaiting_agent_event(self) -> bool:
-        """True iff there's an agent message with kind=='event' after the last human
-        message — a PR-merge/close signal the owning agent hasn't handled yet."""
-        last_human = -1
+        """True iff there's an unhandled agent `event` message — one posted after
+        the agent's own last non-event message. A *human* message does NOT clear it
+        (the event is for the agent, not the operator); the owning agent clears it
+        by acting on the thread (posting any non-event message after the event)."""
+        last_agent_action = -1  # index of the agent's last NON-event message
         for i, m in enumerate(self.messages):
-            if m.role == "human":
-                last_human = i
+            if m.role == "agent" and m.kind != "event":
+                last_agent_action = i
         return any(
             m.role == "agent" and m.kind == "event"
-            for m in self.messages[last_human + 1:]
+            for m in self.messages[last_agent_action + 1:]
         )
 
     @computed_field
