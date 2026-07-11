@@ -786,15 +786,29 @@ def create_app(
     @app.post("/items/{item_id}/phase")
     def post_item_phase(item_id: str, body: PhaseOverrideBody):
         """Set (Mark done) or clear (Reopen) a work item's phase override. `null`
-        returns the item to its derived phase. Shares _item_msg_lock with the other
-        item writers to avoid a lost update if a steer/toggle lands concurrently.
+        returns the item to its derived phase. The existence check and the
+        commit below each take _item_msg_lock briefly (shared with the other
+        item writers, to avoid a lost update if a steer/toggle lands
+        concurrently) — but the lock is released while the lifecycle hook (a
+        subprocess, potentially slow) runs in between. See below for why.
 
         Lifecycle hooks (MOS-220): setting an explicit phase (not clearing one)
         fires `workitem.phase.<phase>` before the override below commits — the
         one concrete "WorkItem phase-change" call site today (phase is
         otherwise derived on read via compute_phase, not mutated anywhere
-        else). A `required: true` hook's failure blocks the override (422); a
-        non-required failure is fail-open — logged, override still proceeds.
+        else). A `required: true` hook's failure blocks the override (422) —
+        this still holds: the hook runs, and can still raise, strictly before
+        `set_phase_override` is ever called below. A non-required failure is
+        fail-open — logged, override still proceeds.
+
+        MOS-220 Greptile fix ("Hook Holds Lock"): the hook must NOT run while
+        `_item_msg_lock` is held — a slow/timing-out hook would otherwise
+        block unrelated item messages, unattended toggles, and other phase
+        changes for up to the hook's timeout. So the lock is taken twice: once
+        to check the item exists, released for the (possibly slow) hook call,
+        then re-taken to persist the override — mirroring PrWatcher's
+        `_fire_lifecycle_hook` (do the bookkeeping under the lock, run the
+        subprocess outside it).
 
         The ONLY reason this skips firing hooks is `config is None` — this
         serve instance has no workspace config wired in at all (see
@@ -804,28 +818,33 @@ def create_app(
         condition — so a config that DOES exist can never be silently
         dropped by an unrelated branch here matching the CLI's own
         `workitem phase` command (mship.cli.workitem), which always has a
-        config and always fires hooks when `body.phase is not None`."""
+        config and always fires hooks when `body.phase is not None`. Logged
+        at warning level (not debug) — a serve instance quietly missing its
+        config is a policy hole worth surfacing, not just a curiosity."""
         now = datetime.now(timezone.utc)
         with _item_msg_lock:
             if workitems.get(item_id) is None:
                 raise HTTPException(status_code=404, detail=f"no work item {item_id!r}")
-            if body.phase is not None:
-                if config is not None:
-                    from mship.core.lifecycle_hooks import HookContext, HookRequiredError, run_hooks
-                    try:
-                        run_hooks(
-                            f"workitem.phase.{body.phase}", HookContext(workitem_id=item_id),
-                            config=config, workspace_root=workspace_root,
-                            shell=ShellRunner(), state_manager=state_manager,
-                        )
-                    except HookRequiredError as e:
-                        raise HTTPException(status_code=422, detail=str(e))
-                else:
-                    logger.debug(
-                        "post_item_phase: no workspace config wired into this "
-                        "serve instance — workitem.phase.%s hooks not evaluated "
-                        "for %s", body.phase, item_id,
+
+        if body.phase is not None:
+            if config is not None:
+                from mship.core.lifecycle_hooks import HookContext, HookRequiredError, run_hooks
+                try:
+                    run_hooks(
+                        f"workitem.phase.{body.phase}", HookContext(workitem_id=item_id),
+                        config=config, workspace_root=workspace_root,
+                        shell=ShellRunner(), state_manager=state_manager,
                     )
+                except HookRequiredError as e:
+                    raise HTTPException(status_code=422, detail=str(e))
+            else:
+                logger.warning(
+                    "post_item_phase: no workspace config wired into this "
+                    "serve instance — workitem.phase.%s hooks not evaluated "
+                    "for %s", body.phase, item_id,
+                )
+
+        with _item_msg_lock:
             try:
                 workitems.set_phase_override(item_id, body.phase, now=now)
             except KeyError:

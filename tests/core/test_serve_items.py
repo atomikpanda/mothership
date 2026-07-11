@@ -264,3 +264,51 @@ def test_post_item_phase_hook_fires_iff_config_present(tmp_path):
     assert resp.status_code == 200
     assert marker.exists()
     assert items.get(wi_with_config.id).phase_override == "done"
+
+
+def test_post_item_phase_hook_does_not_hold_item_msg_lock(tmp_path):
+    """MOS-220 Greptile fix ("Hook Holds Lock"): a slow workitem.phase.* hook
+    must not stall unrelated item/message operations that share
+    `_item_msg_lock` (POST /items/{id}/messages, /unattended, /phase itself).
+    Proven with a hook that sleeps: a concurrent POST /items/{other_id}/
+    messages against the SAME client must complete quickly, not wait out the
+    hook's sleep — which it would if the endpoint still ran the hook while
+    holding the lock."""
+    import threading
+    import time
+
+    from mship.core.config import HookConfig, WorkspaceConfig
+
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    slow_item = items.create(title="Slow phase", kind="feature", workspace="testws", now=_now())
+    other_item = items.create(title="Unrelated", kind="feature", workspace="testws", now=_now())
+
+    config = WorkspaceConfig(
+        workspace="testws", repos={},
+        hooks=[HookConfig(on="workitem.phase.done", run="sleep 1")],
+    )
+    client = _app_with_config(tmp_path, config)
+
+    phase_result: dict = {}
+
+    def _fire_slow_phase():
+        t0 = time.monotonic()
+        resp = client.post(f"/items/{slow_item.id}/phase", json={"phase": "done"})
+        phase_result["status"] = resp.status_code
+        phase_result["elapsed"] = time.monotonic() - t0
+
+    thread = threading.Thread(target=_fire_slow_phase)
+    thread.start()
+    time.sleep(0.2)  # let the phase request start running its (slow) hook
+
+    t0 = time.monotonic()
+    msg_resp = client.post(f"/items/{other_item.id}/messages", json={"text": "hi"})
+    elapsed = time.monotonic() - t0
+
+    thread.join(timeout=5)
+
+    assert msg_resp.status_code == 200
+    assert elapsed < 0.5, f"messages POST took {elapsed}s — looks like it waited on the phase hook"
+    assert phase_result["status"] == 200
+    assert phase_result["elapsed"] >= 1.0
+    assert items.get(slow_item.id).phase_override == "done"

@@ -455,8 +455,8 @@ def test_pr_hook_not_refired_on_restart_dedup():
     """A brand-new watcher (empty `notified` set) whose target thread already
     carries the event from a prior process must not refire the hook — only a
     genuinely NEW post (not a restart-dedup skip) may trigger it. Guards the
-    `_check_one`/`_resolve_and_post` refactor that moved the hook call outside
-    the lock: the dedup signal must still gate it correctly."""
+    `_check_one`/`_check_posted`/`_post_event` refactor that moved the hook
+    call outside the lock: the dedup signal must still gate it correctly."""
     from mship.core.config import HookConfig
 
     msgs = FakeMessageStore()
@@ -521,3 +521,91 @@ def test_pr_hook_fires_outside_the_lock():
 
     assert len(shell.calls) == 1
     assert observed_locked == [False]  # the lock was free while the hook ran
+
+
+def test_pr_hook_fires_before_dedup_marker_is_durably_recorded():
+    """MOS-220 Greptile fix ("Dedup Drops Hooks"): the hook must fire BEFORE
+    the durable dedup record (the mailbox event message) is written, not
+    after. If the message were written first, a crash between the write and
+    the hook call would leave the marker in place forever with the hook
+    having never run, and a restarted watcher would see the marker and skip
+    the hook — silently, permanently. Proven by recording the relative order
+    of the hook call and the message append."""
+    from mship.core.config import HookConfig
+
+    order: list[str] = []
+
+    class _OrderTrackingShell(_RecordingShell):
+        def run(self, command, cwd, env=None, timeout=None):
+            order.append("hook")
+            return super().run(command, cwd, env=env, timeout=timeout)
+
+    class _OrderTrackingMessageStore(FakeMessageStore):
+        def append(self, *a, **kw):
+            order.append("append")
+            return super().append(*a, **kw)
+
+    msgs = _OrderTrackingMessageStore()
+    workitems = FakeWorkItemStore()
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    task = FakeTask(pr_urls={"repo1": "https://github.com/org/repo1/pull/1"}, work_item_id="wi-1")
+    state = FakeStateManager({"task-1": task})
+
+    shell = _OrderTrackingShell()
+    config = _hooks_config([HookConfig(on="pr.merged", run="task notify-merge")])
+
+    watcher = PrWatcher(
+        msgs, workitems, state, lambda url: "merged", now_fn,
+        config=config, workspace_root=Path("/ws"), shell=shell,
+    )
+    watcher.check_once()
+
+    assert order == ["hook", "append"]
+    assert len(msgs.append_calls) == 1
+
+
+def test_pr_hook_refires_after_crash_before_dedup_marker_recorded():
+    """MOS-220 Greptile fix ("Dedup Drops Hooks"): simulates the crash window
+    directly — the durable append (the dedup marker) fails the first time,
+    as if the process died before it could land, even though the hook had
+    already fired. A subsequent sweep (the "restart") must see that no
+    marker was durably recorded and refire the hook rather than treating it
+    as already handled — at-least-once beats at-most-zero for hooks. Once
+    the append succeeds, the event is recorded exactly once (happy-path
+    dedup is preserved)."""
+    from mship.core.config import HookConfig
+
+    class _FlakyMessageStore(FakeMessageStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.append_attempts = 0
+
+        def append(self, *a, **kw):
+            self.append_attempts += 1
+            if self.append_attempts == 1:
+                raise RuntimeError("simulated crash before durable write lands")
+            return super().append(*a, **kw)
+
+    msgs = _FlakyMessageStore()
+    workitems = FakeWorkItemStore()
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    task = FakeTask(pr_urls={"repo1": "https://github.com/org/repo1/pull/1"}, work_item_id="wi-1")
+    state = FakeStateManager({"task-1": task})
+
+    shell = _RecordingShell()
+    config = _hooks_config([HookConfig(on="pr.merged", run="task notify-merge")])
+
+    watcher = PrWatcher(
+        msgs, workitems, state, lambda url: "merged", now_fn,
+        config=config, workspace_root=Path("/ws"), shell=shell,
+    )
+
+    watcher.check_once()  # hook fires; the durable append then "crashes"
+    assert len(shell.calls) == 1
+    assert msgs.append_calls == []  # nothing durably recorded yet
+
+    watcher.check_once()  # re-check after the "crash": must refire, not skip
+    assert len(shell.calls) == 2
+    assert len(msgs.append_calls) == 1  # now durably recorded, exactly once
