@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from mship.core.base_resolver import resolve_base
 from mship.core.config import WorkspaceConfig
 from mship.core.log import LogManager
 from mship.core.reconcile.cache import ReconcileCache
@@ -178,11 +179,31 @@ def _main_checkout_clean(
     return out
 
 
+def _effective_base_for_repo(
+    task: Task, repo: str, config: WorkspaceConfig,
+) -> Optional[str]:
+    """Resolve the effective base branch for `repo` via the canonical resolver.
+
+    Falls back to `task.base_branch` when resolve_base has nothing to go on
+    (no repo config, no `--base` override) — this preserves the pre-MOS-229
+    behavior for repos/workspaces that don't declare `base_branch:` in
+    mothership.yaml, and tolerates a repo missing from config entirely
+    (`config.repos.get` returns None; resolve_base treats that as "no config").
+    """
+    repo_config = config.repos.get(repo)
+    resolved = resolve_base(
+        repo, repo_config, cli_base=None, base_map={},
+        known_repos=config.repos.keys(), task_base=task.base_override,
+    )
+    return resolved if resolved is not None else task.base_branch
+
+
 def _task_payload(
     task: Task,
     log_manager: LogManager,
     git_count: GitCounter,
     cache: Optional[ReconcileCache],
+    config: WorkspaceConfig,
 ) -> dict[str, Any]:
     last_test_state, last_test_iteration = _last_test_summary(task)
 
@@ -191,15 +212,28 @@ def _task_payload(
     for repo, wt_path in task.worktrees.items():
         wt = Path(wt_path)
         ahead_of_origin[repo] = git_count(wt, "@{u}..HEAD")
-        if task.base_branch:
-            ahead_of_base[repo] = git_count(wt, f"{task.base_branch}..HEAD")
+        eff_base = _effective_base_for_repo(task, repo, config)
+        if eff_base:
+            ahead_of_base[repo] = git_count(wt, f"{eff_base}..HEAD")
         else:
             ahead_of_base[repo] = None
+
+    # Only the explicitly-active repo drives the scalar base_branch. Falling
+    # back to the first inserted worktree would make a user-facing value depend
+    # on dict order and could report one repo's base while the agent/UI is
+    # focused on another (Greptile, MOS-229) — task.base_branch is the honest
+    # task-level answer when no repo is active.
+    active_repo = task.active_repo
+    base_branch = (
+        _effective_base_for_repo(task, active_repo, config)
+        if active_repo is not None
+        else task.base_branch
+    )
 
     return {
         "slug": task.slug,
         "branch": task.branch,
-        "base_branch": task.base_branch,
+        "base_branch": base_branch,
         "phase": task.phase,
         "finished_at": task.finished_at.isoformat() if task.finished_at else None,
         "worktrees": {repo: str(p) for repo, p in task.worktrees.items()},
@@ -233,7 +267,7 @@ def build_context(
     constructing a real `ReconcileCache(state_dir)`).
     """
     active_tasks = [
-        _task_payload(task, log_manager, git_count, cache)
+        _task_payload(task, log_manager, git_count, cache, config)
         for task in state.tasks.values()
         if task.finished_at is None
     ]

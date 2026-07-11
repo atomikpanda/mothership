@@ -248,6 +248,136 @@ def test_dispatch_invalid_mode_errors(tmp_path: Path):
         _reset()
 
 
+def _bootstrap_with_repo_config(
+    tmp_path: Path,
+    repo_name: str,
+    worktree: Path,
+    *,
+    repo_base_branch: str | None,
+    base_override: str | None = None,
+    task_base_branch: str | None = None,
+) -> tuple[Path, Path]:
+    """Bootstrap a task plus a mothership.yaml that actually declares `repo_name`
+    (with an optional `base_branch:`), so dispatch can exercise resolve_base
+    against real repo config instead of the empty `repos: {}` used elsewhere
+    in this file."""
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    repo_dir = tmp_path / f"{repo_name}-main"
+    repo_dir.mkdir()
+    (repo_dir / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    base_line = f"    base_branch: {repo_base_branch}\n" if repo_base_branch else ""
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        f"  {repo_name}:\n"
+        f"    path: {repo_dir}\n"
+        "    type: library\n"
+        f"{base_line}"
+    )
+    task = Task(
+        slug="t", description="d", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=[repo_name],
+        worktrees={repo_name: worktree}, branch="feat/t",
+        active_repo=repo_name, base_override=base_override,
+        base_branch=task_base_branch,
+    )
+    StateManager(state_dir).save(WorkspaceState(tasks={"t": task}))
+    return cfg, state_dir
+
+
+def test_dispatch_uses_repo_config_base_branch(tmp_path: Path):
+    """repo_config.base_branch="dev" (no override) -> the prompt shows "dev",
+    not "main" (MOS-229: dispatch used to ignore repo config entirely)."""
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap_with_repo_config(
+        tmp_path, "only", wt, repo_base_branch="dev",
+    )
+    container.config.reset(); container.state_manager.reset(); container.log_manager.reset()
+    container.config_path.override(cfg)
+    container.state_dir.override(state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "do the thing"])
+        assert result.exit_code == 0, result.output
+        assert "- **base branch:** dev" in result.output
+        assert "base (dev)" in result.output
+    finally:
+        _reset()
+
+
+def test_dispatch_base_override_wins_over_repo_config(tmp_path: Path):
+    """task.base_override (the --base pin) takes precedence over repo_config.base_branch."""
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap_with_repo_config(
+        tmp_path, "only", wt, repo_base_branch="dev", base_override="stacked",
+    )
+    container.config.reset(); container.state_manager.reset(); container.log_manager.reset()
+    container.config_path.override(cfg)
+    container.state_dir.override(state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "do the thing"])
+        assert result.exit_code == 0, result.output
+        assert "- **base branch:** stacked" in result.output
+    finally:
+        _reset()
+
+
+def test_dispatch_falls_back_to_main_when_repo_config_has_no_base_branch(tmp_path: Path):
+    """No repo_config.base_branch and no override -> unchanged "main" fallback."""
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap_with_repo_config(
+        tmp_path, "only", wt, repo_base_branch=None,
+    )
+    container.config.reset(); container.state_manager.reset(); container.log_manager.reset()
+    container.config_path.override(cfg)
+    container.state_dir.override(state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "do the thing"])
+        assert result.exit_code == 0, result.output
+        assert "- **base branch:** main" in result.output
+    finally:
+        _reset()
+
+
+def test_dispatch_falls_back_to_stored_task_base_before_main(tmp_path: Path):
+    """No repo_config.base_branch and no override, but the task recorded a
+    non-default base (e.g. the workspace default "staging") -> dispatch honors
+    the stored task.base_branch instead of jumping to "main" (Greptile, MOS-229:
+    keeps dispatch's fallback consistent with the context path)."""
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap_with_repo_config(
+        tmp_path, "only", wt, repo_base_branch=None, task_base_branch="staging",
+    )
+    container.config.reset(); container.state_manager.reset(); container.log_manager.reset()
+    container.config_path.override(cfg)
+    container.state_dir.override(state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "do the thing"])
+        assert result.exit_code == 0, result.output
+        assert "- **base branch:** staging" in result.output
+    finally:
+        _reset()
+
+
+def test_dispatch_repo_missing_from_config_falls_back_to_main(tmp_path: Path):
+    """A repo not declared in mothership.yaml at all (empty `repos: {}`, as in
+    the other tests in this file) must not crash — resolve_base tolerates a
+    missing repo_config and dispatch falls back to "main"."""
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    container.config.reset(); container.state_manager.reset(); container.log_manager.reset()
+    container.config_path.override(cfg)
+    container.state_dir.override(state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "x"])
+        assert result.exit_code == 0, result.output
+        assert "- **base branch:** main" in result.output
+    finally:
+        _reset()
+
+
 def test_dispatch_prompt_includes_dependencies_section(tmp_path: Path):
     now = datetime.now(timezone.utc)
     wt_a = tmp_path / "wt-a"; wt_a.mkdir()
