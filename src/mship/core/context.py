@@ -31,6 +31,124 @@ GitCounter = Callable[[Path, str], Optional[int]]
 DirtyCheck = Callable[[Path], Optional[bool]]
 
 
+# --- MOS-100: --for/--kind audience-shaped output --------------------------
+#
+# `instructions` text below is STATIC and hand-written -- no LLM, no
+# inference, no synthesized summaries. Each string is a fixed constant keyed
+# by (--for, --kind); build_audience_block() only ever selects one verbatim.
+# The implementer/spec-reviewer/code-quality-reviewer framings are drawn from
+# the language already proven out in
+# `src/mship/skills/subagent-driven-development/{implementer,spec-reviewer,
+# code-quality-reviewer}-prompt.md` so a later migration of those templates
+# to consume this output is a drop-in swap rather than a rewrite.
+
+FOR_VALUES: tuple[str, ...] = ("claude-code", "codex", "human", "reviewer")
+KIND_VALUES: tuple[str, ...] = ("spec", "code-quality")
+
+
+class AudienceError(ValueError):
+    """Invalid `--for`/`--kind` combination (MOS-100).
+
+    The single source of truth for this validation: `build_context()` always
+    runs it via `build_audience_block()`, so the CLI (or any other caller)
+    doesn't need its own duplicate check that could drift out of sync.
+    """
+
+
+_IMPLEMENTER_INSTRUCTIONS = (
+    "You are implementing this task. Work from the resolved task's worktree "
+    "(see this payload's `active_tasks[].worktrees` / `resolved_task`), never "
+    "the main checkout. Never commit to `main` -- the mship pre-commit hook "
+    "will refuse it, but don't waste a cycle finding that out. Commit your "
+    "changes with `mship commit \"<message>\"`, not raw `git commit`, so the "
+    "commit lands on the task's feature branch and gets journaled "
+    "automatically. When you're investigating something unexpected (a bug, "
+    "a failing test, unclear behavior), log your working hypothesis with "
+    "`mship debug hypothesis \"<text>\"` before you start changing code."
+)
+
+_HUMAN_INSTRUCTIONS = (
+    "This is a factual status summary of the workspace: active tasks, their "
+    "branches and worktrees, how far each is ahead of or behind its base and "
+    "origin, last test results, and phase. Read it as a status report of "
+    "what's true right now, not as directives -- it does not tell you what "
+    "to do next."
+)
+
+_REVIEWER_SPEC_INSTRUCTIONS = (
+    "You are reviewing this task for spec compliance. Do not trust the "
+    "implementer's self-report on its own -- verify by reading the actual "
+    "diff and comparing it line by line against the task description and "
+    "its plan. Flag anything under-built (requirements skipped or only "
+    "partially done) and anything over-built (scope that wasn't requested). "
+    "Report specific file:line references for any gap you find."
+)
+
+_REVIEWER_CODE_QUALITY_INSTRUCTIONS = (
+    "You are reviewing this task for code quality (after spec compliance "
+    "has already passed -- don't re-litigate that here). Inspect the diff "
+    "for maintainability (clear responsibilities, no unnecessary "
+    "complexity), naming (clear, accurate names matching what things do), "
+    "test quality (tests verify real behavior, not mocks, and cover edge "
+    "cases), and regressions (existing behavior this change may have broken)."
+)
+
+_INSTRUCTIONS: dict[tuple[str, Optional[str]], str] = {
+    ("claude-code", None): _IMPLEMENTER_INSTRUCTIONS,
+    ("codex", None): _IMPLEMENTER_INSTRUCTIONS,
+    ("human", None): _HUMAN_INSTRUCTIONS,
+    ("reviewer", "spec"): _REVIEWER_SPEC_INSTRUCTIONS,
+    ("reviewer", "code-quality"): _REVIEWER_CODE_QUALITY_INSTRUCTIONS,
+}
+
+
+def _validate_audience(for_: Optional[str], kind: Optional[str]) -> None:
+    """Raise AudienceError for any invalid `--for`/`--kind` combination.
+
+    Valid: `for_` is None (kind must also be None); `for_` is claude-code /
+    codex / human (kind must be None); `for_` is reviewer (kind must be spec
+    or code-quality).
+    """
+    if for_ is None:
+        if kind is not None:
+            raise AudienceError(
+                f"--kind requires --for reviewer; got --kind {kind!r} with no --for."
+            )
+        return
+    if for_ not in FOR_VALUES:
+        raise AudienceError(
+            f"unknown --for {for_!r}; expected one of: {', '.join(FOR_VALUES)}."
+        )
+    if for_ == "reviewer":
+        if kind is None:
+            raise AudienceError(
+                "--for reviewer requires --kind (spec | code-quality)."
+            )
+        if kind not in KIND_VALUES:
+            raise AudienceError(
+                f"unknown --kind {kind!r}; expected one of: {', '.join(KIND_VALUES)}."
+            )
+    elif kind is not None:
+        raise AudienceError(
+            f"--kind is only valid with --for reviewer; got --for {for_!r} with --kind {kind!r}."
+        )
+
+
+def build_audience_block(
+    for_: Optional[str], kind: Optional[str] = None
+) -> Optional[dict[str, Any]]:
+    """Validate `for_`/`kind` and assemble the static `audience` block.
+
+    Returns None when `for_` is None -- the default, no-audience-requested
+    path that keeps `mship context`'s output byte-for-byte identical to
+    before MOS-100. Raises `AudienceError` for any invalid combination.
+    """
+    _validate_audience(for_, kind)
+    if for_ is None:
+        return None
+    return {"for": for_, "kind": kind, "instructions": _INSTRUCTIONS[(for_, kind)]}
+
+
 def _git_count_default(wt_path: Path, ref_spec: str) -> Optional[int]:
     """`git rev-list --count <ref_spec>` in wt_path, or None on any error."""
     try:
@@ -263,13 +381,24 @@ def build_context(
     git_count: GitCounter = _git_count_default,
     dirty_check: DirtyCheck = _dirty_check_default,
     binary_check: Callable[[], Optional[bool]] = _binary_matches_editable_install,
+    for_: Optional[str] = None,
+    kind: Optional[str] = None,
 ) -> dict[str, Any]:
     """Assemble the agent-readable workspace context payload.
 
     `cache`, `git_count`, `dirty_check`, and `binary_check` are injection points
     for tests; production callers leave them at the defaults (with the CLI
     constructing a real `ReconcileCache(state_dir)`).
+
+    `for_`/`kind` (MOS-100) shape the output for a specific audience -- see
+    `build_audience_block()`. Validated up front (raising `AudienceError` on
+    an invalid combination) before any of the git/log probing below, so a bad
+    flag combo fails fast. Left at their defaults (both None), the returned
+    payload is byte-for-byte identical to the pre-MOS-100 schema: no
+    `audience` key at all.
     """
+    audience = build_audience_block(for_, kind)
+
     active_tasks = [
         _task_payload(task, log_manager, git_count, cache, config)
         for task in state.tasks.values()
@@ -280,7 +409,7 @@ def build_context(
 
     last_sync = read_last_sync_at(state_dir)
 
-    return {
+    payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "active_tasks": active_tasks,
         "cwd_matches_task": cwd_task,
@@ -290,3 +419,6 @@ def build_context(
         "last_workspace_fetch_at": last_sync.isoformat() if last_sync else None,
         "last_drift_check_at": _last_drift_check_at(cache),
     }
+    if audience is not None:
+        payload["audience"] = audience
+    return payload

@@ -9,7 +9,13 @@ from typing import Optional
 import pytest
 
 from mship.core.config import WorkspaceConfig, RepoConfig
-from mship.core.context import SCHEMA_VERSION, build_context
+from mship.core.context import (
+    FOR_VALUES,
+    KIND_VALUES,
+    SCHEMA_VERSION,
+    AudienceError,
+    build_context,
+)
 from mship.core.log import LogManager
 from mship.core.reconcile.cache import CachePayload, ReconcileCache
 from mship.core.state import Task, TestResult, WorkspaceState
@@ -451,3 +457,155 @@ def test_last_workspace_fetch_at_round_trips(tmp_path: Path):
     out = _build(WorkspaceState(), _config(tmp_path), log_mgr, tmp_path,
                  state_dir=tmp_path)
     assert out["last_workspace_fetch_at"] == when.isoformat()
+
+
+# --- MOS-100: --for/--kind audience-shaped output --------------------------
+
+
+def test_no_for_flag_omits_audience_key(tmp_path: Path):
+    """ac1/ac8: default (no --for) has no `audience` key at all."""
+    log_mgr = LogManager(tmp_path / "logs")
+    out = _build(WorkspaceState(), _config(tmp_path), log_mgr, tmp_path)
+    assert "audience" not in out
+
+
+def test_base_payload_identical_regardless_of_for_kind(tmp_path: Path):
+    """ac10: every base factual field is quoted verbatim whether or not
+    --for/--kind is supplied — only the trailing `audience` key differs."""
+    log_mgr = LogManager(tmp_path / "logs")
+    state = WorkspaceState(tasks={"foo": _task("foo")})
+    cfg = _config(tmp_path)
+    baseline = _build(state, cfg, log_mgr, tmp_path)
+    shaped = _build(state, cfg, log_mgr, tmp_path, for_="reviewer", kind="spec")
+    shaped_without_audience = {k: v for k, v in shaped.items() if k != "audience"}
+    assert shaped_without_audience == baseline
+
+
+@pytest.mark.parametrize("for_value", ["claude-code", "codex"])
+def test_implementer_audience_instructions(tmp_path: Path, for_value: str):
+    """ac2: claude-code and codex both get the implementer framing — work
+    from the worktree, never commit to main, commit via `mship commit`,
+    journal investigation via `mship debug hypothesis`."""
+    log_mgr = LogManager(tmp_path / "logs")
+    out = _build(WorkspaceState(), _config(tmp_path), log_mgr, tmp_path, for_=for_value)
+    audience = out["audience"]
+    assert audience["for"] == for_value
+    assert audience["kind"] is None
+    text = audience["instructions"]
+    assert "worktree" in text
+    assert "main" in text
+    assert "mship commit" in text
+    assert "mship debug hypothesis" in text
+
+
+def test_claude_code_and_codex_share_identical_instructions(tmp_path: Path):
+    """q2: claude-code and codex are designed to share one implementer string."""
+    log_mgr = LogManager(tmp_path / "logs")
+    cfg = _config(tmp_path)
+    cc = _build(WorkspaceState(), cfg, log_mgr, tmp_path, for_="claude-code")
+    codex = _build(WorkspaceState(), cfg, log_mgr, tmp_path, for_="codex")
+    assert cc["audience"]["instructions"] == codex["audience"]["instructions"]
+
+
+def test_human_audience_instructions(tmp_path: Path):
+    """ac3: --for human gets a prose-style human summary instruction."""
+    log_mgr = LogManager(tmp_path / "logs")
+    out = _build(WorkspaceState(), _config(tmp_path), log_mgr, tmp_path, for_="human")
+    audience = out["audience"]
+    assert audience["for"] == "human"
+    assert audience["kind"] is None
+    assert "status" in audience["instructions"] or "summary" in audience["instructions"]
+
+
+def test_reviewer_spec_audience_instructions(tmp_path: Path):
+    """ac4: --for reviewer --kind spec instructs verifying against the task
+    description/plan and flagging over-/under-building."""
+    log_mgr = LogManager(tmp_path / "logs")
+    out = _build(WorkspaceState(), _config(tmp_path), log_mgr, tmp_path, for_="reviewer", kind="spec")
+    audience = out["audience"]
+    assert audience["for"] == "reviewer"
+    assert audience["kind"] == "spec"
+    text = audience["instructions"]
+    assert "spec" in text.lower() or "task description" in text.lower()
+    assert "over-built" in text or "under-built" in text
+
+
+def test_reviewer_code_quality_audience_instructions(tmp_path: Path):
+    """ac5: --for reviewer --kind code-quality instructs inspecting the diff
+    for maintainability, naming, test quality, and regressions."""
+    log_mgr = LogManager(tmp_path / "logs")
+    out = _build(WorkspaceState(), _config(tmp_path), log_mgr, tmp_path, for_="reviewer", kind="code-quality")
+    audience = out["audience"]
+    assert audience["for"] == "reviewer"
+    assert audience["kind"] == "code-quality"
+    text = audience["instructions"]
+    for term in ("maintainability", "naming", "test", "regression"):
+        assert term in text.lower()
+
+
+def test_kind_without_for_raises(tmp_path: Path):
+    """ac6: --kind without --for at all is rejected."""
+    log_mgr = LogManager(tmp_path / "logs")
+    with pytest.raises(AudienceError):
+        _build(WorkspaceState(), _config(tmp_path), log_mgr, tmp_path, kind="spec")
+
+
+def test_kind_with_non_reviewer_for_raises(tmp_path: Path):
+    """ac6: --kind with a non-reviewer --for is rejected."""
+    log_mgr = LogManager(tmp_path / "logs")
+    with pytest.raises(AudienceError):
+        _build(WorkspaceState(), _config(tmp_path), log_mgr, tmp_path, for_="human", kind="spec")
+
+
+def test_reviewer_without_kind_raises(tmp_path: Path):
+    """ac7: --for reviewer without --kind is rejected (kind is required)."""
+    log_mgr = LogManager(tmp_path / "logs")
+    with pytest.raises(AudienceError):
+        _build(WorkspaceState(), _config(tmp_path), log_mgr, tmp_path, for_="reviewer")
+
+
+def test_unknown_for_value_raises(tmp_path: Path):
+    """Unknown --for values are rejected with a clear error, not silently accepted."""
+    log_mgr = LogManager(tmp_path / "logs")
+    with pytest.raises(AudienceError):
+        _build(WorkspaceState(), _config(tmp_path), log_mgr, tmp_path, for_="gemini")
+
+
+def test_unknown_kind_value_raises(tmp_path: Path):
+    """Unknown --kind values (even with --for reviewer) are rejected."""
+    log_mgr = LogManager(tmp_path / "logs")
+    with pytest.raises(AudienceError):
+        _build(WorkspaceState(), _config(tmp_path), log_mgr, tmp_path, for_="reviewer", kind="bogus")
+
+
+def test_audience_block_exact_shape(tmp_path: Path):
+    """ac8: the audience block is exactly {"for", "kind", "instructions"} —
+    no extra keys, no missing ones."""
+    log_mgr = LogManager(tmp_path / "logs")
+    out = _build(WorkspaceState(), _config(tmp_path), log_mgr, tmp_path, for_="reviewer", kind="code-quality")
+    assert set(out["audience"].keys()) == {"for", "kind", "instructions"}
+
+
+def test_audience_kind_is_null_for_non_reviewer(tmp_path: Path):
+    """ac8: `kind` is null (not omitted) for audiences other than reviewer."""
+    log_mgr = LogManager(tmp_path / "logs")
+    out = _build(WorkspaceState(), _config(tmp_path), log_mgr, tmp_path, for_="human")
+    assert out["audience"]["kind"] is None
+
+
+def test_no_synthesized_fields_added(tmp_path: Path):
+    """ac11: no inferred/synthesized field (e.g. current_hypothesis,
+    next_recommended_action) sneaks into the payload alongside audience."""
+    log_mgr = LogManager(tmp_path / "logs")
+    state = WorkspaceState(tasks={"foo": _task("foo")})
+    cfg = _config(tmp_path)
+    baseline_keys = set(_build(state, cfg, log_mgr, tmp_path).keys())
+    shaped_keys = set(_build(state, cfg, log_mgr, tmp_path, for_="reviewer", kind="spec").keys())
+    assert shaped_keys - baseline_keys == {"audience"}
+
+
+def test_for_values_and_kind_values_are_the_documented_closed_set():
+    """q1: the closed set of --for values is claude-code/codex/human/reviewer;
+    --kind is spec/code-quality."""
+    assert set(FOR_VALUES) == {"claude-code", "codex", "human", "reviewer"}
+    assert set(KIND_VALUES) == {"spec", "code-quality"}
