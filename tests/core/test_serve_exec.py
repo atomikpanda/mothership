@@ -150,24 +150,44 @@ class _ArtifactWritingShellRunner(_FakeShellRunner):
         return super().run_streaming(command, cwd, env=env)
 
 
-def _parse_exec_stream(content: bytes):
+# A fixed nonce for direct `run_verb_stream` calls (the HTTP layer generates a
+# fresh one per request and hands it back in the X-Mship-Exec-Nonce header — see
+# `_nonce_of`). Control records are only recognized when tagged with the nonce.
+_TEST_NONCE = "testnonce0123"
+
+
+def _nonce_of(resp) -> str:
+    """The per-request anti-spoof nonce from the response header (case-
+    insensitive). Every `POST /exec/{verb}` sets it; control records in the
+    body are tagged with it."""
+    return resp.headers["x-mship-exec-nonce"]
+
+
+def _exit_line(nonce: str, code: int) -> str:
+    return f"{remote_exec.EXIT_MARKER}:{nonce} {code}"
+
+
+def _parse_exec_stream(content: bytes, nonce: str):
     """Mirror the client-side parse of the `/exec/{verb}` wire framing: text
-    lines, optionally one `__MSHIP_ARTIFACTS__ <n>` marker followed by exactly
-    `n` raw tar bytes, then the trailing `__MSHIP_EXIT__ <code>` line. Returns
+    lines, optionally one `__MSHIP_ARTIFACTS__:<nonce> <n>` marker followed by
+    exactly `n` raw tar bytes, then the trailing `__MSHIP_EXIT__:<nonce> <code>`
+    line. A control record counts ONLY when tagged with `nonce`. Returns
     `(text_lines, tar_bytes_or_None, exit_line)`."""
     lines: list[str] = []
     tar_bytes: bytes | None = None
     idx = 0
+    art_prefix = f"{remote_exec.ARTIFACT_MARKER}:{nonce} ".encode()
+    exit_prefix = f"{remote_exec.EXIT_MARKER}:{nonce} ".encode()
     while True:
         nl = content.index(b"\n", idx)
         line = content[idx:nl]
         idx = nl + 1
-        if line.startswith(b"__MSHIP_ARTIFACTS__ "):
+        if line.startswith(art_prefix):
             n = int(line.split(b" ", 1)[1])
             tar_bytes = content[idx : idx + n]
             idx += n
             continue
-        if line.startswith(b"__MSHIP_EXIT__ "):
+        if line.startswith(exit_prefix):
             return lines, tar_bytes, line.decode()
         lines.append(line.decode())
 
@@ -187,7 +207,7 @@ def test_run_verb_stream_yields_lines_as_produced_not_buffered(tmp_path):
     fake = _FakeShellRunner(streaming_proc=proc)
     deps = remote_exec.RemoteExecDeps(config=_config(tmp_path), shell=fake, workspace_root=tmp_path)
 
-    gen = remote_exec.run_verb_stream("run", "t1", ["api"], None, deps=deps)
+    gen = remote_exec.run_verb_stream("run", "t1", ["api"], None, deps=deps, nonce=_TEST_NONCE)
     first = next(gen)
     assert first == b"first\n"
     # Not released yet — proves the generator didn't need "second" to produce "first".
@@ -195,13 +215,48 @@ def test_run_verb_stream_yields_lines_as_produced_not_buffered(tmp_path):
     gate.set()
     rest = list(gen)
     assert rest[0] == b"second\n"
-    assert rest[-1] == b"__MSHIP_EXIT__ 0\n"
+    assert rest[-1] == f"__MSHIP_EXIT__:{_TEST_NONCE} 0\n".encode()
+
+
+def test_run_verb_stream_client_disconnect_cleans_up_tempdir_and_proc(tmp_path):
+    """FIX 8: a client disconnect (the generator being `.close()`d while
+    suspended at a yield mid-stream) must not leak the capture temp dir OR the
+    still-running task subprocess. The per-repo `finally` removes the temp dir
+    and terminates the proc."""
+    gate = threading.Event()  # never set -> line 2 blocks; generator stays suspended
+
+    class _TerminableProc(_FakeProc):
+        pid = None  # not a real OS pid -> _terminate_proc falls back to .terminate()
+
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.terminated = False
+
+        def poll(self):
+            return None  # still running
+
+        def terminate(self):
+            self.terminated = True
+
+    proc = _TerminableProc(stdout_lines=["line1\n", "line2\n"], returncode=0, gate=gate, gate_before=1)
+    fake = _FakeShellRunner(streaming_proc=proc)
+    deps = remote_exec.RemoteExecDeps(config=_config(tmp_path), shell=fake, workspace_root=tmp_path)
+
+    gen = remote_exec.run_verb_stream("capture", "t1", ["api"], None, deps=deps, nonce=_TEST_NONCE)
+    assert next(gen) == b"line1\n"  # first line delivered; generator now suspended at the yield
+    capture_dir = Path(fake.streaming_calls[0]["env"]["MSHIP_CAPTURE_DIR"])
+    assert capture_dir.exists()
+
+    gen.close()  # simulate the client hanging up -> GeneratorExit at the suspended yield
+
+    assert proc.terminated, "the running task subprocess must be terminated on disconnect"
+    assert not capture_dir.exists(), "the capture temp dir must be removed on disconnect"
 
 
 def test_run_verb_stream_unknown_verb_raises(tmp_path):
     deps = remote_exec.RemoteExecDeps(config=_config(tmp_path), shell=_FakeShellRunner(), workspace_root=tmp_path)
     try:
-        list(remote_exec.run_verb_stream("frobnicate", "t1", ["api"], None, deps=deps))
+        list(remote_exec.run_verb_stream("frobnicate", "t1", ["api"], None, deps=deps, nonce=_TEST_NONCE))
         assert False, "expected UnknownVerbError"
     except remote_exec.UnknownVerbError:
         pass
@@ -218,9 +273,9 @@ def test_run_verb_stream_unknown_repo_does_not_raise_keyerror(tmp_path):
     fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["should not run\n"], returncode=0))
     deps = remote_exec.RemoteExecDeps(config=_config(tmp_path), shell=fake, workspace_root=tmp_path)
 
-    lines = list(remote_exec.run_verb_stream("run", "t1", ["ghost-repo"], None, deps=deps))
+    lines = list(remote_exec.run_verb_stream("run", "t1", ["ghost-repo"], None, deps=deps, nonce=_TEST_NONCE))
     text = [l.decode() for l in lines]
-    assert text[-1].startswith(f"{remote_exec.EXIT_MARKER} ")
+    assert text[-1].startswith(f"{remote_exec.EXIT_MARKER}:{_TEST_NONCE} ")
     exit_code = int(text[-1].split(" ", 1)[1].strip())
     assert exit_code != 0
     assert any("ghost-repo" in l for l in text[:-1])
@@ -233,7 +288,7 @@ def test_run_verb_stream_unknown_repo_among_known_ones_rejects_before_any_task_r
     fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"], returncode=0))
     deps = remote_exec.RemoteExecDeps(config=_config(tmp_path), shell=fake, workspace_root=tmp_path)
 
-    lines = list(remote_exec.run_verb_stream("run", "t1", ["api", "ghost-repo"], None, deps=deps))
+    lines = list(remote_exec.run_verb_stream("run", "t1", ["api", "ghost-repo"], None, deps=deps, nonce=_TEST_NONCE))
     text = [l.decode() for l in lines]
     exit_code = int(text[-1].split(" ", 1)[1].strip())
     assert exit_code != 0
@@ -250,9 +305,10 @@ def test_exec_unknown_repo_in_request_fails_cleanly_not_500(tmp_path, monkeypatc
 
     r = client.post("/exec/run", json={"task": "t1", "repos": ["ghost-repo"]})
     assert r.status_code == 200
+    nonce = _nonce_of(r)
     lines = r.content.decode().splitlines()
-    assert lines[-1].startswith("__MSHIP_EXIT__ ")
-    assert lines[-1] != "__MSHIP_EXIT__ 0"
+    assert lines[-1].startswith(f"{remote_exec.EXIT_MARKER}:{nonce} ")
+    assert lines[-1] != _exit_line(nonce, 0)
     assert any("ghost-repo" in ln for ln in lines[:-1])
     assert not fake.streaming_calls
 
@@ -279,9 +335,10 @@ def test_run_verb_stream_materialize_failure_surfaces_repo_and_stops(tmp_path, m
 
     r = client.post("/exec/run", json={"task": "t1", "repos": ["api"]})
     assert r.status_code == 200
+    nonce = _nonce_of(r)
     lines = r.content.decode().splitlines()
-    assert lines[-1].startswith("__MSHIP_EXIT__ ")
-    assert lines[-1] != "__MSHIP_EXIT__ 0"
+    assert lines[-1].startswith(f"{remote_exec.EXIT_MARKER}:{nonce} ")
+    assert lines[-1] != _exit_line(nonce, 0)
     assert any("api" in ln and "fatal: could not create worktree" in ln for ln in lines[:-1])
     assert not fake.streaming_calls, "the task must not run once materialize fails"
 
@@ -313,6 +370,26 @@ def test_exec_without_config_is_503(tmp_path, monkeypatch):
     assert r.status_code == 503
 
 
+def test_exec_rejects_shell_metachar_task_name_before_any_command(tmp_path, monkeypatch):
+    """FIX 3 (injection): `task` is interpolated into `branch_pattern` and then
+    into git commands run with shell=True on the remote. A task name with shell
+    metacharacters must be rejected with a 400 BEFORE the StreamingResponse is
+    built — never reaching the shell, and running NOTHING."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["pwned\n"], returncode=0))
+    _patch_shell(monkeypatch, fake)
+    client = TestClient(_app(tmp_path))
+
+    r = client.post(
+        "/exec/run",
+        json={"task": "x; touch /tmp/pwned; #", "repos": ["api"]},
+    )
+    assert r.status_code == 400
+    assert "invalid task name" in r.json()["detail"]
+    # Nothing ran: no git plumbing, no task.
+    assert not fake.run_calls
+    assert not fake.streaming_calls
+
+
 def test_exec_run_materializes_new_worktree_and_streams_output(tmp_path, monkeypatch):
     proc = _FakeProc(stdout_lines=["hello\n", "world\n"], returncode=0)
     fake = _FakeShellRunner(streaming_proc=proc)
@@ -324,7 +401,7 @@ def test_exec_run_materializes_new_worktree_and_streams_output(tmp_path, monkeyp
     lines = r.content.decode().splitlines()
     assert "hello" in lines
     assert "world" in lines
-    assert lines[-1] == "__MSHIP_EXIT__ 0"  # trailing exit-code sentinel, conveyed as data
+    assert lines[-1] == _exit_line(_nonce_of(r), 0)  # trailing exit-code sentinel, conveyed as data
 
     commands = [c for c, _ in fake.run_calls]
     # Branch materialize: fetch the task's branch, then (no prior worktree at
@@ -368,7 +445,7 @@ def test_exec_nonzero_task_exit_conveyed_not_500(tmp_path, monkeypatch):
     assert r.status_code == 200  # a failing remote task is data, not a 5xx
     lines = r.content.decode().splitlines()
     assert "oops" in lines
-    assert lines[-1] == "__MSHIP_EXIT__ 2"
+    assert lines[-1] == _exit_line(_nonce_of(r), 2)
 
 
 def test_exec_capture_sets_capture_env_contract(tmp_path, monkeypatch):
@@ -452,8 +529,9 @@ def test_exec_response_streams_over_http_in_multiple_chunks(tmp_path, monkeypatc
 
     with client.stream("POST", "/exec/run", json={"task": "t1", "repos": ["api"]}) as r:
         assert r.status_code == 200
+        nonce = _nonce_of(r)  # header arrives before the streamed body
         lines = list(r.iter_lines())
-    assert lines == ["a", "b", "c", "__MSHIP_EXIT__ 0"]
+    assert lines == ["a", "b", "c", _exit_line(nonce, 0)]
 
 
 # --- capture artifact round-trip (Task 4) -----------------------------------
@@ -474,9 +552,10 @@ def test_exec_capture_streams_artifact_tar_before_exit_sentinel(tmp_path, monkey
     r = client.post("/exec/capture", json={"task": "t1", "repos": ["api"]})
     assert r.status_code == 200
 
-    lines, tar_bytes, exit_line = _parse_exec_stream(r.content)
+    nonce = _nonce_of(r)
+    lines, tar_bytes, exit_line = _parse_exec_stream(r.content, nonce)
     assert "captured" in lines
-    assert exit_line == "__MSHIP_EXIT__ 0"
+    assert exit_line == _exit_line(nonce, 0)
     assert tar_bytes is not None
 
     with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r") as tar:
@@ -487,9 +566,12 @@ def test_exec_capture_streams_artifact_tar_before_exit_sentinel(tmp_path, monkey
         assert tar.extractfile("layout.json").read() == b'{"a": 1}'
 
 
-def test_exec_capture_no_artifacts_emits_no_artifact_block(tmp_path, monkeypatch):
-    """A capture whose task produces nothing (empty MSHIP_CAPTURE_DIR) must
-    not emit an artifact marker — only the plain stream + exit sentinel."""
+def test_exec_capture_no_artifacts_is_an_error_not_silent_success(tmp_path, monkeypatch):
+    """FIX 7 (parity with local `capture.run_capture`): a capture whose task
+    exits 0 but produces NO recognized artifact (empty MSHIP_CAPTURE_DIR) is a
+    HARD error, not a silent success — the remote emits a "no recognized
+    artifact" error line and a NON-ZERO exit sentinel, and never an artifact
+    block."""
     fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["nothing here\n"], returncode=0))
     _patch_shell(monkeypatch, fake)
     client = TestClient(_app(tmp_path))
@@ -497,8 +579,13 @@ def test_exec_capture_no_artifacts_emits_no_artifact_block(tmp_path, monkeypatch
     r = client.post("/exec/capture", json={"task": "t1", "repos": ["api"]})
     assert r.status_code == 200
     assert b"__MSHIP_ARTIFACTS__" not in r.content
+    nonce = _nonce_of(r)
     lines = r.content.decode().splitlines()
-    assert lines == ["nothing here", "__MSHIP_EXIT__ 0"]
+    assert lines[-1] != _exit_line(nonce, 0)  # non-zero effective exit
+    assert lines[-1].startswith(f"{remote_exec.EXIT_MARKER}:{nonce} ")
+    assert any("no recognized artifact" in ln for ln in lines[:-1])
+    # The plain task output still streamed before the error line.
+    assert "nothing here" in lines
 
 
 def test_exec_capture_task_failure_emits_no_artifact_block(tmp_path, monkeypatch):
@@ -516,7 +603,7 @@ def test_exec_capture_task_failure_emits_no_artifact_block(tmp_path, monkeypatch
     assert r.status_code == 200
     assert b"__MSHIP_ARTIFACTS__" not in r.content
     lines = r.content.decode().splitlines()
-    assert lines == ["boom", "__MSHIP_EXIT__ 1"]
+    assert lines == ["boom", _exit_line(_nonce_of(r), 1)]
 
 
 def test_exec_run_and_build_never_emit_artifact_block(tmp_path, monkeypatch):

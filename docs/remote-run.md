@@ -92,6 +92,14 @@ Nothing secret is ever committed to `mothership.yaml` — that file only ever ho
 
 so `discover_artifacts` and anything reading captures locally (including an agent) sees them unchanged, regardless of whether the capture ran locally or on a remote host.
 
+## Known limitations (v1)
+
+These are deliberately out of scope for the first cut. Know them before you lean on `--remote` for a repo with heavier setup needs.
+
+- **The remote worktree is a bare `git fetch` + `git worktree add`.** It does **not** replicate the local `WorktreeManager.spawn` machinery — `symlink_dirs` / `bind_files` and any `task setup` step are not run on the remote. So remote `capture` (which observes a running app) works, but remote `run`/`build` for a repo that depends on symlinked gitignored deps (a shared `.venv`, `node_modules`, etc.) may fail because those deps aren't present in the freshly-added remote worktree. If your `run`/`build` needs them, run it locally for now.
+- **Remote task stdout is streamed to your terminal verbatim.** There is no ANSI / control-sequence sanitization — the remote host is trusted. Don't point `--remote` at a host you don't control.
+- **A `run_host:` set under a `capture:` block in `mothership.yaml` is silently ignored.** `CaptureConfig` has no `run_host` field; only the **repo-level** `run_host` (documented above under "Declaring roles") is honored. Put `run_host:` directly on the repo, not inside its `capture:` block.
+
 ## Troubleshooting
 
 | Symptom | Meaning | Fix |

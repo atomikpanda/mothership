@@ -173,6 +173,25 @@ def register(app: typer.Typer, get_container):
             except RemoteExecError as e:
                 output.error(str(e))
                 raise typer.Exit(code=1)
+
+            # On success, emit the SAME confirmation a local capture does
+            # (respecting --json), pointing at the local landing path where
+            # the artifacts were extracted — a remote capture should be
+            # indistinguishable from a local one to the caller. Re-discover the
+            # extracted files (exec_remote returns only the exit code).
+            if code == 0:
+                landed = _cap.discover_artifacts(out_dir, kinds)
+                if output.human_mode:
+                    for a in landed:
+                        output.success(f"captured {a.kind} → {a.path}")
+                else:
+                    output.json({
+                        "platform": resolved_platform,
+                        "repo": resolved_repo,
+                        "artifacts": [{"kind": a.kind, "path": str(a.path)} for a in landed],
+                        "resolved_task": t.slug if t is not None else None,
+                        "resolution_source": source.value if source is not None else None,
+                    })
             raise typer.Exit(code=code)
 
         try:

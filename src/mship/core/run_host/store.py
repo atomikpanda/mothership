@@ -60,12 +60,23 @@ class RunHostStore:
 
     def _write_all(self, data: dict[str, dict[str, str]]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        payload = yaml.safe_dump(data, sort_keys=True)
+        # Create the tmp file 0600 FROM THE START (os.open with mode 0o600),
+        # not under the process umask (typically 0644) then chmod'd afterward —
+        # otherwise the token sits world-readable for the window between write
+        # and chmod. `os.open` applies the mode subject to umask, so we also
+        # chmod the final file to guarantee 0600 even under an odd umask.
         tmp = self._path.with_suffix(".yaml.tmp")
-        tmp.write_text(yaml.safe_dump(data, sort_keys=True))
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(payload)
+        except BaseException:
+            # Don't leave a partial tmp behind if the write fails.
+            tmp.unlink(missing_ok=True)
+            raise
+        os.chmod(tmp, 0o600)  # belt-and-suspenders vs. a permissive umask
         tmp.replace(self._path)
-        # chmod after the replace: a fresh save must still end up 0600 even
-        # though the tmp file was created under the process umask.
-        self._path.chmod(0o600)
 
     def get(self, role: str) -> RunHostConnection | None:
         """The connection for `role`, or None if neither the file nor the

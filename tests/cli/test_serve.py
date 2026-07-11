@@ -82,3 +82,102 @@ def test_serve_no_pair_link_without_token(_configured, monkeypatch):
     result = runner.invoke(app, ["serve"])  # loopback default, no token
     assert result.exit_code == 0, result.output
     assert "groundcontrol://add" not in result.output
+
+
+def test_relay_serve_app_serves_exec_with_config_not_503(tmp_path, monkeypatch):
+    """FIX 1 regression: the relay serve path must pass `config=config` to
+    `create_app` exactly like the non-relay path — otherwise `/exec/{verb}`
+    (the PRIMARY transport for `--remote`) always 503s "not bootstrapped" over
+    the relay. We drive `_serve_with_relay` with the tunnel machinery stubbed,
+    capture the app it hands to uvicorn, and prove `/exec` is live (config
+    present) rather than 503-ing."""
+    from fastapi.testclient import TestClient
+
+    from mship.cli.output import Output
+    from mship.cli.serve import _serve_with_relay
+    from mship.core.config import RepoConfig, WorkspaceConfig
+    from mship.core.state import StateManager
+
+    monkeypatch.setenv("MSHIP_PR_WATCH_INTERVAL", "0")  # no gh-shelling watcher loop
+
+    repo_dir = tmp_path / "api"
+    repo_dir.mkdir()
+    (tmp_path / ".mothership").mkdir()
+    config = WorkspaceConfig(
+        workspace="t",
+        repos={"api": RepoConfig(path=repo_dir, type="service", tasks={"run": "start"})},
+    )
+
+    class _FakeContainer:
+        def __init__(self, state_dir):
+            self._sm = StateManager(state_dir)
+
+        def state_manager(self):
+            return self._sm
+
+        def log_manager(self):
+            return None
+
+        def worktree_manager(self):
+            return None
+
+    class _FakeSup:
+        restart_count = 0
+
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def tick(self):
+            pass
+
+        def recent_output(self):
+            return ""
+
+    # Stub the whole tunnel/key/token/health surface so nothing touches ssh,
+    # ~/.ssh, DNS, or the network — we only care about the app create_app builds.
+    monkeypatch.setattr("mship.core.relay.token.ensure_serve_token", lambda root: "test-token")
+    monkeypatch.setattr("mship.core.relay.keys.ensure_relay_key", lambda home=None: tmp_path / "key")
+    monkeypatch.setattr("mship.core.relay.keys.relay_public_key", lambda key_path: "ssh-ed25519 AAAAfake")
+    monkeypatch.setattr("mship.core.relay.tunnel.device_id", lambda pub: "dev")
+    monkeypatch.setattr("mship.core.relay.tunnel.device_subdomain", lambda ws, dev: "sub")
+    monkeypatch.setattr("mship.core.relay.tunnel.build_tunnel_argv", lambda *a, **k: ["true"])
+    monkeypatch.setattr("mship.core.relay.tunnel.TunnelSupervisor", _FakeSup)
+    monkeypatch.setattr("mship.core.relay.pairing.build_pair_link", lambda **k: "groundcontrol://add?x=1")
+    monkeypatch.setattr("mship.core.relay.health.wait_until_reachable", lambda *a, **k: (True, ""))
+
+    captured: dict = {}
+
+    def _capture_run(api, **kw):
+        captured["app"] = api
+
+    monkeypatch.setattr("uvicorn.run", _capture_run)
+
+    _serve_with_relay(
+        container=_FakeContainer(tmp_path / ".mothership"),
+        config=config,
+        workspace_root=tmp_path,
+        output=Output(),
+        relay_host_override="relay.example.test",
+        port=47199,
+        relay_tick=0.01,
+    )
+
+    api = captured["app"]
+    assert api is not None, "relay path never handed an app to uvicorn.run"
+
+    client = TestClient(api)
+    # Unknown repo -> config IS wired in (200 data-error), NOT a 503
+    # "not bootstrapped". The 503 is exactly what a missing config would give.
+    r = client.post(
+        "/exec/run",
+        json={"task": "t1", "repos": ["ghost-repo"]},
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert r.status_code != 503, "relay-created app 503'd — config was not passed to create_app"
+    assert r.status_code == 200

@@ -4,6 +4,7 @@ map. `state_dir` here is the `.mothership` dir itself (mirrors StateManager /
 InboxLease — see src/mship/core/state.py), so the store file lives directly
 at `state_dir / "run-hosts.yaml"`.
 """
+import os
 from pathlib import Path
 
 import yaml
@@ -32,6 +33,32 @@ def test_fresh_save_creates_file_with_0600_perms(tmp_path: Path):
     assert path.exists()
     mode = path.stat().st_mode & 0o777
     assert mode == 0o600
+
+
+def test_token_tmp_file_is_0600_from_the_start_no_wide_window(tmp_path: Path, monkeypatch):
+    """FIX 6: the token-bearing `.tmp` file must be 0600 FROM CREATION — not
+    written under the process umask (typically 0644) then chmod'd afterward,
+    which would leave the token world-readable for that window. We spy on the
+    atomic replace to capture the tmp's mode at the instant it's swapped in, and
+    force a permissive umask to prove the umask doesn't widen it."""
+    store = RunHostStore(tmp_path)
+    real_replace = Path.replace
+    seen: dict[str, int] = {}
+
+    def spy_replace(self, target):
+        seen["tmp_mode"] = self.stat().st_mode & 0o777
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", spy_replace)
+
+    old_umask = os.umask(0o000)  # deliberately permissive
+    try:
+        store.set("ios-sim-host", RunHostConnection(url="http://h", token="super-secret"))
+    finally:
+        os.umask(old_umask)
+
+    assert seen["tmp_mode"] == 0o600, "tmp file was wider than 0600 at replace time"
+    assert (tmp_path / "run-hosts.yaml").stat().st_mode & 0o777 == 0o600
 
 
 def test_store_file_shape_is_role_to_url_token_mapping(tmp_path: Path):

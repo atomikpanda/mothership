@@ -694,9 +694,19 @@ def create_app(
     # A fresh `ShellRunner` per request (like `gh_token_shell` above) rather than
     # reaching into pr_manager's — same class, its own lifetime.
 
+    import re
+    import secrets
+
     from mship.core import remote_exec
     from fastapi.responses import StreamingResponse
     from starlette.concurrency import iterate_in_threadpool
+
+    # A task name is interpolated into `branch_pattern` and then into git
+    # `fetch`/`checkout`/`reset`/`worktree add` run with `shell=True` on the
+    # remote — so validate it here, BEFORE any StreamingResponse is built, and
+    # reject anything outside this safe charset (fail fast, never reaching the
+    # shell). Mirrors the slug charset the rest of mship uses for task names.
+    _TASK_NAME_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
     @app.post("/exec/{verb}")
     async def post_exec(verb: str, body: ExecBody):
@@ -715,18 +725,31 @@ def create_app(
                     "restart `mship serve --relay`"
                 ),
             )
+        if not _TASK_NAME_RE.match(body.task):
+            # Never reaches the shell — a shell-metacharacter task name (e.g.
+            # "x; rm -rf ~ #") is refused up front, not streamed as data.
+            raise HTTPException(status_code=400, detail="invalid task name")
         deps = remote_exec.RemoteExecDeps(
             config=config, shell=ShellRunner(), workspace_root=workspace_root,
         )
+        # Per-request anti-spoof nonce (FIX 2): the task can't predict it, and
+        # it's returned as a response HEADER (sent before the streamed body, so
+        # the task can't inject it) — the client treats a line as a control
+        # record only if it carries this exact nonce. Task stdout that happens
+        # to print a bare `__MSHIP_EXIT__ 0` is therefore just output, never a
+        # forged exit code.
+        nonce = secrets.token_hex(8)
         # `run_verb_stream` is a plain sync generator doing blocking subprocess
         # + git I/O; `iterate_in_threadpool` pulls each chunk in the threadpool
         # so it never blocks the event loop (see the module docstring).
         gen = remote_exec.run_verb_stream(
             verb, body.task, body.repos, body.platform,
-            kind=body.kind, deps=deps,
+            kind=body.kind, deps=deps, nonce=nonce,
         )
         return StreamingResponse(
-            iterate_in_threadpool(gen), media_type="application/octet-stream",
+            iterate_in_threadpool(gen),
+            media_type="application/octet-stream",
+            headers={"X-Mship-Exec-Nonce": nonce},
         )
 
     return app

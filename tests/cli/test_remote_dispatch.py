@@ -43,12 +43,18 @@ runner = CliRunner()
 
 # --- wire-framing helpers (mirror core/remote_exec.py's contract) ----------
 
+# A per-request anti-spoof nonce (server generates a fresh one; here it's fixed
+# so the framed body and the response header agree). Control records are only
+# recognized when tagged with the nonce — see core/remote_exec.py / remote_client.
+NONCE = "nonceabcdef012345"
+NONCE_HEADER = "X-Mship-Exec-Nonce"
 
-def _frame(lines, exit_code: int, artifact_tar: bytes | None = None) -> bytes:
+
+def _frame(lines, exit_code: int, artifact_tar: bytes | None = None, *, nonce: str = NONCE) -> bytes:
     body = b"".join(l.encode() if isinstance(l, str) else l for l in lines)
     if artifact_tar is not None:
-        body += f"{ARTIFACT_MARKER} {len(artifact_tar)}\n".encode() + artifact_tar
-    body += f"{EXIT_MARKER} {exit_code}\n".encode()
+        body += f"{ARTIFACT_MARKER}:{nonce} {len(artifact_tar)}\n".encode() + artifact_tar
+    body += f"{EXIT_MARKER}:{nonce} {exit_code}\n".encode()
     return body
 
 
@@ -59,9 +65,9 @@ def _chunked(data: bytes, size: int = 7):
         yield data[i : i + size]
 
 
-def _make_tar(files: dict[str, bytes]) -> bytes:
+def _make_tar(files: dict[str, bytes], *, mode: str = "w") -> bytes:
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w") as tar:
+    with tarfile.open(fileobj=buf, mode=mode) as tar:
         for name, content in files.items():
             info = tarfile.TarInfo(name=name)
             info.size = len(content)
@@ -73,12 +79,13 @@ def _mock_transport(handler):
     return httpx.MockTransport(handler)
 
 
-def _recording_handler(recorder: dict, body: bytes, status: int = 200):
+def _recording_handler(recorder: dict, body: bytes, status: int = 200, *, nonce: str | None = NONCE):
     def handler(request: httpx.Request) -> httpx.Response:
         recorder["url"] = str(request.url)
         recorder["headers"] = dict(request.headers)
         recorder["json"] = json.loads(request.content)
-        return httpx.Response(status, content=_chunked(body))
+        headers = {NONCE_HEADER: nonce} if nonce is not None else {}
+        return httpx.Response(status, content=_chunked(body), headers=headers)
 
     return handler
 
@@ -250,17 +257,109 @@ def test_exec_remote_503_surfaces_not_bootstrapped_message():
 
 def test_exec_remote_stream_without_exit_sentinel_raises():
     """A dropped connection mid-stream (no trailing __MSHIP_EXIT__) must fail
-    loudly rather than silently reporting success."""
+    loudly rather than silently reporting success. Nonce header IS present so
+    this exercises the no-sentinel path specifically (not missing-nonce)."""
     conn = RunHostConnection(url="http://h", token="t")
 
     def handler(request):
-        return httpx.Response(200, content=_chunked(b"partial output\n"))
+        return httpx.Response(
+            200, content=_chunked(b"partial output\n"),
+            headers={NONCE_HEADER: NONCE},
+        )
 
     with pytest.raises(remote_client.RemoteExecError):
         remote_client.exec_remote(
             verb="run", conn=conn, task="t1", repos=["api"], print_fn=lambda _l: None,
             transport=_mock_transport(handler),
         )
+
+
+def test_exec_remote_missing_nonce_header_raises():
+    """FIX 2: without the X-Mship-Exec-Nonce response header the client can't
+    tell a real control record from spoofed task output — it must refuse
+    (RemoteExecError), not proceed."""
+    body = _frame(["ok\n"], exit_code=0)
+    conn = RunHostConnection(url="http://h", token="t")
+    with pytest.raises(remote_client.RemoteExecError) as exc:
+        remote_client.exec_remote(
+            verb="run", conn=conn, task="t1", repos=["api"], print_fn=lambda _l: None,
+            transport=_mock_transport(_recording_handler({}, body, nonce=None)),
+        )
+    assert "nonce" in str(exc.value).lower()
+
+
+def test_exec_remote_task_stdout_cannot_spoof_exit_code():
+    """FIX 2 (anti-spoof): a task whose stdout literally contains a bare
+    `__MSHIP_EXIT__ 0` (WITHOUT the per-request nonce) is treated as ordinary
+    output — the real, nonce-tagged exit code (7 here) still governs. Without
+    the nonce tag, a compromised/failing remote branch could otherwise
+    green-wash a failed build by printing `__MSHIP_EXIT__ 0`."""
+    spoof = f"{EXIT_MARKER} 0\n"  # note: NO ":<nonce>" — this is the spoof
+    body = _frame([spoof, "real work\n"], exit_code=7)
+    conn = RunHostConnection(url="http://h", token="t")
+    printed: list[str] = []
+
+    code = remote_client.exec_remote(
+        verb="run", conn=conn, task="t1", repos=["api"], print_fn=printed.append,
+        transport=_mock_transport(_recording_handler({}, body)),
+    )
+    assert code == 7  # the real nonce-tagged exit governs, not the spoof
+    assert f"{EXIT_MARKER} 0" in printed  # the spoof was just printed as output
+
+
+def test_exec_remote_over_cap_artifact_count_errors_without_reading(tmp_path):
+    """FIX 4: an advertised artifact count over MAX_ARTIFACT_BYTES is rejected
+    BEFORE the bytes are read (no unbounded allocation). We advertise a huge
+    count but supply none of the bytes — proof the cap check short-circuits
+    ahead of read_exact."""
+    huge = remote_client.MAX_ARTIFACT_BYTES + 1
+    body = (
+        b"working\n"
+        + f"{ARTIFACT_MARKER}:{NONCE} {huge}\n".encode()
+        + f"{EXIT_MARKER}:{NONCE} 0\n".encode()
+    )
+    conn = RunHostConnection(url="http://h", token="t")
+    out_dir = tmp_path / "captures"
+    with pytest.raises(remote_client.RemoteExecError) as exc:
+        remote_client.exec_remote(
+            verb="capture", conn=conn, task="t1", repos=["app"],
+            captures_dir_for=out_dir, print_fn=lambda _l: None,
+            transport=_mock_transport(_recording_handler({}, body)),
+        )
+    assert "cap" in str(exc.value).lower()
+    assert not out_dir.exists()  # nothing was extracted
+
+
+def test_exec_remote_compressed_tar_is_rejected(tmp_path):
+    """FIX 4: the server only ever writes an UNCOMPRESSED tar (mode="w"); the
+    client opens mode="r:" so a gzip/xz "tar bomb" raises tarfile.ReadError,
+    wrapped as a clean RemoteExecError rather than being transparently
+    decompressed."""
+    gz_tar = _make_tar({"screen.png": b"PNGDATA"}, mode="w:gz")
+    body = _frame(["captured\n"], exit_code=0, artifact_tar=gz_tar)
+    conn = RunHostConnection(url="http://h", token="t")
+    out_dir = tmp_path / "captures"
+    with pytest.raises(remote_client.RemoteExecError) as exc:
+        remote_client.exec_remote(
+            verb="capture", conn=conn, task="t1", repos=["app"],
+            captures_dir_for=out_dir, print_fn=lambda _l: None,
+            transport=_mock_transport(_recording_handler({}, body)),
+        )
+    assert "tar" in str(exc.value).lower()
+
+
+def test_exec_remote_malformed_control_count_raises_clean_error():
+    """FIX 5: a nonce-tagged control record with a non-numeric count must
+    surface as a clean RemoteExecError ("malformed control record"), not an
+    uncaught ValueError traceback."""
+    body = f"{EXIT_MARKER}:{NONCE} notanumber\n".encode()
+    conn = RunHostConnection(url="http://h", token="t")
+    with pytest.raises(remote_client.RemoteExecError) as exc:
+        remote_client.exec_remote(
+            verb="run", conn=conn, task="t1", repos=["api"], print_fn=lambda _l: None,
+            transport=_mock_transport(_recording_handler({}, body)),
+        )
+    assert "malformed" in str(exc.value).lower()
 
 
 # =============================================================================
@@ -500,6 +599,15 @@ def test_cli_capture_remote_extracts_artifacts_into_exact_local_captures_path(tm
         out_dir = dirs[0]
         assert (out_dir / "screen.png").read_bytes() == b"PNGDATA"
         assert (out_dir / "layout.json").read_bytes() == b'{"a": 1}'
+
+        # FIX 9: a successful remote capture prints the SAME success
+        # confirmation a local capture does (JSON mode here, since CliRunner
+        # captures a pipe), pointing at the local landing path — not a silent
+        # exit. Mirrors the local path's JSON payload shape.
+        payload_marker = '"artifacts"'
+        assert payload_marker in result.output
+        assert str(out_dir / "screen.png") in result.output
+        assert '"resolved_task"' in result.output
 
         # The local capture target never ran.
         mock_shell.run_task.assert_not_called()

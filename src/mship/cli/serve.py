@@ -171,6 +171,10 @@ def _serve_with_relay(
         workspace_name=workspace,
         auth_token=token,
         worktree_manager=container.worktree_manager(),
+        # The relay is the PRIMARY transport for `--remote`; without `config`
+        # here `POST /exec/{verb}` would always 503 ("not bootstrapped") over
+        # it, exactly as the non-relay path passes it (MOS-191 fix).
+        config=config,
     )
 
     key_path = ensure_relay_key(home=Path.home())

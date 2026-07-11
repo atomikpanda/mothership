@@ -8,8 +8,11 @@ and drives the streamed `application/octet-stream` response: it prints
 stdout/stderr lines live as they arrive and, for `verb == "capture"` when a
 local destination is given, extracts the artifact tar (if any) there. See
 `mship.core.remote_exec`'s module docstring for the exact wire framing this
-parses (line-per-chunk task output, an optional `__MSHIP_ARTIFACTS__ <n>` +
-`n` raw tar bytes, and a trailing `__MSHIP_EXIT__ <code>` sentinel).
+parses (line-per-chunk task output, an optional `__MSHIP_ARTIFACTS__:<nonce>
+<n>` + `n` raw tar bytes, and a trailing `__MSHIP_EXIT__:<nonce> <code>`
+sentinel — where `<nonce>` is the per-request secret from the
+`X-Mship-Exec-Nonce` response header that stops task stdout from spoofing a
+control record).
 
 The CLI (`cli/exec.py`'s `run`/`build`, `cli/capture.py`'s `capture`) is the
 only caller: it resolves `--remote[=role]` to a `RunHostConnection` via
@@ -27,6 +30,17 @@ import httpx
 
 from mship.core.remote_exec import ARTIFACT_MARKER, EXIT_MARKER
 from mship.core.run_host import RunHostConnection
+
+# The response header carrying the per-request anti-spoof nonce (see
+# `core/serve.py post_exec` / `core/remote_exec.py`). Read BEFORE draining the
+# body; a control line counts only if it carries this exact nonce.
+NONCE_HEADER = "X-Mship-Exec-Nonce"
+
+# Hard cap on the advertised artifact-tar size. The server only ever writes a
+# handful of small capture files (screen.png, layout.*), so a wildly larger
+# advertised count is a bug or a hostile/compromised remote — reject it BEFORE
+# reading (no unbounded allocation / tar-bomb landing on disk). 256 MiB.
+MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
 
 
 class RemoteExecError(Exception):
@@ -140,12 +154,32 @@ class _ChunkReader:
         return data
 
 
+def _control_count(text: str) -> int:
+    """Parse the base-10 count off a nonce-tagged control line
+    (`__MSHIP_EXIT__:<nonce> <count>` / `__MSHIP_ARTIFACTS__:<nonce> <count>`).
+    A non-numeric/empty count is a malformed record from the remote — surface
+    it as a clean `RemoteExecError`, not an uncaught `ValueError` traceback."""
+    parts = text.split(" ", 1)
+    try:
+        return int(parts[1])
+    except (IndexError, ValueError):
+        raise RemoteExecError(
+            f"malformed control record from remote: {text!r}"
+        )
+
+
 def _drive(
     reader: _ChunkReader,
     *,
+    nonce: str,
     captures_dir_for: Optional[Path],
     print_fn: Callable[[str], None],
 ) -> int:
+    # A line is a CONTROL record only if it carries this request's nonce (see
+    # NONCE_HEADER). Everything else — including task stdout that literally
+    # prints `__MSHIP_EXIT__ 0` without the nonce — is passthrough output.
+    artifact_prefix = f"{ARTIFACT_MARKER}:{nonce} "
+    exit_prefix = f"{EXIT_MARKER}:{nonce} "
     while True:
         line = reader.readline()
         if line is None:
@@ -154,17 +188,33 @@ def _drive(
             )
         text = line.decode("utf-8", errors="replace").rstrip("\n")
 
-        if text.startswith(ARTIFACT_MARKER + " "):
-            n = int(text.split(" ", 1)[1])
+        if text.startswith(artifact_prefix):
+            n = _control_count(text)
+            if n > MAX_ARTIFACT_BYTES:
+                # Refuse BEFORE reading — no unbounded allocation / tar-bomb.
+                raise RemoteExecError(
+                    f"remote advertised {n} artifact bytes, exceeding the "
+                    f"{MAX_ARTIFACT_BYTES}-byte cap; refusing to read"
+                )
             tar_bytes = reader.read_exact(n)
             if captures_dir_for is not None:
                 captures_dir_for.mkdir(parents=True, exist_ok=True)
-                with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r") as tar:
-                    tar.extractall(captures_dir_for, filter="data")
+                # mode="r:" = UNCOMPRESSED only (the server writes mode="w").
+                # A gzip/xz "tar bomb" then raises tarfile.ReadError instead of
+                # being transparently decompressed. `filter="data"` still guards
+                # path traversal / unsafe members on extract.
+                try:
+                    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as tar:
+                        tar.extractall(captures_dir_for, filter="data")
+                except tarfile.TarError as exc:
+                    raise RemoteExecError(
+                        f"remote artifact block is not a valid uncompressed "
+                        f"tar: {exc}"
+                    ) from exc
             continue
 
-        if text.startswith(EXIT_MARKER + " "):
-            return int(text.split(" ", 1)[1])
+        if text.startswith(exit_prefix):
+            return _control_count(text)
 
         print_fn(text)
 
@@ -219,9 +269,21 @@ def exec_remote(
                 if resp.status_code >= 400:
                     resp.read()
                     raise RemoteExecError(_http_status_message(url, resp))
+                # Read the anti-spoof nonce from the response HEADERS before
+                # draining the body — headers arrive first, and the task can't
+                # inject into them (httpx headers are case-insensitive). Without
+                # it we can't tell a real control record from spoofed output.
+                nonce = resp.headers.get(NONCE_HEADER)
+                if not nonce:
+                    raise RemoteExecError(
+                        f"remote response missing the {NONCE_HEADER} header; "
+                        f"cannot authenticate the exit-code/artifact framing "
+                        f"(is the remote running a current mship serve?)"
+                    )
                 reader = _ChunkReader(resp.iter_raw())
                 return _drive(
-                    reader, captures_dir_for=captures_dir_for, print_fn=print_fn
+                    reader, nonce=nonce,
+                    captures_dir_for=captures_dir_for, print_fn=print_fn,
                 )
     except httpx.HTTPError as exc:
         # Connection-level failure (unreachable host, DNS, timeout, dropped
