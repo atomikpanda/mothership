@@ -191,10 +191,11 @@ def register(parent: typer.Typer, get_container) -> None:
         typer.echo(wi.id)
 
     @item_app.command("list")
-    def list_items():
+    def list_items(all_items: bool = typer.Option(False, "--all",
+            help="Include archived work items (hidden by default).")):
         items, specs, state_manager, msgs, _ = _ctx()
         summaries = build_workitem_index(
-            items.list(),
+            items.list(include_archived=all_items),
             {s.id: s for s in specs.list()},
             dict(state_manager.load().tasks),
             {t.id: t for t in msgs.list()},
@@ -272,6 +273,48 @@ def register(parent: typer.Typer, get_container) -> None:
         _guard(items, item_id)
         items.set_unattended(item_id, on, now=datetime.now(timezone.utc))
         typer.echo(f"{item_id}: unattended={on}")
+
+    @item_app.command("archive")
+    def archive(item_id: str,
+                force: bool = typer.Option(False, "--force", "-f",
+                    help="Archive even though a live task still references this item.")):
+        """Soft-delete a work item: hidden from `item list` unless `--all`.
+
+        Refused when a task in state.tasks still has work_item_id == item_id —
+        `mship close` removes a task from state entirely, so a task still present
+        there is by definition not yet closed (live). Pass --force to archive
+        anyway (e.g. an abandoned/orphaned task)."""
+        items, _, state_manager, _, _ = _ctx()
+        output = Output()
+        if not force:
+            state = state_manager.load()
+            blocking = sorted(slug for slug, t in state.tasks.items()
+                              if t.work_item_id == item_id)
+            if blocking:
+                output.error(
+                    f"Work item {item_id} still has live task(s): "
+                    f"{', '.join(blocking)}. Run `mship item archive {item_id} "
+                    f"--force` to archive anyway."
+                )
+                raise typer.Exit(1)
+        try:
+            items.archive(item_id, now=datetime.now(timezone.utc))
+        except KeyError:
+            output.error(f"no work item {item_id!r}")
+            raise typer.Exit(1)
+        typer.echo(f"archived {item_id}")
+
+    @item_app.command("unarchive")
+    def unarchive(item_id: str):
+        """Reverse of `item archive`: restore an item to the default `item list`."""
+        items, _, _, _, _ = _ctx()
+        output = Output()
+        try:
+            items.unarchive(item_id, now=datetime.now(timezone.utc))
+        except KeyError:
+            output.error(f"no work item {item_id!r}")
+            raise typer.Exit(1)
+        typer.echo(f"unarchived {item_id}")
 
     def _build_run_deps(holder: str, now) -> RunDeps:
         """Wire the runner's injectable edges to this workspace's real stores.

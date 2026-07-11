@@ -378,3 +378,107 @@ def test_link_url_with_invalid_provider_errors_cleanly(tmp_path):
         container.config_path.reset_override()
         container.state_dir.reset_override()
         container.config.reset()
+
+
+def test_item_archive_hides_from_list_but_all_shows_it(tmp_path):
+    # No task references the item, so archive proceeds without --force.
+    _isolate(tmp_path)
+    try:
+        res = runner.invoke(app, ["item", "new", "Title", "--kind", "feature"])
+        assert res.exit_code == 0, res.output
+        item_id = res.output.strip()
+
+        res = runner.invoke(app, ["item", "archive", item_id])
+        assert res.exit_code == 0, res.output
+
+        res = runner.invoke(app, ["--json", "item", "list"])
+        assert res.exit_code == 0, res.output
+        assert json.loads(res.output) == []
+
+        res = runner.invoke(app, ["--json", "item", "list", "--all"])
+        assert res.exit_code == 0, res.output
+        rows = json.loads(res.output)
+        assert [r["id"] for r in rows] == [item_id]
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+
+
+def test_item_archive_refused_when_live_task_linked_unless_forced(tmp_path):
+    # A task still present in state.tasks (close removes it entirely) is "live" by
+    # definition — archiving must be refused unless --force.
+    _isolate(tmp_path)
+    try:
+        res = runner.invoke(app, ["item", "new", "Title", "--kind", "feature"])
+        assert res.exit_code == 0, res.output
+        item_id = res.output.strip()
+
+        sm = StateManager(tmp_path / ".mothership")
+        sm.mutate(lambda s: s.tasks.__setitem__("t-1", Task(
+            slug="t-1", description="d", phase="dev", created_at=_NOW,
+            affected_repos=["mothership"], branch="feat/t-1")))
+        assert runner.invoke(app, ["item", "link-task", item_id, "t-1"]).exit_code == 0
+
+        res = runner.invoke(app, ["item", "archive", item_id])
+        assert res.exit_code != 0
+        assert "t-1" in res.output
+        assert "--force" in res.output
+
+        # The item must still be live (not archived) after the refusal.
+        res = runner.invoke(app, ["--json", "item", "list"])
+        assert [r["id"] for r in json.loads(res.output)] == [item_id]
+
+        res = runner.invoke(app, ["item", "archive", item_id, "--force"])
+        assert res.exit_code == 0, res.output
+
+        res = runner.invoke(app, ["--json", "item", "list"])
+        assert json.loads(res.output) == []
+    finally:
+        _reset()
+
+
+def test_item_unarchive_restores_to_default_list(tmp_path):
+    _isolate(tmp_path)
+    try:
+        res = runner.invoke(app, ["item", "new", "Title", "--kind", "feature"])
+        assert res.exit_code == 0, res.output
+        item_id = res.output.strip()
+
+        assert runner.invoke(app, ["item", "archive", item_id]).exit_code == 0
+        res = runner.invoke(app, ["--json", "item", "list"])
+        assert json.loads(res.output) == []
+
+        res = runner.invoke(app, ["item", "unarchive", item_id])
+        assert res.exit_code == 0, res.output
+
+        res = runner.invoke(app, ["--json", "item", "list"])
+        assert [r["id"] for r in json.loads(res.output)] == [item_id]
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+
+
+def test_item_archive_unknown_id_errors_cleanly(tmp_path):
+    _isolate(tmp_path)
+    try:
+        res = runner.invoke(app, ["item", "archive", "wi-does-not-exist"])
+        assert res.exit_code != 0
+        assert "wi-does-not-exist" in res.output
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+
+
+def test_item_unarchive_unknown_id_errors_cleanly(tmp_path):
+    _isolate(tmp_path)
+    try:
+        res = runner.invoke(app, ["item", "unarchive", "wi-does-not-exist"])
+        assert res.exit_code != 0
+        assert "wi-does-not-exist" in res.output
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
