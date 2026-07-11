@@ -138,11 +138,19 @@ class RedactConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def normalize_patterns(cls, data):
-        if isinstance(data, dict) and "patterns" in data and data["patterns"] is not None:
-            normalized = []
-            for entry in data["patterns"]:
-                normalized.append({"pattern": entry} if isinstance(entry, str) else entry)
-            data["patterns"] = normalized
+        if isinstance(data, dict) and "patterns" in data:
+            if data["patterns"] is None:
+                # `redact:\n  patterns:` (key present, no list) parses as YAML
+                # null, not an omitted key — coerce to the same empty-list
+                # default as omitting `patterns` entirely, rather than
+                # failing pydantic's list validation and erroring the whole
+                # config load.
+                data["patterns"] = []
+            else:
+                normalized = []
+                for entry in data["patterns"]:
+                    normalized.append({"pattern": entry} if isinstance(entry, str) else entry)
+                data["patterns"] = normalized
         return data
 
 

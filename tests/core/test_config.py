@@ -805,3 +805,23 @@ def test_repo_without_capture_defaults_none(tmp_path):
     )
     config = ConfigLoader.load(cfg, require_paths=False)
     assert config.repos["app"].capture is None
+
+
+def test_redact_null_patterns_coerces_to_empty_list(tmp_path):
+    """`redact:\\n  patterns:` (no list under the key) parses as YAML null,
+    not an omitted key — must coerce to `[]` rather than fail pydantic list
+    validation and error the whole config load (MOS-102 Greptile fix)."""
+    from mship.core.config import ConfigLoader
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "redact:\n"
+        "  patterns:\n"
+        "repos:\n"
+        "  app:\n"
+        "    path: ./app\n"
+        "    type: service\n"
+    )
+    config = ConfigLoader.load(cfg, require_paths=False)
+    assert config.redact is not None
+    assert config.redact.patterns == []

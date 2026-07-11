@@ -6,7 +6,7 @@ Two independent concerns live here:
 
 - Bundle assembly (`export_task` / `build_export_bundle`): pull a task's
   journal, bound spec, discovered plan doc, state slice, and per-repo
-  `base..branch` diffs from the sources that already own them (LogManager,
+  `base...branch` merge-base diffs from the sources that already own them (LogManager,
   SpecStore, StateManager-backed Task, git) and lay them out under
   `<task>-export/` (or zip that tree).
 - Redaction (`BUILTIN_PATTERNS` / `redact_text` / `load_user_patterns`): a
@@ -15,11 +15,12 @@ Two independent concerns live here:
 """
 from __future__ import annotations
 
-import concurrent.futures
 import json
 import re
+import shutil
 import subprocess
 import tempfile
+import threading
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -122,18 +123,33 @@ def _apply_pattern_safe(text: str, pattern: RedactionPattern) -> tuple[str, str 
     Bound it with a timeout instead of a blind `re.sub`: on timeout the text
     is left unredacted *for that one pattern* rather than the whole export
     hanging (see spec risks).
+
+    Uses a daemon thread + `join(timeout=...)` rather than a
+    `ThreadPoolExecutor` — the executor's `__exit__` does
+    `shutdown(wait=True)`, which blocks until the submitted task actually
+    finishes even after `future.result(timeout=...)` raised. A genuinely
+    hanging pattern (catastrophic backtracking, infinite loop) would then
+    hang the whole export despite the "timeout". A daemon thread has no such
+    join-on-exit: on timeout we abandon it (it dies with the process) and
+    return immediately.
     """
     if pattern.builtin:
         return _apply_pattern(text, pattern), None
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        fut = ex.submit(_apply_pattern, text, pattern)
-        try:
-            return fut.result(timeout=_CUSTOM_PATTERN_TIMEOUT_SECS), None
-        except concurrent.futures.TimeoutError:
-            return text, (
-                f"custom redact pattern timed out (kind={pattern.kind!r}); "
-                "left this artifact unredacted for that pattern"
-            )
+
+    result_box: dict[str, str] = {}
+
+    def _run() -> None:
+        result_box["result"] = _apply_pattern(text, pattern)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.join(timeout=_CUSTOM_PATTERN_TIMEOUT_SECS)
+    if thread.is_alive():
+        return text, (
+            f"custom redact pattern timed out (kind={pattern.kind!r}); "
+            "left this artifact unredacted for that pattern"
+        )
+    return result_box["result"], None
 
 
 def redact_text(text: str, patterns: list[RedactionPattern]) -> tuple[str, list[str]]:
@@ -246,7 +262,12 @@ def collect_repo_diff(task: "Task", repo_name: str, config: "WorkspaceConfig") -
     ) or task.base_branch or "main"
     try:
         result = subprocess.run(
-            ["git", "diff", f"{base}..{task.branch}"],
+            # Three-dot (merge-base) diff, not two-dot: exports only the task
+            # branch's own patch. A two-dot `base..branch` diff compares tree
+            # snapshots directly, so once `base` has advanced past the fork
+            # point it spuriously includes an "undo" of whatever landed on
+            # `base` afterward. See MOS-102 Greptile fix.
+            ["git", "diff", f"{base}...{task.branch}"],
             cwd=Path(worktree), capture_output=True, check=False,
         )
     except OSError:
@@ -261,15 +282,31 @@ def collect_repo_diff(task: "Task", repo_name: str, config: "WorkspaceConfig") -
 # Bundle assembly
 # ---------------------------------------------------------------------------
 
+def _plan_stem_matches_slug(stem: str, task_slug: str) -> bool:
+    """Precise match, not substring: either the stem IS the slug, or it's the
+    canonical `<YYYY-MM-DD>-<slug>.md` form. A bare `-<slug>` suffix (e.g.
+    'my-add.md' for slug 'add') deliberately does NOT match — that's still a
+    substring-style match in disguise, just anchored to the end instead of
+    anywhere, and would wrongly pick up unrelated docs prefixed with
+    another word (MOS-102 Greptile fix)."""
+    if stem == task_slug:
+        return True
+    escaped_slug = re.escape(task_slug)
+    return re.fullmatch(rf"\d{{4}}-\d{{2}}-\d{{2}}-{escaped_slug}", stem) is not None
+
+
 def discover_plan_path(workspace_root: Path, task_slug: str, docs_dir: str = "docs") -> Path | None:
-    """Best-effort plan-doc discovery: a `docs/plans/*.md` file whose filename
-    contains the task slug. v1 is intentionally exact-match-on-slug (no
-    fuzzy/similarity scoring, no explicit plan_path reference on Task) —
-    picks the most-recently-modified match when more than one file matches."""
+    """Best-effort plan-doc discovery: a `docs/plans/*.md` file whose stem
+    precisely matches the task slug (exact stem, or the canonical
+    `<date>-<slug>.md` form) — not merely containing the slug as a
+    substring, which would false-positive on a short slug like "add"
+    matching "add-labels.md". v1 has no fuzzy/similarity scoring and no
+    explicit plan_path reference on Task — picks the most-recently-modified
+    match when more than one file matches."""
     plans_dir = workspace_root / docs_dir / "plans"
     if not plans_dir.is_dir():
         return None
-    matches = [p for p in sorted(plans_dir.glob("*.md")) if task_slug in p.stem]
+    matches = [p for p in sorted(plans_dir.glob("*.md")) if _plan_stem_matches_slug(p.stem, task_slug)]
     if not matches:
         return None
     return max(matches, key=lambda p: p.stat().st_mtime)
@@ -301,15 +338,43 @@ def _render_journal(task_slug: str, entries: list) -> str:
     return "\n".join(lines)
 
 
-def _task_state_json(task: "Task") -> str:
-    """Serialize a task's state slice the same way StateManager persists it
-    (worktrees as plain strings, passive_repos sorted) so state.json matches
-    what's actually in state.yaml."""
+def _task_state_data(task: "Task") -> dict:
+    """A task's state slice as a plain JSON-serializable dict, the same shape
+    StateManager persists to state.yaml (worktrees as plain strings,
+    passive_repos sorted)."""
     data = task.model_dump(mode="json")
     data["worktrees"] = {k: str(v) for k, v in task.worktrees.items()}
     if "passive_repos" in data:
         data["passive_repos"] = sorted(data["passive_repos"])
-    return json.dumps(data, indent=2, sort_keys=False)
+    return data
+
+
+def _redact_json_leaves(value: object, patterns: list[RedactionPattern]) -> tuple[object, list[str]]:
+    """Recursively redact every string leaf of a JSON-serializable structure
+    (dict/list/str/anything else passed through), preserving its shape.
+
+    Used for state.json under `--redacted` instead of running `redact_text`
+    over the raw serialized JSON string: the built-in patterns' greedy value
+    groups (`env_secret`, `bearer_token`) aren't JSON-aware and would happily
+    swallow a closing quote/brace past the secret, producing invalid JSON.
+    Redacting each string value in isolation instead leaves every non-string
+    leaf and all JSON structure/delimiters untouched, so the result is
+    always valid JSON.
+    """
+    warnings: list[str] = []
+
+    def _walk(v: object) -> object:
+        if isinstance(v, str):
+            redacted, warns = redact_text(v, patterns)
+            warnings.extend(warns)
+            return redacted
+        if isinstance(v, dict):
+            return {k: _walk(sub) for k, sub in v.items()}
+        if isinstance(v, list):
+            return [_walk(sub) for sub in v]
+        return v
+
+    return _walk(value), warnings
 
 
 @dataclass(frozen=True)
@@ -332,10 +397,20 @@ def build_export_bundle(
     """Assemble the bundle directory tree at `dest_dir`. Never errors on a
     missing-but-optional artifact (AC8) — omits it instead.
 
-    Redaction (when `redacted`) covers journal.md, plan.md, spec.md, and
-    diffs/*.diff per the spec's Approach + AC3 (the bundle's TEXT artifacts);
-    state.json is a structured, mship-owned metadata slice, not scanned.
+    Redaction (when `redacted`) covers journal.md, plan.md, spec.md,
+    diffs/*.diff, and state.json. The text artifacts run through
+    `redact_text` directly; state.json is redacted leaf-by-leaf (see
+    `_redact_json_leaves`) so free-text fields like `description` /
+    `blocked_reason` don't leak secrets under `--redacted` while the file
+    stays valid JSON either way.
     """
+    # Clear any stale prior export at this path first — a `--format dir`
+    # export reusing an existing `<task>-export/` dir must not leave behind
+    # files this run no longer writes (e.g. a diff for a repo no longer
+    # ahead of base). The zip path stages into a fresh tempdir, so this is a
+    # no-op there. See MOS-102 Greptile fix.
+    if dest_dir.exists():
+        shutil.rmtree(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
     warnings: list[str] = []
 
@@ -370,8 +445,13 @@ def build_export_bundle(
             from mship.core.spec_store import serialize_spec
             _write_text("spec.md", serialize_spec(spec))
 
-    # state.json — always faithful, never redacted (see docstring above).
-    (dest_dir / "state.json").write_text(_task_state_json(task))
+    # state.json — leaf-redacted under --redacted (see docstring above),
+    # otherwise a faithful copy.
+    state_data = _task_state_data(task)
+    if redacted:
+        state_data, warns = _redact_json_leaves(state_data, patterns)
+        warnings.extend(warns)
+    (dest_dir / "state.json").write_text(json.dumps(state_data, indent=2, sort_keys=False))
 
     # diffs/<repo>.diff (optional per repo)
     for repo_name in task.affected_repos:

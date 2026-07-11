@@ -253,6 +253,43 @@ def test_apply_pattern_safe_timeout_leaves_text_unredacted(monkeypatch):
     assert "timed out" in warning
 
 
+def test_apply_pattern_safe_never_returning_regex_does_not_hang(monkeypatch):
+    """A catastrophic custom pattern whose `.sub()` never returns (runaway
+    backtracking / infinite loop) must not hang export — the timeout guard
+    has to abandon the thread rather than join/shutdown(wait=True) on it.
+
+    Run the call on a side thread with a real wall-clock join timeout so a
+    regression (the old ThreadPoolExecutor `__exit__` blocking forever)
+    surfaces as a failed assertion instead of hanging the whole test run.
+    """
+    import threading
+
+    class _HangingRegex:
+        def sub(self, repl, text):
+            threading.Event().wait()  # never returns
+            return text  # unreachable
+
+    monkeypatch.setattr(export_mod, "_CUSTOM_PATTERN_TIMEOUT_SECS", 0.05)
+    pattern = RedactionPattern("custom", _HangingRegex(), builtin=False)
+
+    outcome: dict = {}
+
+    def _call():
+        outcome["value"] = export_mod._apply_pattern_safe("hello world", pattern)
+
+    caller = threading.Thread(target=_call, daemon=True)
+    caller.start()
+    caller.join(timeout=5.0)  # generous margin over the 0.05s internal timeout
+    assert not caller.is_alive(), (
+        "_apply_pattern_safe hung past its own timeout — a catastrophic "
+        "custom pattern must not block export"
+    )
+    result, warning = outcome["value"]
+    assert result == "hello world"
+    assert warning is not None
+    assert "timed out" in warning
+
+
 # --------------------------------------------------------------------------
 # Plan-doc discovery (v1: exact slug-in-filename match)
 # --------------------------------------------------------------------------
@@ -279,10 +316,15 @@ def test_discover_plan_path_no_match_returns_none(tmp_path):
 
 
 def test_discover_plan_path_picks_newest_on_multiple_matches(tmp_path):
+    """Two docs both in the canonical `<date>-<slug>.md` form (re-planned on
+    a different day) — pick the most-recently-modified. Note: a versioned
+    suffix like '-v1'/'-v2' after the slug is deliberately NOT a match under
+    the precise-match rule (MOS-102 Greptile fix) — only exact-stem or
+    exact `<date>-<slug>` qualifies."""
     plans = tmp_path / "docs" / "plans"
     plans.mkdir(parents=True)
-    older = plans / "2026-01-01-add-labels-v1.md"
-    newer = plans / "2026-02-01-add-labels-v2.md"
+    older = plans / "2026-01-01-add-labels.md"
+    newer = plans / "2026-02-01-add-labels.md"
     older.write_text("old")
     newer.write_text("new")
     now = time.time()
@@ -299,6 +341,30 @@ def test_discover_plan_path_honors_custom_docs_dir(tmp_path):
     assert discover_plan_path(tmp_path, "add-labels", docs_dir="docs") is None
     found = discover_plan_path(tmp_path, "add-labels", docs_dir="documentation")
     assert found is not None
+
+
+def test_discover_plan_path_short_slug_precise_match_not_substring(tmp_path):
+    """A short slug like 'add' must not match by substring — 'add-labels.md'
+    contains 'add' but isn't a plan for the 'add' task. Only an exact stem
+    match or the canonical `<date>-<slug>.md` form should match; a bare
+    `-<slug>` suffix (e.g. 'my-add.md') must also be rejected (MOS-102
+    Greptile fix)."""
+    plans = tmp_path / "docs" / "plans"
+    plans.mkdir(parents=True)
+    (plans / "add-labels.md").write_text("wrong: substring match")
+    (plans / "my-add.md").write_text("wrong: suffix match")
+    assert discover_plan_path(tmp_path, "add") is None
+
+    (plans / "add.md").write_text("right: exact stem")
+    found = discover_plan_path(tmp_path, "add")
+    assert found is not None
+    assert found.name == "add.md"
+
+    (plans / "add.md").unlink()
+    (plans / "2026-07-11-add.md").write_text("right: canonical dated form")
+    found = discover_plan_path(tmp_path, "add")
+    assert found is not None
+    assert found.name == "2026-07-11-add.md"
 
 
 # --------------------------------------------------------------------------
@@ -318,6 +384,37 @@ def test_collect_repo_diff_returns_diff_with_commits_ahead(workspace_with_git):
     assert diff is not None
     assert "API_KEY=abcdef123456" in diff
     assert "secret.env" in diff
+
+
+def test_collect_repo_diff_excludes_mainline_only_changes_past_fork_point(workspace_with_git):
+    """Three-dot (merge-base) diff, not two-dot: once `base` has advanced past
+    where the task branch forked, the export diff must contain only the task
+    branch's own commits — not a spurious removal of whatever landed on
+    `base` afterward (which a straight `base..branch` two-dot diff would
+    include, since it compares tree snapshots directly rather than from the
+    merge-base) (MOS-102 Greptile fix)."""
+    repo_dir = workspace_with_git / "shared"
+    _sh("git", "checkout", "-b", "feat/x", cwd=repo_dir)
+    (repo_dir / "task-change.txt").write_text("task branch work\n")
+    # Add only the new file (not `.`) — Taskfile.yml is deliberately left
+    # untracked by the fixture's `--allow-empty` init commit; committing it
+    # here would make `git checkout main` below delete it from the working
+    # tree (main's tree wouldn't have it), breaking ConfigLoader.load.
+    _sh("git", "add", "task-change.txt", cwd=repo_dir)
+    _sh("git", "commit", "-m", "task branch change", cwd=repo_dir)
+
+    # Advance base (main) past the fork point with a mainline-only commit.
+    _sh("git", "checkout", "main", cwd=repo_dir)
+    (repo_dir / "mainline-change.txt").write_text("mainline-only work\n")
+    _sh("git", "add", "mainline-change.txt", cwd=repo_dir)
+    _sh("git", "commit", "-m", "mainline-only change", cwd=repo_dir)
+
+    config = ConfigLoader.load(workspace_with_git / "mothership.yaml")
+    task = _make_task(worktrees={"shared": repo_dir}, branch="feat/x")
+    diff = collect_repo_diff(task, "shared", config)
+    assert diff is not None
+    assert "task-change.txt" in diff
+    assert "mainline-change.txt" not in diff
 
 
 def test_collect_repo_diff_none_when_no_worktree(workspace_with_git):
@@ -379,7 +476,11 @@ def bundle_env(workspace_with_git, tmp_path):
     config = ConfigLoader.load(workspace_with_git / "mothership.yaml")
     task = _make_task(
         worktrees={"shared": repo_dir}, branch="feat/add-labels", spec_id="add-labels",
-        description="task description with API_KEY=taskdescsecret123",
+        description=(
+            "task description with API_KEY=taskdescsecret123 and "
+            "ghp_" + "d" * 36
+        ),
+        blocked_reason="waiting on API_KEY=blockedreasonsecret789",
     )
     return {
         "workspace_root": workspace_with_git,
@@ -406,6 +507,32 @@ def test_bundle_contains_all_expected_artifacts(bundle_env, tmp_path):
     assert (dest / "diffs" / "shared.diff").is_file()
 
 
+def test_bundle_clears_stale_files_from_a_prior_export(bundle_env, tmp_path):
+    """A `--format dir` export reusing an existing `<task>-export/` dir must
+    not leave behind files this run no longer writes (e.g. a diff for a repo
+    that no longer has commits ahead, or an unrelated leftover file) — the
+    dest dir is cleared before this run's files are written (MOS-102
+    Greptile fix)."""
+    dest = tmp_path / "out"
+    dest.mkdir(parents=True)
+    stale = dest / "stale-leftover.txt"
+    stale.write_text("from a previous export run")
+    stale_diff = dest / "diffs" / "some-old-repo.diff"
+    stale_diff.parent.mkdir(parents=True)
+    stale_diff.write_text("stale diff")
+
+    build_export_bundle(
+        task=bundle_env["task"], config=bundle_env["config"],
+        workspace_root=bundle_env["workspace_root"],
+        log_manager=bundle_env["log_manager"], spec_store=bundle_env["spec_store"],
+        dest_dir=dest, redacted=False,
+    )
+    assert not stale.exists()
+    assert not stale_diff.exists()
+    # This run's own artifacts still land normally.
+    assert (dest / "journal.md").is_file()
+
+
 def test_unredacted_export_is_faithful(bundle_env, tmp_path):
     """Without --redacted, every planted secret survives unchanged (AC5)."""
     dest = tmp_path / "out"
@@ -419,7 +546,10 @@ def test_unredacted_export_is_faithful(bundle_env, tmp_path):
     assert "sk_live_SPECSECRET123" in (dest / "spec.md").read_text()
     assert "ghp_" + "c" * 36 in (dest / "plan.md").read_text()
     assert "API_KEY=abcdef123456" in (dest / "diffs" / "shared.diff").read_text()
-    assert "API_KEY=taskdescsecret123" in (dest / "state.json").read_text()
+    state_text = (dest / "state.json").read_text()
+    assert "API_KEY=taskdescsecret123" in state_text
+    assert "ghp_" + "d" * 36 in state_text
+    assert "blockedreasonsecret789" in state_text
 
 
 def test_redacted_export_scrubs_journal_plan_spec_diffs(bundle_env, tmp_path):
@@ -441,10 +571,14 @@ def test_redacted_export_scrubs_journal_plan_spec_diffs(bundle_env, tmp_path):
     assert "abcdef123456" not in diff_text and "<REDACTED:env_secret>" in diff_text
 
 
-def test_redacted_export_does_not_scrub_state_json(bundle_env, tmp_path):
-    """AC3 + Approach scope --redacted to journal/plan/spec/diffs only; state.json
-    is mship's own structured metadata slice, not scanned (see report note on
-    the spec's differing 'every text file above' phrasing in Bundle contents)."""
+def test_redacted_export_scrubs_state_json(bundle_env, tmp_path):
+    """`--redacted` must scrub state.json too — it's written raw otherwise,
+    leaking secrets embedded in free-text fields like `description` /
+    `blocked_reason`. Each string leaf of the serialized state is redacted
+    independently and re-serialized (not `redact_text` over the raw JSON
+    blob — the greedy `env_secret`/`bearer_token` value groups would swallow
+    JSON delimiters, like the closing quote, and produce invalid JSON), so
+    state.json must still be valid JSON afterward (MOS-102 Greptile fix)."""
     dest = tmp_path / "out"
     build_export_bundle(
         task=bundle_env["task"], config=bundle_env["config"],
@@ -453,8 +587,32 @@ def test_redacted_export_does_not_scrub_state_json(bundle_env, tmp_path):
         dest_dir=dest, redacted=True,
     )
     state_text = (dest / "state.json").read_text()
-    assert "API_KEY=taskdescsecret123" in state_text
-    json.loads(state_text)  # still valid JSON
+    parsed = json.loads(state_text)  # still valid JSON
+
+    assert "taskdescsecret123" not in state_text
+    assert "ghp_" + "d" * 36 not in state_text
+    assert "blockedreasonsecret789" not in state_text
+    assert "<REDACTED:env_secret>" in state_text
+    assert "<REDACTED:github_token>" in state_text
+    # Non-secret structure survives untouched.
+    assert parsed["slug"] == "add-labels"
+    assert parsed["branch"] == "feat/add-labels"
+
+
+def test_unredacted_state_json_stays_verbatim(bundle_env, tmp_path):
+    """Without --redacted, state.json is untouched — same faithful-copy
+    guarantee as the other bundle artifacts."""
+    dest = tmp_path / "out"
+    build_export_bundle(
+        task=bundle_env["task"], config=bundle_env["config"],
+        workspace_root=bundle_env["workspace_root"],
+        log_manager=bundle_env["log_manager"], spec_store=bundle_env["spec_store"],
+        dest_dir=dest, redacted=False,
+    )
+    state_text = (dest / "state.json").read_text()
+    assert "taskdescsecret123" in state_text
+    assert "ghp_" + "d" * 36 in state_text
+    assert "blockedreasonsecret789" in state_text
 
 
 def test_bundle_omits_missing_optional_artifacts(workspace_with_git, tmp_path):
