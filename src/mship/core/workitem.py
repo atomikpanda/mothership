@@ -33,3 +33,6 @@ class WorkItem(BaseModel):
     phase_override: Phase | None = None
     # Opt-in: this item is eligible for unattended (cloud-runner) execution. #unattended-runner
     unattended: bool = False
+    # Soft, reversible archive: excluded from list() by default. Missing on legacy
+    # (pre-archive) JSON files, which pydantic defaults to False on load.
+    archived: bool = False
