@@ -57,6 +57,45 @@ def _enroll_server_impl(*, store_dir, pubkeys_dir, port, host, ttl, relay_domain
     _run_uvicorn(build_enroll_app(store, relay_domain=relay_domain), host=host, port=port)
 
 
+def _gh_broker_impl(*, port, host, token_dir, app_id, app_key_path, installation_id):
+    from pathlib import Path
+
+    from mship.core.relay.gh_broker_app import create_gh_broker_app
+    from mship.core.relay.token import ensure_serve_token
+
+    missing = [name for name, val in (
+        ("MSHIP_GH_APP_ID", app_id),
+        ("MSHIP_GH_APP_KEY", app_key_path),
+        ("MSHIP_GH_APP_INSTALLATION", installation_id),
+    ) if not val]
+    if missing:
+        raise typer.BadParameter(
+            "gh-broker requires " + ", ".join(missing) + " (set as env vars, or the "
+            "matching --app-id/--app-key/--installation-id options)."
+        )
+
+    key_path = Path(app_key_path)
+    if not key_path.is_file():
+        raise typer.BadParameter(
+            f"MSHIP_GH_APP_KEY must be a path to the App's private key PEM file "
+            f"(got {app_key_path!r}, no such file)."
+        )
+    private_key = key_path.read_text()
+
+    token = ensure_serve_token(Path(token_dir))
+    Output().print(
+        f"gh-broker → http://{host}:{port}  (installation: {installation_id}, "
+        f"token store: {token_dir})"
+    )
+    _run_uvicorn(
+        create_gh_broker_app(
+            bearer_token=token, app_id=app_id, private_key=private_key,
+            installation_id=installation_id,
+        ),
+        host=host, port=port,
+    )
+
+
 def register(parent: typer.Typer, get_container):
     relay_app = typer.Typer(
         name="relay",
@@ -126,6 +165,33 @@ def register(parent: typer.Typer, get_container):
         """Run the public enroll endpoint on the relay host (devices POST their key here)."""
         _enroll_server_impl(store_dir=store_dir, pubkeys_dir=pubkeys_dir,
                             port=port, host=host, ttl=ttl, relay_domain=relay_domain)
+
+    # -------------------------------------------------------------------------
+    # Owner-side: gh-broker (Broker B — mints GitHub App installation tokens)
+    # -------------------------------------------------------------------------
+
+    @relay_app.command("gh-broker")
+    def gh_broker(
+        port: int = typer.Option(47181, "--port", help="Port to listen on."),
+        host: str = typer.Option("127.0.0.1", "--host",
+                                 help="Interface to bind (loopback; Caddy fronts it)."),
+        token_dir: str = typer.Option("./gh-broker-store", "--token-dir",
+                                      help="Directory for the persisted bearer token "
+                                           "(MSHIP_SERVE_TOKEN overrides; see ensure_serve_token)."),
+        app_id: str = typer.Option(lambda: os.environ.get("MSHIP_GH_APP_ID", ""), "--app-id",
+                                   help="GitHub App id (default $MSHIP_GH_APP_ID)."),
+        app_key: str = typer.Option(lambda: os.environ.get("MSHIP_GH_APP_KEY", ""), "--app-key",
+                                    help="Path to the GitHub App private key PEM file "
+                                         "(default $MSHIP_GH_APP_KEY — a file path, not the PEM text)."),
+        installation_id: str = typer.Option(
+            lambda: os.environ.get("MSHIP_GH_APP_INSTALLATION", ""), "--installation-id",
+            help="GitHub App installation id (default $MSHIP_GH_APP_INSTALLATION)."),
+    ):
+        """Run the standalone relay gh-token broker (Broker B): mints short-lived,
+        repo-scoped GitHub App installation tokens over a bearer-auth'd GET /gh-token,
+        independent of any dev machine's `gh auth login` (that's Broker A, `mship serve`)."""
+        _gh_broker_impl(port=port, host=host, token_dir=token_dir, app_id=app_id,
+                        app_key_path=app_key, installation_id=installation_id)
 
     # -------------------------------------------------------------------------
     # Owner-side: list / approve / deny
