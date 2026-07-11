@@ -603,7 +603,13 @@ def create_app(
         returns a full thread: GET /threads/{id}, POST /threads, POST /threads/{id}/messages,
         POST /threads/{id}/seen. The GET /threads list/summary endpoint is unaffected."""
         data = t.model_dump(mode="json")
-        all_items = list(workitems.list())  # single store scan, reused below
+        # include_archived=True: this is link/ownership resolution (which WorkItem does
+        # this thread belong to?), not a user-facing listing. A thread stays linked to its
+        # WorkItem after that item is archived (MOS-228 T3), so resolving with the default
+        # archived-excluding list() would wrongly report work_item_id=null here. The
+        # user-facing filter still applies at GET /items (_workitem_index above) and
+        # `item list` — only this internal resolution needs the full set.
+        all_items = list(workitems.list(include_archived=True))  # single store scan, reused below
         wi_id = resolve_thread_work_item(t.id, t.spec_id, t.task_slug, all_items)
         data["work_item_id"] = wi_id
         if wi_id is None:

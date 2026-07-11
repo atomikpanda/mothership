@@ -438,6 +438,48 @@ def test_item_archive_refused_when_live_task_linked_unless_forced(tmp_path):
         _reset()
 
 
+def test_item_archive_refused_for_forward_linked_task_with_stale_reverse_link(tmp_path):
+    """MOS-228 fix: the guard must also catch a live task attached via the item's
+    OWN forward link (task_slugs) even when the task's reverse link
+    (task.work_item_id) is missing/stale — the two links can drift apart, and
+    checking only the reverse link let a still-live task slip through."""
+    from mship.core.workitem_store import WorkItemStore
+
+    _isolate(tmp_path)
+    try:
+        res = runner.invoke(app, ["item", "new", "Title", "--kind", "feature"])
+        assert res.exit_code == 0, res.output
+        item_id = res.output.strip()
+
+        sm = StateManager(tmp_path / ".mothership")
+        sm.mutate(lambda s: s.tasks.__setitem__("t-1", Task(
+            slug="t-1", description="d", phase="dev", created_at=_NOW,
+            affected_repos=["mothership"], branch="feat/t-1")))
+
+        # Forward-link only: add_task with no `state` arg leaves the task's own
+        # work_item_id untouched, simulating a reverse link that drifted stale.
+        items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+        items.add_task(item_id, "t-1", now=_NOW)
+        assert sm.load().tasks["t-1"].work_item_id is None
+
+        res = runner.invoke(app, ["item", "archive", item_id])
+        assert res.exit_code != 0
+        assert "t-1" in res.output
+        assert "--force" in res.output
+
+        # The item must still be live (not archived) after the refusal.
+        res = runner.invoke(app, ["--json", "item", "list"])
+        assert [r["id"] for r in json.loads(res.output)] == [item_id]
+
+        res = runner.invoke(app, ["item", "archive", item_id, "--force"])
+        assert res.exit_code == 0, res.output
+
+        res = runner.invoke(app, ["--json", "item", "list"])
+        assert json.loads(res.output) == []
+    finally:
+        _reset()
+
+
 def test_item_unarchive_restores_to_default_list(tmp_path):
     _isolate(tmp_path)
     try:

@@ -472,6 +472,34 @@ def test_thread_detail_null_work_item_when_unrelated(tmp_path):
     assert body["work_item"] is None
 
 
+def test_thread_detail_resolves_work_item_id_when_archived(tmp_path):
+    """MOS-228 fix: archiving a WorkItem must not break the thread->work-item link
+    graph. GET /threads/{id} still needs to report work_item_id for a thread whose
+    owning item is archived — only the user-facing GET /items listing should drop
+    it (regression test for the link-resolution using the archived-excluding
+    workitems.list() default)."""
+    from mship.core.workitem_store import WorkItemStore
+
+    now = datetime(2026, 7, 8, tzinfo=timezone.utc)
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="Old work", kind="feature", workspace="test-ws", now=now)
+
+    client = TestClient(_app(tmp_path))
+    tid = client.post("/threads", json={"text": "hi"}).json()["id"]
+    items.add_thread(wi.id, tid, now=now)
+
+    items.archive(wi.id, now=now)
+
+    body = client.get(f"/threads/{tid}").json()
+    assert body["work_item_id"] == wi.id
+    assert body["work_item"] == {
+        "id": wi.id, "title": "Old work", "kind": "feature", "phase": "inbox",
+    }
+
+    # The user-facing listing still excludes the archived item.
+    assert client.get("/items").json() == []
+
+
 def test_thread_detail_linkifies_spec_ref_in_agent_message_only(tmp_path):
     from mship.core.message_store import MessageStore
     from datetime import datetime, timezone, timedelta

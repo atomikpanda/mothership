@@ -284,16 +284,23 @@ def register(parent: typer.Typer, get_container) -> None:
                     help="Archive even though a live task still references this item.")):
         """Soft-delete a work item: hidden from `item list` unless `--all`.
 
-        Refused when a task in state.tasks still has work_item_id == item_id —
-        `mship close` removes a task from state entirely, so a task still present
-        there is by definition not yet closed (live). Pass --force to archive
-        anyway (e.g. an abandoned/orphaned task)."""
+        Refused when a live task (present in state.tasks — `mship close` removes a
+        task from state entirely, so presence there is by definition not yet closed)
+        is attached to this item via EITHER direction of the task<->item link:
+        reverse (task.work_item_id == item_id) or forward (the item's own
+        task_slugs). The two links are normally kept in sync (WorkItemStore.add_task
+        sets both), but a stale/missing reverse link must not let a forward-linked
+        live task slip through the guard. Pass --force to archive anyway (e.g. an
+        abandoned/orphaned task)."""
         items, _, state_manager, _, _ = _ctx()
         output = Output()
         if not force:
             state = state_manager.load()
-            blocking = sorted(slug for slug, t in state.tasks.items()
-                              if t.work_item_id == item_id)
+            reverse = {slug for slug, t in state.tasks.items() if t.work_item_id == item_id}
+            wi = items.get(item_id)
+            forward = {slug for slug in (wi.task_slugs if wi is not None else [])
+                      if slug in state.tasks}
+            blocking = sorted(reverse | forward)
             if blocking:
                 output.error(
                     f"Work item {item_id} still has live task(s): "
