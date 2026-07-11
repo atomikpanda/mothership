@@ -132,6 +132,7 @@ from mship.cli import pr as _pr_mod
 from mship.cli import prune as _prune_mod
 from mship.cli import reconcile as _reconcile_mod
 from mship.cli import relay as _relay_mod
+from mship.cli import run_host as _run_host_mod
 from mship.cli import skill as _skill_mod
 from mship.cli import spec as _spec_mod
 from mship.cli import status as _status_mod
@@ -192,6 +193,7 @@ _pr_mod.register(app, get_container)
 _prune_mod.register(app, get_container)
 _reconcile_mod.register(app, get_container)
 _relay_mod.register(app, get_container)
+_run_host_mod.register(app, get_container)
 _skill_mod.register(app, get_container)
 _spec_mod.register(app, get_container)
 _status_mod.register(app, get_container)
