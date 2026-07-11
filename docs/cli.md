@@ -27,6 +27,44 @@ mship journal "msg" [--action X] [--open Y] [--repo R] [--test-state pass|fail|m
 mship journal --show-open                           # list open questions
 mship finish [--body-file PATH | --body TEXT] [--base B] [--base-map a=B,b=B] [--push-only] [--handoff] [--force-audit] [--bypass-reconcile] [--force]
 mship close [--yes] [--abandon] [--force] [--skip-pr-check] [--bypass-reconcile]
+mship commit "message" [--task <slug>]              # commit staged changes across the task's worktrees; pushes if finished
+mship depends add|remove|list                       # manage task-to-task dependency edges (#104)
+```
+
+## Work items & specs
+
+A **work item** is the durable unit of intent (`feature`/`bug`/`chore`/`question`) that a task implements; a **spec** is its approved design. Feature work items gate `phase dev`/`finish` on an approved linked spec (bugs and chores don't need one).
+
+```bash
+mship item new "title" --kind feature|bug|chore|question   # create a work item
+mship item list [--all]                             # list work items (--all includes archived)
+mship item show <id>                                # detail incl. linked spec/tasks
+mship item phase <id> <phase>                       # move the item through its lifecycle
+mship item link-spec|link-task|link-url <id> <ref>  # attach a spec, task, or URL
+mship item archive|unarchive <id>                   # soft-hide / restore
+
+mship spec new --title "title"                      # create a spec (lands in needs_review)
+mship spec draft <id> [--from-text "..."]           # emit an authoring prompt for an agent
+mship spec apply <id> --from-json <file>            # populate the spec from JSON
+mship spec review <id> | mship spec show <id>       # read a spec
+mship spec verdict <id> <criterion> <verdict>       # record a per-criterion review verdict
+mship spec request-changes <id> --reason "..."      # send a spec back with a reason
+mship spec approve <id>                             # mark approved (unblocks dev/finish)
+mship spec dispatch <id> [--task <slug>]            # bind an approved spec to a task + emit handoff
+mship spec list                                     # list specs
+```
+
+Specs live at `<workspace>/specs/<date>-<id>.md`. Lifecycle: `new → draft → apply → review → approve → dispatch`.
+
+## Messaging & serve
+
+`mship serve` exposes a JSON API over the spec + task model (reads plus review/approve writes) — the backend for the Ground Control app and remote agents. The mailbox is a durable store-and-forward channel between a phone and an agent.
+
+```bash
+mship serve [--relay] [--port N]                    # run the JSON API over the spec/task model (+ mailbox)
+mship inbox wait [--since TS] [--timeout S]         # block until a new human message arrives (JSON)
+mship reply <thread_id> "text"                      # reply to a mailbox thread
+mship ask <thread_id> "question"                    # post a question / decision request to a thread
 ```
 
 ## Inspection
@@ -50,6 +88,7 @@ mship doctor
 ```bash
 mship sync [--repos r]                              # fast-forward behind-only clean repos
 mship prune [--force]                               # remove orphaned worktrees
+mship export [--redacted] [--format dir|zip]        # bundle a task's journal/plan/spec/state/diffs (opt-in secret redaction)
 ```
 
 ## Long-running services
@@ -57,6 +96,7 @@ mship prune [--force]                               # remove orphaned worktrees
 ```bash
 mship run [--repos a,b] [--tag t]                   # start services per dependency tier
 mship logs <service>                                # tail logs for a service
+mship run-host add|list|remove                      # manage per-machine run-host connections (role -> {url, token})
 ```
 
 ## `mship finish`

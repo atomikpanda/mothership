@@ -50,6 +50,11 @@ mship test                              # run tests in dependency order
 mship finish --body-file - <<'EOF'...   # open PR(s)
 mship close                             # clean up task state and worktrees
 
+# Work items & specs
+mship item new "title" --kind feature|bug|chore|question  # durable unit of intent behind a task
+mship spec new --title "title"          # design a spec; approve before feature dev/finish
+mship spec dispatch <id>                # bind an approved spec to a task + emit a handoff
+
 # Task dependencies (#104)
 mship spawn "downstream" --depends-on a,b  # declare at spawn
 mship depends add/remove/list               # manage task-to-task dependency edges
@@ -60,6 +65,12 @@ mship status                            # active task, phase, branch, drift
 mship journal                           # task log with context
 mship context                           # JSON snapshot of workspace state
 mship graph                             # dependency graph across all tasks
+mship export [--redacted]               # bundle task artifacts to share (opt-in secret redaction)
+
+# Messaging (phone <-> agent)
+mship serve [--relay]                   # JSON API + mailbox backing the Ground Control app
+mship inbox wait                        # block until the next human message arrives
+mship reply <thread> "text"             # answer a mailbox thread
 ```
 
 For details, see `mship spawn --help`, [`docs/cli.md`](docs/cli.md), and the `working-with-mothership` skill.
