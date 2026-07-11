@@ -263,3 +263,80 @@ def test_dispatch_spec_reuses_existing_workitem_when_spec_already_has_one(tmp_pa
     assert "dq" in wi.task_slugs
     assert result.spec.work_item_id == existing.id
     assert sm.load().tasks["dq"].work_item_id == existing.id
+
+
+# --- MOS-228 T4: WorkItem-join adopt + refuse-to-guess ---
+
+def test_dispatch_spec_adopts_via_workitem_join(tmp_path):
+    sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
+    sm.save(WorkspaceState(tasks={"other-task": _task(slug="other-task")}))
+    wi = items.create(title="Decision Queue", kind="feature", workspace=WORKSPACE, now=NOW)
+    items.add_task(wi.id, "other-task", now=NOW, state=sm)
+    spec = _approved_spec(work_item_id=wi.id)  # id == "dq"; unbound; task slug != spec.id
+    store.save(spec)
+
+    def spawn_fn(_s):
+        raise AssertionError("must not auto-spawn when the WorkItem join resolves a live task")
+
+    result = dispatch_spec(
+        spec, state_manager=sm, store=store, spawn_fn=spawn_fn, now=NOW,
+        workitems=items, workspace=WORKSPACE,
+    )
+
+    assert result.spawned is False
+    assert result.task.slug == "other-task"
+    assert result.spec.task_slug == "other-task"
+    assert sm.load().tasks["other-task"].spec_id == "dq"
+    assert [i.id for i in items.list()] == [wi.id]              # no new WorkItem minted
+
+
+def test_dispatch_spec_refuses_to_guess_with_multiple_workitem_candidates(tmp_path):
+    sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
+    sm.save(WorkspaceState(tasks={"t1": _task(slug="t1"), "t2": _task(slug="t2")}))
+    wi = items.create(title="Decision Queue", kind="feature", workspace=WORKSPACE, now=NOW)
+    items.add_task(wi.id, "t1", now=NOW, state=sm)
+    items.add_task(wi.id, "t2", now=NOW, state=sm)
+    spec = _approved_spec(work_item_id=wi.id)  # id == "dq"; unbound
+    store.save(spec)
+
+    def spawn_fn(_s):
+        raise AssertionError("must not auto-spawn when the join is ambiguous")
+
+    with pytest.raises(DispatchError, match="--task"):
+        dispatch_spec(
+            spec, state_manager=sm, store=store, spawn_fn=spawn_fn, now=NOW,
+            workitems=items, workspace=WORKSPACE,
+        )
+
+    assert store.find_by_id("dq").status == "approved"          # unchanged, not dispatched
+    assert sorted(sm.load().tasks) == ["t1", "t2"]               # nothing spawned
+    assert [i.id for i in items.list()] == [wi.id]               # no new WorkItem minted
+    assert sorted(items.get(wi.id).task_slugs) == ["t1", "t2"]   # WorkItem untouched
+
+
+def test_dispatch_spec_ignores_closed_workitem_candidates_and_auto_spawns(tmp_path):
+    sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
+    sm.save(WorkspaceState(tasks={}))
+    wi = items.create(title="Decision Queue", kind="feature", workspace=WORKSPACE, now=NOW)
+    wi.task_slugs.append("closed-task")  # simulate a closed task: absent from state.tasks
+    items.save(wi)
+    spec = _approved_spec(work_item_id=wi.id)
+    store.save(spec)
+
+    calls = []
+
+    def spawn_fn(s):
+        calls.append(s.id)
+        task = _task(slug=s.id, repos=s.affected_repos)
+        sm.mutate(lambda st: st.tasks.__setitem__(s.id, task))
+        return task
+
+    result = dispatch_spec(
+        spec, state_manager=sm, store=store, spawn_fn=spawn_fn, now=NOW,
+        workitems=items, workspace=WORKSPACE,
+    )
+
+    assert result.spawned is True
+    assert calls == ["dq"]
+    assert result.task.slug == "dq"
+    assert sorted(items.get(wi.id).task_slugs) == ["closed-task", "dq"]
