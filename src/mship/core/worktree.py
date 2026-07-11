@@ -593,6 +593,11 @@ class WorktreeManager:
                             f"from possibly-stale local {cut_base}; run `mship sync` and "
                             f"re-check, or re-spawn with a fresh base"
                         )
+                # When we didn't cut from origin's tip (offline / no remote / fetch
+                # failed), cut from the local base branch explicitly rather than the
+                # checkout's HEAD.
+                if start_point is None and self._git.ref_exists(repo_path, cut_base):
+                    start_point = cut_base
                 self._git.worktree_add(
                     repo_path=repo_path,
                     worktree_path=wt_path,

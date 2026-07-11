@@ -228,6 +228,47 @@ def test_spawn_default_base_warns_loudly_when_fetch_fails(worktree_deps, tmp_pat
     assert len(matches) == 1, result.setup_warnings
 
 
+def test_spawn_default_base_cuts_from_local_base_not_checkout_head_when_fetch_fails(
+    worktree_deps, tmp_path
+):
+    """MOS-203 (Greptile, worktree.py ~594): when the default (non --base) cut can't
+    fetch origin/<base>, it must cut the new worktree from the local <base> branch
+    tip — NOT from whatever branch the canonical checkout's HEAD happens to be on.
+    Regression for "fetch failure uses current HEAD"."""
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    shared = workspace / "shared"
+
+    # Normalize the fixture's default branch to literally "main" regardless of the
+    # host's git init.defaultBranch, so `cut_base` ("main") is unambiguous.
+    _git_run(shared, "branch", "-m", "main")
+    main_tip = _head(shared)
+
+    # Materialize origin/main so the fetch path is exercised (has_remote is True),
+    # then break the remote so `fetch_remote_ref` fails — the exact scenario named
+    # in the warning ("could not fetch origin/main").
+    origin = tmp_path / "shared-origin.git"
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+    _git_run(shared, "remote", "add", "origin", str(origin))
+    _git_run(shared, "push", "origin", "main")
+    _git_run(shared, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+
+    # Move the canonical checkout's HEAD to an unrelated branch with a DIFFERENT
+    # commit than main, so a HEAD-based cut would silently pick up the wrong tip.
+    _git_run(shared, "checkout", "-b", "unrelated-work")
+    (shared / "unrelated.txt").write_text("unrelated work in progress")
+    _git_run(shared, "add", "unrelated.txt")
+    _git_run(shared, "commit", "-m", "unrelated work commit")
+    unrelated_tip = _head(shared)
+    assert unrelated_tip != main_tip  # sanity: HEAD really is ahead of, and distinct from, main
+
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("default base test", repos=["shared"], workspace_root=workspace)
+    wt = Path(state_mgr.load().tasks["default-base-test"].worktrees["shared"])
+
+    assert _head(wt) == main_tip        # cut from local main, not the checkout's HEAD
+    assert _head(wt) != unrelated_tip
+
+
 def test_abort_succeeds_even_if_branch_delete_fails(worktree_deps):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
