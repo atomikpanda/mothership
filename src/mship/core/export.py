@@ -549,6 +549,21 @@ def build_export_bundle(
     return ExportBundle(bundle_path=dest_dir, warnings=warnings)
 
 
+def _is_prior_export_zip(zip_path: Path, bundle_name: str) -> bool:
+    """True if `zip_path` is a prior mship export bundle — a readable zip
+    containing our `<bundle_name>/.mship-export` marker entry. Gates the zip
+    overwrite the same way the directory path gates its rmtree on the marker,
+    so `mship export --format zip` never clobbers an unrelated same-named file
+    (a corrupt/non-zip file returns False → refuse). See MOS-102 Greptile fix.
+    """
+    marker_arc = f"{bundle_name}/.mship-export"
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            return marker_arc in zf.namelist()
+    except (zipfile.BadZipFile, OSError):
+        return False
+
+
 def export_task(
     *,
     task: "Task",
@@ -580,6 +595,16 @@ def export_task(
     if format != "zip":
         raise ValueError(f"Unknown export format: {format!r} (use 'dir' or 'zip')")
 
+    # Only ever overwrite a zip WE created: refuse an existing same-named file
+    # that isn't a prior mship export (mirrors the directory marker guard, so
+    # an unrelated `<task>-export.zip` isn't silently clobbered). See Greptile.
+    zip_path = output_root / f"{bundle_name}.zip"
+    if zip_path.exists() and not _is_prior_export_zip(zip_path, bundle_name):
+        raise ValueError(
+            f"refusing to overwrite {zip_path}: it exists and is not a prior "
+            f"mship export (no .mship-export marker). Remove it or export elsewhere."
+        )
+
     with tempfile.TemporaryDirectory() as tmp:
         staging = Path(tmp) / bundle_name
         result = build_export_bundle(
@@ -587,7 +612,6 @@ def export_task(
             log_manager=log_manager, spec_store=spec_store,
             dest_dir=staging, redacted=redacted, home_dir=home_dir,
         )
-        zip_path = output_root / f"{bundle_name}.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for file_path in sorted(staging.rglob("*")):
                 if file_path.is_file():

@@ -812,6 +812,51 @@ def test_export_task_format_zip(bundle_env, tmp_path):
         assert b"abcdef123456" not in journal_bytes
 
 
+def test_export_zip_refuses_to_overwrite_unrelated_file(bundle_env, tmp_path):
+    """`--format zip` must not clobber an unrelated file that happens to share
+    the `<task>-export.zip` name: if it exists and isn't a prior mship export
+    (no `.mship-export` marker entry — e.g. a non-zip file), refuse rather than
+    truncate the user's data (Greptile, mirrors the directory guard)."""
+    out_root = tmp_path / "cwd"
+    out_root.mkdir()
+    precious = out_root / "add-labels-export.zip"
+    precious.write_bytes(b"not a zip - the user's important file")
+
+    with pytest.raises(ValueError, match="refusing to overwrite"):
+        export_task(
+            task=bundle_env["task"], config=bundle_env["config"],
+            workspace_root=bundle_env["workspace_root"],
+            log_manager=bundle_env["log_manager"], spec_store=bundle_env["spec_store"],
+            format="zip", output_root=out_root,
+        )
+    assert precious.read_bytes() == b"not a zip - the user's important file"
+
+
+def test_export_zip_overwrites_a_prior_export_zip(bundle_env, tmp_path):
+    """Re-exporting to a `<task>-export.zip` that IS a prior mship export
+    (carries the `<bundle>/.mship-export` marker entry) overwrites cleanly —
+    the marker gate only blocks unrelated files, not our own re-exports."""
+    out_root = tmp_path / "cwd"
+    out_root.mkdir()
+    first = export_task(
+        task=bundle_env["task"], config=bundle_env["config"],
+        workspace_root=bundle_env["workspace_root"],
+        log_manager=bundle_env["log_manager"], spec_store=bundle_env["spec_store"],
+        format="zip", output_root=out_root,
+    )
+    # second export to the same path must succeed (prior export is replaceable)
+    second = export_task(
+        task=bundle_env["task"], config=bundle_env["config"],
+        workspace_root=bundle_env["workspace_root"],
+        log_manager=bundle_env["log_manager"], spec_store=bundle_env["spec_store"],
+        format="zip", output_root=out_root,
+    )
+    assert second.bundle_path == first.bundle_path
+    with zipfile.ZipFile(second.bundle_path) as zf:
+        assert "add-labels-export/.mship-export" in zf.namelist()
+        assert "add-labels-export/journal.md" in zf.namelist()
+
+
 def test_export_task_invalid_format_raises(bundle_env, tmp_path):
     with pytest.raises(ValueError):
         export_task(
