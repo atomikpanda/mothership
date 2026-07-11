@@ -1145,8 +1145,17 @@ def register(app: typer.Typer, get_container):
 
         # PR creation flow
         pr_mgr = container.pr_manager()
-        from mship.core.gh_auth import resolve_token
-        gh_token = resolve_token(token)
+        from mship.core.gh_auth import broker_config_from_env, resolve_token
+        # Broker-pull fallback repo set: this task's affected repos, falling
+        # back to every non-git_root repo in the workspace when the task has
+        # none recorded (mirrors bootstrap's repo-set derivation).
+        finish_repos = list(task.affected_repos) or [
+            n for n, r in config.repos.items() if r.git_root is None
+        ]
+        broker_url, broker_bearer = broker_config_from_env()
+        gh_token = resolve_token(
+            token, broker_url=broker_url, broker_bearer=broker_bearer, repos=finish_repos,
+        )
 
         # --push-only: push branches, stamp finished_at, skip gh entirely.
         if push_only:

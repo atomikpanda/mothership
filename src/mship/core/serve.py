@@ -146,6 +146,10 @@ def create_app(
 
     store = SpecStore(specs_dir)
     pr_manager = PRManager(ShellRunner())
+    # Separate ShellRunner instance for GET /gh-token (Broker A) rather than
+    # reaching into pr_manager's private `_shell` — same class, own lifetime,
+    # kept simple to construct/replace independently of PRManager.
+    gh_token_shell = ShellRunner()
 
     # `msgs` and `workitems` back both the mailbox/work-item routes below and
     # the `PrWatcher` started by `_lifespan`; defined here (rather than next
@@ -243,6 +247,36 @@ def create_app(
         if slug not in state.tasks:
             raise HTTPException(status_code=404, detail=f"no task {slug!r}")
         return jsonable_encoder(log_manager.read(slug, last=50))
+
+    # --- gh-token (Broker A): proxy the serve host's own `gh auth token` ---
+    # Shared contract with Broker B (mship.core.gh_app.mint_installation_token):
+    # both return {"token", "expires_at", "repositories"}. Broker A does no
+    # independent repo scoping — it just hands back whatever `gh` on this host
+    # is already authenticated as, so `expires_at` is always None here (the
+    # underlying gh auth token's lifetime isn't introspectable this way) and
+    # `repositories` is purely an echo of the query, not an enforced scope.
+
+    @app.get("/gh-token")
+    def get_gh_token(repos: str | None = None):
+        """Inherits the app-wide bearer dependency (see `_make_auth_dependency`
+        above) automatically — no separate auth check needed here."""
+        repos_list = [r.strip() for r in repos.split(",") if r.strip()] if repos else None
+        result = gh_token_shell.run("gh auth token", cwd=workspace_root)
+        token = (result.stdout or "").strip()
+        if result.returncode != 0 or not token:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "gh auth token unavailable on serve host — run `gh auth login`, "
+                    "or use a relay broker"
+                ),
+            )
+        # Audit the mint: timestamp + requested repos, never the token value.
+        logger.info(
+            "gh-token minted: broker=A repos=%s at=%s",
+            repos_list, datetime.now(timezone.utc).isoformat(),
+        )
+        return {"token": token, "expires_at": None, "repositories": repos_list}
 
     # --- write endpoints ---
 

@@ -32,6 +32,27 @@ enroll.{$RELAY_DOMAIN} {
 	}
 }
 
+# gh-token broker (Broker B) — public but edge-hardened (only GET /gh-token;
+# the broker itself still requires the bearer token — see gh_broker_app.py).
+gh.{$RELAY_DOMAIN} {
+	tls {
+		on_demand
+	}
+	@gh_token {
+		method GET
+		path /gh-token
+	}
+	handle @gh_token {
+		request_body {
+			max_size 4KB
+		}
+		reverse_proxy 127.0.0.1:47181
+	}
+	handle {
+		respond "not found" 404
+	}
+}
+
 # Per-device serve subdomains -> sish (Host preserved). The more-specific
 # enroll.<domain> site above takes precedence over this wildcard.
 *.{$RELAY_DOMAIN} {
