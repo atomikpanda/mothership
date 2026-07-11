@@ -2,6 +2,7 @@
 /gh-token minting GitHub App installation tokens). `mint_installation_token`
 itself is exercised in tests/core/test_gh_app.py — here we only check the
 FastAPI wiring: auth, config validation, and error surfacing."""
+import pytest
 from fastapi.testclient import TestClient
 
 from mship.core.gh_app import GhAppError
@@ -71,6 +72,28 @@ def test_gh_token_missing_app_config_is_clear_error_not_a_crash(monkeypatch):
     detail = r.json()["detail"]
     assert "-----BEGIN" not in detail
     assert "secret" not in detail  # bearer token itself never leaks either
+
+
+def test_gh_token_missing_repos_is_400_and_does_not_call_mint(monkeypatch):
+    def fake_mint(**kw):
+        pytest.fail("mint_installation_token must not be called when repos is missing")
+
+    client = _client(monkeypatch, mint=fake_mint)
+    r = client.get("/gh-token", headers={"Authorization": "Bearer secret"})
+
+    assert r.status_code == 400
+    assert "repos" in r.json()["detail"]
+
+
+def test_gh_token_blank_repos_is_400_and_does_not_call_mint(monkeypatch):
+    def fake_mint(**kw):
+        pytest.fail("mint_installation_token must not be called when repos is blank")
+
+    client = _client(monkeypatch, mint=fake_mint)
+    r = client.get("/gh-token", params={"repos": ""}, headers={"Authorization": "Bearer secret"})
+
+    assert r.status_code == 400
+    assert "repos" in r.json()["detail"]
 
 
 def test_gh_token_mint_failure_surfaces_repo_not_a_200(monkeypatch):

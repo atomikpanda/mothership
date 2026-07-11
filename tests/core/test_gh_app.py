@@ -123,3 +123,21 @@ def test_mint_installation_token_never_leaks_private_key_on_error(rsa_keypair):
         )
 
     assert private_pem not in str(exc_info.value)
+
+
+def test_mint_installation_token_refuses_empty_repos_without_a_network_call(rsa_keypair):
+    """An empty/omitted `repos` must never reach GitHub: an empty
+    `repositories` list in the request body mints a token scoped to the
+    WHOLE App installation, not nothing. Assert this fails fast — no
+    `.post` call at all — by using a client whose `.post` fails the test."""
+    private_pem, _public_pem = rsa_keypair
+
+    class _ExplodingClient:
+        def post(self, *args, **kwargs):
+            pytest.fail("mint_installation_token must not make an HTTP call for empty repos")
+
+    with pytest.raises(GhAppError, match="unscoped"):
+        mint_installation_token(
+            app_id="123", private_key=private_pem, installation_id="456",
+            repos=[], client=_ExplodingClient(),
+        )

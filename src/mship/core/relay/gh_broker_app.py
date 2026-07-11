@@ -60,6 +60,12 @@ def create_gh_broker_app(
     def get_gh_token(repos: str | None = None):
         repos_list = [r.strip() for r in repos.split(",") if r.strip()] if repos else []
 
+        if not repos_list:
+            raise HTTPException(
+                status_code=400,
+                detail="repos query param is required (comma-separated repo names)",
+            )
+
         if not (app_id and private_key and installation_id):
             raise HTTPException(
                 status_code=500,
