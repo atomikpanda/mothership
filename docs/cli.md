@@ -64,7 +64,7 @@ Specs live at `<workspace>/specs/<date>-<id>.md`. Lifecycle: `new → draft → 
 mship serve [--relay] [--port N]                    # run the JSON API over the spec/task model (+ mailbox)
 mship inbox wait [--since TS] [--timeout S]         # block until a new human message arrives (JSON)
 mship reply <thread_id> "text"                      # reply to a mailbox thread
-mship ask <thread_id> "question"                    # post a question / decision request to a thread
+mship ask <thread_id> "question" --option A --option B  # post a decision (>=2 tappable options; --recommend/--multi/--no-free-text)
 ```
 
 ## Inspection
