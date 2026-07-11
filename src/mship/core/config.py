@@ -119,6 +119,33 @@ class AuditPolicy(BaseModel):
     block_finish: bool = True
 
 
+class RedactPatternEntry(BaseModel):
+    """One user-configured `--redacted` pattern (MOS-102).
+
+    A bare YAML string normalizes to `{"pattern": <string>}` (kind "custom");
+    `{name: ..., pattern: ...}` lets an operator label the pattern so its
+    `<REDACTED:kind>` marker is more legible than the generic "custom".
+    """
+    name: str | None = None
+    pattern: str
+
+
+class RedactConfig(BaseModel):
+    """`mothership.yaml#redact.patterns` — extra regexes unioned with the
+    built-in `mship export --redacted` pattern set. See core/export.py."""
+    patterns: list[RedactPatternEntry] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_patterns(cls, data):
+        if isinstance(data, dict) and "patterns" in data and data["patterns"] is not None:
+            normalized = []
+            for entry in data["patterns"]:
+                normalized.append({"pattern": entry} if isinstance(entry, str) else entry)
+            data["patterns"] = normalized
+        return data
+
+
 class WorkspaceConfig(BaseModel):
     workspace: str
     env_runner: str | None = None
@@ -159,6 +186,10 @@ class WorkspaceConfig(BaseModel):
     # mship.core.run_host.RunHostStore / resolve_run_host). A repo opts into
     # one via `RepoConfig.run_host`.
     run_hosts: list[str] = []
+    # Extra `mship export --redacted` patterns unioned with the built-in set
+    # (MOS-102). None (the default — no `redact:` key) leaves export's
+    # redaction pass exactly the built-in patterns.
+    redact: RedactConfig | None = None
     repos: dict[str, RepoConfig]
 
     @field_validator("relay", mode="before")

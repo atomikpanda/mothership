@@ -120,6 +120,7 @@ from mship.cli import depends as _depends_mod
 from mship.cli import dispatch as _dispatch_mod
 from mship.cli import doctor as _doctor_mod
 from mship.cli import exec as _exec_mod
+from mship.cli import export as _export_mod
 from mship.cli import gh as _gh_mod
 from mship.cli import init as _init_mod
 from mship.cli import internal as _internal_mod
@@ -181,6 +182,7 @@ _depends_mod.register(app, get_container)
 _dispatch_mod.register(app, get_container)
 _doctor_mod.register(app, get_container)
 _exec_mod.register(app, get_container)
+_export_mod.register(app, get_container)
 _gh_mod.register(app, get_container)
 _init_mod.register(app, get_container)
 _internal_mod.register(app, get_container)
