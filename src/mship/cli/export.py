@@ -20,7 +20,10 @@ def register(app: typer.Typer, get_container):
             False, "--redacted",
             help="Strip well-known secret shapes (Stripe/GitHub/AWS/PEM/Bearer/.env-style) "
                  "from the bundle's text artifacts. Opt-in; omitted means a faithful, "
-                 "unredacted copy.",
+                 "unredacted copy. Built-in patterns are vetted and safe. A custom pattern "
+                 "from redact.patterns is your own regex: a pathological one (catastrophic "
+                 "backtracking) can still hang export — Python can't forcibly interrupt a "
+                 "runaway re.sub, so keep custom patterns simple.",
         ),
         fmt: str = typer.Option(
             "dir", "--format",

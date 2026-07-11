@@ -12,6 +12,23 @@ Two independent concerns live here:
 - Redaction (`BUILTIN_PATTERNS` / `redact_text` / `load_user_patterns`): a
   deterministic, regex-only pass applied only when `--redacted` is requested.
   Never runs otherwise — plain `mship export` is a faithful copy.
+
+KNOWN LIMITATION — custom `redact.patterns` can still hang export: the
+built-in patterns above are hand-reviewed and applied directly, but a
+user-supplied pattern (from `mothership.yaml#redact.patterns` or
+`~/.config/mship/redact.patterns`) is an arbitrary regex we didn't write. It
+runs under `_apply_pattern_safe`'s daemon-thread `join(timeout=...)` guard,
+but Python's GIL means a thread cannot be preempted mid-`re.sub` — a
+pathological pattern with catastrophic backtracking (e.g. nested
+repetition like `(a+)+b` against a long non-matching string) keeps running
+and holding the GIL even after the timeout "returns" from the caller's
+point of view, so it can still burn a core and, in the worst case, make the
+process appear to hang. There is no way to truly interrupt a CPU-bound
+regex from within the stdlib short of a subprocess/signal-based sandbox,
+which is intentionally out of scope for v1 (see `_apply_pattern_safe`'s
+docstring). Built-in patterns are exempt from this risk since they're
+reviewed for linear-time behavior; only opt-in, operator-authored custom
+patterns are exposed to it.
 """
 from __future__ import annotations
 
@@ -124,6 +141,17 @@ def _apply_pattern_safe(text: str, pattern: RedactionPattern) -> tuple[str, str 
     is left unredacted *for that one pattern* rather than the whole export
     hanging (see spec risks).
 
+    HONEST CAVEAT (not fully solved, by design — see module docstring): this
+    timeout is best-effort, not a hard interrupt. `join(timeout=...)` only
+    bounds how long the *caller* waits; it cannot stop the daemon thread
+    itself from still executing inside `re.sub`, because the GIL means one
+    Python thread can't preempt another mid-C-call. A catastrophic pattern
+    still burns a core indefinitely in the background after we "time out"
+    and move on. We do not chase this further with a subprocess/signal-based
+    hard-kill for v1 — that's real complexity for a risk that only exists
+    for opt-in, operator-authored patterns (built-ins are reviewed and
+    linear-time).
+
     Uses a daemon thread + `join(timeout=...)` rather than a
     `ThreadPoolExecutor` — the executor's `__exit__` does
     `shutdown(wait=True)`, which blocks until the submitted task actually
@@ -219,7 +247,23 @@ _BINARY_MARKERS = ("Binary files ", "GIT binary patch")
 
 
 def _chunk_is_binary(chunk: str) -> bool:
-    return any(marker in chunk for marker in _BINARY_MARKERS) or "\0" in chunk
+    """A chunk is binary only if one of git's own marker LINES is present —
+    not merely if the marker phrase appears anywhere in the chunk's body.
+
+    A text file can legitimately add a line that *mentions* "Binary files "
+    or "GIT binary patch" as ordinary content (e.g. a comment, doc, or log
+    line) sitting right next to a real secret. The old substring-anywhere
+    check treated that whole chunk as binary and skipped it from redaction
+    entirely, leaking the secret into a "redacted" bundle (MOS-102 Greptile
+    fix: "Text Diff Bypasses Redaction"). Git always emits these markers as
+    whole lines starting at column 0, so anchoring on `line.startswith(...)`
+    only matches the real thing.
+    """
+    return "\0" in chunk or any(
+        line.startswith(marker)
+        for line in chunk.splitlines()
+        for marker in _BINARY_MARKERS
+    )
 
 
 def _split_diff_chunks(diff_text: str) -> list[str]:
@@ -244,13 +288,29 @@ def redact_diff_text(diff_text: str, patterns: list[RedactionPattern]) -> tuple[
     return "".join(out), warnings
 
 
-def collect_repo_diff(task: "Task", repo_name: str, config: "WorkspaceConfig") -> str | None:
+def collect_repo_diff(
+    task: "Task", repo_name: str, config: "WorkspaceConfig",
+    *, warnings: list[str] | None = None,
+) -> str | None:
     """Return the `base..branch` diff for one affected repo, or None.
 
     None covers every "nothing to bundle" case (no worktree recorded for
     this repo, base ref unresolvable, git failure, or simply no commits on
     the task branch relative to base) — export omits the file rather than
     erroring (AC8).
+
+    Base resolution mirrors the canonical helper used by dispatch/finish/
+    context (`_effective_base_for_repo` in context.py): `resolve_base(...)`
+    first, then `task.base_branch` as the one documented fallback for
+    workspaces that don't declare `base_branch:` in mothership.yaml. It must
+    NOT go on to guess a hardcoded "main" after that — `resolve_base`
+    returning None means "no configured base", not "the base is main", and a
+    literal "main" fallback can silently diff against an unrelated
+    same-named branch and produce a materially wrong diff instead of erring
+    on the side of omitting it (MOS-102 Greptile fix: "Default Base Becomes
+    Main"). When the base truly can't be resolved, skip this repo's diff
+    and — if `warnings` is given — append a note so the caller can surface
+    it, rather than exporting a diff against a wrong base.
     """
     worktree = task.worktrees.get(repo_name)
     if worktree is None:
@@ -259,7 +319,16 @@ def collect_repo_diff(task: "Task", repo_name: str, config: "WorkspaceConfig") -
     base = resolve_base(
         repo_name, repo_config, cli_base=None, base_map={},
         known_repos=config.repos.keys(), task_base=task.base_override,
-    ) or task.base_branch or "main"
+    )
+    if base is None:
+        base = task.base_branch
+    if base is None:
+        if warnings is not None:
+            warnings.append(
+                f"could not resolve a base branch for repo {repo_name!r}; "
+                "skipped its diff"
+            )
+        return None
     try:
         result = subprocess.run(
             # Three-dot (merge-base) diff, not two-dot: exports only the task
@@ -467,7 +536,7 @@ def build_export_bundle(
 
     # diffs/<repo>.diff (optional per repo)
     for repo_name in task.affected_repos:
-        diff_text = collect_repo_diff(task, repo_name, config)
+        diff_text = collect_repo_diff(task, repo_name, config, warnings=warnings)
         if diff_text is None:
             continue
         if redacted:

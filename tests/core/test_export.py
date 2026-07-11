@@ -189,6 +189,45 @@ def test_chunk_is_binary_detects_markers():
     assert not export_mod._chunk_is_binary("+some text change\n")
 
 
+def test_chunk_is_binary_only_matches_marker_at_line_start_not_mid_line():
+    """A text file can legitimately add a line that merely *mentions* the
+    phrase 'Binary files ' or 'GIT binary patch' as ordinary content (e.g. a
+    comment about git internals) sitting next to a real secret. The chunk
+    must not be mistaken for git's own binary-diff marker line just because
+    the phrase appears somewhere in the chunk body — only a line that
+    actually STARTS WITH the marker (how git emits it) counts (MOS-102
+    Greptile fix: 'Text Diff Bypasses Redaction')."""
+    chunk = (
+        "diff --git a/notes.py b/notes.py\n"
+        "index 111..222 100644\n"
+        "--- a/notes.py\n"
+        "+++ b/notes.py\n"
+        "@@ -1 +1,2 @@\n"
+        "+# see also: Binary files can appear here too\n"
+        "+API_KEY=abcdef123456\n"
+    )
+    assert not export_mod._chunk_is_binary(chunk)
+
+
+def test_redact_diff_text_redacts_secret_next_to_binary_marker_phrase_as_content():
+    """End-to-end regression for the same bug via redact_diff_text: before
+    the fix, this whole chunk was wrongly classified as binary and copied
+    through unredacted, leaking the secret into a '--redacted' bundle."""
+    diff_text = (
+        "diff --git a/notes.py b/notes.py\n"
+        "index 111..222 100644\n"
+        "--- a/notes.py\n"
+        "+++ b/notes.py\n"
+        "@@ -1 +1,2 @@\n"
+        "+# see also: Binary files can appear here too\n"
+        "+API_KEY=abcdef123456\n"
+    )
+    result, warnings = redact_diff_text(diff_text, BUILTIN_PATTERNS)
+    assert "API_KEY=<REDACTED:env_secret>" in result
+    assert "abcdef123456" not in result
+    assert warnings == []
+
+
 # --------------------------------------------------------------------------
 # User-configured patterns (optional; MOS-102 AC7)
 # --------------------------------------------------------------------------
@@ -440,6 +479,49 @@ def test_collect_repo_diff_none_on_unresolvable_base(workspace_with_git):
     assert collect_repo_diff(task, "shared", config) is None
 
 
+def test_collect_repo_diff_never_falls_back_to_hardcoded_main(workspace_with_git):
+    """If neither the repo config's `base_branch`, a `--base` override, nor
+    `task.base_branch` gives a base, export must skip this repo's diff (and
+    warn) rather than silently assuming "main". A hardcoded "main" fallback
+    can hit an unrelated same-named branch and produce a materially wrong
+    diff instead of erring on the side of omitting it — the documented AC8
+    behavior for an unresolvable base (MOS-102 Greptile fix: "Default Base
+    Becomes Main")."""
+    repo_dir = workspace_with_git / "shared"
+    _sh("git", "checkout", "-b", "develop", cwd=repo_dir)
+    (repo_dir / "develop-baseline.txt").write_text("develop baseline\n")
+    _sh("git", "add", "develop-baseline.txt", cwd=repo_dir)
+    _sh("git", "commit", "-m", "develop baseline", cwd=repo_dir)
+
+    _sh("git", "checkout", "-b", "feat/x", cwd=repo_dir)
+    (repo_dir / "task-change.txt").write_text("task branch work\n")
+    _sh("git", "add", "task-change.txt", cwd=repo_dir)
+    _sh("git", "commit", "-m", "task branch change", cwd=repo_dir)
+
+    config = ConfigLoader.load(workspace_with_git / "mothership.yaml")
+    config.repos["shared"].base_branch = None  # not configured for this repo
+    task = _make_task(worktrees={"shared": repo_dir}, branch="feat/x", base_branch=None)
+
+    warnings: list[str] = []
+    diff = collect_repo_diff(task, "shared", config, warnings=warnings)
+    # Must NOT silently diff against the fixture's literal "main" branch
+    # (the real fork point is "develop") — that would spuriously include
+    # develop-baseline.txt or otherwise misrepresent the task's own patch.
+    assert diff is None
+    assert any("shared" in w and "base" in w for w in warnings)
+
+
+def test_collect_repo_diff_warnings_kwarg_defaults_to_no_collection(workspace_with_git):
+    """Callers that don't care about warnings (existing call sites/tests)
+    keep working unchanged — `warnings` is optional and a no-op when
+    omitted."""
+    repo_dir = workspace_with_git / "shared"
+    config = ConfigLoader.load(workspace_with_git / "mothership.yaml")
+    config.repos["shared"].base_branch = None
+    task = _make_task(worktrees={"shared": repo_dir}, branch="feat/x", base_branch=None)
+    assert collect_repo_diff(task, "shared", config) is None
+
+
 # --------------------------------------------------------------------------
 # build_export_bundle / export_task — full assembly (AC1, AC2, AC5, AC8)
 # --------------------------------------------------------------------------
@@ -662,6 +744,34 @@ def test_bundle_omits_missing_optional_artifacts(workspace_with_git, tmp_path):
     assert not (dest / "diffs" / "auth-service.diff").exists()
     assert not (dest / "diffs" / "shared.diff").exists()  # branch == main: no commits ahead
     assert result.warnings == []
+
+
+def test_bundle_surfaces_warning_when_a_repo_base_is_unresolvable(workspace_with_git, tmp_path):
+    """build_export_bundle propagates collect_repo_diff's unresolvable-base
+    warning into ExportBundle.warnings (surfaced by the CLI as `output.warning`)
+    instead of silently guessing a base (MOS-102 Greptile fix)."""
+    repo_dir = workspace_with_git / "shared"
+    _sh("git", "checkout", "-b", "feat/x", cwd=repo_dir)
+    (repo_dir / "task-change.txt").write_text("task branch work\n")
+    _sh("git", "add", "task-change.txt", cwd=repo_dir)
+    _sh("git", "commit", "-m", "task branch change", cwd=repo_dir)
+
+    state_dir = tmp_path / "state"
+    log_mgr = LogManager(state_dir / "logs")
+    log_mgr.create("no-base")
+    spec_store = SpecStore(workspace_with_git / "specs")
+    config = ConfigLoader.load(workspace_with_git / "mothership.yaml")
+    config.repos["shared"].base_branch = None
+    task = _make_task(
+        slug="no-base", branch="feat/x", worktrees={"shared": repo_dir}, base_branch=None,
+    )
+    dest = tmp_path / "out"
+    result = build_export_bundle(
+        task=task, config=config, workspace_root=workspace_with_git,
+        log_manager=log_mgr, spec_store=spec_store, dest_dir=dest, redacted=False,
+    )
+    assert not (dest / "diffs" / "shared.diff").exists()
+    assert any("shared" in w and "base" in w for w in result.warnings)
 
 
 # --------------------------------------------------------------------------
