@@ -22,6 +22,7 @@ from typing import Callable
 from mship.core.spec import Spec
 from mship.core.spec_body import parse_body_sections
 from mship.core.state import Task
+from mship.core.worktree import BaseBranchNotFoundError
 
 
 class DispatchError(Exception):
@@ -76,7 +77,14 @@ def _auto_spawn(spec: Spec, spawn_fn: Callable[[Spec], Task]) -> tuple[Task, boo
             f"spec {spec.id!r} has no affected_repos; cannot auto-spawn a task. "
             f"Add repos to the spec or spawn a task named {spec.id!r} first."
         )
-    return spawn_fn(spec), True
+    try:
+        return spawn_fn(spec), True
+    except BaseBranchNotFoundError as e:
+        # Surface a missing base as a clean DispatchError so the CLI
+        # (`mship spec dispatch`) and serve (`POST /specs/{id}/dispatch`) —
+        # which already catch DispatchError — report it cleanly instead of
+        # letting the ValueError escape as a traceback / 500.
+        raise DispatchError(str(e)) from e
 
 
 def dispatch_spec(

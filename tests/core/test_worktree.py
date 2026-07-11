@@ -317,6 +317,45 @@ def test_spawn_default_base_cuts_from_origin_when_no_local_base_and_fetch_fails(
     assert _head(wt) != unrelated_tip
 
 
+def test_spawn_default_base_raises_when_base_exists_nowhere(worktree_deps):
+    """MOS-203 (Greptile, 'HEAD fallback remains'): when the default (non
+    --base) cut_base resolves to NEITHER a local branch NOR an origin/<base>
+    remote-tracking ref (no remote at all here, so no fetch to fall back on),
+    spawn must raise a clear, actionable error naming the repo and the
+    missing base — NOT silently cut the new worktree from the checkout's
+    current HEAD (which can carry unrelated commits). No worktree/hub
+    directory should be left behind."""
+    from mship.core.worktree import BaseBranchNotFoundError
+
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    shared = workspace / "shared"
+
+    # Normalize the fixture's default branch to literally "main" (base_branch
+    # in mothership.yaml), then delete it entirely so cut_base ("main") exists
+    # nowhere: no local branch, and no remote at all (so no origin/main
+    # either). Move HEAD to an unrelated branch first — required to delete
+    # main, and it also proves a HEAD-based cut would silently succeed here.
+    _git_run(shared, "branch", "-m", "main")
+    _git_run(shared, "checkout", "-b", "unrelated-work")
+    (shared / "unrelated.txt").write_text("unrelated work in progress")
+    _git_run(shared, "add", "unrelated.txt")
+    _git_run(shared, "commit", "-m", "unrelated work commit")
+    _git_run(shared, "branch", "-D", "main")  # main now exists nowhere
+
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    with pytest.raises(BaseBranchNotFoundError) as exc_info:
+        mgr.spawn("no base anywhere", repos=["shared"], workspace_root=workspace)
+
+    msg = str(exc_info.value)
+    assert "shared" in msg
+    assert "main" in msg
+    assert "not found" in msg.lower()
+
+    # Preflight: fail-fast before any worktree/hub is created.
+    assert "no-base-anywhere" not in state_mgr.load().tasks
+    assert not (workspace / ".worktrees" / "no-base-anywhere").exists()
+
+
 def test_abort_succeeds_even_if_branch_delete_fails(worktree_deps):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)

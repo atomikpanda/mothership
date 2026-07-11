@@ -9,6 +9,7 @@ from mship.core.spec_store import SpecStore
 from mship.core.state import StateManager, Task, WorkspaceState
 from mship.core.spec_dispatch import DispatchError, build_dispatch_handoff, dispatch_spec
 from mship.core.workitem_store import WorkItemStore
+from mship.core.worktree import BaseBranchNotFoundError
 
 
 NOW = datetime(2026, 6, 14, tzinfo=timezone.utc)
@@ -125,6 +126,26 @@ def test_dispatch_spec_auto_spawn_requires_affected_repos(tmp_path):
     with pytest.raises(DispatchError):
         dispatch_spec(
             spec, state_manager=sm, store=store, spawn_fn=lambda s: None, now=NOW,
+            workitems=items, workspace=WORKSPACE,
+        )
+
+
+def test_dispatch_spec_auto_spawn_surfaces_base_not_found_as_dispatch_error(tmp_path):
+    """A missing base during auto-spawn surfaces as DispatchError (which the CLI
+    and serve already handle) rather than an unhandled BaseBranchNotFoundError."""
+    sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
+    sm.save(WorkspaceState(tasks={}))
+    spec = _approved_spec()
+    store.save(spec)
+
+    def spawn_fn(_s):
+        raise BaseBranchNotFoundError(
+            "shared: base branch 'main' not found locally or on origin"
+        )
+
+    with pytest.raises(DispatchError, match="not found"):
+        dispatch_spec(
+            spec, state_manager=sm, store=store, spawn_fn=spawn_fn, now=NOW,
             workitems=items, workspace=WORKSPACE,
         )
 
