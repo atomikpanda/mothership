@@ -225,3 +225,47 @@ def test_json_flag_changes_pty_output(workspace):
     forced = _run_mship(["--json", "graph"], workspace, use_pty=True)
     assert human != forced
     json.loads(forced)  # forced output parses as JSON
+
+
+# ---- MOS-206 guard: no command may decide JSON-vs-human output shape via a
+# raw isatty() check — that silently ignores --json/MSHIP_JSON on a real TTY.
+# `Output().json_mode` is the only sanctioned way to make that decision (it
+# already folds in the flag > env > TTY precedence tested above). Any new
+# isatty() use under src/mship/cli/ must either route through json_mode or be
+# added to the allow-list below with a reason it is NOT an output-shape call
+# (e.g. an interactivity or color-only decision made *after* shape is fixed).
+
+_CLI_SRC = Path(__file__).resolve().parents[2] / "src" / "mship" / "cli"
+
+# {relative path under src/mship/cli/: (substrings of allowed isatty lines,)}
+_ALLOWED_ISATTY = {
+    "output.py": (
+        # The canonical is_tty check Output.json_mode's TTY-fallback default is
+        # built on — this *is* the source of truth, not a bypass of it.
+        "self._stream.isatty()",
+    ),
+    "worktree.py": (
+        # Guards `--body -` against blocking on an interactive stdin read; an
+        # input-mode decision, not an output-shape one.
+        "sys.stdin.isatty()",
+    ),
+}
+
+
+def test_no_cli_command_branches_output_shape_on_isatty():
+    offenders = []
+    for path in sorted(_CLI_SRC.rglob("*.py")):
+        rel = path.relative_to(_CLI_SRC).as_posix()
+        allowed = _ALLOWED_ISATTY.get(rel, ())
+        for lineno, line in enumerate(path.read_text().splitlines(), start=1):
+            if "isatty" not in line:
+                continue
+            if any(snippet in line for snippet in allowed):
+                continue
+            offenders.append(f"{rel}:{lineno}: {line.strip()}")
+    assert offenders == [], (
+        "found isatty() use(s) in src/mship/cli/ not on the MOS-206 allow-list "
+        "(likely an output-shape branch bypassing Output().json_mode); use "
+        "Output().json_mode instead, or add to _ALLOWED_ISATTY above with a "
+        "reason it's not an output-shape decision:\n" + "\n".join(offenders)
+    )
