@@ -207,6 +207,85 @@ def test_run_verb_stream_unknown_verb_raises(tmp_path):
         pass
 
 
+# --- Task 6 hardening: unknown repo must not raise a raw KeyError mid-stream ---
+
+
+def test_run_verb_stream_unknown_repo_does_not_raise_keyerror(tmp_path):
+    """Task 3 left `config.repos[repo_name]` an unguarded dict index — an
+    unknown repo name used to raise a raw KeyError mid-generator. It must
+    instead fail cleanly: a clear error line + a non-zero __MSHIP_EXIT__,
+    with NO task ever executed (checked upfront, before the per-repo loop)."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["should not run\n"], returncode=0))
+    deps = remote_exec.RemoteExecDeps(config=_config(tmp_path), shell=fake, workspace_root=tmp_path)
+
+    lines = list(remote_exec.run_verb_stream("run", "t1", ["ghost-repo"], None, deps=deps))
+    text = [l.decode() for l in lines]
+    assert text[-1].startswith(f"{remote_exec.EXIT_MARKER} ")
+    exit_code = int(text[-1].split(" ", 1)[1].strip())
+    assert exit_code != 0
+    assert any("ghost-repo" in l for l in text[:-1])
+    assert not fake.streaming_calls, "no task should run once an unknown repo is detected"
+
+
+def test_run_verb_stream_unknown_repo_among_known_ones_rejects_before_any_task_runs(tmp_path):
+    """A mix of a known + unknown repo must fail before the known repo's task
+    ever executes (fail fast on the whole request), not partway through."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"], returncode=0))
+    deps = remote_exec.RemoteExecDeps(config=_config(tmp_path), shell=fake, workspace_root=tmp_path)
+
+    lines = list(remote_exec.run_verb_stream("run", "t1", ["api", "ghost-repo"], None, deps=deps))
+    text = [l.decode() for l in lines]
+    exit_code = int(text[-1].split(" ", 1)[1].strip())
+    assert exit_code != 0
+    assert not fake.streaming_calls
+
+
+def test_exec_unknown_repo_in_request_fails_cleanly_not_500(tmp_path, monkeypatch):
+    """Through the HTTP layer: an unknown repo name is conveyed as DATA (200
+    + an error line + non-zero exit sentinel), exactly like a failing task —
+    never a 500 and never a truncated/broken stream."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"], returncode=0))
+    _patch_shell(monkeypatch, fake)
+    client = TestClient(_app(tmp_path))
+
+    r = client.post("/exec/run", json={"task": "t1", "repos": ["ghost-repo"]})
+    assert r.status_code == 200
+    lines = r.content.decode().splitlines()
+    assert lines[-1].startswith("__MSHIP_EXIT__ ")
+    assert lines[-1] != "__MSHIP_EXIT__ 0"
+    assert any("ghost-repo" in ln for ln in lines[:-1])
+    assert not fake.streaming_calls
+
+
+# --- Task 6 hardening: a branch-materialize failure surfaces cleanly, named with the repo ---
+
+
+def test_run_verb_stream_materialize_failure_surfaces_repo_and_stops(tmp_path, monkeypatch):
+    """If `git fetch`/`git worktree add` fails while materializing a repo's
+    task branch, run_verb_stream must not silently continue on to run the
+    task against a missing/stale worktree — it should fail cleanly, naming
+    the repo, via the same data-conveyed error-line + non-zero-exit pattern."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["should not run\n"], returncode=0))
+
+    def _failing_run(command, cwd, env=None):
+        fake.run_calls.append((command, Path(cwd)))
+        if command.startswith("git worktree add"):
+            return ShellResult(returncode=128, stdout="", stderr="fatal: could not create worktree")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    fake.run = _failing_run
+    _patch_shell(monkeypatch, fake)
+    client = TestClient(_app(tmp_path))
+
+    r = client.post("/exec/run", json={"task": "t1", "repos": ["api"]})
+    assert r.status_code == 200
+    lines = r.content.decode().splitlines()
+    assert lines[-1].startswith("__MSHIP_EXIT__ ")
+    assert lines[-1] != "__MSHIP_EXIT__ 0"
+    assert any("api" in ln and "fatal: could not create worktree" in ln for ln in lines[:-1])
+    assert not fake.streaming_calls, "the task must not run once materialize fails"
+
+
 # --- POST /exec/{verb} -------------------------------------------------------
 
 

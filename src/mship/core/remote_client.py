@@ -35,7 +35,46 @@ class RemoteExecError(Exception):
     producing the trailing `__MSHIP_EXIT__` sentinel (a truncated/dropped
     connection). Distinct from a non-zero REMOTE TASK exit — that's conveyed
     as data (the wire contract's `__MSHIP_EXIT__ <code>` line) and returned as
-    a plain int from `exec_remote`, never raised."""
+    a plain int from `exec_remote`, never raised.
+
+    Task 6: the message is chosen per failure so the CLI error names the
+    actual fix — see `_http_status_message` for the non-2xx cases (a 503
+    "not bootstrapped" remote vs. any other status) and `exec_remote`'s
+    `except httpx.HTTPError` for the connection-level ("unreachable via
+    relay") case."""
+
+
+def _http_status_message(url: str, resp: httpx.Response) -> str:
+    """Build an actionable message for a non-2xx `POST /exec/{verb}`
+    response. `resp` has already been `.read()` so `.json()`/`.text` are
+    safe to inspect (the streaming context manager doesn't buffer the body
+    otherwise)."""
+    detail = None
+    try:
+        body = resp.json()
+        if isinstance(body, dict):
+            detail = body.get("detail")
+    except Exception:
+        pass
+
+    if resp.status_code == 503:
+        # Task 3's `POST /exec/{verb}` 503s when the remote serve has no
+        # workspace config wired in — i.e. that machine was never bootstrapped
+        # as an mship workspace (or serve started without one).
+        base = f"remote workspace not bootstrapped at {url} (503)"
+        return f"{base}: {detail}" if detail else (
+            f"{base}; bootstrap that machine as an mship workspace and "
+            f"restart `mship serve --relay` there"
+        )
+    if resp.status_code == 401:
+        return (
+            f"remote host at {url} rejected the bearer token (401); the "
+            f"run-host mapping may be stale — re-run `mship run-host add "
+            f"<role>` with a fresh pair link/token"
+        )
+    if detail:
+        return f"remote exec failed ({url}): HTTP {resp.status_code}: {detail}"
+    return f"remote exec failed ({url}): HTTP {resp.status_code}"
 
 
 class _ChunkReader:
@@ -158,10 +197,14 @@ def exec_remote(
     `__MSHIP_EXIT__ <code>` line — conveyed as DATA, not an HTTP error, so a
     non-zero remote task exit is a normal return here, not a raise.
 
-    Raises `RemoteExecError` for a genuine connection failure (unreachable
-    host, non-2xx response, a stream that never produced the exit sentinel).
-    `transport` is an injection seam for tests (e.g. `httpx.MockTransport`);
-    production callers omit it and get a real network connection.
+    Raises `RemoteExecError` for a genuine connection failure. Task 6 gives
+    each case a specific, actionable message: a non-2xx HTTP response (a 503
+    "remote workspace not bootstrapped", a 401 stale-token, or a generic
+    status — see `_http_status_message`), a connection-level failure
+    (unreachable host/timeout — "unreachable via relay"), or a stream that
+    never produced the exit sentinel (unchanged from Task 5). `transport` is
+    an injection seam for tests (e.g. `httpx.MockTransport`); production
+    callers omit it and get a real network connection.
     """
     body: dict = {"task": task, "repos": repos, "kind": kind}
     if platform is not None:
@@ -173,10 +216,20 @@ def exec_remote(
     try:
         with httpx.Client(transport=transport) as client:
             with client.stream("POST", url, headers=headers, json=body) as resp:
-                resp.raise_for_status()
+                if resp.status_code >= 400:
+                    resp.read()
+                    raise RemoteExecError(_http_status_message(url, resp))
                 reader = _ChunkReader(resp.iter_raw())
                 return _drive(
                     reader, captures_dir_for=captures_dir_for, print_fn=print_fn
                 )
     except httpx.HTTPError as exc:
-        raise RemoteExecError(f"remote exec failed ({url}): {exc}") from exc
+        # Connection-level failure (unreachable host, DNS, timeout, dropped
+        # tunnel before a response was ever received) — distinct from the
+        # non-2xx case above, which raises RemoteExecError directly and so
+        # never reaches this handler.
+        raise RemoteExecError(
+            f"remote host at {url} is unreachable via relay ({exc}); check "
+            f"that machine is running `mship serve --relay` and its pairing "
+            f"is still valid"
+        ) from exc

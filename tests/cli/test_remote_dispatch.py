@@ -201,11 +201,16 @@ def test_exec_remote_connection_failure_raises_remote_exec_error():
         raise httpx.ConnectError("connection refused", request=request)
 
     conn = RunHostConnection(url="http://unreachable.example", token="t")
-    with pytest.raises(remote_client.RemoteExecError):
+    with pytest.raises(remote_client.RemoteExecError) as exc_info:
         remote_client.exec_remote(
             verb="run", conn=conn, task="t1", repos=["api"], print_fn=lambda _l: None,
             transport=_mock_transport(handler),
         )
+    # Task 6: a connection-level failure gets a specific, actionable message
+    # ("unreachable via relay"), distinct from a non-2xx HTTP status.
+    msg = str(exc_info.value)
+    assert "unreachable" in msg
+    assert "http://unreachable.example" in msg
 
 
 def test_exec_remote_non_2xx_raises_remote_exec_error():
@@ -219,6 +224,28 @@ def test_exec_remote_non_2xx_raises_remote_exec_error():
             verb="run", conn=conn, task="t1", repos=["api"], print_fn=lambda _l: None,
             transport=_mock_transport(handler),
         )
+
+
+def test_exec_remote_503_surfaces_not_bootstrapped_message():
+    """Task 3's `POST /exec/{verb}` 503s when the remote serve has no
+    workspace config wired in — the client must turn that into a specific
+    "remote workspace not bootstrapped" message, not a generic HTTP-status
+    error, so an operator immediately knows the fix is on the REMOTE side."""
+    conn = RunHostConnection(url="http://remote.example", token="t")
+
+    def handler(request):
+        return httpx.Response(
+            503,
+            json={"detail": "remote workspace not bootstrapped: no config wired in"},
+        )
+
+    with pytest.raises(remote_client.RemoteExecError) as exc_info:
+        remote_client.exec_remote(
+            verb="run", conn=conn, task="t1", repos=["api"], print_fn=lambda _l: None,
+            transport=_mock_transport(handler),
+        )
+    msg = str(exc_info.value)
+    assert "not bootstrapped" in msg
 
 
 def test_exec_remote_stream_without_exit_sentinel_raises():
@@ -537,6 +564,75 @@ def test_cli_run_remote_unknown_role_is_clean_error_not_traceback(tmp_path, monk
         assert isinstance(result.exception, SystemExit) or result.exception is None
         assert "Traceback" not in (result.output or "")
         assert "ghost-role" in result.output
+    finally:
+        _reset()
+
+
+def test_cli_run_remote_unreachable_host_is_clean_error_not_traceback(tmp_path, monkeypatch):
+    """A relay/network-level connect failure must surface as a clean CLI
+    error (naming "unreachable") + non-zero exit, never a raw traceback."""
+    _write_run_workspace(tmp_path, run_hosts=["role-x"])
+    _seed_task(tmp_path, slug="t1", repos=["api"])
+    _configure(tmp_path)
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+
+    def handler(request):
+        raise httpx.ConnectError("connection refused", request=request)
+
+    try:
+        with _ClientPatch(monkeypatch, handler):
+            result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
+        assert result.exit_code != 0
+        assert isinstance(result.exception, SystemExit) or result.exception is None
+        assert "Traceback" not in (result.output or "")
+        assert "unreachable" in result.output.lower()
+    finally:
+        _reset()
+
+
+def test_cli_run_remote_not_bootstrapped_is_clean_error_not_traceback(tmp_path, monkeypatch):
+    """A remote serve with no workspace config wired in 503s — the CLI must
+    show a specific "not bootstrapped" message, not a generic HTTP error."""
+    _write_run_workspace(tmp_path, run_hosts=["role-x"])
+    _seed_task(tmp_path, slug="t1", repos=["api"])
+    _configure(tmp_path)
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+
+    def handler(request):
+        return httpx.Response(503, json={"detail": "remote workspace not bootstrapped"})
+
+    try:
+        with _ClientPatch(monkeypatch, handler):
+            result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
+        assert result.exit_code != 0
+        assert isinstance(result.exception, SystemExit) or result.exception is None
+        assert "Traceback" not in (result.output or "")
+        assert "not bootstrapped" in result.output.lower()
+    finally:
+        _reset()
+
+
+def test_cli_capture_remote_unmapped_role_is_clean_error_not_traceback(tmp_path, monkeypatch):
+    """The same RunHostError surfacing exercised for run/build above must
+    also hold for capture, which resolves the role via its own inline block
+    in cli/capture.py rather than the shared `_run_remote` helper."""
+    wt = _write_capture_workspace(tmp_path, run_hosts=["role-x"], platforms=["android"])
+    _seed_task(tmp_path, slug="t1", repos=["app"], worktrees={"app": str(wt)})
+    _configure(tmp_path)
+    # Deliberately do NOT add "role-x" to the RunHostStore.
+    try:
+        result = runner.invoke(
+            app, ["capture", "--task", "t1", "--repo", "app", "--remote=role-x"]
+        )
+        assert result.exit_code != 0
+        assert isinstance(result.exception, SystemExit) or result.exception is None
+        assert "Traceback" not in (result.output or "")
+        assert "role-x" in result.output
+        assert "run-host add role-x" in result.output
     finally:
         _reset()
 

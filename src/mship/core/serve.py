@@ -709,8 +709,10 @@ def create_app(
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "remote execution unavailable: this serve host has no "
-                    "workspace config wired in (pass `config=` to create_app)"
+                    "remote workspace not bootstrapped: this serve host has "
+                    "no workspace config wired in — bootstrap this machine "
+                    "as an mship workspace (mothership.yaml present) and "
+                    "restart `mship serve --relay`"
                 ),
             )
         deps = remote_exec.RemoteExecDeps(

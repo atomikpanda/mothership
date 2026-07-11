@@ -68,6 +68,17 @@ class UnknownVerbError(ValueError):
     """`verb` is not one of `VERBS`."""
 
 
+class MaterializeError(Exception):
+    """A git plumbing command needed to bring a repo's task-branch worktree
+    up to date (fetch, checkout, reset, or worktree add) exited non-zero.
+
+    Raised by `materialize_worktree`/`_run_checked` and caught by
+    `run_verb_stream`, which turns it into a clean stream error (an error
+    line naming the repo + failing command, then a non-zero `__MSHIP_EXIT__`)
+    rather than silently running the task against a missing/stale worktree
+    (Task 6 hardening — see the module docstring's wire contract)."""
+
+
 class ShellLike(Protocol):
     """The subset of `mship.util.shell.ShellRunner` this module needs.
     `.run` issues git plumbing (fetch/worktree add/reset, base-freshness
@@ -138,8 +149,24 @@ def check_base_freshness(
     return None
 
 
+def _run_checked(shell: ShellLike, command: str, cwd: Path, *, repo_name: str) -> None:
+    """Run a git plumbing command that MUST succeed for the branch worktree
+    to be usable. Raises `MaterializeError` (naming the repo, the failing
+    command, and its stderr) on a non-zero exit rather than letting
+    `run_verb_stream` continue on to run the task against a missing/stale
+    worktree (Task 6 hardening — previously every `materialize_worktree`
+    call site ignored `ShellResult.returncode` entirely)."""
+    result = shell.run(command, cwd=cwd)
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        detail = f": {stderr}" if stderr else f" (exit {result.returncode})"
+        raise MaterializeError(
+            f"branch-materialize failed for repo {repo_name!r}: `{command}`{detail}"
+        )
+
+
 def materialize_worktree(
-    shell: ShellLike, repo_path: Path, worktree_path: Path, branch: str
+    shell: ShellLike, repo_path: Path, worktree_path: Path, branch: str, *, repo_name: str
 ) -> None:
     """Ensure `worktree_path` is a git worktree of `repo_path` sitting on
     `branch`, fresh from origin.
@@ -152,17 +179,24 @@ def materialize_worktree(
     remote run); a first-time run creates it with `git worktree add -B`,
     which is safe to re-run even if a stale local branch ref of the same
     name exists (e.g. left over from a removed worktree).
+
+    Every git command runs through `_run_checked` (`repo_name` is only used
+    for that error message): a failure here (e.g. the branch not yet pushed,
+    a dirty/locked worktree) raises `MaterializeError` instead of silently
+    letting execution continue against a missing/stale checkout.
     """
-    shell.run(f"git fetch origin {branch}", cwd=repo_path)
+    _run_checked(shell, f"git fetch origin {branch}", repo_path, repo_name=repo_name)
     if (worktree_path / ".git").exists():
-        shell.run(f"git fetch origin {branch}", cwd=worktree_path)
-        shell.run(f"git checkout {branch}", cwd=worktree_path)
-        shell.run(f"git reset --hard origin/{branch}", cwd=worktree_path)
+        _run_checked(shell, f"git fetch origin {branch}", worktree_path, repo_name=repo_name)
+        _run_checked(shell, f"git checkout {branch}", worktree_path, repo_name=repo_name)
+        _run_checked(shell, f"git reset --hard origin/{branch}", worktree_path, repo_name=repo_name)
     else:
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
-        shell.run(
+        _run_checked(
+            shell,
             f"git worktree add -B {branch} {worktree_path} origin/{branch}",
-            cwd=repo_path,
+            repo_path,
+            repo_name=repo_name,
         )
 
 
@@ -269,6 +303,18 @@ def run_verb_stream(
     Always ends with the trailing sentinel line `f"{EXIT_MARKER} {code}\\n"`
     conveying the run's exit code as DATA — never raises for a non-zero
     task exit (see module docstring for the full wire contract).
+
+    Task 6 hardening (both fail the SAME way — an error line naming the
+    problem, then a non-zero `__MSHIP_EXIT__`, never a raised exception mid
+    generator):
+      - An unknown repo name (not in `deps.config.repos`) is rejected
+        UPFRONT, before the per-repo loop starts and before any git/task
+        command runs for ANY repo in the request (Task 3 previously left
+        this a raw `KeyError` on `config.repos[repo_name]`).
+      - A branch-materialize failure (a git fetch/checkout/reset/worktree-add
+        exiting non-zero — see `materialize_worktree`/`MaterializeError`)
+        stops at that repo exactly like a failing task would; already-yielded
+        output from earlier repos in the same request is preserved.
     """
     if verb not in VERBS:
         raise UnknownVerbError(
@@ -283,6 +329,15 @@ def run_verb_stream(
     shell = deps.shell
     hub = _hub_dir(deps.workspace_root, task)
     branch = config.branch_pattern.replace("{slug}", task)
+
+    unknown_repos = [r for r in repos if r not in config.repos]
+    if unknown_repos:
+        yield (
+            f"error: unknown repo(s) {', '.join(unknown_repos)}; known "
+            f"repos: {', '.join(sorted(config.repos)) or '(none)'}\n"
+        ).encode("utf-8")
+        yield f"{EXIT_MARKER} 2\n".encode("utf-8")
+        return
 
     materialized: dict[str, Path] = {}
     exit_code = 0
@@ -304,7 +359,12 @@ def run_verb_stream(
             if warning is not None:
                 yield f"{warning}\n".encode("utf-8")
 
-            materialize_worktree(shell, repo_path, worktree_path, branch)
+            try:
+                materialize_worktree(shell, repo_path, worktree_path, branch, repo_name=repo_name)
+            except MaterializeError as exc:
+                yield f"error: {exc}\n".encode("utf-8")
+                yield f"{EXIT_MARKER} 1\n".encode("utf-8")
+                return
 
         materialized[repo_name] = worktree_path
 
