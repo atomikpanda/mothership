@@ -561,3 +561,103 @@ def test_plan_to_dev_bypass_spec_gate_skips_corrupt_workitem_store(tmp_path: Pat
 
     result = pm.transition("wi-task", "dev", bypass_spec_gate=True)
     assert result.new_phase == "dev"
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle hooks (MOS-220, spec mship-lifecycle-hooks): `phase.entered.<phase>`
+# ---------------------------------------------------------------------------
+
+
+class _RecordingShell:
+    """Minimal ShellRunner-shaped fake: records the resolved command, and can
+    be told to fail a match on a substring (returncode=1)."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.fail_substrings: set[str] = set()
+
+    def build_command(self, command: str, env_runner: str | None = None) -> str:
+        return f"{env_runner} {command}" if env_runner else command
+
+    def run(self, command, cwd, env=None, timeout=None):
+        from mship.util.shell import ShellResult
+        self.calls.append(command)
+        if any(s in command for s in self.fail_substrings):
+            return ShellResult(returncode=1, stdout="", stderr="boom")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+
+def _make_phase_manager_with_hooks(state_mgr, workspace_root, hooks, shell=None):
+    from mship.core.config import RepoConfig, WorkspaceConfig
+    config = WorkspaceConfig(
+        workspace="test",
+        repos={"shared": RepoConfig(path=Path("./shared"), type="library")},
+        hooks=hooks,
+    )
+    return PhaseManager(
+        state_mgr, MagicMock(spec=LogManager),
+        config=config, workspace_root=workspace_root, shell=shell,
+    )
+
+
+def test_transition_fires_matching_phase_entered_hook(state_with_task, tmp_path):
+    from mship.core.config import HookConfig
+    shell = _RecordingShell()
+    pm = _make_phase_manager_with_hooks(
+        state_with_task, tmp_path,
+        hooks=[HookConfig(on="phase.entered.dev", run="task notify-dev")],
+        shell=shell,
+    )
+    pm.transition("add-labels", "dev")
+    assert any("notify-dev" in c for c in shell.calls)
+
+
+def test_transition_does_not_fire_hook_for_a_different_phase(state_with_task, tmp_path):
+    from mship.core.config import HookConfig
+    shell = _RecordingShell()
+    pm = _make_phase_manager_with_hooks(
+        state_with_task, tmp_path,
+        hooks=[HookConfig(on="phase.entered.review", run="task notify-review")],
+        shell=shell,
+    )
+    pm.transition("add-labels", "dev")
+    assert shell.calls == []
+
+
+def test_transition_non_required_hook_failure_warns_and_does_not_block(state_with_task, tmp_path):
+    from mship.core.config import HookConfig
+    shell = _RecordingShell()
+    shell.fail_substrings.add("notify-dev")
+    pm = _make_phase_manager_with_hooks(
+        state_with_task, tmp_path,
+        hooks=[HookConfig(on="phase.entered.dev", run="task notify-dev")],
+        shell=shell,
+    )
+    result = pm.transition("add-labels", "dev")
+    assert result.new_phase == "dev"
+    assert any("notify-dev" in w for w in result.warnings)
+    reloaded = state_with_task.load()
+    assert reloaded.tasks["add-labels"].phase == "dev"
+
+
+def test_transition_required_hook_failure_blocks_transition(state_with_task, tmp_path):
+    from mship.core.config import HookConfig
+    from mship.core.lifecycle_hooks import HookRequiredError
+    shell = _RecordingShell()
+    shell.fail_substrings.add("notify-dev")
+    pm = _make_phase_manager_with_hooks(
+        state_with_task, tmp_path,
+        hooks=[HookConfig(on="phase.entered.dev", run="task notify-dev", required=True)],
+        shell=shell,
+    )
+    with pytest.raises(HookRequiredError):
+        pm.transition("add-labels", "dev")
+    # Never committed — state and journal are untouched by the aborted transition.
+    reloaded = state_with_task.load()
+    assert reloaded.tasks["add-labels"].phase == "plan"
+
+
+def test_transition_with_no_hooks_configured_is_unaffected(state_with_task, tmp_path):
+    pm = _make_phase_manager_with_hooks(state_with_task, tmp_path, hooks=[])
+    result = pm.transition("add-labels", "dev")
+    assert result.new_phase == "dev"

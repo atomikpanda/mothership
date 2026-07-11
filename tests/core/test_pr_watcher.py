@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -23,6 +24,7 @@ def now_fn() -> datetime:
 class FakeTask:
     pr_urls: dict[str, str] = field(default_factory=dict)
     work_item_id: str | None = None
+    worktrees: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -281,3 +283,169 @@ def test_no_pr_urls_skipped():
     watcher = PrWatcher(msgs, workitems, state, lambda url: "merged", now_fn)
     watcher.check_once()
     assert msgs.append_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle hooks (MOS-220, spec mship-lifecycle-hooks): `pr.merged`/`pr.closed`
+# ---------------------------------------------------------------------------
+
+
+class _RecordingShell:
+    """Minimal ShellRunner-shaped fake for asserting lifecycle-hook execution."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.fail_substrings: set[str] = set()
+
+    def build_command(self, command, env_runner=None):
+        return f"{env_runner} {command}" if env_runner else command
+
+    def run(self, command, cwd, env=None, timeout=None):
+        from pathlib import Path as _Path
+        from mship.util.shell import ShellResult
+        self.calls.append({"command": command, "cwd": _Path(cwd)})
+        if any(s in command for s in self.fail_substrings):
+            return ShellResult(returncode=1, stdout="", stderr="boom")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+
+def _hooks_config(hooks, repos=None):
+    from mship.core.config import WorkspaceConfig
+    return WorkspaceConfig(workspace="test", repos=repos or {}, hooks=hooks)
+
+
+def test_pr_merged_fires_matching_hook():
+    from mship.core.config import HookConfig
+
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    task = FakeTask(pr_urls={"repo1": "https://github.com/org/repo1/pull/1"}, work_item_id="wi-1")
+    state = FakeStateManager({"task-1": task})
+
+    shell = _RecordingShell()
+    config = _hooks_config([HookConfig(on="pr.merged", run="task notify-merge")])
+
+    watcher = PrWatcher(
+        msgs, workitems, state, lambda url: "merged", now_fn,
+        config=config, workspace_root=Path("/ws"), shell=shell,
+    )
+    watcher.check_once()
+
+    assert any("notify-merge" in c["command"] for c in shell.calls)
+
+
+def test_pr_closed_fires_only_the_closed_hook_not_merged():
+    from mship.core.config import HookConfig
+
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    task = FakeTask(pr_urls={"repo1": "https://github.com/org/repo1/pull/1"}, work_item_id="wi-1")
+    state = FakeStateManager({"task-1": task})
+
+    shell = _RecordingShell()
+    config = _hooks_config([
+        HookConfig(on="pr.merged", run="task notify-merge"),
+        HookConfig(on="pr.closed", run="task notify-closed"),
+    ])
+
+    watcher = PrWatcher(
+        msgs, workitems, state, lambda url: "closed", now_fn,
+        config=config, workspace_root=Path("/ws"), shell=shell,
+    )
+    watcher.check_once()
+
+    commands = [c["command"] for c in shell.calls]
+    assert any("notify-closed" in c for c in commands)
+    assert not any("notify-merge" in c for c in commands)
+
+
+def test_pr_hook_runs_from_the_prs_own_repo(tmp_path: Path):
+    from mship.core.config import HookConfig, RepoConfig
+
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    task = FakeTask(pr_urls={"repo1": "https://github.com/org/repo1/pull/1"}, work_item_id="wi-1")
+    state = FakeStateManager({"task-1": task})
+
+    shell = _RecordingShell()
+    config = _hooks_config(
+        [HookConfig(on="pr.merged", run="task notify-merge")],
+        repos={"repo1": RepoConfig(path=tmp_path / "repo1", type="service", env_runner="direnv exec --")},
+    )
+
+    watcher = PrWatcher(
+        msgs, workitems, state, lambda url: "merged", now_fn,
+        config=config, workspace_root=tmp_path, shell=shell,
+    )
+    watcher.check_once()
+
+    call = shell.calls[0]
+    assert call["cwd"] == tmp_path / "repo1"
+    assert call["command"] == "direnv exec -- task notify-merge"
+
+
+def test_pr_hook_failure_does_not_abort_sweep_or_block_message():
+    from mship.core.config import HookConfig
+
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    task = FakeTask(pr_urls={"repo1": "https://github.com/org/repo1/pull/1"}, work_item_id="wi-1")
+    state = FakeStateManager({"task-1": task})
+
+    shell = _RecordingShell()
+    shell.fail_substrings.add("notify-merge")
+    config = _hooks_config([HookConfig(on="pr.merged", run="task notify-merge")])
+
+    watcher = PrWatcher(
+        msgs, workitems, state, lambda url: "merged", now_fn,
+        config=config, workspace_root=Path("/ws"), shell=shell,
+    )
+    watcher.check_once()  # must not raise
+
+    assert len(msgs.append_calls) == 1  # message still posted
+
+
+def test_pr_watcher_without_config_is_unaffected():
+    """Default construction (no config/workspace_root/shell) — existing
+    behavior, no lifecycle hooks evaluated at all."""
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    task = FakeTask(pr_urls={"repo1": "https://github.com/org/repo1/pull/1"}, work_item_id="wi-1")
+    state = FakeStateManager({"task-1": task})
+
+    watcher = PrWatcher(msgs, workitems, state, lambda url: "merged", now_fn)
+    watcher.check_once()  # must not raise
+    assert len(msgs.append_calls) == 1
+
+
+def test_pr_hook_not_refired_on_second_sweep():
+    from mship.core.config import HookConfig
+
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    task = FakeTask(pr_urls={"repo1": "https://github.com/org/repo1/pull/1"}, work_item_id="wi-1")
+    state = FakeStateManager({"task-1": task})
+
+    shell = _RecordingShell()
+    config = _hooks_config([HookConfig(on="pr.merged", run="task notify-merge")])
+
+    watcher = PrWatcher(
+        msgs, workitems, state, lambda url: "merged", now_fn,
+        config=config, workspace_root=Path("/ws"), shell=shell,
+    )
+    watcher.check_once()
+    watcher.check_once()
+
+    assert len(shell.calls) == 1

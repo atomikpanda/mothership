@@ -832,6 +832,24 @@ def register(app: typer.Typer, get_container):
         except Exception:
             pass
 
+        # Lifecycle hooks (MOS-220): `task.closed` fires here, before the
+        # worktree teardown/state-removal mutation below, so a `required: true`
+        # hook's failure aborts the close entirely. A non-required hook's
+        # failure is fail-open: warned, close proceeds.
+        from mship.core.lifecycle_hooks import HookContext, HookRequiredError, run_hooks
+        try:
+            hook_results = run_hooks(
+                "task.closed", HookContext(task_slug=task_slug),
+                config=config, workspace_root=Path(container.config_path()).parent,
+                shell=container.shell(), state_manager=state_mgr,
+            )
+        except HookRequiredError as e:
+            output.error(f"blocked by required lifecycle hook: {e}")
+            raise typer.Exit(code=1)
+        for hr in hook_results:
+            if not hr.ok:
+                output.warning(f"lifecycle hook '{hr.hook_name}' for task.closed failed: {hr.error}")
+
         wt_mgr = container.worktree_manager()
         wt_mgr.abort(task_slug)  # core method retains the name; only CLI verb changed
 
@@ -1537,6 +1555,25 @@ def register(app: typer.Typer, get_container):
                     t.slug,
                     f"PR created for {pr_info['repo']}: {pr_info['url']}",
                 )
+
+        # Lifecycle hooks (MOS-220): `task.finished` fires here, before the
+        # finished_at mutation below commits, so a `required: true` hook's
+        # failure aborts the stamp (the PRs above are already created by this
+        # point — see spec's own caveat re: mid-flow blocking value). A
+        # non-required hook's failure is fail-open: warned, finish proceeds.
+        from mship.core.lifecycle_hooks import HookContext, HookRequiredError, run_hooks
+        try:
+            hook_results = run_hooks(
+                "task.finished", HookContext(task_slug=t.slug),
+                config=config, workspace_root=workspace_root, shell=shell,
+                state_manager=state_mgr,
+            )
+        except HookRequiredError as e:
+            output.error(f"blocked by required lifecycle hook: {e}")
+            raise typer.Exit(code=1)
+        for hr in hook_results:
+            if not hr.ok:
+                output.warning(f"lifecycle hook '{hr.hook_name}' for task.finished failed: {hr.error}")
 
         # Stamp finished_at on successful PR creation OR on --force re-push.
         from datetime import datetime as _dt, timezone as _tz

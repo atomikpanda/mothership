@@ -337,6 +337,103 @@ def test_phase_with_invalid_value_errors_cleanly(tmp_path):
         container.config.reset()
 
 
+# ---------------------------------------------------------------------------
+# Lifecycle hooks (MOS-220, spec mship-lifecycle-hooks): `workitem.phase.<phase>`
+# ---------------------------------------------------------------------------
+
+
+def test_item_phase_fires_workitem_phase_hook(tmp_path):
+    from unittest.mock import MagicMock
+    from mship.util.shell import ShellResult, ShellRunner
+
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: testws\nrepos: {}\n"
+        "hooks:\n"
+        "  - on: workitem.phase.done\n"
+        "    run: notify-done\n"
+    )
+    container.config_path.override(tmp_path / "mothership.yaml")
+    container.state_dir.override(tmp_path / ".mothership")
+    container.config.reset()
+    container.state_manager.reset()
+    container.log_manager.reset()
+    try:
+        res = runner.invoke(app, ["item", "new", "Title", "--kind", "feature"])
+        assert res.exit_code == 0, res.output
+        item_id = res.output.strip()
+
+        call_log = []
+
+        def mock_run(cmd, cwd, env=None, timeout=None):
+            call_log.append(cmd)
+            return ShellResult(returncode=0, stdout="", stderr="")
+
+        mock_shell = MagicMock(spec=ShellRunner)
+        mock_shell.run.side_effect = mock_run
+        mock_shell.build_command.side_effect = (
+            lambda command, env_runner=None: f"{env_runner} {command}" if env_runner else command
+        )
+        container.shell.override(mock_shell)
+
+        res = runner.invoke(app, ["item", "phase", item_id, "done"])
+        assert res.exit_code == 0, res.output
+        assert any("notify-done" in c for c in call_log)
+
+        from mship.core.workitem_store import WorkItemStore
+        items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+        assert items.get(item_id).phase_override == "done"
+    finally:
+        container.shell.reset_override()
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+        container.log_manager.reset()
+
+
+def test_item_phase_required_hook_failure_blocks_override(tmp_path):
+    from unittest.mock import MagicMock
+    from mship.util.shell import ShellResult, ShellRunner
+
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: testws\nrepos: {}\n"
+        "hooks:\n"
+        "  - on: workitem.phase.done\n"
+        "    run: notify-done-fails\n"
+        "    required: true\n"
+    )
+    container.config_path.override(tmp_path / "mothership.yaml")
+    container.state_dir.override(tmp_path / ".mothership")
+    container.config.reset()
+    container.state_manager.reset()
+    container.log_manager.reset()
+    try:
+        res = runner.invoke(app, ["item", "new", "Title", "--kind", "feature"])
+        assert res.exit_code == 0, res.output
+        item_id = res.output.strip()
+
+        mock_shell = MagicMock(spec=ShellRunner)
+        mock_shell.run.return_value = ShellResult(returncode=1, stdout="", stderr="boom")
+        mock_shell.build_command.side_effect = (
+            lambda command, env_runner=None: f"{env_runner} {command}" if env_runner else command
+        )
+        container.shell.override(mock_shell)
+
+        res = runner.invoke(app, ["item", "phase", item_id, "done"])
+        assert res.exit_code != 0
+
+        from mship.core.workitem_store import WorkItemStore
+        items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+        assert items.get(item_id).phase_override is None
+    finally:
+        container.shell.reset_override()
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+        container.log_manager.reset()
+
+
 def test_item_unattended_cli(tmp_path):
     _isolate(tmp_path)
     try:

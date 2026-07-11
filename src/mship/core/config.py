@@ -35,6 +35,86 @@ class CaptureConfig(BaseModel):
     platforms: list[str] = []
 
 
+# Lifecycle-hook event catalog (v1) — see spec mship-lifecycle-hooks (MOS-220).
+# Task phases mirror core/phase.py's `Phase` Literal (plan/dev/review/run);
+# WorkItem phases mirror core/workitem.py's `Phase` Literal (inbox/shaping/
+# ready/in_flight/review/done) — a distinct, unrelated enum, kept as its own
+# event family rather than one shared `phase.entered.*`. If either source
+# enum changes, update the corresponding set below too.
+_TASK_PHASE_EVENTS = frozenset(
+    f"phase.entered.{p}" for p in ("plan", "dev", "review", "run")
+)
+_WORKITEM_PHASE_EVENTS = frozenset(
+    f"workitem.phase.{p}"
+    for p in ("inbox", "shaping", "ready", "in_flight", "review", "done")
+)
+LIFECYCLE_EVENTS: frozenset[str] = frozenset(
+    {"task.finished", "task.closed", "pr.merged", "pr.closed"}
+    | _TASK_PHASE_EVENTS
+    | _WORKITEM_PHASE_EVENTS
+)
+
+# `pr.merged`/`pr.closed` are polling-derived (PrWatcher's sweep cadence) —
+# by the time the transition is observed it has already happened, so
+# `required: true` can't block anything there. Rejected at config-load time
+# rather than silently accepted-but-meaningless. See spec open question q5.
+_NON_BLOCKING_EVENTS: frozenset[str] = frozenset({"pr.merged", "pr.closed"})
+
+
+class HookConfig(BaseModel):
+    """One `hooks:` entry: run a go-task target or shell command when `on`
+    fires. See mship.core.lifecycle_hooks for the runtime dispatcher — NOT
+    mship.core.hooks, which is the unrelated git pre-commit/pre-push installer."""
+    on: str
+    run: str
+    repo: str | None = None
+    name: str | None = None
+    timeout: int | None = None
+    required: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_on_key(cls, data):
+        """PyYAML's SafeLoader parses YAML 1.1, which treats a bare `on` (or
+        `off`/`yes`/`no`) key as a boolean rather than a string — so `on:
+        pr.merged` in mothership.yaml round-trips through yaml.safe_load as
+        `{True: 'pr.merged', ...}`, not `{'on': 'pr.merged', ...}`. Normalize
+        before field validation so the config keeps reading naturally as
+        `on:` in the yaml source."""
+        if isinstance(data, dict) and True in data and "on" not in data:
+            data = dict(data)
+            data["on"] = data.pop(True)
+        return data
+
+    @field_validator("on", mode="after")
+    @classmethod
+    def validate_on(cls, v: str) -> str:
+        if v not in LIFECYCLE_EVENTS:
+            raise ValueError(
+                f"hooks: unknown event {v!r}. Valid events: "
+                f"{', '.join(sorted(LIFECYCLE_EVENTS))}"
+            )
+        return v
+
+    @field_validator("run", mode="after")
+    @classmethod
+    def validate_run(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("hooks: `run` must be a non-empty string")
+        return v
+
+    @model_validator(mode="after")
+    def validate_required_not_on_polling_events(self) -> "HookConfig":
+        if self.required and self.on in _NON_BLOCKING_EVENTS:
+            raise ValueError(
+                f"hooks: `required: true` is not meaningful on {self.on!r} — "
+                f"pr.merged/pr.closed are detected after the fact by "
+                f"PrWatcher's poll, so a hook here cannot block a transition "
+                f"that already happened. Remove `required: true` for this hook."
+            )
+        return self
+
+
 class RepoConfig(BaseModel):
     path: Path
     type: Literal["library", "service"]
@@ -159,6 +239,11 @@ class WorkspaceConfig(BaseModel):
     # mship.core.run_host.RunHostStore / resolve_run_host). A repo opts into
     # one via `RepoConfig.run_host`.
     run_hosts: list[str] = []
+    # Declarative reactions to task/WorkItem/PR state transitions — see spec
+    # mship-lifecycle-hooks (MOS-220) and mship.core.lifecycle_hooks.
+    hooks: list[HookConfig] = []
+    # Fallback per-hook timeout (seconds) when a `hooks:` entry omits `timeout`.
+    hooks_default_timeout: int = 30
     repos: dict[str, RepoConfig]
 
     @field_validator("relay", mode="before")
@@ -239,6 +324,17 @@ class WorkspaceConfig(BaseModel):
                 raise ValueError(
                     f"Repo '{name}' git_root '{repo.git_root}' is itself a subdirectory service. "
                     f"Cannot chain git_root references."
+                )
+        return self
+
+    @model_validator(mode="after")
+    def validate_hooks_repo_refs(self) -> "WorkspaceConfig":
+        repo_names = set(self.repos.keys())
+        for hook in self.hooks:
+            if hook.repo is not None and hook.repo not in repo_names:
+                raise ValueError(
+                    f"hooks: entry `on: {hook.on}` references unknown repo "
+                    f"{hook.repo!r}. Valid repos: {sorted(repo_names)}"
                 )
         return self
 

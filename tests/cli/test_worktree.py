@@ -2011,3 +2011,84 @@ def test_close_cascade_removes_downstream(configured_git_app: Path):
     assert result.exit_code == 0, result.output
     state = sm.load()
     assert state.tasks == {}
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle hooks (MOS-220, spec mship-lifecycle-hooks): `task.closed`
+# ---------------------------------------------------------------------------
+
+
+def test_close_fires_task_closed_hook_on_abandon(configured_git_app):
+    from mship.core.state import StateManager, WorkspaceState
+
+    cfg_path = configured_git_app / "mothership.yaml"
+    cfg_path.write_text(
+        cfg_path.read_text()
+        + "hooks:\n"
+        + "  - on: task.closed\n"
+        + "    run: notify-closed\n"
+    )
+    container.config.reset()
+
+    sm = StateManager(configured_git_app / ".mothership")
+    task = _build_close_task(finished=False)
+    sm.save(WorkspaceState(tasks={"t": task}))
+
+    call_log = []
+
+    def mock_run(cmd, cwd, env=None, timeout=None):
+        call_log.append(cmd)
+        return ShellResult(returncode=0, stdout="0\n", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.build_command.side_effect = (
+        lambda command, env_runner=None: f"{env_runner} {command}" if env_runner else command
+    )
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        r = CliRunner().invoke(app, ["close", "--yes", "--abandon", "--task", "t"])
+        assert r.exit_code == 0, r.output
+        assert any("notify-closed" in c for c in call_log)
+        assert "t" not in sm.load().tasks
+    finally:
+        container.shell.reset_override()
+
+
+def test_close_required_hook_failure_blocks_close(configured_git_app):
+    from mship.core.state import StateManager, WorkspaceState
+
+    cfg_path = configured_git_app / "mothership.yaml"
+    cfg_path.write_text(
+        cfg_path.read_text()
+        + "hooks:\n"
+        + "  - on: task.closed\n"
+        + "    run: notify-closed-fails\n"
+        + "    required: true\n"
+    )
+    container.config.reset()
+
+    sm = StateManager(configured_git_app / ".mothership")
+    task = _build_close_task(finished=False)
+    sm.save(WorkspaceState(tasks={"t": task}))
+
+    def mock_run(cmd, cwd, env=None, timeout=None):
+        if "notify-closed-fails" in cmd:
+            return ShellResult(returncode=1, stdout="", stderr="boom")
+        return ShellResult(returncode=0, stdout="0\n", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.build_command.side_effect = (
+        lambda command, env_runner=None: f"{env_runner} {command}" if env_runner else command
+    )
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        r = CliRunner().invoke(app, ["close", "--yes", "--abandon", "--task", "t"])
+        assert r.exit_code != 0
+        # Never committed — the worktree teardown/state removal never ran.
+        assert "t" in sm.load().tasks
+    finally:
+        container.shell.reset_override()

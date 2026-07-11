@@ -270,6 +270,12 @@ def create_app(
             check_state=lambda u: pr_manager.check_pr_state(u).state,
             now_fn=lambda: datetime.now(timezone.utc),
             lock=_item_msg_lock,
+            # Lifecycle hooks (MOS-220): `pr.merged`/`pr.closed`. `config` is
+            # this machine's own WorkspaceConfig (optional — see create_app's
+            # docstring); without it hooks are simply never evaluated.
+            config=config,
+            workspace_root=workspace_root,
+            shell=ShellRunner(),
         )
         stop = asyncio.Event()
         task = asyncio.create_task(_pr_watch_loop(watcher, stop, interval))
@@ -781,9 +787,28 @@ def create_app(
     def post_item_phase(item_id: str, body: PhaseOverrideBody):
         """Set (Mark done) or clear (Reopen) a work item's phase override. `null`
         returns the item to its derived phase. Shares _item_msg_lock with the other
-        item writers to avoid a lost update if a steer/toggle lands concurrently."""
+        item writers to avoid a lost update if a steer/toggle lands concurrently.
+
+        Lifecycle hooks (MOS-220): setting an explicit phase (not clearing one)
+        fires `workitem.phase.<phase>` before the override below commits — the
+        one concrete "WorkItem phase-change" call site today (phase is
+        otherwise derived on read via compute_phase, not mutated anywhere
+        else). A `required: true` hook's failure blocks the override (422); a
+        non-required failure is fail-open — logged, override still proceeds."""
         now = datetime.now(timezone.utc)
         with _item_msg_lock:
+            if workitems.get(item_id) is None:
+                raise HTTPException(status_code=404, detail=f"no work item {item_id!r}")
+            if body.phase is not None and config is not None:
+                from mship.core.lifecycle_hooks import HookContext, HookRequiredError, run_hooks
+                try:
+                    run_hooks(
+                        f"workitem.phase.{body.phase}", HookContext(workitem_id=item_id),
+                        config=config, workspace_root=workspace_root,
+                        shell=ShellRunner(), state_manager=state_manager,
+                    )
+                except HookRequiredError as e:
+                    raise HTTPException(status_code=422, detail=str(e))
             try:
                 workitems.set_phase_override(item_id, body.phase, now=now)
             except KeyError:

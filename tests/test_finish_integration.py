@@ -960,3 +960,101 @@ def test_finish_evidence_via_journal_suppresses_warning(finish_workspace, tmp_pa
     lower = result.output.lower()
     assert "test-evidence warnings" not in lower
     assert "not run" not in lower
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle hooks (MOS-220, spec mship-lifecycle-hooks): `task.finished`
+# ---------------------------------------------------------------------------
+
+
+def test_finish_fires_task_finished_hook(finish_workspace):
+    workspace, mock_shell = finish_workspace
+
+    cfg_path = workspace / "mothership.yaml"
+    cfg_path.write_text(
+        cfg_path.read_text()
+        + "hooks:\n"
+        + "  - on: task.finished\n"
+        + "    run: notify-finished\n"
+    )
+    container.config.reset()
+
+    result = runner.invoke(app, ["spawn", "--hotfix", "hook finish test", "--repos", "shared"])
+    assert result.exit_code == 0, result.output
+
+    pr_url = "https://github.com/org/shared/pull/1"
+    call_log = []
+
+    def mock_run(cmd, cwd, env=None, timeout=None):
+        call_log.append(cmd)
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout=f"{pr_url}\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+    # mock_shell is a MagicMock(spec=ShellRunner) — .build_command isn't the
+    # real implementation by default, so give it one (matching ShellRunner's
+    # actual behavior) or the lifecycle-hook's resolved command is a MagicMock,
+    # not a string.
+    mock_shell.build_command.side_effect = (
+        lambda command, env_runner=None: f"{env_runner} {command}" if env_runner else command
+    )
+
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "hook-finish-test"])
+    assert result.exit_code == 0, result.output
+
+    assert any("notify-finished" in c for c in call_log)
+
+
+def test_finish_required_hook_failure_blocks_finished_stamp(finish_workspace):
+    workspace, mock_shell = finish_workspace
+
+    cfg_path = workspace / "mothership.yaml"
+    cfg_path.write_text(
+        cfg_path.read_text()
+        + "hooks:\n"
+        + "  - on: task.finished\n"
+        + "    run: notify-finished-fails\n"
+        + "    required: true\n"
+    )
+    container.config.reset()
+
+    result = runner.invoke(app, ["spawn", "--hotfix", "hook required test", "--repos", "shared"])
+    assert result.exit_code == 0, result.output
+
+    pr_url = "https://github.com/org/shared/pull/2"
+
+    def mock_run(cmd, cwd, env=None, timeout=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout=f"{pr_url}\n", stderr="")
+        if "notify-finished-fails" in cmd:
+            return ShellResult(returncode=1, stdout="", stderr="boom")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+    mock_shell.build_command.side_effect = (
+        lambda command, env_runner=None: f"{env_runner} {command}" if env_runner else command
+    )
+
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "hook-required-test"])
+    assert result.exit_code != 0
+
+    mgr = StateManager(workspace / ".mothership")
+    state = mgr.load()
+    assert state.tasks["hook-required-test"].finished_at is None

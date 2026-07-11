@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
 
 log = logging.getLogger(__name__)
@@ -44,6 +45,9 @@ class PrWatcher:
         check_state: Callable[[str], str],
         now_fn: Callable[[], datetime],
         lock: Any | None = None,
+        config: Any | None = None,
+        workspace_root: Path | None = None,
+        shell: Any | None = None,
     ) -> None:
         self.msgs = msgs
         self.workitems = workitems
@@ -52,6 +56,12 @@ class PrWatcher:
         self.now_fn = now_fn
         self.lock = lock
         self.notified: set[tuple[str, str, str, str]] = set()
+        # Lifecycle hooks (MOS-220): `pr.merged`/`pr.closed`. `config` is the
+        # workspace's WorkspaceConfig — when None (default), hooks are simply
+        # never evaluated, so existing callers/tests are unaffected.
+        self.config = config
+        self.workspace_root = workspace_root
+        self.shell = shell
 
     def check_once(self) -> None:
         """One sweep over all tasks' PR urls. Never raises — a failure while
@@ -79,12 +89,12 @@ class PrWatcher:
             return
         if self.lock is not None:
             with self.lock:
-                self._resolve_and_post(slug, task, url, st, key)
+                self._resolve_and_post(slug, task, repo, url, st, key)
         else:
-            self._resolve_and_post(slug, task, url, st, key)
+            self._resolve_and_post(slug, task, repo, url, st, key)
 
     def _resolve_and_post(
-        self, slug: str, task: Any, url: str, st: str,
+        self, slug: str, task: Any, repo: str, url: str, st: str,
         key: tuple[str, str, str, str],
     ) -> None:
         now = self.now_fn()
@@ -105,6 +115,34 @@ class PrWatcher:
 
         self.msgs.append(tid, "agent", text, now, kind="event")
         self.notified.add(key)
+        self._fire_lifecycle_hook(st, slug, repo)
+
+    def _fire_lifecycle_hook(self, st: str, slug: str, repo: str) -> None:
+        """Fire the `pr.merged`/`pr.closed` lifecycle hook (MOS-220), once,
+        the same time the mailbox event is posted above. Polling-derived —
+        the merge/close already happened by the time this sweep observes it,
+        so `required: true` is rejected for these events at config-load time
+        (nothing left to block). Never lets a hook failure escape: this
+        mirrors check_once()'s own never-abort-the-sweep-on-one-failure
+        pattern, so a broken hook config can't take down PR notifications
+        for every other task."""
+        if self.config is None or self.workspace_root is None:
+            return
+        from mship.core.lifecycle_hooks import HookContext, run_hooks
+        try:
+            run_hooks(
+                f"pr.{st}",
+                HookContext(task_slug=slug, repo=repo),
+                config=self.config,
+                workspace_root=self.workspace_root,
+                shell=self.shell,
+                state_manager=self.state_manager,
+            )
+        except Exception:
+            log.exception(
+                "pr_watcher: lifecycle hook failed for pr.%s (task=%s repo=%s)",
+                st, slug, repo,
+            )
 
     def _resolve_thread(self, slug: str, task: Any, now: datetime) -> tuple[str, Any]:
         """Mirror POST /items/{id}/messages' thread resolution: prefer the

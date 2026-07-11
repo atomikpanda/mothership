@@ -163,3 +163,70 @@ def test_post_item_phase_rejects_invalid_phase(tmp_path):
     wi = items.create(title="Item", kind="feature", workspace="testws", now=_now())
     client = _app(tmp_path)
     assert client.post(f"/items/{wi.id}/phase", json={"phase": "bogus"}).status_code == 422
+
+
+# --- Lifecycle hooks (MOS-220, spec mship-lifecycle-hooks): `workitem.phase.<phase>` ---
+
+
+def _app_with_config(tmp_path, config):
+    specs_dir = tmp_path / "specs"
+    SpecStore(specs_dir)  # ensure dir resolvable
+    state_manager = StateManager(tmp_path / ".mothership")
+    app = create_app(
+        specs_dir=specs_dir, state_manager=state_manager, log_manager=None,
+        workspace_root=tmp_path, workspace_name="testws", config=config,
+    )
+    return TestClient(app)
+
+
+def test_post_item_phase_fires_workitem_phase_hook(tmp_path):
+    from mship.core.config import HookConfig, WorkspaceConfig
+
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="Stuck item", kind="feature", workspace="testws", now=_now())
+
+    marker = tmp_path / "hook-fired.txt"
+    config = WorkspaceConfig(
+        workspace="testws", repos={},
+        hooks=[HookConfig(on="workitem.phase.done", run=f"touch {marker}")],
+    )
+    client = _app_with_config(tmp_path, config)
+
+    resp = client.post(f"/items/{wi.id}/phase", json={"phase": "done"})
+    assert resp.status_code == 200
+    assert marker.exists()
+    assert items.get(wi.id).phase_override == "done"
+
+
+def test_post_item_phase_required_hook_failure_returns_422_and_blocks_override(tmp_path):
+    from mship.core.config import HookConfig, WorkspaceConfig
+
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="Stuck item", kind="feature", workspace="testws", now=_now())
+
+    config = WorkspaceConfig(
+        workspace="testws", repos={},
+        hooks=[HookConfig(on="workitem.phase.done", run="false", required=True)],
+    )
+    client = _app_with_config(tmp_path, config)
+
+    resp = client.post(f"/items/{wi.id}/phase", json={"phase": "done"})
+    assert resp.status_code == 422
+    assert items.get(wi.id).phase_override is None
+
+
+def test_post_item_phase_non_required_hook_failure_still_sets_override(tmp_path):
+    from mship.core.config import HookConfig, WorkspaceConfig
+
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="Stuck item", kind="feature", workspace="testws", now=_now())
+
+    config = WorkspaceConfig(
+        workspace="testws", repos={},
+        hooks=[HookConfig(on="workitem.phase.done", run="false")],
+    )
+    client = _app_with_config(tmp_path, config)
+
+    resp = client.post(f"/items/{wi.id}/phase", json={"phase": "done"})
+    assert resp.status_code == 200
+    assert items.get(wi.id).phase_override == "done"

@@ -805,3 +805,196 @@ def test_repo_without_capture_defaults_none(tmp_path):
     )
     config = ConfigLoader.load(cfg, require_paths=False)
     assert config.repos["app"].capture is None
+
+
+# ---------------------------------------------------------------------------
+# `hooks:` — lifecycle hooks config schema (MOS-220, spec mship-lifecycle-hooks)
+# ---------------------------------------------------------------------------
+
+
+def test_hooks_default_empty(workspace: Path):
+    config = ConfigLoader.load(workspace / "mothership.yaml")
+    assert config.hooks == []
+
+
+def test_hooks_default_timeout_defaults_to_30(workspace: Path):
+    config = ConfigLoader.load(workspace / "mothership.yaml")
+    assert config.hooks_default_timeout == 30
+
+
+def test_hooks_default_timeout_overridable(tmp_path):
+    from mship.core.config import ConfigLoader
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "hooks_default_timeout: 90\n"
+        "repos:\n"
+        "  app:\n"
+        "    path: ./app\n"
+        "    type: service\n"
+    )
+    config = ConfigLoader.load(cfg, require_paths=False)
+    assert config.hooks_default_timeout == 90
+
+
+def test_hooks_parses_full_entry(tmp_path):
+    from mship.core.config import ConfigLoader
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  app:\n"
+        "    path: ./app\n"
+        "    type: service\n"
+        "hooks:\n"
+        "  - on: pr.merged\n"
+        "    run: notify-pr-merged\n"
+        "    repo: app\n"
+        "    name: \"Notify on PR merge\"\n"
+        "    timeout: 45\n"
+        "    required: false\n"
+    )
+    config = ConfigLoader.load(cfg, require_paths=False)
+    assert len(config.hooks) == 1
+    hook = config.hooks[0]
+    assert hook.on == "pr.merged"
+    assert hook.run == "notify-pr-merged"
+    assert hook.repo == "app"
+    assert hook.name == "Notify on PR merge"
+    assert hook.timeout == 45
+    assert hook.required is False
+
+
+def test_hooks_entry_defaults(tmp_path):
+    from mship.core.config import ConfigLoader
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  app:\n"
+        "    path: ./app\n"
+        "    type: service\n"
+        "hooks:\n"
+        "  - on: task.finished\n"
+        "    run: some-task\n"
+    )
+    config = ConfigLoader.load(cfg, require_paths=False)
+    hook = config.hooks[0]
+    assert hook.repo is None
+    assert hook.name is None
+    assert hook.timeout is None
+    assert hook.required is False
+
+
+@pytest.mark.parametrize("event", [
+    "task.finished", "task.closed", "pr.merged", "pr.closed",
+    "phase.entered.plan", "phase.entered.dev", "phase.entered.review", "phase.entered.run",
+    "workitem.phase.inbox", "workitem.phase.shaping", "workitem.phase.ready",
+    "workitem.phase.in_flight", "workitem.phase.review", "workitem.phase.done",
+])
+def test_hooks_v1_event_catalog_accepted(tmp_path, event):
+    from mship.core.config import ConfigLoader
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  app:\n"
+        "    path: ./app\n"
+        "    type: service\n"
+        "hooks:\n"
+        f"  - on: {event}\n"
+        "    run: some-task\n"
+    )
+    config = ConfigLoader.load(cfg, require_paths=False)
+    assert config.hooks[0].on == event
+
+
+def test_hooks_unknown_event_rejected(tmp_path):
+    from mship.core.config import ConfigLoader
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  app:\n"
+        "    path: ./app\n"
+        "    type: service\n"
+        "hooks:\n"
+        "  - on: task.exploded\n"
+        "    run: some-task\n"
+    )
+    with pytest.raises(ValueError, match="task.exploded"):
+        ConfigLoader.load(cfg, require_paths=False)
+
+
+def test_hooks_empty_run_rejected(tmp_path):
+    from mship.core.config import ConfigLoader
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  app:\n"
+        "    path: ./app\n"
+        "    type: service\n"
+        "hooks:\n"
+        "  - on: task.finished\n"
+        "    run: \"\"\n"
+    )
+    with pytest.raises(ValueError):
+        ConfigLoader.load(cfg, require_paths=False)
+
+
+@pytest.mark.parametrize("event", ["pr.merged", "pr.closed"])
+def test_hooks_required_true_rejected_on_polling_events(tmp_path, event):
+    """required: true can't block anything on pr.merged/pr.closed — the merge/close
+    already happened by the time PrWatcher's poll observes it. See spec q5."""
+    from mship.core.config import ConfigLoader
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  app:\n"
+        "    path: ./app\n"
+        "    type: service\n"
+        "hooks:\n"
+        f"  - on: {event}\n"
+        "    run: some-task\n"
+        "    required: true\n"
+    )
+    with pytest.raises(ValueError, match="required"):
+        ConfigLoader.load(cfg, require_paths=False)
+
+
+def test_hooks_required_true_accepted_on_blocking_events(tmp_path):
+    from mship.core.config import ConfigLoader
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  app:\n"
+        "    path: ./app\n"
+        "    type: service\n"
+        "hooks:\n"
+        "  - on: task.finished\n"
+        "    run: some-task\n"
+        "    required: true\n"
+    )
+    config = ConfigLoader.load(cfg, require_paths=False)
+    assert config.hooks[0].required is True
+
+
+def test_hooks_unknown_repo_ref_rejected(tmp_path):
+    from mship.core.config import ConfigLoader
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  app:\n"
+        "    path: ./app\n"
+        "    type: service\n"
+        "hooks:\n"
+        "  - on: task.finished\n"
+        "    run: some-task\n"
+        "    repo: nonexistent\n"
+    )
+    with pytest.raises(ValueError, match="nonexistent"):
+        ConfigLoader.load(cfg, require_paths=False)
