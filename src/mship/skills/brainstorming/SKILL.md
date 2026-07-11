@@ -117,6 +117,8 @@ Capture the design using the dual-path based on workspace detection (is there a 
   - (User preferences for spec location override this default)
   - Use elements-of-style:writing-clearly-and-concisely skill if available
 
+**Where specs live (workspace-level, branch-stable):** an `mship spec` is a **workspace** artifact — `<workspace>/specs/<date>-<id>.md` plus its entry under `.mothership/` — authored during brainstorming **before** `mship spawn` / `mship spec dispatch`, and then *consumed* by the dispatched task. It does **not** live on a member-repo feature branch, so unlike an ad-hoc design doc committed on a branch it can't diverge across branches or go stale relative to `main`. Always create and edit a spec through the `mship spec` commands (`spec new` / `spec draft` / `spec apply` / `spec ask` / …) — never hand-edit the spec file inside a task worktree — so `mship view spec` (and the phone) always resolve the latest. This supersedes the older "commit the design doc on a branch" guidance: the main-vs-branch question is moot because `mship spec`s are not branch-scoped.
+
 **Spec Self-Review:**
 After writing the spec document, look at it with fresh eyes:
 
