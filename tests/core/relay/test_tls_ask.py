@@ -5,6 +5,12 @@ RELAY = "mship-relay.atomikpanda.com"
 def test_allows_enroll_host():
     assert tls_ask_allowed(f"enroll.{RELAY}", RELAY) is True
 
+def test_allows_gh_broker_host():
+    assert tls_ask_allowed(f"gh.{RELAY}", RELAY) is True
+
+def test_rejects_random_host():
+    assert tls_ask_allowed(f"random-host.{RELAY}", RELAY) is False
+
 def test_allows_serve_subdomains():
     assert tls_ask_allowed(f"mship-workspace-92bbb7.{RELAY}", RELAY) is True
     assert tls_ask_allowed(f"x-000000.{RELAY}", RELAY) is True
