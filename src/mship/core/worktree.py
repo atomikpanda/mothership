@@ -589,8 +589,9 @@ class WorktreeManager:
                         self._git.fast_forward_if_clean(repo_path=repo_path, base=cut_base)
                     else:
                         setup_warnings.append(
-                            f"{repo_name}: could not fetch origin/{cut_base}; "
-                            f"cutting worktree from local {cut_base}"
+                            f"{repo_name}: could not fetch origin/{cut_base} — worktree cut "
+                            f"from possibly-stale local {cut_base}; run `mship sync` and "
+                            f"re-check, or re-spawn with a fresh base"
                         )
                 self._git.worktree_add(
                     repo_path=repo_path,

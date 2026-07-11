@@ -209,14 +209,17 @@ def _task_payload(
 
     ahead_of_origin: dict[str, Optional[int]] = {}
     ahead_of_base: dict[str, Optional[int]] = {}
+    base_behind_origin: dict[str, Optional[int]] = {}
     for repo, wt_path in task.worktrees.items():
         wt = Path(wt_path)
         ahead_of_origin[repo] = git_count(wt, "@{u}..HEAD")
         eff_base = _effective_base_for_repo(task, repo, config)
         if eff_base:
             ahead_of_base[repo] = git_count(wt, f"{eff_base}..HEAD")
+            base_behind_origin[repo] = git_count(wt, f"{eff_base}..origin/{eff_base}")
         else:
             ahead_of_base[repo] = None
+            base_behind_origin[repo] = None
 
     # Only the explicitly-active repo drives the scalar base_branch. Falling
     # back to the first inserted worktree would make a user-facing value depend
@@ -240,6 +243,7 @@ def _task_payload(
         "active_repo": task.active_repo,
         "ahead_of_origin": ahead_of_origin,
         "ahead_of_base": ahead_of_base,
+        "base_behind_origin": base_behind_origin,
         "pr_urls": dict(task.pr_urls),
         "last_test_state": last_test_state,
         "last_test_iteration": last_test_iteration,

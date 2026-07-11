@@ -207,6 +207,27 @@ def test_spawn_base_origin_only_survives_flapping_in_loop_fetch(worktree_deps, t
     assert _head(wt) != head_before
 
 
+def test_spawn_default_base_warns_loudly_when_fetch_fails(worktree_deps, tmp_path):
+    """MOS-203: when the normal (non --base) spawn path can't fetch origin/<base>,
+    the worktree is cut from a possibly-stale local base. The warning must say so
+    explicitly and name `mship sync` as the remedy — not a quiet 'cutting from
+    local <base>' aside."""
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    shared = workspace / "shared"
+
+    origin = tmp_path / "shared-origin.git"
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+    _git_run(shared, "remote", "add", "origin", str(origin))
+    _git_run(shared, "push", "origin", "HEAD:main")          # materialize origin/main
+    _git_run(shared, "remote", "set-url", "origin", str(tmp_path / "gone.git"))  # fetch will fail
+
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    result = mgr.spawn("fetch fail test", repos=["shared"], workspace_root=workspace)
+
+    matches = [w for w in result.setup_warnings if "shared" in w and "mship sync" in w]
+    assert len(matches) == 1, result.setup_warnings
+
+
 def test_abort_succeeds_even_if_branch_delete_fails(worktree_deps):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
