@@ -207,6 +207,8 @@ def test_ask_defaults_to_single_select(_configured):
     r = runner.invoke(app, ["ask", t.id, "How to store?",
                             "--option", "a", "--option", "b"])
     assert r.exit_code == 0, r.output
+    got = s.get(t.id)
+    assert got.messages[-1].decision.multi is False
 
 
 # ---- MOS-206: --json must be honored on a real TTY (CliRunner's stdout is
