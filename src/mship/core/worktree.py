@@ -485,6 +485,41 @@ class WorktreeManager:
                     f"repo(s): {', '.join(missing_base)}. Push the base branch first, "
                     f"or check the name."
                 )
+        else:
+            # --- MOS-203 (Greptile, "HEAD fallback remains"): validate the
+            #     default cut_base the SAME way, BEFORE creating any worktree.
+            #     Mirrors the --base preflight above: fetch first (so an
+            #     origin-only base is recognized), then require a local branch
+            #     or an origin/<base> remote-tracking ref. If cut_base resolves
+            #     to NEITHER anywhere, the in-loop code below would otherwise
+            #     leave start_point as None and `git worktree add` would
+            #     silently cut from the checkout's current HEAD instead —
+            #     inheriting whatever unrelated commits happen to be checked
+            #     out there. Fail loudly instead.
+            missing_default_base: list[str] = []
+            for repo_name in all_repos:
+                if repo_name in passive:
+                    continue
+                repo_config = self._config.repos[repo_name]
+                if repo_config.git_root is not None:
+                    continue  # subdirectory child shares its parent's checkout + branch
+                repo_path = repo_config.path
+                cut_base = repo_config.base_branch or default_base or "main"
+                if not offline and self._git.has_remote(repo_path):
+                    self._git.fetch_remote_ref(repo_path=repo_path, ref=cut_base)
+                if not (
+                    self._git.ref_exists(repo_path, cut_base)
+                    or self._git.ref_exists(repo_path, f"origin/{cut_base}")
+                ):
+                    missing_default_base.append(
+                        f"{repo_name}: base branch '{cut_base}' not found locally or on origin"
+                    )
+            if missing_default_base:
+                raise BaseBranchNotFoundError(
+                    "; ".join(missing_default_base)
+                    + " — set `base_branch` in mothership.yaml or create the "
+                    "branch, then re-spawn"
+                )
 
         hub = workspace_root / ".worktrees" / slug
         hub.mkdir(parents=True, exist_ok=True)
@@ -589,9 +624,29 @@ class WorktreeManager:
                         self._git.fast_forward_if_clean(repo_path=repo_path, base=cut_base)
                     else:
                         setup_warnings.append(
-                            f"{repo_name}: could not fetch origin/{cut_base}; "
-                            f"cutting worktree from local {cut_base}"
+                            f"{repo_name}: could not fetch origin/{cut_base} — worktree cut "
+                            f"from possibly-stale local {cut_base}; run `mship sync` and "
+                            f"re-check, or re-spawn with a fresh base"
                         )
+                # When we didn't cut from origin's tip (offline / no remote / fetch
+                # failed), cut from the local base branch explicitly rather than the
+                # checkout's HEAD. If there's no local base branch either (only a
+                # stale remote-tracking ref from an earlier fetch), fall back to
+                # that rather than silently defaulting to HEAD.
+                if start_point is None and self._git.ref_exists(repo_path, cut_base):
+                    start_point = cut_base
+                elif start_point is None and self._git.ref_exists(repo_path, f"origin/{cut_base}"):
+                    start_point = f"origin/{cut_base}"
+                if start_point is None:
+                    # MOS-203: the preflight above should already have caught
+                    # this — this is a TOCTOU safety net only (e.g. the base
+                    # branch was deleted between preflight and here). Never
+                    # silently fall back to worktree_add's HEAD default.
+                    raise BaseBranchNotFoundError(
+                        f"{repo_name}: base branch '{cut_base}' not found locally or on "
+                        "origin — set `base_branch` in mothership.yaml or create the "
+                        "branch, then re-spawn"
+                    )
                 self._git.worktree_add(
                     repo_path=repo_path,
                     worktree_path=wt_path,

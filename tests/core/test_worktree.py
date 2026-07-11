@@ -207,6 +207,155 @@ def test_spawn_base_origin_only_survives_flapping_in_loop_fetch(worktree_deps, t
     assert _head(wt) != head_before
 
 
+def test_spawn_default_base_warns_loudly_when_fetch_fails(worktree_deps, tmp_path):
+    """MOS-203: when the normal (non --base) spawn path can't fetch origin/<base>,
+    the worktree is cut from a possibly-stale local base. The warning must say so
+    explicitly and name `mship sync` as the remedy — not a quiet 'cutting from
+    local <base>' aside."""
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    shared = workspace / "shared"
+
+    origin = tmp_path / "shared-origin.git"
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+    _git_run(shared, "remote", "add", "origin", str(origin))
+    _git_run(shared, "push", "origin", "HEAD:main")          # materialize origin/main
+    _git_run(shared, "remote", "set-url", "origin", str(tmp_path / "gone.git"))  # fetch will fail
+
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    result = mgr.spawn("fetch fail test", repos=["shared"], workspace_root=workspace)
+
+    matches = [w for w in result.setup_warnings if "shared" in w and "mship sync" in w]
+    assert len(matches) == 1, result.setup_warnings
+
+
+def test_spawn_default_base_cuts_from_local_base_not_checkout_head_when_fetch_fails(
+    worktree_deps, tmp_path
+):
+    """MOS-203 (Greptile, worktree.py ~594): when the default (non --base) cut can't
+    fetch origin/<base>, it must cut the new worktree from the local <base> branch
+    tip — NOT from whatever branch the canonical checkout's HEAD happens to be on.
+    Regression for "fetch failure uses current HEAD"."""
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    shared = workspace / "shared"
+
+    # Normalize the fixture's default branch to literally "main" regardless of the
+    # host's git init.defaultBranch, so `cut_base` ("main") is unambiguous.
+    _git_run(shared, "branch", "-m", "main")
+    main_tip = _head(shared)
+
+    # Materialize origin/main so the fetch path is exercised (has_remote is True),
+    # then break the remote so `fetch_remote_ref` fails — the exact scenario named
+    # in the warning ("could not fetch origin/main").
+    origin = tmp_path / "shared-origin.git"
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+    _git_run(shared, "remote", "add", "origin", str(origin))
+    _git_run(shared, "push", "origin", "main")
+    _git_run(shared, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+
+    # Move the canonical checkout's HEAD to an unrelated branch with a DIFFERENT
+    # commit than main, so a HEAD-based cut would silently pick up the wrong tip.
+    _git_run(shared, "checkout", "-b", "unrelated-work")
+    (shared / "unrelated.txt").write_text("unrelated work in progress")
+    _git_run(shared, "add", "unrelated.txt")
+    _git_run(shared, "commit", "-m", "unrelated work commit")
+    unrelated_tip = _head(shared)
+    assert unrelated_tip != main_tip  # sanity: HEAD really is ahead of, and distinct from, main
+
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("default base test", repos=["shared"], workspace_root=workspace)
+    wt = Path(state_mgr.load().tasks["default-base-test"].worktrees["shared"])
+
+    assert _head(wt) == main_tip        # cut from local main, not the checkout's HEAD
+    assert _head(wt) != unrelated_tip
+
+
+def test_spawn_default_base_cuts_from_origin_when_no_local_base_and_fetch_fails(
+    worktree_deps, tmp_path
+):
+    """MOS-203 (Greptile, worktree.py ~600): when the default (non --base) cut
+    can't fetch origin/<base> AND there is no local <base> branch at all (only
+    a stale remote-tracking origin/<base> from an earlier fetch), it must cut
+    the new worktree from origin/<base> — NOT silently fall through to the
+    checkout's HEAD. Regression for "no local base ref means ref_exists(base)
+    is False and start_point stays None"."""
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    shared = workspace / "shared"
+
+    # Normalize the fixture's default branch to literally "main" regardless of
+    # the host's git init.defaultBranch, so `cut_base` ("main") is unambiguous.
+    _git_run(shared, "branch", "-m", "main")
+    main_tip = _head(shared)
+
+    # Materialize origin/main (push + explicit fetch), so it exists as a
+    # remote-tracking ref, then break the remote so the in-spawn fetch fails.
+    origin = tmp_path / "shared-origin.git"
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+    _git_run(shared, "remote", "add", "origin", str(origin))
+    _git_run(shared, "push", "origin", "main")
+    _git_run(shared, "fetch", "origin", "main")
+
+    # Move HEAD off main onto an unrelated commit (also required to delete the
+    # local main branch below), so a HEAD-based cut would silently pick up the
+    # wrong tip.
+    _git_run(shared, "checkout", "-b", "unrelated-work")
+    (shared / "unrelated.txt").write_text("unrelated work in progress")
+    _git_run(shared, "add", "unrelated.txt")
+    _git_run(shared, "commit", "-m", "unrelated work commit")
+    unrelated_tip = _head(shared)
+    assert unrelated_tip != main_tip  # sanity: HEAD really is ahead of, and distinct from, main
+
+    # Delete the local main branch entirely — main now exists ONLY as
+    # origin/main — then break the remote so any further fetch fails.
+    _git_run(shared, "branch", "-D", "main")
+    _git_run(shared, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("no local base test", repos=["shared"], workspace_root=workspace)
+    wt = Path(state_mgr.load().tasks["no-local-base-test"].worktrees["shared"])
+
+    assert _head(wt) == main_tip        # cut from origin/main, not the checkout's HEAD
+    assert _head(wt) != unrelated_tip
+
+
+def test_spawn_default_base_raises_when_base_exists_nowhere(worktree_deps):
+    """MOS-203 (Greptile, 'HEAD fallback remains'): when the default (non
+    --base) cut_base resolves to NEITHER a local branch NOR an origin/<base>
+    remote-tracking ref (no remote at all here, so no fetch to fall back on),
+    spawn must raise a clear, actionable error naming the repo and the
+    missing base — NOT silently cut the new worktree from the checkout's
+    current HEAD (which can carry unrelated commits). No worktree/hub
+    directory should be left behind."""
+    from mship.core.worktree import BaseBranchNotFoundError
+
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    shared = workspace / "shared"
+
+    # Normalize the fixture's default branch to literally "main" (base_branch
+    # in mothership.yaml), then delete it entirely so cut_base ("main") exists
+    # nowhere: no local branch, and no remote at all (so no origin/main
+    # either). Move HEAD to an unrelated branch first — required to delete
+    # main, and it also proves a HEAD-based cut would silently succeed here.
+    _git_run(shared, "branch", "-m", "main")
+    _git_run(shared, "checkout", "-b", "unrelated-work")
+    (shared / "unrelated.txt").write_text("unrelated work in progress")
+    _git_run(shared, "add", "unrelated.txt")
+    _git_run(shared, "commit", "-m", "unrelated work commit")
+    _git_run(shared, "branch", "-D", "main")  # main now exists nowhere
+
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    with pytest.raises(BaseBranchNotFoundError) as exc_info:
+        mgr.spawn("no base anywhere", repos=["shared"], workspace_root=workspace)
+
+    msg = str(exc_info.value)
+    assert "shared" in msg
+    assert "main" in msg
+    assert "not found" in msg.lower()
+
+    # Preflight: fail-fast before any worktree/hub is created.
+    assert "no-base-anywhere" not in state_mgr.load().tasks
+    assert not (workspace / ".worktrees" / "no-base-anywhere").exists()
+
+
 def test_abort_succeeds_even_if_branch_delete_fails(worktree_deps):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)

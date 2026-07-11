@@ -222,6 +222,7 @@ def test_finish_not_blocked_by_own_worktree(finish_workspace):
 
 def test_finish_passes_base_from_config(finish_workspace, tmp_path):
     """Config base_branch flows into gh pr create --base."""
+    import subprocess
     import yaml
 
     workspace, mock_shell = finish_workspace
@@ -232,6 +233,14 @@ def test_finish_passes_base_from_config(finish_workspace, tmp_path):
     cfg["repos"]["shared"]["base_branch"] = "release/7"
     cfg_path.write_text(yaml.safe_dump(cfg))
     container.config.reset()
+
+    # MOS-203: spawn's default-cut preflight now requires the base branch to
+    # exist somewhere (local or origin) before it will cut a worktree. This
+    # test only cares about `release/7` flowing through to `gh pr create
+    # --base` at finish time (which is entirely mocked below), so create the
+    # branch locally at HEAD to satisfy the preflight.
+    subprocess.run(["git", "branch", "release/7"], cwd=workspace / "shared",
+                   check=True, capture_output=True)
 
     result = runner.invoke(app, ["spawn", "--hotfix", "base test", "--repos", "shared"])
     assert result.exit_code == 0, result.output
@@ -313,6 +322,7 @@ def test_finish_uses_spawn_base_override(finish_workspace):
 
 
 def test_finish_fails_when_base_missing_on_remote(finish_workspace):
+    import subprocess
     import yaml
 
     workspace, mock_shell = finish_workspace
@@ -321,6 +331,14 @@ def test_finish_fails_when_base_missing_on_remote(finish_workspace):
     cfg["repos"]["shared"]["base_branch"] = "nope"
     cfg_path.write_text(yaml.safe_dump(cfg))
     container.config.reset()
+
+    # MOS-203: spawn's default-cut preflight now requires the base branch to
+    # exist somewhere (local or origin) before it will cut a worktree. This
+    # test is about `finish` discovering the base is missing on the *real*
+    # remote (mocked below via an empty `git ls-remote`), so create `nope`
+    # locally at HEAD to get spawn past its own preflight.
+    subprocess.run(["git", "branch", "nope"], cwd=workspace / "shared",
+                   check=True, capture_output=True)
 
     result = runner.invoke(app, ["spawn", "--hotfix", "missing base", "--repos", "shared"])
     assert result.exit_code == 0, result.output

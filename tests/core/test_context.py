@@ -101,6 +101,7 @@ def test_task_payload_shape(tmp_path: Path):
     git = _fake_git_count({
         (wt.name, "@{u}..HEAD"): 2,
         (wt.name, "main..HEAD"): 4,
+        (wt.name, "main..origin/main"): 1,
     })
     out = _build(state, _config(tmp_path), log_mgr, tmp_path, git_count=git)
     task = out["active_tasks"][0]
@@ -111,6 +112,7 @@ def test_task_payload_shape(tmp_path: Path):
     assert task["active_repo"] == "repo"
     assert task["ahead_of_origin"] == {"repo": 2}
     assert task["ahead_of_base"] == {"repo": 4}
+    assert task["base_behind_origin"] == {"repo": 1}
     assert task["pr_urls"] == {"repo": "https://example/pr/1"}
     assert task["last_test_state"] == "pass"
     assert task["last_test_iteration"] == 3
@@ -213,6 +215,44 @@ def test_task_payload_scalar_base_uses_task_base_when_no_active_repo(tmp_path: P
     task = out["active_tasks"][0]
     assert task["base_branch"] == "staging"          # task base, not repo's "dev"
     assert task["ahead_of_base"] == {"repo": 3}       # per-repo still uses "dev"
+
+
+def test_base_behind_origin_reports_commits_behind(tmp_path: Path):
+    """MOS-203: an agent should be able to gate on how far the repo's base is
+    behind origin/<base> (read-only — reflects the last fetch, no fetch here)
+    instead of eyeballing last_workspace_fetch_at."""
+    wt = tmp_path / "wt-foo"
+    wt.mkdir()
+    log_mgr = LogManager(tmp_path / "logs")
+    state = WorkspaceState(tasks={"foo": _task("foo", worktrees={"repo": wt})})
+    git = _fake_git_count({(wt.name, "main..origin/main"): 5})
+    out = _build(state, _config(tmp_path), log_mgr, tmp_path, git_count=git)
+    task = out["active_tasks"][0]
+    assert task["base_behind_origin"] == {"repo": 5}
+
+
+def test_base_behind_origin_zero_when_base_current(tmp_path: Path):
+    wt = tmp_path / "wt-foo"
+    wt.mkdir()
+    log_mgr = LogManager(tmp_path / "logs")
+    state = WorkspaceState(tasks={"foo": _task("foo", worktrees={"repo": wt})})
+    git = _fake_git_count({(wt.name, "main..origin/main"): 0})
+    out = _build(state, _config(tmp_path), log_mgr, tmp_path, git_count=git)
+    task = out["active_tasks"][0]
+    assert task["base_behind_origin"] == {"repo": 0}
+
+
+def test_base_behind_origin_null_when_base_branch_unset(tmp_path: Path):
+    wt = tmp_path / "wt-x"
+    wt.mkdir()
+    log_mgr = LogManager(tmp_path / "logs")
+    state = WorkspaceState(tasks={"x": _task(
+        "x", worktrees={"repo": wt}, base_branch=None,
+    )})
+    git = _fake_git_count({(wt.name, "@{u}..HEAD"): 1})
+    out = _build(state, _config(tmp_path), log_mgr, tmp_path, git_count=git)
+    task = out["active_tasks"][0]
+    assert task["base_behind_origin"] == {"repo": None}
 
 
 def test_cwd_inside_worktree_populates_match_fields(tmp_path: Path):
