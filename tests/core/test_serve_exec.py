@@ -14,6 +14,7 @@ Two layers are covered:
 from __future__ import annotations
 
 import io
+import tarfile
 import threading
 from pathlib import Path
 
@@ -128,6 +129,47 @@ def _app(tmp_path: Path, *, auth_token: str | None = None, config: WorkspaceConf
 
 def _patch_shell(monkeypatch, fake: _FakeShellRunner):
     monkeypatch.setattr("mship.core.serve.ShellRunner", lambda: fake)
+
+
+class _ArtifactWritingShellRunner(_FakeShellRunner):
+    """Like `_FakeShellRunner`, but `.run_streaming()` first writes canned
+    files into `env["MSHIP_CAPTURE_DIR"]` before returning the canned proc —
+    standing in for the real go-task `capture:` target (adb/simctl/etc.)
+    actually producing `screen.png`/`layout.*` there."""
+
+    def __init__(self, *, streaming_proc, artifacts: dict[str, bytes] | None = None, **kw):
+        super().__init__(streaming_proc=streaming_proc, **kw)
+        self._artifacts = artifacts or {}
+
+    def run_streaming(self, command, cwd, env=None):
+        if env and "MSHIP_CAPTURE_DIR" in env:
+            out_dir = Path(env["MSHIP_CAPTURE_DIR"])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for name, content in self._artifacts.items():
+                (out_dir / name).write_bytes(content)
+        return super().run_streaming(command, cwd, env=env)
+
+
+def _parse_exec_stream(content: bytes):
+    """Mirror the client-side parse of the `/exec/{verb}` wire framing: text
+    lines, optionally one `__MSHIP_ARTIFACTS__ <n>` marker followed by exactly
+    `n` raw tar bytes, then the trailing `__MSHIP_EXIT__ <code>` line. Returns
+    `(text_lines, tar_bytes_or_None, exit_line)`."""
+    lines: list[str] = []
+    tar_bytes: bytes | None = None
+    idx = 0
+    while True:
+        nl = content.index(b"\n", idx)
+        line = content[idx:nl]
+        idx = nl + 1
+        if line.startswith(b"__MSHIP_ARTIFACTS__ "):
+            n = int(line.split(b" ", 1)[1])
+            tar_bytes = content[idx : idx + n]
+            idx += n
+            continue
+        if line.startswith(b"__MSHIP_EXIT__ "):
+            return lines, tar_bytes, line.decode()
+        lines.append(line.decode())
 
 
 # --- run_verb_stream (direct, no HTTP layer) --------------------------------
@@ -333,3 +375,80 @@ def test_exec_response_streams_over_http_in_multiple_chunks(tmp_path, monkeypatc
         assert r.status_code == 200
         lines = list(r.iter_lines())
     assert lines == ["a", "b", "c", "__MSHIP_EXIT__ 0"]
+
+
+# --- capture artifact round-trip (Task 4) -----------------------------------
+
+
+def test_exec_capture_streams_artifact_tar_before_exit_sentinel(tmp_path, monkeypatch):
+    """A capture task that writes screen.png + layout.json into
+    MSHIP_CAPTURE_DIR produces a stream with a `__MSHIP_ARTIFACTS__ <n>`
+    marker, exactly n tar bytes containing both files (by basename, with
+    their contents intact), and the exit sentinel still last."""
+    fake = _ArtifactWritingShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["captured\n"], returncode=0),
+        artifacts={"screen.png": b"\x89PNGfakebytes", "layout.json": b'{"a": 1}'},
+    )
+    _patch_shell(monkeypatch, fake)
+    client = TestClient(_app(tmp_path))
+
+    r = client.post("/exec/capture", json={"task": "t1", "repos": ["api"]})
+    assert r.status_code == 200
+
+    lines, tar_bytes, exit_line = _parse_exec_stream(r.content)
+    assert "captured" in lines
+    assert exit_line == "__MSHIP_EXIT__ 0"
+    assert tar_bytes is not None
+
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r") as tar:
+        names = tar.getnames()
+        assert "screen.png" in names
+        assert "layout.json" in names
+        assert tar.extractfile("screen.png").read() == b"\x89PNGfakebytes"
+        assert tar.extractfile("layout.json").read() == b'{"a": 1}'
+
+
+def test_exec_capture_no_artifacts_emits_no_artifact_block(tmp_path, monkeypatch):
+    """A capture whose task produces nothing (empty MSHIP_CAPTURE_DIR) must
+    not emit an artifact marker — only the plain stream + exit sentinel."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["nothing here\n"], returncode=0))
+    _patch_shell(monkeypatch, fake)
+    client = TestClient(_app(tmp_path))
+
+    r = client.post("/exec/capture", json={"task": "t1", "repos": ["api"]})
+    assert r.status_code == 200
+    assert b"__MSHIP_ARTIFACTS__" not in r.content
+    lines = r.content.decode().splitlines()
+    assert lines == ["nothing here", "__MSHIP_EXIT__ 0"]
+
+
+def test_exec_capture_task_failure_emits_no_artifact_block(tmp_path, monkeypatch):
+    """Even if files happen to exist in MSHIP_CAPTURE_DIR, a non-zero task
+    exit must not produce an artifact block — a failed capture never claims
+    to have artifacts."""
+    fake = _ArtifactWritingShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["boom\n"], returncode=1),
+        artifacts={"screen.png": b"stray-bytes"},
+    )
+    _patch_shell(monkeypatch, fake)
+    client = TestClient(_app(tmp_path))
+
+    r = client.post("/exec/capture", json={"task": "t1", "repos": ["api"]})
+    assert r.status_code == 200
+    assert b"__MSHIP_ARTIFACTS__" not in r.content
+    lines = r.content.decode().splitlines()
+    assert lines == ["boom", "__MSHIP_EXIT__ 1"]
+
+
+def test_exec_run_and_build_never_emit_artifact_block(tmp_path, monkeypatch):
+    """run/build stay stream-only regardless of what MSHIP_CAPTURE_DIR would
+    hold — that env var isn't even set for them (see
+    test_exec_run_has_no_capture_env), so there's nothing to discover."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"], returncode=0))
+    _patch_shell(monkeypatch, fake)
+    client = TestClient(_app(tmp_path))
+
+    for verb in ("run", "build"):
+        r = client.post(f"/exec/{verb}", json={"task": "t1", "repos": ["api"]})
+        assert r.status_code == 200
+        assert b"__MSHIP_ARTIFACTS__" not in r.content

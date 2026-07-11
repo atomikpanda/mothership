@@ -19,6 +19,18 @@ Wire contract (Task 5's client parses this):
       are indistinguishable from task output on the wire — they're just
       more lines — so a client that renders every line live is correct by
       construction; nothing needs it to distinguish notice vs. task output.
+    - For `verb == "capture"` ONLY, if the task exits 0 and produces at
+      least one artifact (`capture.discover_artifacts` on the remote's
+      `MSHIP_CAPTURE_DIR`), a length-prefixed tar block is emitted after
+      that repo's task lines and before the exit sentinel:
+          __MSHIP_ARTIFACTS__ <byte_count>\\n
+          <exactly byte_count bytes of tar, containing the discovered
+           artifact files at their basenames, e.g. screen.png, layout.json>
+      `<byte_count>` is a base-10 int. The client must read exactly that
+      many raw bytes as the tar (binary-safe — do NOT line-split them)
+      before resuming line-based reads. No block is emitted when capture
+      produced no artifacts (task failed, or its output dir was empty),
+      and `run`/`build` never emit one.
     - The LAST line always matches `__MSHIP_EXIT__ <code>\\n` where <code>
       is a base-10 int (0 == success). This conveys the remote task's exit
       code as DATA, never as an HTTP error status — a non-zero task exit
@@ -27,7 +39,10 @@ Wire contract (Task 5's client parses this):
 """
 from __future__ import annotations
 
+import io
 import queue
+import shutil
+import tarfile
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -42,6 +57,11 @@ VERBS: tuple[str, ...] = ("run", "capture", "build")
 # Trailing sentinel line: `f"{EXIT_MARKER} {code}\n"`. See module docstring
 # for the full wire contract Task 5's client must parse.
 EXIT_MARKER = "__MSHIP_EXIT__"
+
+# Length-prefixed tar block marker (capture only): `f"{ARTIFACT_MARKER}
+# {len(tar_bytes)}\n"` immediately followed by exactly that many raw tar
+# bytes. See module docstring for the full framing.
+ARTIFACT_MARKER = "__MSHIP_ARTIFACTS__"
 
 
 class UnknownVerbError(ValueError):
@@ -195,6 +215,18 @@ def _stream_proc_lines(proc) -> Iterator[bytes]:
         t.join(timeout=1.0)
 
 
+def _build_artifact_tar(artifacts: list[_cap.Artifact]) -> bytes:
+    """Pack the discovered artifact files into an in-memory tar, each stored
+    at its basename (e.g. `screen.png`, `layout.json`) rather than its full
+    remote temp-dir path — that's all Task 5's client needs to know to
+    reconstruct them under its own local capture directory."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for artifact in artifacts:
+            tar.add(artifact.path, arcname=artifact.path.name)
+    return buf.getvalue()
+
+
 def run_verb_stream(
     verb: str,
     task: str,
@@ -224,6 +256,12 @@ def run_verb_stream(
          `mship.core.capture.run_capture`.
       4. Run it via `ShellRunner.run_streaming`, yielding each stdout/stderr
          line as it's produced.
+      4b. For `verb == "capture"` only: once that repo's task exits, if it
+          succeeded and produced artifacts in `MSHIP_CAPTURE_DIR`
+          (`capture.discover_artifacts`), yield them as a length-prefixed
+          tar block (`ARTIFACT_MARKER` line + raw tar bytes — see module
+          docstring). Either way the remote capture temp dir is removed
+          afterward. `run`/`build` skip this entirely (stream-only).
       5. Stop at the first repo whose task exits non-zero (fail-fast,
          mirroring `RepoExecutor`'s tier behavior) rather than continuing
          to the next repo.
@@ -287,6 +325,18 @@ def run_verb_stream(
         proc = shell.run_streaming(command, cwd=worktree_path, env=env)
         yield from _stream_proc_lines(proc)
         exit_code = proc.wait()
+
+        if verb == "capture":
+            try:
+                if exit_code == 0:
+                    artifacts = _cap.discover_artifacts(out_dir, kinds or [])
+                    if artifacts:
+                        tar_bytes = _build_artifact_tar(artifacts)
+                        yield f"{ARTIFACT_MARKER} {len(tar_bytes)}\n".encode("utf-8")
+                        yield tar_bytes
+            finally:
+                shutil.rmtree(out_dir, ignore_errors=True)
+
         if exit_code != 0:
             break
 
