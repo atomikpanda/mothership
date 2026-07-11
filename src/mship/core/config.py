@@ -35,6 +35,110 @@ class CaptureConfig(BaseModel):
     platforms: list[str] = []
 
 
+# Lifecycle-hook event catalog (v1) — see spec mship-lifecycle-hooks (MOS-220).
+# Task phases mirror core/phase.py's `Phase` Literal (plan/dev/review/run);
+# WorkItem phases mirror core/workitem.py's `Phase` Literal (inbox/shaping/
+# ready/in_flight/review/done) — a distinct, unrelated enum, kept as its own
+# event family rather than one shared `phase.entered.*`. If either source
+# enum changes, update the corresponding set below too.
+_TASK_PHASE_EVENTS = frozenset(
+    f"phase.entered.{p}" for p in ("plan", "dev", "review", "run")
+)
+_WORKITEM_PHASE_EVENTS = frozenset(
+    f"workitem.phase.{p}"
+    for p in ("inbox", "shaping", "ready", "in_flight", "review", "done")
+)
+LIFECYCLE_EVENTS: frozenset[str] = frozenset(
+    {"task.finished", "task.closed", "pr.merged", "pr.closed"}
+    | _TASK_PHASE_EVENTS
+    | _WORKITEM_PHASE_EVENTS
+)
+
+# `required: true` is only meaningful on events that fire BEFORE their state
+# mutation commits — a required hook's failure can then genuinely abort the
+# transition. That's true of `phase.entered.*` and `workitem.phase.*` only.
+# Every other event in the v1 catalog fires *after* its transition's
+# side effects already landed, so a required failure there can't block or roll
+# anything back — it just leaves partial state:
+#   - `pr.merged`/`pr.closed` are polling-derived (PrWatcher's sweep cadence) —
+#     the merge/close already happened by the time the sweep observes it.
+#   - `task.finished` fires after PRs/branches are already created and pushed
+#     (a required failure would only block the local finished_at stamp, not
+#     the already-visible remote PRs).
+#   - `task.closed` fires after the bound spec has already been advanced (and
+#     before worktree teardown) — a required failure blocks the teardown but
+#     leaves the spec advanced while the task stays open.
+# Rejected at config-load time rather than silently accepted-but-meaningless.
+# See spec open question q5 and the MOS-220 PR review follow-up.
+_POST_HOC_EVENTS: frozenset[str] = frozenset(
+    {"task.finished", "task.closed", "pr.merged", "pr.closed"}
+)
+
+
+class HookConfig(BaseModel):
+    """One `hooks:` entry: run a go-task target or shell command when `on`
+    fires. See mship.core.lifecycle_hooks for the runtime dispatcher — NOT
+    mship.core.hooks, which is the unrelated git pre-commit/pre-push installer."""
+    on: str
+    run: str
+    repo: str | None = None
+    name: str | None = None
+    timeout: int | None = None
+    required: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_on_key(cls, data):
+        """PyYAML's SafeLoader parses YAML 1.1, which treats a bare `on` (or
+        `off`/`yes`/`no`) key as a boolean rather than a string — so `on:
+        pr.merged` in mothership.yaml round-trips through yaml.safe_load as
+        `{True: 'pr.merged', ...}`, not `{'on': 'pr.merged', ...}`. Normalize
+        before field validation so the config keeps reading naturally as
+        `on:` in the yaml source."""
+        if isinstance(data, dict) and True in data and "on" not in data:
+            data = dict(data)
+            data["on"] = data.pop(True)
+        return data
+
+    @field_validator("on", mode="after")
+    @classmethod
+    def validate_on(cls, v: str) -> str:
+        if v not in LIFECYCLE_EVENTS:
+            raise ValueError(
+                f"hooks: unknown event {v!r}. Valid events: "
+                f"{', '.join(sorted(LIFECYCLE_EVENTS))}"
+            )
+        return v
+
+    @field_validator("run", mode="after")
+    @classmethod
+    def validate_run(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("hooks: `run` must be a non-empty string")
+        return v
+
+    @model_validator(mode="after")
+    def validate_required_only_on_pre_mutation_events(self) -> "HookConfig":
+        """`required: true` is only accepted on the pre-mutation events —
+        `phase.entered.*` / `workitem.phase.*` — which fire before their state
+        mutation commits, so a required failure can genuinely abort the
+        transition. Every other v1 event (`task.finished`, `task.closed`,
+        `pr.merged`, `pr.closed`) fires after its own irreversible side
+        effects already landed, so `required: true` there can't block or roll
+        anything back. See `_POST_HOC_EVENTS` above."""
+        if self.required and self.on in _POST_HOC_EVENTS:
+            raise ValueError(
+                f"hooks: `required: true` is not meaningful on {self.on!r} — "
+                f"this event fires only after its transition's side effects "
+                f"(PR/branch creation, spec advance, polling-observed "
+                f"merge/close, etc.) already happened, so a hook here cannot "
+                f"block a transition that's already committed. `required: "
+                f"true` is only valid on phase.entered.*/workitem.phase.* "
+                f"(pre-mutation events). Remove `required: true` for this hook."
+            )
+        return self
+
+
 class RepoConfig(BaseModel):
     path: Path
     type: Literal["library", "service"]
@@ -159,6 +263,11 @@ class WorkspaceConfig(BaseModel):
     # mship.core.run_host.RunHostStore / resolve_run_host). A repo opts into
     # one via `RepoConfig.run_host`.
     run_hosts: list[str] = []
+    # Declarative reactions to task/WorkItem/PR state transitions — see spec
+    # mship-lifecycle-hooks (MOS-220) and mship.core.lifecycle_hooks.
+    hooks: list[HookConfig] = []
+    # Fallback per-hook timeout (seconds) when a `hooks:` entry omits `timeout`.
+    hooks_default_timeout: int = 30
     repos: dict[str, RepoConfig]
 
     @field_validator("relay", mode="before")
@@ -239,6 +348,17 @@ class WorkspaceConfig(BaseModel):
                 raise ValueError(
                     f"Repo '{name}' git_root '{repo.git_root}' is itself a subdirectory service. "
                     f"Cannot chain git_root references."
+                )
+        return self
+
+    @model_validator(mode="after")
+    def validate_hooks_repo_refs(self) -> "WorkspaceConfig":
+        repo_names = set(self.repos.keys())
+        for hook in self.hooks:
+            if hook.repo is not None and hook.repo not in repo_names:
+                raise ValueError(
+                    f"hooks: entry `on: {hook.on}` references unknown repo "
+                    f"{hook.repo!r}. Valid repos: {sorted(repo_names)}"
                 )
         return self
 

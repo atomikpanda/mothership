@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -23,6 +24,7 @@ def now_fn() -> datetime:
 class FakeTask:
     pr_urls: dict[str, str] = field(default_factory=dict)
     work_item_id: str | None = None
+    worktrees: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -281,3 +283,329 @@ def test_no_pr_urls_skipped():
     watcher = PrWatcher(msgs, workitems, state, lambda url: "merged", now_fn)
     watcher.check_once()
     assert msgs.append_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle hooks (MOS-220, spec mship-lifecycle-hooks): `pr.merged`/`pr.closed`
+# ---------------------------------------------------------------------------
+
+
+class _RecordingShell:
+    """Minimal ShellRunner-shaped fake for asserting lifecycle-hook execution."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.fail_substrings: set[str] = set()
+
+    def build_command(self, command, env_runner=None):
+        return f"{env_runner} {command}" if env_runner else command
+
+    def run(self, command, cwd, env=None, timeout=None):
+        from pathlib import Path as _Path
+        from mship.util.shell import ShellResult
+        self.calls.append({"command": command, "cwd": _Path(cwd)})
+        if any(s in command for s in self.fail_substrings):
+            return ShellResult(returncode=1, stdout="", stderr="boom")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+
+def _hooks_config(hooks, repos=None):
+    from mship.core.config import WorkspaceConfig
+    return WorkspaceConfig(workspace="test", repos=repos or {}, hooks=hooks)
+
+
+def test_pr_merged_fires_matching_hook():
+    from mship.core.config import HookConfig
+
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    task = FakeTask(pr_urls={"repo1": "https://github.com/org/repo1/pull/1"}, work_item_id="wi-1")
+    state = FakeStateManager({"task-1": task})
+
+    shell = _RecordingShell()
+    config = _hooks_config([HookConfig(on="pr.merged", run="task notify-merge")])
+
+    watcher = PrWatcher(
+        msgs, workitems, state, lambda url: "merged", now_fn,
+        config=config, workspace_root=Path("/ws"), shell=shell,
+    )
+    watcher.check_once()
+
+    assert any("notify-merge" in c["command"] for c in shell.calls)
+
+
+def test_pr_closed_fires_only_the_closed_hook_not_merged():
+    from mship.core.config import HookConfig
+
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    task = FakeTask(pr_urls={"repo1": "https://github.com/org/repo1/pull/1"}, work_item_id="wi-1")
+    state = FakeStateManager({"task-1": task})
+
+    shell = _RecordingShell()
+    config = _hooks_config([
+        HookConfig(on="pr.merged", run="task notify-merge"),
+        HookConfig(on="pr.closed", run="task notify-closed"),
+    ])
+
+    watcher = PrWatcher(
+        msgs, workitems, state, lambda url: "closed", now_fn,
+        config=config, workspace_root=Path("/ws"), shell=shell,
+    )
+    watcher.check_once()
+
+    commands = [c["command"] for c in shell.calls]
+    assert any("notify-closed" in c for c in commands)
+    assert not any("notify-merge" in c for c in commands)
+
+
+def test_pr_hook_runs_from_the_prs_own_repo(tmp_path: Path):
+    from mship.core.config import HookConfig, RepoConfig
+
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    task = FakeTask(pr_urls={"repo1": "https://github.com/org/repo1/pull/1"}, work_item_id="wi-1")
+    state = FakeStateManager({"task-1": task})
+
+    shell = _RecordingShell()
+    config = _hooks_config(
+        [HookConfig(on="pr.merged", run="task notify-merge")],
+        repos={"repo1": RepoConfig(path=tmp_path / "repo1", type="service", env_runner="direnv exec --")},
+    )
+
+    watcher = PrWatcher(
+        msgs, workitems, state, lambda url: "merged", now_fn,
+        config=config, workspace_root=tmp_path, shell=shell,
+    )
+    watcher.check_once()
+
+    call = shell.calls[0]
+    assert call["cwd"] == tmp_path / "repo1"
+    assert call["command"] == "direnv exec -- task notify-merge"
+
+
+def test_pr_hook_failure_does_not_abort_sweep_or_block_message():
+    from mship.core.config import HookConfig
+
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    task = FakeTask(pr_urls={"repo1": "https://github.com/org/repo1/pull/1"}, work_item_id="wi-1")
+    state = FakeStateManager({"task-1": task})
+
+    shell = _RecordingShell()
+    shell.fail_substrings.add("notify-merge")
+    config = _hooks_config([HookConfig(on="pr.merged", run="task notify-merge")])
+
+    watcher = PrWatcher(
+        msgs, workitems, state, lambda url: "merged", now_fn,
+        config=config, workspace_root=Path("/ws"), shell=shell,
+    )
+    watcher.check_once()  # must not raise
+
+    assert len(msgs.append_calls) == 1  # message still posted
+
+
+def test_pr_watcher_without_config_is_unaffected():
+    """Default construction (no config/workspace_root/shell) — existing
+    behavior, no lifecycle hooks evaluated at all."""
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    task = FakeTask(pr_urls={"repo1": "https://github.com/org/repo1/pull/1"}, work_item_id="wi-1")
+    state = FakeStateManager({"task-1": task})
+
+    watcher = PrWatcher(msgs, workitems, state, lambda url: "merged", now_fn)
+    watcher.check_once()  # must not raise
+    assert len(msgs.append_calls) == 1
+
+
+def test_pr_hook_not_refired_on_second_sweep():
+    from mship.core.config import HookConfig
+
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    task = FakeTask(pr_urls={"repo1": "https://github.com/org/repo1/pull/1"}, work_item_id="wi-1")
+    state = FakeStateManager({"task-1": task})
+
+    shell = _RecordingShell()
+    config = _hooks_config([HookConfig(on="pr.merged", run="task notify-merge")])
+
+    watcher = PrWatcher(
+        msgs, workitems, state, lambda url: "merged", now_fn,
+        config=config, workspace_root=Path("/ws"), shell=shell,
+    )
+    watcher.check_once()
+    watcher.check_once()
+
+    assert len(shell.calls) == 1
+
+
+def test_pr_hook_not_refired_on_restart_dedup():
+    """A brand-new watcher (empty `notified` set) whose target thread already
+    carries the event from a prior process must not refire the hook — only a
+    genuinely NEW post (not a restart-dedup skip) may trigger it. Guards the
+    `_check_one`/`_check_posted`/`_post_event` refactor that moved the hook
+    call outside the lock: the dedup signal must still gate it correctly."""
+    from mship.core.config import HookConfig
+
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    url = "https://github.com/org/repo1/pull/1"
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    # Simulate a prior process having already posted the event.
+    msgs.append(
+        thread.id, "agent",
+        f"\U0001f500 PR merged: {url} (task task-1) — ready to close out.",
+        NOW, kind="event",
+    )
+    task = FakeTask(pr_urls={"repo1": url}, work_item_id="wi-1")
+    state = FakeStateManager({"task-1": task})
+
+    shell = _RecordingShell()
+    config = _hooks_config([HookConfig(on="pr.merged", run="task notify-merge")])
+
+    watcher = PrWatcher(
+        msgs, workitems, state, lambda u: "merged", now_fn,
+        config=config, workspace_root=Path("/ws"), shell=shell,
+    )
+    watcher.check_once()
+
+    assert shell.calls == []  # dedup-skipped post must not fire the hook
+
+
+def test_pr_hook_fires_outside_the_lock():
+    """MOS-220 Greptile fix ("PR Hook Holds Item Lock"): the lifecycle hook
+    must run AFTER the watcher releases its lock. In `serve` this lock is the
+    same `_item_msg_lock` guarding POST /items/{id}/messages, /unattended, and
+    /phase — a slow hook holding it would stall unrelated item/message HTTP
+    requests for up to the hook's timeout."""
+    import threading
+
+    from mship.core.config import HookConfig
+
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    task = FakeTask(pr_urls={"repo1": "https://github.com/org/repo1/pull/1"}, work_item_id="wi-1")
+    state = FakeStateManager({"task-1": task})
+
+    lock = threading.Lock()
+    observed_locked: list[bool] = []
+
+    class _AssertingShell(_RecordingShell):
+        def run(self, command, cwd, env=None, timeout=None):
+            observed_locked.append(lock.locked())
+            return super().run(command, cwd, env=env, timeout=timeout)
+
+    shell = _AssertingShell()
+    config = _hooks_config([HookConfig(on="pr.merged", run="task notify-merge")])
+
+    watcher = PrWatcher(
+        msgs, workitems, state, lambda url: "merged", now_fn,
+        lock=lock, config=config, workspace_root=Path("/ws"), shell=shell,
+    )
+    watcher.check_once()
+
+    assert len(shell.calls) == 1
+    assert observed_locked == [False]  # the lock was free while the hook ran
+
+
+def test_pr_hook_fires_before_dedup_marker_is_durably_recorded():
+    """MOS-220 Greptile fix ("Dedup Drops Hooks"): the hook must fire BEFORE
+    the durable dedup record (the mailbox event message) is written, not
+    after. If the message were written first, a crash between the write and
+    the hook call would leave the marker in place forever with the hook
+    having never run, and a restarted watcher would see the marker and skip
+    the hook — silently, permanently. Proven by recording the relative order
+    of the hook call and the message append."""
+    from mship.core.config import HookConfig
+
+    order: list[str] = []
+
+    class _OrderTrackingShell(_RecordingShell):
+        def run(self, command, cwd, env=None, timeout=None):
+            order.append("hook")
+            return super().run(command, cwd, env=env, timeout=timeout)
+
+    class _OrderTrackingMessageStore(FakeMessageStore):
+        def append(self, *a, **kw):
+            order.append("append")
+            return super().append(*a, **kw)
+
+    msgs = _OrderTrackingMessageStore()
+    workitems = FakeWorkItemStore()
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    task = FakeTask(pr_urls={"repo1": "https://github.com/org/repo1/pull/1"}, work_item_id="wi-1")
+    state = FakeStateManager({"task-1": task})
+
+    shell = _OrderTrackingShell()
+    config = _hooks_config([HookConfig(on="pr.merged", run="task notify-merge")])
+
+    watcher = PrWatcher(
+        msgs, workitems, state, lambda url: "merged", now_fn,
+        config=config, workspace_root=Path("/ws"), shell=shell,
+    )
+    watcher.check_once()
+
+    assert order == ["hook", "append"]
+    assert len(msgs.append_calls) == 1
+
+
+def test_pr_hook_refires_after_crash_before_dedup_marker_recorded():
+    """MOS-220 Greptile fix ("Dedup Drops Hooks"): simulates the crash window
+    directly — the durable append (the dedup marker) fails the first time,
+    as if the process died before it could land, even though the hook had
+    already fired. A subsequent sweep (the "restart") must see that no
+    marker was durably recorded and refire the hook rather than treating it
+    as already handled — at-least-once beats at-most-zero for hooks. Once
+    the append succeeds, the event is recorded exactly once (happy-path
+    dedup is preserved)."""
+    from mship.core.config import HookConfig
+
+    class _FlakyMessageStore(FakeMessageStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.append_attempts = 0
+
+        def append(self, *a, **kw):
+            self.append_attempts += 1
+            if self.append_attempts == 1:
+                raise RuntimeError("simulated crash before durable write lands")
+            return super().append(*a, **kw)
+
+    msgs = _FlakyMessageStore()
+    workitems = FakeWorkItemStore()
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    task = FakeTask(pr_urls={"repo1": "https://github.com/org/repo1/pull/1"}, work_item_id="wi-1")
+    state = FakeStateManager({"task-1": task})
+
+    shell = _RecordingShell()
+    config = _hooks_config([HookConfig(on="pr.merged", run="task notify-merge")])
+
+    watcher = PrWatcher(
+        msgs, workitems, state, lambda url: "merged", now_fn,
+        config=config, workspace_root=Path("/ws"), shell=shell,
+    )
+
+    watcher.check_once()  # hook fires; the durable append then "crashes"
+    assert len(shell.calls) == 1
+    assert msgs.append_calls == []  # nothing durably recorded yet
+
+    watcher.check_once()  # re-check after the "crash": must refire, not skip
+    assert len(shell.calls) == 2
+    assert len(msgs.append_calls) == 1  # now durably recorded, exactly once

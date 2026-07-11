@@ -36,11 +36,13 @@ class PhaseManager:
         log: LogManager,
         config: "WorkspaceConfig | None" = None,
         workspace_root: Path | None = None,
+        shell=None,
     ) -> None:
         self._state_manager = state_manager
         self._log = log
         self._config = config
         self._workspace_root = workspace_root
+        self._shell = shell
 
     def transition(
         self,
@@ -127,6 +129,28 @@ class PhaseManager:
             warnings.append(
                 f"Task was blocked: {task.blocked_reason} — force-unblocked by phase transition"
             )
+
+        # Lifecycle hooks (MOS-220): `phase.entered.<target>` fires here, before
+        # the mutation below commits, so a `required: true` hook's failure
+        # (HookRequiredError) aborts the transition entirely. A non-required
+        # hook's failure is fail-open — surfaced as a warning (mirroring the
+        # gate warnings above), the transition still proceeds.
+        if self._config is not None and self._workspace_root is not None:
+            from mship.core.lifecycle_hooks import HookContext, run_hooks
+            hook_results = run_hooks(
+                f"phase.entered.{target}",
+                HookContext(task_slug=task_slug),
+                config=self._config,
+                workspace_root=self._workspace_root,
+                shell=self._shell,
+                state_manager=self._state_manager,
+            )
+            for hr in hook_results:
+                if not hr.ok:
+                    warnings.append(
+                        f"lifecycle hook '{hr.hook_name}' for phase.entered.{target} "
+                        f"failed: {hr.error}"
+                    )
 
         def _apply(s):
             t = s.tasks[task_slug]

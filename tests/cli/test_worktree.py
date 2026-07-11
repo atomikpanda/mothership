@@ -2011,3 +2011,107 @@ def test_close_cascade_removes_downstream(configured_git_app: Path):
     assert result.exit_code == 0, result.output
     state = sm.load()
     assert state.tasks == {}
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle hooks (MOS-220, spec mship-lifecycle-hooks): `task.closed`
+# ---------------------------------------------------------------------------
+
+
+def test_close_fires_task_closed_hook_on_abandon(configured_git_app):
+    from mship.core.state import StateManager, WorkspaceState
+
+    cfg_path = configured_git_app / "mothership.yaml"
+    cfg_path.write_text(
+        cfg_path.read_text()
+        + "hooks:\n"
+        + "  - on: task.closed\n"
+        + "    run: notify-closed\n"
+    )
+    container.config.reset()
+
+    sm = StateManager(configured_git_app / ".mothership")
+    task = _build_close_task(finished=False)
+    sm.save(WorkspaceState(tasks={"t": task}))
+
+    call_log = []
+
+    def mock_run(cmd, cwd, env=None, timeout=None):
+        call_log.append(cmd)
+        return ShellResult(returncode=0, stdout="0\n", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.build_command.side_effect = (
+        lambda command, env_runner=None: f"{env_runner} {command}" if env_runner else command
+    )
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        r = CliRunner().invoke(app, ["close", "--yes", "--abandon", "--task", "t"])
+        assert r.exit_code == 0, r.output
+        assert any("notify-closed" in c for c in call_log)
+        assert "t" not in sm.load().tasks
+    finally:
+        container.shell.reset_override()
+
+
+def test_close_required_hook_on_task_closed_rejected_at_config_load(configured_git_app):
+    """`required: true` on `task.closed` is rejected at config-load time (see
+    config.py's `_POST_HOC_EVENTS`) rather than allowed to block the close
+    mid-flow: by the time `task.closed` fires, `advance_spec_on_close` may
+    already have committed a spec-status mutation, so a required failure
+    here could only ever leave the spec advanced while the task stays open
+    — the Greptile "Spec State Advances Before Hook" finding this fixes."""
+    from mship.core.config import ConfigLoader
+
+    cfg_path = configured_git_app / "mothership.yaml"
+    cfg_path.write_text(
+        cfg_path.read_text()
+        + "hooks:\n"
+        + "  - on: task.closed\n"
+        + "    run: notify-closed-fails\n"
+        + "    required: true\n"
+    )
+    with pytest.raises(ValueError, match="required"):
+        ConfigLoader.load(cfg_path)
+
+
+def test_close_non_required_hook_failure_never_blocks_close(configured_git_app):
+    """A failing `task.closed` hook (non-required — the only kind config-load
+    accepts for this event now) is fail-open: close still proceeds and the
+    task is torn down regardless."""
+    from mship.core.state import StateManager, WorkspaceState
+
+    cfg_path = configured_git_app / "mothership.yaml"
+    cfg_path.write_text(
+        cfg_path.read_text()
+        + "hooks:\n"
+        + "  - on: task.closed\n"
+        + "    run: notify-closed-fails\n"
+    )
+    container.config.reset()
+
+    sm = StateManager(configured_git_app / ".mothership")
+    task = _build_close_task(finished=False)
+    sm.save(WorkspaceState(tasks={"t": task}))
+
+    def mock_run(cmd, cwd, env=None, timeout=None):
+        if "notify-closed-fails" in cmd:
+            return ShellResult(returncode=1, stdout="", stderr="boom")
+        return ShellResult(returncode=0, stdout="0\n", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.build_command.side_effect = (
+        lambda command, env_runner=None: f"{env_runner} {command}" if env_runner else command
+    )
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        r = CliRunner().invoke(app, ["close", "--yes", "--abandon", "--task", "t"])
+        assert r.exit_code == 0, r.output
+        # Fail-open: close proceeds despite the failing hook.
+        assert "t" not in sm.load().tasks
+    finally:
+        container.shell.reset_override()

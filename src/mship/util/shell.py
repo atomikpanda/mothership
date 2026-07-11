@@ -20,8 +20,14 @@ class ShellRunner:
         return command
 
     def run(
-        self, command: str, cwd: Path, env: dict[str, str] | None = None
+        self, command: str, cwd: Path, env: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> ShellResult:
+        """Run `command` and capture output. `timeout` (seconds) raises
+        `subprocess.TimeoutExpired` if the command hasn't finished by then —
+        used by lifecycle hooks (core/lifecycle_hooks.py) to bound a hook's
+        runtime; other callers simply don't pass it (no timeout, unchanged
+        behavior)."""
         run_env = None
         if env:
             run_env = {**os.environ, **env}
@@ -32,6 +38,7 @@ class ShellRunner:
             capture_output=True,
             text=True,
             env=run_env,
+            timeout=timeout,
         )
         return ShellResult(
             returncode=result.returncode,

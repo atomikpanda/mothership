@@ -80,6 +80,7 @@ class Container(containers.DeclarativeContainer):
             lambda config_path: Path(config_path).parent,
             config_path,
         ),
+        shell=shell,
     )
 
     pr_manager = providers.Factory(

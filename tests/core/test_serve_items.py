@@ -125,9 +125,15 @@ def test_post_item_message_404_for_unknown_item(tmp_path):
 # --- gc32 ac3: POST /items/{id}/phase (Mark done / Reopen) ---
 
 def test_post_item_phase_sets_override(tmp_path):
+    """A config with no hooks configured for this phase still applies the
+    override cleanly — config presence is what matters, not whether a hook
+    happens to be registered for this particular phase name."""
+    from mship.core.config import WorkspaceConfig
+
     items = WorkItemStore(tmp_path / ".mothership" / "workitems")
     wi = items.create(title="Stuck item", kind="feature", workspace="testws", now=_now())
-    client = _app(tmp_path)
+    config = WorkspaceConfig(workspace="testws", repos={}, hooks=[])
+    client = _app_with_config(tmp_path, config)
 
     resp = client.post(f"/items/{wi.id}/phase", json={"phase": "done"})
     assert resp.status_code == 200
@@ -163,3 +169,154 @@ def test_post_item_phase_rejects_invalid_phase(tmp_path):
     wi = items.create(title="Item", kind="feature", workspace="testws", now=_now())
     client = _app(tmp_path)
     assert client.post(f"/items/{wi.id}/phase", json={"phase": "bogus"}).status_code == 422
+
+
+# --- Lifecycle hooks (MOS-220, spec mship-lifecycle-hooks): `workitem.phase.<phase>` ---
+
+
+def _app_with_config(tmp_path, config):
+    specs_dir = tmp_path / "specs"
+    SpecStore(specs_dir)  # ensure dir resolvable
+    state_manager = StateManager(tmp_path / ".mothership")
+    app = create_app(
+        specs_dir=specs_dir, state_manager=state_manager, log_manager=None,
+        workspace_root=tmp_path, workspace_name="testws", config=config,
+    )
+    return TestClient(app)
+
+
+def test_post_item_phase_fires_workitem_phase_hook(tmp_path):
+    from mship.core.config import HookConfig, WorkspaceConfig
+
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="Stuck item", kind="feature", workspace="testws", now=_now())
+
+    marker = tmp_path / "hook-fired.txt"
+    config = WorkspaceConfig(
+        workspace="testws", repos={},
+        hooks=[HookConfig(on="workitem.phase.done", run=f"touch {marker}")],
+    )
+    client = _app_with_config(tmp_path, config)
+
+    resp = client.post(f"/items/{wi.id}/phase", json={"phase": "done"})
+    assert resp.status_code == 200
+    assert marker.exists()
+    assert items.get(wi.id).phase_override == "done"
+
+
+def test_post_item_phase_required_hook_failure_returns_422_and_blocks_override(tmp_path):
+    from mship.core.config import HookConfig, WorkspaceConfig
+
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="Stuck item", kind="feature", workspace="testws", now=_now())
+
+    config = WorkspaceConfig(
+        workspace="testws", repos={},
+        hooks=[HookConfig(on="workitem.phase.done", run="false", required=True)],
+    )
+    client = _app_with_config(tmp_path, config)
+
+    resp = client.post(f"/items/{wi.id}/phase", json={"phase": "done"})
+    assert resp.status_code == 422
+    assert items.get(wi.id).phase_override is None
+
+
+def test_post_item_phase_non_required_hook_failure_still_sets_override(tmp_path):
+    from mship.core.config import HookConfig, WorkspaceConfig
+
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="Stuck item", kind="feature", workspace="testws", now=_now())
+
+    config = WorkspaceConfig(
+        workspace="testws", repos={},
+        hooks=[HookConfig(on="workitem.phase.done", run="false")],
+    )
+    client = _app_with_config(tmp_path, config)
+
+    resp = client.post(f"/items/{wi.id}/phase", json={"phase": "done"})
+    assert resp.status_code == 200
+    assert items.get(wi.id).phase_override == "done"
+
+
+def test_post_item_phase_hook_fires_iff_config_present(tmp_path):
+    """MOS-220 Greptile fix ("Configless Server Bypasses Hooks", #312): a
+    configless serve instance cannot evaluate lifecycle hooks at all, so it
+    must refuse the phase change (503) rather than silently applying it —
+    the earlier behavior (apply anyway, just skip the hook) was itself the
+    bypass this test now guards against. Same hook definition, same
+    WorkItemStore dir; the only variable between the two calls below is
+    whether `config` is wired into `create_app` at all."""
+    from mship.core.config import HookConfig, WorkspaceConfig
+
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi_no_config = items.create(title="No config", kind="feature", workspace="testws", now=_now())
+    wi_with_config = items.create(title="With config", kind="feature", workspace="testws", now=_now())
+
+    marker = tmp_path / "hook-fired.txt"
+    hooks = [HookConfig(on="workitem.phase.done", run=f"touch {marker}")]
+
+    # No config wired into create_app at all -> nothing to evaluate hooks
+    # against, so the endpoint must fail closed: refuse the mutation rather
+    # than bypassing whatever hook policy would otherwise apply.
+    client_no_config = _app(tmp_path)
+    resp = client_no_config.post(f"/items/{wi_no_config.id}/phase", json={"phase": "done"})
+    assert resp.status_code == 503
+    assert not marker.exists()
+    assert items.get(wi_no_config.id).phase_override is None
+
+    # Same hook definition, config now wired in -> it must fire, and the
+    # override applies normally.
+    config = WorkspaceConfig(workspace="testws", repos={}, hooks=hooks)
+    client_with_config = _app_with_config(tmp_path, config)
+    resp = client_with_config.post(f"/items/{wi_with_config.id}/phase", json={"phase": "done"})
+    assert resp.status_code == 200
+    assert marker.exists()
+    assert items.get(wi_with_config.id).phase_override == "done"
+
+
+def test_post_item_phase_hook_does_not_hold_item_msg_lock(tmp_path):
+    """MOS-220 Greptile fix ("Hook Holds Lock"): a slow workitem.phase.* hook
+    must not stall unrelated item/message operations that share
+    `_item_msg_lock` (POST /items/{id}/messages, /unattended, /phase itself).
+    Proven with a hook that sleeps: a concurrent POST /items/{other_id}/
+    messages against the SAME client must complete quickly, not wait out the
+    hook's sleep — which it would if the endpoint still ran the hook while
+    holding the lock."""
+    import threading
+    import time
+
+    from mship.core.config import HookConfig, WorkspaceConfig
+
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    slow_item = items.create(title="Slow phase", kind="feature", workspace="testws", now=_now())
+    other_item = items.create(title="Unrelated", kind="feature", workspace="testws", now=_now())
+
+    config = WorkspaceConfig(
+        workspace="testws", repos={},
+        hooks=[HookConfig(on="workitem.phase.done", run="sleep 1")],
+    )
+    client = _app_with_config(tmp_path, config)
+
+    phase_result: dict = {}
+
+    def _fire_slow_phase():
+        t0 = time.monotonic()
+        resp = client.post(f"/items/{slow_item.id}/phase", json={"phase": "done"})
+        phase_result["status"] = resp.status_code
+        phase_result["elapsed"] = time.monotonic() - t0
+
+    thread = threading.Thread(target=_fire_slow_phase)
+    thread.start()
+    time.sleep(0.2)  # let the phase request start running its (slow) hook
+
+    t0 = time.monotonic()
+    msg_resp = client.post(f"/items/{other_item.id}/messages", json={"text": "hi"})
+    elapsed = time.monotonic() - t0
+
+    thread.join(timeout=5)
+
+    assert msg_resp.status_code == 200
+    assert elapsed < 0.5, f"messages POST took {elapsed}s — looks like it waited on the phase hook"
+    assert phase_result["status"] == 200
+    assert phase_result["elapsed"] >= 1.0
+    assert items.get(slow_item.id).phase_override == "done"

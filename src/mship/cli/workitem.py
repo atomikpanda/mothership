@@ -266,6 +266,35 @@ def register(parent: typer.Typer, get_container) -> None:
             raise typer.Exit(1)
         items, _, _, _, _ = _ctx()
         _guard(items, item_id)
+
+        # Lifecycle hooks (MOS-220): `workitem.phase.<phase>` fires here, before
+        # the phase_override mutation below, so a `required: true` hook's
+        # failure blocks the override entirely. A non-required hook's failure
+        # is fail-open: warned, the override still proceeds. This is the one
+        # concrete "WorkItem phase-change" call site in the codebase today —
+        # a WorkItem's phase is otherwise derived on read (compute_phase), not
+        # mutated at any other single point.
+        from mship.core.lifecycle_hooks import HookContext, HookRequiredError, run_hooks
+        container = get_container()
+        config = container.config()
+        workspace_root = Path(container.config_path()).parent
+        try:
+            hook_results = run_hooks(
+                f"workitem.phase.{phase}", HookContext(workitem_id=item_id),
+                config=config, workspace_root=workspace_root,
+                shell=container.shell(), state_manager=container.state_manager(),
+            )
+        except HookRequiredError as e:
+            typer.echo(f"blocked by required lifecycle hook: {e}", err=True)
+            raise typer.Exit(1)
+        for hr in hook_results:
+            if not hr.ok:
+                typer.echo(
+                    f"warning: lifecycle hook '{hr.hook_name}' for workitem.phase.{phase} "
+                    f"failed: {hr.error}",
+                    err=True,
+                )
+
         items.set_phase_override(item_id, phase, now=datetime.now(timezone.utc))
         typer.echo(f"set phase_override={phase} on {item_id}")
 
