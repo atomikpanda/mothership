@@ -228,3 +228,18 @@ def test_build_index_unattended_defaults_false():
     item = _wi(id="wi-default")
     s = build_workitem_index([item], {}, {}, {})[0]
     assert s.unattended is False
+
+
+# --- MOS-228 T3: archived items hidden from the default index ---
+
+def test_build_index_excludes_archived_by_default():
+    visible = _wi(id="visible")
+    hidden = _wi(id="hidden", archived=True)
+    summaries = build_workitem_index([visible, hidden], {}, {}, {})
+    assert [s.id for s in summaries] == ["visible"]
+
+
+def test_build_index_include_archived_true_includes_archived():
+    hidden = _wi(id="hidden", archived=True)
+    summaries = build_workitem_index([hidden], {}, {}, {}, include_archived=True)
+    assert [s.id for s in summaries] == ["hidden"]

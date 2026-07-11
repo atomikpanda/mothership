@@ -41,3 +41,14 @@ def test_workitem_unattended_defaults_false_and_roundtrips():
     assert WorkItem.model_validate_json(dumped).unattended is False
     wi2 = wi.model_copy(update={"unattended": True})
     assert WorkItem.model_validate_json(wi2.model_dump_json()).unattended is True
+
+
+def test_workitem_archived_defaults_false_and_roundtrips():
+    now = _now()
+    wi = WorkItem(id="wi-1", title="t", workspace="ws", kind="feature",
+                  created_at=now, updated_at=now)
+    assert wi.archived is False
+    dumped = wi.model_dump_json()
+    assert WorkItem.model_validate_json(dumped).archived is False
+    wi2 = wi.model_copy(update={"archived": True})
+    assert WorkItem.model_validate_json(wi2.model_dump_json()).archived is True

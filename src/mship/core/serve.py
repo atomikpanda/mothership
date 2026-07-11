@@ -565,18 +565,22 @@ def create_app(
     # lands, producing a duplicate/orphaned WorkItem. See post_dispatch for the re-load.
     _dispatch_lock = threading.Lock()
 
-    def _workitem_index():
+    def _workitem_index(include_archived: bool = False):
         return build_workitem_index(
-            workitems.list(),
+            workitems.list(include_archived=include_archived),
             {s.id: s for s in store.list()},
             dict(state_manager.load().tasks),
             {t.id: t for t in msgs.list()},
+            include_archived=include_archived,
         )
 
     def _summarize_item(item_id: str):
         """Summarize a single work item by id via per-id child lookups (no full
         list() scans), mirroring the direct-get short-circuit of GET /threads/{id},
-        /specs/{id}. Returns None if the item does not exist."""
+        /specs/{id}. Returns None if the item does not exist. Unlike GET /items, this
+        is NOT subject to the archived filter (MOS-228 T3): a direct fetch by id
+        always resolves, archived or not — include_archived=True so build_workitem_index
+        doesn't drop it."""
         wi = workitems.get(item_id)
         if wi is None:
             return None
@@ -587,6 +591,7 @@ def create_app(
             {spec.id: spec} if spec else {},
             {s: tasks[s] for s in wi.task_slugs if s in tasks},
             {tid: t for tid in wi.thread_ids if (t := msgs.get(tid))},
+            include_archived=True,
         )[0]
 
     def _thread_payload(t):
@@ -598,7 +603,13 @@ def create_app(
         returns a full thread: GET /threads/{id}, POST /threads, POST /threads/{id}/messages,
         POST /threads/{id}/seen. The GET /threads list/summary endpoint is unaffected."""
         data = t.model_dump(mode="json")
-        all_items = list(workitems.list())  # single store scan, reused below
+        # include_archived=True: this is link/ownership resolution (which WorkItem does
+        # this thread belong to?), not a user-facing listing. A thread stays linked to its
+        # WorkItem after that item is archived (MOS-228 T3), so resolving with the default
+        # archived-excluding list() would wrongly report work_item_id=null here. The
+        # user-facing filter still applies at GET /items (_workitem_index above) and
+        # `item list` — only this internal resolution needs the full set.
+        all_items = list(workitems.list(include_archived=True))  # single store scan, reused below
         wi_id = resolve_thread_work_item(t.id, t.spec_id, t.task_slug, all_items)
         data["work_item_id"] = wi_id
         if wi_id is None:
@@ -617,8 +628,8 @@ def create_app(
         return data
 
     @app.get("/items")
-    def list_items():
-        return jsonable_encoder(_workitem_index())
+    def list_items(include_archived: bool = False):
+        return jsonable_encoder(_workitem_index(include_archived))
 
     @app.get("/items/{item_id}")
     def get_item(item_id: str):

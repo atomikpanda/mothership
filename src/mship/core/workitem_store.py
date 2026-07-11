@@ -44,10 +44,12 @@ class WorkItemStore:
             return None
         return WorkItem.model_validate_json(path.read_text())
 
-    def list(self) -> list[WorkItem]:
+    def list(self, include_archived: bool = False) -> list[WorkItem]:
         if not self._dir.is_dir():
             return []
         items = [WorkItem.model_validate_json(p.read_text()) for p in self._dir.glob("*.json")]
+        if not include_archived:
+            items = [item for item in items if not item.archived]
         return sorted(items, key=lambda w: w.updated_at, reverse=True)
 
     def create(self, title: str, kind: Kind, workspace: str, now: datetime) -> WorkItem:
@@ -114,4 +116,18 @@ class WorkItemStore:
     def set_unattended(self, item_id: str, on: bool, now: datetime | None = None) -> None:
         item = self._mutate(item_id, now)
         item.unattended = on
+        self.save(item)
+
+    def archive(self, item_id: str, now: datetime | None = None) -> None:
+        """Soft-delete: mark the item archived so it's excluded from list() by
+        default. Raises KeyError if the item does not exist."""
+        item = self._mutate(item_id, now)
+        item.archived = True
+        self.save(item)
+
+    def unarchive(self, item_id: str, now: datetime | None = None) -> None:
+        """Reverse of archive(): clear the archived flag. Raises KeyError if the
+        item does not exist."""
+        item = self._mutate(item_id, now)
+        item.archived = False
         self.save(item)

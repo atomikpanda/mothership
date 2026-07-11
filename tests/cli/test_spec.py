@@ -592,6 +592,90 @@ def test_spec_dispatch_unknown_id_errors(configured_app_with_task: Path):
     assert "no-such-spec" in result.output
 
 
+# --- spec dispatch: WorkItem-join adopt + refuse-to-guess (MOS-228 T4) ---
+
+
+def test_spec_dispatch_adopts_via_workitem_join(configured_app_with_task: Path, tmp_path: Path):
+    """Spec's WorkItem already has exactly one live candidate task -> dispatch
+    adopts it instead of auto-spawning a duplicate task/WorkItem."""
+    from mship.core.workitem_store import WorkItemStore
+
+    state_dir = configured_app_with_task / ".mothership"
+    mgr = StateManager(state_dir)
+    now = datetime(2026, 4, 10, tzinfo=timezone.utc)
+    state = mgr.load()
+    state.tasks["other-task"] = Task(
+        slug="other-task", description="d", phase="plan", created_at=now,
+        affected_repos=["shared"], branch="feat/other-task",
+    )
+    mgr.save(state)
+
+    items = WorkItemStore(state_dir / "workitems")
+    wi = items.create(title="Decision queue", kind="feature", workspace="testws", now=now)
+    items.add_task(wi.id, "other-task", now=now, state=mgr)
+
+    _apply_dq(tmp_path)
+    runner.invoke(app, ["spec", "verdict", "dq", "ac1", "approved"])
+    runner.invoke(app, ["spec", "answer", "dq", "q1", "yes"])
+    runner.invoke(app, ["spec", "approve", "dq"])
+
+    store = _store(configured_app_with_task)
+    spec = store.find_by_id("dq")
+    spec.work_item_id = wi.id
+    store.save(spec)
+
+    result = runner.invoke(app, ["spec", "dispatch", "dq"])
+    assert result.exit_code == 0, result.output
+
+    assert store.find_by_id("dq").task_slug == "other-task"
+    state_after = StateManager(state_dir).load()
+    assert state_after.tasks["other-task"].spec_id == "dq"
+    assert "dq" not in state_after.tasks                  # no auto-spawned duplicate task
+    assert [i.id for i in items.list()] == [wi.id]        # no new WorkItem minted
+
+
+def test_spec_dispatch_refuses_to_guess_via_workitem_join(configured_app_with_task: Path, tmp_path: Path):
+    """Spec's WorkItem has >=2 live candidate tasks -> dispatch refuses with a
+    clean non-zero exit (not a bare traceback) naming --task, mutating nothing."""
+    from mship.core.workitem_store import WorkItemStore
+
+    state_dir = configured_app_with_task / ".mothership"
+    mgr = StateManager(state_dir)
+    now = datetime(2026, 4, 10, tzinfo=timezone.utc)
+    state = mgr.load()
+    state.tasks["t1"] = Task(slug="t1", description="d", phase="plan", created_at=now,
+                              affected_repos=["shared"], branch="feat/t1")
+    state.tasks["t2"] = Task(slug="t2", description="d", phase="plan", created_at=now,
+                              affected_repos=["shared"], branch="feat/t2")
+    mgr.save(state)
+
+    items = WorkItemStore(state_dir / "workitems")
+    wi = items.create(title="Decision queue", kind="feature", workspace="testws", now=now)
+    items.add_task(wi.id, "t1", now=now, state=mgr)
+    items.add_task(wi.id, "t2", now=now, state=mgr)
+
+    _apply_dq(tmp_path)
+    runner.invoke(app, ["spec", "verdict", "dq", "ac1", "approved"])
+    runner.invoke(app, ["spec", "answer", "dq", "q1", "yes"])
+    runner.invoke(app, ["spec", "approve", "dq"])
+
+    store = _store(configured_app_with_task)
+    spec = store.find_by_id("dq")
+    spec.work_item_id = wi.id
+    store.save(spec)
+
+    result = runner.invoke(app, ["spec", "dispatch", "dq"])
+
+    assert result.exit_code != 0
+    assert "--task" in result.output
+    assert isinstance(result.exception, SystemExit)  # clean typer.Exit, no bare traceback
+
+    assert store.find_by_id("dq").status == "approved"                    # unchanged
+    assert sorted(StateManager(state_dir).load().tasks) == ["add-labels", "t1", "t2"]
+    assert [i.id for i in items.list()] == [wi.id]                        # no new WorkItem
+    assert sorted(items.get(wi.id).task_slugs) == ["t1", "t2"]            # untouched
+
+
 # --- spec from-thread (#capture-as-conversation) ---
 
 

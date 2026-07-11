@@ -69,6 +69,16 @@ Run `mship dispatch --task {task.slug} --instruction "<your instruction>"` to em
 """
 
 
+def _auto_spawn(spec: Spec, spawn_fn: Callable[[Spec], Task]) -> tuple[Task, bool]:
+    """Spawn a brand-new task for `spec` (requires `affected_repos`)."""
+    if not spec.affected_repos:
+        raise DispatchError(
+            f"spec {spec.id!r} has no affected_repos; cannot auto-spawn a task. "
+            f"Add repos to the spec or spawn a task named {spec.id!r} first."
+        )
+    return spawn_fn(spec), True
+
+
 def dispatch_spec(
     spec: Spec,
     *,
@@ -87,6 +97,10 @@ def dispatch_spec(
       spec is already bound to a *different* task).
     - spec already bound (`spec.task_slug` exists in state): reuse it (idempotent).
     - a task named `spec.id` exists: bind to it.
+    - the spec's `work_item_id` names a WorkItem with exactly one non-closed task
+      in `task_slugs`: adopt it (the WorkItem is the join key, not the spec id).
+      If that WorkItem has *two or more* live candidate tasks, refuse to guess —
+      raise `DispatchError` naming `--task` rather than silently duplicating.
     - otherwise: auto-spawn via `spawn_fn(spec)` (requires `affected_repos`).
 
     Either way, the chosen task is attached to a feature WorkItem (created if
@@ -126,14 +140,26 @@ def dispatch_spec(
     elif spec.id in state.tasks:
         task = state.tasks[spec.id]
         spawned = False
-    else:
-        if not spec.affected_repos:
+    elif spec.work_item_id is not None and workitems.get(spec.work_item_id) is not None:
+        # Join through the spec's WorkItem: adopt the task it's already attached
+        # to instead of blindly spawning a second one. Only non-closed candidates
+        # count (`mship close` removes a task from state.tasks, so a stale/closed
+        # slug left in task_slugs is inert and doesn't block adoption).
+        wi = workitems.get(spec.work_item_id)
+        candidates = [s for s in wi.task_slugs if s in state.tasks]
+        if len(candidates) == 1:
+            task = state.tasks[candidates[0]]
+            spawned = False
+        elif len(candidates) >= 2:
             raise DispatchError(
-                f"spec {spec.id!r} has no affected_repos; cannot auto-spawn a task. "
-                f"Add repos to the spec or spawn a task named {spec.id!r} first."
+                f"spec {spec.id!r} is linked to work item {wi.id!r}, which has "
+                f"multiple live candidate tasks: {candidates}. Refusing to guess "
+                f"which one to dispatch to — pass --task <slug> to pick one."
             )
-        task = spawn_fn(spec)
-        spawned = True
+        else:
+            task, spawned = _auto_spawn(spec, spawn_fn)
+    else:
+        task, spawned = _auto_spawn(spec, spawn_fn)
 
     # Bind the chosen task to the spec under the state lock.
     chosen_slug = task.slug

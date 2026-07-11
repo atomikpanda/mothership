@@ -83,3 +83,73 @@ def test_redundant_add_thread_does_not_bump_updated_at(tmp_path):
     got = store.get(wi.id)
     assert got.thread_ids == ["thread-x"]
     assert got.updated_at == _now()
+
+
+def test_archive_sets_flag_and_persists(tmp_path):
+    store = WorkItemStore(tmp_path / "workitems")
+    wi = store.create(title="t", kind="feature", workspace="ws", now=_now())
+    store.archive(wi.id, now=datetime(2026, 6, 30, 13, 0, tzinfo=timezone.utc))
+    # reload via a fresh store instance to prove it was persisted, not just mutated in memory
+    fresh = WorkItemStore(tmp_path / "workitems")
+    got = fresh.get(wi.id)
+    assert got.archived is True
+    assert got.updated_at == datetime(2026, 6, 30, 13, 0, tzinfo=timezone.utc)
+
+
+def test_unarchive_clears_flag(tmp_path):
+    store = WorkItemStore(tmp_path / "workitems")
+    wi = store.create(title="t", kind="feature", workspace="ws", now=_now())
+    store.archive(wi.id, now=_now())
+    store.unarchive(wi.id, now=datetime(2026, 6, 30, 14, 0, tzinfo=timezone.utc))
+    fresh = WorkItemStore(tmp_path / "workitems")
+    got = fresh.get(wi.id)
+    assert got.archived is False
+    assert got.updated_at == datetime(2026, 6, 30, 14, 0, tzinfo=timezone.utc)
+
+
+def test_list_excludes_archived_by_default(tmp_path):
+    store = WorkItemStore(tmp_path / "workitems")
+    a = store.create(title="a", kind="bug", workspace="ws",
+                     now=datetime(2026, 6, 30, 10, 0, tzinfo=timezone.utc))
+    b = store.create(title="b", kind="bug", workspace="ws",
+                     now=datetime(2026, 6, 30, 11, 0, tzinfo=timezone.utc))
+    store.archive(b.id, now=datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc))
+    assert [w.id for w in store.list()] == [a.id]
+
+
+def test_list_include_archived_returns_all(tmp_path):
+    store = WorkItemStore(tmp_path / "workitems")
+    a = store.create(title="a", kind="bug", workspace="ws",
+                     now=datetime(2026, 6, 30, 10, 0, tzinfo=timezone.utc))
+    b = store.create(title="b", kind="bug", workspace="ws",
+                     now=datetime(2026, 6, 30, 11, 0, tzinfo=timezone.utc))
+    store.archive(b.id, now=datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc))
+    assert {w.id for w in store.list(include_archived=True)} == {a.id, b.id}
+
+
+def test_get_loads_legacy_workitem_json_without_archived_field(tmp_path):
+    workitems_dir = tmp_path / "workitems"
+    workitems_dir.mkdir(parents=True)
+    legacy_json = (
+        '{"id": "wi-legacy", "title": "pre-archive item", "workspace": "ws", '
+        '"kind": "feature", "created_at": "2026-06-30T10:00:00Z", '
+        '"updated_at": "2026-06-30T10:00:00Z", "spec_id": null, '
+        '"task_slugs": [], "thread_ids": [], "external_links": [], '
+        '"phase_override": null, "unattended": false}'
+    )
+    (workitems_dir / "wi-legacy.json").write_text(legacy_json)
+    store = WorkItemStore(workitems_dir)
+    got = store.get("wi-legacy")
+    assert got.archived is False
+
+
+def test_archive_missing_item_raises(tmp_path):
+    store = WorkItemStore(tmp_path / "workitems")
+    with pytest.raises(KeyError):
+        store.archive("nope")
+
+
+def test_unarchive_missing_item_raises(tmp_path):
+    store = WorkItemStore(tmp_path / "workitems")
+    with pytest.raises(KeyError):
+        store.unarchive("nope")

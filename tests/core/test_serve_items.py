@@ -45,6 +45,43 @@ def test_list_and_get_item_with_derived_phase(tmp_path):
     assert client.get("/items/nope").status_code == 404
 
 
+# --- MOS-228 T3: GET /items archived filter; GET /items/{id} stays unfiltered ---
+
+def test_list_items_excludes_archived_by_default(tmp_path):
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    visible = items.create(title="Visible", kind="feature", workspace="testws", now=_now())
+    hidden = items.create(title="Hidden", kind="feature", workspace="testws", now=_now())
+    items.archive(hidden.id, now=_now())
+    client = _app(tmp_path)
+
+    listed = client.get("/items").json()
+    assert [i["id"] for i in listed] == [visible.id]
+
+
+def test_list_items_include_archived_query_flag_shows_archived(tmp_path):
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    visible = items.create(title="Visible", kind="feature", workspace="testws", now=_now())
+    hidden = items.create(title="Hidden", kind="feature", workspace="testws", now=_now())
+    items.archive(hidden.id, now=_now())
+    client = _app(tmp_path)
+
+    listed = client.get("/items", params={"include_archived": True}).json()
+    assert {i["id"] for i in listed} == {visible.id, hidden.id}
+
+
+def test_get_item_by_id_returns_archived_item_unfiltered(tmp_path):
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="Archived thing", kind="feature", workspace="testws", now=_now())
+    items.archive(wi.id, now=_now())
+    client = _app(tmp_path)
+
+    # A direct fetch by id is not subject to the archived filter, unlike the list.
+    assert client.get("/items").json() == []
+    resp = client.get(f"/items/{wi.id}")
+    assert resp.status_code == 200
+    assert resp.json()["id"] == wi.id
+
+
 def test_post_item_message_creates_and_links_thread_when_none(tmp_path):
     """An in-flight item created from a spec/task has no thread; steering it must
     lazily create+link one (not silently no-op) so the message lands somewhere."""
