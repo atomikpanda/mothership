@@ -80,6 +80,7 @@ def register(app: typer.Typer, get_container):
             workspace_name=config.workspace,
             auth_token=token,
             worktree_manager=container.worktree_manager(),
+            config=config,
         )
         auth_note = "auth: bearer token" if token else "auth: none (loopback only)"
         docs_note = "docs: disabled (auth)" if token else "docs: /docs"

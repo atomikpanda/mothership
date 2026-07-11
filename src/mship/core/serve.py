@@ -88,6 +88,17 @@ class PhaseOverrideBody(BaseModel):
     phase: Phase | None = None
 
 
+class ExecBody(BaseModel):
+    """POST /exec/{verb} request body — see `mship.core.remote_exec` for the
+    full wire contract (how the response streams task output + exit code)."""
+    task: str
+    repos: list[str]
+    platform: str | None = None
+    # Only meaningful for verb == "capture"; mirrors `cli/capture.py`'s
+    # `--kind` default. Optional so run/build callers can omit it.
+    kind: str = "all"
+
+
 def _make_auth_dependency(token: str):
     import hmac
     from fastapi import Header, HTTPException
@@ -132,12 +143,19 @@ def create_app(
     workspace_name: str = "mothership",
     auth_token: str | None = None,
     worktree_manager=None,
+    config=None,
 ):
     """Build the mship serve FastAPI app (read + review/approve write endpoints).
     Sync handlers call the core directly; FastAPI serializes the returns.
 
     `worktree_manager` (optional) enables the dispatch endpoint to auto-spawn a
-    task when none exists; without it, dispatch can only bind a pre-existing task."""
+    task when none exists; without it, dispatch can only bind a pre-existing task.
+
+    `config` (optional, this machine's own `WorkspaceConfig`) enables
+    `POST /exec/{verb}` (see `mship.core.remote_exec`) — the serve side of
+    `mship run/capture/build --remote`. Without it, `/exec/*` is unavailable
+    (503) rather than absent, so a caller gets an actionable message instead
+    of a bare 404."""
     from fastapi import Depends, FastAPI, HTTPException
 
     from mship.core.spec_store import SpecStore
@@ -668,5 +686,45 @@ def create_app(
             except KeyError:
                 raise HTTPException(status_code=404, detail=f"no work item {item_id!r}")
         return {"id": item_id, "phase_override": body.phase}
+
+    # --- remote exec (MOS-191): serve side of `mship run/capture/build --remote` ---
+    # Runs a go-task verb on THIS machine and streams its output back — see
+    # `mship.core.remote_exec` for the full wire contract (line-buffered task
+    # output, terminated by a trailing `__MSHIP_EXIT__ <code>` sentinel line).
+    # A fresh `ShellRunner` per request (like `gh_token_shell` above) rather than
+    # reaching into pr_manager's — same class, its own lifetime.
+
+    from mship.core import remote_exec
+    from fastapi.responses import StreamingResponse
+    from starlette.concurrency import iterate_in_threadpool
+
+    @app.post("/exec/{verb}")
+    async def post_exec(verb: str, body: ExecBody):
+        if verb not in remote_exec.VERBS:
+            raise HTTPException(
+                status_code=404,
+                detail=f"unknown verb {verb!r}; expected one of {remote_exec.VERBS}",
+            )
+        if config is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "remote execution unavailable: this serve host has no "
+                    "workspace config wired in (pass `config=` to create_app)"
+                ),
+            )
+        deps = remote_exec.RemoteExecDeps(
+            config=config, shell=ShellRunner(), workspace_root=workspace_root,
+        )
+        # `run_verb_stream` is a plain sync generator doing blocking subprocess
+        # + git I/O; `iterate_in_threadpool` pulls each chunk in the threadpool
+        # so it never blocks the event loop (see the module docstring).
+        gen = remote_exec.run_verb_stream(
+            verb, body.task, body.repos, body.platform,
+            kind=body.kind, deps=deps,
+        )
+        return StreamingResponse(
+            iterate_in_threadpool(gen), media_type="application/octet-stream",
+        )
 
     return app
