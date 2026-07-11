@@ -25,6 +25,7 @@ def _ws(root: Path) -> Path:
     ws.mkdir()
     (ws / "mothership.yaml").write_text(
         "workspace: w\n"
+        "default_remote: https://github.com/acme\n"
         "repos:\n"
         "  mothership:\n    path: mothership\n    type: service\n"
         "  ground-control:\n    path: ground-control\n    type: service\n"
@@ -140,13 +141,77 @@ def test_preflight_no_broker_but_token_present_exit_zero(tmp_path, monkeypatch):
     monkeypatch.setenv("GH_TOKEN", "gh-env-token")
 
     def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("broker must not be called when a token is available")
+        # The broker must never be called when a token is available, but the
+        # override-token path now DOES call the GitHub REST API to verify the
+        # token actually covers each repo — this stubs that check.
+        assert str(request.url).startswith("https://api.github.com/repos/acme/")
+        assert request.headers.get("authorization") == "Bearer gh-env-token"
+        return httpx.Response(200, json={"permissions": {"push": True}})
 
     _patch_httpx_client(monkeypatch, handler)
     try:
         result = runner.invoke(app, ["gh", "preflight"])
         assert result.exit_code == 0, result.output
         assert "auth ok" in result.output.lower()
+        assert "acme/mothership" in result.output
+        assert "acme/ground-control" in result.output
+    finally:
+        _reset()
+
+
+def test_preflight_override_token_repo_lacks_push_exit_nonzero(tmp_path, monkeypatch):
+    ws = _ws(tmp_path)
+    _configure(ws)
+    monkeypatch.setenv("GH_TOKEN", "gh-env-token")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "ground-control" in str(request.url):
+            return httpx.Response(200, json={"permissions": {"push": False}})
+        return httpx.Response(200, json={"permissions": {"push": True}})
+
+    _patch_httpx_client(monkeypatch, handler)
+    try:
+        result = runner.invoke(app, ["gh", "preflight"])
+        assert result.exit_code != 0
+        assert "acme/ground-control" in result.output
+        assert "cannot push" in result.output.lower()
+    finally:
+        _reset()
+
+
+def test_preflight_override_token_repo_404_exit_nonzero(tmp_path, monkeypatch):
+    ws = _ws(tmp_path)
+    _configure(ws)
+    monkeypatch.setenv("GH_TOKEN", "gh-env-token")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "ground-control" in str(request.url):
+            return httpx.Response(404, json={"message": "Not Found"})
+        return httpx.Response(200, json={"permissions": {"push": True}})
+
+    _patch_httpx_client(monkeypatch, handler)
+    try:
+        result = runner.invoke(app, ["gh", "preflight"])
+        assert result.exit_code != 0
+        assert "acme/ground-control" in result.output
+        assert "cannot push" in result.output.lower()
+    finally:
+        _reset()
+
+
+def test_preflight_override_token_401_exit_nonzero(tmp_path, monkeypatch):
+    ws = _ws(tmp_path)
+    _configure(ws)
+    monkeypatch.setenv("GH_TOKEN", "gh-env-token")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"message": "Bad credentials"})
+
+    _patch_httpx_client(monkeypatch, handler)
+    try:
+        result = runner.invoke(app, ["gh", "preflight"])
+        assert result.exit_code != 0
+        assert "invalid or expired" in result.output.lower()
     finally:
         _reset()
 

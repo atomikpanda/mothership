@@ -42,7 +42,11 @@ def register(parent: typer.Typer, get_container):
         swallow: a broker error or missing auth exits non-zero with a clear,
         actionable message instead of quietly degrading to no auth."""
         from mship.core.gh_auth import broker_config_from_env
-        from mship.core.gh_preflight import repo_set_from_config, run_preflight
+        from mship.core.gh_preflight import (
+            repo_owner_names_from_config,
+            repo_set_from_config,
+            run_preflight,
+        )
 
         output = Output()
         container = get_container()
@@ -52,6 +56,10 @@ def register(parent: typer.Typer, get_container):
             [n.strip() for n in repos.split(",") if n.strip()] if repos else None
         )
         resolved_repos = repo_set_from_config(config_path, explicit_repos)
+        # Only needed on the override-token path (see run_preflight), but
+        # resolving it is pure config parsing (no network) so it's cheap to
+        # compute unconditionally here.
+        repo_owner_names = repo_owner_names_from_config(config_path, resolved_repos)
 
         broker_url, broker_bearer = broker_config_from_env()
         result = run_preflight(
@@ -59,6 +67,7 @@ def register(parent: typer.Typer, get_container):
             broker_url=broker_url,
             broker_bearer=broker_bearer,
             repos=resolved_repos,
+            repo_owner_names=repo_owner_names,
         )
 
         if result.ok:
