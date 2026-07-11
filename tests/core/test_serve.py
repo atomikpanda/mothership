@@ -2,12 +2,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from fastapi.testclient import TestClient
 
+from mship.core.message_store import MessageStore
 from mship.core.serve import create_app
 from mship.core.spec import AcceptanceCriterion, OpenQuestion, Spec
 from mship.core.spec_body import render_body
 from mship.core.spec_store import SpecStore
 from mship.core.state import StateManager, Task, WorkspaceState
 from mship.core.log import LogManager
+from mship.core.workitem_store import WorkItemStore
 
 
 def _app(tmp_path: Path):
@@ -384,6 +386,78 @@ def test_post_dispatch_auto_spawn_unavailable_409(tmp_path):
         workspace_root=tmp_path, workspace_name="t",
     )
     assert TestClient(app).post("/specs/cap/dispatch").status_code == 409
+
+
+# --- MOS-194: serve dispatch posts an agent-event handoff into the WorkItem thread ---
+
+
+def _dispatch_app(tmp_path, spec_id="cap", repos=("shared",)):
+    sm = _empty_state(tmp_path)
+    _seed_approved_spec(tmp_path, spec_id=spec_id, repos=list(repos))
+    app = create_app(
+        specs_dir=tmp_path / "specs", state_manager=sm, log_manager=None,
+        workspace_root=tmp_path, workspace_name="t",
+        worktree_manager=_FakeWorktreeManager(sm),
+    )
+    return app, sm
+
+
+def test_post_dispatch_posts_agent_event_handoff(tmp_path):
+    app, sm = _dispatch_app(tmp_path)
+    r = TestClient(app).post("/specs/cap/dispatch")
+    assert r.status_code == 200, r.text
+    wi_id = r.json()["spec"]["work_item_id"]
+    assert wi_id
+
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    msgs = MessageStore(tmp_path / ".mothership" / "messages")
+    wi = items.get(wi_id)
+    assert wi is not None and wi.thread_ids, "dispatch should create+link a thread for the handoff event"
+    thread = msgs.get(wi.thread_ids[0])
+    assert thread is not None
+
+    # A seed (human) message plus exactly one agent event carrying the handoff.
+    assert [m.role for m in thread.messages] == ["human", "agent"]
+    event = thread.messages[-1]
+    assert event.kind == "event"
+    assert "dispatch cap -> cap" in event.text     # stable marker (spec id -> task slug)
+    assert "cap" in event.text                     # spec id / task slug
+    assert "/wt/cap/shared" in event.text          # worktree path, from the rendered handoff
+
+    assert thread.awaiting_agent_event is True
+    assert thread.needs_you is False
+
+
+def test_post_dispatch_idempotent_no_double_event(tmp_path):
+    app, sm = _dispatch_app(tmp_path)
+    client = TestClient(app)
+    first = client.post("/specs/cap/dispatch")
+    assert first.status_code == 200, first.text
+    wi_id = first.json()["spec"]["work_item_id"]
+
+    second = client.post("/specs/cap/dispatch")   # re-dispatch: idempotent bind, no new task
+    assert second.status_code == 200, second.text
+    assert second.json()["spawned"] is False
+
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    msgs = MessageStore(tmp_path / ".mothership" / "messages")
+    wi = items.get(wi_id)
+    thread = msgs.get(wi.thread_ids[0])
+    events = [m for m in thread.messages if m.kind == "event"]
+    assert len(events) == 1                        # no double-post on re-dispatch
+
+
+def test_post_dispatch_never_500s_if_notify_raises(tmp_path, monkeypatch):
+    sm, log = _seed_task(tmp_path)                 # task "dq", affected_repos=["mothership"]
+    _seed_approved_spec(tmp_path)                  # approved spec "dq"
+    monkeypatch.setattr(
+        "mship.core.serve._notify_dispatch",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("mailbox glitch")),
+    )
+    client = TestClient(_app_with(tmp_path, sm, log))
+    r = client.post("/specs/dq/dispatch")
+    assert r.status_code == 200, r.text            # dispatch itself is unaffected
+    assert r.json()["spec"]["status"] == "dispatched"
 
 
 # --- message mailbox endpoints ---

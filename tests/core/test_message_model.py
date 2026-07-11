@@ -143,10 +143,34 @@ def test_awaiting_agent_event_true_for_trailing_event():
     assert t.needs_decision is False
 
 
-def test_awaiting_agent_event_reset_by_later_human():
-    t = _thread(_m("agent", 0, kind="event"), _m("human", 1))
+def test_awaiting_agent_event_false_with_no_event():
+    t = _thread(_m("human", 0), _m("agent", 1))
     assert t.awaiting_agent_event is False
-    assert t.awaiting_reply is True
+
+
+def test_awaiting_agent_event_survives_a_later_human_message():
+    # The Greptile finding on PR #307 (MOS-194): an `event` is a signal FOR THE
+    # AGENT, not the operator, so a human posting on the thread after it must
+    # NOT clear it -- otherwise an idle host agent armed on `mship inbox wait`
+    # can miss a dispatch/PR-merge handoff whenever a human happens to reply
+    # first. This is the inverse of `test_awaiting_agent_event_reset_by_later_human`
+    # (old, now-wrong behavior) it replaces.
+    t = _thread(_m("agent", 0, kind="event"), _m("human", 1))
+    assert t.awaiting_agent_event is True
+    assert t.awaiting_reply is True  # the human message still needs an agent reply
+
+
+def test_awaiting_agent_event_cleared_by_agent_non_event_message():
+    # The owning agent clears its own event by acting on the thread -- posting
+    # any non-event message after it (even with a human message interleaved).
+    t = _thread(_m("agent", 0, kind="event"), _m("human", 1), _m("agent", 2))
+    assert t.awaiting_agent_event is False
+
+
+def test_awaiting_agent_event_persists_through_agent_followup_event_only():
+    # Sanity: a second event with no intervening agent action stays pending.
+    t = _thread(_m("agent", 0, kind="event"), _m("human", 1), _m("agent", 2, kind="event"))
+    assert t.awaiting_agent_event is True
 
 
 def test_decision_payload_legacy_json_without_multi_defaults_false():

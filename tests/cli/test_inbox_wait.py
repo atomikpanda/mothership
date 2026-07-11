@@ -77,6 +77,55 @@ def test_wait_ignores_agent_reply(tmp_path: Path):
         _reset()
 
 
+def test_wait_matches_event_thread_even_after_interleaved_human_message(tmp_path: Path):
+    # MOS-194 (Greptile finding on PR #307): a dispatch/PR event is a signal FOR
+    # THE AGENT. A human posting on the thread afterwards (e.g. a quick "thanks"
+    # from the phone) must not make `mship inbox wait` stop matching it -- the
+    # predicate is `awaiting_reply or awaiting_agent_event`, and it's
+    # `awaiting_agent_event` that must survive the interleave.
+    cfg, state_dir, store = _bootstrap(tmp_path)
+    t = store.create_thread("task-1", "seed", datetime.now(timezone.utc))
+    store.append(t.id, "agent", "dispatch handoff", datetime.now(timezone.utc), kind="event")
+    store.append(t.id, "human", "thanks", datetime.now(timezone.utc))  # the interleave
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["inbox", "wait", "--since", PAST, "--timeout", "5"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["timed_out"] is False
+        assert [th["id"] for th in payload["threads"]] == [t.id]
+    finally:
+        _reset()
+
+
+def test_wait_does_not_reloop_on_a_still_pending_event_once_cursor_advances(tmp_path: Path):
+    # Loop-safety: once a wait has surfaced the event thread and its cursor has
+    # advanced past it, a fresh wait `--since` that cursor must NOT immediately
+    # re-hit on the very same still-unhandled event -- `changed_since` gates on
+    # `updated_at > since`, independent of `awaiting_agent_event` itself, so a
+    # more-persistent flag can't cause a wake-loop.
+    cfg, state_dir, store = _bootstrap(tmp_path)
+    t = store.create_thread("task-1", "seed", datetime.now(timezone.utc))
+    store.append(t.id, "agent", "dispatch handoff", datetime.now(timezone.utc), kind="event")
+    _override(cfg, state_dir)
+    try:
+        first = runner.invoke(app, ["inbox", "wait", "--since", PAST, "--timeout", "5"])
+        assert first.exit_code == 0, first.output
+        first_payload = json.loads(first.output)
+        assert first_payload["timed_out"] is False
+        assert [th["id"] for th in first_payload["threads"]] == [t.id]
+
+        second = runner.invoke(app, [
+            "inbox", "wait", "--since", first_payload["cursor"], "--timeout", "0.1",
+        ])
+        assert second.exit_code == 0, second.output
+        second_payload = json.loads(second.output)
+        assert second_payload["timed_out"] is True
+        assert second_payload["threads"] == []  # no re-wake on the still-True flag
+    finally:
+        _reset()
+
+
 def test_wait_stands_down_when_another_listener_holds_lease(tmp_path: Path):
     import os
     from mship.core.inbox_lease import InboxLease
