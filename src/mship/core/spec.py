@@ -38,6 +38,7 @@ class Spec(BaseModel):
     task_slug: str | None = None
     body: str = ""
     work_item_id: str | None = None
+    clarification_reason: str | None = None
 
     @property
     def dispatch_ready(self) -> bool:

@@ -4,6 +4,7 @@ import typer
 
 from mship.cli._resolve import resolve_for_command
 from mship.cli.output import Output
+from mship.core.lifecycle_hooks import HookRequiredError
 from mship.core.phase import PHASE_ORDER, FinishedTaskError, SpecGateError
 
 
@@ -58,6 +59,9 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=1)
         except SpecGateError as e:
             output.error(str(e))
+            raise typer.Exit(code=1)
+        except HookRequiredError as e:
+            output.error(f"blocked by required lifecycle hook: {e}")
             raise typer.Exit(code=1)
 
         for w in result.warnings:

@@ -34,6 +34,17 @@ def test_build_review_shapes_units_and_context():
     assert r["context"]["non_goals"] == ["chat"]
 
 
+def test_build_review_includes_clarification_reason():
+    spec = _spec()
+    spec.clarification_reason = "tighten scope"
+    r = build_review(spec)
+    assert r["clarification_reason"] == "tighten scope"
+
+
+def test_build_review_clarification_reason_defaults_none():
+    assert build_review(_spec())["clarification_reason"] is None
+
+
 def test_build_review_summary_counts():
     s = build_review(_spec())["summary"]
     assert s == {

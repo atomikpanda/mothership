@@ -203,6 +203,26 @@ def test_post_request_changes(tmp_path):
     assert r.status_code == 200 and r.json()["status"] == "needs_clarification"
 
 
+def test_post_request_changes_persists_reason(tmp_path):
+    """MOS-215: the reason must land on the persisted spec, not just the
+    review payload — verified by reloading via GET /specs/{id}."""
+    _seed_spec(tmp_path)
+    client = TestClient(_app(tmp_path))
+    r = client.post("/specs/dq/request-changes", json={"reason": "tighten scope"})
+    assert r.status_code == 200
+    assert r.json()["clarification_reason"] == "tighten scope"
+    assert client.get("/specs/dq").json()["clarification_reason"] == "tighten scope"
+
+
+def test_get_review_includes_clarification_reason(tmp_path):
+    _seed_spec(tmp_path)
+    client = TestClient(_app(tmp_path))
+    client.post("/specs/dq/request-changes", json={"reason": "tighten scope"})
+    r = client.get("/specs/dq/review")
+    assert r.status_code == 200
+    assert r.json()["clarification_reason"] == "tighten scope"
+
+
 def test_writes_require_auth(tmp_path):
     client = TestClient(_auth_app(tmp_path, "secret"))
     # No Authorization header → 401 even for a write.
@@ -292,6 +312,46 @@ def test_post_apply_illegal_transition_409_and_bypass(tmp_path):
     assert client.post("/specs/dq/apply", json=draft).status_code == 409      # needs_review → needs_review illegal
     ok = client.post("/specs/dq/apply", json={**draft, "bypass_status_gate": True})
     assert ok.status_code == 200 and ok.json()["status"] == "needs_review"
+
+
+def test_post_apply_revising_clears_clarification_reason(tmp_path):
+    """MOS-215: applying a revised draft to a needs_clarification spec must
+    clear the stale reason from the earlier request-changes."""
+    client = TestClient(_app(tmp_path))
+    client.post("/specs", json={"title": "DQ", "id": "dq"})   # drafting
+    client.post("/specs/dq/apply", json={"draft": {
+        "problem": "P", "user_story": "U", "approach": "A",
+        "acceptance_criteria": ["view questions"], "open_questions": [],
+    }})   # -> needs_review
+    client.post("/specs/dq/request-changes", json={"reason": "tighten scope"})   # -> needs_clarification
+    assert client.get("/specs/dq").json()["clarification_reason"] == "tighten scope"
+
+    r = client.post("/specs/dq/apply", json={"draft": {
+        "problem": "P2", "user_story": "U", "approach": "A",
+        "acceptance_criteria": ["view questions"], "open_questions": [],
+    }})
+    assert r.status_code == 200 and r.json()["status"] == "needs_review"
+    assert client.get("/specs/dq").json()["clarification_reason"] is None
+
+
+def test_post_approve_clears_clarification_reason(tmp_path):
+    """MOS-215 (Greptile): approving a spec that still carries a request-changes
+    reason clears it — an approved spec has no pending clarification. Seed a
+    needs_review spec with a lingering reason (normal flow clears it on apply;
+    this guards the approve path too)."""
+    now = datetime(2026, 6, 14, tzinfo=timezone.utc)
+    SpecStore(tmp_path / "specs").save(Spec(
+        id="dq", title="DQ", status="needs_review",
+        created_at=now, updated_at=now, clarification_reason="tighten scope",
+        body=render_body("P", "U", "A"),
+        acceptance_criteria=[AcceptanceCriterion(id="ac1", text="x", verdict="approved")],
+    ))
+    client = TestClient(_app(tmp_path))
+    assert client.get("/specs/dq").json()["clarification_reason"] == "tighten scope"
+
+    r = client.post("/specs/dq/approve", json={"bypass_gate": True})
+    assert r.status_code == 200 and r.json()["status"] == "approved"
+    assert client.get("/specs/dq").json()["clarification_reason"] is None
 
 
 def test_capture_writes_require_auth(tmp_path):

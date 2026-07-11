@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import typer
 
+from mship.cli.output import Output
 from mship.core.message_store import MessageStore
 
 
@@ -26,13 +26,13 @@ def register(parent: typer.Typer, get_container) -> None:
              "updated_at": t.updated_at.isoformat()}
             for t in store.list() if t.awaiting_reply
         ]
-        if sys.stdout.isatty():
+        if Output().json_mode:
+            typer.echo(json.dumps(out))
+        else:
             if not out:
                 typer.echo("(inbox empty)")
             for o in out:
                 typer.echo(f"{o['id']}  {o['subject']}\n  > {o['pending']}")
-        else:
-            typer.echo(json.dumps(out))
 
     @inbox_app.callback(invoke_without_command=True)
     def inbox(ctx: typer.Context) -> None:
@@ -157,8 +157,8 @@ def register(parent: typer.Typer, get_container) -> None:
         if t is None:
             typer.echo(f"no thread {thread_id!r}", err=True)
             raise typer.Exit(1)
-        if sys.stdout.isatty():
+        if Output().json_mode:
+            typer.echo(t.model_dump_json())
+        else:
             for m in t.messages:
                 typer.echo(f"[{m.role}] {m.text}")
-        else:
-            typer.echo(t.model_dump_json())

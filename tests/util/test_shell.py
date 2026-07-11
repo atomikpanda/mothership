@@ -2,6 +2,8 @@ import subprocess
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 
+import pytest
+
 from mship.util.shell import ShellRunner, ShellResult
 
 
@@ -99,3 +101,16 @@ def test_run_task_passes_env():
         env={"MY_VAR": "hello"},
     )
     assert "hello" in result.stdout
+
+
+def test_run_accepts_timeout_and_completes_within_it():
+    runner = ShellRunner()
+    result = runner.run("echo hi", cwd=Path("."), timeout=5)
+    assert result.returncode == 0
+    assert "hi" in result.stdout
+
+
+def test_run_raises_timeout_expired_when_command_exceeds_timeout():
+    runner = ShellRunner()
+    with pytest.raises(subprocess.TimeoutExpired):
+        runner.run("sleep 2", cwd=Path("."), timeout=0.1)

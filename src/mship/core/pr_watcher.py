@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
 
 log = logging.getLogger(__name__)
@@ -44,6 +45,9 @@ class PrWatcher:
         check_state: Callable[[str], str],
         now_fn: Callable[[], datetime],
         lock: Any | None = None,
+        config: Any | None = None,
+        workspace_root: Path | None = None,
+        shell: Any | None = None,
     ) -> None:
         self.msgs = msgs
         self.workitems = workitems
@@ -52,6 +56,12 @@ class PrWatcher:
         self.now_fn = now_fn
         self.lock = lock
         self.notified: set[tuple[str, str, str, str]] = set()
+        # Lifecycle hooks (MOS-220): `pr.merged`/`pr.closed`. `config` is the
+        # workspace's WorkspaceConfig — when None (default), hooks are simply
+        # never evaluated, so existing callers/tests are unaffected.
+        self.config = config
+        self.workspace_root = workspace_root
+        self.shell = shell
 
     def check_once(self) -> None:
         """One sweep over all tasks' PR urls. Never raises — a failure while
@@ -77,19 +87,51 @@ class PrWatcher:
         key = (slug, repo, url, st)
         if key in self.notified:
             return
+        # `_check_posted` resolves the thread and checks the dedup marker
+        # under the lock (when one is given) — cheap, no subprocess. It does
+        # NOT write the marker message: that write is deliberately deferred
+        # to `_post_event`, called only AFTER the lifecycle hook below has
+        # been attempted (see `_post_event`'s docstring for why — MOS-220
+        # Greptile "Dedup Drops Hooks"). A restart-dedup skip (thread already
+        # carried the event from a prior process) must not refire the hook.
         if self.lock is not None:
             with self.lock:
-                self._resolve_and_post(slug, task, url, st, key)
+                already_posted, tid, wi = self._check_posted(slug, task, key)
         else:
-            self._resolve_and_post(slug, task, url, st, key)
+            already_posted, tid, wi = self._check_posted(slug, task, key)
+        if already_posted:
+            return
 
-    def _resolve_and_post(
-        self, slug: str, task: Any, url: str, st: str,
-        key: tuple[str, str, str, str],
-    ) -> None:
+        # Fire the hook BEFORE the durable dedup record (the mailbox event
+        # message) is written — deliberately outside the lock (see
+        # `_fire_lifecycle_hook`'s docstring) — a slow hook must not hold up
+        # unrelated item/message operations (serve's `_item_msg_lock` also
+        # guards POST /items/{id}/messages, /unattended, and /phase) — AND
+        # deliberately before the durable write (see `_post_event`'s
+        # docstring): if the process dies between the hook call and the
+        # write, a restarted watcher sees no marker yet and refires the hook
+        # next sweep rather than silently dropping it forever (at-least-once,
+        # not at-most-zero). The happy path still posts — and dedups —
+        # exactly once.
+        self._fire_lifecycle_hook(st, slug, repo)
+
+        if self.lock is not None:
+            with self.lock:
+                self._post_event(tid, slug, repo, url, st, key)
+        else:
+            self._post_event(tid, slug, repo, url, st, key)
+
+    def _check_posted(
+        self, slug: str, task: Any, key: tuple[str, str, str, str],
+    ) -> tuple[bool, str, Any]:
+        """Resolve the target thread and report whether its dedup marker
+        (the mailbox event message) is already present — a prior, COMPLETE
+        post+hook for this key (see `_post_event`: the marker is only ever
+        written after the hook has been attempted, so its presence proves
+        the hook already ran). Runs under the lock — cheap, no subprocess.
+        Returns (already_posted, thread_id, work_item_or_None)."""
+        _, _repo, url, st = key
         now = self.now_fn()
-        text = f"\U0001f500 PR {st}: {url} (task {slug}) — ready to close out."
-
         tid, wi = self._resolve_thread(slug, task, now)
 
         thread = self.msgs.get(tid)
@@ -101,10 +143,59 @@ class PrWatcher:
             # Already posted (prior process) — record it so this process's
             # in-memory set short-circuits future checks too.
             self.notified.add(key)
-            return
+            return True, tid, wi
 
+        return False, tid, wi
+
+    def _post_event(
+        self, tid: str, slug: str, repo: str, url: str, st: str,
+        key: tuple[str, str, str, str],
+    ) -> None:
+        """Write the durable dedup record (the mailbox event message) —
+        called only AFTER the lifecycle hook has been attempted (see
+        `_check_one`). This ordering IS the fix for "Dedup Drops Hooks": were
+        the record written first (as it used to be), a crash between the
+        write and the hook call would leave the marker in place with the
+        hook having never run, and a restarted watcher would see the marker
+        and skip the hook — silently, forever. Runs under the lock — must
+        stay cheap."""
+        now = self.now_fn()
+        text = f"\U0001f500 PR {st}: {url} (task {slug}) — ready to close out."
         self.msgs.append(tid, "agent", text, now, kind="event")
         self.notified.add(key)
+
+    def _fire_lifecycle_hook(self, st: str, slug: str, repo: str) -> None:
+        """Fire the `pr.merged`/`pr.closed` lifecycle hook (MOS-220), once,
+        BEFORE the mailbox event is durably posted (see `_post_event`'s
+        docstring for why) — and, deliberately, OUTSIDE `self.lock`. A hook
+        shells out and is bounded by its own (possibly generous) timeout;
+        running it while holding `self.lock` (in `serve`, the same
+        `_item_msg_lock` guarding POST /items/{id}/messages, /unattended,
+        and /phase) would let one slow PR hook stall unrelated item/message
+        HTTP requests for up to that timeout. Polling-derived — the
+        merge/close already happened by the time this sweep observes it,
+        so `required: true` is rejected for these events at config-load time
+        (nothing left to block). Never lets a hook failure escape: this
+        mirrors check_once()'s own never-abort-the-sweep-on-one-failure
+        pattern, so a broken hook config can't take down PR notifications
+        for every other task."""
+        if self.config is None or self.workspace_root is None:
+            return
+        from mship.core.lifecycle_hooks import HookContext, run_hooks
+        try:
+            run_hooks(
+                f"pr.{st}",
+                HookContext(task_slug=slug, repo=repo),
+                config=self.config,
+                workspace_root=self.workspace_root,
+                shell=self.shell,
+                state_manager=self.state_manager,
+            )
+        except Exception:
+            log.exception(
+                "pr_watcher: lifecycle hook failed for pr.%s (task=%s repo=%s)",
+                st, slug, repo,
+            )
 
     def _resolve_thread(self, slug: str, task: Any, now: datetime) -> tuple[str, Any]:
         """Mirror POST /items/{id}/messages' thread resolution: prefer the
@@ -123,8 +214,9 @@ class PrWatcher:
             return existing.id, wi
 
         # create_thread seeds a human message — the event itself is appended
-        # separately (below, in _resolve_and_post) so it lands as an agent
-        # message, matching every other event/needs_you/decision message.
+        # separately (in _post_event, after the hook has been attempted) so
+        # it lands as an agent message, matching every other
+        # event/needs_you/decision message.
         thread = self.msgs.create_thread(
             subject=slug, text=f"PR watcher: tracking {slug}", now=now, task_slug=slug,
         )
