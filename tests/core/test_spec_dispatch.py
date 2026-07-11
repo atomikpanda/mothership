@@ -361,3 +361,30 @@ def test_dispatch_spec_ignores_closed_workitem_candidates_and_auto_spawns(tmp_pa
     assert calls == ["dq"]
     assert result.task.slug == "dq"
     assert sorted(items.get(wi.id).task_slugs) == ["closed-task", "dq"]
+
+
+# --- MOS-194: the agent-event handoff notify is serve-only, not part of dispatch_spec ---
+
+def test_dispatch_spec_does_not_touch_message_store(tmp_path):
+    """`mship spec dispatch` (the CLI) calls `dispatch_spec` directly, with no
+    message store in hand at all — the agent-event handoff notify (MOS-194)
+    lives only in serve's `post_dispatch` (`mship.core.serve._notify_dispatch`),
+    never here, so a bare `dispatch_spec` call must not create any thread."""
+    from mship.core.message_store import MessageStore
+
+    sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
+    sm.save(WorkspaceState(tasks={}))
+    spec = _approved_spec()
+    store.save(spec)
+
+    def spawn_fn(s):
+        task = _task(slug=s.id, repos=s.affected_repos)
+        sm.mutate(lambda st: st.tasks.__setitem__(s.id, task))
+        return task
+
+    dispatch_spec(
+        spec, state_manager=sm, store=store, spawn_fn=spawn_fn, now=NOW,
+        workitems=items, workspace=WORKSPACE,
+    )
+
+    assert MessageStore(tmp_path / "messages").list() == []

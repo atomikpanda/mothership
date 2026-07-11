@@ -9,7 +9,7 @@ import time as _time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel
 
@@ -133,6 +133,82 @@ async def _pr_watch_loop(watcher: PrWatcher, stop: asyncio.Event, interval: floa
             await asyncio.wait_for(stop.wait(), timeout=interval)
         except asyncio.TimeoutError:
             pass
+
+
+def _dispatch_marker(spec_id: str, task_slug: str) -> str:
+    """Stable substring embedded in the posted event's text, scanned by
+    `_notify_dispatch` for idempotency (see there) — one marker per
+    (spec, task) pair rather than per-dispatch-call, so a re-dispatch of the
+    same spec/task is recognized as already-notified."""
+    return f"dispatch {spec_id} -> {task_slug}"
+
+
+def _notify_dispatch(
+    *, msgs: Any, workitems: Any, item_msg_lock: Any,
+    spec: Any, task: Any, handoff: str, now: datetime,
+) -> bool:
+    """Post a one-time agent `event` message announcing a serve-side dispatch's
+    handoff (spec id, task slug, worktree paths — the same text
+    `build_dispatch_handoff` renders) into the spec's WorkItem thread. This is
+    what makes `Thread.awaiting_agent_event` true, so an idle host agent armed
+    on `mship inbox wait` (whose predicate already includes
+    `awaiting_agent_event`) picks the handoff up automatically — no separate
+    flag or wake mechanism needed.
+
+    Called ONLY from `post_dispatch` (`POST /specs/{id}/dispatch`) — never from
+    `dispatch_spec` itself — so this is serve-only: `mship spec dispatch` (the
+    CLI, which calls `dispatch_spec` directly with no message store in hand)
+    never posts an event.
+
+    Idempotency mirrors `PrWatcher` (`pr_watcher.py`): before appending, the
+    resolved thread's existing messages are scanned for a prior `kind=="event"`
+    message containing `_dispatch_marker(spec.id, task.slug)`; if found, this is
+    a re-dispatch and nothing is posted. The marker is embedded as the event
+    message's leading line so the scan is reliable across both a re-dispatch in
+    the same process and a restart (the scan reads persisted messages, not
+    in-memory state).
+
+    Thread resolution mirrors `post_item_message` / `PrWatcher._resolve_thread`:
+    reuse the WorkItem's first thread if it has one; otherwise create one
+    (linking it back to the WorkItem) and seed it with a short human placeholder
+    — `create_thread` always seeds a human message, and the event must land as
+    a *separate*, trailing agent message for `awaiting_agent_event` to compute
+    True.
+
+    Returns whether a new event message was posted (False when idempotency
+    skipped it). The caller wraps this in a broad try/except regardless — a
+    mailbox glitch here must never turn a successful dispatch into a 500."""
+    if spec.work_item_id is None:
+        # Shouldn't happen — dispatch_spec always attaches a WorkItem — but
+        # there's nowhere to hang a thread without one, so just skip.
+        return False
+
+    marker = _dispatch_marker(spec.id, task.slug)
+    text = f"{marker}\n\n{handoff}"
+
+    with item_msg_lock:
+        wi = workitems.get(spec.work_item_id)
+        if wi is None:
+            return False
+
+        if wi.thread_ids:
+            tid = wi.thread_ids[0]
+        else:
+            seed = f"Dispatch handoff for {task.slug}"
+            thread = msgs.create_thread(
+                subject=spec.title or task.slug, text=seed, now=now, task_slug=task.slug,
+            )
+            workitems.add_thread(wi.id, thread.id, now=now)
+            tid = thread.id
+
+        thread = msgs.get(tid)
+        if thread is not None and any(
+            m.kind == "event" and marker in m.text for m in thread.messages
+        ):
+            return False  # already notified (this dispatch or a prior process) — skip
+
+        msgs.append(tid, "agent", text, now, kind="event")
+        return True
 
 
 def create_app(
@@ -457,6 +533,22 @@ def create_app(
                     spawn_fn=_serve_spawn, now=datetime.now(timezone.utc),
                     workitems=workitems, workspace=workspace_name,
                 )
+                # Serve-side-only handoff notify (MOS-194): posts an agent `event`
+                # message naming the spec/task/worktree into the WorkItem's thread
+                # so an idle host agent armed on `mship inbox wait` picks it up.
+                # Never lets a mailbox glitch turn a successful dispatch into a
+                # 500 — mirrors PrWatcher's never-raise philosophy.
+                try:
+                    _notify_dispatch(
+                        msgs=msgs, workitems=workitems, item_msg_lock=_item_msg_lock,
+                        spec=result.spec, task=result.task, handoff=result.handoff,
+                        now=datetime.now(timezone.utc),
+                    )
+                except Exception:
+                    logger.exception(
+                        "dispatch handoff notify failed (spec=%s task=%s) — "
+                        "dispatch itself succeeded", result.spec.id, result.task.slug,
+                    )
         except DispatchError as e:
             raise HTTPException(status_code=409, detail=str(e))
         return {
