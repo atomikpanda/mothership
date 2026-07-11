@@ -533,6 +533,24 @@ def test_spec_apply_revising_clears_clarification_reason(configured_app_with_tas
     assert spec.clarification_reason is None
 
 
+def test_spec_approve_clears_clarification_reason(configured_app_with_task: Path, tmp_path):
+    """Invariant guard (Greptile): an approved spec carries no stale
+    request-changes reason. The normal flow clears it on apply; this also
+    clears it on the approve path so a needs_review spec that still carries a
+    reason (e.g. seeded/legacy state) doesn't get approved with it lingering."""
+    store = _store(configured_app_with_task)
+    _apply_dq(tmp_path)  # dq -> needs_review
+    spec = store.find_by_id("dq")
+    spec.clarification_reason = "tighten scope"  # simulate a lingering reason on needs_review
+    store.save(spec)
+
+    result = runner.invoke(app, ["spec", "approve", "dq", "--bypass-gate"])
+    assert result.exit_code == 0, result.output
+    spec = store.find_by_id("dq")
+    assert spec.status == "approved"
+    assert spec.clarification_reason is None
+
+
 def test_spec_show_includes_clarification_reason(configured_app_with_task: Path, tmp_path):
     _apply_dq(tmp_path)
     runner.invoke(app, ["spec", "request-changes", "dq", "--reason", "tighten scope"])

@@ -334,6 +334,26 @@ def test_post_apply_revising_clears_clarification_reason(tmp_path):
     assert client.get("/specs/dq").json()["clarification_reason"] is None
 
 
+def test_post_approve_clears_clarification_reason(tmp_path):
+    """MOS-215 (Greptile): approving a spec that still carries a request-changes
+    reason clears it — an approved spec has no pending clarification. Seed a
+    needs_review spec with a lingering reason (normal flow clears it on apply;
+    this guards the approve path too)."""
+    now = datetime(2026, 6, 14, tzinfo=timezone.utc)
+    SpecStore(tmp_path / "specs").save(Spec(
+        id="dq", title="DQ", status="needs_review",
+        created_at=now, updated_at=now, clarification_reason="tighten scope",
+        body=render_body("P", "U", "A"),
+        acceptance_criteria=[AcceptanceCriterion(id="ac1", text="x", verdict="approved")],
+    ))
+    client = TestClient(_app(tmp_path))
+    assert client.get("/specs/dq").json()["clarification_reason"] == "tighten scope"
+
+    r = client.post("/specs/dq/approve", json={"bypass_gate": True})
+    assert r.status_code == 200 and r.json()["status"] == "approved"
+    assert client.get("/specs/dq").json()["clarification_reason"] is None
+
+
 def test_capture_writes_require_auth(tmp_path):
     client = TestClient(_auth_app(tmp_path, "secret"))
     assert client.post("/specs", json={"title": "X"}).status_code == 401

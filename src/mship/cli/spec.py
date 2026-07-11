@@ -379,6 +379,7 @@ def register(parent: typer.Typer, get_container):
             output.error(str(e))
             raise typer.Exit(1)
         spec.status = "approved"
+        spec.clarification_reason = None  # an approved spec carries no pending request-changes reason
         spec.updated_at = datetime.now(timezone.utc)
         path = store.save(spec)
         if output.human_mode:

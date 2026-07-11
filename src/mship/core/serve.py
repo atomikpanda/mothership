@@ -428,6 +428,7 @@ def create_app(
         except InvalidTransition as e:
             raise HTTPException(status_code=409, detail=str(e))
         spec.status = "approved"
+        spec.clarification_reason = None  # an approved spec carries no pending request-changes reason
         return _save_and_review(spec)
 
     @app.post("/specs/{spec_id}/request-changes")
