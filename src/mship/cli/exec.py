@@ -2,8 +2,28 @@ import os
 from typing import Optional
 
 import typer
+from typer.core import TyperCommand
 
 from mship.cli.output import Output
+
+
+class _RemoteFlagCommand(TyperCommand):
+    """A `TyperCommand` that lets `--remote` double as a bare flag OR take a
+    value (`--remote=<role>`) — the "optional value option" Click recipe
+    (`is_flag=False, flag_value=...`) that `typer.Option` explicitly doesn't
+    support (see `typer.models.OptionInfo`, which warns and silently drops
+    both `is_flag`/`flag_value`). Rewriting an exact bare `--remote` token to
+    `--remote=` before Click's own parser runs lets the rest of the command
+    stay a normal `Optional[str] = typer.Option(None, "--remote")`: absent →
+    `None` (local path unchanged), bare `--remote` → `""` (auto-resolve the
+    role), `--remote=role` → `"role"` (explicit role). Only that one exact
+    token is touched; `--remote=role`, `--remote foo` (space-separated, not
+    supported — same limitation as the underlying Click recipe) and every
+    other argument pass through untouched."""
+
+    def parse_args(self, ctx, args):
+        args = ["--remote=" if a == "--remote" else a for a in args]
+        return super().parse_args(ctx, args)
 
 
 def _relpath(path_str: str) -> str:
@@ -79,6 +99,65 @@ def _resolve_repos(
     if candidates is not None:
         return list(candidates)
     return task_affected
+
+
+def _run_remote(
+    *,
+    verb: str,
+    remote_role: str,
+    task_slug: Optional[str],
+    target_repos: list[str],
+    config,
+    container,
+    output: Output,
+) -> int:
+    """Shared `--remote` dispatch for `run`/`build`: resolve the run-host
+    role to a connection, POST to the remote's `/exec/{verb}`, and return the
+    remote task's exit code (mirrored by the caller as `raise
+    typer.Exit(code)`).
+
+    `remote_role` is the raw `--remote` CLI value: `""` (bare flag) means
+    auto-resolve the role (repo's declared `run_host`, else the sole
+    configured `run_hosts` entry); a non-empty string is an explicit
+    `--remote=<role>`.
+
+    Remote execution always operates on a task's branch — the remote
+    materializes `.worktrees/<task>/<repo>` from origin — so there's no
+    "ad-hoc" remote run. Local `run`/`build` gracefully fall back to "the
+    whole workspace" when no task is active, but that fallback has no branch
+    for the remote to check out, so `--remote` without a resolvable task is a
+    clean, actionable CLI error rather than a confusing remote-side failure.
+
+    A `RunHostError` (unknown/ambiguous/unmapped role) or `RemoteExecError`
+    (remote unreachable) surfaces as `output.error(...)` + `typer.Exit(1)` —
+    never a bare traceback.
+    """
+    from mship.core.remote_client import RemoteExecError, exec_remote
+    from mship.core.run_host import RunHostError, RunHostStore, resolve_run_host
+
+    if task_slug is None:
+        output.error(
+            "--remote requires a resolvable task: the remote materializes "
+            "the task's branch, so there's no ad-hoc remote run. Pass "
+            "--task, or run from an active task's worktree."
+        )
+        raise typer.Exit(code=1)
+
+    role = remote_role or None
+    repo_for_host = config.repos[target_repos[0]] if len(target_repos) == 1 else None
+
+    store = RunHostStore(container.state_dir())
+    try:
+        conn = resolve_run_host(role, repo=repo_for_host, config=config, store=store)
+    except RunHostError as e:
+        output.error(str(e))
+        raise typer.Exit(code=1)
+
+    try:
+        return exec_remote(verb=verb, conn=conn, task=task_slug, repos=target_repos)
+    except RemoteExecError as e:
+        output.error(str(e))
+        raise typer.Exit(code=1)
 
 
 def register(app: typer.Typer, get_container):
@@ -304,11 +383,19 @@ def register(app: typer.Typer, get_container):
         if not result.success:
             raise typer.Exit(code=1)
 
-    @app.command(name="run")
+    @app.command(name="run", cls=_RemoteFlagCommand)
     def run_cmd(
         repos: Optional[str] = typer.Option(None, "--repos", help="Comma-separated repo names to filter"),
         tag: Optional[list[str]] = typer.Option(None, "--tag", help="Filter repos by tag"),
         task: Optional[str] = typer.Option(None, "--task", help="Narrow to one task's affected repos"),
+        remote: Optional[str] = typer.Option(
+            None, "--remote",
+            help="Execute on a mapped run-host role instead of locally. Bare "
+                 "--remote auto-resolves the role (the repo's declared "
+                 "run_host, else the sole configured run_hosts entry); "
+                 "--remote=<role> picks one explicitly. Without this flag, "
+                 "behavior is unchanged (local).",
+        ),
     ):
         """Start services across repos in dependency order."""
         import os as _os
@@ -335,6 +422,7 @@ def register(app: typer.Typer, get_container):
         # multiple tasks" case degrades gracefully to "all repos" instead of
         # hard-erroring. An explicit --task or env that points at an unknown
         # slug is still an error.
+        task_slug: str | None
         fallback_repos: list[str]
         try:
             t, _ = resolve_task(
@@ -344,18 +432,28 @@ def register(app: typer.Typer, get_container):
                 cwd=_P.cwd(),
             )
             fallback_repos = t.affected_repos
+            task_slug = t.slug
         except UnknownTaskError as e:
             known = ", ".join(sorted(state.tasks.keys())) or "(none)"
             output.error(f"Unknown task: {e.slug}. Known: {known}.")
             raise typer.Exit(1)
         except (NoActiveTaskError, AmbiguousTaskError):
             fallback_repos = list(config.repos.keys())
+            task_slug = None
 
         try:
             target_repos = _resolve_repos(config, fallback_repos, repos, tag)
         except ValueError as e:
             output.error(str(e))
             raise typer.Exit(code=1)
+
+        if remote is not None:
+            code = _run_remote(
+                verb="run", remote_role=remote, task_slug=task_slug,
+                target_repos=target_repos, config=config, container=container,
+                output=output,
+            )
+            raise typer.Exit(code=code)
 
         executor = container.executor()
         result = executor.execute("run", repos=target_repos)
@@ -433,12 +531,20 @@ def register(app: typer.Typer, get_container):
 
         output.print("All background services have exited")
 
-    @app.command(name="build")
+    @app.command(name="build", cls=_RemoteFlagCommand)
     def build_cmd(
         run_all: bool = typer.Option(False, "--all", help="Build all repos even if one fails"),
         repos: Optional[str] = typer.Option(None, "--repos", help="Comma-separated repo names to filter"),
         tag: Optional[list[str]] = typer.Option(None, "--tag", help="Filter repos by tag"),
         task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
+        remote: Optional[str] = typer.Option(
+            None, "--remote",
+            help="Execute on a mapped run-host role instead of locally. Bare "
+                 "--remote auto-resolves the role (the repo's declared "
+                 "run_host, else the sole configured run_hosts entry); "
+                 "--remote=<role> picks one explicitly. Without this flag, "
+                 "behavior is unchanged (local).",
+        ),
     ):
         """Build artifacts across repos in dependency order (runs `task build`)."""
         import os as _os
@@ -481,6 +587,14 @@ def register(app: typer.Typer, get_container):
         except ValueError as e:
             output.error(str(e))
             raise typer.Exit(code=1)
+
+        if remote is not None:
+            code = _run_remote(
+                verb="build", remote_role=remote, task_slug=task_slug,
+                target_repos=target_repos, config=config, container=container,
+                output=output,
+            )
+            raise typer.Exit(code=code)
 
         executor = container.executor()
         result = executor.execute(
