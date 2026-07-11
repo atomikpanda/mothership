@@ -21,6 +21,7 @@ def build_review(spec: Spec) -> dict:
     return {
         "id": spec.id,
         "status": spec.status,
+        "clarification_reason": spec.clarification_reason,
         "acceptance_criteria": [
             {"id": c.id, "text": c.text, "verdict": c.verdict}
             for c in spec.acceptance_criteria
