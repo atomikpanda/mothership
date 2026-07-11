@@ -54,6 +54,12 @@ class RepoConfig(BaseModel):
     allow_dirty: bool = False
     allow_extra_worktrees: bool = False
     capture: CaptureConfig | None = None
+    # Logical run-host role this repo uses for `--remote` execution (e.g. an
+    # iOS simulator or Android emulator machine). Must name an entry declared
+    # in the workspace's `run_hosts:` list; the concrete {url, token} for the
+    # role lives in the gitignored `.mothership/run-hosts.yaml` store, never
+    # here. See mship.core.run_host.resolve_run_host.
+    run_host: str | None = None
 
     @field_validator("url", mode="after")
     @classmethod
@@ -146,6 +152,13 @@ class WorkspaceConfig(BaseModel):
     # See spec mship-bootstrap (MOS-180).
     default_remote: str | None = None
     relay: RelayConfig | None = None
+    # Logical run-host role names available to this workspace (e.g.
+    # "ios-sim-host", "android-emu-host"). Public/committed — only the role
+    # *names* live here; each machine maps a role to a concrete {url, token}
+    # connection in the gitignored `.mothership/run-hosts.yaml` (see
+    # mship.core.run_host.RunHostStore / resolve_run_host). A repo opts into
+    # one via `RepoConfig.run_host`.
+    run_hosts: list[str] = []
     repos: dict[str, RepoConfig]
 
     @field_validator("relay", mode="before")
