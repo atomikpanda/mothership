@@ -810,17 +810,25 @@ def create_app(
         `_fire_lifecycle_hook` (do the bookkeeping under the lock, run the
         subprocess outside it).
 
-        The ONLY reason this skips firing hooks is `config is None` — this
+        The ONLY reason hooks aren't evaluated here is `config is None` — this
         serve instance has no workspace config wired in at all (see
         `create_app`'s docstring), so there is structurally nothing to
-        evaluate. That check is deliberately its own `if`, nested below
-        `body.phase is not None`, rather than folded into one combined
+        evaluate against. That check is deliberately its own `if`, nested
+        below `body.phase is not None`, rather than folded into one combined
         condition — so a config that DOES exist can never be silently
         dropped by an unrelated branch here matching the CLI's own
         `workitem phase` command (mship.cli.workitem), which always has a
-        config and always fires hooks when `body.phase is not None`. Logged
-        at warning level (not debug) — a serve instance quietly missing its
-        config is a policy hole worth surfacing, not just a curiosity."""
+        config and always fires hooks when `body.phase is not None`.
+
+        MOS-220 Greptile fix ("Configless Server Bypasses Hooks", #312): a
+        missing config used to just log a warning and still apply the phase
+        override below — letting a configless serve instance move a work
+        item to e.g. `done` without ever running a `required` hook the CLI
+        would have enforced. That's a silent policy bypass, not a graceful
+        degradation, so this now fails CLOSED: `config is None` raises 503
+        and returns without touching `set_phase_override` at all. Clearing an
+        override (`body.phase is None`, no phase name to fire a hook for) is
+        unaffected and always applies regardless of config."""
         now = datetime.now(timezone.utc)
         with _item_msg_lock:
             if workitems.get(item_id) is None:
@@ -838,10 +846,23 @@ def create_app(
                 except HookRequiredError as e:
                     raise HTTPException(status_code=422, detail=str(e))
             else:
+                # Fail closed (Greptile, MOS-220 #312): this serve instance has no
+                # workspace config, so there is structurally nothing to evaluate
+                # `workitem.phase.<phase>` hooks against. Refuse the mutation
+                # rather than silently applying a policy-relevant phase change
+                # that a config'd instance (or the CLI) would have gated on a
+                # required hook.
                 logger.warning(
                     "post_item_phase: no workspace config wired into this "
-                    "serve instance — workitem.phase.%s hooks not evaluated "
-                    "for %s", body.phase, item_id,
+                    "serve instance — refusing workitem.phase.%s for %s "
+                    "(cannot evaluate lifecycle hooks)", body.phase, item_id,
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "server has no workspace config; cannot evaluate "
+                        "lifecycle hooks for this phase change"
+                    ),
                 )
 
         with _item_msg_lock:

@@ -125,9 +125,15 @@ def test_post_item_message_404_for_unknown_item(tmp_path):
 # --- gc32 ac3: POST /items/{id}/phase (Mark done / Reopen) ---
 
 def test_post_item_phase_sets_override(tmp_path):
+    """A config with no hooks configured for this phase still applies the
+    override cleanly — config presence is what matters, not whether a hook
+    happens to be registered for this particular phase name."""
+    from mship.core.config import WorkspaceConfig
+
     items = WorkItemStore(tmp_path / ".mothership" / "workitems")
     wi = items.create(title="Stuck item", kind="feature", workspace="testws", now=_now())
-    client = _app(tmp_path)
+    config = WorkspaceConfig(workspace="testws", repos={}, hooks=[])
+    client = _app_with_config(tmp_path, config)
 
     resp = client.post(f"/items/{wi.id}/phase", json={"phase": "done"})
     assert resp.status_code == 200
@@ -233,13 +239,13 @@ def test_post_item_phase_non_required_hook_failure_still_sets_override(tmp_path)
 
 
 def test_post_item_phase_hook_fires_iff_config_present(tmp_path):
-    """MOS-220 Greptile fix ("Server Can Bypass Phase Hooks"): the endpoint
-    must fire configured hooks whenever `config` IS present, and the skip
-    must be strictly BECAUSE `config is None` — not some other code path
-    that happens to drop hooks even when a config (with a matching hook)
-    exists. Same hook definition, same WorkItemStore dir; the only variable
-    between the two calls below is whether `config` is wired into
-    `create_app` at all."""
+    """MOS-220 Greptile fix ("Configless Server Bypasses Hooks", #312): a
+    configless serve instance cannot evaluate lifecycle hooks at all, so it
+    must refuse the phase change (503) rather than silently applying it —
+    the earlier behavior (apply anyway, just skip the hook) was itself the
+    bypass this test now guards against. Same hook definition, same
+    WorkItemStore dir; the only variable between the two calls below is
+    whether `config` is wired into `create_app` at all."""
     from mship.core.config import HookConfig, WorkspaceConfig
 
     items = WorkItemStore(tmp_path / ".mothership" / "workitems")
@@ -249,15 +255,17 @@ def test_post_item_phase_hook_fires_iff_config_present(tmp_path):
     marker = tmp_path / "hook-fired.txt"
     hooks = [HookConfig(on="workitem.phase.done", run=f"touch {marker}")]
 
-    # No config wired into create_app at all -> genuinely nothing to fire,
-    # but the override must still apply cleanly (no crash).
+    # No config wired into create_app at all -> nothing to evaluate hooks
+    # against, so the endpoint must fail closed: refuse the mutation rather
+    # than bypassing whatever hook policy would otherwise apply.
     client_no_config = _app(tmp_path)
     resp = client_no_config.post(f"/items/{wi_no_config.id}/phase", json={"phase": "done"})
-    assert resp.status_code == 200
+    assert resp.status_code == 503
     assert not marker.exists()
-    assert items.get(wi_no_config.id).phase_override == "done"
+    assert items.get(wi_no_config.id).phase_override is None
 
-    # Same hook definition, config now wired in -> it must fire.
+    # Same hook definition, config now wired in -> it must fire, and the
+    # override applies normally.
     config = WorkspaceConfig(workspace="testws", repos={}, hooks=hooks)
     client_with_config = _app_with_config(tmp_path, config)
     resp = client_with_config.post(f"/items/{wi_with_config.id}/phase", json={"phase": "done"})
