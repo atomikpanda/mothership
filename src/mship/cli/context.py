@@ -25,13 +25,14 @@ from mship.core.task_resolver import (
 
 def _render_audience_block(audience: dict) -> None:
     """Print a readable rendition of `audience["instructions"]` (MOS-100
-    ac9). TTY-only -- callers must guard with `output.human_mode` first, same
-    as the existing `mship spec show` human-render path (cli/spec.py)."""
+    ac9) to STDERR, so `mship context`'s stdout stays a pure JSON stream
+    (MOS-177) — the audience is also in the JSON payload under `audience`.
+    TTY-only -- callers guard with `output.human_mode` first."""
     from rich.console import Console
     from rich.markdown import Markdown
 
     kind_suffix = f" ({audience['kind']})" if audience.get("kind") else ""
-    Console().print(Markdown(
+    Console(stderr=True).print(Markdown(
         f"**Audience: {audience['for']}{kind_suffix}**\n\n{audience['instructions']}"
     ))
 

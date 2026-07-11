@@ -284,10 +284,11 @@ def test_context_unknown_for_value_is_rejected(tmp_path: Path):
 
 
 def test_context_tty_renders_markdown_audience_block(tmp_path: Path, monkeypatch):
-    """ac9: in human/TTY mode, the instructions render as a readable block
-    after the existing breadcrumb output — in addition to (not instead of)
-    the unchanged JSON payload."""
-    runner = CliRunner()
+    """ac9 + MOS-177: in human mode the instructions render to STDERR as a
+    readable block, while STDOUT stays a PURE JSON stream (a human preamble on
+    stdout would break callers that parse `mship context` output as JSON). The
+    audience is also carried in the JSON payload."""
+    runner = CliRunner()  # click 8.2+: stdout/stderr are already separate
     cfg, state_dir = _bootstrap(tmp_path, [])
     container.config.reset()
     container.state_manager.reset()
@@ -299,16 +300,11 @@ def test_context_tty_renders_markdown_audience_block(tmp_path: Path, monkeypatch
     try:
         result = runner.invoke(app, ["context", "--for", "human"])
         assert result.exit_code == 0, result.output
-        assert "human" in result.output
-        # The instructions text (or a clear fragment of it) renders as a
-        # human-readable block ahead of the JSON dump.
-        brace_index = result.output.index("{")
-        rendered_block = result.output[:brace_index]
-        assert "status" in rendered_block or "summary" in rendered_block
-        # ...and the JSON payload (the load-bearing copy) is still emitted,
-        # unaltered, with the same audience block.
-        data = json.loads(result.output[brace_index:])
+        # STDOUT is pure, parseable JSON — no prose preamble polluting it.
+        data = json.loads(result.stdout)
         assert data["audience"]["for"] == "human"
+        # The human-readable block renders to STDERR (alongside breadcrumbs).
+        assert "Audience" in result.stderr or "human" in result.stderr
     finally:
         reset_output_settings()
         _reset_container()
