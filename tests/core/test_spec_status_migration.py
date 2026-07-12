@@ -68,6 +68,30 @@ def test_migrated_sent_back_spec_can_be_reapplied():
     assert can_transition(spec.status, "needs_review") is True
 
 
+def test_model_validate_json_migrates_legacy_status_directly():
+    # The migration runs at the MODEL layer, not just parse_spec — a client or
+    # script validating old serialized Spec JSON must not error on removed literals.
+    import json
+    from mship.core.spec import Spec
+    old = json.dumps({
+        "id": "demo", "title": "Demo", "status": "drafting",
+        "created_at": "2026-07-01T00:00:00Z", "updated_at": "2026-07-01T00:00:00Z",
+    })
+    spec = Spec.model_validate_json(old)
+    assert spec.status == "draft"
+
+
+def test_direct_construct_migrates_legacy_needs_clarification():
+    from datetime import datetime
+    from mship.core.spec import Spec
+    spec = Spec(
+        id="d", title="D", status="needs_clarification",
+        created_at=datetime(2026, 7, 1), updated_at=datetime(2026, 7, 1),
+    )
+    assert spec.status == "draft"
+    assert spec.clarification_reason is not None
+
+
 @pytest.mark.parametrize("status", ["draft", "needs_review", "approved", "dispatched", "implemented", "archived"])
 def test_new_statuses_pass_through_unchanged(status):
     spec = parse_spec(_spec_file(status))

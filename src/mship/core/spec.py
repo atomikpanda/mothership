@@ -3,18 +3,30 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 # MOS-240: collapsed status vocabulary (was 8: captured/drafting/needs_review/
 # needs_clarification/approved/dispatched/implemented/archived). `captured` +
 # `drafting` merged into `draft`; `needs_clarification` dropped — "needs
 # clarification" is now expressed by a non-null `clarification_reason` on any
-# status. Old persisted values are mapped forward on read (see
-# spec_store.parse_spec / LEGACY_STATUS_MAP).
+# status.
 SpecStatus = Literal[
     "draft", "needs_review", "approved", "dispatched", "implemented", "archived",
 ]
+
+# Legacy statuses are mapped forward at EVERY Spec construction path via the model
+# validator below — not just `parse_spec` — so `Spec.model_validate_json(...)`,
+# direct construction, or any client loading old serialized Spec data never errors
+# on the removed literals. `captured`/`drafting`/`needs_clarification` → `draft`;
+# for `needs_clarification` the "sent back for changes" signal is preserved as a
+# `clarification_reason` (matching how `mship spec request-changes` writes it).
+LEGACY_STATUS_MAP: dict[str, str] = {
+    "captured": "draft",
+    "drafting": "draft",
+    "needs_clarification": "draft",
+}
+_MIGRATED_CLARIFICATION_REASON = "needs clarification (migrated from needs_clarification status)"
 
 
 class AcceptanceCriterion(BaseModel):
@@ -44,6 +56,26 @@ class Spec(BaseModel):
     body: str = ""
     work_item_id: str | None = None
     clarification_reason: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_status(cls, data):
+        """Map pre-MOS-240 statuses forward at EVERY construction path (MOS-240).
+
+        Runs for `model_validate`/`model_validate_json`/direct-dict construction —
+        so old serialized Spec data loads cleanly regardless of whether it came
+        through `parse_spec`, a client, or a script — before the `SpecStatus`
+        literal is enforced.
+        """
+        if not isinstance(data, dict):
+            return data
+        old = data.get("status")
+        new = LEGACY_STATUS_MAP.get(old)
+        if new is not None:
+            data["status"] = new
+            if old == "needs_clarification" and not data.get("clarification_reason"):
+                data["clarification_reason"] = _MIGRATED_CLARIFICATION_REASON
+        return data
 
     @property
     def dispatch_ready(self) -> bool:
