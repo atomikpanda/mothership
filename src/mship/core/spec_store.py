@@ -15,12 +15,15 @@ class SpecParseError(Exception):
 
 
 # MOS-240: forward-map the pre-collapse status vocabulary. `captured`/`drafting`
-# collapse into `draft`; `needs_clarification` becomes `needs_review` (the
-# "needs clarification" signal now lives in a non-null `clarification_reason`).
+# collapse into `draft`; `needs_clarification` also maps to `draft` — the new
+# model expresses "sent back for changes" as `draft` + a non-null
+# `clarification_reason` (exactly what `mship spec request-changes` now writes),
+# so a migrated sent-back spec must land in `draft` (not `needs_review`, which
+# would falsely read as "ready to approve" and block re-apply).
 LEGACY_STATUS_MAP: dict[str, str] = {
     "captured": "draft",
     "drafting": "draft",
-    "needs_clarification": "needs_review",
+    "needs_clarification": "draft",
 }
 
 # Sentinel reason stamped on a migrated `needs_clarification` spec that carried no

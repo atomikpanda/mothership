@@ -85,7 +85,7 @@ MSHIP_TASK=other-task ./scripts/run-integration.sh
 In a mothership workspace the **canonical design artifact is a structured `mship spec`**, not an ad-hoc design doc. A spec is the shared communication substrate: a durable, queryable artifact that agents hand off to each other and that humans review/steer from the mobile app over `mship serve`. The `plan` phase is where a spec is authored and approved.
 
 A spec lives at `<workspace>/specs/<date>-<id>.md` — frontmatter (id, title, status, acceptance criteria, open questions, non-goals, risks, bound task) + a body with `Problem` / `User story` / `Approach` sections. Status flows:
-`captured → drafting → needs_review → needs_clarification → approved → dispatched → implemented → archived`.
+`draft → needs_review → approved → dispatched → implemented → archived` (a review sends a spec back to `draft` carrying a `clarification_reason`; any non-terminal status can be `archived`).
 
 **Specs are workspace-level and branch-stable.** The `specs/` directory lives at the workspace root — not inside a member repo's feature branch — so a spec resolves the same way no matter which task/branch is checked out, and `mship view spec` always finds it. Author the spec (during `plan`) **before** `mship spec dispatch` spawns/binds the task; the task then consumes it. **Never hand-edit a spec file inside a task worktree** — that copy would diverge from the canonical one and be invisible to `mship view spec`. Mutate specs only through the `mship spec` commands below. (This is why the old "which branch do I commit the design doc on?" question doesn't arise: `mship spec`s aren't branch-scoped.)
 
@@ -104,7 +104,7 @@ mship spec questions <id>                    # list open questions
 mship spec ask <id> "<question>"             # add a question
 mship spec answer <id> <question-id> "<answer>"
 mship spec approve <id> [--bypass-gate]      # → approved (gate: all criteria approved + questions answered)
-mship spec request-changes <id> --reason "<why>"   # → needs_clarification
+mship spec request-changes <id> --reason "<why>"   # → draft (carries the reason)
 mship spec dispatch <id>                     # bind the approved spec to a task + emit a handoff
 ```
 

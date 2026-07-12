@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import pytest
 
+from mship.core.spec import can_transition
 from mship.core.spec_store import parse_spec, serialize_spec
+from mship.core.view.workitem_index import compute_attention
 
 
 def _spec_file(status: str, *, clarification_reason: str | None = None, extra: str = "") -> str:
@@ -34,9 +36,11 @@ def test_legacy_captured_and_drafting_map_to_draft(legacy):
     assert spec.status == "draft"
 
 
-def test_legacy_needs_clarification_maps_to_needs_review_preserving_reason():
+def test_legacy_needs_clarification_maps_to_draft_preserving_reason():
+    # "sent back for changes" is now `draft` + a non-null clarification_reason
+    # (what request-changes writes), so the migrated spec must land in `draft`.
     spec = parse_spec(_spec_file("needs_clarification", clarification_reason="tighten scope"))
-    assert spec.status == "needs_review"
+    assert spec.status == "draft"
     assert spec.clarification_reason == "tighten scope"
 
 
@@ -44,8 +48,24 @@ def test_legacy_needs_clarification_without_reason_gets_a_reason():
     # The new model expresses "needs clarification" via a non-null clarification_reason,
     # so a migrated needs_clarification spec that lacked one must gain one.
     spec = parse_spec(_spec_file("needs_clarification"))
-    assert spec.status == "needs_review"
+    assert spec.status == "draft"
     assert spec.clarification_reason is not None
+
+
+def test_migrated_sent_back_spec_is_not_flagged_needs_approval():
+    # A migrated needs_clarification spec is awaiting the AUTHOR, not the reviewer —
+    # it must NOT surface as needs_approval (which keys off status == needs_review).
+    spec = parse_spec(_spec_file("needs_clarification", clarification_reason="tighten scope"))
+    attention = compute_attention(spec, [], [])
+    assert attention.needs_approval is False
+
+
+def test_migrated_sent_back_spec_can_be_reapplied():
+    # From draft, re-applying a revised spec (draft → needs_review) must be legal —
+    # a needs_review→needs_review mapping would have blocked resubmission.
+    spec = parse_spec(_spec_file("needs_clarification", clarification_reason="tighten scope"))
+    assert spec.status == "draft"
+    assert can_transition(spec.status, "needs_review") is True
 
 
 @pytest.mark.parametrize("status", ["draft", "needs_review", "approved", "dispatched", "implemented", "archived"])
