@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from mship.core.spec import Spec
 from mship.core.spec_store import SpecStore
 from mship.core.state import StateManager, Task, WorkspaceState
-from mship.core.workitem_gate import GateResult, check_task_gate, log_hotfix
+from mship.core.workitem_gate import GateResult, check_task_gate, log_hotfix, resolve_bound_spec
 from mship.core.workitem_store import WorkItemStore
 
 
@@ -216,3 +216,38 @@ def test_workitem_migrate_shares_the_same_approved_statuses_object():
     can't silently drift out of sync."""
     from mship.core import workitem_gate, workitem_migrate
     assert workitem_migrate.APPROVED_STATUSES is workitem_gate.APPROVED_STATUSES
+
+
+# ---------------------------------------------------------------------------
+# ac8 (PR-b): shared resolve_bound_spec(task, workspace_root) -> Spec | None.
+# Resolves the spec bound to a task via the WorkItem's spec_id first, then a
+# task_slug fallback — the same resolution the WorkItem gate +
+# PhaseManager._has_approved_spec use. Never raises (missing/corrupt store -> None).
+# ---------------------------------------------------------------------------
+
+def test_resolve_bound_spec_via_workitem_spec_id(tmp_path):
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="F", kind="feature", workspace="ws", now=now)
+    SpecStore(tmp_path / "specs").save(Spec(id="s1", title="S", status="approved",
+                                            created_at=now, updated_at=now))
+    items.link_spec(wi.id, "s1", now=now)
+    task = Task(slug="t", description="d", phase="dev", created_at=now,
+                affected_repos=["shared"], branch="feat/t", work_item_id=wi.id)
+    assert resolve_bound_spec(task, tmp_path).id == "s1"
+
+
+def test_resolve_bound_spec_via_task_slug_fallback(tmp_path):
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    SpecStore(tmp_path / "specs").save(Spec(id="s2", title="S", status="approved",
+                                            created_at=now, updated_at=now, task_slug="t"))
+    task = Task(slug="t", description="d", phase="dev", created_at=now,
+                affected_repos=["shared"], branch="feat/t")
+    assert resolve_bound_spec(task, tmp_path).id == "s2"
+
+
+def test_resolve_bound_spec_none_when_unbound(tmp_path):
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    task = Task(slug="t", description="d", phase="dev", created_at=now,
+                affected_repos=["shared"], branch="feat/t")
+    assert resolve_bound_spec(task, tmp_path) is None

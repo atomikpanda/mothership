@@ -56,6 +56,28 @@ def _feature_has_approved_spec(wi: WorkItem, task, workspace_root: Path) -> bool
     return any(s.task_slug == task.slug and s.status in APPROVED_STATUSES for s in specs.list())
 
 
+def resolve_bound_spec(task, workspace_root: Path):
+    """Return the Spec bound to `task` (its WorkItem's spec_id, else a spec whose
+    task_slug matches), or None. Reuses the SpecStore/WorkItemStore resolution the
+    WorkItem gate + PhaseManager._has_approved_spec already use. Never raises — a
+    missing/corrupt store yields None, so the AC-evidence gate is simply a no-op."""
+    try:
+        specs = SpecStore(Path(workspace_root) / "specs")
+        wi_id = getattr(task, "work_item_id", None)
+        if wi_id is not None:
+            wi = WorkItemStore(Path(workspace_root) / ".mothership" / "workitems").get(wi_id)
+            if wi is not None and wi.spec_id:
+                bound = specs.find_by_id(wi.spec_id)
+                if bound is not None:
+                    return bound
+        for s in specs.list():
+            if s.task_slug == task.slug:
+                return s
+    except Exception:
+        return None
+    return None
+
+
 def _docs_dir(workspace_root: Path) -> str:
     """`docs_dir` from mothership.yaml; fall back to "docs" on any load error
     (e.g. running outside a materialized workspace)."""

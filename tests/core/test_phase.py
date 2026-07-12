@@ -787,3 +787,34 @@ def test_transition_with_no_hooks_configured_is_unaffected(state_with_task, tmp_
     pm = _make_phase_manager_with_hooks(state_with_task, tmp_path, hooks=[])
     result = pm.transition("add-labels", "dev")
     assert result.new_phase == "dev"
+
+
+# ---------------------------------------------------------------------------
+# ac8 (PR-b): entering review WARNs listing bound-spec acceptance criteria that
+# have no evidence — a soft signal that never blocks the transition.
+# ---------------------------------------------------------------------------
+
+def test_transition_to_review_warns_on_acs_without_evidence(state_with_task, tmp_path):
+    """ac8: entering review WARNs listing bound-spec ACs with no evidence, and
+    never blocks the transition."""
+    from mship.core.spec import AcceptanceCriterion, Spec
+    from mship.core.spec_store import SpecStore
+    now = datetime(2026, 4, 10, tzinfo=timezone.utc)
+    SpecStore(tmp_path / "specs").save(Spec(
+        id="add-labels-spec", title="S", status="approved",
+        created_at=now, updated_at=now, task_slug="add-labels",
+        acceptance_criteria=[AcceptanceCriterion(id="ac1", text="x", verdict="approved")],
+    ))
+    pm = _make_phase_manager(state_with_task, tmp_path)
+    pm.transition("add-labels", "dev")
+    result = pm.transition("add-labels", "review")
+    assert result.new_phase == "review"                                   # never blocks
+    assert any("evidence" in w.lower() and "ac1" in w for w in result.warnings)
+
+
+def test_transition_to_review_no_ac_warning_without_bound_spec(state_with_task, tmp_path):
+    pm = _make_phase_manager(state_with_task, tmp_path)
+    pm.transition("add-labels", "dev")
+    result = pm.transition("add-labels", "review")
+    assert not any("evidence" in w.lower() and "acceptance" in w.lower()
+                   for w in result.warnings)
