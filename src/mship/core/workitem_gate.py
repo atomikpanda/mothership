@@ -39,9 +39,11 @@ def check_task_gate(task, workspace_root: Path, require_plan: bool = False) -> G
         return GateResult(False, "feature WorkItem requires an approved spec before dev/finish "
                                  "(approve it in Ground Control, or `--hotfix` to override)")
     if require_plan and wi.kind == "feature" and not _feature_has_plan(wi, task, workspace_root):
-        return GateResult(False, "feature WorkItem requires an implementation plan before dev/finish — "
-                                 "write one (writing-plans, at <docs_dir>/plans/<date>-<slug>.md) or link "
-                                 "it with `mship item link-plan`. Use --bypass-plan-gate / --hotfix to skip.")
+        dd = _docs_dir(workspace_root)
+        return GateResult(False, f"feature WorkItem requires an implementation plan before dev/finish — "
+                                 f"write one (writing-plans) at {dd}/plans/<date>-{task.slug}.md, or link it "
+                                 f"with `mship item link-plan {task.work_item_id} <path>`. "
+                                 f"Use --bypass-plan-gate / --hotfix to skip.")
     return GateResult(True)
 
 
@@ -54,22 +56,27 @@ def _feature_has_approved_spec(wi: WorkItem, task, workspace_root: Path) -> bool
     return any(s.task_slug == task.slug and s.status in APPROVED_STATUSES for s in specs.list())
 
 
-def _feature_has_plan(wi: WorkItem, task, workspace_root: Path) -> bool:
-    """A feature's plan resolves (via the WorkItem's explicit `plan_path` or the
-    `<docs_dir>/plans/<date>-<slug>.md` convention) AND carries a mship:task
-    anchor. `docs_dir` comes from mothership.yaml; fall back to "docs" on any
-    load error (e.g. running outside a materialized workspace)."""
+def _docs_dir(workspace_root: Path) -> str:
+    """`docs_dir` from mothership.yaml; fall back to "docs" on any load error
+    (e.g. running outside a materialized workspace)."""
     from mship.core.config import ConfigLoader
-    from mship.core.plan import plan_has_tasks, resolve_plan_path
-
-    docs_dir = "docs"
     try:
-        docs_dir = ConfigLoader.load(
+        return ConfigLoader.load(
             Path(workspace_root) / "mothership.yaml", require_paths=False
         ).docs_dir
     except Exception:
-        pass
-    p = resolve_plan_path(task.slug, getattr(wi, "plan_path", None), workspace_root, docs_dir)
+        return "docs"
+
+
+def _feature_has_plan(wi: WorkItem, task, workspace_root: Path) -> bool:
+    """A feature's plan resolves (via the WorkItem's explicit `plan_path` or the
+    `<docs_dir>/plans/<date>-<slug>.md` convention) AND carries a mship:task
+    anchor."""
+    from mship.core.plan import plan_has_tasks, resolve_plan_path
+
+    p = resolve_plan_path(
+        task.slug, getattr(wi, "plan_path", None), workspace_root, _docs_dir(workspace_root)
+    )
     return p is not None and plan_has_tasks(p.read_text())
 
 

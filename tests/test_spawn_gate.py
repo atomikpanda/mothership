@@ -101,6 +101,21 @@ def test_spawn_with_valid_work_item_sets_forward_and_reverse_link(spawn_gate_wor
     assert "add-labels" in reloaded.task_slugs
 
 
+def test_spawn_feature_work_item_without_spec_or_plan_succeeds(spawn_gate_workspace: Path):
+    """ac3: spawn is never spec/plan-gated — a FEATURE work item spawns fine
+    before its spec is approved or its plan is written (those gate phase dev,
+    not spawn)."""
+    items = _items_store(spawn_gate_workspace)
+    wi = items.create(title="add labels", kind="feature", workspace="ws", now=_now())
+
+    result = runner.invoke(
+        app, ["spawn", "add labels", "--repos", "shared", "--work-item", wi.id],
+    )
+    assert result.exit_code == 0, result.output
+    state = StateManager(spawn_gate_workspace / ".mothership").load()
+    assert state.tasks["add-labels"].work_item_id == wi.id
+
+
 def test_spawn_with_item_alias_flag_accepted(spawn_gate_workspace: Path):
     """--item is the short alias for --work-item."""
     items = _items_store(spawn_gate_workspace)
