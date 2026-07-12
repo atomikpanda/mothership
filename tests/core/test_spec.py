@@ -8,7 +8,7 @@ from mship.core.spec import AcceptanceCriterion, AcceptanceEvidence, InvalidTran
 
 def _spec(**kw):
     now = datetime(2026, 6, 13, tzinfo=timezone.utc)
-    base = dict(id="demo", title="Demo", status="drafting", created_at=now, updated_at=now)
+    base = dict(id="demo", title="Demo", status="draft", created_at=now, updated_at=now)
     base.update(kw)
     return Spec(**base)
 
@@ -49,18 +49,16 @@ def test_acceptance_evidence_rejects_unknown_kind():
 
 
 @pytest.mark.parametrize("current,target", [
-    ("captured", "drafting"),
-    ("drafting", "needs_review"),
+    ("draft", "needs_review"),
     ("needs_review", "approved"),
-    ("needs_review", "needs_clarification"),
-    ("needs_clarification", "needs_review"),
+    ("needs_review", "draft"),              # request-changes / send back
     ("approved", "dispatched"),
-    ("approved", "needs_clarification"),   # re-open
+    ("approved", "draft"),                  # re-open / request-changes
     ("dispatched", "implemented"),
     ("implemented", "archived"),
-    ("drafting", "archived"),              # abandon from any non-terminal
+    ("draft", "archived"),                 # abandon from any non-terminal
     ("approved", "archived"),              # abandon
-    ("needs_clarification", "archived"),   # abandon
+    ("needs_review", "archived"),          # abandon
     ("dispatched", "archived"),            # abandon
 ])
 def test_legal_transitions_allowed(current, target):
@@ -69,9 +67,9 @@ def test_legal_transitions_allowed(current, target):
 
 
 @pytest.mark.parametrize("current,target", [
-    ("captured", "approved"),     # skips drafting/review
-    ("drafting", "dispatched"),   # skips review/approval
-    ("archived", "drafting"),     # terminal
+    ("draft", "approved"),        # skips review
+    ("draft", "dispatched"),      # skips review/approval
+    ("archived", "draft"),        # terminal
     ("approved", "approved"),     # no-op
 ])
 def test_illegal_transitions_rejected(current, target):

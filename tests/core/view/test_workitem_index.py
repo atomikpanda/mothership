@@ -40,7 +40,7 @@ def _task(*, finished=False, pr=False, blocked=False):
 
 
 def test_phase_override_wins():
-    assert compute_phase(_wi(phase_override="done"), _spec("drafting"), [_task()]) == "done"
+    assert compute_phase(_wi(phase_override="done"), _spec("draft"), [_task()]) == "done"
 
 
 def test_no_children_is_inbox():
@@ -48,10 +48,10 @@ def test_no_children_is_inbox():
 
 
 def test_spec_status_maps_to_phase():
-    assert compute_phase(_wi(), _spec("captured"), []) == "inbox"
-    assert compute_phase(_wi(), _spec("drafting"), []) == "shaping"
+    # MOS-240: collapsed vocabulary. `draft` -> shaping (preserves the phase of
+    # every spec created via the normal flow, which were always `drafting`).
+    assert compute_phase(_wi(), _spec("draft"), []) == "shaping"
     assert compute_phase(_wi(), _spec("needs_review"), []) == "shaping"
-    assert compute_phase(_wi(), _spec("needs_clarification"), []) == "shaping"
     assert compute_phase(_wi(), _spec("approved"), []) == "ready"
     assert compute_phase(_wi(), _spec("dispatched"), []) == "in_flight"
     assert compute_phase(_wi(), _spec("implemented"), []) == "done"

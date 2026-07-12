@@ -14,6 +14,10 @@ class SpecParseError(Exception):
     pass
 
 
+# MOS-240: legacy spec statuses (captured/drafting/needs_clarification) are mapped
+# forward by the Spec model's `_migrate_legacy_status` validator (see core/spec.py),
+# so EVERY construction path — parse_spec, `Spec.model_validate_json`, direct
+# construction — handles old serialized data, not just this reader.
 def parse_spec(text: str) -> Spec:
     lines = text.splitlines(keepends=True)
     if not lines or lines[0].strip() != "---":

@@ -224,7 +224,8 @@ def test_post_request_changes(tmp_path):
     _seed_spec(tmp_path)
     client = TestClient(_app(tmp_path))
     r = client.post("/specs/dq/request-changes", json={"reason": "tighten scope"})
-    assert r.status_code == 200 and r.json()["status"] == "needs_clarification"
+    # MOS-240: request-changes -> editable `draft` status carrying the reason.
+    assert r.status_code == 200 and r.json()["status"] == "draft"
 
 
 def test_post_request_changes_persists_reason(tmp_path):
@@ -268,7 +269,7 @@ def test_post_create_spec(tmp_path):
     assert r.status_code == 200
     body = r.json()
     assert body["id"] == "decision-queue"     # slugified title
-    assert body["status"] == "drafting"
+    assert body["status"] == "draft"
     assert body["affected_repos"] == ["mothership"]
     # persisted → shows up in the list
     assert any(s["id"] == "decision-queue" for s in client.get("/specs").json())
@@ -300,7 +301,7 @@ def test_post_draft_returns_prompt_no_mutation(tmp_path):
     assert "I want a decision queue" in prompt          # the intent
     assert "acceptance_criteria" in prompt              # the draft JSON shape
     # draft is read-only: status unchanged
-    assert client.get("/specs/dq").json()["status"] == "drafting"
+    assert client.get("/specs/dq").json()["status"] == "draft"
 
 
 def test_post_draft_unknown_spec_404(tmp_path):
@@ -339,15 +340,15 @@ def test_post_apply_illegal_transition_409_and_bypass(tmp_path):
 
 
 def test_post_apply_revising_clears_clarification_reason(tmp_path):
-    """MOS-215: applying a revised draft to a needs_clarification spec must
-    clear the stale reason from the earlier request-changes."""
+    """MOS-215/MOS-240: applying a revised draft to a spec that was sent back
+    (draft + clarification_reason) must clear the stale reason."""
     client = TestClient(_app(tmp_path))
-    client.post("/specs", json={"title": "DQ", "id": "dq"})   # drafting
+    client.post("/specs", json={"title": "DQ", "id": "dq"})   # draft
     client.post("/specs/dq/apply", json={"draft": {
         "problem": "P", "user_story": "U", "approach": "A",
         "acceptance_criteria": ["view questions"], "open_questions": [],
     }})   # -> needs_review
-    client.post("/specs/dq/request-changes", json={"reason": "tighten scope"})   # -> needs_clarification
+    client.post("/specs/dq/request-changes", json={"reason": "tighten scope"})   # -> draft (+ reason)
     assert client.get("/specs/dq").json()["clarification_reason"] == "tighten scope"
 
     r = client.post("/specs/dq/apply", json={"draft": {
@@ -808,7 +809,7 @@ def test_post_archive_from_any_non_terminal_state(tmp_path):
     # Decluttering: archive is reachable from any non-terminal status, not only
     # implemented -> archived.
     for i, status in enumerate(
-        ["captured", "drafting", "needs_review", "approved", "dispatched"]
+        ["draft", "needs_review", "approved", "dispatched"]
     ):
         sid = f"s{i}"
         _seed_status_spec(tmp_path, status, spec_id=sid)

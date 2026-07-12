@@ -169,14 +169,12 @@ def register(parent: typer.Typer, get_container):
                 output.error(f"{e}. Use --bypass-status-gate to override.")
                 raise typer.Exit(1)
 
-        # MOS-215: applying a revised draft is how a needs_clarification spec
-        # moves forward — clear the stale reason so it doesn't linger once
-        # addressed. (Capture the prior status before overwriting it below.)
-        was_needs_clarification = spec.status == "needs_clarification"
+        # MOS-215/MOS-240: applying a (re)drafted spec supersedes any pending
+        # request-changes, so clear the reason — a freshly applied draft carries
+        # no outstanding clarification ask. (A brand-new draft has none anyway.)
         apply_draft(spec, draft)
         spec.status = "needs_review"
-        if was_needs_clarification:
-            spec.clarification_reason = None
+        spec.clarification_reason = None
         spec.updated_at = datetime.now(timezone.utc)
         path = store.save(spec)
 
@@ -206,7 +204,7 @@ def register(parent: typer.Typer, get_container):
         payload = build_review(spec)
         if output.human_mode:
             output.print(f"[bold]{payload['id']}[/bold] ({payload['status']})")
-            if payload["status"] == "needs_clarification" and payload["clarification_reason"]:
+            if payload["clarification_reason"]:
                 output.print(f"  [bold yellow]Requested changes:[/bold yellow] {payload['clarification_reason']}")
             for c in payload["acceptance_criteria"]:
                 output.print(f"  [{c['verdict']}] {c['id']}: {c['text']}")
@@ -545,7 +543,11 @@ def register(parent: typer.Typer, get_container):
         spec_id: str = typer.Argument(...),
         reason: str = typer.Option(..., "--reason", help="What needs to change."),
     ):
-        """Send a spec back for changes (→ needs_clarification)."""
+        """Send a spec back for changes (→ draft, with a clarification reason).
+
+        MOS-240: `needs_clarification` is gone; "needs clarification" is now the
+        non-null `clarification_reason` carried by the editable `draft` status.
+        """
         from datetime import datetime, timezone
         from pathlib import Path
         from mship.core.spec import InvalidTransition, validate_transition
@@ -558,11 +560,11 @@ def register(parent: typer.Typer, get_container):
             output.error(f"No spec with id {spec_id!r}.")
             raise typer.Exit(1)
         try:
-            validate_transition(spec.status, "needs_clarification")
+            validate_transition(spec.status, "draft")
         except InvalidTransition as e:
             output.error(str(e))
             raise typer.Exit(1)
-        spec.status = "needs_clarification"
+        spec.status = "draft"
         spec.clarification_reason = reason
         spec.updated_at = datetime.now(timezone.utc)
         store.save(spec)
@@ -664,7 +666,7 @@ def register(parent: typer.Typer, get_container):
             console = Console()
             console.print(f"[bold]{spec.title}[/bold]  ({spec.id})")
             console.print(f"Status: {spec.status}  Task: {spec.task_slug or '—'}")
-            if spec.status == "needs_clarification" and spec.clarification_reason:
+            if spec.clarification_reason:
                 console.print(f"[bold yellow]Requested changes:[/bold yellow] {spec.clarification_reason}")
             if spec.body:
                 console.print(Markdown(spec.body))

@@ -73,7 +73,7 @@ def test_spec_new_creates_structured_file(configured_app_with_task: Path):
     assert result.exit_code == 0, result.output
     spec = _store(configured_app_with_task).find_by_id("add-labels")
     assert spec is not None
-    assert spec.status == "drafting"
+    assert spec.status == "draft"
     assert spec.title == "Add labels"
     assert "## Problem" in spec.body
 
@@ -210,7 +210,7 @@ def test_spec_new_json_output_non_tty(configured_app_with_task: Path, monkeypatc
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["id"] == "json-spec"
-    assert payload["status"] == "drafting"
+    assert payload["status"] == "draft"
     assert "path" in payload
 
 
@@ -536,7 +536,11 @@ def test_spec_request_changes(configured_app_with_task: Path, tmp_path):
     _apply_dq(tmp_path)
     result = runner.invoke(app, ["spec", "request-changes", "dq", "--reason", "tighten scope"])
     assert result.exit_code == 0, result.output
-    assert _store(configured_app_with_task).find_by_id("dq").status == "needs_clarification"
+    # MOS-240: request-changes sends the spec back to the editable `draft` status
+    # (needs_clarification is gone); the ask lives in clarification_reason.
+    spec = _store(configured_app_with_task).find_by_id("dq")
+    assert spec.status == "draft"
+    assert spec.clarification_reason == "tighten scope"
 
 
 def test_spec_request_changes_persists_reason_and_logs(configured_app_with_task: Path, tmp_path):
@@ -557,7 +561,7 @@ def test_spec_request_changes_persists_reason_and_logs(configured_app_with_task:
 
 
 def test_spec_apply_revising_clears_clarification_reason(configured_app_with_task: Path, tmp_path):
-    """Applying a revised draft moves needs_clarification -> needs_review; the
+    """Applying a revised draft moves draft -> needs_review (MOS-240); the
     stale reason from the earlier request-changes must not linger."""
     _apply_dq(tmp_path)
     runner.invoke(app, ["spec", "request-changes", "dq", "--reason", "tighten scope"])

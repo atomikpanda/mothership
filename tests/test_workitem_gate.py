@@ -59,7 +59,7 @@ def test_feature_work_item_with_approved_spec_via_spec_id_is_ok(tmp_path):
 def test_feature_work_item_with_unapproved_spec_via_spec_id_is_not_ok(tmp_path):
     items = WorkItemStore(tmp_path / ".mothership" / "workitems")
     specs = SpecStore(tmp_path / "specs")
-    specs.save(Spec(id="spec-1", title="Spec", status="drafting",
+    specs.save(Spec(id="spec-1", title="Spec", status="draft",
                     created_at=_now(), updated_at=_now()))
     wi = items.create(title="add thing", kind="feature", workspace="ws", now=_now())
     items.link_spec(wi.id, "spec-1", now=_now())
