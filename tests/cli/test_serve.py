@@ -181,3 +181,67 @@ def test_relay_serve_app_serves_exec_with_config_not_503(tmp_path, monkeypatch):
     )
     assert r.status_code != 503, "relay-created app 503'd — config was not passed to create_app"
     assert r.status_code == 200
+
+
+# --- Task 2: GitHub App broker (Broker B) creds threaded into create_app ---
+# create_app is imported locally (`from mship.core.serve import create_app`)
+# inside the serve command, so these patch it at its SOURCE module
+# (mship.core.serve) — patching mship.cli.serve.create_app would miss the
+# call-time local rebind.
+
+
+def test_serve_threads_gh_app_creds_into_create_app(_configured, monkeypatch, tmp_path):
+    monkeypatch.delenv("MSHIP_SERVE_TOKEN", raising=False)
+    key_file = tmp_path / "app.pem"
+    key_file.write_text("-----BEGIN PRIVATE KEY-----\nKEYTEXT\n-----END PRIVATE KEY-----\n")
+    monkeypatch.setenv("MSHIP_GH_APP_ID", "123")
+    monkeypatch.setenv("MSHIP_GH_APP_KEY", str(key_file))
+
+    captured: dict = {}
+
+    def _fake_create_app(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("mship.core.serve.create_app", _fake_create_app)
+    import uvicorn
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+
+    result = runner.invoke(app, ["serve"])
+    assert result.exit_code == 0, result.output
+    # id passed through as-is; the KEY env var is a PATH — its TEXT is read.
+    assert captured["gh_app_id"] == "123"
+    assert "KEYTEXT" in captured["gh_app_key"]
+
+
+def test_serve_warns_on_ignored_installation_var(_configured, monkeypatch):
+    monkeypatch.delenv("MSHIP_SERVE_TOKEN", raising=False)
+    monkeypatch.setenv("MSHIP_GH_APP_INSTALLATION", "42")
+    monkeypatch.setattr("mship.core.serve.create_app", lambda **k: object())
+    import uvicorn
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+
+    result = runner.invoke(app, ["serve"])
+    assert result.exit_code == 0, result.output
+    assert "MSHIP_GH_APP_INSTALLATION is ignored" in result.output
+
+
+def test_serve_warns_and_disables_when_gh_app_key_unreadable(_configured, monkeypatch, tmp_path):
+    monkeypatch.delenv("MSHIP_SERVE_TOKEN", raising=False)
+    monkeypatch.setenv("MSHIP_GH_APP_ID", "123")
+    monkeypatch.setenv("MSHIP_GH_APP_KEY", str(tmp_path / "missing.pem"))
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        "mship.core.serve.create_app",
+        lambda **k: (captured.update(k), object())[1],
+    )
+    import uvicorn
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+
+    result = runner.invoke(app, ["serve"])
+    assert result.exit_code == 0, result.output
+    assert "App minting disabled" in result.output
+    # id still passes through; the unreadable key path yields no key text.
+    assert captured["gh_app_id"] == "123"
+    assert captured["gh_app_key"] is None

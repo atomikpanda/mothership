@@ -36,6 +36,24 @@ def _patch_shell(monkeypatch, result: ShellResult):
     monkeypatch.setattr("mship.core.serve.ShellRunner", lambda: _FakeShellRunner(result))
 
 
+def test_create_app_accepts_gh_app_creds(tmp_path):
+    # Task 2: create_app accepts + stores the Broker B App creds. The mint
+    # behavior is Task 3 — here we only assert the app builds when the creds
+    # are supplied (selection is by presence of these creds).
+    state = StateManager(tmp_path / ".mothership")
+    app = create_app(
+        specs_dir=tmp_path / "specs",
+        state_manager=state,
+        log_manager=None,
+        workspace_root=tmp_path,
+        workspace_name="test-ws",
+        auth_token="t",
+        gh_app_id="123",
+        gh_app_key="-----BEGIN PRIVATE KEY-----\n...",
+    )
+    assert app is not None
+
+
 def test_gh_token_requires_bearer(tmp_path, monkeypatch):
     _patch_shell(monkeypatch, ShellResult(returncode=0, stdout="ghs_abc123\n", stderr=""))
     client = TestClient(_app(tmp_path, auth_token="secret"))

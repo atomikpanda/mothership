@@ -220,6 +220,8 @@ def create_app(
     auth_token: str | None = None,
     worktree_manager=None,
     config=None,
+    gh_app_id: str | None = None,
+    gh_app_key: str | None = None,
 ):
     """Build the mship serve FastAPI app (read + review/approve write endpoints).
     Sync handlers call the core directly; FastAPI serializes the returns.
@@ -231,7 +233,16 @@ def create_app(
     `POST /exec/{verb}` (see `mship.core.remote_exec`) — the serve side of
     `mship run/capture/build --remote`. Without it, `/exec/*` is unavailable
     (503) rather than absent, so a caller gets an actionable message instead
-    of a bare 404."""
+    of a bare 404.
+
+    `gh_app_id` / `gh_app_key` (optional) are the GitHub App broker (Broker B)
+    credentials — the App's numeric id and its private-key TEXT (already read
+    from the .pem by the caller, never a path). When BOTH are present,
+    `GET /gh-token` mints short-lived, repo-scoped installation tokens via
+    `mship.core.gh_app` (Task 3); when absent, it falls back to proxying this
+    host's own `gh auth token` (Broker A). Broker selection is purely by
+    presence of these creds. They are captured in this closure and read by
+    `get_gh_token`."""
     from fastapi import Depends, FastAPI, HTTPException
 
     from mship.core.spec_store import SpecStore

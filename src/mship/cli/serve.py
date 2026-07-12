@@ -8,6 +8,45 @@ import typer
 from mship.cli.output import Output
 
 
+def _read_gh_app_creds(output: Output) -> tuple[Optional[str], Optional[str]]:
+    """Resolve the GitHub App broker (Broker B) creds from the environment for
+    `create_app`.
+
+    - `MSHIP_GH_APP_ID`  — the App's numeric id (passed through as-is).
+    - `MSHIP_GH_APP_KEY` — a PATH to the App's private-key `.pem`; its TEXT is
+      read here and returned (the path itself never reaches `create_app`). A set
+      but unreadable path warns and disables App minting (returns key=None)
+      rather than crashing serve.
+
+    Returns `(gh_app_id, gh_app_key)`; either/both may be None, in which case
+    `GET /gh-token` falls back to Broker A (`gh auth token`).
+
+    `MSHIP_GH_APP_INSTALLATION` is accepted-but-ignored — the installation is
+    now auto-resolved per repo (see `mship.core.gh_app.resolve_installation`).
+    Warn once if it's set so an operator isn't misled into thinking it's honored.
+    """
+    import os
+
+    gh_app_id = os.environ.get("MSHIP_GH_APP_ID") or None
+    gh_app_key = None
+    key_path = os.environ.get("MSHIP_GH_APP_KEY")
+    if key_path:
+        p = Path(key_path)
+        if not p.is_file():
+            output.warning(
+                f"MSHIP_GH_APP_KEY is set but not a readable file ({key_path!r}); "
+                "App minting disabled."
+            )
+        else:
+            gh_app_key = p.read_text()
+    if os.environ.get("MSHIP_GH_APP_INSTALLATION"):
+        output.warning(
+            "MSHIP_GH_APP_INSTALLATION is ignored — the installation is now "
+            "auto-resolved per repo."
+        )
+    return gh_app_id, gh_app_key
+
+
 def register(app: typer.Typer, get_container):
     @app.command()
     def serve(
@@ -72,6 +111,8 @@ def register(app: typer.Typer, get_container):
             )
             raise typer.Exit(1)
 
+        gh_app_id, gh_app_key = _read_gh_app_creds(output)
+
         api = create_app(
             specs_dir=workspace_root / SPECS_DIRNAME,
             state_manager=container.state_manager(),
@@ -81,6 +122,8 @@ def register(app: typer.Typer, get_container):
             auth_token=token,
             worktree_manager=container.worktree_manager(),
             config=config,
+            gh_app_id=gh_app_id,
+            gh_app_key=gh_app_key,
         )
         auth_note = "auth: bearer token" if token else "auth: none (loopback only)"
         docs_note = "docs: disabled (auth)" if token else "docs: /docs"
@@ -161,6 +204,8 @@ def _serve_with_relay(
     # Token is REQUIRED when relaying — the public URL is reachable from anywhere.
     token = ensure_serve_token(workspace_root)
 
+    gh_app_id, gh_app_key = _read_gh_app_creds(output)
+
     # serve stays bound to loopback; the tunnel is what exposes it.
     host = "127.0.0.1"
     api = create_app(
@@ -175,6 +220,8 @@ def _serve_with_relay(
         # here `POST /exec/{verb}` would always 503 ("not bootstrapped") over
         # it, exactly as the non-relay path passes it (MOS-191 fix).
         config=config,
+        gh_app_id=gh_app_id,
+        gh_app_key=gh_app_key,
     )
 
     key_path = ensure_relay_key(home=Path.home())
