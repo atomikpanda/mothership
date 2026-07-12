@@ -17,7 +17,7 @@ mship init --install-hooks                          # (re)install pre-commit gua
                                                     # (mship _guard-edit) that blocks edits to a repo's
                                                     # main checkout while it has an active task.
                                                     # Bypass: MSHIP_ALLOW_MAIN_EDIT=1.
-mship spawn "description" --work-item <id> [--repos a,b] [--skip-setup] [--bypass-reconcile]
+mship spawn "description" (--work-item <id> | --hotfix) [--repos a,b] [--skip-setup] [--bypass-reconcile]
                                                     # --work-item <id> required (create via `mship item new`);
                                                     # bypass the gate with --hotfix. Also: --depends-on, --base, --slug.
 mship switch <repo>                                 # cross-repo context switch
@@ -105,7 +105,7 @@ mship audit [--repos r] [--json]
 mship reconcile [--json] [--ignore SLUG] [--clear-ignores] [--refresh]
 mship pr                                            # PR state for every active task with recorded PR URLs
 mship debug hypothesis "..." | rule-out "..." | resolved  # structured debugging journal entries (#30)
-mship view status|logs|diff|spec [--watch]
+mship view status|journal|diff|spec [--watch]
 mship view spec --web                               # serve rendered spec on localhost
 mship graph
 mship worktrees
@@ -201,7 +201,7 @@ audit:
 `mship view` provides read-only TUIs designed for tmux/zellij panes. All views support `--watch` and `--interval N`.
 
 - `mship view status [--task <slug>] [--watch]` — all tasks stacked by default; `--task` narrows to one.
-- `mship view logs [--task <slug>] [--watch]` — tail the task's log.
+- `mship view journal [--task <slug>] [--watch]` — tail the task's journal.
 - `mship view diff [--task <slug>] [--watch]` — per-worktree git diff.
 - `mship view spec [name-or-path] [--task <slug>] [--watch] [--web]` — cross-task spec index picker by default.
 
