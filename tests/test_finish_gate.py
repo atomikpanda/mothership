@@ -349,3 +349,20 @@ def test_finish_require_evidence_noop_without_bound_spec(finish_gate_workspace):
     assert result.exit_code == 0, result.output
     state = StateManager(workspace / ".mothership").load()
     assert state.tasks["ev-noop"].pr_urls.get("shared") == "https://github.com/org/shared/pull/1"
+
+
+def test_finish_appends_acceptance_block_to_pr_body(finish_gate_workspace):
+    from mship.core.spec import AcceptanceEvidence
+    workspace, mock_shell = finish_gate_workspace
+    wi = _seed_feature_with_ac(
+        workspace, ac_evidence=[AcceptanceEvidence(kind="test", ref="test-runs/1")],
+    )
+    runner.invoke(app, ["spawn", "--work-item", wi.id, "ev body", "--repos", "shared"])
+    _write_plan(workspace, "ev-body")
+    result = runner.invoke(app, ["finish", "--task", "ev-body"])
+    assert result.exit_code == 0, result.output
+    create_cmds = [c.args[0] for c in mock_shell.run.call_args_list if "gh pr create" in c.args[0]]
+    assert create_cmds, "expected a gh pr create call"
+    assert "Acceptance criteria" in create_cmds[0]      # block injected into the PR body
+    assert "test:test-runs/1" in create_cmds[0]         # the evidence ref renders end-to-end
+    assert "ac1" in create_cmds[0]                        # the criterion id is listed

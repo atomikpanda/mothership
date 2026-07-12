@@ -423,3 +423,28 @@ class PRManager:
         lines.append(f"⚠ Merge in order: {deps_note}")
 
         return "\n".join(lines)
+
+
+def build_acceptance_block(spec) -> str:
+    """Render an 'Acceptance criteria' PR-body section listing each AC as verified
+    (with its evidence refs) or unverified. Pure analogue of
+    PRManager.build_coordination_block: returns '' when there is nothing to render
+    (no criteria), else a leading-separator markdown block ready to append to a
+    PR body."""
+    acs = getattr(spec, "acceptance_criteria", None) or []
+    if not acs:
+        return ""
+    lines = [
+        "",
+        "---",
+        "",
+        "## Acceptance criteria",
+        "",
+    ]
+    for c in acs:
+        if c.evidence:
+            refs = ", ".join(f"{e.kind}:{e.ref}" for e in c.evidence)
+            lines.append(f"- [x] `{c.id}` {c.text} — {refs}")
+        else:
+            lines.append(f"- [ ] `{c.id}` {c.text} — _no evidence_")
+    return "\n".join(lines)

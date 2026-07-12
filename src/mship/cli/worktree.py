@@ -1382,6 +1382,11 @@ def register(app: typer.Typer, get_container):
                     "`mship spec evidence <spec> <ac> <ref>`."
                 )
 
+        # Render the acceptance-criteria PR-body section once (reuses bound_spec
+        # from the gate above). Empty string when there's no bound spec or no ACs.
+        from mship.core.pr import build_acceptance_block
+        acceptance_block = build_acceptance_block(bound_spec) if bound_spec is not None else ""
+
         pr_list: list[dict] = []
         repushed_repos: list[str] = []  # repos where --force re-pushed commits
 
@@ -1534,6 +1539,8 @@ def register(app: typer.Typer, get_container):
                 else:
                     pr_body_base = task.description
                 pr_body = append_closes_footer(pr_body_base, extract_issue_refs(texts))
+                if acceptance_block:
+                    pr_body = pr_body + acceptance_block
 
                 try:
                     pr_url = pr_mgr.create_pr(

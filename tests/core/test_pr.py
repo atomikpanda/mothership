@@ -130,6 +130,33 @@ def test_build_coordination_block_single_repo():
     assert block == ""
 
 
+def _spec_with_acs(acs):
+    from datetime import datetime, timezone
+    from mship.core.spec import Spec
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    return Spec(id="dq", title="DQ", status="approved", created_at=now, updated_at=now,
+                acceptance_criteria=acs)
+
+
+def test_build_acceptance_block_renders_verified_and_unverified():
+    from mship.core.pr import build_acceptance_block
+    from mship.core.spec import AcceptanceCriterion, AcceptanceEvidence
+    spec = _spec_with_acs([
+        AcceptanceCriterion(id="ac1", text="does X", verdict="approved",
+                            evidence=[AcceptanceEvidence(kind="test", ref="test-runs/5")]),
+        AcceptanceCriterion(id="ac2", text="does Y"),   # no evidence
+    ])
+    block = build_acceptance_block(spec)
+    assert "## Acceptance criteria" in block
+    assert "ac1" in block and "test:test-runs/5" in block   # verified with its ref
+    assert "ac2" in block and "no evidence" in block.lower()  # unverified
+
+
+def test_build_acceptance_block_empty_when_no_criteria():
+    from mship.core.pr import build_acceptance_block
+    assert build_acceptance_block(_spec_with_acs([])) == ""
+
+
 def test_create_pr_with_base(mock_shell: MagicMock):
     mock_shell.run.return_value = ShellResult(
         returncode=0,
