@@ -266,35 +266,37 @@ def test_resolve_bound_spec_fallback_skips_non_approved_spec(tmp_path):
     assert resolve_bound_spec(task, tmp_path) is None
 
 
-def test_resolve_bound_spec_fallback_picks_most_recently_updated_approved(tmp_path):
-    # Greptile #341: with multiple APPROVED specs sharing a slug, bind the most
-    # recently updated one (a superseding spec wins over an older checklist), not
-    # list()'s filename order.
+def test_resolve_bound_spec_fallback_none_when_multiple_approved_matches(tmp_path):
+    # Greptile #341: when several APPROVED specs share a slug the mapping is
+    # ambiguous — the resolver refuses to guess (returns None) rather than pick a
+    # possibly-wrong checklist. No pick means no "wrong spec" is ever bound.
     store = SpecStore(tmp_path / "specs")
     older = datetime(2026, 7, 10, tzinfo=timezone.utc)
     newer = datetime(2026, 7, 12, tzinfo=timezone.utc)
-    store.save(Spec(id="old-s", title="old", status="approved",
+    store.save(Spec(id="one-s", title="one", status="approved",
                     created_at=older, updated_at=older, task_slug="t"))
-    store.save(Spec(id="new-s", title="new", status="approved",
+    store.save(Spec(id="two-s", title="two", status="approved",
                     created_at=older, updated_at=newer, task_slug="t"))
     task = Task(slug="t", description="d", phase="dev", created_at=newer,
                 affected_repos=["shared"], branch="feat/t")
-    assert resolve_bound_spec(task, tmp_path).id == "new-s"
+    assert resolve_bound_spec(task, tmp_path) is None
 
 
-def test_resolve_bound_spec_fallback_tiebreak_is_deterministic_on_equal_updated_at(tmp_path):
-    # Greptile #341: an exact updated_at tie must resolve deterministically (by id),
-    # never by filesystem/list() order.
-    store = SpecStore(tmp_path / "specs")
+def test_resolve_bound_spec_explicit_missing_spec_does_not_fall_back(tmp_path):
+    # Greptile #341 "Explicit Link Falls Back": if the WorkItem's spec_id points at a
+    # spec that no longer exists (deleted/renamed), the resolver returns None — it
+    # must NOT silently fall back to a task_slug guess, even when an approved
+    # slug-matching spec exists. The explicit link is authoritative and terminal.
     now = datetime(2026, 7, 12, tzinfo=timezone.utc)
-    store.save(Spec(id="aaa-s", title="a", status="approved",
-                    created_at=now, updated_at=now, task_slug="t"))
-    store.save(Spec(id="zzz-s", title="z", status="approved",
-                    created_at=now, updated_at=now, task_slug="t"))
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="F", kind="feature", workspace="ws", now=now)
+    items.link_spec(wi.id, "gone-spec", now=now)          # spec_id set...
+    # ...but only an unrelated approved spec sharing the slug is actually on disk.
+    SpecStore(tmp_path / "specs").save(Spec(id="other-s", title="other", status="approved",
+                                            created_at=now, updated_at=now, task_slug="t"))
     task = Task(slug="t", description="d", phase="dev", created_at=now,
-                affected_repos=["shared"], branch="feat/t")
-    # max((updated_at, id)) → the lexicographically-greater id, deterministically.
-    assert resolve_bound_spec(task, tmp_path).id == "zzz-s"
+                affected_repos=["shared"], branch="feat/t", work_item_id=wi.id)
+    assert resolve_bound_spec(task, tmp_path) is None
 
 
 def test_resolve_bound_spec_explicit_spec_id_bypasses_status_filter(tmp_path):

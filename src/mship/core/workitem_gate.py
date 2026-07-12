@@ -57,14 +57,20 @@ def _feature_has_approved_spec(wi: WorkItem, task, workspace_root: Path) -> bool
 
 
 def resolve_bound_spec(task, workspace_root: Path):
-    """Return the Spec bound to `task`, or None when nothing is bound.
+    """Return the Spec bound to `task`, or None when nothing is unambiguously bound.
 
-    Resolution: the task's WorkItem `spec_id` first (an EXPLICIT link — returned
-    regardless of status, it is authoritative), else a fallback to a spec whose
-    `task_slug` matches AND is approved. The fallback is a HEURISTIC guess, so it is
-    restricted to `APPROVED_STATUSES` — never binding to a draft, archived, or
-    superseded spec (which would let `finish --require-evidence` block on, or a PR
-    body render, an irrelevant checklist).
+    Resolution never GUESSES:
+    - If the task's WorkItem has an explicit `spec_id`, that link is AUTHORITATIVE and
+      TERMINAL: return the linked spec (regardless of status), or None if it's gone
+      (deleted/renamed). It does NOT fall through to a slug guess — an explicit intent
+      exists, so binding some other spec would be wrong.
+    - Otherwise, fall back to a spec whose `task_slug` matches AND is approved, but
+      bind ONLY when exactly one such spec exists. If several match, the mapping is
+      ambiguous (which is "the" spec is undecidable from the data) and any pick risks
+      enforcing/rendering the wrong checklist, so refuse to guess and return None.
+
+    Full disambiguation of the fallback needs stable spec identity — tracked in
+    MOS-247.
 
     Returns None cleanly when the stores are simply empty/absent (missing dir →
     empty list, unknown id → None). It does NOT swallow genuine read/parse errors
@@ -76,22 +82,12 @@ def resolve_bound_spec(task, workspace_root: Path):
     if wi_id is not None:
         wi = WorkItemStore(Path(workspace_root) / ".mothership" / "workitems").get(wi_id)
         if wi is not None and wi.spec_id:
-            bound = specs.find_by_id(wi.spec_id)
-            if bound is not None:
-                return bound
+            return specs.find_by_id(wi.spec_id)
     candidates = [
         s for s in specs.list()
         if s.task_slug == task.slug and s.status in APPROVED_STATUSES
     ]
-    if candidates:
-        # If several approved specs share the slug, bind the MOST RECENTLY UPDATED
-        # one (not list() order, which is by filename date-prefix) so a superseding
-        # spec wins over an older checklist. `id` is a deterministic secondary key so
-        # an exact updated_at tie never resolves by filesystem order. (The fallback
-        # is a heuristic used only when there's no explicit WorkItem spec_id link;
-        # full disambiguation needs stable spec identity — tracked in MOS-247.)
-        return max(candidates, key=lambda s: (s.updated_at, s.id))
-    return None
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _docs_dir(workspace_root: Path) -> str:
