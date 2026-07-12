@@ -16,7 +16,7 @@ graph TD
 
     WI["WorkItem<br/>durable intent<br/>kind: feature / bug / chore / question<br/>phase: inbox → … → done"]
     SPEC["Spec<br/>approved design<br/>status: needs_review → approved"]
-    PLAN["Plan<br/>docs/plans/&lt;date&gt;-&lt;slug&gt;.md<br/>bite-sized mship:task blocks"]
+    PLAN["Plan<br/>&lt;docs_dir&gt;/plans/&lt;date&gt;-&lt;slug&gt;.md<br/>bite-sized mship:task blocks"]
     TASK["Task<br/>execution unit<br/>phase: plan → dev → review → run"]
     WT["Worktrees<br/>one git worktree per repo,<br/>shared feature branch"]
 
@@ -44,7 +44,7 @@ graph LR
     IDEA(["idea / phone capture"]) --> WIC["mship item new<br/>→ WorkItem"]
     WIC --> SPECN["mship spec new / draft / apply<br/>→ needs_review"]
     SPECN --> APPR["review + mship spec approve<br/>→ approved"]
-    APPR --> PLANW["writing-plans skill<br/>→ docs/plans/*.md"]
+    APPR --> PLANW["writing-plans skill<br/>→ &lt;docs_dir&gt;/plans/*.md"]
     PLANW --> SPAWN["mship spawn / spec dispatch<br/>→ Task + worktrees (phase: plan)"]
     SPAWN --> GATE{"phase plan → dev<br/>gates"}
     GATE -->|"WorkItem + spec + plan gates pass"| DEV["dev<br/>(subagents build the plan)"]
@@ -82,7 +82,7 @@ Enforced at `phase plan → dev` and at `mship finish` (never at `spawn`, so you
 
 1. **WorkItem gate** — every task must belong to a WorkItem (`spawn` requires `--work-item <id>`, or `--hotfix` to override). Applies to all kinds.
 2. **Spec gate** — a **feature** WorkItem needs an approved linked spec. Bypass: `--bypass-spec-gate` (phase) / `--hotfix` (finish).
-3. **Plan gate** — a **feature** WorkItem needs a valid implementation plan (resolved via `plan_path` or the `docs/plans/<date>-<slug>.md` convention, containing at least one `mship:task` anchor). Bypass: `--bypass-plan-gate` / `--hotfix`.
+3. **Plan gate** — a **feature** WorkItem needs a valid implementation plan (resolved via `plan_path` or the `<docs_dir>/plans/<date>-<slug>.md` convention — `docs_dir` defaults to `docs` — containing at least one `mship:task` anchor). Bypass: `--bypass-plan-gate` / `--hotfix`.
 
 Bug and chore work items pass straight through — only features carry the design/plan gates. Every bypass is recorded to `.mothership/bypass-log.jsonl`.
 
