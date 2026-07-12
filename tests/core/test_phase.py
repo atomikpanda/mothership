@@ -799,12 +799,18 @@ def test_transition_to_review_warns_on_acs_without_evidence(state_with_task, tmp
     never blocks the transition."""
     from mship.core.spec import AcceptanceCriterion, Spec
     from mship.core.spec_store import SpecStore
+    from mship.core.workitem_store import WorkItemStore
     now = datetime(2026, 4, 10, tzinfo=timezone.utc)
     SpecStore(tmp_path / "specs").save(Spec(
         id="add-labels-spec", title="S", status="approved",
-        created_at=now, updated_at=now, task_slug="add-labels",
+        created_at=now, updated_at=now,
         acceptance_criteria=[AcceptanceCriterion(id="ac1", text="x", verdict="approved")],
     ))
+    # Bind via the explicit spec_id link (authoritative for any WorkItem kind); the
+    # slug fallback is feature-gated, and this fixture's WorkItem is a bug.
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi_id = state_with_task.load().tasks["add-labels"].work_item_id
+    items.link_spec(wi_id, "add-labels-spec", now=now)
     pm = _make_phase_manager(state_with_task, tmp_path)
     pm.transition("add-labels", "dev")
     result = pm.transition("add-labels", "review")

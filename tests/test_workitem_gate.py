@@ -237,12 +237,21 @@ def test_resolve_bound_spec_via_workitem_spec_id(tmp_path):
     assert resolve_bound_spec(task, tmp_path).id == "s1"
 
 
+def _feature_task(tmp_path, now, slug="t"):
+    """A task linked to a feature WorkItem with NO spec_id (so the slug fallback,
+    which is gated on feature-eligibility, applies)."""
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="F", kind="feature", workspace="ws", now=now)
+    return Task(slug=slug, description="d", phase="dev", created_at=now,
+                affected_repos=["shared"], branch=f"feat/{slug}", work_item_id=wi.id)
+
+
 def test_resolve_bound_spec_via_task_slug_fallback(tmp_path):
+    # A feature task with no explicit spec_id binds an approved spec by task_slug.
     now = datetime(2026, 7, 12, tzinfo=timezone.utc)
     SpecStore(tmp_path / "specs").save(Spec(id="s2", title="S", status="approved",
                                             created_at=now, updated_at=now, task_slug="t"))
-    task = Task(slug="t", description="d", phase="dev", created_at=now,
-                affected_repos=["shared"], branch="feat/t")
+    task = _feature_task(tmp_path, now)
     assert resolve_bound_spec(task, tmp_path).id == "s2"
 
 
@@ -253,24 +262,39 @@ def test_resolve_bound_spec_none_when_unbound(tmp_path):
     assert resolve_bound_spec(task, tmp_path) is None
 
 
+def test_resolve_bound_spec_bug_task_ignores_slug_collision(tmp_path):
+    # Greptile #341 "Slug Collision Binds Unrelated Specs": a bug/chore/hotfix task
+    # whose slug coincidentally matches an approved FEATURE spec must NOT bind it —
+    # the slug fallback is gated on feature-eligibility. Both a bug WorkItem and a
+    # task with no WorkItem must resolve to None here.
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    SpecStore(tmp_path / "specs").save(Spec(id="feat-spec", title="S", status="approved",
+                                            created_at=now, updated_at=now, task_slug="t"))
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    bug = items.create(title="B", kind="bug", workspace="ws", now=now)
+    bug_task = Task(slug="t", description="d", phase="dev", created_at=now,
+                    affected_repos=["shared"], branch="feat/t", work_item_id=bug.id)
+    assert resolve_bound_spec(bug_task, tmp_path) is None
+    hotfix_task = Task(slug="t", description="d", phase="dev", created_at=now,
+                       affected_repos=["shared"], branch="feat/t")   # no WorkItem
+    assert resolve_bound_spec(hotfix_task, tmp_path) is None
+
+
 def test_resolve_bound_spec_fallback_skips_non_approved_spec(tmp_path):
-    # Greptile #341: the task_slug FALLBACK must not bind to a draft/archived/
-    # superseded spec — only an approved one. A drafting spec matching the slug is
-    # ignored (returns None), so finish/--require-evidence can't block on a stale
+    # The feature slug fallback binds only an APPROVED spec — a drafting spec matching
+    # the slug is ignored (None), so finish/--require-evidence can't block on a stale
     # checklist and the PR body can't render the wrong one.
     now = datetime(2026, 7, 12, tzinfo=timezone.utc)
     SpecStore(tmp_path / "specs").save(Spec(id="draft-s", title="S", status="drafting",
                                             created_at=now, updated_at=now, task_slug="t"))
-    task = Task(slug="t", description="d", phase="dev", created_at=now,
-                affected_repos=["shared"], branch="feat/t")
+    task = _feature_task(tmp_path, now)
     assert resolve_bound_spec(task, tmp_path) is None
 
 
 def test_resolve_bound_spec_raises_when_multiple_approved_matches(tmp_path):
-    # Greptile #341: several APPROVED specs sharing a slug is ambiguous — the resolver
-    # RAISES (not None) so finish --require-evidence fails safe rather than opening a
-    # PR with the required check silently skipped. (None is reserved for genuinely
-    # unbound tasks.)
+    # Several APPROVED specs sharing a slug is ambiguous — the resolver RAISES (not
+    # None) so finish --require-evidence fails safe rather than opening a PR with the
+    # required check silently skipped. (None is reserved for genuinely unbound tasks.)
     import pytest
     from mship.core.workitem_gate import BoundSpecUnresolved
     store = SpecStore(tmp_path / "specs")
@@ -280,8 +304,7 @@ def test_resolve_bound_spec_raises_when_multiple_approved_matches(tmp_path):
                     created_at=older, updated_at=older, task_slug="t"))
     store.save(Spec(id="two-s", title="two", status="approved",
                     created_at=older, updated_at=newer, task_slug="t"))
-    task = Task(slug="t", description="d", phase="dev", created_at=newer,
-                affected_repos=["shared"], branch="feat/t")
+    task = _feature_task(tmp_path, newer)
     with pytest.raises(BoundSpecUnresolved):
         resolve_bound_spec(task, tmp_path)
 
@@ -327,8 +350,27 @@ def test_resolve_bound_spec_propagates_corrupt_store_error(tmp_path):
     # It propagates so callers can fail safe.
     (tmp_path / "specs").mkdir(parents=True)
     (tmp_path / "specs" / "2026-07-12-broken.md").write_text("not valid frontmatter, no ---\n")
-    task = Task(slug="t", description="d", phase="dev", created_at=_now(),
-                affected_repos=["shared"], branch="feat/t")
+    # A feature task with no spec_id reaches the slug fallback → SpecStore.list()
+    # parses the corrupt file and raises; the resolver must let it propagate.
+    task = _feature_task(tmp_path, _now())
     import pytest
     with pytest.raises(Exception):
         resolve_bound_spec(task, tmp_path)
+
+
+def test_feature_gate_blocks_when_linked_spec_deleted_despite_slug_match(tmp_path):
+    # Greptile #341 "Spec Gates Diverge": the feature spec-gate shares
+    # resolve_bound_spec's terminal-explicit-link rule, so a feature whose linked
+    # spec was deleted does NOT pass the gate just because another approved spec
+    # happens to share the task slug (which the old slug fallthrough allowed).
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="F", kind="feature", workspace="ws", now=now)
+    items.link_spec(wi.id, "gone-spec", now=now)          # linked spec absent
+    SpecStore(tmp_path / "specs").save(Spec(id="other-s", title="other", status="approved",
+                                            created_at=now, updated_at=now, task_slug="t"))
+    task = Task(slug="t", description="d", phase="dev", created_at=now,
+                affected_repos=["shared"], branch="feat/t", work_item_id=wi.id)
+    result = check_task_gate(task, tmp_path)
+    assert result.ok is False
+    assert "approved spec" in (result.reason or "")
