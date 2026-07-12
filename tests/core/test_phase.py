@@ -634,6 +634,24 @@ def test_plan_to_dev_bypass_plan_gate_allows_and_logs_hotfix(tmp_path: Path):
     assert line["reason"] == "hotfix"
 
 
+def test_plan_to_dev_bypass_plan_gate_noop_writes_no_log(tmp_path: Path):
+    """A --bypass-plan-gate that wasn't needed (a valid plan is already present)
+    records NO bypass-log entry — the bypass only logs when it actually dropped a
+    blocking plan gate, and only after all later gates pass (Greptile)."""
+    wi = _seed_feature_wi_with_approved_spec(tmp_path)
+    sm, pm = _workitem_gate_env(tmp_path)
+    sm.save(WorkspaceState(tasks={"wi-task": _plan_task(work_item_id=wi.id)}))
+    plans = tmp_path / "docs" / "plans"
+    plans.mkdir(parents=True, exist_ok=True)
+    (plans / "wi-task.md").write_text(
+        "# Plan\n\n<!-- mship:task id=1 -->\n### T1\n<!-- /mship:task -->\n"
+    )
+
+    result = pm.transition("wi-task", "dev", bypass_plan_gate=True)
+    assert result.new_phase == "dev"
+    assert not (tmp_path / ".mothership" / "bypass-log.jsonl").exists()
+
+
 def test_plan_to_dev_bypass_plan_gate_still_enforces_spec(tmp_path: Path):
     """--bypass-plan-gate skips ONLY the plan clause — a feature with no approved
     spec still blocks (spec + WorkItem checks keep running via require_plan=False)."""

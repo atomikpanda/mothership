@@ -81,9 +81,10 @@ def _feature_has_plan(wi: WorkItem, task, workspace_root: Path) -> bool:
         return False
     try:
         return plan_has_tasks(p.read_text())
-    except OSError:
-        # resolved but unreadable (deleted/permission between resolve and read)
-        # → treat as no valid plan; the gate fails with its actionable message.
+    except (OSError, UnicodeDecodeError):
+        # resolved but unreadable — deleted/permission (OSError) or a non-UTF-8
+        # / binary file (UnicodeDecodeError). Treat as no valid plan so the gate
+        # fails with its actionable message, NOT the generic corrupt-store error.
         return False
 
 

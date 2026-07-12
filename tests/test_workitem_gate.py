@@ -191,6 +191,18 @@ def test_empty_plan_file_is_invalid(tmp_path):
     assert res.ok is False
 
 
+def test_non_utf8_plan_file_fails_cleanly(tmp_path):
+    # A non-UTF-8 / binary plan at the convention path must fail the plan gate
+    # cleanly (ok=False), NOT raise UnicodeDecodeError that surfaces as a
+    # misleading "corrupt store" error (Greptile).
+    _items, _wi, task = _approved_feature(tmp_path)
+    plans = tmp_path / "docs" / "plans"
+    plans.mkdir(parents=True)
+    (plans / "2026-07-12-t.md").write_bytes(b"\xff\xfe binary <!-- mship:task id=1 -->")
+    res = check_task_gate(task, tmp_path, require_plan=True)  # must not raise
+    assert res.ok is False
+
+
 def test_bug_never_plan_gated(tmp_path):
     items = WorkItemStore(tmp_path / ".mothership" / "workitems")
     wi = items.create(title="fix it", kind="bug", workspace="ws", now=_now())
