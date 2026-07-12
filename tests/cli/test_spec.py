@@ -458,6 +458,17 @@ def test_spec_evidence_unknown_criterion_errors(configured_app_with_task: Path, 
     assert "ac99" in result.output
 
 
+def test_spec_review_human_shows_evidence_and_unverified(configured_app_with_task: Path, tmp_path, monkeypatch):
+    from mship.cli.output import Output
+    monkeypatch.setattr(Output, "is_tty", property(lambda self: True))
+    _apply_dq(tmp_path)   # ac1, no evidence yet
+    runner.invoke(app, ["spec", "evidence", "dq", "ac1", "test-runs/7"])
+    result = runner.invoke(app, ["spec", "review", "dq"])
+    assert result.exit_code == 0, result.output
+    assert "test-runs/7" in result.output          # the evidence ref is shown
+    assert "unverified" in result.output.lower()    # summary carries the count
+
+
 # --- spec ask / answer / questions (#148) ---
 
 

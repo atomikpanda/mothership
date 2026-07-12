@@ -27,8 +27,8 @@ def test_build_review_shapes_units_and_context():
     r = build_review(_spec())
     assert r["id"] == "dq" and r["status"] == "needs_review"
     assert r["acceptance_criteria"] == [
-        {"id": "ac1", "text": "view questions", "verdict": "approved"},
-        {"id": "ac2", "text": "record answer", "verdict": "unreviewed"},
+        {"id": "ac1", "text": "view questions", "verdict": "approved", "evidence": []},
+        {"id": "ac2", "text": "record answer", "verdict": "unreviewed", "evidence": []},
     ]
     assert r["open_questions"] == [{"id": "q1", "text": "Android?", "answer": None}]
     assert r["context"]["problem"] == "the problem"
@@ -51,8 +51,28 @@ def test_build_review_summary_counts():
     s = build_review(_spec())["summary"]
     assert s == {
         "criteria_total": 2, "approved": 1, "flagged": 0, "unreviewed": 1,
-        "open_questions_unanswered": 1,
+        "unverified": 2, "open_questions_unanswered": 1,
     }
+
+
+def test_build_review_surfaces_evidence_and_unverified_count():
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    spec = Spec(
+        id="dq", title="DQ", status="needs_review", created_at=now, updated_at=now,
+        acceptance_criteria=[
+            AcceptanceCriterion(id="ac1", text="a", verdict="approved",
+                                evidence=[AcceptanceEvidence(kind="test", ref="test-runs/5")]),
+            AcceptanceCriterion(id="ac2", text="b"),   # no evidence
+            AcceptanceCriterion(id="ac3", text="c"),   # no evidence
+        ],
+    )
+    r = build_review(spec)
+    assert r["acceptance_criteria"][0]["evidence"] == [
+        {"kind": "test", "ref": "test-runs/5", "note": None}
+    ]
+    assert r["acceptance_criteria"][1]["evidence"] == []
+    # unverified is EXACTLY the number of ACs with an empty evidence list.
+    assert r["summary"]["unverified"] == 2
 
 
 def test_set_criterion_verdict_updates():

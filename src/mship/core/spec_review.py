@@ -27,7 +27,14 @@ def build_review(spec: Spec) -> dict:
         "status": spec.status,
         "clarification_reason": spec.clarification_reason,
         "acceptance_criteria": [
-            {"id": c.id, "text": c.text, "verdict": c.verdict}
+            {
+                "id": c.id,
+                "text": c.text,
+                "verdict": c.verdict,
+                "evidence": [
+                    {"kind": e.kind, "ref": e.ref, "note": e.note} for e in c.evidence
+                ],
+            }
             for c in spec.acceptance_criteria
         ],
         "open_questions": [
@@ -47,6 +54,7 @@ def build_review(spec: Spec) -> dict:
             "approved": counts["approved"],
             "flagged": counts["flagged"],
             "unreviewed": counts["unreviewed"],
+            "unverified": sum(1 for c in spec.acceptance_criteria if not c.evidence),
             "open_questions_unanswered": sum(
                 1 for q in spec.open_questions if q.answer is None
             ),

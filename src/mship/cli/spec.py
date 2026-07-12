@@ -210,10 +210,14 @@ def register(parent: typer.Typer, get_container):
                 output.print(f"  [bold yellow]Requested changes:[/bold yellow] {payload['clarification_reason']}")
             for c in payload["acceptance_criteria"]:
                 output.print(f"  [{c['verdict']}] {c['id']}: {c['text']}")
+                for ev in c["evidence"]:
+                    note = f" ({ev['note']})" if ev.get("note") else ""
+                    output.print(f"      · {ev['kind']}: {ev['ref']}{note}")
             s = payload["summary"]
             output.print(
                 f"  summary: {s['approved']} approved, {s['flagged']} flagged, "
-                f"{s['unreviewed']} unreviewed; {s['open_questions_unanswered']} open question(s)"
+                f"{s['unreviewed']} unreviewed, {s['unverified']} unverified; "
+                f"{s['open_questions_unanswered']} open question(s)"
             )
         else:
             output.json(payload)
