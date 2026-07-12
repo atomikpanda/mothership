@@ -26,7 +26,7 @@ def _install_agent_hooks_with_output(ws_root: Path, output: Output) -> None:
 
 
 def register(app: typer.Typer, get_container):
-    @app.command()
+    @app.command(rich_help_panel="Setup")
     def init(
         path: Optional[str] = typer.Argument(None, help="Workspace directory (defaults to current directory)"),
         name: Optional[str] = typer.Option(None, "--name", help="Workspace name"),

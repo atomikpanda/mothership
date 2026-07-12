@@ -4,7 +4,7 @@ from mship.cli.output import Output
 
 
 def register(app: typer.Typer, get_container):
-    @app.command()
+    @app.command(rich_help_panel="Maintenance")
     def prune(
         force: bool = typer.Option(False, "--force", help="Actually remove orphaned worktrees"),
     ):

@@ -164,7 +164,7 @@ def _branch_state_for(item, state, log_mgr, config) -> BranchState:
 
 def register(parent: typer.Typer, get_container) -> None:
     item_app = typer.Typer(help="First-class work items (the phase-aware cockpit spine).")
-    parent.add_typer(item_app, name="item")
+    parent.add_typer(item_app, name="item", rich_help_panel="Work items & specs")
 
     def _ctx():
         container = get_container()

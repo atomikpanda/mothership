@@ -90,4 +90,4 @@ def register(parent: typer.Typer, get_container):
         RunHostStore(state_dir).remove(role)
         out.success(f"removed run-host {role!r}")
 
-    parent.add_typer(run_host_app)
+    parent.add_typer(run_host_app, rich_help_panel="Runtime")

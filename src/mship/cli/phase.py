@@ -9,7 +9,7 @@ from mship.core.phase import PHASE_ORDER, FinishedTaskError, SpecGateError
 
 
 def register(app: typer.Typer, get_container):
-    @app.command()
+    @app.command(rich_help_panel="Workflow")
     def phase(
         target: str,
         force: bool = typer.Option(False, "--force", "-f", help="Force transition even if task is blocked or finished"),

@@ -269,4 +269,4 @@ def register(parent: typer.Typer, get_container):
         out.error("timed out waiting for approval.")
         raise typer.Exit(1)
 
-    parent.add_typer(relay_app)
+    parent.add_typer(relay_app, rich_help_panel="Setup")

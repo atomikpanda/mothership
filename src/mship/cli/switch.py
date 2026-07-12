@@ -7,7 +7,7 @@ from mship.cli.output import Output
 
 
 def register(app: typer.Typer, get_container):
-    @app.command()
+    @app.command(rich_help_panel="Workflow")
     def switch(
         repo: Optional[str] = typer.Argument(None, help="Repo to switch to. Omit to re-render current."),
         task_opt: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),

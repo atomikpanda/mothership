@@ -38,7 +38,7 @@ def _render_audience_block(audience: dict) -> None:
 
 
 def register(app: typer.Typer, get_container):
-    @app.command()
+    @app.command(rich_help_panel="Inspection")
     def context(
         task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
         for_: Optional[str] = typer.Option(

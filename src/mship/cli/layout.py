@@ -88,4 +88,4 @@ def register(app: typer.Typer, get_container):
         """Launch zellij with the mothership layout (replaces current process)."""
         os.execvp("zellij", ["zellij", "--layout", "mothership"])
 
-    app.add_typer(layout_app)
+    app.add_typer(layout_app, rich_help_panel="Setup")

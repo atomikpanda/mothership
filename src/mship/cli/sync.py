@@ -6,7 +6,7 @@ from mship.cli.output import Output
 
 
 def register(app: typer.Typer, get_container):
-    @app.command()
+    @app.command(rich_help_panel="Maintenance")
     def sync(
         repos: Optional[str] = typer.Option(None, "--repos", help="Comma-separated repo names"),
         no_passive: bool = typer.Option(

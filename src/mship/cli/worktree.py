@@ -230,7 +230,7 @@ def _capture_dirty_main_post_op(command: str, task, config, shell, state_dir: Pa
 
 
 def register(app: typer.Typer, get_container):
-    @app.command()
+    @app.command(rich_help_panel="Workflow")
     def spawn(
         description: str,
         repos: Optional[str] = typer.Option(None, help="Comma-separated repo names"),
@@ -517,7 +517,7 @@ def register(app: typer.Typer, get_container):
             data["setup_warnings"] = result.setup_warnings
             output.json(data)
 
-    @app.command()
+    @app.command(rich_help_panel="Inspection")
     def worktrees():
         """List active worktrees grouped by task."""
         container = get_container()
@@ -542,7 +542,7 @@ def register(app: typer.Typer, get_container):
             }
             output.json({"tasks": data})
 
-    @app.command()
+    @app.command(rich_help_panel="Workflow")
     def close(
         task_slug: Optional[str] = typer.Argument(
             None,
@@ -881,7 +881,7 @@ def register(app: typer.Typer, get_container):
         # see the snapshot count via `mship doctor`. See spec 2026-04-21.
         _capture_dirty_main_post_op("close", task, config, container.shell(), container.state_dir())
 
-    @app.command()
+    @app.command(rich_help_panel="Workflow")
     def finish(
         handoff: bool = typer.Option(False, "--handoff", help="Generate CI handoff manifest"),
         base: Optional[str] = typer.Option(None, "--base", help="Global override of PR base branch for all repos"),

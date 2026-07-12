@@ -8,7 +8,7 @@ from mship.cli.output import Output
 
 
 def register(app: typer.Typer, get_container):
-    @app.command()
+    @app.command(rich_help_panel="Workflow")
     def block(
         reason: str,
         task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
@@ -48,7 +48,7 @@ def register(app: typer.Typer, get_container):
                 "resolution_source": resolved.source,
             })
 
-    @app.command()
+    @app.command(rich_help_panel="Workflow")
     def unblock(
         task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
     ):
