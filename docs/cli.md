@@ -17,7 +17,9 @@ mship init --install-hooks                          # (re)install pre-commit gua
                                                     # (mship _guard-edit) that blocks edits to a repo's
                                                     # main checkout while it has an active task.
                                                     # Bypass: MSHIP_ALLOW_MAIN_EDIT=1.
-mship spawn "description" [--repos a,b] [--skip-setup] [--bypass-reconcile]
+mship spawn "description" --work-item <id> [--repos a,b] [--skip-setup] [--bypass-reconcile]
+                                                    # --work-item <id> required (create via `mship item new`);
+                                                    # bypass the gate with --hotfix. Also: --depends-on, --base, --slug.
 mship switch <repo>                                 # cross-repo context switch
 mship phase plan|dev|review|run [-f]                # transition with soft-gate warnings
 mship block "reason" | mship unblock
@@ -29,6 +31,26 @@ mship finish [--body-file PATH | --body TEXT] [--base B] [--base-map a=B,b=B] [-
 mship close [--yes] [--abandon] [--force] [--skip-pr-check] [--bypass-reconcile]
 mship commit "message" [--task <slug>]              # commit staged changes across the task's worktrees; pushes if finished
 mship depends add|remove|list                       # manage task-to-task dependency edges (#104)
+```
+
+## Setup & admin
+
+```bash
+mship bootstrap [--repos a,b] [--token TOK]         # clone missing workspace members (fresh clone -> full workspace)
+mship skill install|list [--only claude,codex,gemini] [--force] [-y]  # install/list mship-bundled agent skills
+mship gh preflight                                  # fail-fast check that GitHub auth covers the workspace repos
+mship bind refresh                                  # re-sync bind_files + symlink_dirs from source repos into worktrees
+mship layout init|launch                            # write / launch the mothership zellij layout
+```
+
+`mship relay` manages the reverse-tunnel relay client keys (for `mship serve --relay`, see [`relay-hosting.md`](relay-hosting.md)):
+
+```bash
+mship relay setup                                   # generate the relay SSH key (if absent) + print an enroll command
+mship relay enroll                                  # from a NEW device: request relay access (owner approves/denies)
+mship relay enroll-server                           # run the public enroll endpoint on the relay host
+mship relay requests                                # list pending enroll requests (id · hostname · fingerprint)
+mship relay approve <id> | deny <id>                # approve (add key to allowlist) / deny a pending request
 ```
 
 ## Work items & specs
@@ -68,6 +90,8 @@ mship serve [--relay] [--port N]                    # run the JSON API over the 
 mship inbox wait [--since TS] [--timeout S]         # block until a new human message arrives (JSON)
 mship reply <thread_id> "text"                      # reply to a mailbox thread
 mship ask <thread_id> "question" --option A --option B  # post a decision (>=2 tappable options; --recommend/--multi/--no-free-text)
+mship messages <thread_id>                          # print a mailbox thread's conversation in order
+mship pair                                          # print a pairing deep-link + QR to connect the Ground Control app
 ```
 
 ## Inspection
@@ -79,6 +103,8 @@ mship dispatch --task <slug> -i "<instruction>"     # emit self-contained subage
 mship dispatch --task <slug> --mode standalone -i "<instruction>"  # standalone framing — subagent finishes and opens its own PR
 mship audit [--repos r] [--json]
 mship reconcile [--json] [--ignore SLUG] [--clear-ignores] [--refresh]
+mship pr                                            # PR state for every active task with recorded PR URLs
+mship debug hypothesis "..." | rule-out "..." | resolved  # structured debugging journal entries (#30)
 mship view status|logs|diff|spec [--watch]
 mship view spec --web                               # serve rendered spec on localhost
 mship graph
@@ -100,7 +126,13 @@ mship export [--redacted] [--format dir|zip]        # bundle a task's journal/pl
 mship run [--repos a,b] [--tag t]                   # start services per dependency tier
 mship logs <service>                                # tail logs for a service
 mship run-host add|list|remove                      # manage per-machine run-host connections (role -> {url, token})
+mship build [--all] [--repos a,b] [--tag t] [--remote[=role]]  # `task build` across repos in dependency order
+mship capture [--repo R] [--platform P] [--kind image|layout|all] [--out DIR] [--remote[=role]]
+                                                    # screenshot + layout of the running UI into files;
+                                                    # task-aware but not required (ad-hoc against a repo's main checkout)
 ```
+
+`mship build` and `mship capture` accept `--remote` to execute on a mapped run-host role (an iOS-sim / Android-emu machine): bare `--remote` auto-resolves the repo's `run_host` (or the sole configured `run_hosts` entry), `--remote=<role>` picks one explicitly.
 
 ## `mship finish`
 
