@@ -161,6 +161,30 @@ def test_post_verdict(tmp_path):
     assert client.post("/specs/none/verdict", json={"criterion_id": "ac1", "verdict": "approved"}).status_code == 404
 
 
+def test_post_evidence_persists_and_validates(tmp_path):
+    _seed_spec(tmp_path)   # spec "dq" with one AC "ac1"
+    client = TestClient(_app(tmp_path))
+
+    r = client.post("/specs/dq/evidence", json={"criterion_id": "ac1", "ref": "test-runs/5"})
+    assert r.status_code == 200
+    # build_review surfacing is Task 5; verify persistence via the full spec dump.
+    ac = client.get("/specs/dq").json()["acceptance_criteria"][0]
+    assert ac["evidence"] == [{"kind": "test", "ref": "test-runs/5", "note": None}]
+
+    # explicit kind override + note round-trips
+    r2 = client.post(
+        "/specs/dq/evidence",
+        json={"criterion_id": "ac1", "ref": "HEAD", "kind": "commit", "note": "fix"},
+    )
+    assert r2.status_code == 200
+    ev = client.get("/specs/dq").json()["acceptance_criteria"][0]["evidence"]
+    assert ev[1] == {"kind": "commit", "ref": "HEAD", "note": "fix"}
+
+    # bad criterion → 400; unknown spec → 404
+    assert client.post("/specs/dq/evidence", json={"criterion_id": "nope", "ref": "x"}).status_code == 400
+    assert client.post("/specs/none/evidence", json={"criterion_id": "ac1", "ref": "x"}).status_code == 404
+
+
 def test_post_question_and_answer(tmp_path):
     _seed_spec(tmp_path)
     client = TestClient(_app(tmp_path))

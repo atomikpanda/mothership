@@ -68,6 +68,7 @@ def register(app: typer.Typer, get_container):
 
             log_mgr.append(
                 t.slug, message, repo=repo_name, action="committed",
+                evidence=sha or None,
             )
 
             pushed = False

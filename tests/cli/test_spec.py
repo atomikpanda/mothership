@@ -430,6 +430,45 @@ def test_spec_verdict_rejects_unknown_criterion(configured_app_with_task: Path, 
     assert "ac99" in result.output
 
 
+# --- spec evidence (AC evidence loop) ---
+
+
+def test_spec_evidence_infers_kind_and_persists(configured_app_with_task: Path, tmp_path):
+    _apply_dq(tmp_path)  # seeds ac1
+    result = runner.invoke(app, ["spec", "evidence", "dq", "ac1", "test-runs/5"])
+    assert result.exit_code == 0, result.output
+    ac = _store(configured_app_with_task).find_by_id("dq").acceptance_criteria[0]
+    assert [(e.kind, e.ref) for e in ac.evidence] == [("test", "test-runs/5")]
+
+
+def test_spec_evidence_kind_override_and_note(configured_app_with_task: Path, tmp_path):
+    _apply_dq(tmp_path)
+    result = runner.invoke(
+        app, ["spec", "evidence", "dq", "ac1", "HEAD", "--kind", "commit", "--note", "the fix"],
+    )
+    assert result.exit_code == 0, result.output
+    ac = _store(configured_app_with_task).find_by_id("dq").acceptance_criteria[0]
+    assert ac.evidence[0].kind == "commit" and ac.evidence[0].note == "the fix"
+
+
+def test_spec_evidence_unknown_criterion_errors(configured_app_with_task: Path, tmp_path):
+    _apply_dq(tmp_path)
+    result = runner.invoke(app, ["spec", "evidence", "dq", "ac99", "test-runs/1"])
+    assert result.exit_code != 0
+    assert "ac99" in result.output
+
+
+def test_spec_review_human_shows_evidence_and_unverified(configured_app_with_task: Path, tmp_path, monkeypatch):
+    from mship.cli.output import Output
+    monkeypatch.setattr(Output, "is_tty", property(lambda self: True))
+    _apply_dq(tmp_path)   # ac1, no evidence yet
+    runner.invoke(app, ["spec", "evidence", "dq", "ac1", "test-runs/7"])
+    result = runner.invoke(app, ["spec", "review", "dq"])
+    assert result.exit_code == 0, result.output
+    assert "test-runs/7" in result.output          # the evidence ref is shown
+    assert "unverified" in result.output.lower()    # summary carries the count
+
+
 # --- spec ask / answer / questions (#148) ---
 
 

@@ -210,10 +210,14 @@ def register(parent: typer.Typer, get_container):
                 output.print(f"  [bold yellow]Requested changes:[/bold yellow] {payload['clarification_reason']}")
             for c in payload["acceptance_criteria"]:
                 output.print(f"  [{c['verdict']}] {c['id']}: {c['text']}")
+                for ev in c["evidence"]:
+                    note = f" ({ev['note']})" if ev.get("note") else ""
+                    output.print(f"      · {ev['kind']}: {ev['ref']}{note}")
             s = payload["summary"]
             output.print(
                 f"  summary: {s['approved']} approved, {s['flagged']} flagged, "
-                f"{s['unreviewed']} unreviewed; {s['open_questions_unanswered']} open question(s)"
+                f"{s['unreviewed']} unreviewed, {s['unverified']} unverified; "
+                f"{s['open_questions_unanswered']} open question(s)"
             )
         else:
             output.json(payload)
@@ -251,6 +255,47 @@ def register(parent: typer.Typer, get_container):
             output.success(f"{criterion_id} → {verdict_value}: {path}")
         else:
             output.json({"id": spec.id, "criterion": criterion_id, "verdict": verdict_value})
+
+    @spec_app.command("evidence")
+    def evidence(
+        spec_id: str = typer.Argument(..., help="Spec id."),
+        criterion_id: str = typer.Argument(..., help="Acceptance criterion id (e.g. ac1)."),
+        ref: str = typer.Argument(
+            ..., help="Evidence ref: test-runs/<iter>[.<repo>], a commit sha, or an artifact path/URL.",
+        ),
+        kind: Optional[str] = typer.Option(
+            None, "--kind", help="test | commit | artifact. Inferred from the ref shape when omitted.",
+        ),
+        note: Optional[str] = typer.Option(None, "--note", help="Optional human note."),
+    ):
+        """Attach an evidence entry to one acceptance criterion (no status change)."""
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+        from mship.core.spec_review import infer_evidence_kind, set_criterion_evidence
+
+        output = Output()
+        container = get_container()
+        workspace_root = Path(container.config_path()).parent
+        store = SpecStore(workspace_root / SPECS_DIRNAME)
+        spec = store.find_by_id(spec_id)
+        if spec is None:
+            output.error(f"No spec with id {spec_id!r}.")
+            raise typer.Exit(1)
+
+        resolved_kind = kind or infer_evidence_kind(ref)
+        try:
+            set_criterion_evidence(spec, criterion_id, resolved_kind, ref, note)
+        except ValueError as e:
+            output.error(str(e))
+            raise typer.Exit(1)
+
+        spec.updated_at = datetime.now(timezone.utc)
+        path = store.save(spec)
+        if output.human_mode:
+            output.success(f"{criterion_id} += {resolved_kind}:{ref}: {path}")
+        else:
+            output.json({"id": spec.id, "criterion": criterion_id, "kind": resolved_kind, "ref": ref})
 
     @spec_app.command("validate")
     def validate(

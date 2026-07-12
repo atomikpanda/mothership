@@ -34,6 +34,13 @@ class VerdictBody(BaseModel):
     verdict: str
 
 
+class EvidenceBody(BaseModel):
+    criterion_id: str
+    ref: str
+    kind: str | None = None
+    note: str | None = None
+
+
 class NewSpecBody(BaseModel):
     title: str
     id: str | None = None
@@ -459,7 +466,9 @@ def create_app(
     # --- write endpoints ---
 
     # datetime/timezone are imported at module top (needed earlier by _lifespan).
-    from mship.core.spec_review import set_criterion_verdict
+    from mship.core.spec_review import (
+        infer_evidence_kind, set_criterion_evidence, set_criterion_verdict,
+    )
     from mship.core.spec_questions import add_question, answer_question
 
     def _load_or_404(spec_id: str):
@@ -478,6 +487,16 @@ def create_app(
         spec = _load_or_404(spec_id)
         try:
             set_criterion_verdict(spec, body.criterion_id, body.verdict)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return _save_and_review(spec)
+
+    @app.post("/specs/{spec_id}/evidence")
+    def post_evidence(spec_id: str, body: EvidenceBody):
+        spec = _load_or_404(spec_id)
+        kind = body.kind or infer_evidence_kind(body.ref)
+        try:
+            set_criterion_evidence(spec, body.criterion_id, kind, body.ref, body.note)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return _save_and_review(spec)

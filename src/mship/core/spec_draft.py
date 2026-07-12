@@ -101,10 +101,48 @@ def apply_draft(spec: Spec, draft: SpecDraft) -> Spec:
     spec.non_goals = list(draft.non_goals)
     spec.risks = list(draft.risks)
     spec.affected_repos = list(draft.affected_repos)
-    spec.acceptance_criteria = [
-        AcceptanceCriterion(id=f"ac{i + 1}", text=t)
-        for i, t in enumerate(draft.acceptance_criteria)
-    ]
+    # Preserve verdict + evidence for unchanged criteria across a re-apply. Criteria
+    # have no stable id (ids are positional, ac{i+1}), so match each new criterion to
+    # a prior one in two passes, consuming each prior at most once:
+    #   Pass 1 — exact (same id AND same text): the strongest "same criterion" signal.
+    #     Pins an unchanged criterion to its position even when an unrelated edit makes
+    #     a *sibling*'s text collide with it (so the unchanged one keeps its evidence
+    #     and the edited one can't steal it).
+    #   Pass 2 — by text among the still-unmatched priors: recovers criteria whose
+    #     position shifted (insert / remove / reorder) but whose text didn't change.
+    # Whatever stays unmatched is new or materially-changed and starts fresh. Because
+    # priors are consumed, evidence is never duplicated onto two criteria.
+    prior_acs = list(spec.acceptance_criteria)
+    consumed = [False] * len(prior_acs)
+    matched: list[AcceptanceCriterion | None] = [None] * len(draft.acceptance_criteria)
+
+    for i, t in enumerate(draft.acceptance_criteria):
+        ac_id = f"ac{i + 1}"
+        for j, p in enumerate(prior_acs):
+            if not consumed[j] and p.id == ac_id and p.text == t:
+                matched[i], consumed[j] = p, True
+                break
+
+    for i, t in enumerate(draft.acceptance_criteria):
+        if matched[i] is not None:
+            continue
+        for j, p in enumerate(prior_acs):
+            if not consumed[j] and p.text == t:
+                matched[i], consumed[j] = p, True
+                break
+
+    new_acs: list[AcceptanceCriterion] = []
+    for i, t in enumerate(draft.acceptance_criteria):
+        ac_id = f"ac{i + 1}"
+        prior = matched[i]
+        if prior is not None:
+            new_acs.append(AcceptanceCriterion(
+                id=ac_id, text=t, verdict=prior.verdict,
+                evidence=list(prior.evidence),
+            ))
+        else:
+            new_acs.append(AcceptanceCriterion(id=ac_id, text=t))
+    spec.acceptance_criteria = new_acs
     spec.open_questions = [
         OpenQuestion(id=f"q{i + 1}", text=t)
         for i, t in enumerate(draft.open_questions)

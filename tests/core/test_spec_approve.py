@@ -28,3 +28,11 @@ def test_no_blockers_when_all_clear():
     s = _spec(criteria=[AcceptanceCriterion(id="ac1", text="x", verdict="approved")],
               questions=[OpenQuestion(id="q1", text="?", answer="yes")])
     assert approval_blockers(s) == []
+
+
+def test_approval_gate_unchanged_approved_verdicts_zero_evidence():
+    """ac6: evidence is NEVER required to approve. A spec with all verdicts
+    approved and NO evidence has no approval blockers."""
+    s = _spec(criteria=[AcceptanceCriterion(id="ac1", text="x", verdict="approved")])
+    assert all(c.evidence == [] for c in s.acceptance_criteria)
+    assert approval_blockers(s) == []

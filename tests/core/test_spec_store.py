@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from mship.core.spec import AcceptanceCriterion, OpenQuestion, Spec
+from mship.core.spec import AcceptanceCriterion, AcceptanceEvidence, OpenQuestion, Spec
 from mship.core.spec_store import SpecParseError, SpecStore, parse_spec, serialize_spec
 
 
@@ -23,6 +23,46 @@ def _spec():
 def test_round_trip_is_identity():
     s = _spec()
     assert parse_spec(serialize_spec(s)) == s
+
+
+def test_evidence_round_trips_through_serialize_parse():
+    now = datetime(2026, 7, 12, 10, 0, 0, tzinfo=timezone.utc)
+    s = Spec(
+        id="ev", title="Evidence", status="needs_review",
+        created_at=now, updated_at=now,
+        acceptance_criteria=[AcceptanceCriterion(
+            id="ac1", text="does the thing", verdict="approved",
+            evidence=[
+                AcceptanceEvidence(kind="test", ref="test-runs/5.mothership"),
+                AcceptanceEvidence(kind="commit", ref="deadbeef", note="the fix"),
+            ],
+        )],
+        body="## Problem\n\nx\n",
+    )
+    parsed = parse_spec(serialize_spec(s))
+    assert parsed == s
+    assert parsed.acceptance_criteria[0].evidence[1].note == "the fix"
+
+
+def test_legacy_spec_without_evidence_key_loads_with_empty_list():
+    # A frontmatter block whose acceptance_criteria have NO evidence key at all
+    # (an older on-disk spec) must load with evidence == [].
+    text = (
+        "---\n"
+        "id: legacy\n"
+        "title: Legacy\n"
+        "status: needs_review\n"
+        "created_at: '2026-07-12T10:00:00Z'\n"
+        "updated_at: '2026-07-12T10:00:00Z'\n"
+        "acceptance_criteria:\n"
+        "- id: ac1\n"
+        "  text: old criterion\n"
+        "  verdict: approved\n"
+        "---\n"
+        "## Problem\n\nlegacy body\n"
+    )
+    spec = parse_spec(text)
+    assert spec.acceptance_criteria[0].evidence == []
 
 
 def test_body_is_preserved_verbatim():
