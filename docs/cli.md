@@ -1,5 +1,7 @@
 # CLI Reference
 
+> New here? [`docs/concepts.md`](concepts.md) explains how WorkItem / Spec / Plan / Task / worktrees / agents relate, with diagrams.
+
 All task-scoped commands (`status`, `phase`, `test`, `journal`, `view …`, etc.) resolve their target task in this priority order:
 
 1. `--task <slug>` flag — explicit, highest priority.

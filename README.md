@@ -104,6 +104,7 @@ Agents plug into this through any MCP server or shell tool they already have. ms
 
 ## Reference
 
+- [`docs/concepts.md`](docs/concepts.md) — how the pieces fit: WorkItem, Spec, Plan, Task, worktrees, agents/subagents (with diagrams).
 - [`docs/cli.md`](docs/cli.md) — full command surface.
 - [`docs/configuration.md`](docs/configuration.md) — `mothership.yaml`, healthchecks, service start modes, monorepo rules, task aliasing, drift policy.
 - [`docs/cloud-agent-auth.md`](docs/cloud-agent-auth.md) — GitHub auth for cloud/unattended agent sessions (token broker setup, GitHub App, `mship gh preflight`).
