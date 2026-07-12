@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from mship.core.base_resolver import resolve_base
-from mship.core.plan import discover_plan_path
+from mship.core.plan import discover_plan_path, resolve_plan_path  # noqa: F401 (discover_plan_path re-exported)
 
 if TYPE_CHECKING:
     from mship.core.config import WorkspaceConfig
@@ -485,8 +485,15 @@ def build_export_bundle(
     entries = log_manager.read(task.slug)
     _write_text("journal.md", _render_journal(task.slug, entries))
 
-    # plan.md (optional)
-    plan_path = discover_plan_path(workspace_root, task.slug, docs_dir=config.docs_dir)
+    # plan.md (optional) — honor an explicit WorkItem.plan_path link, else the
+    # docs/plans/<date>-<slug>.md convention (same resolver the gate/dispatch use,
+    # so a linked off-convention plan isn't silently omitted from the bundle).
+    _wi_plan = None
+    if getattr(task, "work_item_id", None):
+        from mship.core.workitem_store import WorkItemStore
+        _wi = WorkItemStore(workspace_root / ".mothership" / "workitems").get(task.work_item_id)
+        _wi_plan = _wi.plan_path if _wi else None
+    plan_path = resolve_plan_path(task.slug, _wi_plan, workspace_root, config.docs_dir)
     if plan_path is not None:
         _write_text("plan.md", plan_path.read_text())
 

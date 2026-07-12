@@ -77,7 +77,14 @@ def _feature_has_plan(wi: WorkItem, task, workspace_root: Path) -> bool:
     p = resolve_plan_path(
         task.slug, getattr(wi, "plan_path", None), workspace_root, _docs_dir(workspace_root)
     )
-    return p is not None and plan_has_tasks(p.read_text())
+    if p is None:
+        return False
+    try:
+        return plan_has_tasks(p.read_text())
+    except OSError:
+        # resolved but unreadable (deleted/permission between resolve and read)
+        # → treat as no valid plan; the gate fails with its actionable message.
+        return False
 
 
 def log_hotfix(workspace_root: Path, where: str, task_slug: str) -> None:

@@ -42,3 +42,16 @@ def test_resolve_plan_path_falls_back_to_convention(tmp_path):
 
 def test_resolve_plan_path_none_when_missing(tmp_path):
     assert resolve_plan_path("add-labels", None, tmp_path, "docs") is None
+
+
+def test_resolve_plan_path_rejects_absolute_escape(tmp_path):
+    """An explicit plan_path outside the workspace is rejected — the gate/dispatch
+    read this path, so never read files outside the workspace (Greptile security)."""
+    outside = tmp_path.parent / "outside-plan.md"
+    outside.write_text(_PLAN)
+    assert resolve_plan_path("add-labels", str(outside), tmp_path, "docs") is None
+
+
+def test_resolve_plan_path_rejects_dotdot_traversal(tmp_path):
+    (tmp_path.parent / "esc-plan.md").write_text(_PLAN)
+    assert resolve_plan_path("add-labels", "../esc-plan.md", tmp_path, "docs") is None

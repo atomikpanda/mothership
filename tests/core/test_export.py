@@ -746,6 +746,42 @@ def test_bundle_omits_missing_optional_artifacts(workspace_with_git, tmp_path):
     assert result.warnings == []
 
 
+def test_bundle_honors_explicit_linked_plan_path(workspace_with_git, tmp_path):
+    """export includes a plan linked via WorkItem.plan_path even when it's OFF
+    the docs/plans/<slug>.md convention — same resolver the gate/dispatch use,
+    so a linked off-convention plan isn't silently omitted (Greptile)."""
+    from mship.core.workitem_store import WorkItemStore
+    state_dir = workspace_with_git / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    log_mgr = LogManager(state_dir / "logs")
+    log_mgr.create("linked-plan")
+    spec_store = SpecStore(workspace_with_git / "specs")
+    config = ConfigLoader.load(workspace_with_git / "mothership.yaml")
+
+    # off-convention plan doc inside the workspace (discover_plan_path won't find it)
+    plan_file = workspace_with_git / "custom" / "the-plan.md"
+    plan_file.parent.mkdir(parents=True, exist_ok=True)
+    plan_file.write_text("# Plan\n\n<!-- mship:task id=1 -->\n### Task 1\n<!-- /mship:task -->\n")
+
+    _now = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    items = WorkItemStore(state_dir / "workitems")
+    wi = items.create(title="linked plan", kind="feature", workspace="ws", now=_now)
+    items.link_plan(wi.id, "custom/the-plan.md", now=_now)
+
+    task = _make_task(
+        slug="linked-plan", branch="feat/linked-plan",
+        worktrees={"shared": workspace_with_git / "shared"},
+        spec_id=None, work_item_id=wi.id,
+    )
+    dest = tmp_path / "out"
+    build_export_bundle(
+        task=task, config=config, workspace_root=workspace_with_git,
+        log_manager=log_mgr, spec_store=spec_store, dest_dir=dest, redacted=False,
+    )
+    assert (dest / "plan.md").is_file()
+    assert "Task 1" in (dest / "plan.md").read_text()
+
+
 def test_bundle_surfaces_warning_when_a_repo_base_is_unresolvable(workspace_with_git, tmp_path):
     """build_export_bundle propagates collect_repo_diff's unresolvable-base
     warning into ExportBundle.warnings (surfaced by the CLI as `output.warning`)

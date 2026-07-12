@@ -88,8 +88,6 @@ class PhaseManager:
             else:
                 if self._workspace_root is not None:
                     from mship.core.workitem_gate import check_task_gate, log_hotfix
-                    if bypass_plan_gate:
-                        log_hotfix(self._workspace_root, "phase-dev-plan", task_slug)
                     # A corrupt/unreadable WorkItem store must not propagate a
                     # raw exception out of transition() — --bypass-spec-gate
                     # already skips this call entirely as the escape hatch;
@@ -107,6 +105,20 @@ class PhaseManager:
                         ) from e
                     if not gate_result.ok:
                         raise SpecGateError(gate_result.reason)
+                    # The transition will proceed. Record a plan-gate bypass ONLY
+                    # when it actually had an effect — i.e. the plan clause WOULD
+                    # have blocked. Avoids audit entries for no-op overrides
+                    # (non-feature item, plan already present) or for transitions
+                    # blocked above anyway (Greptile).
+                    if bypass_plan_gate:
+                        try:
+                            with_plan = check_task_gate(
+                                task, self._workspace_root, require_plan=True
+                            )
+                        except Exception:
+                            with_plan = None
+                        if with_plan is not None and not with_plan.ok:
+                            log_hotfix(self._workspace_root, "phase-dev-plan", task_slug)
 
                 # Approved-spec gate: opt-in via require_approved_spec in
                 # mothership.yaml. Older, task-slug-based and kind-agnostic —

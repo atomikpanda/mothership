@@ -55,11 +55,21 @@ def resolve_plan_path(
     workspace_root: Path,
     docs_dir: str = "docs",
 ) -> Path | None:
-    """Explicit `plan_path` (workspace-relative or absolute) wins; else the
-    discover_plan_path convention. Returns the Path if the file exists, else None."""
+    """Explicit `plan_path` (workspace-relative) wins; else the
+    discover_plan_path convention. Returns the Path if the file exists AND lives
+    inside the workspace, else None. The plan path is later read by the gate and
+    dispatch, so a path that escapes the workspace (absolute, or `..` traversal)
+    is rejected — never read files outside the workspace (Greptile security)."""
+    root = Path(workspace_root).resolve()
     if plan_path:
         p = Path(plan_path)
         if not p.is_absolute():
-            p = Path(workspace_root) / p
+            p = root / p
+        try:
+            p = p.resolve()
+        except OSError:
+            return None
+        if not p.is_relative_to(root):
+            return None
         return p if p.is_file() else None
-    return discover_plan_path(Path(workspace_root), task_slug, docs_dir)
+    return discover_plan_path(root, task_slug, docs_dir)
