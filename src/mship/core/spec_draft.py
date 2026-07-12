@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import Counter
 from datetime import datetime
 
 from mship.core.spec import AcceptanceCriterion, OpenQuestion, Spec, SpecDraft
@@ -102,30 +101,46 @@ def apply_draft(spec: Spec, draft: SpecDraft) -> Spec:
     spec.non_goals = list(draft.non_goals)
     spec.risks = list(draft.risks)
     spec.affected_repos = list(draft.affected_repos)
-    # Preserve verdict + evidence for a criterion whose TEXT is unchanged, matched
-    # by text (not positional id) so inserting, removing, or reordering an earlier
-    # criterion doesn't reset verification on the ones that didn't change (ids stay
-    # positional, ac{i+1}). We only carry evidence forward on an UNAMBIGUOUS match:
-    # the text must occur exactly once in BOTH the prior spec and the new draft, so
-    # there is a unique prior↔new correspondence. If a text is duplicated on either
-    # side the mapping is ambiguous (e.g. an edit makes one AC collide with another's
-    # text), so those criteria start fresh — losing evidence is recoverable by
-    # re-attaching, but silently attaching it to the WRONG criterion is not.
-    prior_by_text = {c.text: c for c in spec.acceptance_criteria}
-    prior_text_counts = Counter(c.text for c in spec.acceptance_criteria)
-    new_text_counts = Counter(draft.acceptance_criteria)
+    # Preserve verdict + evidence for unchanged criteria across a re-apply. Criteria
+    # have no stable id (ids are positional, ac{i+1}), so match each new criterion to
+    # a prior one in two passes, consuming each prior at most once:
+    #   Pass 1 — exact (same id AND same text): the strongest "same criterion" signal.
+    #     Pins an unchanged criterion to its position even when an unrelated edit makes
+    #     a *sibling*'s text collide with it (so the unchanged one keeps its evidence
+    #     and the edited one can't steal it).
+    #   Pass 2 — by text among the still-unmatched priors: recovers criteria whose
+    #     position shifted (insert / remove / reorder) but whose text didn't change.
+    # Whatever stays unmatched is new or materially-changed and starts fresh. Because
+    # priors are consumed, evidence is never duplicated onto two criteria.
+    prior_acs = list(spec.acceptance_criteria)
+    consumed = [False] * len(prior_acs)
+    matched: list[AcceptanceCriterion | None] = [None] * len(draft.acceptance_criteria)
+
+    for i, t in enumerate(draft.acceptance_criteria):
+        ac_id = f"ac{i + 1}"
+        for j, p in enumerate(prior_acs):
+            if not consumed[j] and p.id == ac_id and p.text == t:
+                matched[i], consumed[j] = p, True
+                break
+
+    for i, t in enumerate(draft.acceptance_criteria):
+        if matched[i] is not None:
+            continue
+        for j, p in enumerate(prior_acs):
+            if not consumed[j] and p.text == t:
+                matched[i], consumed[j] = p, True
+                break
+
     new_acs: list[AcceptanceCriterion] = []
     for i, t in enumerate(draft.acceptance_criteria):
         ac_id = f"ac{i + 1}"
-        prior = prior_by_text.get(t)
-        if prior is not None and prior_text_counts[t] == 1 and new_text_counts[t] == 1:
-            # unambiguous unchanged criterion → carry forward verdict + evidence.
+        prior = matched[i]
+        if prior is not None:
             new_acs.append(AcceptanceCriterion(
                 id=ac_id, text=t, verdict=prior.verdict,
                 evidence=list(prior.evidence),
             ))
         else:
-            # new, materially-changed, or ambiguous (duplicate text) → start fresh.
             new_acs.append(AcceptanceCriterion(id=ac_id, text=t))
     spec.acceptance_criteria = new_acs
     spec.open_questions = [

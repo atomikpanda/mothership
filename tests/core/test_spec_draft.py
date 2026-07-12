@@ -102,9 +102,9 @@ def test_apply_draft_preserves_evidence_across_insert_and_reorder():
     assert out.acceptance_criteria[2].evidence == [AcceptanceEvidence(kind="commit", ref="deadbeef")]
 
 
-def test_apply_draft_duplicate_text_is_ambiguous_so_starts_fresh():
-    # Duplicate text on either side makes the prior↔new mapping ambiguous, so nothing
-    # is carried forward — safer than guessing which criterion owns which evidence.
+def test_apply_draft_duplicate_text_preserved_positionally_then_fresh():
+    # Duplicate text: the exact-id+text pass (pass 1) preserves each prior dup at its
+    # own position; a genuinely new duplicate (no prior at that id) starts fresh.
     spec = _spec()
     spec.acceptance_criteria = [
         AcceptanceCriterion(id="ac1", text="dup", verdict="approved",
@@ -115,15 +115,22 @@ def test_apply_draft_duplicate_text_is_ambiguous_so_starts_fresh():
     draft = SpecDraft(problem="P", user_story="U", approach="A",
                       acceptance_criteria=["dup", "dup", "dup"])
     out = apply_draft(spec, draft)
-    assert [c.evidence for c in out.acceptance_criteria] == [[], [], []]
-    assert all(c.verdict == "unreviewed" for c in out.acceptance_criteria)
+    assert [c.evidence for c in out.acceptance_criteria] == [
+        [AcceptanceEvidence(kind="test", ref="test-runs/1")],   # ac1 exact-matched
+        [AcceptanceEvidence(kind="test", ref="test-runs/2")],   # ac2 exact-matched
+        [],                                                      # ac3 new → fresh
+    ]
+    assert [c.verdict for c in out.acceptance_criteria] == ["approved", "flagged", "unreviewed"]
 
 
-def test_apply_draft_edit_into_text_collision_does_not_move_evidence():
-    # Greptile #339 "Evidence Can Move": editing ac1's text so it now equals ac2's
-    # text must NOT transplant ac2's evidence onto the edited criterion. The collided
-    # text is duplicated in the new draft → ambiguous → both start fresh; ac2's
-    # evidence is dropped (recoverable) rather than silently attached to the wrong AC.
+def test_apply_draft_edit_into_text_collision_keeps_unchanged_and_never_moves_evidence():
+    # Greptile #339 findings 2 ("Evidence Can Move") + 3 ("Unchanged Duplicate Loses
+    # Evidence"), which are in tension. Prior: ac1 "view"(A), ac2 "edit"(B). Edit ac1
+    # "view" → "edit" so the draft is ["edit", "edit"]. Correct outcome:
+    #   - the UNCHANGED ac2 "edit" keeps its evidence B (finding 3), matched exactly
+    #     by id+text in pass 1;
+    #   - the EDITED criterion (now at ac1) does NOT receive B (finding 2) — pass 2
+    #     finds no remaining "edit" prior, so it starts fresh.
     spec = _spec()
     spec.acceptance_criteria = [
         AcceptanceCriterion(id="ac1", text="view", verdict="approved",
@@ -131,13 +138,43 @@ def test_apply_draft_edit_into_text_collision_does_not_move_evidence():
         AcceptanceCriterion(id="ac2", text="edit", verdict="flagged",
                             evidence=[AcceptanceEvidence(kind="commit", ref="B")]),
     ]
-    # ac1 "view" edited → "edit" (now collides with ac2's text).
     draft = SpecDraft(problem="P", user_story="U", approach="A",
                       acceptance_criteria=["edit", "edit"])
     out = apply_draft(spec, draft)
-    # Neither new criterion carries evidence B — no mis-attribution.
-    assert [c.evidence for c in out.acceptance_criteria] == [[], []]
-    assert all(c.verdict == "unreviewed" for c in out.acceptance_criteria)
+    # ac1 (the edited criterion) is fresh — evidence B was NOT moved onto it.
+    assert out.acceptance_criteria[0].evidence == []
+    assert out.acceptance_criteria[0].verdict == "unreviewed"
+    # ac2 (unchanged) keeps its verdict + evidence B.
+    assert out.acceptance_criteria[1].evidence == [AcceptanceEvidence(kind="commit", ref="B")]
+    assert out.acceptance_criteria[1].verdict == "flagged"
+    # Evidence A ("view", now gone) is not present anywhere; B appears exactly once.
+    all_refs = [e.ref for c in out.acceptance_criteria for e in c.evidence]
+    assert all_refs == ["B"]
+
+
+def test_apply_draft_insert_plus_collision_tiebreak_is_positional_and_lossless():
+    # Documents the one residual ambiguity (insert + edit-into-collision). Prior:
+    # ac1 "A"(E1), ac2 "B"(E2). Draft inserts "NEW" and edits "A"→"B", giving
+    # ["NEW","B","B"] — two "B"s but only one prior "B". The single E2 is preserved
+    # exactly once (never duplicated, never dropped) and lands on a criterion whose
+    # text is "B"; the id-aligned "B" (pass-1 exact match) wins the tie-break.
+    spec = _spec()
+    spec.acceptance_criteria = [
+        AcceptanceCriterion(id="ac1", text="A", verdict="approved",
+                            evidence=[AcceptanceEvidence(kind="test", ref="E1")]),
+        AcceptanceCriterion(id="ac2", text="B", verdict="flagged",
+                            evidence=[AcceptanceEvidence(kind="commit", ref="E2")]),
+    ]
+    draft = SpecDraft(problem="P", user_story="U", approach="A",
+                      acceptance_criteria=["NEW", "B", "B"])
+    out = apply_draft(spec, draft)
+    assert [(c.id, c.text) for c in out.acceptance_criteria] == [("ac1", "NEW"), ("ac2", "B"), ("ac3", "B")]
+    assert out.acceptance_criteria[0].evidence == []                                    # NEW: fresh
+    assert out.acceptance_criteria[1].evidence == [AcceptanceEvidence(kind="commit", ref="E2")]  # id-aligned B keeps E2
+    assert out.acceptance_criteria[2].evidence == []                                    # shifted B: fresh
+    # E1 ("A", edited away) is gone; E2 preserved exactly once, never duplicated.
+    all_refs = [e.ref for c in out.acceptance_criteria for e in c.evidence]
+    assert all_refs == ["E2"]
 
 
 import pytest
