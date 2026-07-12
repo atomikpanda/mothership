@@ -78,6 +78,50 @@ def test_apply_draft_resets_evidence_and_verdict_for_materially_changed_ac():
     assert out.acceptance_criteria[0].evidence == []            # fresh
 
 
+def test_apply_draft_preserves_evidence_across_insert_and_reorder():
+    # Greptile #339: preservation is by TEXT, not positional id — inserting a NEW
+    # criterion ahead of unchanged ones (which shifts their ac{i+1} ids) must NOT
+    # reset the unchanged ones' evidence/verdict.
+    spec = _spec()
+    spec.acceptance_criteria = [
+        AcceptanceCriterion(id="ac1", text="A", verdict="approved",
+                            evidence=[AcceptanceEvidence(kind="test", ref="test-runs/1")]),
+        AcceptanceCriterion(id="ac2", text="B", verdict="flagged",
+                            evidence=[AcceptanceEvidence(kind="commit", ref="deadbeef")]),
+    ]
+    draft = SpecDraft(problem="P", user_story="U", approach="A",
+                      acceptance_criteria=["NEW", "A", "B"])   # NEW inserted first
+    out = apply_draft(spec, draft)
+    ids_texts = [(c.id, c.text) for c in out.acceptance_criteria]
+    assert ids_texts == [("ac1", "NEW"), ("ac2", "A"), ("ac3", "B")]
+    assert out.acceptance_criteria[0].verdict == "unreviewed"          # NEW: fresh
+    assert out.acceptance_criteria[0].evidence == []
+    assert out.acceptance_criteria[1].verdict == "approved"            # A: preserved despite id shift
+    assert out.acceptance_criteria[1].evidence == [AcceptanceEvidence(kind="test", ref="test-runs/1")]
+    assert out.acceptance_criteria[2].verdict == "flagged"             # B: preserved despite id shift
+    assert out.acceptance_criteria[2].evidence == [AcceptanceEvidence(kind="commit", ref="deadbeef")]
+
+
+def test_apply_draft_duplicate_text_consumes_each_prior_once():
+    # Two criteria with identical text: each prior's evidence is claimed once, not
+    # duplicated onto both.
+    spec = _spec()
+    spec.acceptance_criteria = [
+        AcceptanceCriterion(id="ac1", text="dup", verdict="approved",
+                            evidence=[AcceptanceEvidence(kind="test", ref="test-runs/1")]),
+        AcceptanceCriterion(id="ac2", text="dup", verdict="flagged",
+                            evidence=[AcceptanceEvidence(kind="test", ref="test-runs/2")]),
+    ]
+    draft = SpecDraft(problem="P", user_story="U", approach="A",
+                      acceptance_criteria=["dup", "dup", "dup"])   # one MORE than before
+    out = apply_draft(spec, draft)
+    assert [c.evidence for c in out.acceptance_criteria] == [
+        [AcceptanceEvidence(kind="test", ref="test-runs/1")],   # first prior
+        [AcceptanceEvidence(kind="test", ref="test-runs/2")],   # second prior
+        [],                                                      # no prior left → fresh
+    ]
+
+
 import pytest
 
 from mship.core.spec_draft import new_spec, SPEC_BODY_TEMPLATE

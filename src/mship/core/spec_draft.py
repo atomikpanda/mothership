@@ -101,13 +101,21 @@ def apply_draft(spec: Spec, draft: SpecDraft) -> Spec:
     spec.non_goals = list(draft.non_goals)
     spec.risks = list(draft.risks)
     spec.affected_repos = list(draft.affected_repos)
-    prior_acs = {c.id: c for c in spec.acceptance_criteria}
+    # Preserve verdict + evidence for a criterion whose TEXT is unchanged, matched
+    # by text (not positional id) so inserting, removing, or reordering an earlier
+    # criterion doesn't reset verification on the ones that didn't change. Ids stay
+    # positional (ac{i+1}); each prior criterion is consumed at most once so that
+    # duplicate-text criteria can't both claim the same prior's evidence.
+    prior_by_text: dict[str, list[AcceptanceCriterion]] = {}
+    for c in spec.acceptance_criteria:
+        prior_by_text.setdefault(c.text, []).append(c)
     new_acs: list[AcceptanceCriterion] = []
     for i, t in enumerate(draft.acceptance_criteria):
         ac_id = f"ac{i + 1}"
-        prior = prior_acs.get(ac_id)
-        if prior is not None and prior.text == t:
-            # id AND text unchanged → carry forward verdict + evidence.
+        bucket = prior_by_text.get(t)
+        if bucket:
+            # text unchanged → carry forward verdict + evidence (consume the match).
+            prior = bucket.pop(0)
             new_acs.append(AcceptanceCriterion(
                 id=ac_id, text=t, verdict=prior.verdict,
                 evidence=list(prior.evidence),
