@@ -12,10 +12,17 @@ SpecStatus = Literal[
 ]
 
 
+class AcceptanceEvidence(BaseModel):
+    kind: Literal["test", "commit", "artifact"]
+    ref: str
+    note: str | None = None
+
+
 class AcceptanceCriterion(BaseModel):
     id: str
     text: str
     verdict: Literal["unreviewed", "approved", "flagged"] = "unreviewed"
+    evidence: list[AcceptanceEvidence] = []
 
 
 class OpenQuestion(BaseModel):

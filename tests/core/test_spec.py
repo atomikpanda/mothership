@@ -1,8 +1,9 @@
 from datetime import datetime, timezone
 
 import pytest
+from pydantic import ValidationError
 
-from mship.core.spec import AcceptanceCriterion, InvalidTransition, OpenQuestion, Spec, can_transition, validate_transition
+from mship.core.spec import AcceptanceCriterion, AcceptanceEvidence, InvalidTransition, OpenQuestion, Spec, can_transition, validate_transition
 
 
 def _spec(**kw):
@@ -35,6 +36,16 @@ def test_dispatch_ready_requires_approved_and_no_open_questions():
 def test_acceptance_criterion_verdict_defaults_unreviewed():
     ac = AcceptanceCriterion(id="ac1", text="works")
     assert ac.verdict == "unreviewed"
+
+
+def test_acceptance_evidence_defaults_note_none():
+    e = AcceptanceEvidence(kind="artifact", ref="docs/x.md:12-18")
+    assert e.note is None
+
+
+def test_acceptance_evidence_rejects_unknown_kind():
+    with pytest.raises(ValidationError):
+        AcceptanceEvidence(kind="screenshot", ref="x")
 
 
 @pytest.mark.parametrize("current,target", [
