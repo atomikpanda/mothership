@@ -101,10 +101,11 @@ The compose file (`docker/relay/docker-compose.yml`) starts two services:
 The `Caddyfile` (`docker/relay/Caddyfile`) wires:
 
 - `enroll.{$RELAY_DOMAIN}` → `127.0.0.1:47180` (enroll-server; only `POST /enroll` and `GET /status/*` are forwarded — everything else returns 404).
-- `gh.{$RELAY_DOMAIN}` → `127.0.0.1:47181` (the gh-token broker, Broker B; only `GET /gh-token` is forwarded — everything else returns 404). See [`docs/cloud-agent-auth.md`](cloud-agent-auth.md) for setting this up (GitHub App, env vars, `mship relay gh-broker`).
 - `*.{$RELAY_DOMAIN}` → `127.0.0.1:8080` (sish HTTP, `Host` header preserved).
 
-On-demand TLS is gated by the enroll-server's `/tls-check` ask endpoint, so Caddy only issues certificates for known hostnames — this allowlist also covers `gh.{$RELAY_DOMAIN}`.
+The GitHub token broker is no longer a separate host/route: it's folded into `mship serve`'s `GET /gh-token` and reached over the workspace's own `*.{$RELAY_DOMAIN}` serve tunnel. See [`docs/cloud-agent-auth.md`](cloud-agent-auth.md).
+
+On-demand TLS is gated by the enroll-server's `/tls-check` ask endpoint, so Caddy only issues certificates for known hostnames.
 
 ---
 
