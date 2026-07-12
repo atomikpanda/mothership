@@ -9,7 +9,7 @@ description: Use when working in a workspace with mothership.yaml — provides p
 
 Mothership (`mship`) is a control plane for agentic development. It tracks workflow phases, manages git worktrees, executes tasks across repos in dependency order, and gives agents structured state for context recovery.
 
-> **New to the model? Start with the concepts map.** mship's `docs/concepts.md` explains how **WorkItem, Spec, Plan, Task, worktrees**, and **agents/subagents** relate (with diagrams). That's the *what-is*; this skill is the *how-to*. Read the map first so the commands below have a mental model to hang on.
+> **New to the model? Start with the concepts map.** The mship **concepts map** explains how **WorkItem, Spec, Plan, Task, worktrees**, and **agents/subagents** relate (with diagrams) — it's the *what-is*; this skill is the *how-to*. It lives at `docs/concepts.md` in the mship source repo (github.com/atomikpanda/mothership); if the source tree is available locally, read it there, otherwise view it in the repo. Read the map first so the commands below have a model to hang on.
 
 **You are the brain. Mothership is the coordinator. go-task is the muscle.**
 
