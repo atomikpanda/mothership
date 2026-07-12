@@ -72,6 +72,29 @@ def test_resolve_token_broker_pull_returns_token(monkeypatch):
     assert captured["auth"] == "Bearer serve-secret"
 
 
+def test_resolve_token_broker_pull_sends_owner_repo(monkeypatch):
+    # resolve_token is caller-agnostic: it joins whatever `repos` it is given
+    # straight into `?repos=`. The callers (bootstrap/finish) now hand it
+    # `owner/repo` slugs so the folded serve can resolve the App installation;
+    # verify the query carries them (url-encoded or raw).
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        return httpx.Response(200, json={"token": "ghs_x"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    tok = resolve_token(
+        None, broker_url="https://serve", broker_bearer="b",
+        repos=["acme/widgets", "acme/gadgets"], client=client,
+    )
+    assert tok == "ghs_x"
+    assert "acme%2Fwidgets" in seen["url"] or "acme/widgets" in seen["url"]
+    assert "acme%2Fgadgets" in seen["url"] or "acme/gadgets" in seen["url"]
+
+
 def test_resolve_token_explicit_wins_over_broker(monkeypatch):
     def handler(request):
         raise AssertionError("broker must not be called when an explicit token is given")

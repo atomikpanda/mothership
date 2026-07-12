@@ -29,6 +29,46 @@ def _app_jwt(app_id: str, private_key: str, now: int | None = None) -> str:
     )
 
 
+def resolve_installation(
+    *,
+    app_id: str,
+    private_key: str,
+    owner: str,
+    repo: str,
+    now: int | None = None,
+    client: httpx.Client | None = None,
+) -> str:
+    """Return the App installation id that owns `owner/repo`, discovered from
+    the App JWT via GET /repos/{owner}/{repo}/installation. Raises GhAppError
+    naming owner/repo if the App is not installed there. Never logs the key.
+    """
+    token_jwt = _app_jwt(app_id, private_key, now)
+    c, owns = (client, False) if client is not None else (httpx.Client(timeout=15), True)
+    try:
+        try:
+            resp = c.get(
+                f"{_API}/repos/{owner}/{repo}/installation",
+                headers={
+                    "Authorization": f"Bearer {token_jwt}",
+                    "Accept": "application/vnd.github+json",
+                },
+            )
+        except httpx.HTTPError as e:
+            raise GhAppError(f"gh-app: installation lookup failed for {owner}/{repo}: {e}") from e
+        if resp.status_code == 200:
+            inst = resp.json().get("id")
+            if inst is None:
+                raise GhAppError(f"gh-app: installation lookup for {owner}/{repo} had no id")
+            return str(inst)
+        raise GhAppError(
+            f"gh-app: App is not installed on {owner}/{repo} "
+            f"(install the App on {owner}) — status {resp.status_code}"
+        )
+    finally:
+        if owns:
+            c.close()
+
+
 def mint_installation_token(
     *,
     app_id: str,

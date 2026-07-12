@@ -532,6 +532,61 @@ def test_finish_creates_prs(configured_git_app: Path):
     cli_container.shell.reset_override()
 
 
+def test_finish_broker_pull_sends_owner_repo(configured_git_app: Path, monkeypatch):
+    """finish maps the task's affected repos to `owner/repo` slugs before the
+    broker pull, so the folded serve can resolve the GitHub App installation."""
+    import mship.core.gh_auth as gh_auth
+    from mship.cli import container as cli_container
+
+    # Add a default_remote so short repo names resolve to owner/repo slugs.
+    cfg = configured_git_app / "mothership.yaml"
+    cfg.write_text(
+        "workspace: test-platform\n"
+        "default_remote: https://github.com/acme\n"
+        "repos:\n"
+        "  shared:\n    path: ./shared\n    type: library\n    base_branch: main\n"
+    )
+    cli_container.config.reset()
+
+    captured: dict[str, list] = {}
+
+    def fake_resolve_token(token, *, repos=None, **kw):
+        captured["repos"] = repos
+        return None
+
+    monkeypatch.setattr(gh_auth, "resolve_token", fake_resolve_token)
+
+    runner.invoke(app, ["spawn", "--hotfix", "brk test", "--repos", "shared"])
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://github.com/acme/shared/pull/1\n", stderr="")
+        if "gh pr view" in cmd:
+            return ShellResult(returncode=0, stdout="body text", stderr="")
+        if "gh pr edit" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    cli_container.shell.override(mock_shell)
+
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "brk-test"])
+    assert result.exit_code == 0, result.output
+    assert captured["repos"] == ["acme/shared"]
+
+    cli_container.shell.reset_override()
+
+
 def test_finish_body_file_passed_to_gh_pr_create(configured_git_app: Path):
     """--body-file contents must land in the gh pr create invocation."""
     from mship.cli import container as cli_container

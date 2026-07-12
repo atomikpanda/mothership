@@ -9,9 +9,10 @@ _SERVE_LABEL = re.compile(r"[a-z0-9][a-z0-9-]*-[0-9a-f]{6}")
 def tls_ask_allowed(domain: str, relay_domain: str) -> bool:
     """Whether Caddy may provision an on-demand TLS cert for `domain`.
 
-    True only for the enroll host, the gh-token broker host, and serve
-    per-device subdomains under `relay_domain`; False for the bare apex,
-    foreign domains, extra subdomain levels, lookalikes, and blank input.
+    True only for the enroll host and serve per-device subdomains under
+    `relay_domain`; False for the bare apex, foreign domains, extra
+    subdomain levels, lookalikes, and blank input. (The gh-token broker is
+    folded into `mship serve` — it rides a serve subdomain, no separate cert.)
     This is the cert allowlist — keep it tight; a loose match reopens the
     "mint a cert for any host" surface.
     """
@@ -25,6 +26,6 @@ def tls_ask_allowed(domain: str, relay_domain: str) -> bool:
     label = domain[: -len(suffix)]
     if not label or "." in label:        # no nested subdomain levels
         return False
-    if label in ("enroll", "gh"):
+    if label == "enroll":
         return True
     return len(label) <= 63 and _SERVE_LABEL.fullmatch(label) is not None

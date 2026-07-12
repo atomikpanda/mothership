@@ -229,10 +229,17 @@ def run_preflight(
             "for the broker, or GH_TOKEN/GITHUB_TOKEN/--token).",
         )
 
+    # The folded App-backed serve resolves a GitHub App installation per
+    # owner/repo, so send `owner/repo` slugs (from the caller's map) rather
+    # than the short config names — falling back to the short name for any
+    # repo that couldn't be resolved to a github.com owner.
+    owner_repos = (
+        [repo_owner_names.get(r, r) for r in repos] if repo_owner_names else repos
+    )
     c, owns = (client, False) if client is not None else (httpx.Client(timeout=timeout), True)
     try:
         try:
-            params = {"repos": ",".join(repos)} if repos else None
+            params = {"repos": ",".join(owner_repos)} if owner_repos else None
             headers = {"Authorization": f"Bearer {broker_bearer}"} if broker_bearer else {}
             resp = c.get(f"{broker_url}/gh-token", params=params, headers=headers)
         except httpx.HTTPError as e:
@@ -248,7 +255,7 @@ def run_preflight(
                 "  -> install/grant the GitHub App on the named repo(s) above, then retry.",
             )
 
-        return PreflightResult(True, f"auth OK — broker covers: {', '.join(repos)}")
+        return PreflightResult(True, f"auth OK — broker covers: {', '.join(owner_repos)}")
     finally:
         if owns:
             c.close()
