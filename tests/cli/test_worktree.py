@@ -2079,7 +2079,7 @@ def test_close_fires_task_closed_hook_on_abandon(configured_git_app):
     cfg_path = configured_git_app / "mothership.yaml"
     cfg_path.write_text(
         cfg_path.read_text()
-        + "hooks:\n"
+        + "lifecycle_hooks:\n"
         + "  - on: task.closed\n"
         + "    run: notify-closed\n"
     )
@@ -2123,7 +2123,7 @@ def test_close_required_hook_on_task_closed_rejected_at_config_load(configured_g
     cfg_path = configured_git_app / "mothership.yaml"
     cfg_path.write_text(
         cfg_path.read_text()
-        + "hooks:\n"
+        + "lifecycle_hooks:\n"
         + "  - on: task.closed\n"
         + "    run: notify-closed-fails\n"
         + "    required: true\n"
@@ -2141,7 +2141,7 @@ def test_close_non_required_hook_failure_never_blocks_close(configured_git_app):
     cfg_path = configured_git_app / "mothership.yaml"
     cfg_path.write_text(
         cfg_path.read_text()
-        + "hooks:\n"
+        + "lifecycle_hooks:\n"
         + "  - on: task.closed\n"
         + "    run: notify-closed-fails\n"
     )

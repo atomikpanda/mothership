@@ -132,7 +132,7 @@ def test_post_item_phase_sets_override(tmp_path):
 
     items = WorkItemStore(tmp_path / ".mothership" / "workitems")
     wi = items.create(title="Stuck item", kind="feature", workspace="testws", now=_now())
-    config = WorkspaceConfig(workspace="testws", repos={}, hooks=[])
+    config = WorkspaceConfig(workspace="testws", repos={}, lifecycle_hooks=[])
     client = _app_with_config(tmp_path, config)
 
     resp = client.post(f"/items/{wi.id}/phase", json={"phase": "done"})
@@ -194,7 +194,7 @@ def test_post_item_phase_fires_workitem_phase_hook(tmp_path):
     marker = tmp_path / "hook-fired.txt"
     config = WorkspaceConfig(
         workspace="testws", repos={},
-        hooks=[HookConfig(on="workitem.phase.done", run=f"touch {marker}")],
+        lifecycle_hooks=[HookConfig(on="workitem.phase.done", run=f"touch {marker}")],
     )
     client = _app_with_config(tmp_path, config)
 
@@ -212,7 +212,7 @@ def test_post_item_phase_required_hook_failure_returns_422_and_blocks_override(t
 
     config = WorkspaceConfig(
         workspace="testws", repos={},
-        hooks=[HookConfig(on="workitem.phase.done", run="false", required=True)],
+        lifecycle_hooks=[HookConfig(on="workitem.phase.done", run="false", required=True)],
     )
     client = _app_with_config(tmp_path, config)
 
@@ -229,7 +229,7 @@ def test_post_item_phase_non_required_hook_failure_still_sets_override(tmp_path)
 
     config = WorkspaceConfig(
         workspace="testws", repos={},
-        hooks=[HookConfig(on="workitem.phase.done", run="false")],
+        lifecycle_hooks=[HookConfig(on="workitem.phase.done", run="false")],
     )
     client = _app_with_config(tmp_path, config)
 
@@ -266,7 +266,7 @@ def test_post_item_phase_hook_fires_iff_config_present(tmp_path):
 
     # Same hook definition, config now wired in -> it must fire, and the
     # override applies normally.
-    config = WorkspaceConfig(workspace="testws", repos={}, hooks=hooks)
+    config = WorkspaceConfig(workspace="testws", repos={}, lifecycle_hooks=hooks)
     client_with_config = _app_with_config(tmp_path, config)
     resp = client_with_config.post(f"/items/{wi_with_config.id}/phase", json={"phase": "done"})
     assert resp.status_code == 200
@@ -293,7 +293,7 @@ def test_post_item_phase_hook_does_not_hold_item_msg_lock(tmp_path):
 
     config = WorkspaceConfig(
         workspace="testws", repos={},
-        hooks=[HookConfig(on="workitem.phase.done", run="sleep 1")],
+        lifecycle_hooks=[HookConfig(on="workitem.phase.done", run="sleep 1")],
     )
     client = _app_with_config(tmp_path, config)
 

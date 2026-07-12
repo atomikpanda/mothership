@@ -718,7 +718,7 @@ def _make_phase_manager_with_hooks(state_mgr, workspace_root, hooks, shell=None)
     config = WorkspaceConfig(
         workspace="test",
         repos={"shared": RepoConfig(path=Path("./shared"), type="library")},
-        hooks=hooks,
+        lifecycle_hooks=hooks,
     )
     return PhaseManager(
         state_mgr, MagicMock(spec=LogManager),
