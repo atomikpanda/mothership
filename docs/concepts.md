@@ -14,7 +14,7 @@ graph TD
       SUB["Subagents<br/>(mship dispatch)"]
     end
 
-    WI["WorkItem<br/>durable intent<br/>kind: feature / bug / chore / question<br/>phase: inbox → … → done"]
+    WI["WorkItem<br/>durable intent<br/>kind: feature / bug / chore / question<br/>phase (derived): inbox → … → done"]
     SPEC["Spec<br/>approved design<br/>status: needs_review → approved"]
     PLAN["Plan<br/>&lt;docs_dir&gt;/plans/&lt;date&gt;-&lt;slug&gt;.md<br/>bite-sized mship:task blocks"]
     TASK["Task<br/>execution unit<br/>phase: plan → dev → review → run"]
@@ -66,9 +66,9 @@ For **bug** and **chore** work items the design gates don't apply: `item new --k
 
 ## The objects, one at a time
 
-**WorkItem** — the durable unit of intent, created with `mship item new "<title>" --kind <feature|bug|chore|question>`. It's the spine the phone-facing cockpit is built around, with its own lifecycle phase (`inbox → shaping → ready → in_flight → review → done`, distinct from a Task's phase). It links a Spec (`spec_id`), a Plan (`plan_path`), Tasks (`task_slugs`), mailbox threads, and external links. Every Task must belong to a WorkItem — that's the first gate.
+**WorkItem** — the durable unit of intent, created with `mship item new "<title>" --kind <feature|bug|chore|question>`. It's the spine the phone-facing cockpit is built around. Its phase (`inbox → shaping → ready → in_flight → review → done`) is **derived, not stored**: only a `phase_override` is persisted, and the phase is otherwise computed on read (`core/view/workitem_index.py::compute_phase`) as a projection of the linked Spec's `status` plus a Task-finished overlay. So it's a coarse cockpit view of where the work sits — not an independent lifecycle you drive directly (contrast the **Task** phase below, which *is* a stored, explicitly-driven state). It links a Spec (`spec_id`), a Plan (`plan_path`), Tasks (`task_slugs`), mailbox threads, and external links. Every Task must belong to a WorkItem — that's the first gate.
 
-**Spec** — the approved design for a feature, a workspace artifact at `<workspace>/specs/<date>-<id>.md` (markdown-canonical, branch-stable). Lifecycle: `mship spec new → draft → apply` (lands in `needs_review`) → review (`mship spec review` / `verdict` / `request-changes`) → `mship spec approve` → `dispatch`. The spec is the *what and why*; it's authored during brainstorming, before any code.
+**Spec** — the approved design for a feature, a workspace artifact at `<workspace>/specs/<date>-<id>.md` (markdown-canonical, branch-stable). Lifecycle: `mship spec new → draft → apply` (lands in `needs_review`) → review (`mship spec review` / `verdict` / `request-changes`) → `mship spec approve` → `dispatch`. The spec is the *what and why*; it's authored during brainstorming, before any code. (Canonical specs live in `specs/`. A legacy `spec_paths` default — `docs/superpowers/specs` — is still consulted by `phase dev`'s soft gate and `mship view spec` for backward compatibility; new work uses `specs/`, and collapsing the dual location is tracked cleanup.)
 
 **Plan** — the *how*: a bite-sized, TDD-oriented implementation breakdown at `<docs_dir>/plans/<date>-<slug>.md`, produced by the `writing-plans` skill. Each task is wrapped in `<!-- mship:task id=N -->` anchors so `mship dispatch --plan-task N` can hand one task to a subagent. Plans are first-class and gated for features (see Gates); build dispatch is minted **from the plan** once one exists.
 
@@ -78,13 +78,15 @@ For **bug** and **chore** work items the design gates don't apply: `item new --k
 
 ## The three gates
 
-Enforced at `phase plan → dev` and at `mship finish` (never at `spawn`, so you can create work before designing it):
+The WorkItem/spec/plan gates fire at `phase plan → dev` and at `mship finish` (never at `spawn`, so you can create work before designing it):
 
 1. **WorkItem gate** — every task must belong to a WorkItem (`spawn` requires `--work-item <id>`, or `--hotfix` to override). Applies to all kinds.
 2. **Spec gate** — a **feature** WorkItem needs an approved linked spec. Bypass: `--bypass-spec-gate` (phase) / `--hotfix` (finish).
 3. **Plan gate** — a **feature** WorkItem needs a valid implementation plan (resolved via `plan_path` or the `<docs_dir>/plans/<date>-<slug>.md` convention — `docs_dir` defaults to `docs` — containing at least one `mship:task` anchor). Bypass: `--bypass-plan-gate` / `--hotfix`.
 
-Bug and chore work items pass straight through — only features carry the design/plan gates. Every bypass is recorded to `.mothership/bypass-log.jsonl`.
+Bug and chore work items pass straight through — only features carry the design/plan gates.
+
+The **WorkItem-required** gate is enforced more broadly than the phase/finish transitions: the git pre-commit/pre-push hooks and the Claude Code PreToolUse edit-guard (`mship _guard-edit`) also refuse commits/edits from a worktree whose task lacks a WorkItem, with `MSHIP_BYPASS_GATE=1` as the escape hatch. So the object model isn't just discipline injected into a prompt (as in a pure skills system) — it's enforced in code and at the git/edit boundary, which an agent can't rationalize past. Every bypass (`--hotfix`, `--bypass-spec-gate`, `--bypass-plan-gate`, `MSHIP_BYPASS_GATE`) is recorded to `.mothership/bypass-log.jsonl`.
 
 ## Agents and subagents
 
@@ -96,6 +98,10 @@ Bug and chore work items pass straight through — only features carry the desig
 ## The phone loop (serve + mailbox)
 
 `mship serve` runs a JSON API over the spec + task model — the backend for the **Ground Control** phone app — plus a durable **mailbox** for two-way async messages between you and an agent. A running agent watches the mailbox (`mship inbox wait`) and the turn boundary (`mship _drain` Stop hook) so it sees your replies, dispatch handoffs, and PR-merge events without polling. This is what lets you drive the whole lifecycle above — capture intent, approve a spec, steer a build, merge a PR — from your phone.
+
+## The unattended runner (autonomous execution)
+
+Beyond the interactive loop, mship can run WorkItems autonomously. A WorkItem marked `unattended` becomes eligible for the cloud runner: `mship item run-next` selects the next ready unattended item (keyed off the derived WorkItem phase), carries it through the lifecycle, and `mship item bail` / `heartbeat` handle giveback + liveness; `core/pr_watcher.py` posts a PR-merge event back to the mailbox. It's the same object model driven by a scheduler instead of a human — the phone loop and the unattended loop share the WorkItem / Spec / Plan spine. (This layer is newer than the interactive path; treat it as the autonomous complement to the phone control plane.)
 
 ## Who relates to whom (at a glance)
 
