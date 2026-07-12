@@ -26,6 +26,7 @@ class WorkItem(BaseModel):
     created_at: datetime
     updated_at: datetime
     spec_id: str | None = None
+    plan_path: str | None = None
     task_slugs: list[str] = []
     thread_ids: list[str] = []
     external_links: list[ExternalLink] = []
