@@ -21,8 +21,9 @@ uv tool install git+https://github.com/atomikpanda/mothership.git
 
 cd my-project
 mship init --name my-project --detect
-mship spawn "add hello world"
-cd $(mship status | jq -r '.worktrees | to_entries[0].value')
+mship item new "hello world" --kind chore         # every task needs a work item...
+mship spawn "add hello world" --work-item <id>    # ...pass its id (or --hotfix to skip the gate)
+cd $(mship status | jq -r '.resolved_task.worktrees | to_entries[0].value')
 
 echo 'print("hello")' > hello.py
 git add hello.py && git commit -m "feat: hello world"
@@ -43,7 +44,7 @@ The quickstart above is deliberately minimal — one repo, one file — to show 
 
 ```bash
 # Workflow
-mship spawn "description"               # start a task in isolated worktrees
+mship spawn "description" --work-item <id>  # start a task in isolated worktrees (needs a work item; --hotfix to skip)
 mship switch <repo>                     # context switch across repos
 mship phase plan|dev|review|run         # transition through phases
 mship test                              # run tests in dependency order
@@ -56,7 +57,7 @@ mship spec new --title "title"          # design a spec; approve before feature 
 mship spec dispatch <id>                # bind an approved spec to a task + emit a handoff
 
 # Task dependencies (#104)
-mship spawn "downstream" --depends-on a,b  # declare at spawn
+mship spawn "downstream" --work-item <id> --depends-on a,b  # declare at spawn (--work-item required)
 mship depends add/remove/list               # manage task-to-task dependency edges
 mship finish --bypass-deps                 # ship a downstream even if upstream isn't ready
 
@@ -77,7 +78,7 @@ For details, see `mship spawn --help`, [`docs/cli.md`](docs/cli.md), and the `wo
 
 ## What mship gives agents
 
-**Cross-repo coordination as a first-class concept.** A task in mship is a single unit of work that can span many repos. `mship spawn "propagate user schema v2" --repos schemas,svc-users,svc-billing,api,api-client` creates one worktree per repo on a shared feature branch. `mship test` runs them in dependency order. `mship finish` opens five PRs in dependency order with coordination blocks in each body linking the others. Audits catch drift per repo. The agent operates on "the task" — mship tracks which files across which repos belong to it.
+**Cross-repo coordination as a first-class concept.** A task in mship is a single unit of work that can span many repos. `mship spawn "propagate user schema v2" --work-item <id> --repos schemas,svc-users,svc-billing,api,api-client` creates one worktree per repo on a shared feature branch. `mship test` runs them in dependency order. `mship finish` opens five PRs in dependency order with coordination blocks in each body linking the others. Audits catch drift per repo. The agent operates on "the task" — mship tracks which files across which repos belong to it.
 
 **Isolation that makes coordination safe.** Every worktree is on its own feature branch, separate from main. A pre-commit hook refuses commits from outside the active task's worktrees. mship also installs a Claude Code **PreToolUse guard** (`mship _guard-edit`, added by `mship init --install-hooks`) that refuses an Edit/Write to a repo's main checkout while that repo has an active task — closing the gap that the git pre-commit hook can't see, since edit tools bypass git. Override a one-off with `MSHIP_ALLOW_MAIN_EDIT=1`. Parallel tasks on different features get their own worktree sets and don't collide.
 
