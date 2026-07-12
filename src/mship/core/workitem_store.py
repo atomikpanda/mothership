@@ -71,6 +71,11 @@ class WorkItemStore:
         item.spec_id = spec_id
         self.save(item)
 
+    def link_plan(self, item_id: str, plan_path: str, now: datetime | None = None) -> None:
+        item = self._mutate(item_id, now)
+        item.plan_path = plan_path
+        self.save(item)
+
     def add_task(self, item_id: str, task_slug: str, now: datetime | None = None,
                 state: StateManager | None = None) -> None:
         item = self.get(item_id)

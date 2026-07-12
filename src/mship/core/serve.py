@@ -624,6 +624,8 @@ def create_app(
                     spec, state_manager=state_manager, store=store,
                     spawn_fn=_serve_spawn, now=datetime.now(timezone.utc),
                     workitems=workitems, workspace=workspace_name,
+                    workspace_root=workspace_root,
+                    docs_dir=(config.docs_dir if config is not None else "docs"),
                 )
                 # Serve-side-only handoff notify (MOS-194): posts an agent `event`
                 # message naming the spec/task/worktree into the WorkItem's thread

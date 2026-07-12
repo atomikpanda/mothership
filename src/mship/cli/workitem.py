@@ -237,6 +237,13 @@ def register(parent: typer.Typer, get_container) -> None:
         items.link_spec(item_id, spec_id, now=datetime.now(timezone.utc))
         typer.echo(f"linked spec {spec_id} -> {item_id}")
 
+    @item_app.command("link-plan")
+    def link_plan(item_id: str, plan_path: str):
+        items, _, _, _, _ = _ctx()
+        _guard(items, item_id)
+        items.link_plan(item_id, plan_path, now=datetime.now(timezone.utc))
+        typer.echo(f"linked plan {plan_path} -> {item_id}")
+
     @item_app.command("link-task")
     def link_task(item_id: str, task_slug: str):
         items, _, state_manager, _, _ = _ctx()

@@ -43,6 +43,17 @@ def test_workitem_unattended_defaults_false_and_roundtrips():
     assert WorkItem.model_validate_json(wi2.model_dump_json()).unattended is True
 
 
+def test_workitem_plan_path_defaults_none_and_roundtrips():
+    now = _now()
+    wi = WorkItem(id="wi-1", title="t", workspace="ws", kind="feature",
+                  created_at=now, updated_at=now)
+    assert wi.plan_path is None
+    dumped = wi.model_dump_json()
+    assert WorkItem.model_validate_json(dumped).plan_path is None
+    wi2 = wi.model_copy(update={"plan_path": "docs/plans/x.md"})
+    assert WorkItem.model_validate_json(wi2.model_dump_json()).plan_path == "docs/plans/x.md"
+
+
 def test_workitem_archived_defaults_false_and_roundtrips():
     now = _now()
     wi = WorkItem(id="wi-1", title="t", workspace="ws", kind="feature",

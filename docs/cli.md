@@ -33,7 +33,7 @@ mship depends add|remove|list                       # manage task-to-task depend
 
 ## Work items & specs
 
-A **work item** is the durable unit of intent (`feature`/`bug`/`chore`/`question`) that a task implements; a **spec** is its approved design. Feature work items gate `phase dev`/`finish` on an approved linked spec (bugs and chores don't need one).
+A **work item** is the durable unit of intent (`feature`/`bug`/`chore`/`question`) that a task implements; a **spec** is its approved design and a **plan** is its implementation breakdown. Feature work items gate `phase dev`/`finish` on BOTH an approved linked spec AND a linked/discovered implementation plan (bugs and chores need neither).
 
 ```bash
 mship item new "title" --kind feature|bug|chore|question   # create a work item
@@ -41,6 +41,7 @@ mship item list [--all]                             # list work items (--all inc
 mship item show <id>                                # detail incl. linked spec/tasks
 mship item phase <id> <phase>                       # move the item through its lifecycle
 mship item link-spec|link-task|link-url <id> <ref>  # attach a spec, task, or URL
+mship item link-plan <id> <path>                    # attach an implementation plan doc (feature plan-gate)
 mship item archive|unarchive <id>                   # soft-hide / restore
 
 mship spec new --title "title"                      # create a spec (lands in needs_review)
@@ -55,6 +56,8 @@ mship spec list                                     # list specs
 ```
 
 Specs live at `<workspace>/specs/<date>-<id>.md`. Lifecycle: `new → draft → apply → review → approve → dispatch`.
+
+Plans are first-class too. A **feature** work item can't enter `dev` or `finish` without a valid implementation plan — either linked via `mship item link-plan` or discovered at `<docs_dir>/plans/<date>-<slug>.md` (what the writing-plans skill produces), and containing at least one task block. Bypass with `mship phase dev --bypass-plan-gate` or `mship finish --hotfix`. Build dispatch is plan-driven: once a plan is linked, `mship dispatch --task <slug> --plan-task N` mints the implementer prompt from the plan (no `--plan` needed), and `mship spec dispatch` points the build at the plan's tasks instead of re-deriving from the spec.
 
 ## Messaging & serve
 

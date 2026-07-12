@@ -14,7 +14,27 @@ from mship.cli._resolve import resolve_for_command
 from mship.cli.output import Output
 from mship.core import dispatch as _d
 from mship.core.base_resolver import resolve_base
+from mship.core.plan import resolve_plan_path
 from mship.core.skill_install import pkg_skills_source
+from mship.core.workitem_store import WorkItemStore
+
+
+def _resolve_task_plan(container, task_obj) -> Optional[Path]:
+    """Auto-resolve the implementation plan for a task when `--plan` is omitted.
+
+    Precedence: the task's WorkItem `plan_path` (explicit link) wins, else the
+    `<docs_dir>/plans/<slug>.md` discovery convention. Returns None when nothing
+    resolves.
+    """
+    workspace_root = Path(container.config_path()).parent
+    docs_dir = getattr(container.config(), "docs_dir", "docs")
+    linked = None
+    work_item_id = getattr(task_obj, "work_item_id", None)
+    if work_item_id:
+        wi = WorkItemStore(Path(container.state_dir()) / "workitems").get(work_item_id)
+        if wi is not None:
+            linked = wi.plan_path
+    return resolve_plan_path(task_obj.slug, linked, workspace_root, docs_dir)
 
 
 def register(app: typer.Typer, get_container):
@@ -46,7 +66,10 @@ def register(app: typer.Typer, get_container):
         """Emit a self-contained markdown subagent prompt to stdout.
 
         Exactly one instruction source is required: inline `--instruction "<text>"`,
-        stdin `--instruction -`, or `--plan-task <id>` (with `--plan <path>`).
+        stdin `--instruction -`, or `--plan-task <id>`. With `--plan-task` and no
+        `--plan`, the task's implementation plan is auto-resolved (its WorkItem's
+        linked `plan_path`, else the `<docs_dir>/plans/<slug>.md` convention); an
+        explicit `--plan <path>` overrides that.
         """
         output = Output()
 
@@ -60,7 +83,8 @@ def register(app: typer.Typer, get_container):
         if (instruction is not None) == (plan_task is not None):
             output.error(
                 'provide exactly one instruction source: --instruction "<text>", '
-                "--instruction - (stdin), or --plan-task <id> (with --plan)."
+                "--instruction - (stdin), or --plan-task <id> (with --plan, or "
+                "auto-resolved from the task's plan)."
             )
             raise typer.Exit(code=2)
 
@@ -70,14 +94,29 @@ def register(app: typer.Typer, get_container):
             output.error("--plan requires --plan-task <id>.")
             raise typer.Exit(code=2)
 
+        container = get_container()
+        state = container.state_manager().load()
+        resolved = resolve_for_command("dispatch", state, task, output)
+        task_obj = resolved.task
+
         if plan_task is not None:
-            if plan is None:
-                output.error("--plan-task requires --plan <path>.")
-                raise typer.Exit(code=2)
+            # Explicit --plan wins; else auto-resolve the task's linked/discovered
+            # plan (a resolved plan is the single instruction source).
+            plan_path = plan
+            if plan_path is None:
+                plan_path = _resolve_task_plan(container, task_obj)
+                if plan_path is None:
+                    output.error(
+                        f"no implementation plan found for task {task_obj.slug!r} to "
+                        f"resolve --plan-task {plan_task!r}. Pass --plan <path>, link "
+                        f"one with `mship item link-plan`, or write one at "
+                        f"<docs_dir>/plans/<date>-{task_obj.slug}.md (writing-plans)."
+                    )
+                    raise typer.Exit(code=2)
             try:
-                plan_text = plan.read_text()
+                plan_text = plan_path.read_text()
             except OSError as e:
-                output.error(f"cannot read plan {str(plan)!r}: {e}")
+                output.error(f"cannot read plan {str(plan_path)!r}: {e}")
                 raise typer.Exit(code=2)
             try:
                 resolved_instruction = _d.extract_plan_task(plan_text, plan_task)
@@ -91,11 +130,6 @@ def register(app: typer.Typer, get_container):
                 raise typer.Exit(code=2)
         else:
             resolved_instruction = instruction  # inline (guaranteed non-None here)
-
-        container = get_container()
-        state = container.state_manager().load()
-        resolved = resolve_for_command("dispatch", state, task, output)
-        task_obj = resolved.task
 
         try:
             resolved_repo = _d.resolve_repo(task_obj, repo)

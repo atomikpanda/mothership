@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Callable
 
 from mship.core.spec import Spec
@@ -37,8 +38,16 @@ class DispatchResult:
     handoff: str        # the subagent handoff prompt
 
 
-def build_dispatch_handoff(spec: Spec, task: Task) -> str:
-    """Render the handoff prompt printed/returned after a successful dispatch."""
+def build_dispatch_handoff(
+    spec: Spec, task: Task, plan_path: Path | str | None = None
+) -> str:
+    """Render the handoff prompt printed/returned after a successful dispatch.
+
+    If `plan_path` is given (a linked/discovered implementation plan exists), the
+    handoff points the build at that plan's anchored task blocks. Otherwise it
+    keeps the spec-based kickoff and reminds the build to write the plan first
+    (writing-plans) during the plan phase.
+    """
     sections = parse_body_sections(spec.body)
     problem = sections.get("Problem", "").strip()
     criteria_lines = "\n".join(
@@ -47,6 +56,32 @@ def build_dispatch_handoff(spec: Spec, task: Task) -> str:
     worktrees_lines = "\n".join(
         f"  - {repo}: {path}" for repo, path in task.worktrees.items()
     ) or "  (no worktrees registered yet)"
+
+    if plan_path is not None:
+        next_step = f"""\
+## Implementation plan (linked)
+
+`{plan_path}`
+
+This work has a plan. Execute its anchored task blocks in order — dispatch each
+one and hand it to a per-task implementer:
+
+```
+mship dispatch --task {task.slug} --plan-task <N>
+```
+
+No `--plan` flag needed: dispatch auto-resolves this plan for the task."""
+    else:
+        next_step = f"""\
+## Next: write the implementation plan
+
+No implementation plan is linked yet. During the plan phase, write one with the
+`writing-plans` skill at `<docs_dir>/plans/<date>-{task.slug}.md` (with anchored
+task blocks), then link it via `mship item link-plan <work-item-id> <path>`.
+Feature work items require a plan before entering dev/finish.
+
+Run `mship dispatch --task {task.slug} --instruction "<your instruction>"` to emit a full subagent prompt."""
+
     return f"""\
 # Spec dispatch: {spec.title}
 
@@ -66,7 +101,7 @@ def build_dispatch_handoff(spec: Spec, task: Task) -> str:
 
 {worktrees_lines}
 
-Run `mship dispatch --task {task.slug} --instruction "<your instruction>"` to emit a full subagent prompt.
+{next_step}
 """
 
 
@@ -97,6 +132,8 @@ def dispatch_spec(
     workitems,
     workspace: str,
     task_slug: str | None = None,
+    workspace_root: Path | None = None,
+    docs_dir: str = "docs",
 ) -> DispatchResult:
     """Bind an approved (or already-dispatched) spec to a task.
 
@@ -194,7 +231,18 @@ def dispatch_spec(
     spec.updated_at = now
     store.save(spec)
 
+    # Point the handoff at the task's implementation plan when one resolves (the
+    # WorkItem's linked `plan_path` wins, else the docs/plans convention) so the
+    # build runs plan-driven; otherwise the handoff reminds it to write one.
+    plan_path = None
+    if workspace_root is not None:
+        from mship.core.plan import resolve_plan_path
+
+        wi_obj = workitems.get(spec.work_item_id) if spec.work_item_id else None
+        linked = wi_obj.plan_path if wi_obj is not None else None
+        plan_path = resolve_plan_path(chosen_slug, linked, Path(workspace_root), docs_dir)
+
     return DispatchResult(
         spec=spec, task=task, spawned=spawned,
-        handoff=build_dispatch_handoff(spec, task),
+        handoff=build_dispatch_handoff(spec, task, plan_path=plan_path),
     )

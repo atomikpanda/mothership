@@ -15,6 +15,7 @@ def register(app: typer.Typer, get_container):
         force: bool = typer.Option(False, "--force", "-f", help="Force transition even if task is blocked or finished"),
         task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
         bypass_spec_gate: bool = typer.Option(False, "--bypass-spec-gate", help="Skip the plan→dev gate: the universal WorkItem requirement, the feature-kind approved-spec requirement, and (if require_approved_spec: true in mothership.yaml) the legacy task-scoped approved-spec check. Recorded to the bypass log (--hotfix equivalent)."),
+        bypass_plan_gate: bool = typer.Option(False, "--bypass-plan-gate", help="Skip ONLY the plan→dev implementation-plan requirement (feature WorkItems still need their WorkItem + approved spec). Recorded to the bypass log."),
     ):
         """Transition a task to a new phase."""
         container = get_container()
@@ -53,6 +54,7 @@ def register(app: typer.Typer, get_container):
                 force_unblock=force,
                 force_finished=force,
                 bypass_spec_gate=bypass_spec_gate,
+                bypass_plan_gate=bypass_plan_gate,
             )
         except FinishedTaskError as e:
             output.error(str(e))

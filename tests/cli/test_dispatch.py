@@ -167,14 +167,89 @@ def test_dispatch_rejects_two_instruction_sources(tmp_path: Path):
         _reset()
 
 
-def test_dispatch_plan_task_without_plan_errors(tmp_path: Path):
+def test_dispatch_plan_task_without_resolvable_plan_errors(tmp_path: Path):
+    # --plan-task with no --plan now auto-resolves the task's plan; when there
+    # is no linked/discoverable plan at all, it errors with guidance rather than
+    # the old "--plan-task requires --plan".
     wt = tmp_path / "wt"; wt.mkdir()
     cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
     _override(cfg, state_dir)
     try:
         result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
         assert result.exit_code != 0
-        assert "--plan-task requires --plan" in result.output
+        assert "no implementation plan" in result.output.lower()
+    finally:
+        _reset()
+
+
+def test_dispatch_task_auto_resolves_convention_plan(tmp_path: Path):
+    # A plan discoverable at docs/plans/<slug>.md is auto-resolved when --plan
+    # is omitted; --plan-task selects the block.
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    plans = tmp_path / "docs" / "plans"; plans.mkdir(parents=True)
+    (plans / "t.md").write_text(
+        "<!-- mship:task id=1 -->\n### Task 1\n\nfirst thing\n<!-- /mship:task -->\n"
+        "<!-- mship:task id=2 -->\n### Task 2\n\nsecond thing\n<!-- /mship:task -->\n"
+    )
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "2"])
+        assert result.exit_code == 0, result.output
+        assert "Task 2" in result.output
+        assert "second thing" in result.output
+        assert "first thing" not in result.output
+    finally:
+        _reset()
+
+
+def test_dispatch_task_auto_resolves_workitem_linked_plan(tmp_path: Path):
+    # A plan linked on the task's WorkItem (WorkItem.plan_path) is auto-resolved
+    # even when it lives outside the docs/plans convention.
+    from mship.core.workitem_store import WorkItemStore
+
+    now = datetime.now(timezone.utc)
+    wt = tmp_path / "wt"; wt.mkdir()
+    state_dir = tmp_path / ".mothership"; state_dir.mkdir()
+    cfg = tmp_path / "mothership.yaml"; cfg.write_text("workspace: t\nrepos: {}\n")
+    explicit = tmp_path / "custom-plan.md"
+    explicit.write_text("<!-- mship:task id=3 -->\nlinked plan body\n<!-- /mship:task -->\n")
+    items = WorkItemStore(state_dir / "workitems")
+    wi = items.create(title="t", kind="feature", workspace="t", now=now)
+    items.link_plan(wi.id, "custom-plan.md", now=now)
+    task = Task(
+        slug="t", description="d", phase="dev", created_at=now,
+        affected_repos=["only"], worktrees={"only": wt}, branch="feat/t",
+        base_branch="main", work_item_id=wi.id,
+    )
+    StateManager(state_dir).save(WorkspaceState(tasks={"t": task}))
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "3"])
+        assert result.exit_code == 0, result.output
+        assert "linked plan body" in result.output
+    finally:
+        _reset()
+
+
+def test_dispatch_explicit_plan_overrides_linked(tmp_path: Path):
+    # An explicit --plan still wins over the auto-resolved convention plan.
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    plans = tmp_path / "docs" / "plans"; plans.mkdir(parents=True)
+    (plans / "t.md").write_text(
+        "<!-- mship:task id=2 -->\nconvention thing\n<!-- /mship:task -->\n"
+    )
+    explicit = tmp_path / "explicit.md"
+    explicit.write_text("<!-- mship:task id=2 -->\nexplicit thing\n<!-- /mship:task -->\n")
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(
+            app, ["dispatch", "--task", "t", "--plan", str(explicit), "--plan-task", "2"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "explicit thing" in result.output
+        assert "convention thing" not in result.output
     finally:
         _reset()
 

@@ -1018,9 +1018,11 @@ def register(app: typer.Typer, get_container):
         task = t
 
         # --- WorkItem gate: every task must be linked to a WorkItem, and a
-        # feature-kind WorkItem additionally needs an approved spec
-        # (core/workitem_gate.py::check_task_gate). Placed as early as
-        # possible — right after resolving the task — so finish fails fast
+        # feature-kind WorkItem additionally needs an approved spec AND a valid
+        # implementation plan (require_plan=True — finish is one of the two
+        # plan-enforcement sites alongside phase plan→dev; spawn stays
+        # plan-free). (core/workitem_gate.py::check_task_gate). Placed as early
+        # as possible — right after resolving the task — so finish fails fast
         # before any push/PR work. --hotfix downgrades the block to a
         # warning and records a bypass-log entry, mirroring the spawn/
         # phase-dev gates. See spec workitem-mandatory-kind-gated-approval.
@@ -1034,7 +1036,7 @@ def register(app: typer.Typer, get_container):
         from mship.core import workitem_gate
         workspace_root = container.config_path().parent
         try:
-            gate_result = workitem_gate.check_task_gate(task, workspace_root)
+            gate_result = workitem_gate.check_task_gate(task, workspace_root, require_plan=True)
         except Exception as e:
             gate_result = workitem_gate.GateResult(
                 False, f"couldn't evaluate WorkItem gate (corrupt store?): {e}"

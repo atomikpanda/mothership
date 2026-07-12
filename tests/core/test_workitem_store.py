@@ -53,6 +53,21 @@ def test_link_missing_item_raises(tmp_path):
         store.link_spec("nope", "spec-1")
 
 
+def test_link_plan_persists_plan_path(tmp_path):
+    store = WorkItemStore(tmp_path / "workitems")
+    wi = store.create(title="t", kind="feature", workspace="ws", now=_now())
+    store.link_plan(wi.id, "docs/plans/2026-07-12-t.md", now=_now())
+    # reload via a fresh store instance to prove it was persisted
+    fresh = WorkItemStore(tmp_path / "workitems")
+    assert fresh.get(wi.id).plan_path == "docs/plans/2026-07-12-t.md"
+
+
+def test_link_plan_missing_item_raises(tmp_path):
+    store = WorkItemStore(tmp_path / "workitems")
+    with pytest.raises(KeyError):
+        store.link_plan("nope", "docs/plans/x.md")
+
+
 def test_set_unattended_toggles(tmp_path):
     store = WorkItemStore(tmp_path / "workitems")
     wi = store.create(title="t", kind="feature", workspace="ws",

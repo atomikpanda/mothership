@@ -23,9 +23,11 @@ class GateResult:
     reason: str | None = None  # actionable message when not ok
 
 
-def check_task_gate(task, workspace_root: Path) -> GateResult:
+def check_task_gate(task, workspace_root: Path, require_plan: bool = False) -> GateResult:
     """Universal: a task must have a WorkItem. Kind-gated: a feature WorkItem
-    must have an approved spec. bug/chore/question need only the WorkItem."""
+    must have an approved spec. When `require_plan` is set — only at phase
+    plan→dev and finish, never at spawn — a feature WorkItem must ALSO have a
+    valid implementation plan. bug/chore/question need only the WorkItem."""
     if getattr(task, "work_item_id", None) is None:
         return GateResult(False, "no WorkItem — create one with `mship item new --kind <kind>` "
                                  "and spawn with `--work-item <id>` (or pass `--hotfix` to override)")
@@ -36,6 +38,12 @@ def check_task_gate(task, workspace_root: Path) -> GateResult:
     if wi.kind == "feature" and not _feature_has_approved_spec(wi, task, workspace_root):
         return GateResult(False, "feature WorkItem requires an approved spec before dev/finish "
                                  "(approve it in Ground Control, or `--hotfix` to override)")
+    if require_plan and wi.kind == "feature" and not _feature_has_plan(wi, task, workspace_root):
+        dd = _docs_dir(workspace_root)
+        return GateResult(False, f"feature WorkItem requires an implementation plan before dev/finish — "
+                                 f"write one (writing-plans) at {dd}/plans/<date>-{task.slug}.md, or link it "
+                                 f"with `mship item link-plan {task.work_item_id} <path>`. "
+                                 f"Use --bypass-plan-gate / --hotfix to skip.")
     return GateResult(True)
 
 
@@ -46,6 +54,38 @@ def _feature_has_approved_spec(wi: WorkItem, task, workspace_root: Path) -> bool
         if s is not None and s.status in APPROVED_STATUSES:
             return True
     return any(s.task_slug == task.slug and s.status in APPROVED_STATUSES for s in specs.list())
+
+
+def _docs_dir(workspace_root: Path) -> str:
+    """`docs_dir` from mothership.yaml; fall back to "docs" on any load error
+    (e.g. running outside a materialized workspace)."""
+    from mship.core.config import ConfigLoader
+    try:
+        return ConfigLoader.load(
+            Path(workspace_root) / "mothership.yaml", require_paths=False
+        ).docs_dir
+    except Exception:
+        return "docs"
+
+
+def _feature_has_plan(wi: WorkItem, task, workspace_root: Path) -> bool:
+    """A feature's plan resolves (via the WorkItem's explicit `plan_path` or the
+    `<docs_dir>/plans/<date>-<slug>.md` convention) AND carries a mship:task
+    anchor."""
+    from mship.core.plan import plan_has_tasks, resolve_plan_path
+
+    p = resolve_plan_path(
+        task.slug, getattr(wi, "plan_path", None), workspace_root, _docs_dir(workspace_root)
+    )
+    if p is None:
+        return False
+    try:
+        return plan_has_tasks(p.read_text())
+    except (OSError, UnicodeDecodeError):
+        # resolved but unreadable — deleted/permission (OSError) or a non-UTF-8
+        # / binary file (UnicodeDecodeError). Treat as no valid plan so the gate
+        # fails with its actionable message, NOT the generic corrupt-store error.
+        return False
 
 
 def log_hotfix(workspace_root: Path, where: str, task_slug: str) -> None:
