@@ -80,8 +80,8 @@ class PhaseManager:
         # is narrower — it drops ONLY the plan clause (the WorkItem + approved-
         # spec checks still run) and records its own bypass-log entry. See spec
         # workitem-mandatory-kind-gated-approval + first-class-implementation-plans.
+        _plan_bypass_effective = False
         if task.phase == "plan" and target == "dev":
-            _plan_bypass_effective = False
             if bypass_spec_gate:
                 if self._workspace_root is not None:
                     from mship.core.workitem_gate import log_hotfix
@@ -134,13 +134,6 @@ class PhaseManager:
                         f"Create and approve one (`mship spec approve`) or pass "
                         f"--bypass-spec-gate to skip this check."
                     )
-
-            # All dev-transition gates have now passed — safe to record a
-            # plan-gate bypass. Deferred to here so a bypass is never logged for
-            # a transition that a later gate (above) rejected (Greptile).
-            if _plan_bypass_effective and self._workspace_root is not None:
-                from mship.core.workitem_gate import log_hotfix
-                log_hotfix(self._workspace_root, "phase-dev-plan", task_slug)
 
         old_phase = task.phase
         warnings = self._check_gates(task_slug, task.phase, target)
@@ -200,6 +193,14 @@ class PhaseManager:
                 f"Unblocked (forced phase transition to {target})",
             )
         self._log.append(task_slug, f"Phase transition: {old_phase} → {target}")
+
+        # Record a plan-gate bypass ONLY now — after the transition is fully
+        # committed (state mutated + every lifecycle hook passed; a required
+        # phase.entered hook would have raised before here). Guarantees the audit
+        # log never holds a bypass for a transition that was later aborted (Greptile).
+        if _plan_bypass_effective and self._workspace_root is not None:
+            from mship.core.workitem_gate import log_hotfix
+            log_hotfix(self._workspace_root, "phase-dev-plan", task_slug)
 
         return PhaseTransition(new_phase=target, warnings=warnings)
 

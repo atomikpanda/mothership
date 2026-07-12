@@ -652,6 +652,31 @@ def test_plan_to_dev_bypass_plan_gate_noop_writes_no_log(tmp_path: Path):
     assert not (tmp_path / ".mothership" / "bypass-log.jsonl").exists()
 
 
+def test_plan_to_dev_bypass_plan_gate_no_log_when_required_hook_aborts(tmp_path: Path):
+    """A --bypass-plan-gate transition later ABORTED by a required
+    phase.entered.dev hook must NOT record a bypass — the audit log never holds a
+    bypass for a transition that didn't commit (Greptile). The bypass is logged
+    only after the state mutation + all lifecycle hooks succeed."""
+    from mship.core.config import HookConfig
+    from mship.core.lifecycle_hooks import HookRequiredError
+
+    wi = _seed_feature_wi_with_approved_spec(tmp_path)  # feature + approved spec, NO plan
+    sm = StateManager(tmp_path / ".mothership")
+    shell = _RecordingShell()
+    shell.fail_substrings.add("notify-dev")
+    pm = _make_phase_manager_with_hooks(
+        sm, tmp_path,
+        hooks=[HookConfig(on="phase.entered.dev", run="task notify-dev", required=True)],
+        shell=shell,
+    )
+    sm.save(WorkspaceState(tasks={"wi-task": _plan_task(work_item_id=wi.id)}))
+
+    with pytest.raises(HookRequiredError):
+        pm.transition("wi-task", "dev", bypass_plan_gate=True)
+    assert sm.load().tasks["wi-task"].phase == "plan"  # aborted
+    assert not (tmp_path / ".mothership" / "bypass-log.jsonl").exists()  # no bypass logged
+
+
 def test_plan_to_dev_bypass_plan_gate_still_enforces_spec(tmp_path: Path):
     """--bypass-plan-gate skips ONLY the plan clause — a feature with no approved
     spec still blocks (spec + WorkItem checks keep running via require_plan=False)."""
