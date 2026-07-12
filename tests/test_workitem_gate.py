@@ -128,6 +128,76 @@ def test_approved_statuses_is_the_expected_set():
     assert APPROVED_STATUSES == {"approved", "dispatched", "implemented"}
 
 
+# ---------------------------------------------------------------------------
+# Plan gate (MOS-235): a feature WorkItem must have a valid implementation
+# plan before dev/finish — opt-in via `require_plan` (default False, so spawn
+# stays plan-free). Validity = plan file resolves AND carries a mship:task
+# anchor. bug/chore/question are never plan-gated.
+# ---------------------------------------------------------------------------
+
+_PLAN_WITH_TASK = "# Plan\n\n<!-- mship:task id=1 -->\n### Task 1\n<!-- /mship:task -->\n"
+
+
+def _approved_feature(tmp_path, slug="t"):
+    """A feature WorkItem with an approved spec so ONLY the plan is missing."""
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    specs = SpecStore(tmp_path / "specs")
+    specs.save(Spec(id="spec-1", title="Spec", status="approved",
+                    created_at=_now(), updated_at=_now()))
+    wi = items.create(title="add thing", kind="feature", workspace="ws", now=_now())
+    items.link_spec(wi.id, "spec-1", now=_now())
+    return items, wi, _task(slug=slug, work_item_id=wi.id)
+
+
+def test_feature_without_plan_blocked_when_require_plan(tmp_path):
+    _items, _wi, task = _approved_feature(tmp_path)
+    res = check_task_gate(task, tmp_path, require_plan=True)
+    assert res.ok is False
+    assert "plan" in res.reason.lower()
+
+
+def test_feature_with_convention_plan_passes(tmp_path):
+    _items, _wi, task = _approved_feature(tmp_path)
+    plans = tmp_path / "docs" / "plans"
+    plans.mkdir(parents=True)
+    (plans / "2026-07-12-t.md").write_text(_PLAN_WITH_TASK)
+    res = check_task_gate(task, tmp_path, require_plan=True)
+    assert res.ok is True
+
+
+def test_feature_with_linked_explicit_plan_passes(tmp_path):
+    items, wi, task = _approved_feature(tmp_path)
+    custom = tmp_path / "custom" / "myplan.md"
+    custom.parent.mkdir(parents=True)
+    custom.write_text(_PLAN_WITH_TASK)
+    items.link_plan(wi.id, "custom/myplan.md", now=_now())
+    res = check_task_gate(task, tmp_path, require_plan=True)
+    assert res.ok is True
+
+
+def test_plan_not_required_by_default(tmp_path):
+    # Same env, NO plan doc, default require_plan=False (spawn path) -> ok.
+    _items, _wi, task = _approved_feature(tmp_path)
+    assert check_task_gate(task, tmp_path).ok is True
+
+
+def test_empty_plan_file_is_invalid(tmp_path):
+    # Plan file exists at the convention path but has no mship:task anchor.
+    _items, _wi, task = _approved_feature(tmp_path)
+    plans = tmp_path / "docs" / "plans"
+    plans.mkdir(parents=True)
+    (plans / "2026-07-12-t.md").write_text("# Prose only, no anchor\n")
+    res = check_task_gate(task, tmp_path, require_plan=True)
+    assert res.ok is False
+
+
+def test_bug_never_plan_gated(tmp_path):
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="fix it", kind="bug", workspace="ws", now=_now())
+    task = _task(work_item_id=wi.id)
+    assert check_task_gate(task, tmp_path, require_plan=True).ok is True
+
+
 def test_workitem_migrate_shares_the_same_approved_statuses_object():
     """workitem_migrate must import (not redefine) workitem_gate's set —
     an identity check, not just an equality check, so a stray local copy
