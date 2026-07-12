@@ -39,7 +39,7 @@ def _render_graph_tty(output, payload):
 
 def register(app: typer.Typer, get_container):
     depends_app = typer.Typer(no_args_is_help=True, help="Manage task-to-task dependencies (#104).")
-    app.add_typer(depends_app, name="depends")
+    app.add_typer(depends_app, name="depends", rich_help_panel="Workflow")
 
     @depends_app.command("add")
     def add(

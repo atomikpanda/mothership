@@ -114,4 +114,4 @@ def register(app: typer.Typer, get_container):
         if any_skipped and not overwrite:
             raise typer.Exit(code=1)
 
-    app.add_typer(bind_app, name="bind")
+    app.add_typer(bind_app, name="bind", rich_help_panel="Maintenance")

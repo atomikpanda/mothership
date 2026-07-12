@@ -51,7 +51,7 @@ def _read_gh_app_creds(output: Output) -> tuple[Optional[str], Optional[str]]:
 
 
 def register(app: typer.Typer, get_container):
-    @app.command()
+    @app.command(rich_help_panel="Messaging")
     def serve(
         host: str = typer.Option(
             "127.0.0.1", "--host",

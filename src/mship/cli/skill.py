@@ -39,7 +39,7 @@ def _legacy_codex_mothership_warning(output: Output) -> None:
 
 
 def register(app: typer.Typer, get_container):
-    @app.command(name="skill")
+    @app.command(name="skill", rich_help_panel="Setup")
     def skill_cmd(
         action: str = typer.Argument(help="Action: install | list"),
         only: Optional[str] = typer.Option(None, "--only", help="Comma-separated agents (claude,codex,gemini)"),

@@ -4,7 +4,7 @@ from mship.cli.output import Output
 
 
 def register(app: typer.Typer, get_container):
-    @app.command()
+    @app.command(rich_help_panel="Inspection")
     def doctor():
         """Check workspace health and configuration."""
         container = get_container()

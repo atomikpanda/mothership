@@ -14,4 +14,4 @@ def register(parent: typer.Typer, get_container):
     _diff.register(app, get_container)
     _spec.register(app, get_container)
 
-    parent.add_typer(app, name="view")
+    parent.add_typer(app, name="view", rich_help_panel="Inspection")

@@ -6,7 +6,7 @@ from mship.cli.output import Output
 
 
 def register(app: typer.Typer, get_container):
-    @app.command()
+    @app.command(rich_help_panel="Inspection")
     def audit(
         repos: Optional[str] = typer.Option(None, "--repos", help="Comma-separated repo names"),
         json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),

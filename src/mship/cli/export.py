@@ -14,7 +14,7 @@ from mship.cli.output import Output
 
 
 def register(app: typer.Typer, get_container):
-    @app.command(name="export")
+    @app.command(name="export", rich_help_panel="Inspection")
     def export_cmd(
         redacted: bool = typer.Option(
             False, "--redacted",

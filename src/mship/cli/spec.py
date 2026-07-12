@@ -667,4 +667,4 @@ def register(parent: typer.Typer, get_container):
         """Advance an implemented spec to archived."""
         _simple_transition("archived", spec_id)
 
-    parent.add_typer(spec_app)
+    parent.add_typer(spec_app, rich_help_panel="Work items & specs")

@@ -41,7 +41,7 @@ def _resolve_since_cutoff(value: str, entries: list):
 
 
 def register(app: typer.Typer, get_container):
-    @app.command(name="journal")
+    @app.command(name="journal", rich_help_panel="Workflow")
     def log_cmd(
         message: Optional[str] = typer.Argument(None, help="Message to append to task journal"),
         last: Optional[int] = typer.Option(None, "--last", help="Show only last N entries"),

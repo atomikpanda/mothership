@@ -10,7 +10,7 @@ from mship.cli.output import Output
 
 
 def register(app: typer.Typer, get_container):
-    @app.command()
+    @app.command(rich_help_panel="Inspection")
     def pr():
         """Show PR state for every active task with recorded PR URLs."""
         container = get_container()

@@ -16,7 +16,7 @@ def register(parent: typer.Typer, get_container) -> None:
         return MessageStore(Path(container.state_dir()) / "messages")
 
     inbox_app = typer.Typer(help="Inspect and wait on the message inbox.")
-    parent.add_typer(inbox_app, name="inbox")
+    parent.add_typer(inbox_app, name="inbox", rich_help_panel="Messaging")
 
     def _print_awaiting() -> None:
         store = _store()
@@ -100,7 +100,7 @@ def register(parent: typer.Typer, get_container) -> None:
         }
         typer.echo(json.dumps(out))
 
-    @parent.command()
+    @parent.command(rich_help_panel="Messaging")
     def reply(
         thread_id: str,
         text: str,
@@ -120,7 +120,7 @@ def register(parent: typer.Typer, get_container) -> None:
             raise typer.Exit(1)
         typer.echo(f"replied to {thread_id}")
 
-    @parent.command()
+    @parent.command(rich_help_panel="Messaging")
     def ask(
         thread_id: str,
         question: str,
@@ -149,7 +149,7 @@ def register(parent: typer.Typer, get_container) -> None:
             raise typer.Exit(1)
         typer.echo(f"asked {thread_id}: {len(option)} options")
 
-    @parent.command()
+    @parent.command(rich_help_panel="Messaging")
     def messages(thread_id: str) -> None:
         """Print a thread's conversation in order."""
         store = _store()

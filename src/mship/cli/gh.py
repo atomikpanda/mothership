@@ -76,4 +76,4 @@ def register(parent: typer.Typer, get_container):
         output.error(result.message)
         raise typer.Exit(code=1)
 
-    parent.add_typer(gh_app)
+    parent.add_typer(gh_app, rich_help_panel="Setup")

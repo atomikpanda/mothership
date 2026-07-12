@@ -12,7 +12,7 @@ from mship.cli.output import Output
 
 
 def register(app: typer.Typer, get_container):
-    @app.command()
+    @app.command(rich_help_panel="Messaging")
     def pair():
         """Print a pairing deep-link + QR to connect the Ground Control app to this workspace."""
         from pathlib import Path

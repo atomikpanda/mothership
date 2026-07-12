@@ -38,7 +38,7 @@ def _resolve_task_plan(container, task_obj) -> Optional[Path]:
 
 
 def register(app: typer.Typer, get_container):
-    @app.command()
+    @app.command(rich_help_panel="Inspection")
     def dispatch(
         task: Optional[str] = typer.Option(None, "--task", help="Target task slug (defaults to cwd-resolved)."),
         repo: Optional[str] = typer.Option(None, "--repo", help="Which repo's worktree to target (multi-repo tasks)."),

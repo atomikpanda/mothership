@@ -31,7 +31,7 @@ def _glyph(state: UpstreamState) -> str:
 
 
 def register(app: typer.Typer, get_container):
-    @app.command()
+    @app.command(rich_help_panel="Inspection")
     def reconcile(
         json_out: bool = typer.Option(False, "--json", help="Emit JSON instead of a table"),
         ignore: Optional[str] = typer.Option(None, "--ignore", help="Persistently ignore drift for this slug"),

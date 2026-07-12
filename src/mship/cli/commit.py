@@ -14,7 +14,7 @@ from mship.cli.output import Output
 
 
 def register(app: typer.Typer, get_container):
-    @app.command()
+    @app.command(rich_help_panel="Workflow")
     def commit(
         message: str = typer.Argument(..., help="Commit message (same for every repo with staged changes)"),
         task: Optional[str] = typer.Option(

@@ -42,7 +42,7 @@ class _RemoteFlagCommand(TyperCommand):
 
 
 def register(app: typer.Typer, get_container):
-    @app.command(cls=_RemoteFlagCommand)
+    @app.command(cls=_RemoteFlagCommand, rich_help_panel="Runtime")
     def capture(
         task: Optional[str] = typer.Option(None, "--task", help="Target task slug (defaults to cwd-resolved)."),
         repo: Optional[str] = typer.Option(None, "--repo", help="Which repo to capture (required for an ad-hoc capture when the workspace has >1 repo)."),

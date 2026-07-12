@@ -120,4 +120,4 @@ def register(app: typer.Typer, get_container):
             id=entry_id,
         )
 
-    app.add_typer(debug_app, name="debug")
+    app.add_typer(debug_app, name="debug", rich_help_panel="Inspection")

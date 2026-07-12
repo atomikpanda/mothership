@@ -161,7 +161,7 @@ def _run_remote(
 
 
 def register(app: typer.Typer, get_container):
-    @app.command(name="test")
+    @app.command(name="test", rich_help_panel="Workflow")
     def test_cmd(
         run_all: bool = typer.Option(False, "--all", help="Run all repos even on failure"),
         repos: Optional[str] = typer.Option(None, "--repos", help="Comma-separated repo names to filter"),
@@ -383,7 +383,7 @@ def register(app: typer.Typer, get_container):
         if not result.success:
             raise typer.Exit(code=1)
 
-    @app.command(name="run", cls=_RemoteFlagCommand)
+    @app.command(name="run", cls=_RemoteFlagCommand, rich_help_panel="Runtime")
     def run_cmd(
         repos: Optional[str] = typer.Option(None, "--repos", help="Comma-separated repo names to filter"),
         tag: Optional[list[str]] = typer.Option(None, "--tag", help="Filter repos by tag"),
@@ -531,7 +531,7 @@ def register(app: typer.Typer, get_container):
 
         output.print("All background services have exited")
 
-    @app.command(name="build", cls=_RemoteFlagCommand)
+    @app.command(name="build", cls=_RemoteFlagCommand, rich_help_panel="Workflow")
     def build_cmd(
         run_all: bool = typer.Option(False, "--all", help="Build all repos even if one fails"),
         repos: Optional[str] = typer.Option(None, "--repos", help="Comma-separated repo names to filter"),
@@ -634,7 +634,7 @@ def register(app: typer.Typer, get_container):
         if not result.success:
             raise typer.Exit(code=1)
 
-    @app.command()
+    @app.command(rich_help_panel="Runtime")
     def logs(
         service: Optional[str] = typer.Argument(None, help="Service name (omit with --all)"),
         all_services: bool = typer.Option(False, "--all", help="Tail logs for every service"),

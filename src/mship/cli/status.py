@@ -31,7 +31,7 @@ def _collect_worktree_paths(state) -> list[Path]:
 
 
 def register(app: typer.Typer, get_container):
-    @app.command()
+    @app.command(rich_help_panel="Inspection")
     def status(
         task: Optional[str] = typer.Option(
             None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."
@@ -246,7 +246,7 @@ def register(app: typer.Typer, get_container):
             envelope["cwd_is_outside_worktrees"] = cwd_outside
         output.json(envelope)
 
-    @app.command()
+    @app.command(rich_help_panel="Inspection")
     def graph():
         """Show repo dependency graph."""
         container = get_container()
