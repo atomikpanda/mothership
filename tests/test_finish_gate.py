@@ -111,6 +111,15 @@ def test_finish_passes_with_bug_work_item_and_no_spec(finish_gate_workspace):
     assert state.tasks["bug-task"].pr_urls.get("shared") == "https://github.com/org/shared/pull/1"
 
 
+_PLAN_DOC = "# Plan\n\n<!-- mship:task id=1 -->\n### Task 1\n<!-- /mship:task -->\n"
+
+
+def _write_plan(workspace: Path, slug: str) -> None:
+    d = workspace / "docs" / "plans"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"2026-07-12-{slug}.md").write_text(_PLAN_DOC)
+
+
 def test_finish_passes_with_feature_work_item_and_approved_spec(finish_gate_workspace):
     workspace, _ = finish_gate_workspace
     items = WorkItemStore(workspace / ".mothership" / "workitems")
@@ -125,12 +134,63 @@ def test_finish_passes_with_feature_work_item_and_approved_spec(finish_gate_work
         app, ["spawn", "--work-item", wi.id, "feature with spec", "--repos", "shared"],
     )
     assert result.exit_code == 0, result.output
+    # finish now also requires a plan (require_plan=True) — write one.
+    _write_plan(workspace, "feature-with-spec")
 
     result = runner.invoke(app, ["finish", "--task", "feature-with-spec"])
     assert result.exit_code == 0, result.output
 
     state = StateManager(workspace / ".mothership").load()
     assert state.tasks["feature-with-spec"].pr_urls.get("shared") == "https://github.com/org/shared/pull/1"
+
+
+def test_finish_blocks_feature_work_item_without_plan(finish_gate_workspace):
+    """Feature with an approved spec but no implementation plan → finish refuses."""
+    workspace, _ = finish_gate_workspace
+    items = WorkItemStore(workspace / ".mothership" / "workitems")
+    specs = SpecStore(workspace / "specs")
+    now = datetime.now(timezone.utc)
+    specs.save(Spec(id="spec-1", title="Spec", status="approved",
+                    created_at=now, updated_at=now))
+    wi = items.create(title="add thing", kind="feature", workspace="ws", now=now)
+    items.link_spec(wi.id, "spec-1", now=now)
+
+    result = runner.invoke(
+        app, ["spawn", "--work-item", wi.id, "feature no plan", "--repos", "shared"],
+    )
+    assert result.exit_code == 0, result.output
+
+    result = runner.invoke(app, ["finish", "--task", "feature-no-plan"])
+    assert result.exit_code == 1, result.output
+    assert "plan" in result.output.lower()
+
+    state = StateManager(workspace / ".mothership").load()
+    assert state.tasks["feature-no-plan"].pr_urls == {}
+
+
+def test_finish_hotfix_bypasses_plan_gate(finish_gate_workspace):
+    """--hotfix downgrades the plan-gate block to a warning and still opens the PR."""
+    workspace, _ = finish_gate_workspace
+    items = WorkItemStore(workspace / ".mothership" / "workitems")
+    specs = SpecStore(workspace / "specs")
+    now = datetime.now(timezone.utc)
+    specs.save(Spec(id="spec-1", title="Spec", status="approved",
+                    created_at=now, updated_at=now))
+    wi = items.create(title="add thing", kind="feature", workspace="ws", now=now)
+    items.link_spec(wi.id, "spec-1", now=now)
+
+    result = runner.invoke(
+        app, ["spawn", "--work-item", wi.id, "feature hotfix plan", "--repos", "shared"],
+    )
+    assert result.exit_code == 0, result.output
+
+    # No plan on disk → --hotfix rescues the finish.
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "feature-hotfix-plan"])
+    assert result.exit_code == 0, result.output
+    assert "WorkItem gate bypassed" in result.output
+
+    state = StateManager(workspace / ".mothership").load()
+    assert state.tasks["feature-hotfix-plan"].pr_urls.get("shared") == "https://github.com/org/shared/pull/1"
 
 
 def test_finish_hotfix_warns_and_proceeds_and_logs_bypass(finish_gate_workspace):

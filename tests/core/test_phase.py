@@ -500,6 +500,8 @@ def test_plan_to_dev_feature_work_item_with_approved_spec_allowed(tmp_path: Path
 
     sm, pm = _workitem_gate_env(tmp_path)
     sm.save(WorkspaceState(tasks={"wi-task": _plan_task(work_item_id=wi.id)}))
+    # plan→dev now also requires an implementation plan (require_plan=True).
+    _write_plan_doc(tmp_path)
     result = pm.transition("wi-task", "dev")
     assert result.new_phase == "dev"
 
@@ -561,6 +563,87 @@ def test_plan_to_dev_bypass_spec_gate_skips_corrupt_workitem_store(tmp_path: Pat
 
     result = pm.transition("wi-task", "dev", bypass_spec_gate=True)
     assert result.new_phase == "dev"
+
+
+# ---------------------------------------------------------------------------
+# Task 4: plan gate at plan→dev (require_plan) + --bypass-plan-gate
+# (first-class-implementation-plans-plan, MOS-235)
+# ---------------------------------------------------------------------------
+
+_PLAN_DOC = "# Plan\n\n<!-- mship:task id=1 -->\n### Task 1\n<!-- /mship:task -->\n"
+
+
+def _seed_feature_wi_with_approved_spec(tmp_path: Path):
+    """Feature WorkItem + an approved, linked spec so ONLY the plan is missing —
+    isolates the plan clause from the spec clause of the gate."""
+    from mship.core.spec import Spec
+    from mship.core.spec_store import SpecStore
+
+    now = datetime(2026, 4, 10, tzinfo=timezone.utc)
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="add thing", kind="feature", workspace="test", now=now)
+    specs = SpecStore(tmp_path / "specs")
+    specs.save(Spec(id="spec-1", title="Spec", status="approved",
+                    created_at=now, updated_at=now))
+    items.link_spec(wi.id, "spec-1", now=now)
+    return wi
+
+
+def _write_plan_doc(tmp_path: Path, slug: str = "wi-task") -> None:
+    d = tmp_path / "docs" / "plans"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"2026-07-12-{slug}.md").write_text(_PLAN_DOC)
+
+
+def test_plan_to_dev_feature_without_plan_blocked(tmp_path: Path):
+    """plan→dev now requires a plan (require_plan=True): feature + approved spec
+    but no plan doc → SpecGateError mentioning the plan."""
+    wi = _seed_feature_wi_with_approved_spec(tmp_path)
+    sm, pm = _workitem_gate_env(tmp_path)
+    sm.save(WorkspaceState(tasks={"wi-task": _plan_task(work_item_id=wi.id)}))
+    with pytest.raises(SpecGateError, match="plan"):
+        pm.transition("wi-task", "dev")
+
+
+def test_plan_to_dev_feature_with_plan_allowed(tmp_path: Path):
+    wi = _seed_feature_wi_with_approved_spec(tmp_path)
+    _write_plan_doc(tmp_path)
+    sm, pm = _workitem_gate_env(tmp_path)
+    sm.save(WorkspaceState(tasks={"wi-task": _plan_task(work_item_id=wi.id)}))
+    result = pm.transition("wi-task", "dev")
+    assert result.new_phase == "dev"
+
+
+def test_plan_to_dev_bypass_plan_gate_allows_and_logs_hotfix(tmp_path: Path):
+    """--bypass-plan-gate drops only the plan requirement and records a
+    bypass-log entry under op 'phase-dev-plan'."""
+    import json
+
+    wi = _seed_feature_wi_with_approved_spec(tmp_path)  # no plan on disk
+    sm, pm = _workitem_gate_env(tmp_path)
+    sm.save(WorkspaceState(tasks={"wi-task": _plan_task(work_item_id=wi.id)}))
+
+    result = pm.transition("wi-task", "dev", bypass_plan_gate=True)
+    assert result.new_phase == "dev"
+
+    log_path = tmp_path / ".mothership" / "bypass-log.jsonl"
+    assert log_path.is_file()
+    line = json.loads(log_path.read_text().splitlines()[-1])
+    assert line["op"] == "phase-dev-plan"
+    assert line["branch"] == "wi-task"
+    assert line["reason"] == "hotfix"
+
+
+def test_plan_to_dev_bypass_plan_gate_still_enforces_spec(tmp_path: Path):
+    """--bypass-plan-gate skips ONLY the plan clause — a feature with no approved
+    spec still blocks (spec + WorkItem checks keep running via require_plan=False)."""
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="add thing", kind="feature", workspace="test",
+                      now=datetime(2026, 4, 10, tzinfo=timezone.utc))
+    sm, pm = _workitem_gate_env(tmp_path)
+    sm.save(WorkspaceState(tasks={"wi-task": _plan_task(work_item_id=wi.id)}))
+    with pytest.raises(SpecGateError, match="approved spec"):
+        pm.transition("wi-task", "dev", bypass_plan_gate=True)
 
 
 # ---------------------------------------------------------------------------
