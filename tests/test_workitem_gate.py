@@ -251,3 +251,44 @@ def test_resolve_bound_spec_none_when_unbound(tmp_path):
     task = Task(slug="t", description="d", phase="dev", created_at=now,
                 affected_repos=["shared"], branch="feat/t")
     assert resolve_bound_spec(task, tmp_path) is None
+
+
+def test_resolve_bound_spec_fallback_skips_non_approved_spec(tmp_path):
+    # Greptile #341: the task_slug FALLBACK must not bind to a draft/archived/
+    # superseded spec — only an approved one. A drafting spec matching the slug is
+    # ignored (returns None), so finish/--require-evidence can't block on a stale
+    # checklist and the PR body can't render the wrong one.
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    SpecStore(tmp_path / "specs").save(Spec(id="draft-s", title="S", status="drafting",
+                                            created_at=now, updated_at=now, task_slug="t"))
+    task = Task(slug="t", description="d", phase="dev", created_at=now,
+                affected_repos=["shared"], branch="feat/t")
+    assert resolve_bound_spec(task, tmp_path) is None
+
+
+def test_resolve_bound_spec_explicit_spec_id_bypasses_status_filter(tmp_path):
+    # The EXPLICIT WorkItem.spec_id link is authoritative and status-agnostic — a
+    # linked spec resolves even while still in review (evidence warnings should
+    # surface pre-approval for the linked spec).
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="F", kind="feature", workspace="ws", now=now)
+    SpecStore(tmp_path / "specs").save(Spec(id="nr", title="S", status="needs_review",
+                                            created_at=now, updated_at=now))
+    items.link_spec(wi.id, "nr", now=now)
+    task = Task(slug="t", description="d", phase="dev", created_at=now,
+                affected_repos=["shared"], branch="feat/t", work_item_id=wi.id)
+    assert resolve_bound_spec(task, tmp_path).id == "nr"
+
+
+def test_resolve_bound_spec_propagates_corrupt_store_error(tmp_path):
+    # Greptile #341: a corrupt/unreadable spec store must NOT be silently turned into
+    # None (which would make finish --require-evidence skip the required check).
+    # It propagates so callers can fail safe.
+    (tmp_path / "specs").mkdir(parents=True)
+    (tmp_path / "specs" / "2026-07-12-broken.md").write_text("not valid frontmatter, no ---\n")
+    task = Task(slug="t", description="d", phase="dev", created_at=_now(),
+                affected_repos=["shared"], branch="feat/t")
+    import pytest
+    with pytest.raises(Exception):
+        resolve_bound_spec(task, tmp_path)

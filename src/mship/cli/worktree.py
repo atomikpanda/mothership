@@ -1364,7 +1364,20 @@ def register(app: typer.Typer, get_container):
         # via the task's WorkItem link; no bound spec ⇒ no-op. `bound_spec` is
         # reused by the PR-body assembly below (build_acceptance_block).
         from mship.core.workitem_gate import resolve_bound_spec
-        bound_spec = resolve_bound_spec(task, workspace_root)
+        try:
+            bound_spec = resolve_bound_spec(task, workspace_root)
+        except Exception as e:
+            # A corrupt/unreadable spec store must not SILENTLY skip a required check.
+            # Under --require-evidence, fail safe (block); otherwise warn and proceed.
+            if require_evidence:
+                output.error(
+                    "Could not read the bound spec to verify acceptance-criteria "
+                    f"evidence — blocking finish (--require-evidence): {e}"
+                )
+                output.error("Fix the spec store or drop --require-evidence, then retry.")
+                raise typer.Exit(code=1)
+            output.warning(f"Could not check acceptance-criteria evidence (spec store unreadable): {e}")
+            bound_spec = None
         if bound_spec is not None:
             unverified_acs = [c.id for c in bound_spec.acceptance_criteria if not c.evidence]
             if unverified_acs:

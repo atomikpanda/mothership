@@ -57,24 +57,31 @@ def _feature_has_approved_spec(wi: WorkItem, task, workspace_root: Path) -> bool
 
 
 def resolve_bound_spec(task, workspace_root: Path):
-    """Return the Spec bound to `task` (its WorkItem's spec_id, else a spec whose
-    task_slug matches), or None. Reuses the SpecStore/WorkItemStore resolution the
-    WorkItem gate + PhaseManager._has_approved_spec already use. Never raises — a
-    missing/corrupt store yields None, so the AC-evidence gate is simply a no-op."""
-    try:
-        specs = SpecStore(Path(workspace_root) / "specs")
-        wi_id = getattr(task, "work_item_id", None)
-        if wi_id is not None:
-            wi = WorkItemStore(Path(workspace_root) / ".mothership" / "workitems").get(wi_id)
-            if wi is not None and wi.spec_id:
-                bound = specs.find_by_id(wi.spec_id)
-                if bound is not None:
-                    return bound
-        for s in specs.list():
-            if s.task_slug == task.slug:
-                return s
-    except Exception:
-        return None
+    """Return the Spec bound to `task`, or None when nothing is bound.
+
+    Resolution: the task's WorkItem `spec_id` first (an EXPLICIT link — returned
+    regardless of status, it is authoritative), else a fallback to a spec whose
+    `task_slug` matches AND is approved. The fallback is a HEURISTIC guess, so it is
+    restricted to `APPROVED_STATUSES` — never binding to a draft, archived, or
+    superseded spec (which would let `finish --require-evidence` block on, or a PR
+    body render, an irrelevant checklist).
+
+    Returns None cleanly when the stores are simply empty/absent (missing dir →
+    empty list, unknown id → None). It does NOT swallow genuine read/parse errors
+    (e.g. a corrupt spec file): those propagate so callers can fail safe. Soft gates
+    (phase review) catch and skip; `finish --require-evidence` catches and BLOCKs
+    rather than silently skipping the required check."""
+    specs = SpecStore(Path(workspace_root) / "specs")
+    wi_id = getattr(task, "work_item_id", None)
+    if wi_id is not None:
+        wi = WorkItemStore(Path(workspace_root) / ".mothership" / "workitems").get(wi_id)
+        if wi is not None and wi.spec_id:
+            bound = specs.find_by_id(wi.spec_id)
+            if bound is not None:
+                return bound
+    for s in specs.list():
+        if s.task_slug == task.slug and s.status in APPROVED_STATUSES:
+            return s
     return None
 
 

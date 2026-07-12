@@ -298,7 +298,12 @@ class PhaseManager:
             return []
         from mship.core.workitem_gate import resolve_bound_spec
 
-        spec = resolve_bound_spec(task, self._workspace_root)
+        try:
+            spec = resolve_bound_spec(task, self._workspace_root)
+        except Exception:
+            # A corrupt/unreadable spec store must never block or crash the review
+            # transition — this is a soft advisory gate. Skip the AC warning.
+            return []
         if spec is None:
             return []
         missing = [c.id for c in spec.acceptance_criteria if not c.evidence]

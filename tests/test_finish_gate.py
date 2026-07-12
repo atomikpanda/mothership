@@ -351,6 +351,52 @@ def test_finish_require_evidence_noop_without_bound_spec(finish_gate_workspace):
     assert state.tasks["ev-noop"].pr_urls.get("shared") == "https://github.com/org/shared/pull/1"
 
 
+def test_finish_require_evidence_blocks_when_spec_resolution_errors(finish_gate_workspace, monkeypatch):
+    """Greptile #341 fail-safe: if resolving the bound spec RAISES (corrupt/unreadable
+    store), --require-evidence must BLOCK — never silently skip the required check —
+    even though the real ev-spec HAS evidence and would otherwise pass. (Monkeypatch
+    resolve_bound_spec so only the AC-gate path errors, not the WorkItem spec-gate.)"""
+    from mship.core.spec import AcceptanceEvidence
+    workspace, _ = finish_gate_workspace
+    wi = _seed_feature_with_ac(
+        workspace, ac_evidence=[AcceptanceEvidence(kind="test", ref="test-runs/1")],
+    )
+    runner.invoke(app, ["spawn", "--work-item", wi.id, "ev err block", "--repos", "shared"])
+    _write_plan(workspace, "ev-err-block")
+
+    def _boom(*a, **k):
+        raise RuntimeError("spec store unreadable")
+    monkeypatch.setattr("mship.core.workitem_gate.resolve_bound_spec", _boom)
+
+    result = runner.invoke(app, ["finish", "--task", "ev-err-block", "--require-evidence"])
+    assert result.exit_code == 1, result.output
+    assert "could not read the bound spec" in result.output.lower()
+    state = StateManager(workspace / ".mothership").load()
+    assert state.tasks["ev-err-block"].pr_urls == {}          # blocked before any PR
+
+
+def test_finish_default_warns_and_proceeds_when_spec_resolution_errors(finish_gate_workspace, monkeypatch):
+    """Without --require-evidence, a spec-resolution error is a WARNING, not a crash
+    or a block — finish still opens the PR (the AC check is advisory by default)."""
+    from mship.core.spec import AcceptanceEvidence
+    workspace, _ = finish_gate_workspace
+    wi = _seed_feature_with_ac(
+        workspace, ac_evidence=[AcceptanceEvidence(kind="test", ref="test-runs/1")],
+    )
+    runner.invoke(app, ["spawn", "--work-item", wi.id, "ev err warn", "--repos", "shared"])
+    _write_plan(workspace, "ev-err-warn")
+
+    def _boom(*a, **k):
+        raise RuntimeError("spec store unreadable")
+    monkeypatch.setattr("mship.core.workitem_gate.resolve_bound_spec", _boom)
+
+    result = runner.invoke(app, ["finish", "--task", "ev-err-warn"])
+    assert result.exit_code == 0, result.output
+    assert "could not check acceptance-criteria evidence" in result.output.lower()
+    state = StateManager(workspace / ".mothership").load()
+    assert state.tasks["ev-err-warn"].pr_urls.get("shared") == "https://github.com/org/shared/pull/1"
+
+
 def test_finish_appends_acceptance_block_to_pr_body(finish_gate_workspace):
     from mship.core.spec import AcceptanceEvidence
     workspace, mock_shell = finish_gate_workspace
