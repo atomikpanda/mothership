@@ -266,6 +266,22 @@ def test_resolve_bound_spec_fallback_skips_non_approved_spec(tmp_path):
     assert resolve_bound_spec(task, tmp_path) is None
 
 
+def test_resolve_bound_spec_fallback_picks_most_recently_updated_approved(tmp_path):
+    # Greptile #341: with multiple APPROVED specs sharing a slug, bind the most
+    # recently updated one (a superseding spec wins over an older checklist), not
+    # list()'s filename order.
+    store = SpecStore(tmp_path / "specs")
+    older = datetime(2026, 7, 10, tzinfo=timezone.utc)
+    newer = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    store.save(Spec(id="old-s", title="old", status="approved",
+                    created_at=older, updated_at=older, task_slug="t"))
+    store.save(Spec(id="new-s", title="new", status="approved",
+                    created_at=older, updated_at=newer, task_slug="t"))
+    task = Task(slug="t", description="d", phase="dev", created_at=newer,
+                affected_repos=["shared"], branch="feat/t")
+    assert resolve_bound_spec(task, tmp_path).id == "new-s"
+
+
 def test_resolve_bound_spec_explicit_spec_id_bypasses_status_filter(tmp_path):
     # The EXPLICIT WorkItem.spec_id link is authoritative and status-agnostic — a
     # linked spec resolves even while still in review (evidence warnings should

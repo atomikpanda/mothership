@@ -79,9 +79,15 @@ def resolve_bound_spec(task, workspace_root: Path):
             bound = specs.find_by_id(wi.spec_id)
             if bound is not None:
                 return bound
-    for s in specs.list():
-        if s.task_slug == task.slug and s.status in APPROVED_STATUSES:
-            return s
+    candidates = [
+        s for s in specs.list()
+        if s.task_slug == task.slug and s.status in APPROVED_STATUSES
+    ]
+    if candidates:
+        # If several approved specs share the slug, bind the MOST RECENTLY UPDATED
+        # one (not list() order, which is by filename date-prefix) so a superseding
+        # spec wins over an older checklist.
+        return max(candidates, key=lambda s: s.updated_at)
     return None
 
 
