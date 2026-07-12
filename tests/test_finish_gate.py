@@ -284,3 +284,68 @@ def test_finish_hotfix_survives_corrupt_workitem_store(finish_gate_workspace):
         and entry["reason"] == "hotfix"
         for entry in lines
     ), lines
+
+
+# ---------------------------------------------------------------------------
+# Acceptance-criteria evidence gate (ac-evidence-loop): WARN by default when
+# any AC on the task's bound spec lacks evidence; BLOCK only under
+# --require-evidence. No bound spec ⇒ no-op.
+# ---------------------------------------------------------------------------
+
+def _seed_feature_with_ac(workspace: Path, *, ac_evidence=None):
+    """Feature WI + approved spec whose ac1 has (or lacks) evidence, linked so
+    resolve_bound_spec finds it via wi.spec_id."""
+    from mship.core.spec import AcceptanceCriterion, Spec
+    items = WorkItemStore(workspace / ".mothership" / "workitems")
+    specs = SpecStore(workspace / "specs")
+    now = datetime.now(timezone.utc)
+    specs.save(Spec(id="ev-spec", title="S", status="approved", created_at=now, updated_at=now,
+                    acceptance_criteria=[AcceptanceCriterion(
+                        id="ac1", text="x", verdict="approved", evidence=ac_evidence or [])]))
+    wi = items.create(title="add thing", kind="feature", workspace="ws", now=now)
+    items.link_spec(wi.id, "ev-spec", now=now)
+    return wi
+
+
+def test_finish_warns_by_default_on_acs_without_evidence(finish_gate_workspace):
+    workspace, _ = finish_gate_workspace
+    wi = _seed_feature_with_ac(workspace)   # ac1 has NO evidence
+    runner.invoke(app, ["spawn", "--work-item", wi.id, "ev warn", "--repos", "shared"])
+    _write_plan(workspace, "ev-warn")       # plan-gate satisfied
+    result = runner.invoke(app, ["finish", "--task", "ev-warn"])
+    assert result.exit_code == 0, result.output          # WARN only → still finishes
+    # Assert on output UNIQUE to the AC-evidence gate (the pre-existing test-evidence
+    # gate also prints "evidence", so a bare "evidence" check would pass even if the
+    # AC gate never fired). The bound spec id + the --require-evidence hint are only
+    # emitted by the AC gate.
+    out = result.output.lower()
+    assert "ev-spec" in out and "ac1" in out             # names the bound spec + the unverified AC
+    assert "--require-evidence" in result.output         # the AC gate's escalation hint
+    state = StateManager(workspace / ".mothership").load()
+    assert state.tasks["ev-warn"].pr_urls.get("shared") == "https://github.com/org/shared/pull/1"
+
+
+def test_finish_blocks_under_require_evidence(finish_gate_workspace):
+    workspace, _ = finish_gate_workspace
+    wi = _seed_feature_with_ac(workspace)   # ac1 has NO evidence
+    runner.invoke(app, ["spawn", "--work-item", wi.id, "ev block", "--repos", "shared"])
+    _write_plan(workspace, "ev-block")
+    result = runner.invoke(app, ["finish", "--task", "ev-block", "--require-evidence"])
+    assert result.exit_code == 1, result.output
+    # Blocked specifically by the AC-evidence gate (names the bound spec + AC), not by
+    # some unrelated failure — exit 1 alone could come from anywhere.
+    assert "ev-spec" in result.output.lower() and "ac1" in result.output.lower()
+    state = StateManager(workspace / ".mothership").load()
+    assert state.tasks["ev-block"].pr_urls == {}          # blocked before any PR
+
+
+def test_finish_require_evidence_noop_without_bound_spec(finish_gate_workspace):
+    """No bound spec (a bug WI) ⇒ --require-evidence is a no-op, not a block."""
+    workspace, _ = finish_gate_workspace
+    items = WorkItemStore(workspace / ".mothership" / "workitems")
+    wi = items.create(title="fix it", kind="bug", workspace="ws", now=datetime.now(timezone.utc))
+    runner.invoke(app, ["spawn", "--work-item", wi.id, "ev noop", "--repos", "shared"])
+    result = runner.invoke(app, ["finish", "--task", "ev-noop", "--require-evidence"])
+    assert result.exit_code == 0, result.output
+    state = StateManager(workspace / ".mothership").load()
+    assert state.tasks["ev-noop"].pr_urls.get("shared") == "https://github.com/org/shared/pull/1"

@@ -919,6 +919,12 @@ def register(app: typer.Typer, get_container):
                  "(task.test_results or journal test_state=pass). Default: WARN only. "
                  "See #81.",
         ),
+        require_evidence: bool = typer.Option(
+            False, "--require-evidence",
+            help="Block finish when any acceptance criterion on the bound spec lacks "
+                 "evidence. Default: WARN only. Mirrors --require-tests. "
+                 "See ac-evidence-loop.",
+        ),
         title: Optional[str] = typer.Option(
             None, "--title",
             help="Override the PR title (default: task.description). "
@@ -1351,6 +1357,30 @@ def register(app: typer.Typer, get_container):
                 "`mship test` / "
                 "`mship journal \"tests verified externally\" --test-state pass`."
             )
+
+        # --- Acceptance-criteria evidence gate (ac-evidence-loop) ---
+        # Mirror the test-evidence gate: WARN by default when any AC on the bound
+        # spec lacks evidence; BLOCK only with --require-evidence. Resolve the spec
+        # via the task's WorkItem link; no bound spec ⇒ no-op. `bound_spec` is
+        # reused by the PR-body assembly below (build_acceptance_block).
+        from mship.core.workitem_gate import resolve_bound_spec
+        bound_spec = resolve_bound_spec(task, workspace_root)
+        if bound_spec is not None:
+            unverified_acs = [c.id for c in bound_spec.acceptance_criteria if not c.evidence]
+            if unverified_acs:
+                if require_evidence:
+                    output.error("Acceptance criteria without evidence — blocking finish (--require-evidence):")
+                    output.error(f"  {bound_spec.id}: {', '.join(unverified_acs)}")
+                    output.error(
+                        "Attach evidence via `mship spec evidence <spec> <ac> <ref>`, then retry."
+                    )
+                    raise typer.Exit(code=1)
+                output.warning("Acceptance-criteria evidence warnings:")
+                output.warning(f"  {bound_spec.id}: {', '.join(unverified_acs)} lack evidence")
+                output.warning(
+                    "Pass `--require-evidence` to treat as blocking, or attach evidence via "
+                    "`mship spec evidence <spec> <ac> <ref>`."
+                )
 
         pr_list: list[dict] = []
         repushed_repos: list[str] = []  # repos where --force re-pushed commits
