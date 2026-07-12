@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import fcntl
 import tempfile
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -11,6 +13,24 @@ from mship.core.workitem import ExternalLink, Kind, Phase, WorkItem
 
 def _new_id(now: datetime) -> str:
     return f"wi-{now:%Y%m%d%H%M%S}-{uuid.uuid4().hex[:8]}"
+
+
+@contextmanager
+def _locked(lock_path: Path, mode: int):
+    """Advisory flock on `lock_path` (mirrors state.py's `_locked`).
+
+    mode: fcntl.LOCK_SH (shared read) or fcntl.LOCK_EX (exclusive write).
+    Released when the context exits. A per-item lock file lets writers to
+    DIFFERENT items proceed in parallel; only same-item writers serialize.
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.touch(exist_ok=True)
+    with open(lock_path, "r+") as lf:
+        fcntl.flock(lf, mode)
+        try:
+            yield
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 class WorkItemStore:
@@ -24,6 +44,12 @@ class WorkItemStore:
                 or item_id in (".", "..") or item_id.startswith(".")):
             raise ValueError(f"unsafe work item id: {item_id!r}")
         return self._dir / f"{item_id}.json"
+
+    def _lock_path(self, item_id: str) -> Path:
+        """Per-item lock file (`<id>.json.lock`). Reuses `_path`'s id validation.
+        Not matched by `list()`'s `*.json` glob, so it stays invisible to reads."""
+        p = self._path(item_id)
+        return p.with_name(p.name + ".lock")
 
     def save(self, item: WorkItem) -> Path:
         self._dir.mkdir(parents=True, exist_ok=True)
@@ -67,72 +93,84 @@ class WorkItemStore:
         return item
 
     def link_spec(self, item_id: str, spec_id: str, now: datetime | None = None) -> None:
-        item = self._mutate(item_id, now)
-        item.spec_id = spec_id
-        self.save(item)
+        with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
+            item = self._mutate(item_id, now)
+            item.spec_id = spec_id
+            self.save(item)
 
     def link_plan(self, item_id: str, plan_path: str, now: datetime | None = None) -> None:
-        item = self._mutate(item_id, now)
-        item.plan_path = plan_path
-        self.save(item)
+        with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
+            item = self._mutate(item_id, now)
+            item.plan_path = plan_path
+            self.save(item)
 
     def add_task(self, item_id: str, task_slug: str, now: datetime | None = None,
                 state: StateManager | None = None) -> None:
-        item = self.get(item_id)
-        if item is None:
-            raise KeyError(item_id)
-        if task_slug in item.task_slugs:
-            return
-        item.task_slugs.append(task_slug)
-        if now is not None:
-            item.updated_at = now
-        self.save(item)
+        # Exclusive lock spans get+append+save so concurrent add_task calls to the
+        # same item can't clobber each other's task_slugs (MOS-233).
+        with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
+            item = self.get(item_id)
+            if item is None:
+                raise KeyError(item_id)
+            if task_slug in item.task_slugs:
+                return
+            item.task_slugs.append(task_slug)
+            if now is not None:
+                item.updated_at = now
+            self.save(item)
         if state is not None:
             # Reverse link: task.work_item_id, mirroring workitem_migrate.wrap_existing's
-            # pass-2 mutation (workitem_migrate.py:46-49).
+            # pass-2 mutation (workitem_migrate.py:46-49). StateManager.mutate takes its
+            # own state.lock, so keep it outside this item lock to avoid lock coupling.
             def _set(s, _slug=task_slug, _wid=item_id):
                 if _slug in s.tasks:
                     s.tasks[_slug].work_item_id = _wid
             state.mutate(_set)
 
     def add_thread(self, item_id: str, thread_id: str, now: datetime | None = None) -> None:
-        item = self.get(item_id)
-        if item is None:
-            raise KeyError(item_id)
-        if thread_id in item.thread_ids:
-            return
-        item.thread_ids.append(thread_id)
-        if now is not None:
-            item.updated_at = now
-        self.save(item)
+        with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
+            item = self.get(item_id)
+            if item is None:
+                raise KeyError(item_id)
+            if thread_id in item.thread_ids:
+                return
+            item.thread_ids.append(thread_id)
+            if now is not None:
+                item.updated_at = now
+            self.save(item)
 
     def add_external_link(self, item_id: str, link: ExternalLink, now: datetime | None = None) -> None:
-        item = self._mutate(item_id, now)
-        item.external_links.append(link)
-        self.save(item)
+        with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
+            item = self._mutate(item_id, now)
+            item.external_links.append(link)
+            self.save(item)
 
     def set_phase_override(self, item_id: str, phase: Phase | None, now: datetime | None = None) -> None:
         """Set the manual phase override, or clear it (return to derived phase) when
         `phase` is None. Raises KeyError if the item does not exist."""
-        item = self._mutate(item_id, now)
-        item.phase_override = phase
-        self.save(item)
+        with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
+            item = self._mutate(item_id, now)
+            item.phase_override = phase
+            self.save(item)
 
     def set_unattended(self, item_id: str, on: bool, now: datetime | None = None) -> None:
-        item = self._mutate(item_id, now)
-        item.unattended = on
-        self.save(item)
+        with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
+            item = self._mutate(item_id, now)
+            item.unattended = on
+            self.save(item)
 
     def archive(self, item_id: str, now: datetime | None = None) -> None:
         """Soft-delete: mark the item archived so it's excluded from list() by
         default. Raises KeyError if the item does not exist."""
-        item = self._mutate(item_id, now)
-        item.archived = True
-        self.save(item)
+        with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
+            item = self._mutate(item_id, now)
+            item.archived = True
+            self.save(item)
 
     def unarchive(self, item_id: str, now: datetime | None = None) -> None:
         """Reverse of archive(): clear the archived flag. Raises KeyError if the
         item does not exist."""
-        item = self._mutate(item_id, now)
-        item.archived = False
-        self.save(item)
+        with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
+            item = self._mutate(item_id, now)
+            item.archived = False
+            self.save(item)
