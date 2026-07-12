@@ -76,8 +76,8 @@ _POST_HOC_EVENTS: frozenset[str] = frozenset(
 
 
 class HookConfig(BaseModel):
-    """One `hooks:` entry: run a go-task target or shell command when `on`
-    fires. See mship.core.lifecycle_hooks for the runtime dispatcher — NOT
+    """One `lifecycle_hooks:` entry: run a go-task target or shell command when
+    `on` fires. See mship.core.lifecycle_hooks for the runtime dispatcher — NOT
     mship.core.hooks, which is the unrelated git pre-commit/pre-push installer."""
     on: str
     run: str
@@ -105,7 +105,7 @@ class HookConfig(BaseModel):
     def validate_on(cls, v: str) -> str:
         if v not in LIFECYCLE_EVENTS:
             raise ValueError(
-                f"hooks: unknown event {v!r}. Valid events: "
+                f"lifecycle_hooks: unknown event {v!r}. Valid events: "
                 f"{', '.join(sorted(LIFECYCLE_EVENTS))}"
             )
         return v
@@ -114,7 +114,7 @@ class HookConfig(BaseModel):
     @classmethod
     def validate_run(cls, v: str) -> str:
         if not v.strip():
-            raise ValueError("hooks: `run` must be a non-empty string")
+            raise ValueError("lifecycle_hooks: `run` must be a non-empty string")
         return v
 
     @model_validator(mode="after")
@@ -128,7 +128,7 @@ class HookConfig(BaseModel):
         anything back. See `_POST_HOC_EVENTS` above."""
         if self.required and self.on in _POST_HOC_EVENTS:
             raise ValueError(
-                f"hooks: `required: true` is not meaningful on {self.on!r} — "
+                f"lifecycle_hooks: `required: true` is not meaningful on {self.on!r} — "
                 f"this event fires only after its transition's side effects "
                 f"(PR/branch creation, spec advance, polling-observed "
                 f"merge/close, etc.) already happened, so a hook here cannot "
@@ -303,11 +303,37 @@ class WorkspaceConfig(BaseModel):
     # redaction pass exactly the built-in patterns.
     redact: RedactConfig | None = None
     # Declarative reactions to task/WorkItem/PR state transitions — see spec
-    # mship-lifecycle-hooks (MOS-220) and mship.core.lifecycle_hooks.
-    hooks: list[HookConfig] = []
-    # Fallback per-hook timeout (seconds) when a `hooks:` entry omits `timeout`.
-    hooks_default_timeout: int = 30
+    # mship-lifecycle-hooks (MOS-220) and mship.core.lifecycle_hooks. Named
+    # `lifecycle_hooks` (not `hooks`) to disambiguate from the unrelated git
+    # commit/push hooks installed by mship.core.hooks.
+    lifecycle_hooks: list[HookConfig] = []
+    # Fallback per-hook timeout (seconds) when a `lifecycle_hooks:` entry omits
+    # `timeout`.
+    lifecycle_hooks_default_timeout: int = 30
     repos: dict[str, RepoConfig]
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_renamed_hook_keys(cls, data):
+        """`hooks:`/`hooks_default_timeout:` were renamed to
+        `lifecycle_hooks:`/`lifecycle_hooks_default_timeout:` to disambiguate
+        from the git commit/push hooks. Pydantic's default `extra="ignore"`
+        would SILENTLY drop the old keys — leaving lifecycle hooks quietly
+        never firing — so raise a clear error instead of failing open."""
+        if isinstance(data, dict):
+            renamed = {
+                "hooks": "lifecycle_hooks",
+                "hooks_default_timeout": "lifecycle_hooks_default_timeout",
+            }
+            found = [old for old in renamed if old in data]
+            if found:
+                raise ValueError(
+                    "`hooks:` was renamed to `lifecycle_hooks:` (and "
+                    "`hooks_default_timeout:` → `lifecycle_hooks_default_timeout:`) "
+                    "— update mothership.yaml. Found old key(s): "
+                    f"{', '.join(sorted(found))}."
+                )
+        return data
 
     @field_validator("relay", mode="before")
     @classmethod
@@ -393,10 +419,10 @@ class WorkspaceConfig(BaseModel):
     @model_validator(mode="after")
     def validate_hooks_repo_refs(self) -> "WorkspaceConfig":
         repo_names = set(self.repos.keys())
-        for hook in self.hooks:
+        for hook in self.lifecycle_hooks:
             if hook.repo is not None and hook.repo not in repo_names:
                 raise ValueError(
-                    f"hooks: entry `on: {hook.on}` references unknown repo "
+                    f"lifecycle_hooks: entry `on: {hook.on}` references unknown repo "
                     f"{hook.repo!r}. Valid repos: {sorted(repo_names)}"
                 )
         return self

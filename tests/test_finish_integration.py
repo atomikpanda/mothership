@@ -973,7 +973,7 @@ def test_finish_fires_task_finished_hook(finish_workspace):
     cfg_path = workspace / "mothership.yaml"
     cfg_path.write_text(
         cfg_path.read_text()
-        + "hooks:\n"
+        + "lifecycle_hooks:\n"
         + "  - on: task.finished\n"
         + "    run: notify-finished\n"
     )
@@ -1028,7 +1028,7 @@ def test_finish_required_hook_on_task_finished_rejected_at_config_load(finish_wo
     cfg_path = workspace / "mothership.yaml"
     cfg_path.write_text(
         cfg_path.read_text()
-        + "hooks:\n"
+        + "lifecycle_hooks:\n"
         + "  - on: task.finished\n"
         + "    run: notify-finished-fails\n"
         + "    required: true\n"
@@ -1046,7 +1046,7 @@ def test_finish_non_required_hook_failure_never_blocks_finished_stamp(finish_wor
     cfg_path = workspace / "mothership.yaml"
     cfg_path.write_text(
         cfg_path.read_text()
-        + "hooks:\n"
+        + "lifecycle_hooks:\n"
         + "  - on: task.finished\n"
         + "    run: notify-finished-fails\n"
     )

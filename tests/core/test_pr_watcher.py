@@ -311,7 +311,7 @@ class _RecordingShell:
 
 def _hooks_config(hooks, repos=None):
     from mship.core.config import WorkspaceConfig
-    return WorkspaceConfig(workspace="test", repos=repos or {}, hooks=hooks)
+    return WorkspaceConfig(workspace="test", repos=repos or {}, lifecycle_hooks=hooks)
 
 
 def test_pr_merged_fires_matching_hook():

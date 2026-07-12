@@ -348,7 +348,7 @@ def test_item_phase_fires_workitem_phase_hook(tmp_path):
 
     (tmp_path / "mothership.yaml").write_text(
         "workspace: testws\nrepos: {}\n"
-        "hooks:\n"
+        "lifecycle_hooks:\n"
         "  - on: workitem.phase.done\n"
         "    run: notify-done\n"
     )
@@ -397,7 +397,7 @@ def test_item_phase_required_hook_failure_blocks_override(tmp_path):
 
     (tmp_path / "mothership.yaml").write_text(
         "workspace: testws\nrepos: {}\n"
-        "hooks:\n"
+        "lifecycle_hooks:\n"
         "  - on: workitem.phase.done\n"
         "    run: notify-done-fails\n"
         "    required: true\n"

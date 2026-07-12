@@ -92,7 +92,7 @@ class HookContext:
 
 
 def _matching_hooks(event: str, config: "WorkspaceConfig") -> list["HookConfig"]:
-    return [h for h in config.hooks if h.on == event]
+    return [h for h in config.lifecycle_hooks if h.on == event]
 
 
 def _resolve_repo_cwd(
@@ -147,7 +147,7 @@ def _run_one(
 ) -> HookResult:
     name = hook.name or hook.run
     repo_name = hook.repo or context.repo
-    timeout = hook.timeout if hook.timeout is not None else config.hooks_default_timeout
+    timeout = hook.timeout if hook.timeout is not None else config.lifecycle_hooks_default_timeout
 
     cwd, env_runner = _resolve_target(
         repo_name, config, workspace_root, state_manager, context.task_slug,

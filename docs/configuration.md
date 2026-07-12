@@ -156,8 +156,8 @@ Top-level keys on `mothership.yaml` (alongside `workspace`, `env_runner`, `branc
 | `relay` | Reverse-tunnel relay connection for `mship serve --relay` (see [`relay-hosting.md`](relay-hosting.md)). |
 | `run_hosts` | Logical run-host role names available to the workspace (only the names are committed here). A repo opts into one via its `run_host`; each machine maps the role to a concrete `{url, token}` in the gitignored `.mothership/run-hosts.yaml`. |
 | `redact` | Extra `mship export --redacted` regex patterns, unioned with the built-in set. (MOS-102) |
-| `hooks` | Declarative reactions to task / WorkItem / PR lifecycle transitions. (MOS-220) |
-| `hooks_default_timeout` | Fallback per-hook timeout in seconds when a `hooks:` entry omits `timeout`. Default: `30`. |
+| `lifecycle_hooks` | Declarative reactions to task / WorkItem / PR lifecycle transitions. Named `lifecycle_hooks` (not `hooks`) to disambiguate from the git commit/push hooks. (MOS-220) |
+| `lifecycle_hooks_default_timeout` | Fallback per-hook timeout in seconds when a `lifecycle_hooks:` entry omits `timeout`. Default: `30`. |
 
 ```yaml
 workspace: my-platform
@@ -179,11 +179,11 @@ redact:
     - "sk-[A-Za-z0-9]{20,}"                    # bare string -> a "custom" pattern
     - { name: internal-host, pattern: "corp\\.example\\.internal" }
 
-hooks:
+lifecycle_hooks:
   - on: pr.merged                 # a lifecycle event (phase.entered.*, workitem.phase.*, task.finished/closed, pr.merged/closed)
     run: notify-slack             # a go-task target or shell command
     repo: backend                 # optional: run in this repo's worktree
-    timeout: 60                   # optional: overrides hooks_default_timeout
+    timeout: 60                   # optional: overrides lifecycle_hooks_default_timeout
     # required: true              # only valid on the pre-mutation events (phase.entered.* / workitem.phase.*)
 ```
 

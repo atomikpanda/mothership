@@ -54,8 +54,8 @@ def _config(repos=None, hooks=None, env_runner=None, hooks_default_timeout=30) -
         workspace="test",
         env_runner=env_runner,
         repos=repos or {},
-        hooks=hooks or [],
-        hooks_default_timeout=hooks_default_timeout,
+        lifecycle_hooks=hooks or [],
+        lifecycle_hooks_default_timeout=hooks_default_timeout,
     )
 
 
