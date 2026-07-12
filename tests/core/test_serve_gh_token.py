@@ -137,6 +137,50 @@ def test_gh_token_app_path_mints_scoped_token(tmp_path, monkeypatch):
     assert calls["mint"]["repos"] == ["widgets", "gadgets"]  # SHORT names for the mint
 
 
+def test_gh_token_app_path_second_account_resolves_independently(tmp_path, monkeypatch):
+    """ac2 (multi-account): a different owner auto-resolves its OWN installation
+    from the same App creds — one App, many accounts, no per-account config."""
+    resolved: list[str] = []
+    monkeypatch.setattr(
+        "mship.core.serve.resolve_installation",
+        lambda **kw: (resolved.append(kw["owner"]) or f"inst-{kw['owner']}"),
+    )
+    minted: dict = {}
+    monkeypatch.setattr(
+        "mship.core.serve.mint_installation_token",
+        lambda **kw: (
+            minted.update(kw)
+            or {"token": f"ghs_{kw['installation_id']}", "expires_at": None,
+                "repositories": kw["repos"]}
+        ),
+    )
+    client = TestClient(_app(tmp_path, auth_token="t", gh_app_id="123", gh_app_key="KEY"))
+    r = client.get("/gh-token?repos=beta-org/thing", headers={"Authorization": "Bearer t"})
+    assert r.status_code == 200
+    assert resolved == ["beta-org"]
+    assert minted["installation_id"] == "inst-beta-org"
+    assert r.json()["token"] == "ghs_inst-beta-org"
+
+
+def test_gh_token_app_path_caches_installation_per_owner(tmp_path, monkeypatch):
+    """Repeated pulls for the same owner resolve the installation only once
+    (per-owner cache for the serve process lifetime); minting still runs each call."""
+    resolve_count = {"n": 0}
+    monkeypatch.setattr(
+        "mship.core.serve.resolve_installation",
+        lambda **kw: (resolve_count.update(n=resolve_count["n"] + 1) or "999"),
+    )
+    monkeypatch.setattr(
+        "mship.core.serve.mint_installation_token",
+        lambda **kw: {"token": "ghs_x", "expires_at": None, "repositories": kw["repos"]},
+    )
+    client = TestClient(_app(tmp_path, auth_token="t", gh_app_id="123", gh_app_key="KEY"))
+    for _ in range(3):
+        r = client.get("/gh-token?repos=acme/widgets", headers={"Authorization": "Bearer t"})
+        assert r.status_code == 200
+    assert resolve_count["n"] == 1  # cached after the first resolve
+
+
 def test_gh_token_app_not_installed_is_error_no_fallback(tmp_path, monkeypatch):
     from mship.core.gh_app import GhAppError
 

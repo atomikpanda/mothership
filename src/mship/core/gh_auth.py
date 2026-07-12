@@ -24,10 +24,10 @@ _TOKEN_ENV_VAR = "MSHIP_GH_TOKEN"
 
 
 def broker_config_from_env() -> tuple[str | None, str | None]:
-    """Read (broker_url, broker_bearer) for the runtime gh-token broker
-    (Broker A on `mship serve`, Broker B on the relay — both expose
-    `GET /gh-token?repos=...`) from the environment, so every call site reads
-    the same two envs identically:
+    """Read (broker_url, broker_bearer) for the runtime gh-token broker — the
+    `mship serve` `GET /gh-token?repos=...` endpoint (App-backed when an App is
+    configured on the serve host, else proxying `gh auth token`) — from the
+    environment, so every call site reads the same two envs identically:
 
     - MSHIP_GH_BROKER_URL: the broker's base URL (no trailing `/gh-token`).
     - MSHIP_SERVE_TOKEN: the bearer token, shared with the broker's own

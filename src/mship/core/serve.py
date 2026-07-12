@@ -378,6 +378,11 @@ def create_app(
     #   authenticated as, so `expires_at` is always None here and `repositories`
     #   is purely an echo of the query, not an enforced scope.
 
+    # Per-owner installation-id cache for the App backend (process lifetime).
+    # A workspace is single-account, so this is effectively one lookup; repeated
+    # pulls skip the extra GET /repos/{owner}/{repo}/installation round-trip.
+    _installation_cache: dict[str, str] = {}
+
     @app.get("/gh-token")
     def get_gh_token(repos: str | None = None):
         """Inherits the app-wide bearer dependency (see `_make_auth_dependency`
@@ -412,10 +417,13 @@ def create_app(
                 )
             owner = owners.pop()
             try:
-                installation_id = resolve_installation(
-                    app_id=gh_app_id, private_key=gh_app_key,
-                    owner=owner, repo=short_names[0],
-                )
+                installation_id = _installation_cache.get(owner)
+                if installation_id is None:
+                    installation_id = resolve_installation(
+                        app_id=gh_app_id, private_key=gh_app_key,
+                        owner=owner, repo=short_names[0],
+                    )
+                    _installation_cache[owner] = installation_id
                 result = mint_installation_token(
                     app_id=gh_app_id, private_key=gh_app_key,
                     installation_id=installation_id, repos=short_names,
@@ -438,7 +446,7 @@ def create_app(
                 status_code=503,
                 detail=(
                     "gh auth token unavailable on serve host — run `gh auth login`, "
-                    "set MSHIP_GH_APP_ID/MSHIP_GH_APP_KEY, or use a relay broker"
+                    "or set MSHIP_GH_APP_ID/MSHIP_GH_APP_KEY for App-backed minting"
                 ),
             )
         # Audit the mint: timestamp + requested repos, never the token value.

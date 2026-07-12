@@ -226,22 +226,24 @@ def test_serve_warns_on_ignored_installation_var(_configured, monkeypatch):
     assert "MSHIP_GH_APP_INSTALLATION is ignored" in result.output
 
 
-def test_serve_warns_and_disables_when_gh_app_key_unreadable(_configured, monkeypatch, tmp_path):
+def test_serve_refuses_when_gh_app_key_unreadable(_configured, monkeypatch, tmp_path):
+    """An unreadable MSHIP_GH_APP_KEY with an App configured is a HARD ERROR —
+    serve refuses to start rather than silently falling back to `gh auth token`
+    (which would push as a different identity than the configured App)."""
     monkeypatch.delenv("MSHIP_SERVE_TOKEN", raising=False)
     monkeypatch.setenv("MSHIP_GH_APP_ID", "123")
     monkeypatch.setenv("MSHIP_GH_APP_KEY", str(tmp_path / "missing.pem"))
 
-    captured: dict = {}
+    called = {"create_app": False}
     monkeypatch.setattr(
         "mship.core.serve.create_app",
-        lambda **k: (captured.update(k), object())[1],
+        lambda **k: (called.update(create_app=True), object())[1],
     )
     import uvicorn
     monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
 
     result = runner.invoke(app, ["serve"])
-    assert result.exit_code == 0, result.output
-    assert "App minting disabled" in result.output
-    # id still passes through; the unreadable key path yields no key text.
-    assert captured["gh_app_id"] == "123"
-    assert captured["gh_app_key"] is None
+    assert result.exit_code == 1, result.output
+    assert "not a readable file" in result.output or "Refusing to start" in result.output
+    # Serve never started — no silent identity downgrade.
+    assert called["create_app"] is False

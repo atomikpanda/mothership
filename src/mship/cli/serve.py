@@ -15,8 +15,9 @@ def _read_gh_app_creds(output: Output) -> tuple[Optional[str], Optional[str]]:
     - `MSHIP_GH_APP_ID`  — the App's numeric id (passed through as-is).
     - `MSHIP_GH_APP_KEY` — a PATH to the App's private-key `.pem`; its TEXT is
       read here and returned (the path itself never reaches `create_app`). A set
-      but unreadable path warns and disables App minting (returns key=None)
-      rather than crashing serve.
+      but unreadable path is a HARD ERROR (serve refuses to start): silently
+      downgrading to `gh auth token` would push as a different identity than the
+      App you configured.
 
     Returns `(gh_app_id, gh_app_key)`; either/both may be None, in which case
     `GET /gh-token` falls back to Broker A (`gh auth token`).
@@ -33,12 +34,14 @@ def _read_gh_app_creds(output: Output) -> tuple[Optional[str], Optional[str]]:
     if key_path:
         p = Path(key_path)
         if not p.is_file():
-            output.warning(
-                f"MSHIP_GH_APP_KEY is set but not a readable file ({key_path!r}); "
-                "App minting disabled."
+            output.error(
+                f"MSHIP_GH_APP_KEY is set but not a readable file ({key_path!r}). "
+                "Refusing to start: with an App configured, silently falling back to "
+                "`gh auth token` would push as a different identity. Fix the path, or "
+                "unset MSHIP_GH_APP_KEY to use the gh-auth-token fallback deliberately."
             )
-        else:
-            gh_app_key = p.read_text()
+            raise typer.Exit(1)
+        gh_app_key = p.read_text()
     if os.environ.get("MSHIP_GH_APP_INSTALLATION"):
         output.warning(
             "MSHIP_GH_APP_INSTALLATION is ignored — the installation is now "
