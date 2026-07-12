@@ -2,9 +2,11 @@ import pytest
 
 from datetime import datetime, timezone
 
-from mship.core.spec import AcceptanceCriterion, OpenQuestion, Spec
+from mship.core.spec import AcceptanceCriterion, AcceptanceEvidence, OpenQuestion, Spec
 from mship.core.spec_body import render_body
-from mship.core.spec_review import build_review, set_criterion_verdict
+from mship.core.spec_review import (
+    build_review, infer_evidence_kind, set_criterion_evidence, set_criterion_verdict,
+)
 
 
 def _spec():
@@ -72,3 +74,33 @@ def test_set_criterion_verdict_rejects_unknown_id():
 def test_set_criterion_verdict_rejects_prose_unit():
     with pytest.raises(ValueError, match="not verdict-able"):
         set_criterion_verdict(_spec(), "problem", "approved")
+
+
+def test_set_criterion_evidence_appends_and_persists_in_object():
+    spec = _spec()
+    set_criterion_evidence(spec, "ac2", "test", "test-runs/5.mothership", note="ran it")
+    ev = spec.acceptance_criteria[1].evidence
+    assert ev == [AcceptanceEvidence(kind="test", ref="test-runs/5.mothership", note="ran it")]
+
+
+def test_set_criterion_evidence_rejects_bad_kind():
+    with pytest.raises(ValueError, match="kind"):
+        set_criterion_evidence(_spec(), "ac1", "screenshot", "x")
+
+
+def test_set_criterion_evidence_rejects_unknown_id():
+    with pytest.raises(ValueError):
+        set_criterion_evidence(_spec(), "ac99", "commit", "deadbeef")
+
+
+@pytest.mark.parametrize("ref,expected", [
+    ("test-runs/5", "test"),
+    ("test-runs/5.mothership", "test"),
+    ("deadbeefcafe", "commit"),
+    ("a1b2c3d", "commit"),
+    ("docs/design.md:12-18", "artifact"),
+    ("https://example.com/run/9", "artifact"),
+    ("HEAD", "artifact"),
+])
+def test_infer_evidence_kind(ref, expected):
+    assert infer_evidence_kind(ref) == expected
