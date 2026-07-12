@@ -1165,15 +1165,23 @@ def register(app: typer.Typer, get_container):
         # PR creation flow
         pr_mgr = container.pr_manager()
         from mship.core.gh_auth import broker_config_from_env, resolve_token
+        from mship.core.gh_preflight import repo_owner_names_from_config
         # Broker-pull fallback repo set: this task's affected repos, falling
         # back to every non-git_root repo in the workspace when the task has
         # none recorded (mirrors bootstrap's repo-set derivation).
         finish_repos = list(task.affected_repos) or [
             n for n, r in config.repos.items() if r.git_root is None
         ]
+        # Send the broker `owner/repo` slugs (not short config names) so the
+        # folded serve can resolve the GitHub App installation per repo. Drop
+        # any repo that doesn't resolve to a github.com owner/repo; fall back to
+        # the short names if none resolve (Broker A ignores `repos`).
+        _owner_map = repo_owner_names_from_config(container.config_path(), finish_repos)
+        broker_repos = [_owner_map[n] for n in finish_repos if n in _owner_map]
         broker_url, broker_bearer = broker_config_from_env()
         gh_token = resolve_token(
-            token, broker_url=broker_url, broker_bearer=broker_bearer, repos=finish_repos,
+            token, broker_url=broker_url, broker_bearer=broker_bearer,
+            repos=broker_repos or finish_repos,
         )
 
         # --push-only: push branches, stamp finished_at, skip gh entirely.

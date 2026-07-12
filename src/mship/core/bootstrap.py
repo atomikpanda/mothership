@@ -11,6 +11,7 @@ from pathlib import Path
 from mship.core.clone_url import resolve_clone_url
 from mship.core.config import ConfigLoader, RepoConfig, unique_git_roots
 from mship.core.gh_auth import broker_config_from_env, resolve_token, git_cred_args
+from mship.core.gh_preflight import repo_owner_names_from_config
 from mship.util.shell import ShellRunner
 
 
@@ -108,9 +109,16 @@ def bootstrap(
     # parent's checkout, not independently-installed repos — excluded so a
     # broker mint request never names a repo the App can't see).
     all_repo_names = [n for n, r in config.repos.items() if r.git_root is None]
+    # Send the broker `owner/repo` slugs (not short config names) so the folded
+    # serve can resolve the GitHub App installation per repo. Drop any repo that
+    # doesn't resolve to a github.com owner/repo; fall back to the short names if
+    # none resolve (Broker A ignores `repos`, so that stays backward-safe).
+    _owner_map = repo_owner_names_from_config(config_path, all_repo_names)
+    broker_repos = [_owner_map[n] for n in all_repo_names if n in _owner_map]
     broker_url, broker_bearer = broker_config_from_env()
     resolved_token = resolve_token(
-        token, broker_url=broker_url, broker_bearer=broker_bearer, repos=all_repo_names,
+        token, broker_url=broker_url, broker_bearer=broker_bearer,
+        repos=broker_repos or all_repo_names,
     )
 
     names = repos or list(config.repos.keys())

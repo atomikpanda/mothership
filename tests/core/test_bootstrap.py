@@ -152,6 +152,72 @@ def test_bootstrap_clone_includes_cred_args_when_token(tmp_path):
     assert env and env.get("MSHIP_GH_TOKEN") == "tok123"
 
 
+def test_bootstrap_broker_pull_sends_owner_repo(tmp_path, monkeypatch):
+    """bootstrap maps its short repo names to `owner/repo` slugs before the
+    broker pull, so the folded serve can resolve the GitHub App installation."""
+    from mship.core import bootstrap as bmod
+    from mship.util.shell import ShellResult
+
+    captured = {}
+
+    def fake_resolve_token(token, *, broker_url=None, broker_bearer=None,
+                           repos=None, **kw):
+        captured["repos"] = repos
+        return None
+
+    monkeypatch.setattr(bmod, "resolve_token", fake_resolve_token)
+
+    class FakeShell:
+        def run(self, command, cwd, env=None):
+            return ShellResult(returncode=0, stdout="", stderr="")
+        def run_task(self, *a, **k):
+            return ShellResult(returncode=0, stdout="", stderr="")
+
+    ws = tmp_path / "wsbrk"; ws.mkdir(); (ws / ".mothership").mkdir()
+    (ws / "mothership.yaml").write_text(
+        "workspace: w\n"
+        "default_remote: https://github.com/acme\n"
+        "repos:\n"
+        "  widgets:\n    path: widgets\n    type: library\n"
+        "  gadgets:\n    path: gadgets\n    type: service\n"
+    )
+    bmod.bootstrap(ws / "mothership.yaml", FakeShell(),
+                   state_dir=ws / ".mothership")
+    assert captured["repos"] == ["acme/widgets", "acme/gadgets"]
+
+
+def test_bootstrap_broker_pull_falls_back_to_short_names(tmp_path, monkeypatch):
+    """When no repo resolves to a github.com owner/repo (non-github/unresolvable
+    url, or no default_remote), bootstrap falls back to the short names — Broker
+    A ignores `repos`, so nothing breaks."""
+    from mship.core import bootstrap as bmod
+    from mship.util.shell import ShellResult
+
+    captured = {}
+
+    def fake_resolve_token(token, *, broker_url=None, broker_bearer=None,
+                           repos=None, **kw):
+        captured["repos"] = repos
+        return None
+
+    monkeypatch.setattr(bmod, "resolve_token", fake_resolve_token)
+
+    class FakeShell:
+        def run(self, command, cwd, env=None):
+            return ShellResult(returncode=0, stdout="", stderr="")
+        def run_task(self, *a, **k):
+            return ShellResult(returncode=0, stdout="", stderr="")
+
+    ws = tmp_path / "wsfb"; ws.mkdir(); (ws / ".mothership").mkdir()
+    (ws / "mothership.yaml").write_text(
+        "workspace: w\nrepos:\n  lib:\n    path: lib\n    type: library\n"
+        "    url: file:///some/path\n"
+    )
+    bmod.bootstrap(ws / "mothership.yaml", FakeShell(),
+                   state_dir=ws / ".mothership")
+    assert captured["repos"] == ["lib"]
+
+
 def test_bootstrap_clone_no_cred_args_without_token(tmp_path):
     from mship.core import bootstrap as bmod
     from mship.util.shell import ShellResult
