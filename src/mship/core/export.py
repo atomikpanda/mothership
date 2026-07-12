@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from mship.core.base_resolver import resolve_base
+from mship.core.plan import discover_plan_path
 
 if TYPE_CHECKING:
     from mship.core.config import WorkspaceConfig
@@ -350,36 +351,6 @@ def collect_repo_diff(
 # ---------------------------------------------------------------------------
 # Bundle assembly
 # ---------------------------------------------------------------------------
-
-def _plan_stem_matches_slug(stem: str, task_slug: str) -> bool:
-    """Precise match, not substring: either the stem IS the slug, or it's the
-    canonical `<YYYY-MM-DD>-<slug>.md` form. A bare `-<slug>` suffix (e.g.
-    'my-add.md' for slug 'add') deliberately does NOT match — that's still a
-    substring-style match in disguise, just anchored to the end instead of
-    anywhere, and would wrongly pick up unrelated docs prefixed with
-    another word (MOS-102 Greptile fix)."""
-    if stem == task_slug:
-        return True
-    escaped_slug = re.escape(task_slug)
-    return re.fullmatch(rf"\d{{4}}-\d{{2}}-\d{{2}}-{escaped_slug}", stem) is not None
-
-
-def discover_plan_path(workspace_root: Path, task_slug: str, docs_dir: str = "docs") -> Path | None:
-    """Best-effort plan-doc discovery: a `docs/plans/*.md` file whose stem
-    precisely matches the task slug (exact stem, or the canonical
-    `<date>-<slug>.md` form) — not merely containing the slug as a
-    substring, which would false-positive on a short slug like "add"
-    matching "add-labels.md". v1 has no fuzzy/similarity scoring and no
-    explicit plan_path reference on Task — picks the most-recently-modified
-    match when more than one file matches."""
-    plans_dir = workspace_root / docs_dir / "plans"
-    if not plans_dir.is_dir():
-        return None
-    matches = [p for p in sorted(plans_dir.glob("*.md")) if _plan_stem_matches_slug(p.stem, task_slug)]
-    if not matches:
-        return None
-    return max(matches, key=lambda p: p.stat().st_mtime)
-
 
 def _render_journal(task_slug: str, entries: list) -> str:
     lines = [f"# Task Journal: {task_slug}", ""]
