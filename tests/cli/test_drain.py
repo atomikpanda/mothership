@@ -82,6 +82,89 @@ def test_allows_when_thread_already_answered(tmp_path: Path):
         _reset()
 
 
+def test_blocks_on_agent_event_thread(tmp_path: Path):
+    # MOS-232: an agent-EVENT thread (a dispatch handoff / PR-merge signal) with
+    # no pending human reply must now block the stop too — and with
+    # event-appropriate wording, NOT the "reply to clear" instruction.
+    cfg, state_dir, store = _bootstrap(tmp_path)
+    now = datetime.now(timezone.utc)
+    t = store.create_thread("task-1", "seed", now)
+    store.append(t.id, "agent", "dispatch handoff: pick up spec-42", now, kind="event")
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["_drain"], input=_event())
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["decision"] == "block"
+        assert "dispatch handoff: pick up spec-42" in payload["reason"]
+        # event wording, and NOT the reply-to-clear instruction
+        assert "mship reply" not in payload["reason"]
+        assert "act on" in payload["reason"].lower()
+    finally:
+        _reset()
+
+
+def test_blocks_on_trailing_event_after_human_interleave(tmp_path: Path):
+    # Mirror of test_inbox_wait's interleave case: awaiting_agent_event must
+    # survive a human message posted after the event. Here a trailing agent
+    # event (after the human "thanks") keeps awaiting_reply False, so the thread
+    # surfaces under the event group despite the interleaved human message.
+    cfg, state_dir, store = _bootstrap(tmp_path)
+    now = datetime.now(timezone.utc)
+    t = store.create_thread("task-1", "seed", now)
+    store.append(t.id, "agent", "dispatch handoff", now, kind="event")
+    store.append(t.id, "human", "thanks", now)  # the interleave
+    store.append(t.id, "agent", "PR #42 merged", now, kind="event")  # trailing event
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["_drain"], input=_event())
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["decision"] == "block"
+        assert t.id in payload["reason"]
+        assert "mship reply" not in payload["reason"]  # event group, not reply
+    finally:
+        _reset()
+
+
+def test_both_reply_and_event_thread_surfaces_under_reply_group(tmp_path: Path):
+    # A thread that is BOTH (an unhandled event AND an unanswered human message)
+    # is prioritized as a reply — it appears under the human-reply group with the
+    # `mship reply` instruction.
+    cfg, state_dir, store = _bootstrap(tmp_path)
+    now = datetime.now(timezone.utc)
+    t = store.create_thread("task-1", "seed", now)
+    store.append(t.id, "agent", "dispatch handoff", now, kind="event")
+    store.append(t.id, "human", "please advise", now)  # unanswered human -> awaiting_reply
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["_drain"], input=_event())
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["decision"] == "block"
+        assert "mship reply" in payload["reason"]  # reply is the priority action
+        assert "please advise" in payload["reason"]
+    finally:
+        _reset()
+
+
+def test_allows_when_event_already_handled(tmp_path: Path):
+    # Regression for the widened filter: an event the agent already acted on
+    # (a following non-event agent message) is handled -> no block.
+    cfg, state_dir, store = _bootstrap(tmp_path)
+    now = datetime.now(timezone.utc)
+    t = store.create_thread("task-1", "seed", now)
+    store.append(t.id, "agent", "dispatch handoff", now, kind="event")
+    store.append(t.id, "agent", "acted on it", now)  # non-event -> clears the event
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["_drain"], input=_event())
+        assert result.exit_code == 0
+        assert '"decision"' not in result.output
+    finally:
+        _reset()
+
+
 def test_allows_when_stop_hook_active(tmp_path: Path):
     cfg, state_dir, store = _bootstrap(tmp_path)
     store.create_thread("s", "still pending", datetime.now(timezone.utc))
