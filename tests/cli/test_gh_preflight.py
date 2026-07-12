@@ -75,10 +75,13 @@ def test_preflight_broker_covers_all_repos_exit_zero(tmp_path, monkeypatch):
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers.get("authorization") == "Bearer serve-secret"
+        # The folded App-backed serve verifies coverage per owner/repo, so
+        # preflight must send owner/repo slugs — not the short config names.
+        assert request.url.params["repos"] == "acme/mothership,acme/ground-control"
         return httpx.Response(200, json={
             "token": "brokered-tok",
             "expires_at": "2026-01-01T00:00:00Z",
-            "repositories": ["mothership", "ground-control"],
+            "repositories": ["acme/mothership", "acme/ground-control"],
         })
 
     _patch_httpx_client(monkeypatch, handler)
