@@ -63,6 +63,33 @@ def test_commit_pre_finish_single_repo(configured_git_app: Path):
         container.shell.reset_override()
 
 
+def test_commit_journals_commit_sha_as_evidence(configured_git_app: Path):
+    """Committed sha is journaled into LogEntry.evidence (commit:<sha> ref)."""
+    runner.invoke(app, ["spawn", "--hotfix", "evidence commit", "--repos", "shared"])
+    slug = "evidence-commit"
+
+    def mock_run(cmd, cwd, env=None):
+        if "git diff --cached --quiet" in cmd:
+            return ShellResult(returncode=1, stdout="", stderr="")
+        if "git commit -m" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "git rev-parse HEAD" in cmd:
+            return ShellResult(returncode=0, stdout="7f3a1b2abcdef\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    container.shell.override(mock_shell)
+    try:
+        result = runner.invoke(app, ["commit", "fix: typo", "--task", slug])
+        assert result.exit_code == 0, result.output
+        log = (configured_git_app / ".mothership" / "logs" / f"{slug}.md").read_text()
+        assert 'evidence="7f3a1b2abcdef"' in log
+        assert "action=committed" in log
+    finally:
+        container.shell.reset_override()
+
+
 def test_commit_pre_finish_multi_repo(configured_git_app: Path):
     """Stage in two worktrees → both commit, no push, two journal entries."""
     runner.invoke(app, ["spawn", "--hotfix", "multi pre", "--repos", "shared,auth-service"])
