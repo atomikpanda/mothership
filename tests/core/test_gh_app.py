@@ -7,7 +7,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from mship.core.gh_app import GhAppError, mint_installation_token
+from mship.core.gh_app import GhAppError, mint_installation_token, resolve_installation
 
 
 @pytest.fixture(scope="module")
@@ -24,6 +24,13 @@ def rsa_keypair():
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
     ).decode()
     return private_pem, public_pem
+
+
+@pytest.fixture(scope="module")
+def rsa_private_key(rsa_keypair):
+    """Just the private PEM from the throwaway keypair, for signing App JWTs."""
+    private_pem, _public_pem = rsa_keypair
+    return private_pem
 
 
 def test_mint_installation_token_posts_scoped_request_and_returns_token(rsa_keypair):
@@ -141,3 +148,26 @@ def test_mint_installation_token_refuses_empty_repos_without_a_network_call(rsa_
             app_id="123", private_key=private_pem, installation_id="456",
             repos=[], client=_ExplodingClient(),
         )
+
+
+def test_resolve_installation_returns_id_for_repo(rsa_private_key):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/acme/widgets/installation"
+        assert request.headers["Authorization"].startswith("Bearer ")
+        return httpx.Response(200, json={"id": 424242})
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    inst = resolve_installation(
+        app_id="123", private_key=rsa_private_key,
+        owner="acme", repo="widgets", client=client,
+    )
+    assert inst == "424242"
+
+
+def test_resolve_installation_not_installed_raises_naming_repo(rsa_private_key):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"message": "Not Found"})
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(GhAppError) as ei:
+        resolve_installation(app_id="123", private_key=rsa_private_key,
+                             owner="acme", repo="widgets", client=client)
+    assert "acme/widgets" in str(ei.value)
