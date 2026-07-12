@@ -462,6 +462,34 @@ def test_item_unattended_cli(tmp_path):
         container.config.reset()
 
 
+def test_link_plan_sets_plan_path(tmp_path):
+    _isolate(tmp_path)
+    try:
+        res = runner.invoke(app, ["item", "new", "Title", "--kind", "feature"])
+        assert res.exit_code == 0, res.output
+        item_id = res.output.strip()
+
+        res = runner.invoke(app, ["item", "link-plan", item_id, "docs/plans/x.md"])
+        assert res.exit_code == 0, res.output
+        assert "docs/plans/x.md" in res.output
+
+        res = runner.invoke(app, ["item", "show", item_id])
+        assert res.exit_code == 0, res.output
+        assert json.loads(res.output)["plan_path"] == "docs/plans/x.md"
+    finally:
+        _reset()
+
+
+def test_link_plan_missing_item_errors(tmp_path):
+    _isolate(tmp_path)
+    try:
+        res = runner.invoke(app, ["item", "link-plan", "nope", "docs/plans/x.md"])
+        assert res.exit_code == 1
+        assert "no work item" in res.output
+    finally:
+        _reset()
+
+
 def test_link_url_with_invalid_provider_errors_cleanly(tmp_path):
     _isolate(tmp_path)
     try:
