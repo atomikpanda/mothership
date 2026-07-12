@@ -5,8 +5,8 @@ RELAY = "mship-relay.atomikpanda.com"
 def test_allows_enroll_host():
     assert tls_ask_allowed(f"enroll.{RELAY}", RELAY) is True
 
-def test_allows_gh_broker_host():
-    assert tls_ask_allowed(f"gh.{RELAY}", RELAY) is True
+def test_rejects_gh_broker_host_after_fold():
+    assert tls_ask_allowed(f"gh.{RELAY}", RELAY) is False  # folded into serve; no separate cert
 
 def test_rejects_random_host():
     assert tls_ask_allowed(f"random-host.{RELAY}", RELAY) is False
