@@ -13,7 +13,12 @@ def test_build_draft_prompt_contains_intent_schema_and_apply():
 
 from datetime import datetime, timezone
 
-from mship.core.spec import Spec, SpecDraft
+from mship.core.spec import (
+    AcceptanceCriterion,
+    AcceptanceEvidence,
+    Spec,
+    SpecDraft,
+)
 from mship.core.spec_draft import apply_draft
 from mship.core.spec_body import validate_body_structure
 
@@ -41,6 +46,36 @@ def test_apply_draft_merges_fields_and_assigns_ids():
     assert [q.id for q in out.open_questions] == ["q1"]
     assert out.open_questions[0].answer is None
     assert out.id == "dq" and out.task_slug == "dq"         # identity preserved
+
+
+def test_apply_draft_preserves_evidence_and_verdict_for_unchanged_ac():
+    spec = _spec()
+    spec.acceptance_criteria = [
+        AcceptanceCriterion(
+            id="ac1", text="view questions", verdict="approved",
+            evidence=[AcceptanceEvidence(kind="test", ref="test-runs/5")],
+        ),
+    ]
+    draft = SpecDraft(problem="P", user_story="U", approach="A",
+                      acceptance_criteria=["view questions"])   # SAME text
+    out = apply_draft(spec, draft)
+    assert out.acceptance_criteria[0].verdict == "approved"     # preserved
+    assert out.acceptance_criteria[0].evidence == [AcceptanceEvidence(kind="test", ref="test-runs/5")]
+
+
+def test_apply_draft_resets_evidence_and_verdict_for_materially_changed_ac():
+    spec = _spec()
+    spec.acceptance_criteria = [
+        AcceptanceCriterion(
+            id="ac1", text="view questions", verdict="approved",
+            evidence=[AcceptanceEvidence(kind="test", ref="test-runs/5")],
+        ),
+    ]
+    draft = SpecDraft(problem="P", user_story="U", approach="A",
+                      acceptance_criteria=["view questions AND record answers"])  # CHANGED
+    out = apply_draft(spec, draft)
+    assert out.acceptance_criteria[0].verdict == "unreviewed"   # fresh
+    assert out.acceptance_criteria[0].evidence == []            # fresh
 
 
 import pytest

@@ -101,10 +101,21 @@ def apply_draft(spec: Spec, draft: SpecDraft) -> Spec:
     spec.non_goals = list(draft.non_goals)
     spec.risks = list(draft.risks)
     spec.affected_repos = list(draft.affected_repos)
-    spec.acceptance_criteria = [
-        AcceptanceCriterion(id=f"ac{i + 1}", text=t)
-        for i, t in enumerate(draft.acceptance_criteria)
-    ]
+    prior_acs = {c.id: c for c in spec.acceptance_criteria}
+    new_acs: list[AcceptanceCriterion] = []
+    for i, t in enumerate(draft.acceptance_criteria):
+        ac_id = f"ac{i + 1}"
+        prior = prior_acs.get(ac_id)
+        if prior is not None and prior.text == t:
+            # id AND text unchanged → carry forward verdict + evidence.
+            new_acs.append(AcceptanceCriterion(
+                id=ac_id, text=t, verdict=prior.verdict,
+                evidence=list(prior.evidence),
+            ))
+        else:
+            # new or materially-changed criterion → start fresh.
+            new_acs.append(AcceptanceCriterion(id=ac_id, text=t))
+    spec.acceptance_criteria = new_acs
     spec.open_questions = [
         OpenQuestion(id=f"q{i + 1}", text=t)
         for i, t in enumerate(draft.open_questions)
