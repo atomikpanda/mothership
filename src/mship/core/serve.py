@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
+from mship.core.gh_app import GhAppError, mint_installation_token, resolve_installation
 from mship.core.pr import PRManager
 from mship.core.pr_watcher import PrWatcher
 from mship.core.spec import SpecDraft
@@ -359,19 +360,77 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"no task {slug!r}")
         return jsonable_encoder(log_manager.read(slug, last=50))
 
-    # --- gh-token (Broker A): proxy the serve host's own `gh auth token` ---
-    # Shared contract with Broker B (mship.core.gh_app.mint_installation_token):
-    # both return {"token", "expires_at", "repositories"}. Broker A does no
-    # independent repo scoping — it just hands back whatever `gh` on this host
-    # is already authenticated as, so `expires_at` is always None here (the
-    # underlying gh auth token's lifetime isn't introspectable this way) and
-    # `repositories` is purely an echo of the query, not an enforced scope.
+    # --- gh-token: two brokers, one contract ---
+    # Both brokers return the same shape {"token", "expires_at", "repositories"}.
+    # Broker selection is decided PURELY by whether App creds (gh_app_id AND
+    # gh_app_key) are configured — installation coverage is NOT part of the
+    # branch condition:
+    #
+    #   Broker B (App-backed): when both creds are present. Resolves the App
+    #   installation from the repos' owner and mints a short-lived token scoped
+    #   to exactly the requested repos (mship.core.gh_app). A workspace must be
+    #   single-account, so repos spanning >1 owner is a 400, and a repo the App
+    #   isn't installed on is a hard 502 — NEVER a silent fall-through to
+    #   Broker A (that would swap the caller's identity without them knowing).
+    #
+    #   Broker A: otherwise, proxy this host's own `gh auth token`. No
+    #   independent repo scoping — it hands back whatever `gh` on this host is
+    #   authenticated as, so `expires_at` is always None here and `repositories`
+    #   is purely an echo of the query, not an enforced scope.
 
     @app.get("/gh-token")
     def get_gh_token(repos: str | None = None):
         """Inherits the app-wide bearer dependency (see `_make_auth_dependency`
         above) automatically — no separate auth check needed here."""
-        repos_list = [r.strip() for r in repos.split(",") if r.strip()] if repos else None
+        repos_list = [r.strip() for r in repos.split(",") if r.strip()] if repos else []
+
+        # --- Broker B: App-backed mint (selected ONLY by App creds present) ---
+        if gh_app_id and gh_app_key:
+            if not repos_list:
+                raise HTTPException(
+                    status_code=400,
+                    detail="repos query param is required (owner/repo,...) for App minting",
+                )
+            owners: set[str] = set()
+            short_names: list[str] = []
+            for full in repos_list:
+                if "/" not in full:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"repos must be owner/repo for App minting; got {full!r}",
+                    )
+                owner, name = full.split("/", 1)
+                owners.add(owner)
+                short_names.append(name)
+            if len(owners) > 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"repos span multiple accounts {sorted(owners)}; a workspace "
+                        "must be a single account (one owner)"
+                    ),
+                )
+            owner = owners.pop()
+            try:
+                installation_id = resolve_installation(
+                    app_id=gh_app_id, private_key=gh_app_key,
+                    owner=owner, repo=short_names[0],
+                )
+                result = mint_installation_token(
+                    app_id=gh_app_id, private_key=gh_app_key,
+                    installation_id=installation_id, repos=short_names,
+                )
+            except GhAppError as e:
+                # Hard error, never a silent Broker-A fallback (no identity swap).
+                raise HTTPException(status_code=502, detail=str(e)) from e
+            # Audit the mint: broker + owner + repos + timestamp, never the token.
+            logger.info(
+                "gh-token minted: broker=App owner=%s repos=%s at=%s",
+                owner, short_names, datetime.now(timezone.utc).isoformat(),
+            )
+            return result
+
+        # --- Broker A: proxy the serve host's own `gh auth token` ---
         result = gh_token_shell.run("gh auth token", cwd=workspace_root)
         token = (result.stdout or "").strip()
         if result.returncode != 0 or not token:
@@ -379,15 +438,15 @@ def create_app(
                 status_code=503,
                 detail=(
                     "gh auth token unavailable on serve host — run `gh auth login`, "
-                    "or use a relay broker"
+                    "set MSHIP_GH_APP_ID/MSHIP_GH_APP_KEY, or use a relay broker"
                 ),
             )
         # Audit the mint: timestamp + requested repos, never the token value.
         logger.info(
             "gh-token minted: broker=A repos=%s at=%s",
-            repos_list, datetime.now(timezone.utc).isoformat(),
+            repos_list or None, datetime.now(timezone.utc).isoformat(),
         )
-        return {"token": token, "expires_at": None, "repositories": repos_list}
+        return {"token": token, "expires_at": None, "repositories": repos_list or None}
 
     # --- write endpoints ---
 
