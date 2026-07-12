@@ -370,7 +370,7 @@ def test_finish_require_evidence_blocks_when_spec_resolution_errors(finish_gate_
 
     result = runner.invoke(app, ["finish", "--task", "ev-err-block", "--require-evidence"])
     assert result.exit_code == 1, result.output
-    assert "could not read the bound spec" in result.output.lower()
+    assert "could not resolve the bound spec" in result.output.lower()
     state = StateManager(workspace / ".mothership").load()
     assert state.tasks["ev-err-block"].pr_urls == {}          # blocked before any PR
 

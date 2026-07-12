@@ -266,10 +266,13 @@ def test_resolve_bound_spec_fallback_skips_non_approved_spec(tmp_path):
     assert resolve_bound_spec(task, tmp_path) is None
 
 
-def test_resolve_bound_spec_fallback_none_when_multiple_approved_matches(tmp_path):
-    # Greptile #341: when several APPROVED specs share a slug the mapping is
-    # ambiguous — the resolver refuses to guess (returns None) rather than pick a
-    # possibly-wrong checklist. No pick means no "wrong spec" is ever bound.
+def test_resolve_bound_spec_raises_when_multiple_approved_matches(tmp_path):
+    # Greptile #341: several APPROVED specs sharing a slug is ambiguous — the resolver
+    # RAISES (not None) so finish --require-evidence fails safe rather than opening a
+    # PR with the required check silently skipped. (None is reserved for genuinely
+    # unbound tasks.)
+    import pytest
+    from mship.core.workitem_gate import BoundSpecUnresolved
     store = SpecStore(tmp_path / "specs")
     older = datetime(2026, 7, 10, tzinfo=timezone.utc)
     newer = datetime(2026, 7, 12, tzinfo=timezone.utc)
@@ -279,24 +282,28 @@ def test_resolve_bound_spec_fallback_none_when_multiple_approved_matches(tmp_pat
                     created_at=older, updated_at=newer, task_slug="t"))
     task = Task(slug="t", description="d", phase="dev", created_at=newer,
                 affected_repos=["shared"], branch="feat/t")
-    assert resolve_bound_spec(task, tmp_path) is None
+    with pytest.raises(BoundSpecUnresolved):
+        resolve_bound_spec(task, tmp_path)
 
 
-def test_resolve_bound_spec_explicit_missing_spec_does_not_fall_back(tmp_path):
-    # Greptile #341 "Explicit Link Falls Back": if the WorkItem's spec_id points at a
-    # spec that no longer exists (deleted/renamed), the resolver returns None — it
-    # must NOT silently fall back to a task_slug guess, even when an approved
-    # slug-matching spec exists. The explicit link is authoritative and terminal.
+def test_resolve_bound_spec_raises_when_explicit_link_missing(tmp_path):
+    # Greptile #341 "Explicit Link Falls Back": a WorkItem spec_id pointing at a
+    # deleted/renamed spec must RAISE (a spec was intended but is gone) — NOT fall
+    # back to a slug guess, and NOT silently return None (which would let
+    # --require-evidence skip the check). An unrelated approved slug-match exists to
+    # prove there's no fallthrough.
+    import pytest
+    from mship.core.workitem_gate import BoundSpecUnresolved
     now = datetime(2026, 7, 12, tzinfo=timezone.utc)
     items = WorkItemStore(tmp_path / ".mothership" / "workitems")
     wi = items.create(title="F", kind="feature", workspace="ws", now=now)
-    items.link_spec(wi.id, "gone-spec", now=now)          # spec_id set...
-    # ...but only an unrelated approved spec sharing the slug is actually on disk.
+    items.link_spec(wi.id, "gone-spec", now=now)          # spec_id set, spec absent
     SpecStore(tmp_path / "specs").save(Spec(id="other-s", title="other", status="approved",
                                             created_at=now, updated_at=now, task_slug="t"))
     task = Task(slug="t", description="d", phase="dev", created_at=now,
                 affected_repos=["shared"], branch="feat/t", work_item_id=wi.id)
-    assert resolve_bound_spec(task, tmp_path) is None
+    with pytest.raises(BoundSpecUnresolved):
+        resolve_bound_spec(task, tmp_path)
 
 
 def test_resolve_bound_spec_explicit_spec_id_bypasses_status_filter(tmp_path):

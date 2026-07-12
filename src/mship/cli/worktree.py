@@ -1367,16 +1367,17 @@ def register(app: typer.Typer, get_container):
         try:
             bound_spec = resolve_bound_spec(task, workspace_root)
         except Exception as e:
-            # A corrupt/unreadable spec store must not SILENTLY skip a required check.
-            # Under --require-evidence, fail safe (block); otherwise warn and proceed.
+            # The bound spec should exist but couldn't be resolved (ambiguous slug,
+            # missing linked spec, or a corrupt store). Never SILENTLY skip a required
+            # check: under --require-evidence fail safe (block); otherwise warn+proceed.
             if require_evidence:
                 output.error(
-                    "Could not read the bound spec to verify acceptance-criteria "
+                    "Could not resolve the bound spec to verify acceptance-criteria "
                     f"evidence — blocking finish (--require-evidence): {e}"
                 )
-                output.error("Fix the spec store or drop --require-evidence, then retry.")
+                output.error("Resolve the spec binding or drop --require-evidence, then retry.")
                 raise typer.Exit(code=1)
-            output.warning(f"Could not check acceptance-criteria evidence (spec store unreadable): {e}")
+            output.warning(f"Could not check acceptance-criteria evidence (spec binding unresolved): {e}")
             bound_spec = None
         if bound_spec is not None:
             unverified_acs = [c.id for c in bound_spec.acceptance_criteria if not c.evidence]

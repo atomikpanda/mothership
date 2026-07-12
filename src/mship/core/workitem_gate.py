@@ -56,38 +56,61 @@ def _feature_has_approved_spec(wi: WorkItem, task, workspace_root: Path) -> bool
     return any(s.task_slug == task.slug and s.status in APPROVED_STATUSES for s in specs.list())
 
 
+class BoundSpecUnresolved(Exception):
+    """A spec SHOULD bind to the task but couldn't be resolved unambiguously
+    (explicit link points at a missing spec, or several approved specs tie on the
+    slug). Distinct from 'no spec bound at all' (which `resolve_bound_spec` signals
+    with None). Callers fail safe: `finish --require-evidence` BLOCKs; soft gates
+    (phase review, default finish) warn/skip."""
+
+
 def resolve_bound_spec(task, workspace_root: Path):
-    """Return the Spec bound to `task`, or None when nothing is unambiguously bound.
+    """Return the Spec bound to `task`, or None when the task genuinely has NO spec.
+
+    The three outcomes are distinct on purpose:
+    - a Spec: the bound spec, resolved unambiguously;
+    - None: the task legitimately has no spec to check (no explicit link AND no
+      approved slug match — e.g. a bug/chore WorkItem) → the AC gate is a real no-op;
+    - raises `BoundSpecUnresolved`: a spec SHOULD exist but can't be pinned down, so
+      callers must NOT silently skip — `finish --require-evidence` blocks, soft gates
+      warn/skip. This prevents an ambiguous/broken binding from quietly opening a PR
+      with the required evidence check skipped.
 
     Resolution never GUESSES:
-    - If the task's WorkItem has an explicit `spec_id`, that link is AUTHORITATIVE and
-      TERMINAL: return the linked spec (regardless of status), or None if it's gone
-      (deleted/renamed). It does NOT fall through to a slug guess — an explicit intent
-      exists, so binding some other spec would be wrong.
-    - Otherwise, fall back to a spec whose `task_slug` matches AND is approved, but
-      bind ONLY when exactly one such spec exists. If several match, the mapping is
-      ambiguous (which is "the" spec is undecidable from the data) and any pick risks
-      enforcing/rendering the wrong checklist, so refuse to guess and return None.
+    - An explicit WorkItem `spec_id` is AUTHORITATIVE and TERMINAL: return that spec
+      (any status), or RAISE if it's gone (deleted/renamed) — never fall through to a
+      slug guess when an explicit intent exists.
+    - Otherwise fall back to an approved spec whose `task_slug` matches, but only when
+      EXACTLY ONE does. Zero → None (unbound); several → RAISE (ambiguous). Full
+      disambiguation needs stable spec identity — tracked in MOS-247.
 
-    Full disambiguation of the fallback needs stable spec identity — tracked in
-    MOS-247.
-
-    Returns None cleanly when the stores are simply empty/absent (missing dir →
-    empty list, unknown id → None). It does NOT swallow genuine read/parse errors
-    (e.g. a corrupt spec file): those propagate so callers can fail safe. Soft gates
-    (phase review) catch and skip; `finish --require-evidence` catches and BLOCKs
-    rather than silently skipping the required check."""
+    Genuine read/parse errors (a corrupt spec file) are NOT swallowed — they
+    propagate, and callers treat them the same as `BoundSpecUnresolved`."""
     specs = SpecStore(Path(workspace_root) / "specs")
     wi_id = getattr(task, "work_item_id", None)
     if wi_id is not None:
         wi = WorkItemStore(Path(workspace_root) / ".mothership" / "workitems").get(wi_id)
         if wi is not None and wi.spec_id:
-            return specs.find_by_id(wi.spec_id)
+            bound = specs.find_by_id(wi.spec_id)
+            if bound is None:
+                raise BoundSpecUnresolved(
+                    f"WorkItem {wi_id} links spec {wi.spec_id!r}, but that spec was not "
+                    f"found (deleted or renamed). Re-link with `mship item link-spec`."
+                )
+            return bound
     candidates = [
         s for s in specs.list()
         if s.task_slug == task.slug and s.status in APPROVED_STATUSES
     ]
-    return candidates[0] if len(candidates) == 1 else None
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise BoundSpecUnresolved(
+            f"{len(candidates)} approved specs share task_slug {task.slug!r} "
+            f"({', '.join(sorted(s.id for s in candidates))}); cannot unambiguously "
+            f"bind one. Link the intended spec explicitly with `mship item link-spec`."
+        )
+    return None
 
 
 def _docs_dir(workspace_root: Path) -> str:
