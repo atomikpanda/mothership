@@ -60,6 +60,49 @@ def test_build_dispatch_handoff_contains_key_facts():
     assert "mship dispatch --task dq" in out       # next-step command
 
 
+def test_build_dispatch_handoff_points_at_plan_when_linked():
+    out = build_dispatch_handoff(
+        _approved_spec(), _task(), plan_path="docs/plans/2026-07-12-dq.md"
+    )
+    assert "docs/plans/2026-07-12-dq.md" in out            # the plan doc path
+    assert "mship dispatch --task dq --plan-task" in out    # plan-driven next step
+
+
+def test_build_dispatch_handoff_reminds_to_write_plan_when_none():
+    out = build_dispatch_handoff(_approved_spec(), _task())  # no plan
+    assert "writing-plans" in out
+    assert "link-plan" in out
+
+
+def test_dispatch_spec_handoff_points_at_discovered_plan(tmp_path):
+    sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
+    sm.save(WorkspaceState(tasks={"dq": _task()}))
+    spec = _approved_spec()
+    store.save(spec)
+    plans = tmp_path / "docs" / "plans"; plans.mkdir(parents=True)
+    (plans / "dq.md").write_text("<!-- mship:task id=1 -->\nx\n<!-- /mship:task -->\n")
+
+    result = dispatch_spec(
+        spec, state_manager=sm, store=store, spawn_fn=lambda s: None, now=NOW,
+        workitems=items, workspace=WORKSPACE, workspace_root=tmp_path,
+    )
+    assert "dq.md" in result.handoff
+    assert "--plan-task" in result.handoff
+
+
+def test_dispatch_spec_handoff_reminds_write_plan_when_none(tmp_path):
+    sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
+    sm.save(WorkspaceState(tasks={"dq": _task()}))
+    spec = _approved_spec()
+    store.save(spec)
+
+    result = dispatch_spec(
+        spec, state_manager=sm, store=store, spawn_fn=lambda s: None, now=NOW,
+        workitems=items, workspace=WORKSPACE, workspace_root=tmp_path,
+    )
+    assert "writing-plans" in result.handoff
+
+
 def test_dispatch_spec_binds_existing_task_without_spawning(tmp_path):
     sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
     sm.save(WorkspaceState(tasks={"dq": _task()}))

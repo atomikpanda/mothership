@@ -481,6 +481,8 @@ def register(parent: typer.Typer, get_container):
                 workitems=workitems,
                 workspace=container.config().workspace,
                 task_slug=task_slug,
+                workspace_root=workspace_root,
+                docs_dir=container.config().docs_dir,
             )
         except DispatchError as e:
             output.error(str(e))
