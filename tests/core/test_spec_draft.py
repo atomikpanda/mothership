@@ -20,7 +20,7 @@ from mship.core.spec_body import validate_body_structure
 
 def _spec():
     now = datetime(2026, 6, 14, tzinfo=timezone.utc)
-    return Spec(id="dq", title="DQ", status="drafting", created_at=now, updated_at=now,
+    return Spec(id="dq", title="DQ", status="draft", created_at=now, updated_at=now,
                 task_slug="dq")
 
 
@@ -53,7 +53,7 @@ def test_new_spec_defaults_id_from_title():
     spec = new_spec("Decision Queue", now=now)
     assert spec.id == "decision-queue"          # slugified title
     assert spec.title == "Decision Queue"
-    assert spec.status == "drafting"            # fresh specs start drafting
+    assert spec.status == "draft"               # fresh specs start draft (MOS-240)
     assert spec.created_at == now and spec.updated_at == now
     assert spec.body == SPEC_BODY_TEMPLATE      # canonical empty body
     assert spec.affected_repos == [] and spec.task_slug is None

@@ -30,7 +30,7 @@ def new_spec(
     affected_repos: list[str] | None = None,
     task_slug: str | None = None,
 ) -> Spec:
-    """Construct a fresh spec in `drafting` with the canonical empty body.
+    """Construct a fresh spec in `draft` with the canonical empty body.
 
     Pure: builds and returns the `Spec` but does NOT persist it — callers own
     save + collision handling. `spec_id` defaults to a slug of the title;
@@ -45,7 +45,7 @@ def new_spec(
     return Spec(
         id=spec_id,
         title=title,
-        status="drafting",
+        status="draft",
         created_at=now,
         updated_at=now,
         affected_repos=list(affected_repos or []),

@@ -122,7 +122,7 @@ def _seed_spec(tmp_path: Path, spec_id: str, task_slug=None) -> Path:
     now = datetime(2026, 6, 13, tzinfo=timezone.utc)
     store = SpecStore(tmp_path / "specs")
     return store.save(Spec(
-        id=spec_id, title=spec_id, status="drafting",
+        id=spec_id, title=spec_id, status="draft",
         created_at=now, updated_at=now, task_slug=task_slug,
     ))
 

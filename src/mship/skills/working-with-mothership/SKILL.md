@@ -92,7 +92,7 @@ A spec lives at `<workspace>/specs/<date>-<id>.md` — frontmatter (id, title, s
 The lifecycle, in order:
 
 ```bash
-mship spec new --title "<title>"            # create a stub (status: captured)
+mship spec new --title "<title>"            # create a stub (status: draft)
 mship spec draft <id> [--from-text "..."|--from-file <path>]  # emit a drafting prompt to stdout
 #   bare `spec draft <id>` emits a generic prompt; supply intent via --from-text or --from-file
 #   → run that prompt through an agent to produce SpecDraft JSON, then:

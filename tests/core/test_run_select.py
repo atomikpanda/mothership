@@ -75,3 +75,27 @@ def test_no_override_no_spec_info_is_not_ready():
     # No override and nothing to derive from -> inbox -> not selectable (safe default).
     it = _wi("wi-blank", phase=None)
     assert select_runnable([it], {"s": True}, claimed=set()) == []
+
+
+# --- MOS-240: run-next selection is unchanged under the collapsed status set ---
+
+def test_run_select_parity_across_collapsed_statuses():
+    """Regression (MOS-240): only an `approved` spec derives `ready` and is
+    selected; every other collapsed status (draft/needs_review derive `shaping`,
+    dispatched `in_flight`, implemented/archived `done`) stays unselected — exactly
+    as the pre-collapse vocabulary did. Selection is invariant to the rename."""
+    # `approved` -> ready -> selected (spec_approved gate also passes).
+    approved = _wi("wi-approved", phase=None)
+    assert [c.item.id for c in select_runnable(
+        [approved], {"s": True}, claimed=set(),
+        specs_by_id={"s": _spec("approved")}, tasks_by_slug={},
+    )] == ["wi-approved"]
+
+    # Every non-approved collapsed status derives a non-ready phase -> not selected.
+    for status in ("draft", "needs_review", "dispatched", "implemented", "archived"):
+        it = _wi(f"wi-{status}", phase=None)
+        out = select_runnable(
+            [it], {"s": True}, claimed=set(),
+            specs_by_id={"s": _spec(status)}, tasks_by_slug={},
+        )
+        assert out == [], f"{status!r} must not be run-selected"

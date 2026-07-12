@@ -54,7 +54,7 @@ def test_orphan_task_becomes_chore_item(tmp_path):
 
 def test_idempotent(tmp_path):
     specs, state, msgs, items = _setup(tmp_path)
-    specs.save(Spec(id="alpha", title="Alpha", status="drafting",
+    specs.save(Spec(id="alpha", title="Alpha", status="draft",
                     created_at=_now(), updated_at=_now()))
     wrap_existing(items, specs, state, msgs, now=_now(), workspace="testws")
     wrap_existing(items, specs, state, msgs, now=_now(), workspace="testws")
@@ -89,7 +89,7 @@ def test_orphan_task_with_unapproved_spec_attaches_to_wrapped_spec_item(tmp_path
     spec now correctly inherits the feature WorkItem's approved-spec gate,
     instead of silently sidestepping it via a chore classification."""
     specs, state, msgs, items = _setup(tmp_path)
-    specs.save(Spec(id="beta", title="Beta", status="drafting",
+    specs.save(Spec(id="beta", title="Beta", status="draft",
                     created_at=_now(), updated_at=_now()))
     state.save(WorkspaceState(tasks={"orphan2": Task(
         slug="orphan2", description="d", phase="dev", created_at=_now(),

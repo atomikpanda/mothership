@@ -54,7 +54,7 @@ def test_malformed_yaml_raises_spec_parse_error():
 
 def _new_spec(spec_id: str):
     now = datetime(2026, 6, 13, tzinfo=timezone.utc)
-    return Spec(id=spec_id, title=spec_id, status="drafting", created_at=now, updated_at=now)
+    return Spec(id=spec_id, title=spec_id, status="draft", created_at=now, updated_at=now)
 
 
 def test_save_then_find_by_id(tmp_path: Path):

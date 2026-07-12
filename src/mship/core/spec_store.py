@@ -14,6 +14,35 @@ class SpecParseError(Exception):
     pass
 
 
+# MOS-240: forward-map the pre-collapse status vocabulary. `captured`/`drafting`
+# collapse into `draft`; `needs_clarification` becomes `needs_review` (the
+# "needs clarification" signal now lives in a non-null `clarification_reason`).
+LEGACY_STATUS_MAP: dict[str, str] = {
+    "captured": "draft",
+    "drafting": "draft",
+    "needs_clarification": "needs_review",
+}
+
+# Sentinel reason stamped on a migrated `needs_clarification` spec that carried no
+# `clarification_reason`, so the "needs clarification" signal survives the collapse.
+_MIGRATED_CLARIFICATION_REASON = "needs clarification (migrated from needs_clarification status)"
+
+
+def _migrate_legacy_frontmatter(data: dict) -> None:
+    """Map old persisted spec statuses forward, in place, on read (MOS-240).
+
+    Does NOT rewrite the file — callers persist the migrated value only on the
+    next explicit `save`. Old specs load cleanly and round-trip without data loss.
+    """
+    old = data.get("status")
+    new = LEGACY_STATUS_MAP.get(old)
+    if new is None:
+        return
+    data["status"] = new
+    if old == "needs_clarification" and not data.get("clarification_reason"):
+        data["clarification_reason"] = _MIGRATED_CLARIFICATION_REASON
+
+
 def parse_spec(text: str) -> Spec:
     lines = text.splitlines(keepends=True)
     if not lines or lines[0].strip() != "---":
@@ -29,6 +58,8 @@ def parse_spec(text: str) -> Spec:
     body = "".join(lines[end + 1:])
     try:
         data = yaml.safe_load(fm_text) or {}
+        if isinstance(data, dict):
+            _migrate_legacy_frontmatter(data)
         return Spec(**data, body=body)
     except yaml.YAMLError as exc:
         raise SpecParseError(f"invalid YAML frontmatter: {exc}") from exc

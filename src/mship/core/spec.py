@@ -6,9 +6,14 @@ from typing import Literal
 from pydantic import BaseModel
 
 
+# MOS-240: collapsed status vocabulary (was 8: captured/drafting/needs_review/
+# needs_clarification/approved/dispatched/implemented/archived). `captured` +
+# `drafting` merged into `draft`; `needs_clarification` dropped — "needs
+# clarification" is now expressed by a non-null `clarification_reason` on any
+# status. Old persisted values are mapped forward on read (see
+# spec_store.parse_spec / LEGACY_STATUS_MAP).
 SpecStatus = Literal[
-    "captured", "drafting", "needs_review", "needs_clarification",
-    "approved", "dispatched", "implemented", "archived",
+    "draft", "needs_review", "approved", "dispatched", "implemented", "archived",
 ]
 
 
@@ -51,12 +56,18 @@ class Spec(BaseModel):
 
 TERMINAL_STATUSES: set[str] = {"archived"}
 
+# MOS-240: with `needs_clarification` gone, "send back for changes" (aka
+# request-changes) is modelled as a move to the editable `draft` status carrying a
+# non-null `clarification_reason`, from either `needs_review` or `approved`
+# (re-open). This preserves the old flow's reachability:
+#   old drafting→needs_review           => draft→needs_review
+#   old needs_review→needs_clarification => needs_review→draft (+ reason)
+#   old approved→needs_clarification     => approved→draft (+ reason)
+#   old needs_clarification→needs_review => draft→needs_review (re-apply)
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
-    "captured": {"drafting"},
-    "drafting": {"needs_review"},
-    "needs_review": {"needs_clarification", "approved"},
-    "needs_clarification": {"needs_review", "drafting"},
-    "approved": {"dispatched", "needs_clarification"},
+    "draft": {"needs_review"},
+    "needs_review": {"draft", "approved"},
+    "approved": {"dispatched", "draft"},
     "dispatched": {"implemented"},
     "implemented": {"archived"},
     "archived": set(),

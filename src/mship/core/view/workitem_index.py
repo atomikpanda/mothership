@@ -8,11 +8,16 @@ from mship.core.spec import Spec
 from mship.core.state import Task
 from mship.core.workitem import ExternalLink, Kind, Phase, WorkItem
 
+# MOS-240 status→phase projection (WorkItem.phase stays a projection, not
+# authoritative). The collapsed `draft` maps to `shaping` — preserving the phase
+# of every spec that could exist via the normal flow, since new specs were always
+# created as `drafting` (→ shaping), never `captured`. `captured` was a vestigial
+# status no code path produced; its old `inbox` mapping is not reachable post-shim
+# (captured→draft on read). run_select only selects `ready`, so this choice leaves
+# run-next selection unchanged either way.
 _SPEC_PHASE: dict[str, Phase] = {
-    "captured": "inbox",
-    "drafting": "shaping",
+    "draft": "shaping",
     "needs_review": "shaping",
-    "needs_clarification": "shaping",
     "approved": "ready",
     "dispatched": "in_flight",
     "implemented": "done",

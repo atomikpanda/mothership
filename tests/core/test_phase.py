@@ -383,7 +383,7 @@ def test_has_approved_spec_uses_shared_workitem_gate_approved_statuses(
 
     now = datetime(2026, 4, 10, tzinfo=timezone.utc)
     SpecStore(tmp_path / "specs").save(Spec(
-        id="s1", title="S", status="drafting",
+        id="s1", title="S", status="draft",
         created_at=now, updated_at=now, task_slug="t",
     ))
     pm = PhaseManager(
@@ -391,11 +391,11 @@ def test_has_approved_spec_uses_shared_workitem_gate_approved_statuses(
         workspace_root=tmp_path,
     )
 
-    # "drafting" isn't approved-or-beyond by the real, shared set.
+    # "draft" isn't approved-or-beyond by the real, shared set.
     assert pm._has_approved_spec("t") is False
 
     # Patching the SHARED set (not a local copy) must change the outcome.
-    monkeypatch.setattr(workitem_gate, "APPROVED_STATUSES", {"drafting"})
+    monkeypatch.setattr(workitem_gate, "APPROVED_STATUSES", {"draft"})
     assert pm._has_approved_spec("t") is True
 
 
