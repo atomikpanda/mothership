@@ -36,18 +36,52 @@ def _staged_source_paths(toplevel: str, container) -> list[str]:
 
 
 def _format_drain_reason(threads: list) -> str:
-    """Render awaiting threads as a Stop-hook block reason instructing the agent
-    to answer each and clear it with `mship reply`."""
-    n = len(threads)
-    lines = [
-        f"{n} message{'s' if n != 1 else ''} waiting in your inbox. Answer each, "
-        f"then post your answer with `mship reply <thread-id> \"<text>\"` "
-        f"(replying clears the thread):",
-        "",
-    ]
-    for t in threads:
-        pending = t.messages[-1].text if t.messages else ""
-        lines.append(f"- thread {t.id} ({t.subject}): {pending}")
+    """Render awaiting threads as a Stop-hook block reason, split into two groups
+    with different calls-to-action:
+
+    - HUMAN-REPLY threads (`awaiting_reply` — the latest message is an unanswered
+      human message): answer each and clear it with `mship reply`.
+    - AGENT-EVENT threads (`awaiting_agent_event` and NOT `awaiting_reply` — an
+      unhandled agent `event`, i.e. a dispatched spec handoff or a PR
+      merged/closed, with no pending human reply): these are signals FOR THE
+      AGENT to act on. They are cleared by the agent taking action on the thread
+      (a human reply does not clear them), so they deliberately do NOT instruct
+      `mship reply`.
+
+    A thread that is BOTH (an unanswered human message AND an unhandled event)
+    lands in the human-reply group — replying is the priority action.
+    """
+    replies = [t for t in threads if t.awaiting_reply]
+    events = [t for t in threads if t.awaiting_agent_event and not t.awaiting_reply]
+
+    def _pending(t) -> str:
+        return t.messages[-1].text if t.messages else ""
+
+    lines: list[str] = []
+    if replies:
+        n = len(replies)
+        lines += [
+            f"{n} message{'s' if n != 1 else ''} waiting in your inbox. Answer each, "
+            f"then post your answer with `mship reply <thread-id> \"<text>\"` "
+            f"(replying clears the thread):",
+            "",
+        ]
+        for t in replies:
+            lines.append(f"- thread {t.id} ({t.subject}): {_pending(t)}")
+    if events:
+        if lines:
+            lines.append("")
+        n = len(events)
+        lines += [
+            f"{n} agent signal{'s' if n != 1 else ''} for you to act on "
+            f"(a dispatched spec handoff, or a PR merged/closed). These are FOR "
+            f"THE AGENT, not the operator — take the action each one calls for. "
+            f"The signal clears once you post a follow-up on the thread; a human "
+            f"reply does not clear it:",
+            "",
+        ]
+        for t in events:
+            lines.append(f"- thread {t.id} ({t.subject}): {_pending(t)}")
     return "\n".join(lines)
 
 
@@ -402,7 +436,11 @@ def register(app: typer.Typer, get_container):
             if container is None:
                 raise typer.Exit(code=0)
             store = MessageStore(Path(container.state_dir()) / "messages")
-            awaiting = [t for t in store.list() if t.awaiting_reply]
+            # Widened (MOS-232): surface agent-EVENT threads (dispatch handoffs +
+            # PR-merge notifications) at the turn boundary too, not just
+            # human-reply threads — mirrors `mship inbox wait`'s predicate.
+            awaiting = [t for t in store.list()
+                        if t.awaiting_reply or t.awaiting_agent_event]
             if not awaiting:
                 raise typer.Exit(code=0)
             reason = _format_drain_reason(awaiting)
