@@ -86,8 +86,11 @@ def resolve_bound_spec(task, workspace_root: Path):
     if candidates:
         # If several approved specs share the slug, bind the MOST RECENTLY UPDATED
         # one (not list() order, which is by filename date-prefix) so a superseding
-        # spec wins over an older checklist.
-        return max(candidates, key=lambda s: s.updated_at)
+        # spec wins over an older checklist. `id` is a deterministic secondary key so
+        # an exact updated_at tie never resolves by filesystem order. (The fallback
+        # is a heuristic used only when there's no explicit WorkItem spec_id link;
+        # full disambiguation needs stable spec identity — tracked in MOS-247.)
+        return max(candidates, key=lambda s: (s.updated_at, s.id))
     return None
 
 

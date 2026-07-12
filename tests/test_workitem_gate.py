@@ -282,6 +282,21 @@ def test_resolve_bound_spec_fallback_picks_most_recently_updated_approved(tmp_pa
     assert resolve_bound_spec(task, tmp_path).id == "new-s"
 
 
+def test_resolve_bound_spec_fallback_tiebreak_is_deterministic_on_equal_updated_at(tmp_path):
+    # Greptile #341: an exact updated_at tie must resolve deterministically (by id),
+    # never by filesystem/list() order.
+    store = SpecStore(tmp_path / "specs")
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    store.save(Spec(id="aaa-s", title="a", status="approved",
+                    created_at=now, updated_at=now, task_slug="t"))
+    store.save(Spec(id="zzz-s", title="z", status="approved",
+                    created_at=now, updated_at=now, task_slug="t"))
+    task = Task(slug="t", description="d", phase="dev", created_at=now,
+                affected_repos=["shared"], branch="feat/t")
+    # max((updated_at, id)) → the lexicographically-greater id, deterministically.
+    assert resolve_bound_spec(task, tmp_path).id == "zzz-s"
+
+
 def test_resolve_bound_spec_explicit_spec_id_bypasses_status_filter(tmp_path):
     # The EXPLICIT WorkItem.spec_id link is authoritative and status-agnostic — a
     # linked spec resolves even while still in review (evidence warnings should
