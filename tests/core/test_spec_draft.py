@@ -102,9 +102,9 @@ def test_apply_draft_preserves_evidence_across_insert_and_reorder():
     assert out.acceptance_criteria[2].evidence == [AcceptanceEvidence(kind="commit", ref="deadbeef")]
 
 
-def test_apply_draft_duplicate_text_consumes_each_prior_once():
-    # Two criteria with identical text: each prior's evidence is claimed once, not
-    # duplicated onto both.
+def test_apply_draft_duplicate_text_is_ambiguous_so_starts_fresh():
+    # Duplicate text on either side makes the prior↔new mapping ambiguous, so nothing
+    # is carried forward — safer than guessing which criterion owns which evidence.
     spec = _spec()
     spec.acceptance_criteria = [
         AcceptanceCriterion(id="ac1", text="dup", verdict="approved",
@@ -113,13 +113,31 @@ def test_apply_draft_duplicate_text_consumes_each_prior_once():
                             evidence=[AcceptanceEvidence(kind="test", ref="test-runs/2")]),
     ]
     draft = SpecDraft(problem="P", user_story="U", approach="A",
-                      acceptance_criteria=["dup", "dup", "dup"])   # one MORE than before
+                      acceptance_criteria=["dup", "dup", "dup"])
     out = apply_draft(spec, draft)
-    assert [c.evidence for c in out.acceptance_criteria] == [
-        [AcceptanceEvidence(kind="test", ref="test-runs/1")],   # first prior
-        [AcceptanceEvidence(kind="test", ref="test-runs/2")],   # second prior
-        [],                                                      # no prior left → fresh
+    assert [c.evidence for c in out.acceptance_criteria] == [[], [], []]
+    assert all(c.verdict == "unreviewed" for c in out.acceptance_criteria)
+
+
+def test_apply_draft_edit_into_text_collision_does_not_move_evidence():
+    # Greptile #339 "Evidence Can Move": editing ac1's text so it now equals ac2's
+    # text must NOT transplant ac2's evidence onto the edited criterion. The collided
+    # text is duplicated in the new draft → ambiguous → both start fresh; ac2's
+    # evidence is dropped (recoverable) rather than silently attached to the wrong AC.
+    spec = _spec()
+    spec.acceptance_criteria = [
+        AcceptanceCriterion(id="ac1", text="view", verdict="approved",
+                            evidence=[AcceptanceEvidence(kind="test", ref="A")]),
+        AcceptanceCriterion(id="ac2", text="edit", verdict="flagged",
+                            evidence=[AcceptanceEvidence(kind="commit", ref="B")]),
     ]
+    # ac1 "view" edited → "edit" (now collides with ac2's text).
+    draft = SpecDraft(problem="P", user_story="U", approach="A",
+                      acceptance_criteria=["edit", "edit"])
+    out = apply_draft(spec, draft)
+    # Neither new criterion carries evidence B — no mis-attribution.
+    assert [c.evidence for c in out.acceptance_criteria] == [[], []]
+    assert all(c.verdict == "unreviewed" for c in out.acceptance_criteria)
 
 
 import pytest
