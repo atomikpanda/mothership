@@ -644,7 +644,7 @@ def create_app(
         if not idea:
             raise HTTPException(status_code=400, detail="idea must not be empty")
         now = datetime.now(timezone.utc)
-        subject = (body.title or idea.splitlines()[0])[:80]
+        subject = ((body.title or "").strip() or idea.splitlines()[0])[:80]
         thread = msgs.create_thread(subject=subject, text=idea, now=now)
         msgs.append(thread.id, "agent", _capture_handoff(thread.id, idea), now, kind="event")
         return _thread_payload(msgs.get(thread.id))
