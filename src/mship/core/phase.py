@@ -127,7 +127,7 @@ class PhaseManager:
                 if (
                     self._config is not None
                     and self._config.require_approved_spec
-                    and not self._has_approved_spec(task_slug)
+                    and not self._has_approved_spec(task)
                 ):
                     raise SpecGateError(
                         f"Task '{task_slug}' has no bound approved spec. "
@@ -255,23 +255,25 @@ class PhaseManager:
             return [warn]
         return []
 
-    def _has_approved_spec(self, task_slug: str) -> bool:
-        """Return True if a spec bound to task_slug has an approved-or-beyond status."""
+    def _has_approved_spec(self, task) -> bool:
+        """Return True iff the task's bound spec is approved-or-beyond, resolved via
+        the shared `resolve_bound_spec` (single source of truth with the WorkItem
+        gate and the AC-evidence path). The explicit WorkItem `spec_id` link is
+        terminal, so a correctly-linked feature is never rejected here just because
+        its spec's `task_slug` differs from the task slug. An unresolvable binding
+        (deleted link / ambiguous slug) counts as 'no approved spec'."""
         if self._workspace_root is None:
             return False
         # Import inside method to avoid potential import cycles at module load.
-        from mship.core.spec_store import SPECS_DIRNAME, SpecStore
-        from mship.core.workitem_gate import APPROVED_STATUSES
+        from mship.core.workitem_gate import APPROVED_STATUSES, resolve_bound_spec
 
-        specs_dir = self._workspace_root / SPECS_DIRNAME
         try:
-            specs = SpecStore(specs_dir).list()
+            spec = resolve_bound_spec(task, self._workspace_root)
         except Exception:
+            # Unresolvable binding (deleted link / ambiguous slug) or unreadable
+            # store → treat as no approved spec (the gate blocks).
             return False
-        return any(
-            s.task_slug == task_slug and s.status in APPROVED_STATUSES
-            for s in specs
-        )
+        return spec is not None and spec.status in APPROVED_STATUSES
 
     def _gate_review(self, task) -> list[str]:
         # Unified reader honors both task.test_results and journal
