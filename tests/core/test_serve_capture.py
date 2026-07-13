@@ -57,3 +57,17 @@ def test_capture_posts_one_agent_event_brainstorm_handoff(tmp_path):
     # this is what makes _drain / inbox wait surface it to a host agent
     assert thread.awaiting_agent_event is True
     assert thread.needs_you is False                    # an event must NOT nag the phone
+
+
+def test_capture_and_draft_path_import_no_llm_sdk():
+    """AC5: serve stays LLM-free. The modules the capture→draft path touches must
+    not import an LLM SDK — the drafting intelligence runs in the agent, not serve."""
+    import inspect
+    import mship.core.serve as serve_mod
+    import mship.core.spec_draft as draft_mod
+
+    banned = ("import anthropic", "from anthropic", "import openai", "from openai")
+    for mod in (serve_mod, draft_mod):
+        src = inspect.getsource(mod)
+        for token in banned:
+            assert token not in src, f"{mod.__name__} imports an LLM SDK ({token!r})"
