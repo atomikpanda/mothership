@@ -343,8 +343,22 @@ def test_a7_plan_to_dev_blocked_when_require_approved_spec_and_no_spec(
 def test_a7_plan_to_dev_allowed_when_approved_spec_exists(
     state_with_task: StateManager, tmp_path: Path
 ):
-    """require_approved_spec=True + bound approved spec → transition succeeds."""
-    _seed_approved_spec(tmp_path, "add-labels")
+    """require_approved_spec=True + an approved spec linked via the WorkItem spec_id
+    → transition succeeds. The gate resolves via resolve_bound_spec, and this
+    regresses the reported bug: the linked spec's task_slug does NOT match the task
+    slug, so a slug-only gate would have wrongly rejected the correctly-linked task."""
+    from datetime import datetime, timezone
+    from mship.core.spec import Spec
+    from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+    from mship.core.workitem_store import WorkItemStore
+    now = datetime(2026, 4, 10, tzinfo=timezone.utc)
+    SpecStore(tmp_path / SPECS_DIRNAME).save(Spec(
+        id="linked-spec", title="S", status="approved",
+        created_at=now, updated_at=now, task_slug="a-different-slug",   # NOT "add-labels"
+    ))
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi_id = state_with_task.load().tasks["add-labels"].work_item_id
+    items.link_spec(wi_id, "linked-spec", now=now)
     pm = _make_phase_manager_with_approved_spec_gate(state_with_task, tmp_path)
     result = pm.transition("add-labels", "dev")
     assert result.new_phase == "dev"
@@ -380,23 +394,29 @@ def test_has_approved_spec_uses_shared_workitem_gate_approved_statuses(
     from mship.core import workitem_gate
     from mship.core.spec import Spec
     from mship.core.spec_store import SpecStore
+    from mship.core.state import Task
+    from mship.core.workitem_store import WorkItemStore
 
     now = datetime(2026, 4, 10, tzinfo=timezone.utc)
     SpecStore(tmp_path / "specs").save(Spec(
-        id="s1", title="S", status="draft",
-        created_at=now, updated_at=now, task_slug="t",
+        id="s1", title="S", status="draft", created_at=now, updated_at=now,
     ))
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="F", kind="feature", workspace="test", now=now)
+    items.link_spec(wi.id, "s1", now=now)   # explicit link → resolves the spec (any status)
+    task = Task(slug="t", description="d", phase="dev", created_at=now,
+                affected_repos=["shared"], branch="feat/t", work_item_id=wi.id)
     pm = PhaseManager(
         StateManager(tmp_path / ".mothership"), MagicMock(spec=LogManager),
         workspace_root=tmp_path,
     )
 
     # "draft" isn't approved-or-beyond by the real, shared set.
-    assert pm._has_approved_spec("t") is False
+    assert pm._has_approved_spec(task) is False
 
     # Patching the SHARED set (not a local copy) must change the outcome.
     monkeypatch.setattr(workitem_gate, "APPROVED_STATUSES", {"draft"})
-    assert pm._has_approved_spec("t") is True
+    assert pm._has_approved_spec(task) is True
 
 
 def test_a7_dispatched_spec_also_satisfies_gate(
@@ -407,6 +427,7 @@ def test_a7_dispatched_spec_also_satisfies_gate(
     from mship.core.spec import Spec
     from mship.core.spec_store import SPECS_DIRNAME, SpecStore
 
+    from mship.core.workitem_store import WorkItemStore
     now = datetime.now(timezone.utc)
     spec = Spec(
         id="add-labels-dispatched",
@@ -417,6 +438,9 @@ def test_a7_dispatched_spec_also_satisfies_gate(
         task_slug="add-labels",
     )
     SpecStore(tmp_path / SPECS_DIRNAME).save(spec)
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi_id = state_with_task.load().tasks["add-labels"].work_item_id
+    items.link_spec(wi_id, "add-labels-dispatched", now=now)
 
     pm = _make_phase_manager_with_approved_spec_gate(state_with_task, tmp_path)
     result = pm.transition("add-labels", "dev")
@@ -787,3 +811,40 @@ def test_transition_with_no_hooks_configured_is_unaffected(state_with_task, tmp_
     pm = _make_phase_manager_with_hooks(state_with_task, tmp_path, hooks=[])
     result = pm.transition("add-labels", "dev")
     assert result.new_phase == "dev"
+
+
+# ---------------------------------------------------------------------------
+# ac8 (PR-b): entering review WARNs listing bound-spec acceptance criteria that
+# have no evidence — a soft signal that never blocks the transition.
+# ---------------------------------------------------------------------------
+
+def test_transition_to_review_warns_on_acs_without_evidence(state_with_task, tmp_path):
+    """ac8: entering review WARNs listing bound-spec ACs with no evidence, and
+    never blocks the transition."""
+    from mship.core.spec import AcceptanceCriterion, Spec
+    from mship.core.spec_store import SpecStore
+    from mship.core.workitem_store import WorkItemStore
+    now = datetime(2026, 4, 10, tzinfo=timezone.utc)
+    SpecStore(tmp_path / "specs").save(Spec(
+        id="add-labels-spec", title="S", status="approved",
+        created_at=now, updated_at=now,
+        acceptance_criteria=[AcceptanceCriterion(id="ac1", text="x", verdict="approved")],
+    ))
+    # Bind via the explicit spec_id link (authoritative for any WorkItem kind); the
+    # slug fallback is feature-gated, and this fixture's WorkItem is a bug.
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi_id = state_with_task.load().tasks["add-labels"].work_item_id
+    items.link_spec(wi_id, "add-labels-spec", now=now)
+    pm = _make_phase_manager(state_with_task, tmp_path)
+    pm.transition("add-labels", "dev")
+    result = pm.transition("add-labels", "review")
+    assert result.new_phase == "review"                                   # never blocks
+    assert any("evidence" in w.lower() and "ac1" in w for w in result.warnings)
+
+
+def test_transition_to_review_no_ac_warning_without_bound_spec(state_with_task, tmp_path):
+    pm = _make_phase_manager(state_with_task, tmp_path)
+    pm.transition("add-labels", "dev")
+    result = pm.transition("add-labels", "review")
+    assert not any("evidence" in w.lower() and "acceptance" in w.lower()
+                   for w in result.warnings)
