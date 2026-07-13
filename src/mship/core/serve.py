@@ -82,6 +82,11 @@ class NewMessageBody(BaseModel):
     text: str
 
 
+class CaptureBody(BaseModel):
+    idea: str
+    title: str | None = None
+
+
 class SeenBody(BaseModel):
     seen_at: str | None = None
 
@@ -612,6 +617,20 @@ def create_app(
         spec.updated_at = datetime.now(timezone.utc)
         store.save(spec)
         return spec.model_dump(mode="json")
+
+    @app.post("/capture")
+    def post_capture(body: CaptureBody):
+        """Idea capture → agent-led brainstorm. Seeds a thread with the idea and
+        posts an agent `event` handoff so a host/cloud agent drains it (mship
+        _drain / inbox wait), brainstorms it in the thread, and produces a spec.
+        Serve does NO drafting — it stays LLM-free."""
+        idea = body.idea.strip()
+        if not idea:
+            raise HTTPException(status_code=400, detail="idea must not be empty")
+        now = datetime.now(timezone.utc)
+        subject = (body.title or idea.splitlines()[0])[:80]
+        thread = msgs.create_thread(subject=subject, text=idea, now=now)
+        return _thread_payload(msgs.get(thread.id))
 
     # --- dispatch endpoint (B4): close the dispatch-from-phone loop ---
 
