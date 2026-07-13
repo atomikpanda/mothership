@@ -69,6 +69,28 @@ def test_capture_is_idempotent_on_key(tmp_path):
     assert r3.json()["id"] != r1.json()["id"]          # a different key is a different capture
 
 
+def test_capture_key_matches_by_line_not_prefix(tmp_path):
+    """A key must not collide with a longer key that has it as a prefix
+    (the marker is compared as a whole line, not a substring)."""
+    client = TestClient(_app(tmp_path))
+    r1 = client.post("/capture", json={"idea": "x", "idempotency_key": "k1"})
+    r2 = client.post("/capture", json={"idea": "y", "idempotency_key": "k1x"})
+    assert r1.json()["id"] != r2.json()["id"]          # "k1" must not match "k1x"
+
+
+def test_keyed_capture_event_still_starts_with_brainstorm_marker(tmp_path):
+    """The driver's first-line contract (event body STARTS WITH
+    `capture-brainstorm <tid>`) must survive a keyed capture — the key marker
+    is appended, not prepended."""
+    client = TestClient(_app(tmp_path))
+    tid = client.post("/capture", json={"idea": "z", "idempotency_key": "k9"}).json()["id"]
+    store = MessageStore(tmp_path / ".mothership" / "messages")
+    event = store.get(tid).messages[-1]
+    assert event.kind == "event"
+    assert event.text.startswith(f"capture-brainstorm {tid}")
+    assert "capture-key k9" in event.text
+
+
 def test_capture_and_draft_path_import_no_llm_sdk():
     """AC5: serve stays LLM-free. The modules the capture→draft path touches must
     not import an LLM SDK — the drafting intelligence runs in the agent, not serve."""

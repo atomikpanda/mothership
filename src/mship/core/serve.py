@@ -651,13 +651,21 @@ def create_app(
         if key:
             marker = f"capture-key {key}"
             for t in msgs.list():
-                if any(m.kind == "event" and marker in m.text for m in t.messages):
+                if any(
+                    m.kind == "event"
+                    and any(line == marker for line in m.text.splitlines())
+                    for m in t.messages
+                ):
                     return _thread_payload(t)
         subject = ((body.title or "").strip() or idea.splitlines()[0])[:80]
         thread = msgs.create_thread(subject=subject, text=idea, now=now)
         handoff = _capture_handoff(thread.id, idea)
         if key:
-            handoff = f"capture-key {key}\n{handoff}"
+            # Append the dedup marker AFTER the handoff so the event body still
+            # STARTS WITH `capture-brainstorm <tid>` (the driver's first-line
+            # contract in the working-with-mothership skill); a leading key line
+            # would make a keyed capture invisible to that contract.
+            handoff = f"{handoff}\n\ncapture-key {key}"
         msgs.append(thread.id, "agent", handoff, now, kind="event")
         return _thread_payload(msgs.get(thread.id))
 
