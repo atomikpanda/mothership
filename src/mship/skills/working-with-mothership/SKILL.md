@@ -136,6 +136,16 @@ Typical flow: `item new` at intake → `link-spec` once a spec exists → `link-
 
 **Raising the attention flags — escalating to the operator.** When you need the human (a decision, an approval, an action), don't just block silently — escalate on the relevant phone thread: `mship ask <thread> "<question>" --option A --option B` posts a tappable decision card, and `mship reply --needs-you <thread> "<ask>"` posts a Home action card. Both are replies into an operator-opened thread; see the `receiving-messages` skill for the full messaging loop.
 
+### Capture-brainstorm handoffs
+
+When you drain an agent-`event` thread whose body starts with `capture-brainstorm <thread-id>`,
+an operator captured an idea from the phone for you to brainstorm into a spec. Run the
+brainstorming flow **in that thread**: ask clarifying questions one at a time with
+`mship reply <thread-id> "<question>"`, settle purpose/scope/approach, then produce the spec
+with `mship spec from-thread <thread-id>` → fill the emitted draft JSON → `mship spec apply <id> --from-json <file>`,
+and `mship reply <thread-id>` to note the spec is drafted. The event clears once you post any
+non-event message on the thread; serve does no drafting itself.
+
 ## Delegating to subagents: `mship context` and `mship dispatch`
 
 Two mship-native primitives for handing work to subagents. Use them instead of hand-rolling task context:

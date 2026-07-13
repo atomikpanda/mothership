@@ -19,6 +19,7 @@ STALE_PATHS = ["~/.config/superpowers", "docs/superpowers/"]
 REAL_SPEC_SUBCOMMANDS = {
     "new", "draft", "apply", "validate", "review", "verdict",
     "questions", "ask", "answer", "approve", "request-changes", "dispatch",
+    "from-thread",
 }
 
 
