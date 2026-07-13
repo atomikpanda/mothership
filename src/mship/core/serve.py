@@ -156,6 +156,22 @@ def _dispatch_marker(spec_id: str, task_slug: str) -> str:
     return f"dispatch {spec_id} -> {task_slug}"
 
 
+def _capture_handoff(thread_id: str, idea: str) -> str:
+    """Agent `event` body for a phone idea capture. Instructs the draining agent
+    to brainstorm the idea into a spec IN THIS THREAD and finish via from-thread.
+    The leading marker line makes the handoff greppable/idempotent per thread."""
+    return (
+        f"capture-brainstorm {thread_id}\n\n"
+        "An idea was captured from the phone to brainstorm into a spec. Run the "
+        "brainstorming flow in THIS thread: ask the operator clarifying questions "
+        f"one at a time with `mship reply {thread_id} \"...\"`, settle "
+        "purpose/scope/approach, then produce the spec with "
+        f"`mship spec from-thread {thread_id}` → fill the draft JSON → "
+        "`mship spec apply <id> --from-json <file>`, and reply here when it's drafted.\n\n"
+        f"Idea: {idea}"
+    )
+
+
 def _notify_dispatch(
     *, msgs: Any, workitems: Any, item_msg_lock: Any,
     spec: Any, task: Any, handoff: str, now: datetime,
@@ -630,6 +646,7 @@ def create_app(
         now = datetime.now(timezone.utc)
         subject = (body.title or idea.splitlines()[0])[:80]
         thread = msgs.create_thread(subject=subject, text=idea, now=now)
+        msgs.append(thread.id, "agent", _capture_handoff(thread.id, idea), now, kind="event")
         return _thread_payload(msgs.get(thread.id))
 
     # --- dispatch endpoint (B4): close the dispatch-from-phone loop ---

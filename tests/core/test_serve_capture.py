@@ -37,3 +37,23 @@ def test_capture_rejects_empty_idea(tmp_path):
     client = TestClient(_app(tmp_path))
     r = client.post("/capture", json={"idea": "   "})
     assert r.status_code == 400
+
+
+def test_capture_posts_one_agent_event_brainstorm_handoff(tmp_path):
+    from mship.core.message_store import MessageStore
+    client = TestClient(_app(tmp_path))
+    tid = client.post("/capture", json={"idea": "a queue tab"}).json()["id"]
+
+    store = MessageStore(tmp_path / ".mothership" / "messages")
+    thread = store.get(tid)
+    # seed human message + exactly one trailing agent event
+    assert [m.role for m in thread.messages] == ["human", "agent"]
+    event = thread.messages[-1]
+    assert event.kind == "event"
+    assert "capture-brainstorm" in event.text          # stable marker
+    assert tid in event.text                            # names the thread to brainstorm
+    assert "a queue tab" in event.text                  # carries the idea
+    assert "mship spec from-thread" in event.text       # tells the driver how to finish
+    # this is what makes _drain / inbox wait surface it to a host agent
+    assert thread.awaiting_agent_event is True
+    assert thread.needs_you is False                    # an event must NOT nag the phone
