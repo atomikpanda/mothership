@@ -59,6 +59,16 @@ def test_capture_posts_one_agent_event_brainstorm_handoff(tmp_path):
     assert thread.needs_you is False                    # an event must NOT nag the phone
 
 
+def test_capture_is_idempotent_on_key(tmp_path):
+    client = TestClient(_app(tmp_path))
+    r1 = client.post("/capture", json={"idea": "x", "idempotency_key": "k1"})
+    r2 = client.post("/capture", json={"idea": "x", "idempotency_key": "k1"})
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert r1.json()["id"] == r2.json()["id"]          # same capture, no duplicate thread
+    r3 = client.post("/capture", json={"idea": "x", "idempotency_key": "k2"})
+    assert r3.json()["id"] != r1.json()["id"]          # a different key is a different capture
+
+
 def test_capture_and_draft_path_import_no_llm_sdk():
     """AC5: serve stays LLM-free. The modules the capture→draft path touches must
     not import an LLM SDK — the drafting intelligence runs in the agent, not serve."""

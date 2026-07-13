@@ -85,6 +85,7 @@ class NewMessageBody(BaseModel):
 class CaptureBody(BaseModel):
     idea: str
     title: str | None = None
+    idempotency_key: str | None = None
 
 
 class SeenBody(BaseModel):
@@ -639,14 +640,25 @@ def create_app(
         """Idea capture → agent-led brainstorm. Seeds a thread with the idea and
         posts an agent `event` handoff so a host/cloud agent drains it (mship
         _drain / inbox wait), brainstorms it in the thread, and produces a spec.
-        Serve does NO drafting — it stays LLM-free."""
+        Serve does NO drafting — it stays LLM-free. An optional idempotency_key
+        makes a retried/duplicated capture return the existing thread instead of
+        spawning a second brainstorm (AC6)."""
         idea = body.idea.strip()
         if not idea:
             raise HTTPException(status_code=400, detail="idea must not be empty")
         now = datetime.now(timezone.utc)
+        key = (body.idempotency_key or "").strip()
+        if key:
+            marker = f"capture-key {key}"
+            for t in msgs.list():
+                if any(m.kind == "event" and marker in m.text for m in t.messages):
+                    return _thread_payload(t)
         subject = ((body.title or "").strip() or idea.splitlines()[0])[:80]
         thread = msgs.create_thread(subject=subject, text=idea, now=now)
-        msgs.append(thread.id, "agent", _capture_handoff(thread.id, idea), now, kind="event")
+        handoff = _capture_handoff(thread.id, idea)
+        if key:
+            handoff = f"capture-key {key}\n{handoff}"
+        msgs.append(thread.id, "agent", handoff, now, kind="event")
         return _thread_payload(msgs.get(thread.id))
 
     # --- dispatch endpoint (B4): close the dispatch-from-phone loop ---
