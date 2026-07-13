@@ -82,6 +82,12 @@ class NewMessageBody(BaseModel):
     text: str
 
 
+class CaptureBody(BaseModel):
+    idea: str
+    title: str | None = None
+    idempotency_key: str | None = None
+
+
 class SeenBody(BaseModel):
     seen_at: str | None = None
 
@@ -149,6 +155,22 @@ def _dispatch_marker(spec_id: str, task_slug: str) -> str:
     (spec, task) pair rather than per-dispatch-call, so a re-dispatch of the
     same spec/task is recognized as already-notified."""
     return f"dispatch {spec_id} -> {task_slug}"
+
+
+def _capture_handoff(thread_id: str, idea: str) -> str:
+    """Agent `event` body for a phone idea capture. Instructs the draining agent
+    to brainstorm the idea into a spec IN THIS THREAD and finish via from-thread.
+    The leading marker line makes the handoff greppable/idempotent per thread."""
+    return (
+        f"capture-brainstorm {thread_id}\n\n"
+        "An idea was captured from the phone to brainstorm into a spec. Run the "
+        "brainstorming flow in THIS thread: ask the operator clarifying questions "
+        f"one at a time with `mship reply {thread_id} \"...\"`, settle "
+        "purpose/scope/approach, then produce the spec with "
+        f"`mship spec from-thread {thread_id}` → fill the draft JSON → "
+        "`mship spec apply <id> --from-json <file>`, and reply here when it's drafted.\n\n"
+        f"Idea: {idea}"
+    )
 
 
 def _notify_dispatch(
@@ -612,6 +634,40 @@ def create_app(
         spec.updated_at = datetime.now(timezone.utc)
         store.save(spec)
         return spec.model_dump(mode="json")
+
+    @app.post("/capture")
+    def post_capture(body: CaptureBody):
+        """Idea capture → agent-led brainstorm. Seeds a thread with the idea and
+        posts an agent `event` handoff so a host/cloud agent drains it (mship
+        _drain / inbox wait), brainstorms it in the thread, and produces a spec.
+        Serve does NO drafting — it stays LLM-free. An optional idempotency_key
+        makes a retried/duplicated capture return the existing thread instead of
+        spawning a second brainstorm (AC6)."""
+        idea = body.idea.strip()
+        if not idea:
+            raise HTTPException(status_code=400, detail="idea must not be empty")
+        now = datetime.now(timezone.utc)
+        key = (body.idempotency_key or "").strip()
+        if key:
+            marker = f"capture-key {key}"
+            for t in msgs.list():
+                if any(
+                    m.kind == "event"
+                    and any(line == marker for line in m.text.splitlines())
+                    for m in t.messages
+                ):
+                    return _thread_payload(t)
+        subject = ((body.title or "").strip() or idea.splitlines()[0])[:80]
+        thread = msgs.create_thread(subject=subject, text=idea, now=now)
+        handoff = _capture_handoff(thread.id, idea)
+        if key:
+            # Append the dedup marker AFTER the handoff so the event body still
+            # STARTS WITH `capture-brainstorm <tid>` (the driver's first-line
+            # contract in the working-with-mothership skill); a leading key line
+            # would make a keyed capture invisible to that contract.
+            handoff = f"{handoff}\n\ncapture-key {key}"
+        msgs.append(thread.id, "agent", handoff, now, kind="event")
+        return _thread_payload(msgs.get(thread.id))
 
     # --- dispatch endpoint (B4): close the dispatch-from-phone loop ---
 
