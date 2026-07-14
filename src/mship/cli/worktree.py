@@ -339,6 +339,14 @@ def register(app: typer.Typer, get_container):
                 repo_list = list(ds)
 
         effective_scope = repo_list if repo_list else list(config.repos.keys())
+        # A workspace with no `repos:` now loads (#259), so spawn must say so explicitly rather
+        # than silently creating a task with no worktrees.
+        if not effective_scope:
+            output.error(
+                "no repos to spawn into — this workspace has no repos configured. "
+                "Add a `repos:` map to mothership.yaml."
+            )
+            raise typer.Exit(code=1)
 
         # Threshold confirmation (#74): only fires when user didn't pass --repos
         # AND effective scope exceeds the workspace-configured threshold.

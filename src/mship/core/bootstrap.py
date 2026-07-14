@@ -122,6 +122,13 @@ def bootstrap(
     )
 
     names = repos or list(config.repos.keys())
+    # A workspace with no `repos:` now loads (#259); bootstrapping it is a no-op, so say so
+    # explicitly rather than silently "succeeding" with nothing cloned.
+    if not names:
+        raise ValueError(
+            "this workspace has no repos configured to bootstrap — "
+            "add a `repos:` map to mothership.yaml."
+        )
     unknown = [n for n in names if n not in config.repos]
     if unknown:
         raise ValueError(
