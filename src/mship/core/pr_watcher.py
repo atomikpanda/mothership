@@ -82,7 +82,9 @@ def announce_prs_on_thread(msgs, workitems, slug, task, pr_list, now):
     tid, _wi = resolve_task_thread(msgs, workitems, slug, task, urls[0], now)
     thread = msgs.get(tid)
     if thread is not None and any(
-        m.kind == "note" and "PR opened:" in m.text and all(u in m.text for u in urls)
+        # match both kinds so a --force re-finish also dedupes against an OLD kind='event'
+        # opened-marker left by a pre-note finish (event→note transition).
+        m.kind in ("note", "event") and "PR opened:" in m.text and all(u in m.text for u in urls)
         for m in thread.messages
     ):
         return

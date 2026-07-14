@@ -756,3 +756,20 @@ def test_resolve_links_task_slug_thread_to_workitem():
 
     assert tid == thread.id
     assert workitems.items["wi-8"].thread_ids == [thread.id]  # linked
+
+
+def test_announce_dedupes_against_legacy_event_opened_marker():
+    # Transition safety: a thread already carrying the OLD kind='event' "PR opened" marker (from a
+    # pre-note finish) must not get a duplicate note on a --force re-finish.
+    from mship.core.pr_watcher import announce_prs_on_thread
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    url = "https://github.com/org/r/pull/3"
+    msgs.append(thread.id, "agent", f"\U0001f500 PR opened: {url}", NOW, kind="event")  # legacy marker
+    task = FakeTask(pr_urls={}, work_item_id="wi-1")
+
+    announce_prs_on_thread(msgs, workitems, "task-1", task, [{"repo": "r", "url": url}], NOW)
+
+    assert not any(c["kind"] == "note" and "PR opened:" in c["text"] for c in msgs.append_calls)
