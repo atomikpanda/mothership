@@ -690,15 +690,17 @@ def test_announce_prs_on_thread_posts_to_workitem_thread():
 
     announce_prs_on_thread(msgs, workitems, "task-1", task, pr_list, NOW)
 
-    events = [c for c in msgs.append_calls if c["kind"] == "event"]
-    assert len(events) == 1
-    assert events[0]["thread_id"] == thread.id
-    assert "PR opened:" in events[0]["text"]
-    assert "https://github.com/org/r1/pull/1" in events[0]["text"]
-    assert "https://github.com/org/r2/pull/2" in events[0]["text"]
+    notes = [c for c in msgs.append_calls if c["kind"] == "note"]
+    assert len(notes) == 1
+    assert notes[0]["thread_id"] == thread.id
+    assert "PR opened:" in notes[0]["text"]
+    assert "https://github.com/org/r1/pull/1" in notes[0]["text"]
+    assert "https://github.com/org/r2/pull/2" in notes[0]["text"]
+    # informational note, NOT an event — must not trip awaiting_agent_event / nag the agent
+    assert not any(c["kind"] == "event" for c in msgs.append_calls)
     # idempotent: a second announce (e.g. --force re-finish) does not double-post
     announce_prs_on_thread(msgs, workitems, "task-1", task, pr_list, NOW)
-    assert len([c for c in msgs.append_calls if c["kind"] == "event"]) == 1
+    assert len([c for c in msgs.append_calls if c["kind"] == "note"]) == 1
 
 
 def test_announce_creates_and_links_thread_when_workitem_has_none():
@@ -711,9 +713,9 @@ def test_announce_creates_and_links_thread_when_workitem_has_none():
     announce_prs_on_thread(msgs, workitems, "task-9", task,
                            [{"repo": "r", "url": "https://github.com/org/r/pull/7"}], NOW)
 
-    events = [c for c in msgs.append_calls if c["kind"] == "event"]
-    assert len(events) == 1
-    new_tid = events[0]["thread_id"]
+    notes = [c for c in msgs.append_calls if c["kind"] == "note"]
+    assert len(notes) == 1
+    new_tid = notes[0]["thread_id"]
     assert workitems.items["wi-9"].thread_ids == [new_tid]  # linked, so later events reuse it
 
 
@@ -734,9 +736,10 @@ def test_finish_announce_then_watcher_merge_share_one_thread():
     PrWatcher(msgs, workitems, state, lambda u: "merged", now_fn).check_once()
 
     assert len(msgs.threads) == threads_after_open  # merge spawned no new thread
-    events = [c for c in msgs.append_calls if c["kind"] == "event"]
-    assert len({e["thread_id"] for e in events}) == 1  # opened + merged on one thread
-    assert any("opened" in e["text"] for e in events) and any("merged" in e["text"] for e in events)
+    # opened (informational note) + merged (agent event) both landed on ONE thread
+    assert len({c["thread_id"] for c in msgs.append_calls}) == 1
+    assert any(c["kind"] == "note" and "opened" in c["text"] for c in msgs.append_calls)
+    assert any(c["kind"] == "event" and "merged" in c["text"] for c in msgs.append_calls)
 
 
 def test_resolve_links_task_slug_thread_to_workitem():
@@ -753,3 +756,20 @@ def test_resolve_links_task_slug_thread_to_workitem():
 
     assert tid == thread.id
     assert workitems.items["wi-8"].thread_ids == [thread.id]  # linked
+
+
+def test_announce_dedupes_against_legacy_event_opened_marker():
+    # Transition safety: a thread already carrying the OLD kind='event' "PR opened" marker (from a
+    # pre-note finish) must not get a duplicate note on a --force re-finish.
+    from mship.core.pr_watcher import announce_prs_on_thread
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    url = "https://github.com/org/r/pull/3"
+    msgs.append(thread.id, "agent", f"\U0001f500 PR opened: {url}", NOW, kind="event")  # legacy marker
+    task = FakeTask(pr_urls={}, work_item_id="wi-1")
+
+    announce_prs_on_thread(msgs, workitems, "task-1", task, [{"repo": "r", "url": url}], NOW)
+
+    assert not any(c["kind"] == "note" and "PR opened:" in c["text"] for c in msgs.append_calls)
