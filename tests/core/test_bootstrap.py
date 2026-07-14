@@ -240,3 +240,15 @@ def test_bootstrap_clone_no_cred_args_without_token(tmp_path):
     clone, clone_env = next((c, e) for c, e in calls if "git" in c and "clone" in c)
     assert "credential.https://github.com.helper" not in clone
     assert clone_env is None  # no token => no injected env at all
+
+
+def test_bootstrap_empty_repos_errors(tmp_path):
+    # A workspace with no `repos:` loads since #259; bootstrapping it must error clearly, not
+    # silently "succeed" with nothing cloned.
+    import pytest
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "mothership.yaml").write_text("workspace: w\n")
+    (ws / ".mothership").mkdir()
+    with pytest.raises(ValueError, match="no repos configured"):
+        bootstrap(ws / "mothership.yaml", ShellRunner(), state_dir=ws / ".mothership")

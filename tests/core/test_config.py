@@ -14,6 +14,16 @@ def test_load_minimal_config(workspace: Path):
     assert config.repos["auth-service"].depends_on[0].repo == "shared"
 
 
+def test_repos_defaults_to_empty_map(tmp_path: Path):
+    # #259: the simplest possible workspace file — `workspace: <name>` alone — must validate,
+    # not fail with a 'repos field required' error.
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text("workspace: minimalws\n")
+    config = ConfigLoader.load(cfg)
+    assert config.workspace == "minimalws"
+    assert config.repos == {}
+
+
 def test_paths_resolved_relative_to_workspace(workspace: Path):
     config = ConfigLoader.load(workspace / "mothership.yaml")
     assert config.repos["shared"].path == workspace / "shared"
