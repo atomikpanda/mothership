@@ -27,13 +27,25 @@ def test_build_review_shapes_units_and_context():
     r = build_review(_spec())
     assert r["id"] == "dq" and r["status"] == "needs_review"
     assert r["acceptance_criteria"] == [
-        {"id": "ac1", "text": "view questions", "verdict": "approved", "evidence": []},
-        {"id": "ac2", "text": "record answer", "verdict": "unreviewed", "evidence": []},
+        {"id": "ac1", "text": "view questions", "verdict": "approved", "comment": None, "evidence": []},
+        {"id": "ac2", "text": "record answer", "verdict": "unreviewed", "comment": None, "evidence": []},
     ]
     assert r["open_questions"] == [{"id": "q1", "text": "Android?", "answer": None}]
     assert r["context"]["problem"] == "the problem"
     assert r["context"]["approach"] == "the approach"
     assert r["context"]["non_goals"] == ["chat"]
+
+
+def test_build_review_emits_prose_verdicts_and_comments():
+    from mship.core.spec import ProseVerdict
+    s = _spec()
+    set_criterion_verdict(s, "ac1", "flagged", comment="fix")
+    s.prose_verdicts = {"approach": ProseVerdict(verdict="approved")}
+    review = build_review(s)
+    assert review["prose_verdicts"]["approach"]["verdict"] == "approved"
+    # the criterion's comment is exposed in the review's criteria list
+    crit = next(c for c in review["acceptance_criteria"] if c["id"] == "ac1")
+    assert crit["comment"] == "fix"
 
 
 def test_build_review_includes_clarification_reason():

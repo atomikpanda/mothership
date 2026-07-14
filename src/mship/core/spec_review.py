@@ -31,12 +31,16 @@ def build_review(spec: Spec) -> dict:
                 "id": c.id,
                 "text": c.text,
                 "verdict": c.verdict,
+                "comment": c.comment,
                 "evidence": [
                     {"kind": e.kind, "ref": e.ref, "note": e.note} for e in c.evidence
                 ],
             }
             for c in spec.acceptance_criteria
         ],
+        "prose_verdicts": {
+            sid: pv.model_dump(mode="json") for sid, pv in spec.prose_verdicts.items()
+        },
         "open_questions": [
             {"id": q.id, "text": q.text, "answer": q.answer}
             for q in spec.open_questions
