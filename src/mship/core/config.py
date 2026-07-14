@@ -310,7 +310,10 @@ class WorkspaceConfig(BaseModel):
     # Fallback per-hook timeout (seconds) when a `lifecycle_hooks:` entry omits
     # `timeout`.
     lifecycle_hooks_default_timeout: int = 30
-    repos: dict[str, RepoConfig]
+    # Default to an empty map so the simplest possible workspace file — `workspace: <name>`
+    # alone — validates (#259). Commands that actually need repos raise their own specific
+    # error when the map is empty, rather than every minimal config failing at load.
+    repos: dict[str, RepoConfig] = {}
 
     @model_validator(mode="before")
     @classmethod
