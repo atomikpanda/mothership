@@ -365,7 +365,19 @@ def create_app(
         spec = store.find_by_id(spec_id)
         if spec is None:
             raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
-        return spec.model_dump(mode="json")
+        data = spec.model_dump(mode="json")
+        # Resolve the linked WorkItem's kind (feature/bug/chore) so the Queue review cards can show
+        # it alongside the spec title + affected_repos. Best-effort: the kind is decorative, so a
+        # missing OR corrupt/unreadable WorkItem must never 500 the spec detail — any lookup failure
+        # just falls back to null (the card still renders, minus the kind).
+        data["work_item_kind"] = None
+        if spec.work_item_id:
+            try:
+                wi = workitems.get(spec.work_item_id)
+                data["work_item_kind"] = wi.kind if wi is not None else None
+            except Exception:
+                data["work_item_kind"] = None
+        return data
 
     @app.get("/specs/{spec_id}/review")
     def get_review(spec_id: str):
