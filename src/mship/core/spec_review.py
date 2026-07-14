@@ -62,24 +62,48 @@ def build_review(spec: Spec) -> dict:
     }
 
 
-def set_criterion_verdict(spec: Spec, criterion_id: str, verdict: str) -> Spec:
+def set_criterion_verdict(
+    spec: Spec, criterion_id: str, verdict: str, comment: str | None = None
+) -> Spec:
     """Set one acceptance criterion's verdict in place. Raises ValueError on an
-    invalid verdict or unknown criterion id. Does not change status or persist."""
+    invalid verdict or unknown criterion id. Does not change status or persist.
+    An explicit `comment` (MOS-217) records a flag-with-comment; an empty string
+    clears it (stored as None)."""
     if verdict not in VERDICTS:
         raise ValueError(
             f"invalid verdict {verdict!r}; expected one of {', '.join(VERDICTS)}"
         )
     if criterion_id in PROSE_UNIT_IDS:
         raise ValueError(
-            f"{criterion_id!r} is not verdict-able; only acceptance criteria "
-            f"(ac1, ac2, …) carry verdicts in this version."
+            f"{criterion_id!r} is a prose section — use set_prose_verdict"
         )
     for c in spec.acceptance_criteria:
         if c.id == criterion_id:
             c.verdict = verdict
+            if comment is not None:
+                c.comment = comment or None
             return spec
     valid = ", ".join(c.id for c in spec.acceptance_criteria) or "(none)"
     raise ValueError(f"no acceptance criterion {criterion_id!r}; valid ids: {valid}")
+
+
+def set_prose_verdict(
+    spec: Spec, section_id: str, verdict: str, comment: str | None = None
+) -> Spec:
+    """Set one prose section's verdict (MOS-172). section_id must be one of
+    PROSE_UNIT_IDS. Raises ValueError on an invalid verdict or unknown section.
+    Does not change status or persist."""
+    if verdict not in VERDICTS:
+        raise ValueError(
+            f"invalid verdict {verdict!r}; expected one of {', '.join(VERDICTS)}"
+        )
+    if section_id not in PROSE_UNIT_IDS:
+        raise ValueError(
+            f"{section_id!r} is not a prose section; valid: {', '.join(sorted(PROSE_UNIT_IDS))}"
+        )
+    from mship.core.spec import ProseVerdict
+    spec.prose_verdicts[section_id] = ProseVerdict(verdict=verdict, comment=(comment or None))
+    return spec
 
 
 def infer_evidence_kind(ref: str) -> str:

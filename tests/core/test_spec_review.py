@@ -91,9 +91,32 @@ def test_set_criterion_verdict_rejects_unknown_id():
         set_criterion_verdict(_spec(), "nope", "approved")
 
 
-def test_set_criterion_verdict_rejects_prose_unit():
-    with pytest.raises(ValueError, match="not verdict-able"):
-        set_criterion_verdict(_spec(), "problem", "approved")
+def test_set_prose_verdict_accepts_a_prose_section():
+    from mship.core.spec_review import set_prose_verdict
+    s = _spec()
+    set_prose_verdict(s, "approach", "flagged", comment="unclear")
+    assert s.prose_verdicts["approach"].verdict == "flagged"
+    assert s.prose_verdicts["approach"].comment == "unclear"
+
+
+def test_set_prose_verdict_rejects_unknown_section():
+    from mship.core.spec_review import set_prose_verdict
+    import pytest
+    with pytest.raises(ValueError, match="not a prose section"):
+        set_prose_verdict(_spec(), "bogus", "approved")
+
+
+def test_set_prose_verdict_rejects_bad_verdict():
+    from mship.core.spec_review import set_prose_verdict
+    import pytest
+    with pytest.raises(ValueError, match="invalid verdict"):
+        set_prose_verdict(_spec(), "problem", "bogus")
+
+
+def test_set_criterion_verdict_stores_comment():
+    s = _spec()  # _spec() should include an ac1
+    set_criterion_verdict(s, "ac1", "flagged", comment="needs work")
+    assert s.acceptance_criteria[0].comment == "needs work"
 
 
 def test_set_criterion_evidence_appends_and_persists_in_object():
