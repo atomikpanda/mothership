@@ -28,6 +28,63 @@ def _refs_pr(text: str, needle: str) -> bool:
     return re.search(re.escape(needle) + r"(?!\d)", text) is not None
 
 
+def resolve_task_thread(msgs, workitems, slug, task, url, now):
+    """Resolve the thread a PR event for `task`/`url` belongs to, strongly preferring an EXISTING
+    thread over a fresh one (PR events were cluttering the app with a thread per task). In order:
+
+      1. the task's WorkItem's first thread (its canonical thread), else
+      2. any existing thread that already references this PR `url` — link it to the WorkItem so
+         later events consolidate there too, else
+      3. an existing thread scoped to this task_slug, else
+      4. create one (linked to the WorkItem when present).
+
+    Only step 4 spawns a new thread. Returns (thread_id, work_item_or_None). Shared by the
+    pr_watcher (merge/close events) and `mship finish` ([announce_prs_on_thread], posting the PR
+    url at open time so there's always a thread to reuse)."""
+    work_item_id = getattr(task, "work_item_id", None)
+    wi = workitems.get(work_item_id) if work_item_id else None
+    if wi and wi.thread_ids:
+        return wi.thread_ids[0], wi
+
+    url_thread = next(
+        (t for t in msgs.list() if any(_refs_pr(m.text, url) for m in t.messages)),
+        None,
+    )
+    if url_thread is not None:
+        if wi is not None:
+            workitems.add_thread(wi.id, url_thread.id, now)
+        return url_thread.id, wi
+
+    existing = next((t for t in msgs.list() if t.task_slug == slug), None)
+    if existing is not None:
+        return existing.id, wi
+
+    # create_thread seeds a human message; the event itself is appended separately so it lands as
+    # an agent message, matching every other event/needs_you/decision message.
+    thread = msgs.create_thread(subject=slug, text=f"Tracking {slug}", now=now, task_slug=slug)
+    if wi is not None:
+        workitems.add_thread(wi.id, thread.id, now)
+    return thread.id, wi
+
+
+def announce_prs_on_thread(msgs, workitems, slug, task, pr_list, now):
+    """Post a one-time `PR opened: <url>…` event into the task's WorkItem/tracking thread (resolved
+    via [resolve_task_thread]) when `mship finish` opens PR(s), so the pr_watcher reuses that thread
+    on merge/close instead of spawning a new one. Idempotent for `--force` re-finish: skips when an
+    equivalent opened-event is already present. No-op when there are no urls."""
+    urls = list(dict.fromkeys(p["url"] for p in pr_list if p.get("url")))
+    if not urls:
+        return
+    tid, _wi = resolve_task_thread(msgs, workitems, slug, task, urls[0], now)
+    thread = msgs.get(tid)
+    if thread is not None and any(
+        m.kind == "event" and "PR opened:" in m.text and all(u in m.text for u in urls)
+        for m in thread.messages
+    ):
+        return
+    msgs.append(tid, "agent", "\U0001f500 PR opened: " + ", ".join(urls), now, kind="event")
+
+
 class PrWatcher:
     """Polls each task's `pr_urls` for a merge/close transition and posts a
     single agent `event` message to the task's mailbox thread the first time
@@ -207,49 +264,7 @@ class PrWatcher:
             )
 
     def _resolve_thread(self, slug: str, task: Any, url: str, now: datetime) -> tuple[str, Any]:
-        """Resolve the thread a PR merge/close event belongs to, strongly
-        preferring an EXISTING thread over spawning a new one (operator
-        feedback 2026-07-14: PR events were cluttering the app with a fresh
-        thread per task). In order:
-
-          1. the task's WorkItem's first thread (its canonical thread), else
-          2. any existing thread that already references this PR `url` — the
-             operator tracks the PR there (a dispatch/chat message), so the
-             merge/close event belongs with it; link it to the WorkItem so
-             later events for the same item consolidate there too, else
-          3. an existing thread scoped to this task_slug, else
-          4. create one (linking it back to the WorkItem when one exists).
-
-        Only step 4 spawns a new thread, and only when the PR url appears in no
-        thread at all. Returns (thread_id, work_item_or_None)."""
-        work_item_id = getattr(task, "work_item_id", None)
-        wi = self.workitems.get(work_item_id) if work_item_id else None
-        if wi and wi.thread_ids:
-            return wi.thread_ids[0], wi
-
-        url_thread = next(
-            (t for t in self.msgs.list()
-             if any(_refs_pr(m.text, url) for m in t.messages)),
-            None,
-        )
-        if url_thread is not None:
-            if wi is not None:
-                self.workitems.add_thread(wi.id, url_thread.id, now)
-            return url_thread.id, wi
-
-        existing = next(
-            (t for t in self.msgs.list() if t.task_slug == slug), None
-        )
-        if existing is not None:
-            return existing.id, wi
-
-        # create_thread seeds a human message — the event itself is appended
-        # separately (in _post_event, after the hook has been attempted) so
-        # it lands as an agent message, matching every other
-        # event/needs_you/decision message.
-        thread = self.msgs.create_thread(
-            subject=slug, text=f"PR watcher: tracking {slug}", now=now, task_slug=slug,
-        )
-        if wi is not None:
-            self.workitems.add_thread(wi.id, thread.id, now)
-        return thread.id, wi
+        """Resolve the thread this PR merge/close event belongs to — the shared
+        [resolve_task_thread] (WorkItem thread → url thread → task_slug thread → create),
+        also used by `mship finish` at PR-open time."""
+        return resolve_task_thread(self.msgs, self.workitems, slug, task, url, now)

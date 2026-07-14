@@ -676,3 +676,64 @@ def test_pr_hook_refires_after_crash_before_dedup_marker_recorded():
     watcher.check_once()  # re-check after the "crash": must refire, not skip
     assert len(shell.calls) == 2
     assert len(msgs.append_calls) == 1  # now durably recorded, exactly once
+
+
+def test_announce_prs_on_thread_posts_to_workitem_thread():
+    from mship.core.pr_watcher import announce_prs_on_thread
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    thread = msgs.create_thread(subject="task-1", text="seed", now=NOW, task_slug="task-1")
+    workitems.items["wi-1"] = FakeWorkItem(id="wi-1", thread_ids=[thread.id])
+    pr_list = [{"repo": "r1", "url": "https://github.com/org/r1/pull/1"},
+               {"repo": "r2", "url": "https://github.com/org/r2/pull/2"}]
+    task = FakeTask(pr_urls={}, work_item_id="wi-1")
+
+    announce_prs_on_thread(msgs, workitems, "task-1", task, pr_list, NOW)
+
+    events = [c for c in msgs.append_calls if c["kind"] == "event"]
+    assert len(events) == 1
+    assert events[0]["thread_id"] == thread.id
+    assert "PR opened:" in events[0]["text"]
+    assert "https://github.com/org/r1/pull/1" in events[0]["text"]
+    assert "https://github.com/org/r2/pull/2" in events[0]["text"]
+    # idempotent: a second announce (e.g. --force re-finish) does not double-post
+    announce_prs_on_thread(msgs, workitems, "task-1", task, pr_list, NOW)
+    assert len([c for c in msgs.append_calls if c["kind"] == "event"]) == 1
+
+
+def test_announce_creates_and_links_thread_when_workitem_has_none():
+    from mship.core.pr_watcher import announce_prs_on_thread
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    workitems.items["wi-9"] = FakeWorkItem(id="wi-9", thread_ids=[])
+    task = FakeTask(pr_urls={}, work_item_id="wi-9")
+
+    announce_prs_on_thread(msgs, workitems, "task-9", task,
+                           [{"repo": "r", "url": "https://github.com/org/r/pull/7"}], NOW)
+
+    events = [c for c in msgs.append_calls if c["kind"] == "event"]
+    assert len(events) == 1
+    new_tid = events[0]["thread_id"]
+    assert workitems.items["wi-9"].thread_ids == [new_tid]  # linked, so later events reuse it
+
+
+def test_finish_announce_then_watcher_merge_share_one_thread():
+    # The end-to-end win: finish announces the PR url (creates+links the thread), and the later
+    # merge event lands in that SAME thread — no second thread spawned per task.
+    from mship.core.pr_watcher import announce_prs_on_thread
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    workitems.items["wi-5"] = FakeWorkItem(id="wi-5", thread_ids=[])
+    url = "https://github.com/org/r/pull/12"
+    task = FakeTask(pr_urls={"r": url}, work_item_id="wi-5")
+    state = FakeStateManager({"task-5": task})
+
+    announce_prs_on_thread(msgs, workitems, "task-5", task, [{"repo": "r", "url": url}], NOW)
+    threads_after_open = len(msgs.threads)
+
+    PrWatcher(msgs, workitems, state, lambda u: "merged", now_fn).check_once()
+
+    assert len(msgs.threads) == threads_after_open  # merge spawned no new thread
+    events = [c for c in msgs.append_calls if c["kind"] == "event"]
+    assert len({e["thread_id"] for e in events}) == 1  # opened + merged on one thread
+    assert any("opened" in e["text"] for e in events) and any("merged" in e["text"] for e in events)
