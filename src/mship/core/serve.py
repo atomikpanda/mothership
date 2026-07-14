@@ -32,6 +32,13 @@ PR_WATCH_INTERVAL_SECONDS = 45
 class VerdictBody(BaseModel):
     criterion_id: str
     verdict: str
+    comment: str | None = None
+
+
+class ProseVerdictBody(BaseModel):
+    section_id: str
+    verdict: str
+    comment: str | None = None
 
 
 class EvidenceBody(BaseModel):
@@ -490,6 +497,7 @@ def create_app(
     # datetime/timezone are imported at module top (needed earlier by _lifespan).
     from mship.core.spec_review import (
         infer_evidence_kind, set_criterion_evidence, set_criterion_verdict,
+        set_prose_verdict,
     )
     from mship.core.spec_questions import add_question, answer_question
 
@@ -508,7 +516,16 @@ def create_app(
     def post_verdict(spec_id: str, body: VerdictBody):
         spec = _load_or_404(spec_id)
         try:
-            set_criterion_verdict(spec, body.criterion_id, body.verdict)
+            set_criterion_verdict(spec, body.criterion_id, body.verdict, body.comment)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return _save_and_review(spec)
+
+    @app.post("/specs/{spec_id}/prose-verdict")
+    def post_prose_verdict(spec_id: str, body: ProseVerdictBody):
+        spec = _load_or_404(spec_id)
+        try:
+            set_prose_verdict(spec, body.section_id, body.verdict, body.comment)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return _save_and_review(spec)
