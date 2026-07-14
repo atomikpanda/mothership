@@ -141,6 +141,32 @@ def test_mark_seen_unknown_thread_raises(tmp_path):
         s.mark_seen("nope", datetime(2026, 6, 30, tzinfo=timezone.utc))
 
 
+def test_mark_agent_seen_advances_cursor(tmp_path):
+    from datetime import timedelta
+    base = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
+    s = _store(tmp_path)
+    t = s.create_thread(subject="x", text="hi", now=base)
+    assert s.get(t.id).agent_seen_at is None   # default: agent hasn't consumed anything yet
+    s.mark_agent_seen(t.id, base + timedelta(minutes=2))
+    assert s.get(t.id).agent_seen_at == base + timedelta(minutes=2)
+
+
+def test_mark_agent_seen_is_monotonic(tmp_path):
+    from datetime import timedelta
+    base = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
+    s = _store(tmp_path)
+    t = s.create_thread(subject="x", text="hi", now=base)
+    s.mark_agent_seen(t.id, base + timedelta(minutes=5))
+    s.mark_agent_seen(t.id, base + timedelta(minutes=1))  # older — must not regress
+    assert s.get(t.id).agent_seen_at == base + timedelta(minutes=5)
+
+
+def test_mark_agent_seen_unknown_thread_raises(tmp_path):
+    s = _store(tmp_path)
+    with pytest.raises(KeyError):
+        s.mark_agent_seen("nope", datetime(2026, 6, 30, tzinfo=timezone.utc))
+
+
 def test_append_decision_roundtrips(tmp_path):
     from mship.core.message import DecisionPayload
     s = _store(tmp_path)

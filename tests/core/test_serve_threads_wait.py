@@ -68,3 +68,16 @@ def test_wait_invalid_since_returns_422(tmp_path: Path):
     client, _ = _client(tmp_path)
     r = client.get("/threads", params={"wait": 1, "since": "notadate", "timeout": 0.1})
     assert r.status_code == 422
+
+
+def test_agent_seen_at_exposed_on_list_and_detail(tmp_path: Path):
+    # #345: the agent read cursor must be visible to Ground Control on both the thread list
+    # (custom summary) and the thread detail (model dump), null when unset.
+    client, store = _client(tmp_path)
+    now = datetime.now(timezone.utc)
+    t = store.create_thread("s", "hi", now)
+    assert client.get("/threads").json()[0]["agent_seen_at"] is None
+    assert client.get(f"/threads/{t.id}").json()["agent_seen_at"] is None
+    store.mark_agent_seen(t.id, now)
+    assert client.get("/threads").json()[0]["agent_seen_at"] is not None
+    assert client.get(f"/threads/{t.id}").json()["agent_seen_at"] is not None

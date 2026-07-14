@@ -23,6 +23,20 @@ def changed_since(threads, since: datetime):
     return changed, cursor
 
 
+def stamp_agent_seen(store, threads, now: datetime) -> None:
+    """Advance the AGENT read cursor to `now` on every surfaced thread whose latest message is human
+    (`awaiting_reply`) — the agent is now SEEING it, which is the "Read" signal (#345). Shared by
+    `mship inbox wait` and `_drain`, the two places that surface human messages to the agent. Only
+    awaiting_reply threads (not `awaiting_agent_event`-only ones). Best-effort per thread — a stamp
+    failure (e.g. a thread deleted mid-flight) must never propagate to the caller."""
+    for t in threads:
+        if getattr(t, "awaiting_reply", False):
+            try:
+                store.mark_agent_seen(t.id, now)
+            except Exception:
+                pass
+
+
 @dataclass(frozen=True)
 class WaitResult:
     threads: list

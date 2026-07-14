@@ -122,3 +122,16 @@ class MessageStore:
                 thread.seen_at = seen_at
                 self.save(thread)
             return thread
+
+    def mark_agent_seen(self, thread_id: str, seen_at: datetime) -> Thread:
+        """Advance the AGENT read cursor (monotonic — never regresses), stamped when the agent
+        consumes a human message (`mship inbox wait` / `_drain` surface it). Mirrors `mark_seen`;
+        does not bump updated_at (consuming is not a content change and must not reorder threads)."""
+        with _locked(self._lock_path(thread_id), fcntl.LOCK_EX):
+            thread = self.get(thread_id)
+            if thread is None:
+                raise KeyError(thread_id)
+            if thread.agent_seen_at is None or seen_at > thread.agent_seen_at:
+                thread.agent_seen_at = seen_at
+                self.save(thread)
+            return thread

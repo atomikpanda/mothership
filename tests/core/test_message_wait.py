@@ -74,3 +74,31 @@ def test_wait_predicate_filters_hits_but_cursor_still_advances():
     assert res.timed_out is True            # agent message is not a hit
     assert res.threads == []
     assert res.cursor == T0 + timedelta(seconds=1)   # cursor advanced past it
+
+
+def test_stamp_agent_seen_marks_only_awaiting_reply_threads():
+    from mship.core.message_wait import stamp_agent_seen
+
+    class FakeStore:
+        def __init__(self):
+            self.marked = []
+
+        def mark_agent_seen(self, tid, now):
+            self.marked.append((tid, now))
+
+    now = T0 + timedelta(minutes=1)
+    s = FakeStore()
+    human = _thread("h", T0, role="human")   # latest is human → awaiting_reply
+    agent = _thread("a", T0, role="agent")   # latest is agent → not awaiting_reply
+    stamp_agent_seen(s, [human, agent], now)
+    assert s.marked == [("h", now)]          # only the human-latest thread is stamped
+
+
+def test_stamp_agent_seen_swallows_store_errors():
+    from mship.core.message_wait import stamp_agent_seen
+
+    class BoomStore:
+        def mark_agent_seen(self, tid, now):
+            raise KeyError(tid)   # e.g. thread deleted mid-flight
+
+    stamp_agent_seen(BoomStore(), [_thread("h", T0, role="human")], T0)  # must not raise

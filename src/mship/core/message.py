@@ -48,6 +48,10 @@ class Thread(BaseModel):
     spec_id: str | None = None
     # Operator read cursor: the operator has seen messages up to this time.
     seen_at: datetime | None = None
+    # Agent read cursor: the agent has consumed (seen) human messages up to this time.
+    # Symmetric to `seen_at`; drives Ground Control's "Read" indicator (#345). A human message
+    # reads as Read iff `agent_seen_at is not None and agent_seen_at >= message.created_at`.
+    agent_seen_at: datetime | None = None
     messages: list[Message] = []
 
     @computed_field  # serialized into model_dump()/JSON (a plain @property is not)

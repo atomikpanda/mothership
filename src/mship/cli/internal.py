@@ -441,6 +441,13 @@ def register(app: typer.Typer, get_container):
             # human-reply threads — mirrors `mship inbox wait`'s predicate.
             awaiting = [t for t in store.list()
                         if t.awaiting_reply or t.awaiting_agent_event]
+            # The agent is now seeing these human messages at the turn boundary — stamp the agent
+            # read cursor so Ground Control shows them as Read (#345). Best-effort; stamps only the
+            # awaiting_reply ones. Done before the empty-check so it runs whenever there's a human
+            # message to consume (a no-op on an empty list anyway).
+            from datetime import datetime as _dt, timezone as _tz
+            from mship.core.message_wait import stamp_agent_seen
+            stamp_agent_seen(store, awaiting, _dt.now(_tz.utc))
             if not awaiting:
                 raise typer.Exit(code=0)
             reason = _format_drain_reason(awaiting)

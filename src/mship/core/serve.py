@@ -821,6 +821,7 @@ def create_app(
                 "needs_you": t.needs_you,
                 "needs_decision": t.needs_decision,
                 "unseen": t.unseen,
+                "agent_seen_at": t.agent_seen_at.isoformat() if t.agent_seen_at else None,
                 "last_message": (t.messages[-1].text[:120] if t.messages else ""),
                 "message_count": len(t.messages),
             }
