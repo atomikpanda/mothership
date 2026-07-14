@@ -70,21 +70,23 @@ def resolve_task_thread(msgs, workitems, slug, task, url, now):
 
 
 def announce_prs_on_thread(msgs, workitems, slug, task, pr_list, now):
-    """Post a one-time `PR opened: <url>…` event into the task's WorkItem/tracking thread (resolved
+    """Post a one-time `PR opened: <url>…` NOTE into the task's WorkItem/tracking thread (resolved
     via [resolve_task_thread]) when `mship finish` opens PR(s), so the pr_watcher reuses that thread
-    on merge/close instead of spawning a new one. Idempotent for `--force` re-finish: skips when an
-    equivalent opened-event is already present. No-op when there are no urls."""
+    on merge/close instead of spawning a new one. Posted as kind='note' (informational) — NOT
+    kind='event' — so it does not trip `Thread.awaiting_agent_event` and nag the agent on every
+    finish; the url still carries for reuse. Idempotent for `--force` re-finish: skips when an
+    equivalent opened-note is already present. No-op when there are no urls."""
     urls = list(dict.fromkeys(p["url"] for p in pr_list if p.get("url")))
     if not urls:
         return
     tid, _wi = resolve_task_thread(msgs, workitems, slug, task, urls[0], now)
     thread = msgs.get(tid)
     if thread is not None and any(
-        m.kind == "event" and "PR opened:" in m.text and all(u in m.text for u in urls)
+        m.kind == "note" and "PR opened:" in m.text and all(u in m.text for u in urls)
         for m in thread.messages
     ):
         return
-    msgs.append(tid, "agent", "\U0001f500 PR opened: " + ", ".join(urls), now, kind="event")
+    msgs.append(tid, "agent", "\U0001f500 PR opened: " + ", ".join(urls), now, kind="note")
 
 
 class PrWatcher:
