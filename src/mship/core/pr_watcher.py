@@ -9,6 +9,7 @@ event; it does not itself wake or steer anything.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -17,6 +18,14 @@ log = logging.getLogger(__name__)
 
 # States that mean "this PR is done, the task's agent should notice."
 _TERMINAL_STATES = ("merged", "closed")
+
+
+def _refs_pr(text: str, needle: str) -> bool:
+    """True if `text` contains `needle` NOT immediately followed by another digit — so a
+    reference to `.../pull/4` doesn't spuriously match `.../pull/42`. Used for both the PR
+    url (thread lookup) and the `PR <state>: <url>` dedup marker; both end in the PR number,
+    so a trailing-digit boundary is exactly the right test."""
+    return re.search(re.escape(needle) + r"(?!\d)", text) is not None
 
 
 class PrWatcher:
@@ -132,12 +141,12 @@ class PrWatcher:
         Returns (already_posted, thread_id, work_item_or_None)."""
         _, _repo, url, st = key
         now = self.now_fn()
-        tid, wi = self._resolve_thread(slug, task, now)
+        tid, wi = self._resolve_thread(slug, task, url, now)
 
         thread = self.msgs.get(tid)
         marker = f"PR {st}: {url}"
         if thread is not None and any(
-            m.kind == "event" and marker in m.text
+            m.kind == "event" and _refs_pr(m.text, marker)
             for m in thread.messages
         ):
             # Already posted (prior process) — record it so this process's
@@ -197,15 +206,36 @@ class PrWatcher:
                 st, slug, repo,
             )
 
-    def _resolve_thread(self, slug: str, task: Any, now: datetime) -> tuple[str, Any]:
-        """Mirror POST /items/{id}/messages' thread resolution: prefer the
-        task's WorkItem's first thread, else an existing thread scoped to
-        this task_slug, else create one (linking it back to the WorkItem when
-        one exists). Returns (thread_id, work_item_or_None)."""
+    def _resolve_thread(self, slug: str, task: Any, url: str, now: datetime) -> tuple[str, Any]:
+        """Resolve the thread a PR merge/close event belongs to, strongly
+        preferring an EXISTING thread over spawning a new one (operator
+        feedback 2026-07-14: PR events were cluttering the app with a fresh
+        thread per task). In order:
+
+          1. the task's WorkItem's first thread (its canonical thread), else
+          2. any existing thread that already references this PR `url` — the
+             operator tracks the PR there (a dispatch/chat message), so the
+             merge/close event belongs with it; link it to the WorkItem so
+             later events for the same item consolidate there too, else
+          3. an existing thread scoped to this task_slug, else
+          4. create one (linking it back to the WorkItem when one exists).
+
+        Only step 4 spawns a new thread, and only when the PR url appears in no
+        thread at all. Returns (thread_id, work_item_or_None)."""
         work_item_id = getattr(task, "work_item_id", None)
         wi = self.workitems.get(work_item_id) if work_item_id else None
         if wi and wi.thread_ids:
             return wi.thread_ids[0], wi
+
+        url_thread = next(
+            (t for t in self.msgs.list()
+             if any(_refs_pr(m.text, url) for m in t.messages)),
+            None,
+        )
+        if url_thread is not None:
+            if wi is not None:
+                self.workitems.add_thread(wi.id, url_thread.id, now)
+            return url_thread.id, wi
 
         existing = next(
             (t for t in self.msgs.list() if t.task_slug == slug), None

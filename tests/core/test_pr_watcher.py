@@ -224,6 +224,73 @@ def test_workitem_with_no_thread_creates_and_links():
     assert new_thread.messages[-1].kind == "event"
 
 
+def test_reuses_existing_thread_that_contains_pr_url():
+    # A CLI-spawned task's WorkItem has no thread, but the PR url was already posted in
+    # some thread (a dispatch/chat message). The merge event must land THERE — not in a
+    # fresh thread (the clutter the operator reported) — and link that thread to the
+    # WorkItem so later events for the item consolidate there too.
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    workitems.items["wi-5"] = FakeWorkItem(id="wi-5", thread_ids=[])
+    url = "https://github.com/org/repoE/pull/45"
+    chat = msgs.create_thread(subject="chat", text="seed", now=NOW, task_slug=None)
+    msgs.append(chat.id, "agent", f"PR is up: {url}", NOW, kind="note")
+    task = FakeTask(pr_urls={"repoE": url}, work_item_id="wi-5")
+    state = FakeStateManager({"task-5": task})
+
+    watcher = PrWatcher(msgs, workitems, state, lambda u: "merged", now_fn)
+    before = len(msgs.threads)
+    watcher.check_once()
+
+    assert len(msgs.threads) == before  # no new thread spawned
+    events = [c for c in msgs.append_calls if c["kind"] == "event"]
+    assert len(events) == 1
+    assert events[0]["thread_id"] == chat.id  # event posted into the url thread
+    assert "merged" in events[0]["text"]
+    assert workitems.items["wi-5"].thread_ids == [chat.id]  # linked to the WorkItem
+
+
+def test_workitem_thread_wins_over_pr_url_thread():
+    # When the WorkItem already has its own canonical thread, that wins even if another
+    # thread also mentions the url — the item's events stay consolidated on its thread.
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    canonical = msgs.create_thread(subject="task-6", text="seed", now=NOW, task_slug="task-6")
+    workitems.items["wi-6"] = FakeWorkItem(id="wi-6", thread_ids=[canonical.id])
+    url = "https://github.com/org/repoF/pull/6"
+    other = msgs.create_thread(subject="chat", text="seed", now=NOW, task_slug=None)
+    msgs.append(other.id, "agent", f"see {url}", NOW, kind="note")
+    task = FakeTask(pr_urls={"repoF": url}, work_item_id="wi-6")
+    state = FakeStateManager({"task-6": task})
+
+    watcher = PrWatcher(msgs, workitems, state, lambda u: "merged", now_fn)
+    watcher.check_once()
+
+    events = [c for c in msgs.append_calls if c["kind"] == "event"]
+    assert len(events) == 1
+    assert events[0]["thread_id"] == canonical.id  # WorkItem's own thread, not the url thread
+
+
+def test_pr_url_match_is_not_a_numeric_prefix():
+    # Resolving .../pull/4 must NOT reuse a thread that only mentions .../pull/42 (a numeric
+    # prefix). With no thread carrying pull/4, a fresh thread is created + linked instead.
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    workitems.items["wi-7"] = FakeWorkItem(id="wi-7", thread_ids=[])
+    other = msgs.create_thread(subject="chat", text="seed", now=NOW, task_slug=None)
+    msgs.append(other.id, "agent", "see https://github.com/org/repoG/pull/42", NOW, kind="note")
+    task = FakeTask(pr_urls={"repoG": "https://github.com/org/repoG/pull/4"}, work_item_id="wi-7")
+    state = FakeStateManager({"task-7": task})
+
+    watcher = PrWatcher(msgs, workitems, state, lambda u: "merged", now_fn)
+    watcher.check_once()
+
+    events = [c for c in msgs.append_calls if c["kind"] == "event"]
+    assert len(events) == 1
+    assert events[0]["thread_id"] != other.id  # did not post into the pull/42 thread
+    assert workitems.items["wi-7"].thread_ids == [events[0]["thread_id"]]  # fresh thread, linked
+
+
 def test_no_work_item_uses_existing_thread_by_task_slug():
     msgs = FakeMessageStore()
     workitems = FakeWorkItemStore()
