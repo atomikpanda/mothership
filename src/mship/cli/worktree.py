@@ -1618,6 +1618,23 @@ def register(app: typer.Typer, get_container):
                     f"PR created for {pr_info['repo']}: {pr_info['url']}",
                 )
 
+        # Post the opened PR url(s) into the task's WorkItem/tracking thread so the pr_watcher
+        # reuses that thread on merge/close instead of spawning a new one (PR events had been
+        # cluttering the app with a thread per task). Best-effort: a mailbox hiccup must never
+        # fail an already-created PR.
+        try:
+            from datetime import datetime as _dt_ann, timezone as _tz_ann
+            from mship.core.message_store import MessageStore
+            from mship.core.pr_watcher import announce_prs_on_thread
+            from mship.core.workitem_store import WorkItemStore
+            _md = workspace_root / ".mothership"
+            announce_prs_on_thread(
+                MessageStore(_md / "messages"), WorkItemStore(_md / "workitems"),
+                t.slug, task, pr_list, _dt_ann.now(_tz_ann.utc),
+            )
+        except Exception as e:
+            output.warning(f"could not post the PR url to the task thread: {e}")
+
         # Lifecycle hooks (MOS-220): `task.finished` fires here, after the
         # PRs above are already created/pushed — an irreversible,
         # already-applied side effect. `required: true` is rejected for
