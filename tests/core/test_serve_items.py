@@ -336,3 +336,24 @@ def test_get_spec_includes_resolved_work_item_kind(tmp_path):
     client = _app(tmp_path)
     assert client.get("/specs/linked").json()["work_item_kind"] == "feature"
     assert client.get("/specs/unlinked").json()["work_item_kind"] is None
+
+
+def test_get_spec_survives_corrupt_linked_work_item(tmp_path, monkeypatch):
+    # A corrupt/unreadable linked WorkItem must not 500 the spec detail — the kind is decorative,
+    # so a lookup failure falls back to work_item_kind=None and the spec still loads.
+    from mship.core.spec import Spec
+    from mship.core.spec_store import SpecStore
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="Feat", kind="feature", workspace="testws", now=_now())
+    store = SpecStore(tmp_path / "specs")
+    store.save(Spec(id="linked", title="Linked", status="needs_review",
+                    created_at=_now(), updated_at=_now(), work_item_id=wi.id))
+
+    def _boom(self, item_id):
+        raise ValueError("corrupt workitem file")
+
+    monkeypatch.setattr(WorkItemStore, "get", _boom)
+    client = _app(tmp_path)
+    resp = client.get("/specs/linked")
+    assert resp.status_code == 200
+    assert resp.json()["work_item_kind"] is None
