@@ -275,7 +275,9 @@ def test_post_approve_gate_and_success(tmp_path):
     # clearing the last blocker (answering q1) auto-approves — no separate /approve needed
     ans = client.post("/specs/dq/questions/q1/answer", json={"answer": "yes"})
     assert ans.status_code == 200 and ans.json()["status"] == "approved"
-    assert client.post("/specs/dq/approve", json={}).status_code == 409           # re-approve illegal
+    # a redundant /approve on the already-approved spec is idempotent (200), not a spurious 409
+    reapprove = client.post("/specs/dq/approve", json={})
+    assert reapprove.status_code == 200 and reapprove.json()["status"] == "approved"
 
 
 def test_post_approve_succeeds_when_approvable_but_not_auto_approved(tmp_path):

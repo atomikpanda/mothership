@@ -582,6 +582,11 @@ def create_app(
     @app.post("/specs/{spec_id}/approve")
     def post_approve(spec_id: str, body: ApproveBody):
         spec = _load_or_404(spec_id)
+        if spec.status == "approved":
+            # Idempotent: already approved (e.g. auto-approved when the last verdict cleared the
+            # gate). A client that still posts /approve as a belt-and-suspenders step gets a plain
+            # success, not a spurious approved->approved 409.
+            return build_review(spec)
         if not body.bypass_gate:
             blockers = approval_blockers(spec)
             if blockers:
