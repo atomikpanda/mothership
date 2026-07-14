@@ -88,10 +88,29 @@ def test_stamp_agent_seen_marks_only_awaiting_reply_threads():
 
     now = T0 + timedelta(minutes=1)
     s = FakeStore()
-    human = _thread("h", T0, role="human")   # latest is human → awaiting_reply
+    human = _thread("h", T0, role="human")   # latest is human → awaiting_reply, message at T0
     agent = _thread("a", T0, role="agent")   # latest is agent → not awaiting_reply
     stamp_agent_seen(s, [human, agent], now)
-    assert s.marked == [("h", now)]          # only the human-latest thread is stamped
+    assert s.marked == [("h", T0)]           # only the human thread, stamped to its message time
+
+
+def test_stamp_agent_seen_uses_snapshot_message_time_not_now():
+    # Stamp the latest message the agent actually SAW (the snapshot), not a wall clock — so a human
+    # message that arrives after the snapshot (with a later created_at) is not marked Read early.
+    from mship.core.message_wait import stamp_agent_seen
+
+    class FakeStore:
+        def __init__(self):
+            self.marked = []
+
+        def mark_agent_seen(self, tid, up_to):
+            self.marked.append((tid, up_to))
+
+    s = FakeStore()
+    human = _thread("h", T0, role="human")       # message at T0
+    much_later = T0 + timedelta(hours=1)
+    stamp_agent_seen(s, [human], much_later)
+    assert s.marked == [("h", T0)]               # T0 (message time), NOT much_later
 
 
 def test_stamp_agent_seen_swallows_store_errors():
