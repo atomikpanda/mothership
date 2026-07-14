@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from mship.core.spec import AcceptanceCriterion, OpenQuestion, Spec, SpecDraft
-from mship.core.spec_body import render_body
+from mship.core.spec_body import parse_body_sections, render_body
 from mship.util.slug import slugify
 
 
@@ -94,6 +94,19 @@ def apply_draft(spec: Spec, draft: SpecDraft) -> Spec:
     """Merge a SpecDraft into `spec` in place: render the canonical body, set the
     structured fields, and assign deterministic `ac`/`q` ids. Does NOT change
     status/updated_at — the caller owns the lifecycle transition + persistence."""
+    # Capture the OLD prose text for each comparable section id BEFORE any field is
+    # overwritten below — the canonical problem/user_story/approach live in `spec.body`
+    # (parse it now, since `render_body` is about to clobber it), while non_goals/risks
+    # are list fields. Used just below to decide which prose verdicts survive.
+    old_sections = parse_body_sections(spec.body)
+    old_prose_text: dict[str, object] = {
+        "problem": old_sections.get("Problem", ""),
+        "user_story": old_sections.get("User story", ""),
+        "approach": old_sections.get("Approach", ""),
+        "non_goals": list(spec.non_goals),
+        "risks": list(spec.risks),
+    }
+
     spec.body = render_body(
         draft.problem, draft.user_story, draft.approach,
         additional_sections=[(s.heading, s.body) for s in draft.additional_sections],
@@ -101,6 +114,30 @@ def apply_draft(spec: Spec, draft: SpecDraft) -> Spec:
     spec.non_goals = list(draft.non_goals)
     spec.risks = list(draft.risks)
     spec.affected_repos = list(draft.affected_repos)
+    # Prose-section verdicts across a re-draft (MOS-172, Greptile #344): a verdict is
+    # preserved only when the section's TEXT is UNCHANGED, and dropped (re-reviewed)
+    # when it changed — mirroring the acceptance-criteria matcher below (a rewritten
+    # section must not keep a stale approval, nor stay blocked after it's fixed). We
+    # compare the new text (parsed-body prose stripped exactly as render_body writes
+    # it; list fields compared as lists) against the OLD text captured above. Section
+    # ids with no draft-derived text (e.g. `scope_risk`, or any unknown/legacy key)
+    # have nothing to compare, so they carry over unchanged.
+    new_prose_text: dict[str, object] = {
+        "problem": draft.problem.strip(),
+        "user_story": draft.user_story.strip(),
+        "approach": draft.approach.strip(),
+        "non_goals": list(draft.non_goals),
+        "risks": list(draft.risks),
+    }
+    preserved_prose = {}
+    for sid, pv in spec.prose_verdicts.items():
+        if sid in old_prose_text:
+            if old_prose_text[sid] == new_prose_text[sid]:
+                preserved_prose[sid] = pv  # unchanged text → keep verdict
+            # else: text changed → drop so it is re-reviewed
+        else:
+            preserved_prose[sid] = pv  # no comparable text → carry over unchanged
+    spec.prose_verdicts = preserved_prose
     # Preserve verdict + evidence for unchanged criteria across a re-apply. Criteria
     # have no stable id (ids are positional, ac{i+1}), so match each new criterion to
     # a prior one in two passes, consuming each prior at most once:

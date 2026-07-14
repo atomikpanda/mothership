@@ -27,13 +27,25 @@ def test_build_review_shapes_units_and_context():
     r = build_review(_spec())
     assert r["id"] == "dq" and r["status"] == "needs_review"
     assert r["acceptance_criteria"] == [
-        {"id": "ac1", "text": "view questions", "verdict": "approved", "evidence": []},
-        {"id": "ac2", "text": "record answer", "verdict": "unreviewed", "evidence": []},
+        {"id": "ac1", "text": "view questions", "verdict": "approved", "comment": None, "evidence": []},
+        {"id": "ac2", "text": "record answer", "verdict": "unreviewed", "comment": None, "evidence": []},
     ]
     assert r["open_questions"] == [{"id": "q1", "text": "Android?", "answer": None}]
     assert r["context"]["problem"] == "the problem"
     assert r["context"]["approach"] == "the approach"
     assert r["context"]["non_goals"] == ["chat"]
+
+
+def test_build_review_emits_prose_verdicts_and_comments():
+    from mship.core.spec import ProseVerdict
+    s = _spec()
+    set_criterion_verdict(s, "ac1", "flagged", comment="fix")
+    s.prose_verdicts = {"approach": ProseVerdict(verdict="approved")}
+    review = build_review(s)
+    assert review["prose_verdicts"]["approach"]["verdict"] == "approved"
+    # the criterion's comment is exposed in the review's criteria list
+    crit = next(c for c in review["acceptance_criteria"] if c["id"] == "ac1")
+    assert crit["comment"] == "fix"
 
 
 def test_build_review_includes_clarification_reason():
@@ -91,9 +103,32 @@ def test_set_criterion_verdict_rejects_unknown_id():
         set_criterion_verdict(_spec(), "nope", "approved")
 
 
-def test_set_criterion_verdict_rejects_prose_unit():
-    with pytest.raises(ValueError, match="not verdict-able"):
-        set_criterion_verdict(_spec(), "problem", "approved")
+def test_set_prose_verdict_accepts_a_prose_section():
+    from mship.core.spec_review import set_prose_verdict
+    s = _spec()
+    set_prose_verdict(s, "approach", "flagged", comment="unclear")
+    assert s.prose_verdicts["approach"].verdict == "flagged"
+    assert s.prose_verdicts["approach"].comment == "unclear"
+
+
+def test_set_prose_verdict_rejects_unknown_section():
+    from mship.core.spec_review import set_prose_verdict
+    import pytest
+    with pytest.raises(ValueError, match="not a prose section"):
+        set_prose_verdict(_spec(), "bogus", "approved")
+
+
+def test_set_prose_verdict_rejects_bad_verdict():
+    from mship.core.spec_review import set_prose_verdict
+    import pytest
+    with pytest.raises(ValueError, match="invalid verdict"):
+        set_prose_verdict(_spec(), "problem", "bogus")
+
+
+def test_set_criterion_verdict_stores_comment():
+    s = _spec()  # _spec() should include an ac1
+    set_criterion_verdict(s, "ac1", "flagged", comment="needs work")
+    assert s.acceptance_criteria[0].comment == "needs work"
 
 
 def test_set_criterion_evidence_appends_and_persists_in_object():

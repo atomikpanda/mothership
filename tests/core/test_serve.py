@@ -161,6 +161,29 @@ def test_post_verdict(tmp_path):
     assert client.post("/specs/none/verdict", json={"criterion_id": "ac1", "verdict": "approved"}).status_code == 404
 
 
+def test_post_prose_verdict(tmp_path):
+    _seed_spec(tmp_path)
+    client = TestClient(_app(tmp_path))
+    r = client.post("/specs/dq/prose-verdict", json={"section_id": "approach", "verdict": "flagged", "comment": "unclear"})
+    assert r.status_code == 200
+    # verdict endpoint returns the review; the spec itself now carries the prose verdict
+    from mship.core.spec_store import SpecStore
+    s = SpecStore(tmp_path / "specs").find_by_id("dq")
+    assert s.prose_verdicts["approach"].verdict == "flagged"
+    assert s.prose_verdicts["approach"].comment == "unclear"
+    assert client.post("/specs/dq/prose-verdict", json={"section_id": "nope", "verdict": "approved"}).status_code == 400
+    assert client.post("/specs/dq/prose-verdict", json={"section_id": "approach", "verdict": "bogus"}).status_code == 400
+
+
+def test_post_verdict_with_comment(tmp_path):
+    _seed_spec(tmp_path)
+    client = TestClient(_app(tmp_path))
+    r = client.post("/specs/dq/verdict", json={"criterion_id": "ac1", "verdict": "flagged", "comment": "fix"})
+    assert r.status_code == 200
+    from mship.core.spec_store import SpecStore
+    assert SpecStore(tmp_path / "specs").find_by_id("dq").acceptance_criteria[0].comment == "fix"
+
+
 def test_post_evidence_persists_and_validates(tmp_path):
     _seed_spec(tmp_path)   # spec "dq" with one AC "ac1"
     client = TestClient(_app(tmp_path))
