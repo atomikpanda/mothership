@@ -57,6 +57,8 @@ def resolve_task_thread(msgs, workitems, slug, task, url, now):
 
     existing = next((t for t in msgs.list() if t.task_slug == slug), None)
     if existing is not None:
+        if wi is not None:
+            workitems.add_thread(wi.id, existing.id, now)  # link so later WorkItem events reuse it
         return existing.id, wi
 
     # create_thread seeds a human message; the event itself is appended separately so it lands as

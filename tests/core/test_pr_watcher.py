@@ -737,3 +737,19 @@ def test_finish_announce_then_watcher_merge_share_one_thread():
     events = [c for c in msgs.append_calls if c["kind"] == "event"]
     assert len({e["thread_id"] for e in events}) == 1  # opened + merged on one thread
     assert any("opened" in e["text"] for e in events) and any("merged" in e["text"] for e in events)
+
+
+def test_resolve_links_task_slug_thread_to_workitem():
+    # A WorkItem with no thread + an existing task_slug thread (no url match): resolve must reuse
+    # AND link it, so later WorkItem events don't fall through and spawn a divergent thread.
+    from mship.core.pr_watcher import resolve_task_thread
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    workitems.items["wi-8"] = FakeWorkItem(id="wi-8", thread_ids=[])
+    thread = msgs.create_thread(subject="task-8", text="seed", now=NOW, task_slug="task-8")
+    task = FakeTask(pr_urls={}, work_item_id="wi-8")
+
+    tid, _wi = resolve_task_thread(msgs, workitems, "task-8", task, "https://github.com/o/r/pull/8", NOW)
+
+    assert tid == thread.id
+    assert workitems.items["wi-8"].thread_ids == [thread.id]  # linked
