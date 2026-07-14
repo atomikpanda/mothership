@@ -88,6 +88,10 @@ def register(parent: typer.Typer, get_container) -> None:
             )
         finally:
             lease.release(pid)
+        # The agent is now seeing these human messages — stamp the agent read cursor (#345). Only
+        # awaiting_reply threads; best-effort so a stamp can't fail the wait.
+        from mship.core.message_wait import stamp_agent_seen
+        stamp_agent_seen(store, res.threads, datetime.now(timezone.utc))
         out = {
             "threads": [
                 {"id": t.id, "subject": t.subject,
