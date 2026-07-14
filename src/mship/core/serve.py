@@ -512,6 +512,24 @@ def create_app(
         store.save(spec)
         return build_review(spec)
 
+    def _auto_approve_if_ready(spec):
+        """Auto-transition needs_review → approved the moment the last verdict/answer clears the
+        approval gate, so a review 'sticks' without a separate approve call. The client used to
+        detect the final chunk itself and POST /approve, but that intent was lost when its
+        in-memory state was recreated across sessions, leaving fully-reviewed specs stuck in
+        needs_review. No-op unless the spec is approvable AND the transition is legal (mirrors
+        POST /approve's own gate)."""
+        from mship.core.spec import InvalidTransition, validate_transition
+        from mship.core.spec_approve import approval_blockers
+        if spec.status != "needs_review" or approval_blockers(spec):
+            return
+        try:
+            validate_transition(spec.status, "approved")
+        except InvalidTransition:
+            return
+        spec.status = "approved"
+        spec.clarification_reason = None  # an approved spec carries no pending request-changes reason
+
     @app.post("/specs/{spec_id}/verdict")
     def post_verdict(spec_id: str, body: VerdictBody):
         spec = _load_or_404(spec_id)
@@ -519,6 +537,7 @@ def create_app(
             set_criterion_verdict(spec, body.criterion_id, body.verdict, body.comment)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        _auto_approve_if_ready(spec)
         return _save_and_review(spec)
 
     @app.post("/specs/{spec_id}/prose-verdict")
@@ -528,6 +547,7 @@ def create_app(
             set_prose_verdict(spec, body.section_id, body.verdict, body.comment)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        _auto_approve_if_ready(spec)
         return _save_and_review(spec)
 
     @app.post("/specs/{spec_id}/evidence")
@@ -553,6 +573,7 @@ def create_app(
             answer_question(spec, qid, body.answer)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        _auto_approve_if_ready(spec)
         return _save_and_review(spec)
 
     from mship.core.spec import InvalidTransition, validate_transition

@@ -184,6 +184,48 @@ def test_post_verdict_with_comment(tmp_path):
     assert SpecStore(tmp_path / "specs").find_by_id("dq").acceptance_criteria[0].comment == "fix"
 
 
+def test_answer_clearing_last_blocker_auto_approves(tmp_path):
+    # "dq" already has ac1 approved and no prose blockers; its only remaining blocker is the
+    # unanswered q1. Answering it clears the gate, so the spec auto-approves (and persists) —
+    # a fully-reviewed spec no longer sits stuck in needs_review.
+    _seed_spec(tmp_path)
+    client = TestClient(_app(tmp_path))
+    r = client.post("/specs/dq/questions/q1/answer", json={"answer": "yes"})
+    assert r.status_code == 200
+    assert r.json()["status"] == "approved"
+    assert SpecStore(tmp_path / "specs").find_by_id("dq").status == "approved"
+
+
+def test_verdict_clearing_last_blocker_auto_approves(tmp_path):
+    now = datetime(2026, 6, 14, tzinfo=timezone.utc)
+    SpecStore(tmp_path / "specs").save(Spec(
+        id="s2", title="s2", status="needs_review", created_at=now, updated_at=now, task_slug="s2",
+        body=render_body("p", "u", "a"),
+        acceptance_criteria=[AcceptanceCriterion(id="ac1", text="x", verdict="unreviewed")],
+        open_questions=[],
+    ))
+    client = TestClient(_app(tmp_path))
+    r = client.post("/specs/s2/verdict", json={"criterion_id": "ac1", "verdict": "approved"})
+    assert r.status_code == 200
+    assert r.json()["status"] == "approved"                                      # sole blocker cleared
+    assert SpecStore(tmp_path / "specs").find_by_id("s2").status == "approved"
+
+
+def test_verdict_not_yet_clearing_blockers_stays_needs_review(tmp_path):
+    now = datetime(2026, 6, 14, tzinfo=timezone.utc)
+    SpecStore(tmp_path / "specs").save(Spec(
+        id="s3", title="s3", status="needs_review", created_at=now, updated_at=now, task_slug="s3",
+        body=render_body("p", "u", "a"),
+        acceptance_criteria=[AcceptanceCriterion(id="ac1", text="x", verdict="unreviewed"),
+                             AcceptanceCriterion(id="ac2", text="y", verdict="unreviewed")],
+        open_questions=[],
+    ))
+    client = TestClient(_app(tmp_path))
+    r = client.post("/specs/s3/verdict", json={"criterion_id": "ac1", "verdict": "approved"})
+    assert r.status_code == 200
+    assert r.json()["status"] == "needs_review"                                  # ac2 still unreviewed
+
+
 def test_post_evidence_persists_and_validates(tmp_path):
     _seed_spec(tmp_path)   # spec "dq" with one AC "ac1"
     client = TestClient(_app(tmp_path))
@@ -230,10 +272,25 @@ def test_post_approve_gate_and_success(tmp_path):
     blocked = client.post("/specs/dq/approve", json={})
     assert blocked.status_code == 409          # q1 unanswered
     assert isinstance(blocked.json()["detail"], str)   # uniform string shape
-    client.post("/specs/dq/questions/q1/answer", json={"answer": "yes"})
-    ok = client.post("/specs/dq/approve", json={})
-    assert ok.status_code == 200 and ok.json()["status"] == "approved"
+    # clearing the last blocker (answering q1) auto-approves — no separate /approve needed
+    ans = client.post("/specs/dq/questions/q1/answer", json={"answer": "yes"})
+    assert ans.status_code == 200 and ans.json()["status"] == "approved"
     assert client.post("/specs/dq/approve", json={}).status_code == 409           # re-approve illegal
+
+
+def test_post_approve_succeeds_when_approvable_but_not_auto_approved(tmp_path):
+    # The explicit /approve still works for an approvable spec that never went through a verdict
+    # endpoint (so auto-approve didn't fire) — e.g. one seeded already-approvable.
+    now = datetime(2026, 6, 14, tzinfo=timezone.utc)
+    SpecStore(tmp_path / "specs").save(Spec(
+        id="ready", title="ready", status="needs_review", created_at=now, updated_at=now, task_slug="ready",
+        body=render_body("p", "u", "a"),
+        acceptance_criteria=[AcceptanceCriterion(id="ac1", text="x", verdict="approved")],
+        open_questions=[],
+    ))
+    client = TestClient(_app(tmp_path))
+    r = client.post("/specs/ready/approve", json={})
+    assert r.status_code == 200 and r.json()["status"] == "approved"
 
 
 def test_post_approve_bypass(tmp_path):
