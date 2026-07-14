@@ -40,6 +40,12 @@ class AcceptanceCriterion(BaseModel):
     text: str
     verdict: Literal["unreviewed", "approved", "flagged"] = "unreviewed"
     evidence: list[AcceptanceEvidence] = []
+    comment: str | None = None
+
+
+class ProseVerdict(BaseModel):
+    verdict: Literal["unreviewed", "approved", "flagged"] = "unreviewed"
+    comment: str | None = None
 
 
 class OpenQuestion(BaseModel):
@@ -63,6 +69,7 @@ class Spec(BaseModel):
     body: str = ""
     work_item_id: str | None = None
     clarification_reason: str | None = None
+    prose_verdicts: dict[str, ProseVerdict] = {}
 
     @model_validator(mode="before")
     @classmethod
