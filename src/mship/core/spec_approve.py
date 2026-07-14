@@ -13,4 +13,11 @@ def approval_blockers(spec: Spec) -> list[str]:
     unanswered = [q.id for q in spec.open_questions if q.answer is None]
     if unanswered:
         blockers.append(f"open questions unanswered: {', '.join(unanswered)}")
+    # Prose-section verdicts (MOS-172), backward-compatibly: a section with an
+    # explicit non-approved verdict blocks; a section absent from prose_verdicts
+    # contributes nothing — legacy specs (and specs the reviewer hasn't touched)
+    # still approve.
+    bad_prose = [sid for sid, pv in spec.prose_verdicts.items() if pv.verdict != "approved"]
+    if bad_prose:
+        blockers.append(f"prose sections not approved: {', '.join(sorted(bad_prose))}")
     return blockers
