@@ -9,6 +9,7 @@ event; it does not itself wake or steer anything.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -17,6 +18,14 @@ log = logging.getLogger(__name__)
 
 # States that mean "this PR is done, the task's agent should notice."
 _TERMINAL_STATES = ("merged", "closed")
+
+
+def _refs_pr(text: str, needle: str) -> bool:
+    """True if `text` contains `needle` NOT immediately followed by another digit — so a
+    reference to `.../pull/4` doesn't spuriously match `.../pull/42`. Used for both the PR
+    url (thread lookup) and the `PR <state>: <url>` dedup marker; both end in the PR number,
+    so a trailing-digit boundary is exactly the right test."""
+    return re.search(re.escape(needle) + r"(?!\d)", text) is not None
 
 
 class PrWatcher:
@@ -137,7 +146,7 @@ class PrWatcher:
         thread = self.msgs.get(tid)
         marker = f"PR {st}: {url}"
         if thread is not None and any(
-            m.kind == "event" and marker in m.text
+            m.kind == "event" and _refs_pr(m.text, marker)
             for m in thread.messages
         ):
             # Already posted (prior process) — record it so this process's
@@ -220,7 +229,7 @@ class PrWatcher:
 
         url_thread = next(
             (t for t in self.msgs.list()
-             if any(url in m.text for m in t.messages)),
+             if any(_refs_pr(m.text, url) for m in t.messages)),
             None,
         )
         if url_thread is not None:
