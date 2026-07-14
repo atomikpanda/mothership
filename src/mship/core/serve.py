@@ -365,7 +365,12 @@ def create_app(
         spec = store.find_by_id(spec_id)
         if spec is None:
             raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
-        return spec.model_dump(mode="json")
+        data = spec.model_dump(mode="json")
+        # Resolve the linked WorkItem's kind (feature/bug/chore) so the Queue review cards can show
+        # it alongside the spec title + affected_repos. Null when the spec isn't linked to an item.
+        wi = workitems.get(spec.work_item_id) if spec.work_item_id else None
+        data["work_item_kind"] = wi.kind if wi is not None else None
+        return data
 
     @app.get("/specs/{spec_id}/review")
     def get_review(spec_id: str):

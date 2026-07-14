@@ -320,3 +320,19 @@ def test_post_item_phase_hook_does_not_hold_item_msg_lock(tmp_path):
     assert phase_result["status"] == 200
     assert phase_result["elapsed"] >= 1.0
     assert items.get(slow_item.id).phase_override == "done"
+
+
+def test_get_spec_includes_resolved_work_item_kind(tmp_path):
+    # The Queue review cards show the WorkItem kind; get_spec resolves it from the linked item.
+    from mship.core.spec import Spec
+    from mship.core.spec_store import SpecStore
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="Feat", kind="feature", workspace="testws", now=_now())
+    store = SpecStore(tmp_path / "specs")
+    store.save(Spec(id="linked", title="Linked", status="needs_review",
+                    created_at=_now(), updated_at=_now(), work_item_id=wi.id))
+    store.save(Spec(id="unlinked", title="Unlinked", status="needs_review",
+                    created_at=_now(), updated_at=_now()))
+    client = _app(tmp_path)
+    assert client.get("/specs/linked").json()["work_item_kind"] == "feature"
+    assert client.get("/specs/unlinked").json()["work_item_kind"] is None
