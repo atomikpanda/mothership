@@ -101,6 +101,14 @@ def apply_draft(spec: Spec, draft: SpecDraft) -> Spec:
     spec.non_goals = list(draft.non_goals)
     spec.risks = list(draft.risks)
     spec.affected_repos = list(draft.affected_repos)
+    # Preserve prose-section verdicts across a re-draft (MOS-172). Section ids are
+    # stable (problem/user_story/approach/non_goals/risks), so this is a straight
+    # carry-over — unlike the positional AC matcher below. (The prose text may have
+    # changed; re-reviewing is the reviewer's call, but a re-draft must not silently
+    # drop prior verdicts.) apply_draft mutates `spec` in place and never reassigns
+    # prose_verdicts, so they already survive; the explicit copy documents the intent
+    # and guards against a future in-place clear.
+    spec.prose_verdicts = dict(spec.prose_verdicts)
     # Preserve verdict + evidence for unchanged criteria across a re-apply. Criteria
     # have no stable id (ids are positional, ac{i+1}), so match each new criterion to
     # a prior one in two passes, consuming each prior at most once:

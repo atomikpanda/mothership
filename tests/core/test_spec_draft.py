@@ -63,6 +63,19 @@ def test_apply_draft_preserves_evidence_and_verdict_for_unchanged_ac():
     assert out.acceptance_criteria[0].evidence == [AcceptanceEvidence(kind="test", ref="test-runs/5")]
 
 
+def test_apply_draft_preserves_prose_verdicts():
+    from mship.core.spec import ProseVerdict
+    spec = _spec()
+    spec.prose_verdicts = {"approach": ProseVerdict(verdict="approved"),
+                           "problem": ProseVerdict(verdict="flagged", comment="c")}
+    draft = SpecDraft(problem="P2", user_story="U", approach="A", acceptance_criteria=["x"])
+    out = apply_draft(spec, draft)
+    # prose verdicts carry over by stable section id (re-review the whole spec is the reviewer's call,
+    # but a re-draft alone must not silently reset prior verdicts)
+    assert out.prose_verdicts["approach"].verdict == "approved"
+    assert out.prose_verdicts["problem"].comment == "c"
+
+
 def test_apply_draft_resets_evidence_and_verdict_for_materially_changed_ac():
     spec = _spec()
     spec.acceptance_criteria = [
