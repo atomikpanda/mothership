@@ -44,6 +44,17 @@ def test_prose_flagged_blocks_but_missing_prose_does_not():
     assert approval_blockers(s) == []
 
 
+def test_unknown_prose_key_does_not_block():
+    # Greptile #344: only known section ids (PROSE_UNIT_IDS) are settable/clearable
+    # via the API, so a stray/unknown persisted prose key must NOT block approval —
+    # otherwise the spec would be un-approvable AND un-fixable.
+    from mship.core.spec import ProseVerdict
+    s = _spec(criteria=[AcceptanceCriterion(id="ac1", text="x", verdict="approved")],
+              questions=[OpenQuestion(id="q1", text="?", answer="y")])
+    s.prose_verdicts = {"bogus_unknown": ProseVerdict(verdict="flagged")}
+    assert approval_blockers(s) == []
+
+
 def test_approval_gate_unchanged_approved_verdicts_zero_evidence():
     """ac6: evidence is NEVER required to approve. A spec with all verdicts
     approved and NO evidence has no approval blockers."""

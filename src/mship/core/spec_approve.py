@@ -1,5 +1,6 @@
 from __future__ import annotations
 from mship.core.spec import Spec
+from mship.core.spec_review import PROSE_UNIT_IDS
 
 
 def approval_blockers(spec: Spec) -> list[str]:
@@ -13,11 +14,16 @@ def approval_blockers(spec: Spec) -> list[str]:
     unanswered = [q.id for q in spec.open_questions if q.answer is None]
     if unanswered:
         blockers.append(f"open questions unanswered: {', '.join(unanswered)}")
-    # Prose-section verdicts (MOS-172), backward-compatibly: a section with an
+    # Prose-section verdicts (MOS-172), backward-compatibly: a KNOWN section with an
     # explicit non-approved verdict blocks; a section absent from prose_verdicts
     # contributes nothing — legacy specs (and specs the reviewer hasn't touched)
-    # still approve.
-    bad_prose = [sid for sid, pv in spec.prose_verdicts.items() if pv.verdict != "approved"]
+    # still approve. Only known section ids (PROSE_UNIT_IDS) are settable/clearable
+    # via the API, so a stray/unknown persisted key must NOT block — otherwise the
+    # spec would be both un-approvable and un-fixable (Greptile #344).
+    bad_prose = [
+        sid for sid, pv in spec.prose_verdicts.items()
+        if sid in PROSE_UNIT_IDS and pv.verdict != "approved"
+    ]
     if bad_prose:
         blockers.append(f"prose sections not approved: {', '.join(sorted(bad_prose))}")
     return blockers

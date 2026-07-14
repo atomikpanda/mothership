@@ -63,17 +63,71 @@ def test_apply_draft_preserves_evidence_and_verdict_for_unchanged_ac():
     assert out.acceptance_criteria[0].evidence == [AcceptanceEvidence(kind="test", ref="test-runs/5")]
 
 
-def test_apply_draft_preserves_prose_verdicts():
+def test_apply_draft_preserves_prose_verdicts_for_unchanged_sections():
     from mship.core.spec import ProseVerdict
+    from mship.core.spec_body import render_body
     spec = _spec()
+    # Establish a known OLD body + list fields, then re-draft with IDENTICAL text —
+    # every prose verdict must carry over unchanged.
+    spec.body = render_body("P", "U", "A")
+    spec.non_goals = ["chat"]
+    spec.risks = ["scope"]
     spec.prose_verdicts = {"approach": ProseVerdict(verdict="approved"),
-                           "problem": ProseVerdict(verdict="flagged", comment="c")}
-    draft = SpecDraft(problem="P2", user_story="U", approach="A", acceptance_criteria=["x"])
+                           "problem": ProseVerdict(verdict="flagged", comment="c"),
+                           "non_goals": ProseVerdict(verdict="approved"),
+                           "risks": ProseVerdict(verdict="approved")}
+    draft = SpecDraft(problem="P", user_story="U", approach="A",
+                      non_goals=["chat"], risks=["scope"], acceptance_criteria=["x"])
     out = apply_draft(spec, draft)
-    # prose verdicts carry over by stable section id (re-review the whole spec is the reviewer's call,
-    # but a re-draft alone must not silently reset prior verdicts)
     assert out.prose_verdicts["approach"].verdict == "approved"
     assert out.prose_verdicts["problem"].comment == "c"
+    assert out.prose_verdicts["non_goals"].verdict == "approved"
+    assert out.prose_verdicts["risks"].verdict == "approved"
+
+
+def test_apply_draft_drops_prose_verdict_when_text_changed():
+    # Greptile #344: a prose verdict is kept ONLY when the section text is unchanged.
+    # A rewritten `approach` must NOT keep its stale approval (would slip past the
+    # gate); an unchanged `problem` must keep its verdict.
+    from mship.core.spec import ProseVerdict
+    from mship.core.spec_body import render_body
+    spec = _spec()
+    spec.body = render_body("the problem", "U", "old approach")
+    spec.prose_verdicts = {"approach": ProseVerdict(verdict="approved"),
+                           "problem": ProseVerdict(verdict="approved")}
+    draft = SpecDraft(problem="the problem", user_story="U", approach="new approach",
+                      acceptance_criteria=["x"])       # approach CHANGED, problem SAME
+    out = apply_draft(spec, draft)
+    assert out.prose_verdicts["problem"].verdict == "approved"   # unchanged → preserved
+    assert "approach" not in out.prose_verdicts                  # changed → re-review
+
+
+def test_apply_draft_drops_prose_verdict_when_list_field_changed():
+    # non_goals/risks are list fields — changing the list must reset that section's
+    # verdict too; an unchanged list keeps it.
+    from mship.core.spec import ProseVerdict
+    spec = _spec()
+    spec.non_goals = ["a"]
+    spec.risks = ["r"]
+    spec.prose_verdicts = {"non_goals": ProseVerdict(verdict="approved"),
+                           "risks": ProseVerdict(verdict="approved")}
+    draft = SpecDraft(problem="P", user_story="U", approach="A",
+                      non_goals=["a", "b"], risks=["r"],       # non_goals CHANGED, risks SAME
+                      acceptance_criteria=["x"])
+    out = apply_draft(spec, draft)
+    assert "non_goals" not in out.prose_verdicts                 # changed → re-review
+    assert out.prose_verdicts["risks"].verdict == "approved"     # unchanged → preserved
+
+
+def test_apply_draft_preserves_uncomparable_prose_verdict():
+    # A section id with no draft-derived text (e.g. scope_risk) has nothing to compare,
+    # so its verdict carries over unchanged across a re-draft.
+    from mship.core.spec import ProseVerdict
+    spec = _spec()
+    spec.prose_verdicts = {"scope_risk": ProseVerdict(verdict="approved")}
+    draft = SpecDraft(problem="P2", user_story="U2", approach="A2", acceptance_criteria=["x"])
+    out = apply_draft(spec, draft)
+    assert out.prose_verdicts["scope_risk"].verdict == "approved"
 
 
 def test_apply_draft_resets_evidence_and_verdict_for_materially_changed_ac():
