@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from mship.core.serve import create_app
 from mship.core.message_store import MessageStore
 from mship.core.state import StateManager
+from mship.core.workitem_store import WorkItemStore
 
 
 def _client(tmp_path: Path, auth_token=None) -> tuple[TestClient, MessageStore]:
@@ -68,6 +69,73 @@ def test_wait_invalid_since_returns_422(tmp_path: Path):
     client, _ = _client(tmp_path)
     r = client.get("/threads", params={"wait": 1, "since": "notadate", "timeout": 0.1})
     assert r.status_code == 422
+
+
+def _workitems(tmp_path: Path) -> WorkItemStore:
+    return WorkItemStore(tmp_path / ".mothership" / "workitems")
+
+
+def test_summary_stamps_direct_work_item_id(tmp_path: Path):
+    # A thread in an item's thread_ids resolves to that item on the list payload.
+    client, store = _client(tmp_path)
+    now = datetime.now(timezone.utc)
+    t = store.create_thread("s", "hi", now)
+    items = _workitems(tmp_path)
+    wi = items.create("Feature X", "feature", "test-ws", now)
+    items.add_thread(wi.id, t.id, now)
+    assert client.get("/threads").json()[0]["work_item_id"] == wi.id
+
+
+def test_summary_stamps_indirect_via_task_slug(tmp_path: Path):
+    # A thread linked only by task_slug (no direct thread_ids membership) still resolves.
+    client, store = _client(tmp_path)
+    now = datetime.now(timezone.utc)
+    store.create_thread("s", "hi", now, task_slug="my-task")
+    items = _workitems(tmp_path)
+    wi = items.create("Feature X", "feature", "test-ws", now)
+    items.add_task(wi.id, "my-task", now)
+    assert client.get("/threads").json()[0]["work_item_id"] == wi.id
+
+
+def test_summary_stamps_indirect_via_spec_id(tmp_path: Path):
+    client, store = _client(tmp_path)
+    now = datetime.now(timezone.utc)
+    t = store.create_thread("s", "hi", now)
+    store.link_spec(t.id, "spec-42", now)
+    items = _workitems(tmp_path)
+    wi = items.create("Feature X", "feature", "test-ws", now)
+    items.link_spec(wi.id, "spec-42", now)
+    assert client.get("/threads").json()[0]["work_item_id"] == wi.id
+
+
+def test_summary_work_item_id_null_when_unowned(tmp_path: Path):
+    client, store = _client(tmp_path)
+    store.create_thread("s", "hi", datetime.now(timezone.utc))
+    assert client.get("/threads").json()[0]["work_item_id"] is None
+
+
+def test_summary_resolves_to_single_item_when_also_indirectly_linkable(tmp_path: Path):
+    # Direct thread_ids membership is exclusive and outranks the indirect fallback, so the
+    # stamped work_item_id is never ambiguous (the merge-watcher routes to the same item).
+    client, store = _client(tmp_path)
+    now = datetime.now(timezone.utc)
+    t = store.create_thread("s", "hi", now, task_slug="my-task")
+    items = _workitems(tmp_path)
+    owner = items.create("Owner", "feature", "test-ws", now)
+    items.add_thread(owner.id, t.id, now)
+    other = items.create("Other", "chore", "test-ws", now)
+    items.add_task(other.id, "my-task", now)
+    assert client.get("/threads").json()[0]["work_item_id"] == owner.id
+
+
+def test_summary_exposes_awaiting_agent_event(tmp_path: Path):
+    # The group attention rollup needs the unhandled-agent-event signal on the list payload.
+    client, store = _client(tmp_path)
+    now = datetime.now(timezone.utc)
+    t = store.create_thread("s", "hi", now)
+    assert client.get("/threads").json()[0]["awaiting_agent_event"] is False
+    store.append(t.id, "agent", "PR merged", now, kind="event")
+    assert client.get("/threads").json()[0]["awaiting_agent_event"] is True
 
 
 def test_agent_seen_at_exposed_on_list_and_detail(tmp_path: Path):
