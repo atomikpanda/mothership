@@ -825,17 +825,34 @@ def create_app(
         return _thread_payload(t)
 
     def _summaries(threads):
+        threads = list(threads)
+        # Stamp each summary with the single WorkItem that owns the thread (direct thread_ids
+        # membership, else indirect via spec_id/task_slug) so Ground Control can group the
+        # messages surface by work item. Invariant: a thread resolves to AT MOST ONE item.
+        # include_archived=True: link ownership survives archival (mirrors _thread_payload's
+        # resolution). Best-effort — a corrupt WorkItem must never 500 the list, so the store
+        # scan is guarded and index_thread_work_items degrades to None, matching get_spec's
+        # work_item_kind stamping.
+        from mship.core.view.thread_links import index_thread_work_items
+        try:
+            all_items = list(workitems.list(include_archived=True))
+        except Exception:
+            all_items = []
+        wi_by_thread = index_thread_work_items(threads, all_items)
         return [
             {
                 "id": t.id, "subject": t.subject,
                 "updated_at": t.updated_at.isoformat(),
                 "awaiting_reply": t.awaiting_reply,
+                # unhandled agent `event` (e.g. a PR merge) — feeds GC's group attention rollup.
+                "awaiting_agent_event": t.awaiting_agent_event,
                 "needs_you": t.needs_you,
                 "needs_decision": t.needs_decision,
                 "unseen": t.unseen,
                 "agent_seen_at": t.agent_seen_at.isoformat() if t.agent_seen_at else None,
                 "last_message": (t.messages[-1].text[:120] if t.messages else ""),
                 "message_count": len(t.messages),
+                "work_item_id": wi_by_thread.get(t.id),
             }
             for t in threads
         ]
