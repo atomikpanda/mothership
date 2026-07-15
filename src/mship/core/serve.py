@@ -17,6 +17,7 @@ from mship.core.gh_app import GhAppError, mint_installation_token, resolve_insta
 from mship.core.pr import PRManager
 from mship.core.pr_watcher import PrWatcher
 from mship.core.spec import SpecDraft
+from mship.core.view.thread_links import index_thread_work_items
 from mship.core.workitem import Phase
 from mship.util.shell import ShellRunner
 
@@ -833,7 +834,6 @@ def create_app(
         # resolution). Best-effort — a corrupt WorkItem must never 500 the list, so the store
         # scan is guarded and index_thread_work_items degrades to None, matching get_spec's
         # work_item_kind stamping.
-        from mship.core.view.thread_links import index_thread_work_items
         try:
             all_items = list(workitems.list(include_archived=True))
         except Exception:

@@ -7,10 +7,21 @@ from typing import Iterable
 def _build_link_index(items: Iterable):
     """Build the three reverse lookups (thread_id / spec_id / task_slug -> work_item_id)
     once, so a whole thread list can be resolved without re-scanning `items` per thread."""
-    items = list(items)
-    by_thread = {tid: w.id for w in items for tid in w.thread_ids}
-    by_spec = {w.spec_id: w.id for w in items if w.spec_id}
-    by_task = {slug: w.id for w in items for slug in w.task_slugs}
+    # Per-item guard: a single corrupt/unreadable WorkItem degrades ONLY its own threads (they fall
+    # back to None), not every thread — a coarse whole-index try/except would blank healthy items too.
+    by_thread: dict = {}
+    by_spec: dict = {}
+    by_task: dict = {}
+    for w in items:
+        try:
+            for tid in w.thread_ids:
+                by_thread[tid] = w.id
+            if w.spec_id:
+                by_spec[w.spec_id] = w.id
+            for slug in w.task_slugs:
+                by_task[slug] = w.id
+        except Exception:
+            continue
     return by_thread, by_spec, by_task
 
 

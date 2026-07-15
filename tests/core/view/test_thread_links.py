@@ -68,3 +68,20 @@ def test_index_guards_corrupt_item_to_none():
 
     # A corrupt WorkItem must never blow up the whole list — resolution degrades to None.
     assert index_thread_work_items([_Thread("t1")], [_Bad()]) == {"t1": None}
+
+
+def test_corrupt_item_degrades_only_its_own_threads():
+    """One corrupt item alongside healthy ones degrades only its own threads — healthy items still
+    resolve (the per-item guard is surgical, not a whole-index blank)."""
+    class _Bad:
+        id = "wi-bad"
+        spec_id = None
+        task_slugs = []
+
+        @property
+        def thread_ids(self):
+            raise RuntimeError("corrupt work item")
+
+    good = _Item("wi-good", thread_ids=["t-good"])
+    out = index_thread_work_items([_Thread("t-good"), _Thread("t-orphan")], [good, _Bad()])
+    assert out == {"t-good": "wi-good", "t-orphan": None}
