@@ -918,6 +918,9 @@ def create_app(
         try:
             return fn()
         except Exception:
+            # Degrade, but leave a trace: a silently-empty store scan in production (e.g. a corrupt or
+            # forward-incompatible file) should be alertable, not invisible.
+            logger.warning("serve: store scan degraded to default (corrupt/unreadable file?)", exc_info=True)
             return default
 
     def _workitem_index(include_archived: bool = False):
