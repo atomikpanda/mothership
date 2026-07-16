@@ -6,7 +6,7 @@ from mship.core.message_store import MessageStore
 from mship.core.spec_store import SpecStore
 from mship.core.state import StateManager
 from mship.core.workitem_gate import APPROVED_STATUSES
-from mship.core.workitem_store import WorkItemStore
+from mship.core.workitem_store import ThreadAlreadyLinkedError, WorkItemStore
 
 
 def wrap_existing(items: WorkItemStore, specs: SpecStore, state: StateManager,
@@ -83,6 +83,12 @@ def wrap_existing(items: WorkItemStore, specs: SpecStore, state: StateManager,
         target = (item_by_spec.get(thread.spec_id) if thread.spec_id else None) \
             or (item_by_task.get(thread.task_slug) if thread.task_slug else None)
         if target:
-            items.add_thread(target, thread.id, now=now)
+            try:
+                items.add_thread(target, thread.id, now=now)
+            except ThreadAlreadyLinkedError:
+                # Legacy data already links this thread to another item; keep the existing owner
+                # rather than crash the (idempotent) migration. The write guard enforces single
+                # ownership from here on.
+                continue
 
     return created

@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from mship.core.workitem_store import WorkItemStore
+from mship.core.workitem_store import ThreadAlreadyLinkedError, WorkItemStore
 
 
 def _now():
@@ -109,6 +109,34 @@ def test_archive_sets_flag_and_persists(tmp_path):
     got = fresh.get(wi.id)
     assert got.archived is True
     assert got.updated_at == datetime(2026, 6, 30, 13, 0, tzinfo=timezone.utc)
+
+
+def test_add_thread_refuses_thread_owned_by_another_item(tmp_path):
+    # Exclusive membership: a thread lives in at most one WorkItem's thread_ids. Adding a thread that
+    # another item already owns must raise (not silently create the dual link the resolver can't handle).
+    store = WorkItemStore(tmp_path / "workitems")
+    a = store.create(title="a", kind="feature", workspace="ws", now=_now())
+    b = store.create(title="b", kind="feature", workspace="ws", now=_now())
+    store.add_thread(a.id, "thread-x", now=_now())
+    with pytest.raises(ThreadAlreadyLinkedError) as exc:
+        store.add_thread(b.id, "thread-x", now=_now())
+    assert exc.value.owner_id == a.id
+    assert exc.value.thread_id == "thread-x"
+    # The rejected write left b untouched.
+    assert store.get(b.id).thread_ids == []
+
+
+def test_add_thread_refuses_when_owner_is_archived(tmp_path):
+    # An archived item still holds its threads, so it still counts as the owner — a thread can't be
+    # re-homed to a new item just because its current owner was archived.
+    store = WorkItemStore(tmp_path / "workitems")
+    a = store.create(title="a", kind="feature", workspace="ws", now=_now())
+    b = store.create(title="b", kind="feature", workspace="ws", now=_now())
+    store.add_thread(a.id, "thread-x", now=_now())
+    store.archive(a.id, now=_now())
+    with pytest.raises(ThreadAlreadyLinkedError) as exc:
+        store.add_thread(b.id, "thread-x", now=_now())
+    assert exc.value.owner_id == a.id
 
 
 def test_unarchive_clears_flag(tmp_path):
