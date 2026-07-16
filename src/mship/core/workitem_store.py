@@ -10,6 +10,8 @@ from pathlib import Path
 from mship.core.state import StateManager
 from mship.core.workitem import ExternalLink, Kind, Phase, WorkItem
 
+__all__ = ["WorkItemStore", "ThreadAlreadyLinkedError"]
+
 
 def _new_id(now: datetime) -> str:
     return f"wi-{now:%Y%m%d%H%M%S}-{uuid.uuid4().hex[:8]}"
@@ -31,6 +33,20 @@ def _locked(lock_path: Path, mode: int):
             yield
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
+
+
+class ThreadAlreadyLinkedError(Exception):
+    """Raised when linking a thread to a WorkItem that another WorkItem already owns.
+
+    Threads are single-owner: the thread->WorkItem resolver (view/thread_links) assumes a thread
+    appears in at most one item's `thread_ids`, so the write side refuses dual membership rather than
+    silently creating an ambiguous link.
+    """
+
+    def __init__(self, thread_id: str, owner_id: str) -> None:
+        self.thread_id = thread_id
+        self.owner_id = owner_id
+        super().__init__(f"thread {thread_id!r} is already linked to work item {owner_id!r}")
 
 
 class WorkItemStore:
@@ -127,13 +143,27 @@ class WorkItemStore:
                     s.tasks[_slug].work_item_id = _wid
             state.mutate(_set)
 
+    def _thread_owner(self, thread_id: str, exclude: str) -> str | None:
+        """Id of a WorkItem (other than `exclude`) whose thread_ids contains `thread_id`, else None.
+        Scans archived items too — an archived item still holds its threads in stored data, so it
+        still counts as the thread's owner for the single-owner invariant."""
+        for w in self.list(include_archived=True):
+            if w.id != exclude and thread_id in w.thread_ids:
+                return w.id
+        return None
+
     def add_thread(self, item_id: str, thread_id: str, now: datetime | None = None) -> None:
         with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
             item = self.get(item_id)
             if item is None:
                 raise KeyError(item_id)
             if thread_id in item.thread_ids:
-                return
+                return  # already ours — idempotent no-op
+            # Exclusive membership: a thread belongs to at most one WorkItem (the resolver assumes a
+            # single owner). If another item already holds it, refuse rather than create dual membership.
+            owner = self._thread_owner(thread_id, exclude=item_id)
+            if owner is not None:
+                raise ThreadAlreadyLinkedError(thread_id, owner)
             item.thread_ids.append(thread_id)
             if now is not None:
                 item.updated_at = now
