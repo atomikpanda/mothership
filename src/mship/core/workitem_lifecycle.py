@@ -1,8 +1,11 @@
 """WorkItem lifecycle helpers for automated phase transitions.
 
-Sibling of spec_lifecycle.py: where advance_spec_on_close advances a bound
-spec's status on merge-close (which compute_phase then projects to `done`),
-this advances the WorkItem itself for the case a spec can't cover.
+Sibling of spec_lifecycle.py. `advance_spec_on_close` advances a spec bound to a
+task via `task.spec_id` (the `mship spec dispatch` path). This advances a
+WorkItem's completion state on the close of its last task — covering both the
+spec-bound case a task-level spec_id misses (features spawned via
+`mship spawn --work-item`, whose spec lives on the WorkItem) and the spec-less
+case a spec can't cover at all.
 """
 from __future__ import annotations
 
@@ -14,28 +17,32 @@ def advance_workitem_on_close(
     *,
     task,
     workitems_dir: Path,
+    specs_dir: Path,
     state,
     merged_count: int,
     closed_count: int,
 ) -> None:
-    """Mark a spec-less WorkItem `done` when its LAST live task closes after a clean merge.
+    """Advance a WorkItem's completion state when its LAST live task closes after a clean merge.
 
-    A feature WorkItem reaches `done` through its spec: advance_spec_on_close
-    moves the spec `dispatched → implemented`, and compute_phase projects a
-    terminal spec status to `done` before it looks at task state. A spec-less
-    WorkItem (bug/chore/question) has no such signal — once its task is closed
-    it is removed from live state, leaving the item with no spec and no live
-    tasks, so compute_phase falls through to `inbox`. Ground Control's item
-    redirect then routes the item's conversation to its now-removed task
-    ("this task is no longer available"). Stamping phase_override=done keeps the
-    merge conversation grouped under a `done` WorkItem instead.
+    Two cases, both gated on this being the WorkItem's last live task + a clean
+    full merge:
 
-    Safe no-op if:
-    - task.work_item_id is None
-    - not a clean full merge (merged_count == 0 or closed_count > 0)
-    - the WorkItem is missing, already has a phase_override, or has a bound spec
-      (spec'd items are handled by advance_spec_on_close + compute_phase)
-    - another live task still references this WorkItem (this isn't the last one)
+    - **Spec-bound WorkItem:** advance its approved/dispatched spec to
+      `implemented`; compute_phase then projects a terminal spec status to
+      `done`. This covers features spawned via `mship spawn --work-item`, whose
+      spec stays `approved` on the WorkItem — `task.spec_id` is null, so
+      `advance_spec_on_close`'s task-bound path never fires and the item would
+      otherwise sit at `ready` forever.
+    - **Spec-less WorkItem** (bug/chore/question): stamp `phase_override=done`,
+      since compute_phase can't derive `done` without a terminal spec — otherwise
+      the item falls to `inbox` and its merge conversation dead-ends on the
+      now-removed task.
+
+    Safe no-op if: `task.work_item_id` is None; not a clean full merge
+    (`merged_count == 0` or `closed_count > 0`); the WorkItem is missing or
+    already has a `phase_override`; another live task still references the
+    WorkItem; or (spec-bound) the spec is missing or not in an advanceable
+    status (`approved`/`dispatched`).
 
     `state` is the pre-teardown State snapshot: it still contains the closing
     task, so the "last live task" check excludes it explicitly by slug.
@@ -54,8 +61,6 @@ def advance_workitem_on_close(
         return
     if item.phase_override is not None:
         return
-    if item.spec_id is not None:
-        return
 
     this_slug = getattr(task, "slug", None)
     has_other_live_task = any(
@@ -65,7 +70,19 @@ def advance_workitem_on_close(
     if has_other_live_task:
         return
 
-    # Stamp updated_at (mirrors advance_spec_on_close) so the freshly-`done` item
-    # sorts to the top of WorkItemStore.list()'s updated_at-desc view rather than
-    # staying buried at its stale timestamp.
+    if item.spec_id is not None:
+        # Spec-bound: advance the WorkItem's spec so compute_phase derives `done`.
+        from mship.core.spec_store import SpecStore
+
+        sstore = SpecStore(specs_dir)
+        spec = sstore.find_by_id(item.spec_id)
+        if spec is not None and spec.status in ("approved", "dispatched"):
+            spec.status = "implemented"
+            spec.updated_at = datetime.now(timezone.utc)
+            sstore.save(spec)
+        return
+
+    # Spec-less: stamp done directly. The updated_at bump (mirrors
+    # advance_spec_on_close) keeps the freshly-`done` item at the top of
+    # WorkItemStore.list()'s updated_at-desc view rather than buried.
     store.set_phase_override(wid, "done", now=datetime.now(timezone.utc))
