@@ -1,5 +1,13 @@
 from pathlib import Path
-from mship.core.relay.keys import ensure_relay_key, relay_public_key
+from mship.core.relay.keys import ensure_relay_key, ensure_subdomain_secret, relay_public_key
+
+
+def test_ensure_subdomain_secret_creates_stable_0600_secret(tmp_path):
+    s1 = ensure_subdomain_secret(home=tmp_path)
+    assert isinstance(s1, bytes) and len(s1) >= 32
+    path = tmp_path / ".mothership" / "relay-subdomain-secret"
+    assert oct(path.stat().st_mode & 0o777) == "0o600"
+    assert ensure_subdomain_secret(home=tmp_path) == s1   # stable across calls
 
 def test_generates_key_when_absent(tmp_path):
     calls = []
