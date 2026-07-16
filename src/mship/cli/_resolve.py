@@ -42,18 +42,20 @@ class ResolvedTask(NamedTuple):
 
 
 def _format_ambiguity(e: AmbiguousTaskError) -> list[str]:
-    """Turn an AmbiguousTaskError into human-readable lines."""
-    lines: list[str] = []
+    """Turn an AmbiguousTaskError into human-readable lines.
+
+    Leads with the candidate slugs inline (#298) so the fix is visible at a glance instead of
+    being tucked only into indented `--task` hints, then keeps the copy-paste hints below.
+    """
+    slugs = ", ".join(e.active)
+    lines: list[str] = [f"{len(e.active)} active tasks: {slugs}."]
     if e.candidates:
         lines.append("Pick one with --task:")
         for slug, path in e.candidates:
             suffix = f"  ({path})" if path else ""
             lines.append(f"  --task {slug}{suffix}")
     else:
-        lines.append(
-            f"Multiple active tasks ({', '.join(e.active)}). "
-            "Specify --task, set MSHIP_TASK, or cd into a worktree."
-        )
+        lines.append("Specify --task, set MSHIP_TASK, or cd into a worktree.")
     return lines
 
 

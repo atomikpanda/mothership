@@ -55,3 +55,6 @@ def test_ambiguous_exits_nonzero_lists_active(monkeypatch, tmp_path, capsys):
     err = capsys.readouterr().err
     assert "A" in err and "B" in err
     assert "--task" in err or "MSHIP_TASK" in err
+    # #298: the candidate slugs are echoed inline on a single line, not only tucked into the
+    # indented --task hints, so recovery is visible at a glance.
+    assert any("active tasks:" in line and "A" in line and "B" in line for line in err.splitlines())
