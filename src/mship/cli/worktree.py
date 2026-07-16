@@ -840,15 +840,20 @@ def register(app: typer.Typer, get_container):
         except Exception:
             pass
 
-        # Auto-mark a spec-less WorkItem `done` when its last live task merges+closes.
-        # Features reach `done` via the spec advance above; bug/chore/question items
-        # have no spec, so without this they fall to `inbox` and their merge
-        # conversation dead-ends on the now-removed task. See workitem_lifecycle.
+        # Advance a WorkItem's completion state when its last live task merges+closes.
+        # Spec-bound items (incl. features spawned via `spawn --work-item`, whose spec
+        # stays `approved` on the WorkItem and so is missed by the task-bound
+        # advance_spec_on_close above) get their spec advanced to `implemented`;
+        # spec-less bug/chore/question items get phase_override=done, so they don't
+        # fall to `inbox` and dead-end their merge conversation. See workitem_lifecycle.
         try:
             from mship.core.workitem_lifecycle import advance_workitem_on_close
+            from mship.core.spec_store import SPECS_DIRNAME
+            _ws_root = Path(container.config_path()).parent
             advance_workitem_on_close(
                 task=task,
-                workitems_dir=Path(container.config_path()).parent / ".mothership" / "workitems",
+                workitems_dir=_ws_root / ".mothership" / "workitems",
+                specs_dir=_ws_root / SPECS_DIRNAME,
                 state=state,
                 merged_count=merged_count,
                 closed_count=closed_count,
