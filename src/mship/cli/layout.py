@@ -1,5 +1,4 @@
 import os
-import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -88,9 +87,15 @@ def serve_cli_args(
     return args
 
 
+def _kdl_quote(s: str) -> str:
+    """Quote a string as a KDL string literal, escaping backslash and double-quote
+    so user-supplied values (e.g. --host) can't produce malformed KDL."""
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def _serve_tab(serve_args: list[str]) -> str:
     """The Serve tab KDL block: one pane running `mship serve <serve_args>`."""
-    tokens = " ".join(f'"{a}"' for a in ["serve", *serve_args])
+    tokens = " ".join(_kdl_quote(a) for a in ["serve", *serve_args])
     return (
         '\n    tab name="Serve" {\n'
         '        pane name="Serve" command="mship" close_on_exit=false { args '
@@ -111,6 +116,17 @@ def _target_path() -> Path:
 
 def _serve_target_path() -> Path:
     return Path.home() / ".config" / "zellij" / "layouts" / "mothership-serve.kdl"
+
+
+def _serve_launch_path() -> Path:
+    """Deterministic per-user path for the launch-time effective serve layout.
+
+    A fixed path (overwritten each launch, outside the layouts/ picker dir) rather
+    than a unique tempfile: `os.execvp` replaces the process, so no cleanup runs
+    after it — a unique temp would orphan one .kdl per launch. Overwriting one file
+    keeps it bounded.
+    """
+    return Path.home() / ".config" / "zellij" / "mothership-serve-launch.kdl"
 
 
 def register(app: typer.Typer, get_container):
@@ -161,9 +177,9 @@ def register(app: typer.Typer, get_container):
             return
         args = serve_cli_args(host=host, port=port, relay=relay, relay_host=relay_host)
         kdl = render_serve_layout(args)
-        fd, path = tempfile.mkstemp(prefix="mothership-serve-", suffix=".kdl")
-        with os.fdopen(fd, "w") as f:
-            f.write(kdl)
-        os.execvp("zellij", ["zellij", "--layout", path])
+        path = _serve_launch_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(kdl)
+        os.execvp("zellij", ["zellij", "--layout", str(path)])
 
     app.add_typer(layout_app, rich_help_panel="Setup")

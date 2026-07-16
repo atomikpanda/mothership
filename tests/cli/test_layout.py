@@ -68,6 +68,13 @@ def test_render_serve_layout_threads_flags():
     assert 'args "serve" "--relay" "--port" "8080";' in kdl
 
 
+def test_render_serve_layout_escapes_kdl_strings():
+    # A value containing a double-quote must be escaped so the KDL stays valid
+    # (Greptile #364: unescaped user strings could break out of the string).
+    kdl = render_serve_layout(["--host", 'ba"d'])
+    assert '"--host" "ba\\"d";' in kdl
+
+
 # --- Task 3: init writes both layouts -----------------------------------------
 
 def test_layout_init_writes_file(tmp_path: Path, monkeypatch):
