@@ -226,6 +226,27 @@ def test_serve_relay_wires_tunnel_and_loopback(relay_configured_workspace, tmp_p
     assert "groundcontrol://add?" in r.output
 
 
+def test_relay_whoami_matches_known_workspace(tmp_path, monkeypatch):
+    """`relay whoami` recovers the workspace by recomputing the opaque slug over
+    candidate names on this machine; unrelated subdomains report no match."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from mship.core.relay.keys import ensure_subdomain_secret
+    from mship.core.relay.tunnel import device_subdomain
+
+    secret = ensure_subdomain_secret(home=tmp_path)
+    sub = device_subdomain("ground-control", "abc123", secret)
+
+    r = runner.invoke(
+        app, ["relay", "whoami", sub, "--workspace", "ground-control", "--workspace", "other"]
+    )
+    assert r.exit_code == 0, r.output
+    assert "ground-control" in r.output
+
+    r2 = runner.invoke(app, ["relay", "whoami", "zzzzzzzz-abc123", "--workspace", "ground-control"])
+    assert r2.exit_code == 0, r2.output
+    assert "no match" in r2.output.lower()
+
+
 def test_serve_relay_requires_host(workspace_no_relay, tmp_path, monkeypatch):
     """`--relay` with no configured relay block and no --relay-host errors cleanly."""
     fake_home = tmp_path / "home"

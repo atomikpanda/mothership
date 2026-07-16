@@ -269,4 +269,42 @@ def register(parent: typer.Typer, get_container):
         out.error("timed out waiting for approval.")
         raise typer.Exit(1)
 
+    @relay_app.command("whoami")
+    def whoami(
+        subdomain: str = typer.Argument(
+            ..., help="A relay subdomain (or full label <slug>-<devid>, or <sub>.host)."
+        ),
+        workspace: list[str] = typer.Option(
+            None, "--workspace", "-w",
+            help="Candidate workspace name(s) to test. Defaults to the current workspace.",
+        ),
+    ):
+        """Recover which workspace a relay subdomain belongs to.
+
+        Subdomains are opaque (HMAC of the name), so there's no decoding — this
+        recomputes the opaque slug over candidate workspace names on THIS machine
+        (using the machine's subdomain secret) and prints the one that matches.
+        """
+        from pathlib import Path
+
+        from mship.core.relay.keys import ensure_subdomain_secret
+        from mship.core.relay.tunnel import opaque_slug
+
+        secret = ensure_subdomain_secret(home=Path.home())
+        # Reduce to the slug part: drop any host suffix (".relay.example.com"),
+        # then the trailing "-<devid>" (the opaque slug itself is hyphen-free base32).
+        label = subdomain.strip().split(".", 1)[0]
+        slug = label.rsplit("-", 1)[0] if "-" in label else label
+        candidates = list(workspace) if workspace else []
+        if not candidates:
+            try:
+                candidates = [get_container().config().workspace]
+            except Exception:
+                candidates = []
+        match = next((w for w in candidates if opaque_slug(w, secret) == slug), None)
+        if match:
+            typer.echo(match)
+        else:
+            typer.echo(f"no match ({len(candidates)} candidate(s) checked)")
+
     parent.add_typer(relay_app, rich_help_panel="Setup")
