@@ -1,4 +1,5 @@
 # tests/core/test_workitem.py
+import json
 from datetime import datetime, timezone
 
 from mship.core.workitem import WorkItem, ExternalLink, PHASE_ORDER
@@ -16,6 +17,24 @@ def test_workitem_defaults_and_roundtrip():
     assert wi.phase_override is None
     restored = WorkItem.model_validate_json(wi.model_dump_json())
     assert restored == wi
+
+
+def test_unknown_future_field_survives_roundtrip():
+    # #342 root cause: a WorkItem JSON is read-modify-written by many code paths, including a
+    # possibly-OLDER binary (e.g. a stale installed `mship serve`) whose schema predates a newer
+    # field. With the default extra="ignore" such a binary silently drops the newer field on re-save
+    # (that's how `plan_path` got nulled while the older `spec_id` survived). extra="allow" must
+    # round-trip fields this schema doesn't know about.
+    raw = {
+        "id": "wi-9", "title": "t", "workspace": "ws", "kind": "feature",
+        "created_at": _now().isoformat(), "updated_at": _now().isoformat(),
+        "spec_id": "spec-1",
+        "a_field_added_by_a_newer_binary": "keep-me",
+    }
+    wi = WorkItem.model_validate(raw)
+    dumped = json.loads(wi.model_dump_json())
+    assert dumped["a_field_added_by_a_newer_binary"] == "keep-me"  # unknown field preserved
+    assert dumped["spec_id"] == "spec-1"                            # known fields intact
 
 
 def test_external_link_and_links_list():
