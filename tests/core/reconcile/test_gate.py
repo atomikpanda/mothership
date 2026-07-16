@@ -33,6 +33,38 @@ def test_reconcile_now_uses_fresh_cache(tmp_path: Path):
     assert decisions["a"].state == UpstreamState.merged
 
 
+def test_reconcile_now_applies_dependency_stale_from_fresh_cache(tmp_path: Path):
+    # #104 regression: dependency_stale is derived from LIVE task state (depends_on edges + the
+    # upstream's merge state), so it must apply on the cache-hit path too — not only the fresh fetch.
+    # A warm cache (the common case: reconcile shares one 300s cache across spawn/finish/close/
+    # precommit) must NOT silently downgrade a dependency-stale task to in_sync, which would let it
+    # finish against a stale base.
+    from mship.core.state import DependencyEdge
+    t0 = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    t1 = datetime(2026, 5, 10, tzinfo=timezone.utc)
+    cache = ReconcileCache(tmp_path)
+    cache.write(CachePayload(
+        fetched_at=time.time(), ttl_seconds=300,
+        results={
+            "a": {"state": "merged", "pr_url": None, "pr_number": None, "base": None,
+                  "merge_commit": None, "updated_at": t1.isoformat()},
+            "b": {"state": "in_sync"},
+        },
+        ignored=[],
+    ))
+    state = WorkspaceState(tasks={
+        "a": _task("a", created_at=t0, finished_at=t0),
+        "b": _task("b", created_at=t0,
+                   depends_on=[DependencyEdge(upstream_slug="a", created_at=t0)]),
+    })
+    # Fresh cache → fetcher must NOT be called; the override still has to apply.
+    decisions = reconcile_now(
+        state, cache=cache,
+        fetcher=lambda *_: (_ for _ in ()).throw(AssertionError("should not fetch")),
+    )
+    assert decisions["b"].state == UpstreamState.dependency_stale
+
+
 def test_reconcile_now_refetches_when_stale(tmp_path: Path):
     cache = ReconcileCache(tmp_path)
     cache.write(CachePayload(

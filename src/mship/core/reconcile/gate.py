@@ -116,7 +116,14 @@ def _decisions_from_cache(state: WorkspaceState, payload: CachePayload) -> dict[
         d = _decision_from_cache_entry(slug, raw, state)
         if d is not None:
             out[slug] = d
-    return out
+    # Apply the dependency-stale override here too (#104). It's derived from LIVE task state
+    # (depends_on edges + the upstream's cached merge state), not from a fresh fetch, so it must be
+    # recomputed on every path. The fresh-fetch path applies it at the bottom of reconcile_now; both
+    # cache paths (fresh-cache hit + FetchError fallback) route through here. Without this a warm
+    # cache — the common case, since reconcile shares one 300s cache across spawn/finish/close/
+    # precommit — silently drops it and a dependency-stale task reverts to in_sync (finish stops
+    # blocking on the stale base).
+    return apply_dependency_stale(state, out)
 
 
 def reconcile_now(
