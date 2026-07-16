@@ -31,7 +31,9 @@ def test_unknown_future_field_survives_roundtrip():
         "spec_id": "spec-1",
         "a_field_added_by_a_newer_binary": "keep-me",
     }
-    wi = WorkItem.model_validate(raw)
+    # Go through model_validate_json → model_dump_json, exactly as WorkItemStore.get/save do when
+    # an older binary reads the on-disk JSON and re-writes it (the real #342 failure path).
+    wi = WorkItem.model_validate_json(json.dumps(raw))
     dumped = json.loads(wi.model_dump_json())
     assert dumped["a_field_added_by_a_newer_binary"] == "keep-me"  # unknown field preserved
     assert dumped["spec_id"] == "spec-1"                            # known fields intact
