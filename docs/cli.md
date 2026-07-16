@@ -35,6 +35,8 @@ mship commit "message" [--task <slug>]              # commit staged changes acro
 mship depends add|remove|list                       # manage task-to-task dependency edges (#104)
 ```
 
+> **Entry point — spawn vs. spec dispatch:** `mship spawn` starts an ad-hoc task directly, but for **spec-driven** work you don't call it first. `mship spec dispatch <id>` (see **Work items & specs** below) is the entry point: it binds an approved spec and **spawns its own task**. Running `spawn` and then `spec dispatch` against the same spec double-creates tasks (#296). Rule of thumb: have an approved spec → `spec dispatch`; ad-hoc chore/bug → `spawn`.
+
 ## Setup & admin
 
 ```bash
