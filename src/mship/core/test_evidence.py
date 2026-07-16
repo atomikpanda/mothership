@@ -156,6 +156,12 @@ def format_missing_summary(
     """Human-readable warning lines for non-passed repos, grouped by status.
 
     Returns an empty list when every repo has passing, non-stale evidence.
+
+    The three concerns carry different weight, so the text distinguishes them (#258):
+    `missing`/`failing` are real gaps, but `stale` only means the recorded run predates a
+    later commit on the SAME branch — the common orchestrated-flow case where the final
+    review-fix commit lands after the last `mship test`. Phrasing it as a soft, actionable
+    advisory (not "stale") keeps the happy path from eroding the evidence signal.
     """
     missing = [r for r, e in evidence.items() if e.status == "missing"]
     stale = [r for r, e in evidence.items() if e.status == "stale"]
@@ -165,7 +171,8 @@ def format_missing_summary(
         lines.append(f"Tests not run in: {', '.join(sorted(missing))}")
     if stale:
         lines.append(
-            f"Tests stale (branch has new commits) in: {', '.join(sorted(stale))}"
+            "Tests passed on an earlier commit of this branch (re-run `mship test` to "
+            f"refresh, or finish as-is if the new commits are trivial) in: {', '.join(sorted(stale))}"
         )
     if failing:
         lines.append(f"Tests failing in: {', '.join(sorted(failing))}")
