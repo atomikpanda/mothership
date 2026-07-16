@@ -50,7 +50,11 @@ def test_marks_spec_less_workitem_done_on_last_task_merge(tmp_path):
         merged_count=1, closed_count=0,
     )
 
-    assert store.get(wi.id).phase_override == "done"
+    got = store.get(wi.id)
+    assert got.phase_override == "done"
+    # updated_at must be refreshed so the freshly-done item isn't buried in the
+    # updated_at-desc list() view (Greptile #362).
+    assert got.updated_at != _now()
 
 
 def test_no_op_when_other_live_task_remains(tmp_path):

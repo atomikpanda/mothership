@@ -6,6 +6,7 @@ this advances the WorkItem itself for the case a spec can't cover.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -64,4 +65,7 @@ def advance_workitem_on_close(
     if has_other_live_task:
         return
 
-    store.set_phase_override(wid, "done")
+    # Stamp updated_at (mirrors advance_spec_on_close) so the freshly-`done` item
+    # sorts to the top of WorkItemStore.list()'s updated_at-desc view rather than
+    # staying buried at its stale timestamp.
+    store.set_phase_override(wid, "done", now=datetime.now(timezone.utc))
