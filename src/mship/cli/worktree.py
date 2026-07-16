@@ -840,6 +840,22 @@ def register(app: typer.Typer, get_container):
         except Exception:
             pass
 
+        # Auto-mark a spec-less WorkItem `done` when its last live task merges+closes.
+        # Features reach `done` via the spec advance above; bug/chore/question items
+        # have no spec, so without this they fall to `inbox` and their merge
+        # conversation dead-ends on the now-removed task. See workitem_lifecycle.
+        try:
+            from mship.core.workitem_lifecycle import advance_workitem_on_close
+            advance_workitem_on_close(
+                task=task,
+                workitems_dir=Path(container.config_path()).parent / ".mothership" / "workitems",
+                state=state,
+                merged_count=merged_count,
+                closed_count=closed_count,
+            )
+        except Exception:
+            pass
+
         # Lifecycle hooks (MOS-220): `task.closed` fires here, after the
         # spec-advance above (which may have already committed a spec-status
         # mutation) and before the worktree teardown/state-removal below.
