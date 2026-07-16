@@ -1,8 +1,10 @@
 from __future__ import annotations
 import re
 
-# A serve per-device subdomain LABEL: <base>-<6 hex>, where base is the
-# DNS-safe workspace slug ([a-z0-9-]). Mirrors device_subdomain() in tunnel.py.
+# A serve per-device subdomain LABEL: <base>-<6 hex>, where base is now an
+# opaque per-workspace slug (base32, [a-z2-7]) — the workspace name is no longer
+# present. Mirrors device_subdomain() in tunnel.py; base32 ⊂ [a-z0-9] so the
+# existing pattern still matches.
 _SERVE_LABEL = re.compile(r"[a-z0-9][a-z0-9-]*-[0-9a-f]{6}")
 
 

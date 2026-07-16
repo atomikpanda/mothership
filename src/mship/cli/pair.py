@@ -49,4 +49,8 @@ def register(app: typer.Typer, get_container):
         link = build_pair_link(url=url, token=token, workspace=workspace)
 
         output.print(link)
+        output.print(
+            "  (opaque subdomain — no workspace name leaked; if you upgraded mship, "
+            "this changed, so re-scan to re-pair. Decode with `mship relay whoami <sub>`.)"
+        )
         typer.echo(segno.make(link).terminal(compact=True))

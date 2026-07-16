@@ -302,6 +302,10 @@ def _serve_with_relay(
 
     output.print(f"mship serve → http://{host}:{port}  (auth: bearer token; docs: disabled)")
     output.print(f"relay → {public_url}  (per-device; tunnel via ssh -R to {rc.host})")
+    output.print(
+        "  (opaque subdomain — no workspace name leaked; upgrading changes it, "
+        "so re-pair the phone once. Decode with `mship relay whoami <sub>`.)"
+    )
     output.print(link)
     typer.echo(segno.make(link).terminal(compact=True))
 
