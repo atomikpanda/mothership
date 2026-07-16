@@ -704,8 +704,28 @@ def create_app(
             raise HTTPException(status_code=400, detail="idea must not be empty")
         now = datetime.now(timezone.utc)
         key = (body.idempotency_key or "").strip()
-        if key:
-            marker = f"capture-key {key}"
+
+        def _create_capture_thread():
+            subject = ((body.title or "").strip() or idea.splitlines()[0])[:80]
+            thread = msgs.create_thread(subject=subject, text=idea, now=now)
+            handoff = _capture_handoff(thread.id, idea)
+            if key:
+                # Append the dedup marker AFTER the handoff so the event body still
+                # STARTS WITH `capture-brainstorm <tid>` (the driver's first-line
+                # contract in the working-with-mothership skill); a leading key line
+                # would make a keyed capture invisible to that contract.
+                handoff = f"{handoff}\n\ncapture-key {key}"
+            msgs.append(thread.id, "agent", handoff, now, kind="event")
+            return _thread_payload(msgs.get(thread.id))
+
+        if not key:
+            return _create_capture_thread()
+
+        # Keyed capture: serialize scan-then-create under _item_msg_lock (mirrors post_item_message)
+        # so two concurrent same-key captures can't both miss the marker and each spawn a brainstorm
+        # thread — the retry/double-tap dedup the idempotency_key promises (AC6).
+        marker = f"capture-key {key}"
+        with _item_msg_lock:
             for t in msgs.list():
                 if any(
                     m.kind == "event"
@@ -713,17 +733,7 @@ def create_app(
                     for m in t.messages
                 ):
                     return _thread_payload(t)
-        subject = ((body.title or "").strip() or idea.splitlines()[0])[:80]
-        thread = msgs.create_thread(subject=subject, text=idea, now=now)
-        handoff = _capture_handoff(thread.id, idea)
-        if key:
-            # Append the dedup marker AFTER the handoff so the event body still
-            # STARTS WITH `capture-brainstorm <tid>` (the driver's first-line
-            # contract in the working-with-mothership skill); a leading key line
-            # would make a keyed capture invisible to that contract.
-            handoff = f"{handoff}\n\ncapture-key {key}"
-        msgs.append(thread.id, "agent", handoff, now, kind="event")
-        return _thread_payload(msgs.get(thread.id))
+            return _create_capture_thread()
 
     # --- dispatch endpoint (B4): close the dispatch-from-phone loop ---
 
@@ -900,12 +910,22 @@ def create_app(
     # lands, producing a duplicate/orphaned WorkItem. See post_dispatch for the re-load.
     _dispatch_lock = threading.Lock()
 
+    def _safe(fn, default):
+        """Best-effort store scan: one corrupt/forward-incompatible file (a WorkItemStore
+        ValidationError or a SpecStore SpecParseError) must never 500 the read paths that scan
+        the whole store — degrade to `default` instead. Mirrors the try/except in _summaries /
+        get_spec ('a corrupt WorkItem must never 500 the list')."""
+        try:
+            return fn()
+        except Exception:
+            return default
+
     def _workitem_index(include_archived: bool = False):
         return build_workitem_index(
-            workitems.list(include_archived=include_archived),
-            {s.id: s for s in store.list()},
-            dict(state_manager.load().tasks),
-            {t.id: t for t in msgs.list()},
+            _safe(lambda: workitems.list(include_archived=include_archived), []),
+            _safe(lambda: {s.id: s for s in store.list()}, {}),
+            _safe(lambda: dict(state_manager.load().tasks), {}),
+            _safe(lambda: {t.id: t for t in msgs.list()}, {}),
             include_archived=include_archived,
         )
 
@@ -944,7 +964,9 @@ def create_app(
         # archived-excluding list() would wrongly report work_item_id=null here. The
         # user-facing filter still applies at GET /items (_workitem_index above) and
         # `item list` — only this internal resolution needs the full set.
-        all_items = list(workitems.list(include_archived=True))  # single store scan, reused below
+        # Best-effort scans (one corrupt/forward-incompatible workitem/spec file must not 500 the
+        # thread read paths — mirrors _summaries' guard; the thread itself still resolves).
+        all_items = _safe(lambda: list(workitems.list(include_archived=True)), [])  # reused below
         wi_id = resolve_thread_work_item(t.id, t.spec_id, t.task_slug, all_items)
         data["work_item_id"] = wi_id
         if wi_id is None:
@@ -955,8 +977,8 @@ def create_app(
                 "id": summ.id, "title": summ.title, "kind": summ.kind, "phase": summ.phase,
             }
         item_ids = {w.id for w in all_items}
-        spec_ids = {s.id for s in store.list()}
-        task_slugs = set(state_manager.load().tasks.keys())
+        spec_ids = _safe(lambda: {s.id for s in store.list()}, set())
+        task_slugs = _safe(lambda: set(state_manager.load().tasks.keys()), set())
         for msg in data.get("messages", []):
             if msg.get("role") == "agent" and msg.get("text"):
                 msg["text"] = linkify_entities(msg["text"], item_ids, spec_ids, task_slugs)

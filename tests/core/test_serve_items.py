@@ -357,3 +357,23 @@ def test_get_spec_survives_corrupt_linked_work_item(tmp_path, monkeypatch):
     resp = client.get("/specs/linked")
     assert resp.status_code == 200
     assert resp.json()["work_item_kind"] is None
+
+
+def test_thread_and_items_endpoints_survive_corrupt_workitem_store(tmp_path, monkeypatch):
+    # One corrupt/forward-incompatible workitem file makes WorkItemStore.list raise. The thread read
+    # paths (_thread_payload) and the items surface (_workitem_index) must degrade to
+    # work_item_id=None / [] rather than 500 — mirroring _summaries' documented "must never 500" guard.
+    # Before the guard these scans were unguarded and one bad file 500'd every thread open + /items.
+    client = _app(tmp_path)
+    tid = client.post("/capture", json={"idea": "an idea worth capturing"}).json()["id"]
+
+    def _boom(self, *a, **k):
+        raise ValueError("corrupt/forward-incompatible workitem file")
+
+    monkeypatch.setattr(WorkItemStore, "list", _boom)
+
+    got = client.get(f"/threads/{tid}")
+    assert got.status_code == 200, got.text        # _thread_payload degrades instead of 500
+    assert got.json()["work_item_id"] is None
+
+    assert client.get("/items").status_code == 200  # _workitem_index degrades too
