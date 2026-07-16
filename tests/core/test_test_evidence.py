@@ -190,6 +190,26 @@ def test_evidence_stale_check_gracefully_skipped_when_no_shell(tmp_path: Path):
     assert ev["a"].status == "passed"
 
 
+def test_format_missing_summary_stale_reads_as_soft_advisory():
+    # #258: a stale repo (tests ran on an EARLIER commit of the same branch) must read as a soft,
+    # actionable advisory — clearly distinct from a real "not run" gap — so the common orchestrated
+    # happy path (final review-fix commit after the last `mship test`) stops eroding the signal.
+    from mship.core.test_evidence import RepoEvidence, format_missing_summary
+    ev = {
+        "svc": RepoEvidence(status="stale", source="test_results", at=datetime.now(timezone.utc)),
+        "web": RepoEvidence(status="missing", source="none", at=None),
+    }
+    lines = format_missing_summary(ev)
+    stale_line = next(l for l in lines if "svc" in l)
+    missing_line = next(l for l in lines if "web" in l)
+    # Stale is framed as earlier-commit + actionable, not as a gap.
+    assert "earlier commit" in stale_line.lower()
+    assert "mship test" in stale_line
+    assert "not run" not in stale_line.lower()
+    # The real gap still reads plainly as "not run".
+    assert "not run" in missing_line.lower()
+
+
 def test_format_missing_summary_empty_when_all_pass(tmp_path: Path):
     from mship.core.test_evidence import read_evidence, format_missing_summary
     log = LogManager(tmp_path / "logs")
