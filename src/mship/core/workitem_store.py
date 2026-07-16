@@ -152,22 +152,34 @@ class WorkItemStore:
                 return w.id
         return None
 
+    def _thread_link_lock_path(self) -> Path:
+        """Store-wide lock serializing all `add_thread` calls. The per-item locks let writers to
+        DIFFERENT items run in parallel, so the cross-item ownership scan + append would otherwise
+        race (two concurrent adds of the same thread to different items could both see "no owner"
+        and both save → dual membership). Held around the scan+append so the exclusivity check is
+        atomic. Starts with '.', so `list()`'s `*.json` glob never reads it."""
+        return self._dir / ".thread-link.lock"
+
     def add_thread(self, item_id: str, thread_id: str, now: datetime | None = None) -> None:
-        with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
-            item = self.get(item_id)
-            if item is None:
-                raise KeyError(item_id)
-            if thread_id in item.thread_ids:
-                return  # already ours — idempotent no-op
-            # Exclusive membership: a thread belongs to at most one WorkItem (the resolver assumes a
-            # single owner). If another item already holds it, refuse rather than create dual membership.
-            owner = self._thread_owner(thread_id, exclude=item_id)
-            if owner is not None:
-                raise ThreadAlreadyLinkedError(thread_id, owner)
-            item.thread_ids.append(thread_id)
-            if now is not None:
-                item.updated_at = now
-            self.save(item)
+        # Outer store-wide lock makes the ownership scan + append atomic ACROSS items; inner per-item
+        # lock keeps this item's read-modify-write atomic against other same-item writers. Ordering is
+        # always store-lock → item-lock (other methods take only the item lock), so no deadlock cycle.
+        with _locked(self._thread_link_lock_path(), fcntl.LOCK_EX):
+            with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
+                item = self.get(item_id)
+                if item is None:
+                    raise KeyError(item_id)
+                if thread_id in item.thread_ids:
+                    return  # already ours — idempotent no-op
+                # Exclusive membership: a thread belongs to at most one WorkItem (the resolver assumes
+                # a single owner). If another item holds it, refuse rather than create dual membership.
+                owner = self._thread_owner(thread_id, exclude=item_id)
+                if owner is not None:
+                    raise ThreadAlreadyLinkedError(thread_id, owner)
+                item.thread_ids.append(thread_id)
+                if now is not None:
+                    item.updated_at = now
+                self.save(item)
 
     def add_external_link(self, item_id: str, link: ExternalLink, now: datetime | None = None) -> None:
         with _locked(self._lock_path(item_id), fcntl.LOCK_EX):

@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from mship.core.message_store import MessageStore
-from mship.core.workitem_store import WorkItemStore
+from mship.core.workitem_store import ThreadAlreadyLinkedError, WorkItemStore
 
 _BASE = datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc)
 
@@ -137,3 +137,37 @@ def test_concurrent_add_thread_to_same_item_do_not_lose_updates(tmp_path: Path):
     missing = expected - set(got.thread_ids)
     assert not missing, f"lost {len(missing)} added thread ids: {sorted(missing)}"
     assert len(got.thread_ids) == workers * rounds
+
+
+# Cross-item exclusivity under contention: N processes each try to link the SAME thread to a
+# DIFFERENT item at once. The store-wide thread-link lock must make the ownership check atomic, so
+# exactly one wins and the rest raise ThreadAlreadyLinkedError — never dual membership. (Without the
+# store-wide lock the per-item locks let multiple pass the owner scan and both save.)
+def _claim_shared_thread_worker(workitems_dir_str: str, item_id: str, thread_id: str) -> None:
+    store = WorkItemStore(Path(workitems_dir_str))
+    try:
+        store.add_thread(item_id, thread_id)
+    except ThreadAlreadyLinkedError:
+        pass  # a concurrent worker won the race first; exclusive membership held
+
+
+def test_concurrent_add_same_thread_to_different_items_stays_exclusive(tmp_path: Path):
+    workitems_dir = tmp_path / ".mothership" / "workitems"
+    store = WorkItemStore(workitems_dir)
+    items = [store.create(title=f"i{w}", kind="feature", workspace="ws", now=_BASE) for w in range(8)]
+
+    procs = [
+        multiprocessing.Process(
+            target=_claim_shared_thread_worker,
+            args=(str(workitems_dir), it.id, "shared-thread"),
+        )
+        for it in items
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=60)
+        assert p.exitcode == 0, f"worker crashed (exitcode={p.exitcode})"
+
+    owners = [it.id for it in items if "shared-thread" in store.get(it.id).thread_ids]
+    assert len(owners) == 1, f"thread landed in {len(owners)} items, expected exactly 1: {owners}"
