@@ -152,8 +152,12 @@ def test_advances_approved_spec_on_last_task_merge(tmp_path):
     _call(tmp_path, t, state)
 
     assert SpecStore(tmp_path / "specs").find_by_id(spec_id).status == "implemented"
+    got = store.get(wi.id)
     # Spec-bound items reach done via the spec, not a phase_override.
-    assert store.get(wi.id).phase_override is None
+    assert got.phase_override is None
+    # ...but the WorkItem's updated_at is still bumped so the freshly-done feature
+    # bubbles to the top of list()'s updated_at-desc view (Greptile #365).
+    assert got.updated_at != _now()
 
 
 def test_advances_dispatched_spec(tmp_path):

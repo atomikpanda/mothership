@@ -77,9 +77,14 @@ def advance_workitem_on_close(
         sstore = SpecStore(specs_dir)
         spec = sstore.find_by_id(item.spec_id)
         if spec is not None and spec.status in ("approved", "dispatched"):
+            now = datetime.now(timezone.utc)
             spec.status = "implemented"
-            spec.updated_at = datetime.now(timezone.utc)
+            spec.updated_at = now
             sstore.save(spec)
+            # Bubble the freshly-done WorkItem to the top of list()'s updated_at-desc
+            # view too (mirrors the spec-less phase_override bump below). The override
+            # stays None — the spec drives `done`; this only refreshes updated_at.
+            store.set_phase_override(wid, None, now=now)
         return
 
     # Spec-less: stamp done directly. The updated_at bump (mirrors
