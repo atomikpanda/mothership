@@ -1083,3 +1083,47 @@ def test_old_hooks_default_timeout_key_raises_clear_rename_error(tmp_path):
     with pytest.raises(ValueError, match="lifecycle_hooks_default_timeout"):
         ConfigLoader.load(cfg, require_paths=False)
 
+
+def test_discover_with_source_env(tmp_path, monkeypatch):
+    from mship.core.config import ConfigLoader
+    root = tmp_path / "ws"; root.mkdir()
+    (root / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    other = tmp_path / "other"; other.mkdir()
+    monkeypatch.setenv("MSHIP_WORKSPACE", str(root))
+    res = ConfigLoader.discover_with_source(other)
+    assert res.path == root / "mothership.yaml"
+    assert res.source == "env"
+
+
+def test_discover_with_source_marker(tmp_path, monkeypatch):
+    from mship.core.config import ConfigLoader
+    from mship.core.workspace_marker import write_marker
+    monkeypatch.delenv("MSHIP_WORKSPACE", raising=False)
+    root = tmp_path / "ws"; root.mkdir()
+    (root / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    wt = tmp_path / "wt"; wt.mkdir()
+    write_marker(wt, root)
+    res = ConfigLoader.discover_with_source(wt)
+    assert res.path == root / "mothership.yaml"
+    assert res.source == "marker"
+
+
+def test_discover_with_source_walk_up(tmp_path, monkeypatch):
+    from mship.core.config import ConfigLoader
+    monkeypatch.delenv("MSHIP_WORKSPACE", raising=False)
+    root = tmp_path / "ws"; root.mkdir()
+    (root / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    nested = root / "a" / "b"; nested.mkdir(parents=True)
+    res = ConfigLoader.discover_with_source(nested)
+    assert res.path == root / "mothership.yaml"
+    assert res.source == "walk-up"
+
+
+def test_discover_delegates_to_discover_with_source(tmp_path, monkeypatch):
+    from mship.core.config import ConfigLoader
+    monkeypatch.delenv("MSHIP_WORKSPACE", raising=False)
+    root = tmp_path / "ws"; root.mkdir()
+    (root / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    nested = root / "a"; nested.mkdir()
+    assert ConfigLoader.discover(nested) == root / "mothership.yaml"
+
