@@ -919,3 +919,66 @@ def test_merge_dirty_worktree_advances_then_posts_skip_note(tmp_path):
     watcher.check_once()  # idempotent: does not double-post
     notes = [c for c in msgs.append_calls if c["kind"] == "note"]
     assert len(notes) == 1
+
+
+def test_merge_auto_close_is_idempotent_across_sweeps(tmp_path):
+    """ac7: a repeated merge signal after teardown does not double-advance or error."""
+    from mship.core.spec_store import SpecStore
+    spec, wi, wstore = _seed_dispatched_spec_and_workitem(tmp_path)
+    msgs = FakeMessageStore()
+    url = "https://github.com/org/repo1/pull/1"
+    task = SimpleNamespace(
+        slug="task-m", pr_urls={"repo1": url}, work_item_id=wi.id,
+        spec_id=spec.id, worktrees={"repo1": str(tmp_path / "wt")},
+    )
+    tasks = {"task-m": task}
+    state = FakeStateManager(tasks)
+    fwm = FakeWorktreeManager(tasks)
+    watcher = PrWatcher(msgs, wstore, state, lambda u: "merged", now_fn,
+                        worktree_manager=fwm, workspace_root=tmp_path)
+    watcher.check_once(); watcher.check_once(); watcher.check_once()
+    assert fwm.abort_calls == [("task-m", False)]
+    assert SpecStore(tmp_path / "specs").find_by_id(spec.id).status == "implemented"
+
+
+def test_merge_partial_multipr_does_not_advance_or_tear_down(tmp_path):
+    """ac7-adjacent: a multi-PR task with one PR still open must not advance or tear down."""
+    from mship.core.spec_store import SpecStore
+    spec, wi, wstore = _seed_dispatched_spec_and_workitem(tmp_path)
+    msgs = FakeMessageStore()
+    url_a = "https://github.com/org/repoA/pull/1"
+    url_b = "https://github.com/org/repoB/pull/2"
+    task = SimpleNamespace(
+        slug="task-m", pr_urls={"repoA": url_a, "repoB": url_b},
+        work_item_id=wi.id, spec_id=spec.id,
+        worktrees={"repoA": str(tmp_path / "wtA"), "repoB": str(tmp_path / "wtB")},
+    )
+    tasks = {"task-m": task}
+    state = FakeStateManager(tasks)
+    fwm = FakeWorktreeManager(tasks)
+
+    def check_state(u):
+        return "merged" if u == url_a else "open"
+
+    PrWatcher(msgs, wstore, state, check_state, now_fn,
+              worktree_manager=fwm, workspace_root=tmp_path).check_once()
+    assert fwm.abort_calls == []
+    assert SpecStore(tmp_path / "specs").find_by_id(spec.id).status == "dispatched"
+
+
+def test_merge_teardown_failure_is_fail_open_event_still_posts(tmp_path):
+    """ac2: an unexpected teardown failure never crashes the sweep or drops the event."""
+    spec, wi, wstore = _seed_dispatched_spec_and_workitem(tmp_path)
+    msgs = FakeMessageStore()
+    url = "https://github.com/org/repo1/pull/1"
+    task = SimpleNamespace(
+        slug="task-m", pr_urls={"repo1": url}, work_item_id=wi.id,
+        spec_id=spec.id, worktrees={"repo1": str(tmp_path / "wt")},
+    )
+    tasks = {"task-m": task}
+    state = FakeStateManager(tasks)
+    fwm = FakeWorktreeManager(tasks, boom=True)
+    watcher = PrWatcher(msgs, wstore, state, lambda u: "merged", now_fn,
+                        worktree_manager=fwm, workspace_root=tmp_path)
+    watcher.check_once()  # must not raise
+    assert any(c["kind"] == "event" and "merged" in c["text"] for c in msgs.append_calls)
