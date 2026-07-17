@@ -982,3 +982,25 @@ def test_merge_teardown_failure_is_fail_open_event_still_posts(tmp_path):
                         worktree_manager=fwm, workspace_root=tmp_path)
     watcher.check_once()  # must not raise
     assert any(c["kind"] == "event" and "merged" in c["text"] for c in msgs.append_calls)
+
+
+def test_merge_multirepo_all_merged_auto_closes_once(tmp_path):
+    """Greptile P2: a task whose N repos all merged advances + tears down ONCE
+    per sweep, not once per repo (dedup on the task slug)."""
+    from mship.core.spec_store import SpecStore
+    spec, wi, wstore = _seed_dispatched_spec_and_workitem(tmp_path)
+    msgs = FakeMessageStore()
+    url_a = "https://github.com/org/repoA/pull/1"
+    url_b = "https://github.com/org/repoB/pull/2"
+    task = SimpleNamespace(
+        slug="task-m", pr_urls={"repoA": url_a, "repoB": url_b},
+        work_item_id=wi.id, spec_id=spec.id,
+        worktrees={"repoA": str(tmp_path / "wtA"), "repoB": str(tmp_path / "wtB")},
+    )
+    tasks = {"task-m": task}
+    state = FakeStateManager(tasks)
+    fwm = FakeWorktreeManager(tasks)
+    PrWatcher(msgs, wstore, state, lambda u: "merged", now_fn,
+              worktree_manager=fwm, workspace_root=tmp_path).check_once()
+    assert fwm.abort_calls == [("task-m", False)]  # torn down once, not twice
+    assert SpecStore(tmp_path / "specs").find_by_id(spec.id).status == "implemented"

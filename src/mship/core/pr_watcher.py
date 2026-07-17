@@ -139,12 +139,16 @@ class PrWatcher:
         # WorkItem and tears the worktree down. Gated on presence — like `config`
         # gates lifecycle hooks — so watchers built without it are unchanged.
         self.worktree_manager = worktree_manager
+        # Per-sweep set of task slugs already auto-closed this sweep, so a task
+        # whose N repos all merged advances + tears down ONCE, not once per repo.
+        self._auto_closed_slugs: set[str] = set()
 
     def check_once(self) -> None:
         """One sweep over all tasks' PR urls. Never raises — a failure while
         checking one PR is logged and skipped so it can't abort the sweep for
         every other task."""
         tasks = self.state_manager.load().tasks
+        self._auto_closed_slugs = set()  # reset per-sweep merge-auto-close dedup
         # Snapshot: a merge auto-close can tear a task down (removing it from
         # state) mid-sweep, so iterate a materialized list rather than the live
         # dict view to avoid "dictionary changed size during iteration".
@@ -214,6 +218,10 @@ class PrWatcher:
             return
         if self.worktree_manager is None or self.workspace_root is None:
             return
+        # A task's N repos are checked as N (slug, repo, url) triples in one
+        # sweep; only handle the first one that finds the whole task merged.
+        if slug in self._auto_closed_slugs:
+            return
 
         # Advance phase/spec FIRST, so it stands even if teardown is later
         # skipped for a dirty worktree.
@@ -228,9 +236,11 @@ class PrWatcher:
             open_count = sum(1 for s in states if s == "open")
             # Only advance/tear down when the WHOLE task is cleanly merged
             # (mirrors `mship close`'s routing). A partially-merged multi-PR
-            # task waits for its remaining PRs.
+            # task waits for its remaining PRs — don't mark it done so a later
+            # sweep re-evaluates once its remaining PRs merge.
             if open_count or merged_count == 0 or closed_count > 0:
                 return
+            self._auto_closed_slugs.add(slug)
 
             specs_dir = self.workspace_root / SPECS_DIRNAME
             workitems_dir = self.workspace_root / ".mothership" / "workitems"
