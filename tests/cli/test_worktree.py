@@ -2170,3 +2170,82 @@ def test_close_non_required_hook_failure_never_blocks_close(configured_git_app):
         assert "t" not in sm.load().tasks
     finally:
         container.shell.reset_override()
+
+
+def test_close_threads_force_true_to_abort(configured_git_app):
+    from datetime import datetime, timezone
+    from unittest.mock import MagicMock
+    from mship.cli import container
+    from mship.core.state import StateManager, Task, WorkspaceState
+    from mship.util.shell import ShellRunner, ShellResult
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+
+    sm = StateManager(configured_git_app / ".mothership")
+    sm.save(WorkspaceState(tasks={"t": Task(
+        slug="t", description="d", phase="review",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["shared"], branch="feat/t",
+        pr_urls={"shared": "https://github.com/o/r/pull/1"},
+        finished_at=datetime.now(timezone.utc),
+    )}))
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="MERGED\n", stderr="")
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+
+    class _Rec:
+        def __init__(self): self.calls = []
+        def abort(self, task_slug, force=False): self.calls.append((task_slug, force))
+
+    rec = _Rec()
+    container.shell.override(mock_shell)
+    container.worktree_manager.override(rec)
+    try:
+        result = CliRunner().invoke(_app, ["close", "--yes", "--force", "--task", "t"])
+        assert result.exit_code == 0, result.output
+        assert rec.calls == [("t", True)]              # ac5: force reaches the primitive
+    finally:
+        container.shell.reset_override()
+        container.worktree_manager.reset_override()
+
+
+def test_close_surfaces_worktree_dirty_error_and_keeps_task(configured_git_app):
+    from datetime import datetime, timezone
+    from unittest.mock import MagicMock
+    from mship.cli import container
+    from mship.core.state import StateManager, Task, WorkspaceState
+    from mship.util.shell import ShellRunner, ShellResult
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+
+    sm = StateManager(configured_git_app / ".mothership")
+    sm.save(WorkspaceState(tasks={"t": Task(
+        slug="t", description="d", phase="review",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["shared"], branch="feat/t",
+        pr_urls={"shared": "https://github.com/o/r/pull/1"},
+        finished_at=datetime.now(timezone.utc),
+    )}))
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="MERGED\n", stderr="")
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+
+    class _Dirty:
+        def abort(self, task_slug, force=False):
+            from mship.core.worktree import WorktreeDirtyError
+            if not force:
+                raise WorktreeDirtyError(task_slug, {"shared": "uncommitted changes"})
+
+    container.shell.override(mock_shell)
+    container.worktree_manager.override(_Dirty())
+    try:
+        result = CliRunner().invoke(_app, ["close", "--yes", "--task", "t"])
+        assert result.exit_code != 0
+        assert "uncommitted changes" in result.output
+        assert "--force" in result.output
+        assert "t" in sm.load().tasks                   # ac3: task NOT removed
+    finally:
+        container.shell.reset_override()
+        container.worktree_manager.reset_override()

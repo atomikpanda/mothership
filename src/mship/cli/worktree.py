@@ -881,7 +881,13 @@ def register(app: typer.Typer, get_container):
                 output.warning(f"lifecycle hook '{hr.hook_name}' for task.closed failed: {hr.error}")
 
         wt_mgr = container.worktree_manager()
-        wt_mgr.abort(task_slug)  # core method retains the name; only CLI verb changed
+        from mship.core.worktree import WorktreeDirtyError
+        try:
+            wt_mgr.abort(task_slug, force=force)  # core method retains the name; only CLI verb changed
+        except WorktreeDirtyError as e:
+            output.error(str(e))
+            output.error("Resolve the changes (commit/push), or re-run `mship close --force` to discard them.")
+            raise typer.Exit(code=1)
 
         if downstream and detach_downstream:
             def _detach(s):
