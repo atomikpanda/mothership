@@ -96,6 +96,14 @@ Tasks live in git worktrees managed by mship and tracked in `.mothership/state.y
 
 Agents plug into this through any MCP server or shell tool they already have. mship doesn't replace `bash`, `playwright-mcp`, or `postgres-mcp`; it tells those tools where to point and what's real.
 
+## Changing workspace config
+
+To edit `mothership.yaml` or a per-repo `Taskfile`, edit it directly in the main checkout, run `mship doctor`, then commit. mship exempts **config-only** edits (drift confined to `mothership.yaml` and/or a `Taskfile`) from the `dirty_worktree` audit gate, so `mship finish` is not blocked on them — the moment any non-config tracked file is *also* modified, the gate re-applies (fail-closed). `mship doctor` loads config with path validation relaxed (`require_paths=False`), so a not-yet-present or in-flux `Taskfile.yml` surfaces as a doctor check rather than hard-failing config load before your change lands. `mship status` and `mship doctor` also report the resolved `mothership.yaml` path and how it resolved (env / marker / walk-up), so you always know which config is live.
+
+## Build & bundling caveat
+
+`.worktrees/` (full checkouts, including `node_modules`) and `.mothership/` live at the **repo root**. Any bundler that does not honor `.gitignore` — AWS CDK `Code.fromAsset`, the Docker build context, `npm pack`, `sam build`, serverless — must exclude them explicitly, or it will ship worktree checkouts into your build output. The `.worktrees` entry `mship spawn` adds to `.gitignore` protects git but **not** those bundlers; `mship doctor` emits a best-effort warning when it spots a bundling config at the workspace root that doesn't exclude `.worktrees`/`.mothership`.
+
 ## Scope
 
 - **Does:** isolate worktrees per task, coordinate cross-repo work, sequence PRs, run dependency-ordered multi-service stacks with healthchecks, expose task-scoped state to agents as structured JSON, emit handoff prompts for subagents.

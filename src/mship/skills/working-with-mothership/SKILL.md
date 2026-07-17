@@ -46,6 +46,14 @@ Mothership supports multiple active tasks simultaneously. Typical reasons:
 
 Each task gets a worktree per affected repo at `.worktrees/<slug>/<repo>/` (the branch is `feat/<slug>`); they coexist cleanly.
 
+### Changing workspace config
+
+To change `mothership.yaml` or a `Taskfile`, edit it directly in the main checkout, run `mship doctor`, then commit — mship exempts **config-only** drift (just `mothership.yaml`/`Taskfile`) from `mship finish`'s `dirty_worktree` gate (fail-closed: any non-config change re-blocks). `mship status` / `mship doctor` report which `mothership.yaml` is live and how it resolved.
+
+### Build/bundling caveat
+
+`.worktrees/` and `.mothership/` live at the **repo root**. Any bundler that ignores `.gitignore` — CDK `Code.fromAsset`, the Docker build context, `npm pack`, `sam build`, serverless — must exclude them, or it bundles worktree checkouts into your build. The `.gitignore` entry spawn adds protects git but not those bundlers; `mship doctor` warns (best-effort) when a bundling config at the workspace root doesn't exclude `.worktrees`/`.mothership`.
+
 ### How mship resolves which task a command targets
 
 In order of precedence:
