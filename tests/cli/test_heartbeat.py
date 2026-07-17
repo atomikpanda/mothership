@@ -5,6 +5,7 @@ import pytest
 from typer.testing import CliRunner
 
 from mship.cli import app, container
+from mship.cli.output import reset_output_settings
 from mship.core.state import StateManager, Task, WorkspaceState
 
 runner = CliRunner()
@@ -28,6 +29,10 @@ def configured_app_with_task(workspace: Path):
     container.state_dir.reset_override()
     container.config.reset()
     container.state_manager.reset()
+    # The `--json` global flag is process-global (set once by the top-level
+    # callback, never auto-reset to False); clear it so the TTY-shape assertions
+    # in other suites (e.g. test_output.py) aren't polluted by our --json test.
+    reset_output_settings()
 
 
 def test_heartbeat_stamps_last_activity(configured_app_with_task: Path):
