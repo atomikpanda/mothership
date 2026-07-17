@@ -461,3 +461,27 @@ def test_status_dependencies_block_present(tmp_path, monkeypatch):
         container.state_dir.reset_override()
         container.config.reset()
         container.state_manager.reset()
+
+
+def test_status_reports_config_path_and_source(workspace, monkeypatch):
+    monkeypatch.delenv("MSHIP_WORKSPACE", raising=False)
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(workspace / "mothership.yaml")
+    container.state_dir.override(workspace / ".mothership")
+    (workspace / ".mothership").mkdir(exist_ok=True)
+    monkeypatch.chdir(workspace)
+    try:
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["config_path"] == str((workspace / "mothership.yaml").resolve())
+        assert payload["config_resolution_source"] == "walk-up"
+        # ac10: existing keys still present
+        for k in ("workspace", "active_tasks", "resolved_task", "resolution_source"):
+            assert k in payload
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
