@@ -325,6 +325,7 @@ def create_app(
             config=config,
             workspace_root=workspace_root,
             shell=ShellRunner(),
+            worktree_manager=worktree_manager,
         )
         stop = asyncio.Event()
         task = asyncio.create_task(_pr_watch_loop(watcher, stop, interval))

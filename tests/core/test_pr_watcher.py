@@ -773,3 +773,15 @@ def test_announce_dedupes_against_legacy_event_opened_marker():
     announce_prs_on_thread(msgs, workitems, "task-1", task, [{"repo": "r", "url": url}], NOW)
 
     assert not any(c["kind"] == "note" and "PR opened:" in c["text"] for c in msgs.append_calls)
+
+
+def test_pr_watcher_stores_worktree_manager():
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    state = FakeStateManager({})
+    sentinel = object()
+    watcher = PrWatcher(
+        msgs, workitems, state, lambda u: "open", now_fn,
+        worktree_manager=sentinel,
+    )
+    assert watcher.worktree_manager is sentinel

@@ -120,6 +120,7 @@ class PrWatcher:
         config: Any | None = None,
         workspace_root: Path | None = None,
         shell: Any | None = None,
+        worktree_manager: Any | None = None,
     ) -> None:
         self.msgs = msgs
         self.workitems = workitems
@@ -134,6 +135,10 @@ class PrWatcher:
         self.config = config
         self.workspace_root = workspace_root
         self.shell = shell
+        # When injected (in `serve`), a PR merge auto-advances the bound spec +
+        # WorkItem and tears the worktree down. Gated on presence — like `config`
+        # gates lifecycle hooks — so watchers built without it are unchanged.
+        self.worktree_manager = worktree_manager
 
     def check_once(self) -> None:
         """One sweep over all tasks' PR urls. Never raises — a failure while

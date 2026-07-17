@@ -118,3 +118,33 @@ async def test_pr_watch_loop_survives_check_once_exception():
     await stopper
 
     assert watcher.calls >= 2  # survived an exception and looped again
+
+
+def test_create_app_wires_worktree_manager_into_watcher(tmp_path, monkeypatch):
+    """serve.create_app must forward its worktree_manager into the PrWatcher it
+    builds in the lifespan, so merge auto-close has a teardown primitive."""
+    captured = {}
+
+    class _StubWatcher:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+        def check_once(self):
+            pass
+
+    monkeypatch.setattr("mship.core.serve.PrWatcher", _StubWatcher)
+    monkeypatch.setenv("MSHIP_PR_WATCH_INTERVAL", "0.01")
+
+    sentinel = object()
+    app = create_app(
+        specs_dir=tmp_path / "specs",
+        state_manager=StateManager(tmp_path / ".mothership"),
+        log_manager=None,
+        workspace_root=tmp_path,
+        workspace_name="test-ws",
+        worktree_manager=sentinel,
+    )
+    with TestClient(app):
+        pass
+
+    assert captured.get("worktree_manager") is sentinel
