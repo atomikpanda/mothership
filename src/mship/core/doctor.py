@@ -355,7 +355,111 @@ class DoctorChecker:
                     ),
                 ))
 
+        # Bundler-exclusion heuristic (issue 366 #7) — best-effort, warn-only.
+        if ws is not None and ws.is_dir():
+            report.checks.extend(self._check_bundler_exclusions(ws))
+
         return report
+
+    def _check_bundler_exclusions(self, ws: Path) -> list[CheckResult]:
+        """WARN when a known asset-bundling config at the workspace root does not
+        exclude `.worktrees`/`.mothership`. Best-effort heuristic (issue 366 #7):
+        it inspects a curated set of bundler configs, cannot detect every tool,
+        and never raises severity above `warn`.
+        """
+        results: list[CheckResult] = []
+        heur = (
+            " (best-effort heuristic — mship cannot detect every bundler; "
+            "verify your build excludes `.worktrees`/`.mothership`)"
+        )
+        tokens = (".worktrees", ".mothership")
+
+        def _excludes(text: str) -> bool:
+            return any(tok in text for tok in tokens)
+
+        # Docker
+        dockerignore = ws / ".dockerignore"
+        dockerfile = ws / "Dockerfile"
+        if dockerignore.exists():
+            try:
+                if not _excludes(dockerignore.read_text()):
+                    results.append(CheckResult(
+                        name="bundler/docker", status="warn",
+                        message=(".dockerignore does not exclude `.worktrees`/"
+                                 "`.mothership` — the Docker build context will ship "
+                                 "worktree checkouts" + heur),
+                    ))
+            except OSError:
+                pass
+        elif dockerfile.exists():
+            results.append(CheckResult(
+                name="bundler/docker", status="warn",
+                message=("Dockerfile present but no .dockerignore excludes "
+                         "`.worktrees`/`.mothership`" + heur),
+            ))
+
+        # serverless
+        for fname in ("serverless.yml", "serverless.yaml"):
+            f = ws / fname
+            if f.exists():
+                try:
+                    if not _excludes(f.read_text()):
+                        results.append(CheckResult(
+                            name="bundler/serverless", status="warn",
+                            message=(f"{fname} does not exclude `.worktrees`/"
+                                     "`.mothership`" + heur),
+                        ))
+                except OSError:
+                    pass
+
+        # SAM
+        for fname in ("template.yaml", "template.yml"):
+            f = ws / fname
+            if f.exists():
+                try:
+                    text = f.read_text()
+                except OSError:
+                    continue
+                if "AWS::Serverless" in text and not _excludes(text):
+                    results.append(CheckResult(
+                        name="bundler/sam", status="warn",
+                        message=(f"SAM template {fname} does not exclude "
+                                 "`.worktrees`/`.mothership`" + heur),
+                    ))
+
+        # npm pack (`files` allowlist)
+        pkg = ws / "package.json"
+        if pkg.exists():
+            try:
+                import json as _json
+                data = _json.loads(pkg.read_text())
+            except Exception:
+                data = {}
+            if isinstance(data, dict) and "files" in data:
+                results.append(CheckResult(
+                    name="bundler/npm", status="warn",
+                    message=("package.json declares `files` for `npm pack` — confirm "
+                             "it does not bundle `.worktrees`/`.mothership`" + heur),
+                ))
+
+        # CDK Code.fromAsset — shallow scan of workspace-root files only
+        for f in ws.iterdir():
+            if not f.is_file() or f.suffix not in (".ts", ".js", ".py"):
+                continue
+            try:
+                text = f.read_text()
+            except OSError:
+                continue
+            if "Code.fromAsset" in text:
+                results.append(CheckResult(
+                    name="bundler/cdk", status="warn",
+                    message=("CDK `Code.fromAsset` bundling detected at the workspace "
+                             "root; ensure the asset root excludes `.worktrees`/"
+                             "`.mothership`" + heur),
+                ))
+                break
+
+        return results
 
     def _detect_mship_dev_workspace(self) -> Path | None:
         """Return the path of a configured repo whose pyproject declares mothership,
