@@ -397,3 +397,59 @@ def test_legacy_state_without_spec_id_loads(tmp_path):
         }}
     }))
     assert StateManager(tmp_path).load().tasks["t"].spec_id is None
+
+
+def test_last_activity_at_defaults_none(state_dir: Path):
+    mgr = StateManager(state_dir)
+    task = Task(
+        slug="a", description="d", phase="dev",
+        created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
+        affected_repos=["shared"], branch="feat/a",
+    )
+    mgr.save(WorkspaceState(tasks={"a": task}))
+    assert mgr.load().tasks["a"].last_activity_at is None
+
+
+def test_last_activity_at_roundtrips(state_dir: Path):
+    mgr = StateManager(state_dir)
+    stamp = datetime(2026, 7, 13, 9, 30, tzinfo=timezone.utc)
+    task = Task(
+        slug="a", description="d", phase="dev",
+        created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
+        affected_repos=["shared"], branch="feat/a",
+        last_activity_at=stamp,
+    )
+    mgr.save(WorkspaceState(tasks={"a": task}))
+    assert mgr.load().tasks["a"].last_activity_at == stamp
+
+
+def test_record_activity_stamps_last_activity_at(state_dir: Path):
+    mgr = StateManager(state_dir)
+    task = Task(
+        slug="a", description="d", phase="dev",
+        created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
+        affected_repos=["shared"], branch="feat/a",
+    )
+    mgr.save(WorkspaceState(tasks={"a": task}))
+    fixed = datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc)
+    mgr.record_activity("a", now=fixed)
+    assert mgr.load().tasks["a"].last_activity_at == fixed
+
+
+def test_record_activity_defaults_to_now(state_dir: Path):
+    mgr = StateManager(state_dir)
+    task = Task(
+        slug="a", description="d", phase="dev",
+        created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
+        affected_repos=["shared"], branch="feat/a",
+    )
+    mgr.save(WorkspaceState(tasks={"a": task}))
+    mgr.record_activity("a")
+    assert mgr.load().tasks["a"].last_activity_at is not None
+
+
+def test_record_activity_unknown_slug_is_noop(state_dir: Path):
+    mgr = StateManager(state_dir)
+    mgr.save(WorkspaceState(tasks={}))
+    mgr.record_activity("ghost")  # must not raise
+    assert mgr.load().tasks == {}
