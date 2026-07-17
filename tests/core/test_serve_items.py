@@ -377,3 +377,22 @@ def test_thread_and_items_endpoints_survive_corrupt_workitem_store(tmp_path, mon
     assert got.json()["work_item_id"] is None
 
     assert client.get("/items").status_code == 200  # _workitem_index degrades too
+
+
+def test_get_item_surfaces_active_task_activity(tmp_path):
+    from mship.core.state import Task, WorkspaceState
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    sm = StateManager(state_dir)
+    now = datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc)
+    sm.save(WorkspaceState(tasks={"s1": Task(
+        slug="s1", description="d", phase="dev", created_at=_now(),
+        affected_repos=["mothership"], branch="b", last_activity_at=now,
+    )}))
+    items = WorkItemStore(state_dir / "workitems")
+    wi = items.create(title="Feat", kind="feature", workspace="testws", now=_now())
+    items.add_task(wi.id, "s1", now=_now())
+
+    got = _app(tmp_path).get(f"/items/{wi.id}").json()
+    assert got["active_phase"] == "dev"
+    assert got["active_last_activity_at"].startswith("2026-07-13T12:00:00")
