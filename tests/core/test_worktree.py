@@ -1721,3 +1721,72 @@ def test_spawn_dirty_canonical_base_not_fast_forwarded_but_worktree_fresh(tmp_pa
     wt = tmp_path / ".worktrees" / "dirty-base" / "svc"
     assert _sha(wt) == origin_tip                 # worktree still cut from origin (ac1)
     assert _sha(repo, "main") != origin_tip       # dirty canonical base left untouched (ac3)
+
+
+# ---------------------------------------------------------------------------
+# abort teardown guard (spec auto-advance-on-merge)
+# ---------------------------------------------------------------------------
+
+def test_abort_refuses_dirty_worktree_and_leaves_it_intact(worktree_deps):
+    from mship.core.worktree import WorktreeDirtyError
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("dirty task", repos=["shared"], workspace_root=workspace)
+    wt = Path(state_mgr.load().tasks["dirty-task"].worktrees["shared"])
+    (wt / "scratch.txt").write_text("uncommitted work")
+
+    with pytest.raises(WorktreeDirtyError):
+        mgr.abort("dirty-task")
+
+    assert wt.exists()                                   # left intact (ac4)
+    assert "dirty-task" in state_mgr.load().tasks        # state unchanged
+
+
+def test_abort_force_removes_dirty_worktree(worktree_deps):
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("dirty task", repos=["shared"], workspace_root=workspace)
+    wt = Path(state_mgr.load().tasks["dirty-task"].worktrees["shared"])
+    (wt / "scratch.txt").write_text("uncommitted work")
+
+    mgr.abort("dirty-task", force=True)                  # ac5
+
+    assert not wt.exists()
+    assert "dirty-task" not in state_mgr.load().tasks
+
+
+def test_abort_clean_worktree_still_torn_down_without_force(worktree_deps):
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("clean task", repos=["shared"], workspace_root=workspace)
+    wt = Path(state_mgr.load().tasks["clean-task"].worktrees["shared"])
+
+    mgr.abort("clean-task")                              # ac6
+
+    assert not wt.exists()
+    assert "clean-task" not in state_mgr.load().tasks
+
+
+def test_abort_idempotent_when_task_already_gone(worktree_deps):
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.abort("never-existed")                           # ac7: no KeyError, no raise
+
+
+def test_abort_does_not_rmtree_when_git_remove_fails(worktree_deps, monkeypatch):
+    """The silent shutil.rmtree(ignore_errors=True) data-loss fallback is REMOVED:
+    a worktree git refused to remove is LEFT on disk, not force-deleted, and the
+    hub is not nuked either."""
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("keep task", repos=["shared"], workspace_root=workspace)
+    wt = Path(state_mgr.load().tasks["keep-task"].worktrees["shared"])
+
+    def _boom(**kwargs):
+        raise RuntimeError("git worktree remove refused")
+    monkeypatch.setattr(git, "worktree_remove", _boom)
+
+    mgr.abort("keep-task")                               # clean tree -> guard passes
+
+    assert wt.exists()                                   # NOT rmtree'd (fallback gone)
+    assert "keep-task" not in state_mgr.load().tasks     # state still cleared

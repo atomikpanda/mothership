@@ -773,3 +773,234 @@ def test_announce_dedupes_against_legacy_event_opened_marker():
     announce_prs_on_thread(msgs, workitems, "task-1", task, [{"repo": "r", "url": url}], NOW)
 
     assert not any(c["kind"] == "note" and "PR opened:" in c["text"] for c in msgs.append_calls)
+
+
+def test_pr_watcher_stores_worktree_manager():
+    msgs = FakeMessageStore()
+    workitems = FakeWorkItemStore()
+    state = FakeStateManager({})
+    sentinel = object()
+    watcher = PrWatcher(
+        msgs, workitems, state, lambda u: "open", now_fn,
+        worktree_manager=sentinel,
+    )
+    assert watcher.worktree_manager is sentinel
+
+
+# ---------------------------------------------------------------------------
+# Merge auto-close (spec auto-advance-on-merge)
+# ---------------------------------------------------------------------------
+
+class FakeWorktreeManager:
+    """Records abort() and mutates the shared task dict so re-sweeps see the
+    teardown, mirroring the real WorktreeManager.abort contract."""
+
+    def __init__(self, tasks: dict, *, dirty: dict | None = None, boom: bool = False) -> None:
+        self._tasks = tasks
+        self._dirty = dirty
+        self._boom = boom
+        self.abort_calls: list[tuple[str, bool]] = []
+
+    def abort(self, task_slug: str, force: bool = False) -> None:
+        self.abort_calls.append((task_slug, force))
+        if task_slug not in self._tasks:
+            return  # idempotent no-op (mirrors real abort)
+        if not force and self._dirty is not None:
+            from mship.core.worktree import WorktreeDirtyError
+            raise WorktreeDirtyError(task_slug, self._dirty)
+        if not force and self._boom:
+            raise RuntimeError("teardown kaboom")
+        self._tasks.pop(task_slug, None)
+
+
+def _seed_dispatched_spec_and_workitem(tmp_path):
+    """Real SpecStore + WorkItemStore on disk: a dispatched spec linked to a
+    feature WorkItem that has one live task. Returns (spec, wi, wstore)."""
+    from mship.core.spec_draft import new_spec
+    from mship.core.spec_store import SpecStore
+    from mship.core.workitem_store import WorkItemStore
+
+    specs_dir = tmp_path / "specs"
+    specs_dir.mkdir(parents=True, exist_ok=True)
+    sstore = SpecStore(specs_dir)
+    spec = new_spec("Auto advance feature", now=NOW, task_slug="task-m")
+    spec.status = "dispatched"
+    sstore.save(spec)
+
+    wstore = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = wstore.create(title="Auto advance feature", kind="feature", workspace="ws", now=NOW)
+    wstore.link_spec(wi.id, spec.id, now=NOW)
+    wstore.add_task(wi.id, "task-m", now=NOW)
+    return spec, wi, wstore
+
+
+def test_merge_auto_advances_spec_and_workitem_then_tears_down(tmp_path):
+    from mship.core.spec_store import SpecStore
+    from mship.core.workitem_store import WorkItemStore
+    from mship.core.view.workitem_index import compute_phase, compute_attention
+
+    spec, wi, wstore = _seed_dispatched_spec_and_workitem(tmp_path)
+
+    msgs = FakeMessageStore()
+    url = "https://github.com/org/repo1/pull/1"
+    task = SimpleNamespace(
+        slug="task-m", pr_urls={"repo1": url}, work_item_id=wi.id,
+        spec_id=spec.id, worktrees={"repo1": str(tmp_path / "wt")},
+    )
+    tasks = {"task-m": task}
+    state = FakeStateManager(tasks)
+    fwm = FakeWorktreeManager(tasks)
+
+    watcher = PrWatcher(
+        msgs, wstore, state, lambda u: "merged", now_fn,
+        worktree_manager=fwm, workspace_root=tmp_path,
+    )
+    watcher.check_once()
+
+    assert SpecStore(tmp_path / "specs").find_by_id(spec.id).status == "implemented"
+    reread_spec = SpecStore(tmp_path / "specs").find_by_id(spec.id)
+    reread_item = WorkItemStore(tmp_path / ".mothership" / "workitems").get(wi.id)
+    assert compute_phase(reread_item, reread_spec, []) == "done"
+    assert compute_attention(reread_spec, [], []).needs_review is False
+    assert fwm.abort_calls == [("task-m", False)]
+    assert "task-m" not in tasks
+    assert any(c["kind"] == "event" and "merged" in c["text"] for c in msgs.append_calls)
+
+
+def test_merge_auto_close_noop_without_worktree_manager(tmp_path):
+    spec, wi, wstore = _seed_dispatched_spec_and_workitem(tmp_path)
+    from mship.core.spec_store import SpecStore
+
+    msgs = FakeMessageStore()
+    url = "https://github.com/org/repo1/pull/1"
+    task = SimpleNamespace(
+        slug="task-m", pr_urls={"repo1": url}, work_item_id=wi.id,
+        spec_id=spec.id, worktrees={"repo1": str(tmp_path / "wt")},
+    )
+    state = FakeStateManager({"task-m": task})
+
+    PrWatcher(msgs, wstore, state, lambda u: "merged", now_fn,
+              workspace_root=tmp_path).check_once()
+
+    assert SpecStore(tmp_path / "specs").find_by_id(spec.id).status == "dispatched"
+
+
+def test_merge_dirty_worktree_advances_then_posts_skip_note(tmp_path):
+    """ac4: when teardown is refused (dirty), the worktree is left intact, the
+    spec/phase still advances, and a note is posted telling the operator to
+    resolve then `mship close` / --force."""
+    from mship.core.spec_store import SpecStore
+
+    spec, wi, wstore = _seed_dispatched_spec_and_workitem(tmp_path)
+
+    msgs = FakeMessageStore()
+    url = "https://github.com/org/repo1/pull/1"
+    task = SimpleNamespace(
+        slug="task-m", pr_urls={"repo1": url}, work_item_id=wi.id,
+        spec_id=spec.id, worktrees={"repo1": str(tmp_path / "wt")},
+    )
+    tasks = {"task-m": task}
+    state = FakeStateManager(tasks)
+    fwm = FakeWorktreeManager(tasks, dirty={"repo1": "uncommitted changes"})
+
+    watcher = PrWatcher(
+        msgs, wstore, state, lambda u: "merged", now_fn,
+        worktree_manager=fwm, workspace_root=tmp_path,
+    )
+    watcher.check_once()
+
+    assert SpecStore(tmp_path / "specs").find_by_id(spec.id).status == "implemented"
+    assert "task-m" in tasks
+    notes = [c for c in msgs.append_calls if c["kind"] == "note"]
+    assert len(notes) == 1
+    assert "uncommitted changes" in notes[0]["text"]
+    assert "mship close" in notes[0]["text"]
+
+    watcher.check_once()  # idempotent: does not double-post
+    notes = [c for c in msgs.append_calls if c["kind"] == "note"]
+    assert len(notes) == 1
+
+
+def test_merge_auto_close_is_idempotent_across_sweeps(tmp_path):
+    """ac7: a repeated merge signal after teardown does not double-advance or error."""
+    from mship.core.spec_store import SpecStore
+    spec, wi, wstore = _seed_dispatched_spec_and_workitem(tmp_path)
+    msgs = FakeMessageStore()
+    url = "https://github.com/org/repo1/pull/1"
+    task = SimpleNamespace(
+        slug="task-m", pr_urls={"repo1": url}, work_item_id=wi.id,
+        spec_id=spec.id, worktrees={"repo1": str(tmp_path / "wt")},
+    )
+    tasks = {"task-m": task}
+    state = FakeStateManager(tasks)
+    fwm = FakeWorktreeManager(tasks)
+    watcher = PrWatcher(msgs, wstore, state, lambda u: "merged", now_fn,
+                        worktree_manager=fwm, workspace_root=tmp_path)
+    watcher.check_once(); watcher.check_once(); watcher.check_once()
+    assert fwm.abort_calls == [("task-m", False)]
+    assert SpecStore(tmp_path / "specs").find_by_id(spec.id).status == "implemented"
+
+
+def test_merge_partial_multipr_does_not_advance_or_tear_down(tmp_path):
+    """ac7-adjacent: a multi-PR task with one PR still open must not advance or tear down."""
+    from mship.core.spec_store import SpecStore
+    spec, wi, wstore = _seed_dispatched_spec_and_workitem(tmp_path)
+    msgs = FakeMessageStore()
+    url_a = "https://github.com/org/repoA/pull/1"
+    url_b = "https://github.com/org/repoB/pull/2"
+    task = SimpleNamespace(
+        slug="task-m", pr_urls={"repoA": url_a, "repoB": url_b},
+        work_item_id=wi.id, spec_id=spec.id,
+        worktrees={"repoA": str(tmp_path / "wtA"), "repoB": str(tmp_path / "wtB")},
+    )
+    tasks = {"task-m": task}
+    state = FakeStateManager(tasks)
+    fwm = FakeWorktreeManager(tasks)
+
+    def check_state(u):
+        return "merged" if u == url_a else "open"
+
+    PrWatcher(msgs, wstore, state, check_state, now_fn,
+              worktree_manager=fwm, workspace_root=tmp_path).check_once()
+    assert fwm.abort_calls == []
+    assert SpecStore(tmp_path / "specs").find_by_id(spec.id).status == "dispatched"
+
+
+def test_merge_teardown_failure_is_fail_open_event_still_posts(tmp_path):
+    """ac2: an unexpected teardown failure never crashes the sweep or drops the event."""
+    spec, wi, wstore = _seed_dispatched_spec_and_workitem(tmp_path)
+    msgs = FakeMessageStore()
+    url = "https://github.com/org/repo1/pull/1"
+    task = SimpleNamespace(
+        slug="task-m", pr_urls={"repo1": url}, work_item_id=wi.id,
+        spec_id=spec.id, worktrees={"repo1": str(tmp_path / "wt")},
+    )
+    tasks = {"task-m": task}
+    state = FakeStateManager(tasks)
+    fwm = FakeWorktreeManager(tasks, boom=True)
+    watcher = PrWatcher(msgs, wstore, state, lambda u: "merged", now_fn,
+                        worktree_manager=fwm, workspace_root=tmp_path)
+    watcher.check_once()  # must not raise
+    assert any(c["kind"] == "event" and "merged" in c["text"] for c in msgs.append_calls)
+
+
+def test_merge_multirepo_all_merged_auto_closes_once(tmp_path):
+    """Greptile P2: a task whose N repos all merged advances + tears down ONCE
+    per sweep, not once per repo (dedup on the task slug)."""
+    from mship.core.spec_store import SpecStore
+    spec, wi, wstore = _seed_dispatched_spec_and_workitem(tmp_path)
+    msgs = FakeMessageStore()
+    url_a = "https://github.com/org/repoA/pull/1"
+    url_b = "https://github.com/org/repoB/pull/2"
+    task = SimpleNamespace(
+        slug="task-m", pr_urls={"repoA": url_a, "repoB": url_b},
+        work_item_id=wi.id, spec_id=spec.id,
+        worktrees={"repoA": str(tmp_path / "wtA"), "repoB": str(tmp_path / "wtB")},
+    )
+    tasks = {"task-m": task}
+    state = FakeStateManager(tasks)
+    fwm = FakeWorktreeManager(tasks)
+    PrWatcher(msgs, wstore, state, lambda u: "merged", now_fn,
+              worktree_manager=fwm, workspace_root=tmp_path).check_once()
+    assert fwm.abort_calls == [("task-m", False)]  # torn down once, not twice
+    assert SpecStore(tmp_path / "specs").find_by_id(spec.id).status == "implemented"

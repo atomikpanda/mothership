@@ -89,16 +89,22 @@ repos:
 @pytest.fixture
 def workspace_with_git(workspace: Path) -> Path:
     """Workspace where each repo is a git repo."""
+    _git_env = {**os.environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t.com",
+                "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t.com"}
     for name in ["shared", "auth-service", "api-gateway"]:
         repo_dir = workspace / name
         subprocess.run(["git", "init", str(repo_dir)], check=True, capture_output=True)
+        # Commit the working tree (the `workspace` fixture wrote a Taskfile.yml into
+        # each repo) so the checkout is CLEAN — otherwise the untracked file trips
+        # WorktreeManager.abort's dirty-worktree guard in tests that point a task
+        # worktree at the main checkout.
+        subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True, capture_output=True, env=_git_env)
         subprocess.run(
-            ["git", "commit", "--allow-empty", "-m", "init"],
+            ["git", "commit", "-m", "init"],
             cwd=repo_dir,
             check=True,
             capture_output=True,
-            env={**os.environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t.com",
-                 "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t.com"},
+            env=_git_env,
         )
     return workspace
 

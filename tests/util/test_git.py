@@ -244,3 +244,39 @@ def test_ref_exists_true_for_remote_tracking_ref(tmp_path):
     # origin/main was fetched by the fixture
     assert git.ref_exists(repo, "origin/main") is True
     assert git.ref_exists(repo, "origin/does-not-exist") is False
+
+
+# ---------------------------------------------------------------------------
+# has_unpushed_commits — teardown guard (spec auto-advance-on-merge)
+# ---------------------------------------------------------------------------
+
+def test_has_unpushed_commits_false_when_no_remote(git_repo: Path):
+    # A repo with no `origin` has nothing to push to; teardown must not be blocked.
+    git = GitRunner()
+    assert git.has_unpushed_commits(git_repo) is False
+
+
+def test_has_unpushed_commits_false_when_fully_pushed(tmp_path: Path):
+    # `_repo_with_origin_ahead` leaves `clone` at origin/main (nothing ahead).
+    _repo, _tip = _repo_with_origin_ahead(tmp_path)
+    clone = tmp_path / "svc-clone"
+    git = GitRunner()
+    assert git.has_unpushed_commits(clone) is False
+
+
+def test_has_unpushed_commits_true_when_local_ahead_of_upstream(tmp_path: Path):
+    _repo, _tip = _repo_with_origin_ahead(tmp_path)
+    clone = tmp_path / "svc-clone"
+    (clone / "c.txt").write_text("3")
+    _run(["git", "add", "-A"], clone)
+    _run(["git", "commit", "-m", "c3 (unpushed)"], clone)
+    git = GitRunner()
+    assert git.has_unpushed_commits(clone) is True
+
+
+def test_has_unpushed_commits_true_when_origin_exists_but_no_upstream(tmp_path: Path):
+    _repo, _tip = _repo_with_origin_ahead(tmp_path)
+    clone = tmp_path / "svc-clone"
+    _run(["git", "checkout", "-b", "feat/never-pushed"], clone)  # no upstream tracking
+    git = GitRunner()
+    assert git.has_unpushed_commits(clone) is True

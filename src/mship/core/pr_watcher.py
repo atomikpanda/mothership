@@ -120,6 +120,7 @@ class PrWatcher:
         config: Any | None = None,
         workspace_root: Path | None = None,
         shell: Any | None = None,
+        worktree_manager: Any | None = None,
     ) -> None:
         self.msgs = msgs
         self.workitems = workitems
@@ -134,13 +135,24 @@ class PrWatcher:
         self.config = config
         self.workspace_root = workspace_root
         self.shell = shell
+        # When injected (in `serve`), a PR merge auto-advances the bound spec +
+        # WorkItem and tears the worktree down. Gated on presence — like `config`
+        # gates lifecycle hooks — so watchers built without it are unchanged.
+        self.worktree_manager = worktree_manager
+        # Per-sweep set of task slugs already auto-closed this sweep, so a task
+        # whose N repos all merged advances + tears down ONCE, not once per repo.
+        self._auto_closed_slugs: set[str] = set()
 
     def check_once(self) -> None:
         """One sweep over all tasks' PR urls. Never raises — a failure while
         checking one PR is logged and skipped so it can't abort the sweep for
         every other task."""
         tasks = self.state_manager.load().tasks
-        for slug, task in tasks.items():
+        self._auto_closed_slugs = set()  # reset per-sweep merge-auto-close dedup
+        # Snapshot: a merge auto-close can tear a task down (removing it from
+        # state) mid-sweep, so iterate a materialized list rather than the live
+        # dict view to avoid "dictionary changed size during iteration".
+        for slug, task in list(tasks.items()):
             if not task.pr_urls:
                 continue
             for repo, url in task.pr_urls.items():
@@ -186,12 +198,99 @@ class PrWatcher:
         # not at-most-zero). The happy path still posts — and dedups —
         # exactly once.
         self._fire_lifecycle_hook(st, slug, repo)
+        self._auto_close_on_merge(slug, task, repo, url, st)
 
         if self.lock is not None:
             with self.lock:
                 self._post_event(tid, slug, repo, url, st, key)
         else:
             self._post_event(tid, slug, repo, url, st, key)
+
+    def _auto_close_on_merge(
+        self, slug: str, task: Any, repo: str, url: str, st: str,
+    ) -> None:
+        """On a clean full merge, advance the bound spec (dispatched->implemented)
+        and its WorkItem (->done / needs_review cleared), then tear the worktree
+        down — the zero-manual-`mship close` path. Non-interactive and fail-open:
+        every failure is logged and swallowed so the sweep never crashes. Only
+        active when a worktree_manager is injected (i.e. inside `mship serve`)."""
+        if st != "merged":
+            return
+        if self.worktree_manager is None or self.workspace_root is None:
+            return
+        # A task's N repos are checked as N (slug, repo, url) triples in one
+        # sweep; only handle the first one that finds the whole task merged.
+        if slug in self._auto_closed_slugs:
+            return
+
+        # Advance phase/spec FIRST, so it stands even if teardown is later
+        # skipped for a dirty worktree.
+        try:
+            from mship.core.spec_store import SPECS_DIRNAME
+            from mship.core.spec_lifecycle import advance_spec_on_close
+            from mship.core.workitem_lifecycle import advance_workitem_on_close
+
+            states = [self.check_state(u) for u in task.pr_urls.values()]
+            merged_count = sum(1 for s in states if s == "merged")
+            closed_count = sum(1 for s in states if s == "closed")
+            open_count = sum(1 for s in states if s == "open")
+            # Only advance/tear down when the WHOLE task is cleanly merged
+            # (mirrors `mship close`'s routing). A partially-merged multi-PR
+            # task waits for its remaining PRs — don't mark it done so a later
+            # sweep re-evaluates once its remaining PRs merge.
+            if open_count or merged_count == 0 or closed_count > 0:
+                return
+            self._auto_closed_slugs.add(slug)
+
+            specs_dir = self.workspace_root / SPECS_DIRNAME
+            workitems_dir = self.workspace_root / ".mothership" / "workitems"
+            snapshot = self.state_manager.load()  # still contains the closing task
+            advance_spec_on_close(
+                task=task, specs_dir=specs_dir,
+                merged_count=merged_count, closed_count=closed_count,
+            )
+            advance_workitem_on_close(
+                task=task, workitems_dir=workitems_dir, specs_dir=specs_dir,
+                state=snapshot, merged_count=merged_count, closed_count=closed_count,
+            )
+        except Exception:
+            log.exception("pr_watcher: merge auto-advance failed (task=%s)", slug)
+            return
+
+        # Guarded teardown. A dirty/unpushed worktree raises WorktreeDirtyError
+        # -> leave the worktree, post a one-time skip-note (the spec/phase advance
+        # already stands). Any other failure just logs (fail-open).
+        try:
+            self.worktree_manager.abort(slug, force=False)
+        except Exception as exc:
+            from mship.core.worktree import WorktreeDirtyError
+            if isinstance(exc, WorktreeDirtyError):
+                try:
+                    self._post_teardown_skipped_note(slug, task, url, exc)
+                except Exception:
+                    log.exception("pr_watcher: teardown-skip note failed (task=%s)", slug)
+            else:
+                log.exception("pr_watcher: merge teardown failed (task=%s)", slug)
+
+    def _post_teardown_skipped_note(
+        self, slug: str, task: Any, url: str, exc: Any,
+    ) -> None:
+        """Post a one-time NOTE (kind='note', not 'event' — informational, no
+        nag) when a merged task's worktree was left intact because it had
+        uncommitted/unpushed changes. Deduped across sweeps by a sentinel line."""
+        now = self.now_fn()
+        tid, _wi = self._resolve_thread(slug, task, url, now)
+        thread = self.msgs.get(tid)
+        sentinel = f"Worktree for {slug} left intact"
+        if thread is not None and any(sentinel in m.text for m in thread.messages):
+            return
+        details = "; ".join(f"{repo}: {reason}" for repo, reason in exc.dirty.items())
+        text = (
+            f"⚠️ {sentinel}: {details}. "
+            f"Resolve (commit/push), then `mship close` "
+            f"(or `mship close --force` to discard)."
+        )
+        self.msgs.append(tid, "agent", text, now, kind="note")
 
     def _check_posted(
         self, slug: str, task: Any, key: tuple[str, str, str, str],

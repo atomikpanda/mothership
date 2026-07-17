@@ -228,8 +228,10 @@ mship capture [--repo R] [--platform P] [--kind image|layout|all] [--out DIR]
 mship journal "msg" [--action X] [--open Y] [--repo R] [--test-state pass|fail|mixed]
 mship journal --show-open                 # what am I blocked on across this task?
 mship finish [--base B] [--base-map ...] [--push-only] [--handoff] [--force-audit] [--body-file F | --body TEXT] [--force] [--require-tests] [--title T] [--body-map ...]
-mship close [--yes] [--abandon] [--force] [--skip-pr-check]
+mship close [--yes] [--abandon] [--force] [--skip-pr-check]   # --force also required to tear down a dirty/unpushed worktree
 ```
+
+**Merge auto-advance (`mship serve`).** With `mship serve` running, the PR-watcher auto-closes the loop: when a task's PR(s) merge it advances the bound spec `dispatched → implemented` and the WorkItem to `done` (clearing the `needs_review` attention), then tears the worktree down — so **no manual `mship close` is needed** in the common case. `mship close` is now needed only to force-teardown a worktree with **uncommitted or unpushed** changes: every teardown path (merge auto-close, `mship close`, `mship close --abandon`) refuses to delete such a worktree unless you pass `--force`, so work is never lost. When auto-teardown is skipped for a dirty worktree, the spec/WorkItem still advance and a note is posted on the thread — resolve, then `mship close` (or `--force`).
 
 ### Every task needs a WorkItem
 

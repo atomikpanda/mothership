@@ -133,6 +133,39 @@ class GitRunner:
         )
         return bool(result.stdout.strip())
 
+    def has_unpushed_commits(self, worktree_path: Path) -> bool:
+        """True if the worktree's current branch has commits not safely on origin.
+
+        Teardown guard (spec auto-advance-on-merge):
+        - No `origin` remote at all -> False (nothing to push to; a no-remote
+          checkout can't have "unpushed" work in the sense this guard protects,
+          and every no-remote fixture must still tear down).
+        - Upstream tracking ref set (post-`finish`, this is origin/<branch>) ->
+          True iff `git rev-list --count @{u}..HEAD` > 0.
+        - `origin` exists but the branch has NO upstream tracking ref (it was
+          never `push -u`'d) -> True: we can't prove its commits are on origin,
+          so refuse (conservative).
+        Any git error -> True (conservative: refuse rather than risk data loss).
+        """
+        if not self.has_remote(worktree_path, "origin"):
+            return False
+        upstream = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            cwd=worktree_path, capture_output=True, text=True,
+        )
+        if upstream.returncode != 0:
+            return True
+        ahead = subprocess.run(
+            ["git", "rev-list", "--count", "@{u}..HEAD"],
+            cwd=worktree_path, capture_output=True, text=True,
+        )
+        if ahead.returncode != 0:
+            return True
+        try:
+            return int(ahead.stdout.strip() or "0") > 0
+        except ValueError:
+            return True
+
     def run_worktree_prune(self, repo_path: Path) -> None:
         """Clean up stale git worktree tracking."""
         subprocess.run(
