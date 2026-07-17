@@ -47,6 +47,24 @@ def test_spawn_creates_worktrees(worktree_deps):
         assert Path(task.worktrees[repo_name]).exists()
 
 
+def test_every_worktree_resolves_to_workspace_root_via_hub_marker(worktree_deps, monkeypatch):
+    """ac7 (resolution goal, without reversing #84's single-marker design): every repo
+    worktree — including the hub repo's own — resolves to the WORKSPACE-root config via
+    the single hub-container `.mship-workspace` marker, so no per-worktree marker is
+    needed and no worktree is dirtied. This is the observable outcome ac7 asks for."""
+    from mship.core.config import ConfigLoader
+    monkeypatch.delenv("MSHIP_WORKSPACE", raising=False)
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("resolve task", repos=["shared", "auth-service"], workspace_root=workspace)
+    task = state_mgr.load().tasks["resolve-task"]
+    for repo_name in ["shared", "auth-service"]:
+        wt = Path(task.worktrees[repo_name])
+        res = ConfigLoader.discover_with_source(wt)
+        assert res.path == (workspace / "mothership.yaml"), repo_name
+        assert res.source == "marker", repo_name
+
+
 def test_spawn_dependency_order(worktree_deps):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
     mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
