@@ -24,11 +24,15 @@ def register(app: typer.Typer, get_container):
         t = resolved.task
 
         state_mgr.record_activity(t.slug)
-        stamped = state_mgr.load().tasks[t.slug].last_activity_at
 
         if output.human_mode:
             output.success(f"Heartbeat: {t.slug}")
         else:
+            # Re-read for the stamp only in JSON mode, and guard against the task
+            # being removed in the narrow window after record_activity (e.g. a
+            # concurrent `mship kill`) — `.get()` avoids a KeyError crash.
+            task = state_mgr.load().tasks.get(t.slug)
+            stamped = task.last_activity_at if task else None
             output.json({
                 "task": t.slug,
                 "last_activity_at": stamped.isoformat() if stamped else None,

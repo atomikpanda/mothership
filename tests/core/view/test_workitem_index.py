@@ -267,3 +267,17 @@ def test_summary_active_fields_none_without_active_task():
     summaries = build_workitem_index([item], {}, {"s1": finished}, {})
     assert summaries[0].active_phase is None
     assert summaries[0].active_last_activity_at is None
+
+
+def test_active_task_prefers_most_recently_active():
+    older = _now()
+    newer = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    t1 = Task(slug="s1", description="d", phase="dev", created_at=_now(),
+              affected_repos=["m"], branch="b", finished_at=None, last_activity_at=older)
+    t2 = Task(slug="s2", description="d", phase="review", created_at=_now(),
+              affected_repos=["m"], branch="b", finished_at=None, last_activity_at=newer)
+    item = _wi(task_slugs=["s1", "s2"])
+    summaries = build_workitem_index([item], {}, {"s1": t1, "s2": t2}, {})
+    # s2 is more recently active → its phase + activity surface (not first-in-list s1).
+    assert summaries[0].active_phase == "review"
+    assert summaries[0].active_last_activity_at == newer

@@ -103,12 +103,17 @@ class WorkItemSummary:
 
 
 def _active_task(tasks: list[Task]) -> Task | None:
-    """The task an operator is watching: the first still-running (unfinished) task,
-    or None when every linked task is finished."""
-    for t in tasks:
-        if t.finished_at is None:
-            return t
-    return None
+    """The task an operator is watching. Among still-running (unfinished) tasks, prefer the one
+    with the most recent activity — so a work item linked to several in-flight tasks reflects
+    where work is actually happening — falling back to the first unfinished task when none have
+    recorded activity yet. None when every linked task is finished."""
+    unfinished = [t for t in tasks if t.finished_at is None]
+    if not unfinished:
+        return None
+    active = [t for t in unfinished if t.last_activity_at is not None]
+    if active:
+        return max(active, key=lambda t: t.last_activity_at)
+    return unfinished[0]
 
 
 def _summarize(
