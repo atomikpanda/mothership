@@ -1,3 +1,4 @@
+import logging
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -15,12 +16,30 @@ from mship.util.shell import ShellRunner
 from mship.util.slug import slugify
 
 
+logger = logging.getLogger(__name__)
+
+
 class BaseBranchNotFoundError(ValueError):
     """`spawn --base <branch>` was given a branch that doesn't exist in a target repo.
 
     A ValueError subclass so callers that already handle spawn ValueErrors keep
     working; the CLI catches this type specifically to print a clean message.
     """
+
+
+class WorktreeDirtyError(RuntimeError):
+    """Raised by WorktreeManager.abort when a repo's worktree has uncommitted
+    or unpushed changes and force was not requested. Carries the offending
+    repos so callers can render an actionable message and never lose work."""
+
+    def __init__(self, task_slug: str, dirty: dict[str, str]) -> None:
+        self.task_slug = task_slug
+        self.dirty = dirty  # repo_name -> reason ("uncommitted changes" | "unpushed commits")
+        details = "; ".join(f"{repo}: {reason}" for repo, reason in dirty.items())
+        super().__init__(
+            f"Refusing to tear down '{task_slug}': {details}. "
+            f"Resolve them, or pass --force to delete the worktree anyway."
+        )
 
 
 @dataclass
@@ -723,10 +742,39 @@ class WorktreeManager:
 
         return SpawnResult(task=task, setup_warnings=setup_warnings)
 
-    def abort(self, task_slug: str) -> None:
-        state = self._state_manager.load()
-        task = state.tasks[task_slug]
+    def _dirty_worktrees(self, task) -> dict[str, str]:
+        """Return {repo_name: reason} for each affected repo's worktree with
+        uncommitted changes OR unpushed commits. Empty dict = safe to tear down.
+        Skips git_root repos (their worktree is a subdir of the parent's) and
+        already-gone paths (nothing to lose)."""
+        dirty: dict[str, str] = {}
+        for repo_name, wt_path in task.worktrees.items():
+            if self._config.repos[repo_name].git_root is not None:
+                continue
+            p = Path(wt_path)
+            if not p.exists():
+                continue
+            if self._git.has_uncommitted_changes(p):
+                dirty[repo_name] = "uncommitted changes"
+            elif self._git.has_unpushed_commits(p):
+                dirty[repo_name] = "unpushed commits"
+        return dirty
 
+    def abort(self, task_slug: str, force: bool = False) -> None:
+        state = self._state_manager.load()
+        task = state.tasks.get(task_slug)
+        if task is None:
+            return  # idempotent: already torn down
+
+        # Universal safety guard: never delete a worktree with uncommitted or
+        # unpushed changes unless force. Pre-pass over ALL worktrees before
+        # removing any, so a dirty repo refuses the whole task's teardown.
+        if not force:
+            dirty = self._dirty_worktrees(task)
+            if dirty:
+                raise WorktreeDirtyError(task_slug, dirty)
+
+        removal_failed = False
         for repo_name, wt_path in task.worktrees.items():
             repo_config = self._config.repos[repo_name]
 
@@ -741,7 +789,13 @@ class WorktreeManager:
                     worktree_path=Path(wt_path),
                 )
             except Exception:
-                shutil.rmtree(Path(wt_path), ignore_errors=True)
+                # The silent shutil.rmtree(ignore_errors=True) data-loss fallback
+                # was REMOVED: never blow away a directory git refused to remove.
+                # Leave it on disk for `mship prune` to reap.
+                removal_failed = True
+                logger.warning(
+                    "worktree remove failed for %s (%s); left intact", repo_name, wt_path,
+                )
             try:
                 self._git.branch_delete(
                     repo_path=repo_config.path,
@@ -750,24 +804,26 @@ class WorktreeManager:
             except Exception:
                 pass
 
-        # Remove the hub directory for this task. Inferred from the first
-        # worktree's parent.parent, which is `<workspace>/.worktrees/<slug>/`.
-        # Legacy per-repo-layout tasks have a different parent shape — leave
-        # those alone.
-        try:
-            sample_wt = None
-            for name, wt in task.worktrees.items():
-                if self._config.repos[name].git_root is None:
-                    sample_wt = wt
-                    break
-            if sample_wt is not None:
-                hub = Path(sample_wt).parent
-                # Sanity: only remove if it looks like a hub (parent ends in .worktrees)
-                if hub.name == task_slug and hub.parent.name == ".worktrees":
-                    if hub.exists():
-                        shutil.rmtree(hub, ignore_errors=True)
-        except Exception:
-            pass
+        # Remove the hub directory for this task, but ONLY when every worktree
+        # was cleanly removed — otherwise nuking the hub would delete a worktree
+        # git just refused to remove. Inferred from the first worktree's parent,
+        # which is `<workspace>/.worktrees/<slug>/`. Legacy per-repo-layout tasks
+        # have a different parent shape — leave those alone.
+        if not removal_failed:
+            try:
+                sample_wt = None
+                for name, wt in task.worktrees.items():
+                    if self._config.repos[name].git_root is None:
+                        sample_wt = wt
+                        break
+                if sample_wt is not None:
+                    hub = Path(sample_wt).parent
+                    # Sanity: only remove if it looks like a hub (parent ends in .worktrees)
+                    if hub.name == task_slug and hub.parent.name == ".worktrees":
+                        if hub.exists():
+                            shutil.rmtree(hub, ignore_errors=True)
+            except Exception:
+                pass
 
         # Only update state after all cleanup attempts
         def _abort(s):
