@@ -25,6 +25,8 @@ class TaskSummary:
     pr_urls: dict[str, str] = field(default_factory=dict)
     test_results: dict[str, str] = field(default_factory=dict)
     depends_on: list[str] = field(default_factory=list)
+    last_activity_at: datetime | None = None
+    phase_entered_at: datetime | None = None
 
 
 def _summarize(task: Task) -> TaskSummary:
@@ -52,6 +54,8 @@ def _summarize(task: Task) -> TaskSummary:
         pr_urls=dict(task.pr_urls),
         test_results={repo: tr.status for repo, tr in task.test_results.items()},
         depends_on=[e.upstream_slug for e in task.depends_on],
+        last_activity_at=task.last_activity_at,
+        phase_entered_at=task.phase_entered_at,
     )
 
 
