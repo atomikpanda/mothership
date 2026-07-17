@@ -141,6 +141,8 @@ Then: Cleanup worktree (Step 5)
 
 *In a mothership workspace, worktree cleanup is handled by `mship close`. Run it after the local merge (Option 1) or after the PR merges on GitHub (Option 2 — check via `mship pr` for an aggregate view across tasks, `mship reconcile` for drift, or `gh pr view <url>` for a single PR). No manual `git worktree remove` needed.*
 
+*Merge auto-advance (`mship serve`): when `mship serve` is running, a merged PR **auto-advances** the bound spec (`dispatched → implemented`) and its WorkItem (→ `done`, clearing `needs_review`) and tears the worktree down for you — zero manual steps in the common (clean) case, so you usually don't run `mship close` at all after the PR merges. You only need `mship close` when the worktree still has **uncommitted or unpushed** changes: auto-teardown is skipped to protect that work (the spec/WorkItem still advance, and a note is posted on the task's thread) — resolve (commit/push) then `mship close`, or `mship close --force` to discard. `--force` is the only way to delete a dirty/unpushed worktree, and this guard is universal (it also applies to `mship close` and `mship close --abandon`), so uncommitted/unpushed work is **never** deleted without `--force`.*
+
 **For Option 3:** Keep worktree.
 
 ## Quick Reference
