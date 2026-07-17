@@ -409,3 +409,22 @@ def test_journal_json_with_message_errors(configured_app_with_task: Path):
     result = runner.invoke(app, ["journal", "hello", "--task", "add-labels", "--json"])
     assert result.exit_code != 0
     assert "read-only" in result.output.lower()
+
+
+def test_journal_write_stamps_last_activity(configured_app_with_task: Path):
+    result = runner.invoke(app, ["journal", "did a thing", "--task", "add-labels"])
+    assert result.exit_code == 0, result.output
+    state = StateManager(configured_app_with_task / ".mothership").load()
+    assert state.tasks["add-labels"].last_activity_at is not None
+
+
+def test_journal_read_does_not_stamp(configured_app_with_task: Path):
+    runner.invoke(app, ["journal", "seed", "--task", "add-labels"])
+    # reset the stamp, then do a read-only invocation
+    mgr = StateManager(configured_app_with_task / ".mothership")
+    st = mgr.load()
+    st.tasks["add-labels"].last_activity_at = None
+    mgr.save(st)
+    result = runner.invoke(app, ["journal", "--task", "add-labels"])  # read path
+    assert result.exit_code == 0, result.output
+    assert mgr.load().tasks["add-labels"].last_activity_at is None

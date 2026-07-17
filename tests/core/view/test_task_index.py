@@ -160,3 +160,19 @@ def test_build_task_index_includes_enriched_fields(tmp_path: Path):
     assert s.pr_urls == {"mothership": "https://github.com/x/mothership/pull/1"}
     assert s.test_results == {"mothership": "pass"}
     assert s.depends_on == ["up"]
+
+
+def test_summary_carries_activity_and_phase_entered(tmp_path: Path):
+    now = datetime.now(timezone.utc)
+    t = _task("a", last_activity_at=now, phase_entered_at=now)
+    state = WorkspaceState(tasks={"a": t})
+    [summary] = build_task_index(state, tmp_path)
+    assert summary.last_activity_at == now
+    assert summary.phase_entered_at == now
+
+
+def test_summary_activity_defaults_none(tmp_path: Path):
+    t = _task("a")
+    [summary] = build_task_index(WorkspaceState(tasks={"a": t}), tmp_path)
+    assert summary.last_activity_at is None
+    assert summary.phase_entered_at is None

@@ -181,7 +181,10 @@ class PhaseManager:
                 t.blocked_reason = None
                 t.blocked_at = None
             t.phase = target
-            t.phase_entered_at = datetime.now(timezone.utc)
+            now = datetime.now(timezone.utc)
+            t.phase_entered_at = now
+            # Agent-agnostic activity heartbeat: a phase transition is task work.
+            t.last_activity_at = now
 
         self._state_manager.mutate(_apply)
 

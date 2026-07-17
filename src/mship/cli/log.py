@@ -166,6 +166,8 @@ def register(app: typer.Typer, get_container):
                 action=action,
                 open_question=open_question,
             )
+            # Agent-agnostic activity heartbeat: journaling is real task work.
+            state_mgr.record_activity(t.slug)
             if output.human_mode:
                 output.success("Logged")
             else:

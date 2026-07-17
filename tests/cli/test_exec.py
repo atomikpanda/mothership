@@ -1088,3 +1088,11 @@ def test_mship_build_works_without_active_task(workspace: Path):
         container.state_dir.reset_override()
         container.config.reset()
         container.state_manager.reset()
+
+
+def test_test_command_stamps_last_activity(configured_exec_app):
+    workspace, mock_shell = configured_exec_app
+    result = runner.invoke(app, ["test", "--task", "test-task"])
+    assert result.exit_code == 0, result.output
+    state = StateManager(workspace / ".mothership").load()
+    assert state.tasks["test-task"].last_activity_at is not None

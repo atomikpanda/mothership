@@ -912,3 +912,19 @@ def test_post_archive_already_archived_409(tmp_path):
     _seed_status_spec(tmp_path, "archived")
     client = TestClient(_app(tmp_path))
     assert client.post("/specs/ar/archive").status_code == 409
+
+
+def test_get_task_serializes_activity_fields(tmp_path):
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    sm = StateManager(state_dir)
+    now = datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc)
+    sm.save(WorkspaceState(tasks={"dq": Task(
+        slug="dq", description="d", phase="dev",
+        created_at=datetime(2026, 6, 14, tzinfo=timezone.utc),
+        affected_repos=["mothership"], branch="feat/dq",
+        last_activity_at=now, phase_entered_at=now,
+    )}))
+    body = TestClient(_app(tmp_path)).get("/tasks/dq").json()
+    assert body["last_activity_at"].startswith("2026-07-13T12:00:00")
+    assert body["phase_entered_at"].startswith("2026-07-13T12:00:00")

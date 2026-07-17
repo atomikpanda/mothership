@@ -277,6 +277,8 @@ def register(app: typer.Typer, get_container):
         # Persist iteration on task (read-modify-write under the lock).
         def _record(s):
             s.tasks[t.slug].test_iteration = new_iter
+            # Agent-agnostic activity heartbeat: running tests is task work.
+            s.tasks[t.slug].last_activity_at = datetime.now(timezone.utc)
         state_mgr.mutate(_record)
 
         prune(state_dir, t.slug, keep=20)

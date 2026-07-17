@@ -311,3 +311,27 @@ def test_commit_push_failure_surfaces_post_finish(configured_git_app: Path):
         assert "fix: will-fail-push" in log
     finally:
         container.shell.reset_override()
+
+
+def test_commit_stamps_last_activity(configured_git_app: Path):
+    """A successful commit stamps the task's activity heartbeat."""
+    runner.invoke(app, ["spawn", "--hotfix", "activity commit", "--repos", "shared"])
+    slug = "activity-commit"
+
+    def mock_run(cmd, cwd, env=None):
+        if "git diff --cached --quiet" in cmd:
+            return ShellResult(returncode=1, stdout="", stderr="")  # staged
+        if "git rev-parse HEAD" in cmd:
+            return ShellResult(returncode=0, stdout="7f3a1b2abcdef\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    container.shell.override(mock_shell)
+    try:
+        result = runner.invoke(app, ["commit", "fix: thing", "--task", slug])
+        assert result.exit_code == 0, result.output
+        state = StateManager(configured_git_app / ".mothership").load()
+        assert state.tasks[slug].last_activity_at is not None
+    finally:
+        container.shell.reset_override()

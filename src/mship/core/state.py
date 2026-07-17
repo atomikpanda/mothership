@@ -1,5 +1,5 @@
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -35,6 +35,7 @@ class Task(BaseModel):
     pr_urls: dict[str, str] = {}
     finished_at: datetime | None = None
     phase_entered_at: datetime | None = None
+    last_activity_at: datetime | None = None
     active_repo: str | None = None
     last_switched_at_sha: dict[str, dict[str, str]] = {}
     test_iteration: int = 0
@@ -129,3 +130,20 @@ class StateManager:
             fn(state)
             self._save_nolock(state)
             return state
+
+    def record_activity(self, slug: str, now: "datetime | None" = None) -> None:
+        """Stamp `last_activity_at` on a task — the agent-agnostic activity heartbeat.
+
+        Cheap: one field write under the same exclusive lock as any other
+        mutation. A no-op when `slug` is unknown, so callers that may pass a
+        slug that isn't (yet) a task (e.g. `mship spec apply` before dispatch)
+        stay safe.
+        """
+        stamp = now or datetime.now(timezone.utc)
+
+        def _apply(state: WorkspaceState) -> None:
+            task = state.tasks.get(slug)
+            if task is not None:
+                task.last_activity_at = stamp
+
+        self.mutate(_apply)

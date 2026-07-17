@@ -178,6 +178,11 @@ def register(parent: typer.Typer, get_container):
         spec.updated_at = datetime.now(timezone.utc)
         path = store.save(spec)
 
+        # Agent-agnostic activity heartbeat: applying a drafted spec is task work.
+        # No-ops when the spec's bound task_slug isn't (yet) a live task.
+        if spec.task_slug:
+            container.state_manager().record_activity(spec.task_slug)
+
         if output.human_mode:
             output.success(f"Applied draft → {spec.status}: {path}")
         else:

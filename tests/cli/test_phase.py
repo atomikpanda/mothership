@@ -163,3 +163,10 @@ def test_phase_refuses_when_active_repo_is_passive(tmp_path, monkeypatch):
         container.state_dir.reset_override()
         container.config.reset()
         container.state_manager.reset()
+
+
+def test_phase_transition_stamps_last_activity(configured_app_with_task, workspace: Path):
+    result = runner.invoke(app, ["phase", "dev", "--task", "add-labels"])
+    assert result.exit_code == 0, result.output
+    state = StateManager(workspace / ".mothership").load()
+    assert state.tasks["add-labels"].last_activity_at is not None

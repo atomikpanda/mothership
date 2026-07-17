@@ -98,6 +98,22 @@ class WorkItemSummary:
     thread_ids: list[str] = field(default_factory=list)
     external_links: list[ExternalLink] = field(default_factory=list)
     unattended: bool = False
+    active_phase: str | None = None
+    active_last_activity_at: datetime | None = None
+
+
+def _active_task(tasks: list[Task]) -> Task | None:
+    """The task an operator is watching. Among still-running (unfinished) tasks, prefer the one
+    with the most recent activity — so a work item linked to several in-flight tasks reflects
+    where work is actually happening — falling back to the first unfinished task when none have
+    recorded activity yet. None when every linked task is finished."""
+    unfinished = [t for t in tasks if t.finished_at is None]
+    if not unfinished:
+        return None
+    active = [t for t in unfinished if t.last_activity_at is not None]
+    if active:
+        return max(active, key=lambda t: t.last_activity_at)
+    return unfinished[0]
 
 
 def _summarize(
@@ -108,6 +124,7 @@ def _summarize(
 ) -> WorkItemSummary:
     spec = specs_by_id.get(item.spec_id) if item.spec_id else None
     tasks = [tasks_by_slug[s] for s in item.task_slugs if s in tasks_by_slug]
+    active = _active_task(tasks)
     threads = [threads_by_id[t] for t in item.thread_ids if t in threads_by_id]
     return WorkItemSummary(
         id=item.id, title=item.title, kind=item.kind, workspace=item.workspace,
@@ -117,6 +134,8 @@ def _summarize(
         spec_id=item.spec_id, task_slugs=list(item.task_slugs),
         thread_ids=list(item.thread_ids), external_links=list(item.external_links),
         unattended=item.unattended,
+        active_phase=active.phase if active else None,
+        active_last_activity_at=active.last_activity_at if active else None,
     )
 
 
