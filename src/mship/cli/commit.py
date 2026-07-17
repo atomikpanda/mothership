@@ -96,6 +96,9 @@ def register(app: typer.Typer, get_container):
             )
             raise typer.Exit(code=1)
 
+        # Agent-agnostic activity heartbeat: a successful commit is task work.
+        state_mgr.record_activity(t.slug)
+
         if output.human_mode:
             for r in results:
                 short = r["commit_sha"][:8] if r["commit_sha"] else "(no sha)"
