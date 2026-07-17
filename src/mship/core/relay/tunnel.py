@@ -1,5 +1,7 @@
 from __future__ import annotations
+import base64
 import hashlib
+import hmac
 import os
 import re
 import subprocess
@@ -35,15 +37,29 @@ def device_id(relay_public_key: str) -> str:
     return hashlib.sha256(body.encode()).hexdigest()[:6]
 
 
-def device_subdomain(workspace: str, dev_id: str) -> str:
-    """Per-device relay subdomain: `<workspace-slug>-<dev_id>`, DNS-label-safe.
+def opaque_slug(workspace: str, secret: bytes) -> str:
+    """Opaque, DNS-label-safe slug for a workspace.
 
-    `dev_id` is from device_id(). The workspace slug is truncated so the whole
-    label (slug + '-' + id) fits the 63-char DNS limit, with any trailing '-'
-    after truncation stripped.
+    Truncated lowercase base32 of HMAC-SHA256(secret, workspace). Deterministic
+    (so the subdomain is stable), yet reveals nothing about the workspace name
+    without `secret` — the relay host / DNS / network only ever see the hash.
+    Recover the name with `mship relay whoami` (recompute-and-match). Base32
+    yields [a-z2-7] which is a subset of the DNS-label alphabet.
+    """
+    digest = hmac.new(secret, workspace.encode("utf-8"), hashlib.sha256).digest()
+    b32 = base64.b32encode(digest).decode("ascii").lower().rstrip("=")
+    return b32[:12]
+
+
+def device_subdomain(workspace: str, dev_id: str, secret: bytes) -> str:
+    """Per-device relay subdomain: `<opaque-slug>-<dev_id>`, DNS-label-safe.
+
+    `dev_id` is from device_id(); the leading part is now `opaque_slug()` rather
+    than the readable workspace slug, so the workspace name is no longer present
+    in the subdomain. Truncated so the whole label fits the 63-char DNS limit.
     """
     suffix = f"-{dev_id}"
-    base = subdomain_for(workspace)[: 63 - len(suffix)].rstrip("-")
+    base = opaque_slug(workspace, secret)[: 63 - len(suffix)]
     return f"{base}{suffix}"
 
 

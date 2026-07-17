@@ -175,7 +175,11 @@ def _serve_with_relay(
 
     from mship.core.relay.config import RelayConfig
     from mship.core.relay.health import wait_until_reachable
-    from mship.core.relay.keys import ensure_relay_key, relay_public_key
+    from mship.core.relay.keys import (
+        ensure_relay_key,
+        ensure_subdomain_secret,
+        relay_public_key,
+    )
     from mship.core.relay.pairing import build_pair_link
     from mship.core.relay.token import ensure_serve_token
     from mship.core.relay.tunnel import (
@@ -229,7 +233,8 @@ def _serve_with_relay(
 
     key_path = ensure_relay_key(home=Path.home())
     dev = device_id(relay_public_key(key_path))
-    subdomain = device_subdomain(workspace, dev)          # was: subdomain_for(workspace)
+    secret = ensure_subdomain_secret(home=Path.home())
+    subdomain = device_subdomain(workspace, dev, secret)  # opaque; was: subdomain_for(workspace)
     argv = build_tunnel_argv(rc, subdomain=subdomain, local_port=port, key_path=key_path)
 
     public_url = f"https://{subdomain}.{rc.host}"
@@ -297,6 +302,10 @@ def _serve_with_relay(
 
     output.print(f"mship serve → http://{host}:{port}  (auth: bearer token; docs: disabled)")
     output.print(f"relay → {public_url}  (per-device; tunnel via ssh -R to {rc.host})")
+    output.print(
+        "  (opaque subdomain — no workspace name leaked; upgrading changes it, "
+        "so re-pair the phone once. Decode with `mship relay whoami <sub>`.)"
+    )
     output.print(link)
     typer.echo(segno.make(link).terminal(compact=True))
 

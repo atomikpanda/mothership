@@ -1,6 +1,14 @@
 from pathlib import Path
 
-from mship.core.relay.tunnel import TunnelSupervisor, device_id, device_subdomain, subdomain_for
+from mship.core.relay.tunnel import (
+    TunnelSupervisor,
+    device_id,
+    device_subdomain,
+    opaque_slug,
+    subdomain_for,
+)
+
+_SECRET = b"\x00" * 32
 
 _PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBodyAAAA mship-relay\n"
 
@@ -20,14 +28,31 @@ def test_device_id_differs_per_key():
     assert device_id(_PUBKEY) != device_id("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDifferentBodyZZZZ x")
 
 
+def test_opaque_slug_is_deterministic_and_dns_safe():
+    s = opaque_slug("My Workspace", _SECRET)
+    assert s == opaque_slug("My Workspace", _SECRET)          # deterministic
+    assert 0 < len(s) <= 12
+    assert all(c in "abcdefghijklmnopqrstuvwxyz234567" for c in s)  # lowercase base32
+
+
+def test_opaque_slug_hides_the_name():
+    # Reveals nothing about the name; different names -> unrelated slugs.
+    assert "workspace" not in opaque_slug("workspace", _SECRET)
+    assert opaque_slug("alpha", _SECRET) != opaque_slug("alphb", _SECRET)
+    # secret matters: same name, different secret -> different slug
+    assert opaque_slug("alpha", _SECRET) != opaque_slug("alpha", b"\x01" * 32)
+
+
 def test_device_subdomain_appends_id_and_is_dns_safe():
-    sd = device_subdomain("mship-workspace", "abc123")
-    assert sd == "mship-workspace-abc123"
+    sd = device_subdomain("mship-workspace", "abc123", _SECRET)
+    assert sd.endswith("-abc123")
     assert len(sd) <= 63 and all(c in "abcdefghijklmnopqrstuvwxyz0123456789-" for c in sd)
+    # The workspace name is no longer present in the subdomain.
+    assert "mship-workspace" not in sd
 
 
 def test_device_subdomain_truncates_to_dns_limit():
-    sd = device_subdomain("w" * 80, "abc123")
+    sd = device_subdomain("w" * 80, "abc123", _SECRET)
     assert len(sd) <= 63
     assert sd.endswith("-abc123")
     assert not sd.startswith("-") and "--" not in sd

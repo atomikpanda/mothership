@@ -19,7 +19,11 @@ def register(app: typer.Typer, get_container):
 
         import segno
 
-        from mship.core.relay.keys import ensure_relay_key, relay_public_key
+        from mship.core.relay.keys import (
+            ensure_relay_key,
+            ensure_subdomain_secret,
+            relay_public_key,
+        )
         from mship.core.relay.pairing import build_pair_link
         from mship.core.relay.token import ensure_serve_token
         from mship.core.relay.tunnel import device_id, device_subdomain
@@ -38,10 +42,15 @@ def register(app: typer.Typer, get_container):
         workspace = config.workspace
         workspace_root = Path(container.config_path()).parent
         key_path = ensure_relay_key(home=Path.home())
-        subdomain = device_subdomain(workspace, device_id(relay_public_key(key_path)))
+        secret = ensure_subdomain_secret(home=Path.home())
+        subdomain = device_subdomain(workspace, device_id(relay_public_key(key_path)), secret)
         url = f"https://{subdomain}.{rc.host}"
         token = ensure_serve_token(workspace_root)
         link = build_pair_link(url=url, token=token, workspace=workspace)
 
         output.print(link)
+        output.print(
+            "  (opaque subdomain — no workspace name leaked; if you upgraded mship, "
+            "this changed, so re-scan to re-pair. Decode with `mship relay whoami <sub>`.)"
+        )
         typer.echo(segno.make(link).terminal(compact=True))

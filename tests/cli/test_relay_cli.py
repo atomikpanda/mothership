@@ -75,7 +75,7 @@ def test_pair_outputs_deeplink(relay_configured_workspace):
 def test_pair_url_uses_subdomain_and_relay_host(relay_configured_workspace, tmp_path, monkeypatch):
     """The deep-link url is https://<per-device-subdomain>.<relay-host>, percent-encoded."""
     from mship.core.relay.tunnel import device_id, device_subdomain
-    from mship.core.relay.keys import relay_public_key
+    from mship.core.relay.keys import ensure_subdomain_secret, relay_public_key
 
     # Pre-create the relay key under a fake HOME so no ssh-keygen subprocess runs.
     fake_home = tmp_path / "home"
@@ -86,7 +86,8 @@ def test_pair_url_uses_subdomain_and_relay_host(relay_configured_workspace, tmp_
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
 
     # Compute the expected per-device subdomain from the same stub key material.
-    expected_subdomain = device_subdomain("Mship Workspace", device_id(relay_public_key(key)))
+    secret = ensure_subdomain_secret(home=fake_home)
+    expected_subdomain = device_subdomain("Mship Workspace", device_id(relay_public_key(key)), secret)
     expected_url_fragment = f"{expected_subdomain}.relay.example.com"
 
     r = runner.invoke(app, ["pair"])
@@ -172,7 +173,7 @@ def test_serve_relay_wires_tunnel_and_loopback(relay_configured_workspace, tmp_p
     No real uvicorn or ssh runs: uvicorn.run and TunnelSupervisor are faked.
     """
     from mship.core.relay.tunnel import device_id, device_subdomain
-    from mship.core.relay.keys import relay_public_key
+    from mship.core.relay.keys import ensure_subdomain_secret, relay_public_key
 
     # Pre-create the relay key under a fake HOME so no ssh-keygen subprocess runs.
     fake_home = tmp_path / "home"
@@ -183,7 +184,8 @@ def test_serve_relay_wires_tunnel_and_loopback(relay_configured_workspace, tmp_p
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
 
     # Compute the expected per-device subdomain from the same stub key material.
-    expected_subdomain = device_subdomain("Mship Workspace", device_id(relay_public_key(key)))
+    secret = ensure_subdomain_secret(home=fake_home)
+    expected_subdomain = device_subdomain("Mship Workspace", device_id(relay_public_key(key)), secret)
     expected_public_url = f"https://{expected_subdomain}.relay.example.com"
 
     seen: dict = {}
@@ -222,6 +224,34 @@ def test_serve_relay_wires_tunnel_and_loopback(relay_configured_workspace, tmp_p
     # Output advertises the public URL + scannable deep-link.
     assert expected_public_url in r.output
     assert "groundcontrol://add?" in r.output
+
+
+def test_relay_whoami_matches_known_workspace(tmp_path, monkeypatch):
+    """`relay whoami` recovers the workspace by recomputing the opaque slug over
+    candidate names on this machine; unrelated subdomains report no match."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from mship.core.relay.keys import ensure_subdomain_secret
+    from mship.core.relay.tunnel import device_subdomain, opaque_slug
+
+    secret = ensure_subdomain_secret(home=tmp_path)
+    sub = device_subdomain("ground-control", "abc123", secret)
+
+    r = runner.invoke(
+        app, ["relay", "whoami", sub, "--workspace", "ground-control", "--workspace", "other"]
+    )
+    assert r.exit_code == 0, r.output
+    assert "ground-control" in r.output
+
+    r2 = runner.invoke(app, ["relay", "whoami", "zzzzzzzz-abc123", "--workspace", "ground-control"])
+    assert r2.exit_code == 0, r2.output
+    assert "no match" in r2.output.lower()
+
+    # A bare slug (no -<devid> suffix) also resolves — the whole label is a candidate.
+    r3 = runner.invoke(
+        app, ["relay", "whoami", opaque_slug("ground-control", secret), "--workspace", "ground-control"]
+    )
+    assert r3.exit_code == 0, r3.output
+    assert "ground-control" in r3.output
 
 
 def test_serve_relay_requires_host(workspace_no_relay, tmp_path, monkeypatch):

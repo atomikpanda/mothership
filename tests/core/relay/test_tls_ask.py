@@ -8,6 +8,12 @@ def test_allows_enroll_host():
 def test_rejects_gh_broker_host_after_fold():
     assert tls_ask_allowed(f"gh.{RELAY}", RELAY) is False  # folded into serve; no separate cert
 
+def test_allows_opaque_subdomain():
+    # An opaque (base32-HMAC) device subdomain still passes the cert allowlist.
+    from mship.core.relay.tunnel import device_subdomain
+    sub = device_subdomain("ground-control", "abc123", b"\x00" * 32)
+    assert tls_ask_allowed(f"{sub}.{RELAY}", RELAY) is True
+
 def test_rejects_random_host():
     assert tls_ask_allowed(f"random-host.{RELAY}", RELAY) is False
 

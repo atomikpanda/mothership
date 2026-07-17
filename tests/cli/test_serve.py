@@ -143,9 +143,10 @@ def test_relay_serve_app_serves_exec_with_config_not_503(tmp_path, monkeypatch):
     # ~/.ssh, DNS, or the network — we only care about the app create_app builds.
     monkeypatch.setattr("mship.core.relay.token.ensure_serve_token", lambda root: "test-token")
     monkeypatch.setattr("mship.core.relay.keys.ensure_relay_key", lambda home=None: tmp_path / "key")
+    monkeypatch.setattr("mship.core.relay.keys.ensure_subdomain_secret", lambda home=None: b"\x00" * 32)
     monkeypatch.setattr("mship.core.relay.keys.relay_public_key", lambda key_path: "ssh-ed25519 AAAAfake")
     monkeypatch.setattr("mship.core.relay.tunnel.device_id", lambda pub: "dev")
-    monkeypatch.setattr("mship.core.relay.tunnel.device_subdomain", lambda ws, dev: "sub")
+    monkeypatch.setattr("mship.core.relay.tunnel.device_subdomain", lambda ws, dev, secret: "sub")
     monkeypatch.setattr("mship.core.relay.tunnel.build_tunnel_argv", lambda *a, **k: ["true"])
     monkeypatch.setattr("mship.core.relay.tunnel.TunnelSupervisor", _FakeSup)
     monkeypatch.setattr("mship.core.relay.pairing.build_pair_link", lambda **k: "groundcontrol://add?x=1")
