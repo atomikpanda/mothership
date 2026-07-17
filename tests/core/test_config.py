@@ -1127,3 +1127,25 @@ def test_discover_delegates_to_discover_with_source(tmp_path, monkeypatch):
     nested = root / "a"; nested.mkdir()
     assert ConfigLoader.discover(nested) == root / "mothership.yaml"
 
+
+def test_discover_with_source_hub_worktree_prefers_marker_over_own_yaml(tmp_path, monkeypatch):
+    """ac6: from a hub-repo worktree that contains its OWN tracked mothership.yaml,
+    discover must resolve to the WORKSPACE-root config via the marker, source=marker."""
+    from mship.core.config import ConfigLoader
+    from mship.core.workspace_marker import write_marker
+    monkeypatch.delenv("MSHIP_WORKSPACE", raising=False)
+
+    root = tmp_path / "ws"; root.mkdir()
+    (root / "mothership.yaml").write_text("workspace: root\nrepos: {}\n")
+
+    # Hub container gets a marker (write_marker at worktree.py:698); the hub-repo
+    # worktree lands under it and carries its OWN tracked mothership.yaml copy.
+    container_dir = root / ".worktrees" / "t"; container_dir.mkdir(parents=True)
+    write_marker(container_dir, root)
+    hub_wt = container_dir / "hub"; hub_wt.mkdir()
+    (hub_wt / "mothership.yaml").write_text("workspace: SHADOW\nrepos: {}\n")
+
+    res = ConfigLoader.discover_with_source(hub_wt)
+    assert res.path == root / "mothership.yaml"     # NOT the worktree's own copy
+    assert res.source == "marker"
+
