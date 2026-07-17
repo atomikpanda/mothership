@@ -11,8 +11,13 @@ def register(app: typer.Typer, get_container):
         output = Output()
 
         from mship.core.doctor import DoctorChecker
+        from mship.core.config import ConfigLoader
 
-        config = container.config()
+        # issue 366 #5/#3: load with require_paths=False so a not-yet-present or
+        # being-changed Taskfile.yml surfaces as a doctor `fail` check rather
+        # than hard-failing ConfigLoader.load before doctor can run. The
+        # container singleton keeps require_paths=True for spawn/finish/exec.
+        config = ConfigLoader.load(container.config_path(), require_paths=False)
         shell = container.shell()
         checker = DoctorChecker(
             config,
