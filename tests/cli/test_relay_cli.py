@@ -231,7 +231,7 @@ def test_relay_whoami_matches_known_workspace(tmp_path, monkeypatch):
     candidate names on this machine; unrelated subdomains report no match."""
     monkeypatch.setenv("HOME", str(tmp_path))
     from mship.core.relay.keys import ensure_subdomain_secret
-    from mship.core.relay.tunnel import device_subdomain
+    from mship.core.relay.tunnel import device_subdomain, opaque_slug
 
     secret = ensure_subdomain_secret(home=tmp_path)
     sub = device_subdomain("ground-control", "abc123", secret)
@@ -245,6 +245,13 @@ def test_relay_whoami_matches_known_workspace(tmp_path, monkeypatch):
     r2 = runner.invoke(app, ["relay", "whoami", "zzzzzzzz-abc123", "--workspace", "ground-control"])
     assert r2.exit_code == 0, r2.output
     assert "no match" in r2.output.lower()
+
+    # A bare slug (no -<devid> suffix) also resolves — the whole label is a candidate.
+    r3 = runner.invoke(
+        app, ["relay", "whoami", opaque_slug("ground-control", secret), "--workspace", "ground-control"]
+    )
+    assert r3.exit_code == 0, r3.output
+    assert "ground-control" in r3.output
 
 
 def test_serve_relay_requires_host(workspace_no_relay, tmp_path, monkeypatch):

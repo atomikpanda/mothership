@@ -285,6 +285,7 @@ def register(parent: typer.Typer, get_container):
         recomputes the opaque slug over candidate workspace names on THIS machine
         (using the machine's subdomain secret) and prints the one that matches.
         """
+        import re
         from pathlib import Path
 
         from mship.core.relay.keys import ensure_subdomain_secret
@@ -292,16 +293,25 @@ def register(parent: typer.Typer, get_container):
 
         secret = ensure_subdomain_secret(home=Path.home())
         # Reduce to the slug part: drop any host suffix (".relay.example.com"),
-        # then the trailing "-<devid>" (the opaque slug itself is hyphen-free base32).
-        label = subdomain.strip().split(".", 1)[0]
-        slug = label.rsplit("-", 1)[0] if "-" in label else label
+        # then a trailing "-<6 hex>" device id IF present. The opaque slug itself
+        # is hyphen-free base32, so only strip a suffix matching the real
+        # device-id shape — and also keep the whole label as a candidate, so a
+        # bare slug, a <slug>-<devid>, or a full host all resolve, and malformed
+        # input (multi-hyphen, no valid devid) can't silently mis-strip.
+        label = subdomain.strip().split(".", 1)[0].lower()
+        possible_slugs = {label}
+        m = re.fullmatch(r"(?P<slug>.+)-[0-9a-f]{6}", label)
+        if m:
+            possible_slugs.add(m.group("slug"))
         candidates = list(workspace) if workspace else []
         if not candidates:
             try:
                 candidates = [get_container().config().workspace]
             except Exception:
                 candidates = []
-        match = next((w for w in candidates if opaque_slug(w, secret) == slug), None)
+        match = next(
+            (w for w in candidates if opaque_slug(w, secret) in possible_slugs), None
+        )
         if match:
             typer.echo(match)
         else:
