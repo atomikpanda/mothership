@@ -858,3 +858,14 @@ def test_spec_from_thread_is_idempotent_and_does_not_orphan(_configured):
     store = SpecStore(ws / SPECS_DIRNAME)
     assert len(store.list()) == 1  # no orphaned spec
     assert "reusing spec" in second.output
+
+
+def test_spec_apply_stamps_bound_task_activity(configured_app_with_task: Path, tmp_path):
+    # `spec new --task add-labels` binds spec.task_slug = "add-labels" (id "add-labels").
+    runner.invoke(app, ["spec", "new", "--task", "add-labels"])
+    jf = tmp_path / "draft.json"
+    jf.write_text(_draft_json())
+    result = runner.invoke(app, ["spec", "apply", "add-labels", "--from-json", str(jf)])
+    assert result.exit_code == 0, result.output
+    state = StateManager(configured_app_with_task / ".mothership").load()
+    assert state.tasks["add-labels"].last_activity_at is not None
