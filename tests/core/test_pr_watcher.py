@@ -785,3 +785,101 @@ def test_pr_watcher_stores_worktree_manager():
         worktree_manager=sentinel,
     )
     assert watcher.worktree_manager is sentinel
+
+
+# ---------------------------------------------------------------------------
+# Merge auto-close (spec auto-advance-on-merge)
+# ---------------------------------------------------------------------------
+
+class FakeWorktreeManager:
+    """Records abort() and mutates the shared task dict so re-sweeps see the
+    teardown, mirroring the real WorktreeManager.abort contract."""
+
+    def __init__(self, tasks: dict, *, dirty: dict | None = None, boom: bool = False) -> None:
+        self._tasks = tasks
+        self._dirty = dirty
+        self._boom = boom
+        self.abort_calls: list[tuple[str, bool]] = []
+
+    def abort(self, task_slug: str, force: bool = False) -> None:
+        self.abort_calls.append((task_slug, force))
+        if task_slug not in self._tasks:
+            return  # idempotent no-op (mirrors real abort)
+        if not force and self._dirty is not None:
+            from mship.core.worktree import WorktreeDirtyError
+            raise WorktreeDirtyError(task_slug, self._dirty)
+        if not force and self._boom:
+            raise RuntimeError("teardown kaboom")
+        self._tasks.pop(task_slug, None)
+
+
+def _seed_dispatched_spec_and_workitem(tmp_path):
+    """Real SpecStore + WorkItemStore on disk: a dispatched spec linked to a
+    feature WorkItem that has one live task. Returns (spec, wi, wstore)."""
+    from mship.core.spec_draft import new_spec
+    from mship.core.spec_store import SpecStore
+    from mship.core.workitem_store import WorkItemStore
+
+    specs_dir = tmp_path / "specs"
+    specs_dir.mkdir(parents=True, exist_ok=True)
+    sstore = SpecStore(specs_dir)
+    spec = new_spec("Auto advance feature", now=NOW, task_slug="task-m")
+    spec.status = "dispatched"
+    sstore.save(spec)
+
+    wstore = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = wstore.create(title="Auto advance feature", kind="feature", workspace="ws", now=NOW)
+    wstore.link_spec(wi.id, spec.id, now=NOW)
+    wstore.add_task(wi.id, "task-m", now=NOW)
+    return spec, wi, wstore
+
+
+def test_merge_auto_advances_spec_and_workitem_then_tears_down(tmp_path):
+    from mship.core.spec_store import SpecStore
+    from mship.core.workitem_store import WorkItemStore
+    from mship.core.view.workitem_index import compute_phase, compute_attention
+
+    spec, wi, wstore = _seed_dispatched_spec_and_workitem(tmp_path)
+
+    msgs = FakeMessageStore()
+    url = "https://github.com/org/repo1/pull/1"
+    task = SimpleNamespace(
+        slug="task-m", pr_urls={"repo1": url}, work_item_id=wi.id,
+        spec_id=spec.id, worktrees={"repo1": str(tmp_path / "wt")},
+    )
+    tasks = {"task-m": task}
+    state = FakeStateManager(tasks)
+    fwm = FakeWorktreeManager(tasks)
+
+    watcher = PrWatcher(
+        msgs, wstore, state, lambda u: "merged", now_fn,
+        worktree_manager=fwm, workspace_root=tmp_path,
+    )
+    watcher.check_once()
+
+    assert SpecStore(tmp_path / "specs").find_by_id(spec.id).status == "implemented"
+    reread_spec = SpecStore(tmp_path / "specs").find_by_id(spec.id)
+    reread_item = WorkItemStore(tmp_path / ".mothership" / "workitems").get(wi.id)
+    assert compute_phase(reread_item, reread_spec, []) == "done"
+    assert compute_attention(reread_spec, [], []).needs_review is False
+    assert fwm.abort_calls == [("task-m", False)]
+    assert "task-m" not in tasks
+    assert any(c["kind"] == "event" and "merged" in c["text"] for c in msgs.append_calls)
+
+
+def test_merge_auto_close_noop_without_worktree_manager(tmp_path):
+    spec, wi, wstore = _seed_dispatched_spec_and_workitem(tmp_path)
+    from mship.core.spec_store import SpecStore
+
+    msgs = FakeMessageStore()
+    url = "https://github.com/org/repo1/pull/1"
+    task = SimpleNamespace(
+        slug="task-m", pr_urls={"repo1": url}, work_item_id=wi.id,
+        spec_id=spec.id, worktrees={"repo1": str(tmp_path / "wt")},
+    )
+    state = FakeStateManager({"task-m": task})
+
+    PrWatcher(msgs, wstore, state, lambda u: "merged", now_fn,
+              workspace_root=tmp_path).check_once()
+
+    assert SpecStore(tmp_path / "specs").find_by_id(spec.id).status == "dispatched"

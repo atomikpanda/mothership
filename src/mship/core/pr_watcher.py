@@ -145,7 +145,10 @@ class PrWatcher:
         checking one PR is logged and skipped so it can't abort the sweep for
         every other task."""
         tasks = self.state_manager.load().tasks
-        for slug, task in tasks.items():
+        # Snapshot: a merge auto-close can tear a task down (removing it from
+        # state) mid-sweep, so iterate a materialized list rather than the live
+        # dict view to avoid "dictionary changed size during iteration".
+        for slug, task in list(tasks.items()):
             if not task.pr_urls:
                 continue
             for repo, url in task.pr_urls.items():
@@ -191,12 +194,65 @@ class PrWatcher:
         # not at-most-zero). The happy path still posts — and dedups —
         # exactly once.
         self._fire_lifecycle_hook(st, slug, repo)
+        self._auto_close_on_merge(slug, task, repo, url, st)
 
         if self.lock is not None:
             with self.lock:
                 self._post_event(tid, slug, repo, url, st, key)
         else:
             self._post_event(tid, slug, repo, url, st, key)
+
+    def _auto_close_on_merge(
+        self, slug: str, task: Any, repo: str, url: str, st: str,
+    ) -> None:
+        """On a clean full merge, advance the bound spec (dispatched->implemented)
+        and its WorkItem (->done / needs_review cleared), then tear the worktree
+        down — the zero-manual-`mship close` path. Non-interactive and fail-open:
+        every failure is logged and swallowed so the sweep never crashes. Only
+        active when a worktree_manager is injected (i.e. inside `mship serve`)."""
+        if st != "merged":
+            return
+        if self.worktree_manager is None or self.workspace_root is None:
+            return
+
+        # Advance phase/spec FIRST, so it stands even if teardown is later
+        # skipped for a dirty worktree.
+        try:
+            from mship.core.spec_store import SPECS_DIRNAME
+            from mship.core.spec_lifecycle import advance_spec_on_close
+            from mship.core.workitem_lifecycle import advance_workitem_on_close
+
+            states = [self.check_state(u) for u in task.pr_urls.values()]
+            merged_count = sum(1 for s in states if s == "merged")
+            closed_count = sum(1 for s in states if s == "closed")
+            open_count = sum(1 for s in states if s == "open")
+            # Only advance/tear down when the WHOLE task is cleanly merged
+            # (mirrors `mship close`'s routing). A partially-merged multi-PR
+            # task waits for its remaining PRs.
+            if open_count or merged_count == 0 or closed_count > 0:
+                return
+
+            specs_dir = self.workspace_root / SPECS_DIRNAME
+            workitems_dir = self.workspace_root / ".mothership" / "workitems"
+            snapshot = self.state_manager.load()  # still contains the closing task
+            advance_spec_on_close(
+                task=task, specs_dir=specs_dir,
+                merged_count=merged_count, closed_count=closed_count,
+            )
+            advance_workitem_on_close(
+                task=task, workitems_dir=workitems_dir, specs_dir=specs_dir,
+                state=snapshot, merged_count=merged_count, closed_count=closed_count,
+            )
+        except Exception:
+            log.exception("pr_watcher: merge auto-advance failed (task=%s)", slug)
+            return
+
+        # Guarded teardown. A dirty/unpushed worktree raises WorktreeDirtyError;
+        # any other failure just logs (fail-open).
+        try:
+            self.worktree_manager.abort(slug, force=False)
+        except Exception:
+            log.exception("pr_watcher: merge teardown failed (task=%s)", slug)
 
     def _check_posted(
         self, slug: str, task: Any, key: tuple[str, str, str, str],
