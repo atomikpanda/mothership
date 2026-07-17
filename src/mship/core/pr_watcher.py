@@ -247,12 +247,40 @@ class PrWatcher:
             log.exception("pr_watcher: merge auto-advance failed (task=%s)", slug)
             return
 
-        # Guarded teardown. A dirty/unpushed worktree raises WorktreeDirtyError;
-        # any other failure just logs (fail-open).
+        # Guarded teardown. A dirty/unpushed worktree raises WorktreeDirtyError
+        # -> leave the worktree, post a one-time skip-note (the spec/phase advance
+        # already stands). Any other failure just logs (fail-open).
         try:
             self.worktree_manager.abort(slug, force=False)
-        except Exception:
-            log.exception("pr_watcher: merge teardown failed (task=%s)", slug)
+        except Exception as exc:
+            from mship.core.worktree import WorktreeDirtyError
+            if isinstance(exc, WorktreeDirtyError):
+                try:
+                    self._post_teardown_skipped_note(slug, task, url, exc)
+                except Exception:
+                    log.exception("pr_watcher: teardown-skip note failed (task=%s)", slug)
+            else:
+                log.exception("pr_watcher: merge teardown failed (task=%s)", slug)
+
+    def _post_teardown_skipped_note(
+        self, slug: str, task: Any, url: str, exc: Any,
+    ) -> None:
+        """Post a one-time NOTE (kind='note', not 'event' — informational, no
+        nag) when a merged task's worktree was left intact because it had
+        uncommitted/unpushed changes. Deduped across sweeps by a sentinel line."""
+        now = self.now_fn()
+        tid, _wi = self._resolve_thread(slug, task, url, now)
+        thread = self.msgs.get(tid)
+        sentinel = f"Worktree for {slug} left intact"
+        if thread is not None and any(sentinel in m.text for m in thread.messages):
+            return
+        details = "; ".join(f"{repo}: {reason}" for repo, reason in exc.dirty.items())
+        text = (
+            f"⚠️ {sentinel}: {details}. "
+            f"Resolve (commit/push), then `mship close` "
+            f"(or `mship close --force` to discard)."
+        )
+        self.msgs.append(tid, "agent", text, now, kind="note")
 
     def _check_posted(
         self, slug: str, task: Any, key: tuple[str, str, str, str],

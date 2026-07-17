@@ -883,3 +883,39 @@ def test_merge_auto_close_noop_without_worktree_manager(tmp_path):
               workspace_root=tmp_path).check_once()
 
     assert SpecStore(tmp_path / "specs").find_by_id(spec.id).status == "dispatched"
+
+
+def test_merge_dirty_worktree_advances_then_posts_skip_note(tmp_path):
+    """ac4: when teardown is refused (dirty), the worktree is left intact, the
+    spec/phase still advances, and a note is posted telling the operator to
+    resolve then `mship close` / --force."""
+    from mship.core.spec_store import SpecStore
+
+    spec, wi, wstore = _seed_dispatched_spec_and_workitem(tmp_path)
+
+    msgs = FakeMessageStore()
+    url = "https://github.com/org/repo1/pull/1"
+    task = SimpleNamespace(
+        slug="task-m", pr_urls={"repo1": url}, work_item_id=wi.id,
+        spec_id=spec.id, worktrees={"repo1": str(tmp_path / "wt")},
+    )
+    tasks = {"task-m": task}
+    state = FakeStateManager(tasks)
+    fwm = FakeWorktreeManager(tasks, dirty={"repo1": "uncommitted changes"})
+
+    watcher = PrWatcher(
+        msgs, wstore, state, lambda u: "merged", now_fn,
+        worktree_manager=fwm, workspace_root=tmp_path,
+    )
+    watcher.check_once()
+
+    assert SpecStore(tmp_path / "specs").find_by_id(spec.id).status == "implemented"
+    assert "task-m" in tasks
+    notes = [c for c in msgs.append_calls if c["kind"] == "note"]
+    assert len(notes) == 1
+    assert "uncommitted changes" in notes[0]["text"]
+    assert "mship close" in notes[0]["text"]
+
+    watcher.check_once()  # idempotent: does not double-post
+    notes = [c for c in msgs.append_calls if c["kind"] == "note"]
+    assert len(notes) == 1
