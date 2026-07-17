@@ -594,3 +594,85 @@ def test_doctor_warns_when_workspace_gitignore_missing_worktrees(tmp_path):
     report = checker.run()
     relevant = [c for c in report.checks if "worktrees" in c.message.lower()]
     assert any(c.status == "warn" for c in relevant), [c.message for c in report.checks]
+
+
+def test_doctor_appends_config_resolution_check(tmp_path):
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\nrepos:\n  a:\n    path: ./a\n    type: service\n"
+    )
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    config = ConfigLoader.load(tmp_path / "mothership.yaml")
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    report = DoctorChecker(
+        config, mock_shell,
+        config_path=tmp_path / "mothership.yaml", config_source="walk-up",
+    ).run()
+    cfg_checks = [c for c in report.checks if c.name == "config"]
+    assert cfg_checks and cfg_checks[0].status == "pass"
+    assert "walk-up" in cfg_checks[0].message
+    assert str((tmp_path / "mothership.yaml").resolve()) in cfg_checks[0].message
+
+
+def _bundler_report(tmp_path):
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\nrepos:\n  a:\n    path: ./a\n    type: service\n"
+    )
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    config = ConfigLoader.load(tmp_path / "mothership.yaml")
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    return DoctorChecker(config, mock_shell, workspace_root=tmp_path).run()
+
+
+def _no_bundler_fail(report) -> bool:
+    return not any(c.status == "fail" for c in report.checks if c.name.startswith("bundler/"))
+
+
+def test_doctor_bundler_warns_dockerignore_missing_worktrees(tmp_path):
+    (tmp_path / ".dockerignore").write_text("node_modules\n")
+    report = _bundler_report(tmp_path)
+    warns = [c for c in report.checks if c.name == "bundler/docker"]
+    assert warns and warns[0].status == "warn"
+    assert "heuristic" in warns[0].message.lower()
+    assert _no_bundler_fail(report)  # never escalates to fail
+
+
+def test_doctor_bundler_no_warn_when_dockerignore_excludes(tmp_path):
+    (tmp_path / ".dockerignore").write_text("node_modules\n.worktrees\n.mothership\n")
+    report = _bundler_report(tmp_path)
+    assert not [c for c in report.checks if c.name == "bundler/docker"]
+
+
+def test_doctor_bundler_warns_serverless(tmp_path):
+    (tmp_path / "serverless.yml").write_text("service: x\nprovider: {name: aws}\n")
+    report = _bundler_report(tmp_path)
+    warns = [c for c in report.checks if c.name == "bundler/serverless"]
+    assert warns and warns[0].status == "warn"
+    assert "heuristic" in warns[0].message.lower()
+
+
+def test_doctor_bundler_warns_cdk_from_asset(tmp_path):
+    (tmp_path / "stack.ts").write_text("new lambda.Function(this,'f',{code: lambda.Code.fromAsset('.')});\n")
+    report = _bundler_report(tmp_path)
+    warns = [c for c in report.checks if c.name == "bundler/cdk"]
+    assert warns and warns[0].status == "warn"
+    assert _no_bundler_fail(report)
+
+
+def test_doctor_bundler_npm_no_warn_for_safe_allowlist(tmp_path):
+    # `files` is an allowlist — a package that names only `dist` cannot leak
+    # `.worktrees`/`.mothership`, so it must NOT warn (Greptile P1: no false positive).
+    (tmp_path / "package.json").write_text('{"name":"x","files":["dist"]}')
+    report = _bundler_report(tmp_path)
+    assert not [c for c in report.checks if c.name == "bundler/npm"]
+
+
+def test_doctor_bundler_npm_warns_when_files_lists_worktrees(tmp_path):
+    (tmp_path / "package.json").write_text('{"name":"x","files":["dist",".worktrees"]}')
+    report = _bundler_report(tmp_path)
+    warns = [c for c in report.checks if c.name == "bundler/npm"]
+    assert warns and warns[0].status == "warn"
+    assert _no_bundler_fail(report)

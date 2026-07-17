@@ -224,6 +224,17 @@ def register(app: typer.Typer, get_container):
                     output.print(f"[bold]Last log:[/bold] \"{last_log['message']}\" ({ts_rel})")
             return
 
+        # --- Config resolution (issue 366 #6): absolute path + how it resolved.
+        from mship.core.config import ConfigLoader
+        config_path_abs = str(Path(container.config_path()).resolve())
+        config_source: str | None = None
+        try:
+            res = ConfigLoader.discover_with_source(Path.cwd())
+            if str(res.path.resolve()) == config_path_abs:
+                config_source = res.source
+        except Exception:
+            config_source = None
+
         # --- JSON envelope (single shape, always).
         envelope = {
             "workspace": config.workspace,
@@ -241,6 +252,8 @@ def register(app: typer.Typer, get_container):
             ],
             "resolved_task": resolved_payload,
             "resolution_source": source,
+            "config_path": config_path_abs,
+            "config_resolution_source": config_source,
         }
         if any_worktrees:
             envelope["cwd_is_outside_worktrees"] = cwd_outside

@@ -1149,6 +1149,13 @@ def register(app: typer.Typer, get_container):
             from mship.core.repo_state import without_no_upstream_on_task_branch
             report = without_no_upstream_on_task_branch(report, task.branch)
 
+        # issue 366 #5: a config-only main-checkout edit (mothership.yaml /
+        # Taskfile) is the supported config-change path — don't block finish's
+        # dirty_worktree on it. Fails closed: any non-config tracked drift is
+        # retained by the filter and re-blocks the gate. spawn/exec unchanged.
+        from mship.core.repo_state import without_config_only_dirty
+        report = without_config_only_dirty(report)
+
         # Scope blocking to repos that will actually produce a PR (have local
         # commits past their base) plus their transitive deps. Drift in repos
         # that won't be pushed is informational, not blocking. See #112.

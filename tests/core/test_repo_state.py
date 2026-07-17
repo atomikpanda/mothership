@@ -666,3 +666,97 @@ def test_audit_passive_dirty_worktree_warns(tmp_path):
     )
     codes = [i.code for i in issues["shared"]]
     assert "passive_dirty_worktree" in codes
+
+
+# ---------------------------------------------------------------------------
+# issue 366 #5: dirty_worktree carries modified paths; config-only filter
+# ---------------------------------------------------------------------------
+
+def test_probe_dirty_records_modified_paths(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    (audit_workspace / "cli" / "Taskfile.yml").write_text(
+        "version: '3'\ntasks:\n  x:\n    cmds:\n      - echo x\n"
+    )
+    rep = audit_repos(cfg, shell, names=["cli"])
+    (repo,) = [r for r in rep.repos if r.name == "cli"]
+    dirty = [i for i in repo.issues if i.code == "dirty_worktree"]
+    assert dirty, [i.code for i in repo.issues]
+    assert "Taskfile.yml" in dirty[0].paths
+
+
+def test_probe_dirty_records_multiple_paths(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    (audit_workspace / "cli" / "README.md").write_text("changed\n")
+    (audit_workspace / "cli" / "Taskfile.yml").write_text("version: '3'\ntasks: {x: {cmds: [echo]}}\n")
+    rep = audit_repos(cfg, shell, names=["cli"])
+    (repo,) = [r for r in rep.repos if r.name == "cli"]
+    (dirty,) = [i for i in repo.issues if i.code == "dirty_worktree"]
+    assert set(dirty.paths) == {"README.md", "Taskfile.yml"}
+
+
+def test_enrich_active_task_preserves_paths():
+    from mship.core.repo_state import Issue, _enrich_active_task
+    issues = (Issue("dirty_worktree", "error", "1 modified tracked file",
+                    paths=("mothership.yaml",)),)
+    out = _enrich_active_task(issues, has_active_task=True)
+    assert out[0].paths == ("mothership.yaml",)
+    assert "worktree" in out[0].message  # hint still appended
+
+
+def test_issue_equality_ignores_paths():
+    from mship.core.repo_state import Issue
+    a = Issue("dirty_worktree", "error", "x")
+    b = Issue("dirty_worktree", "error", "x", paths=("a", "b"))
+    assert a == b  # paths is compare=False → existing equality preserved
+
+
+def test_is_config_only_paths_true_cases():
+    from mship.core.repo_state import is_config_only_paths
+    assert is_config_only_paths(["mothership.yaml"]) is True
+    assert is_config_only_paths(["Taskfile.yaml"]) is True
+    assert is_config_only_paths(["taskfile.yml", "mothership.yaml"]) is True
+    assert is_config_only_paths(["services/api/Taskfile.yml"]) is True  # basename match
+
+
+def test_is_config_only_paths_fail_closed_cases():
+    from mship.core.repo_state import is_config_only_paths
+    assert is_config_only_paths(["mothership.yaml", "src/app.py"]) is False  # mixed
+    assert is_config_only_paths(["src/TaskfileHelper.py"]) is False          # substring look-alike
+    assert is_config_only_paths(["Taskfile.yml.bak"]) is False               # look-alike suffix
+    assert is_config_only_paths([]) is False                                  # empty → fail closed
+
+
+def test_without_config_only_dirty_strips_config_only():
+    from mship.core.repo_state import (
+        AuditReport, Issue, RepoAudit, without_config_only_dirty,
+    )
+    r = RepoAudit(name="hub", path=Path("/w"), current_branch="main",
+                  issues=(Issue("dirty_worktree", "error", "1 file",
+                                paths=("mothership.yaml",)),))
+    out = without_config_only_dirty(AuditReport(repos=(r,)))
+    assert out.has_errors is False
+
+
+def test_without_config_only_dirty_retains_mixed_drift():
+    from mship.core.repo_state import (
+        AuditReport, Issue, RepoAudit, without_config_only_dirty,
+    )
+    r = RepoAudit(name="hub", path=Path("/w"), current_branch="main",
+                  issues=(Issue("dirty_worktree", "error", "2 files",
+                                paths=("mothership.yaml", "src/app.py")),))
+    out = without_config_only_dirty(AuditReport(repos=(r,)))
+    assert out.has_errors is True  # fail closed
+
+
+def test_without_config_only_dirty_retains_other_error_codes():
+    from mship.core.repo_state import (
+        AuditReport, Issue, RepoAudit, without_config_only_dirty,
+    )
+    r = RepoAudit(name="hub", path=Path("/w"), current_branch="main",
+                  issues=(
+                      Issue("dirty_worktree", "error", "1 file", paths=("mothership.yaml",)),
+                      Issue("diverged", "error", "diverged"),
+                  ))
+    out = without_config_only_dirty(AuditReport(repos=(r,)))
+    codes = {i.code for i in out.repos[0].issues}
+    assert codes == {"diverged"}  # dirty stripped, diverged retained

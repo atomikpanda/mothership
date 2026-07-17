@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Literal
 
@@ -14,6 +14,7 @@ class Issue:
     code: str
     severity: Severity
     message: str
+    paths: tuple[str, ...] = field(default=(), compare=False)
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,57 @@ def without_no_upstream_on_task_branch(
                 ))
                 continue
         new_repos.append(r)
+    return AuditReport(repos=tuple(new_repos))
+
+
+_CONFIG_ONLY_BASENAMES = frozenset({
+    "mothership.yaml",
+    "Taskfile.yml", "Taskfile.yaml",
+    "taskfile.yml", "taskfile.yaml",
+})
+
+
+def is_config_only_paths(paths: Iterable[str]) -> bool:
+    """True iff `paths` is non-empty and EVERY path's basename is a workspace
+    config file (`mothership.yaml`) or a Taskfile.
+
+    Fails closed: an empty input, or any path whose basename is outside the
+    allowlist, returns False. Matching is exact basename equality (not
+    substring), so look-alikes like `my_Taskfile.yml` or `Taskfile.yml.bak`
+    never qualify, while a legitimately-named `Taskfile.yml` in a subdir
+    (monorepo git_root child) does. See issue 366 #5.
+    """
+    names = [Path(p).name for p in paths]
+    if not names:
+        return False
+    return all(n in _CONFIG_ONLY_BASENAMES for n in names)
+
+
+def without_config_only_dirty(report: AuditReport) -> AuditReport:
+    """Return a copy of `report` with `dirty_worktree` ERRORS stripped from
+    repos whose modified-tracked drift is confined to workspace config /
+    Taskfiles.
+
+    Used by `mship finish` (issue 366 #5): editing `mothership.yaml` / a
+    Taskfile in the main checkout is the supported config-change path and must
+    not block finish on `dirty_worktree`. Fails closed via
+    `is_config_only_paths` — the moment any non-config tracked file is
+    modified, the issue is retained and the gate blocks again. Other issue
+    codes are untouched; standalone `mship audit` still reports the drift.
+    """
+    new_repos: list[RepoAudit] = []
+    for r in report.repos:
+        kept = tuple(
+            i for i in r.issues
+            if not (i.code == "dirty_worktree" and is_config_only_paths(i.paths))
+        )
+        if len(kept) != len(r.issues):
+            new_repos.append(RepoAudit(
+                name=r.name, path=r.path,
+                current_branch=r.current_branch, issues=kept,
+            ))
+        else:
+            new_repos.append(r)
     return AuditReport(repos=tuple(new_repos))
 
 
@@ -254,6 +306,7 @@ def _probe_dirty(
         return ()
     untracked = 0
     modified = 0
+    modified_paths: list[str] = []
     for line in out.splitlines():
         if not line.strip():
             continue
@@ -264,11 +317,18 @@ def _probe_dirty(
             untracked += 1
         else:
             modified += 1
+            path_part = line[3:].strip()
+            if " -> " in path_part:  # rename/copy: record the destination
+                path_part = path_part.split(" -> ", 1)[1]
+            path_part = path_part.strip().strip('"')
+            if path_part:
+                modified_paths.append(path_part)
     issues: list[Issue] = []
     if modified:
         issues.append(Issue(
             "dirty_worktree", "error",
             f"{modified} modified tracked file" + ("s" if modified != 1 else ""),
+            paths=tuple(modified_paths),
         ))
     if untracked:
         issues.append(Issue(
@@ -304,6 +364,7 @@ def _enrich_active_task(
                 i.message + " — a task is active for this repo; "
                 "edit in its worktree, not the main checkout "
                 "(see `mship worktrees`)",
+                paths=i.paths,
             ))
         else:
             out.append(i)

@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -5,6 +6,18 @@ import yaml
 from pydantic import BaseModel, field_validator, model_validator
 
 from mship.core.relay.config import RelayConfig
+
+
+@dataclass(frozen=True)
+class ConfigResolution:
+    """Result of ConfigLoader.discover_with_source.
+
+    `path` is the resolved mothership.yaml. `source` is which discovery branch
+    produced it: "env" (MSHIP_WORKSPACE), "marker" (.mship-workspace walk-up),
+    or "walk-up" (plain mothership.yaml walk-up).
+    """
+    path: Path
+    source: str
 
 
 class Dependency(BaseModel):
@@ -492,7 +505,7 @@ class ConfigLoader:
         return config
 
     @staticmethod
-    def discover(start: Path) -> Path:
+    def discover_with_source(start: Path) -> "ConfigResolution":
         import os
         from mship.core.workspace_marker import read_marker_from_ancestor
 
@@ -504,7 +517,7 @@ class ConfigLoader:
             env_root = Path(env).resolve()
             env_yaml = env_root / "mothership.yaml"
             if env_yaml.is_file():
-                return env_yaml
+                return ConfigResolution(path=env_yaml, source="env")
             raise FileNotFoundError(
                 f"MSHIP_WORKSPACE={env!r} does not contain a mothership.yaml "
                 f"(expected {env_yaml})"
@@ -514,20 +527,26 @@ class ConfigLoader:
         #    pointer from spawn. Stale markers return None silently.
         marker_root = read_marker_from_ancestor(start)
         if marker_root is not None:
-            return marker_root / "mothership.yaml"
+            return ConfigResolution(
+                path=marker_root / "mothership.yaml", source="marker"
+            )
 
         # 3. Existing walk-up for mothership.yaml.
         current = Path(start).resolve()
         while True:
             candidate = current / "mothership.yaml"
             if candidate.exists():
-                return candidate
+                return ConfigResolution(path=candidate, source="walk-up")
             parent = current.parent
             if parent == current:
                 raise FileNotFoundError(
                     "No mothership.yaml found in any parent directory"
                 )
             current = parent
+
+    @staticmethod
+    def discover(start: Path) -> Path:
+        return ConfigLoader.discover_with_source(start).path
 
 
 def unique_git_roots(
