@@ -91,6 +91,57 @@ def without_no_upstream_on_task_branch(
     return AuditReport(repos=tuple(new_repos))
 
 
+_CONFIG_ONLY_BASENAMES = frozenset({
+    "mothership.yaml",
+    "Taskfile.yml", "Taskfile.yaml",
+    "taskfile.yml", "taskfile.yaml",
+})
+
+
+def is_config_only_paths(paths: Iterable[str]) -> bool:
+    """True iff `paths` is non-empty and EVERY path's basename is a workspace
+    config file (`mothership.yaml`) or a Taskfile.
+
+    Fails closed: an empty input, or any path whose basename is outside the
+    allowlist, returns False. Matching is exact basename equality (not
+    substring), so look-alikes like `my_Taskfile.yml` or `Taskfile.yml.bak`
+    never qualify, while a legitimately-named `Taskfile.yml` in a subdir
+    (monorepo git_root child) does. See issue 366 #5.
+    """
+    names = [Path(p).name for p in paths]
+    if not names:
+        return False
+    return all(n in _CONFIG_ONLY_BASENAMES for n in names)
+
+
+def without_config_only_dirty(report: AuditReport) -> AuditReport:
+    """Return a copy of `report` with `dirty_worktree` ERRORS stripped from
+    repos whose modified-tracked drift is confined to workspace config /
+    Taskfiles.
+
+    Used by `mship finish` (issue 366 #5): editing `mothership.yaml` / a
+    Taskfile in the main checkout is the supported config-change path and must
+    not block finish on `dirty_worktree`. Fails closed via
+    `is_config_only_paths` — the moment any non-config tracked file is
+    modified, the issue is retained and the gate blocks again. Other issue
+    codes are untouched; standalone `mship audit` still reports the drift.
+    """
+    new_repos: list[RepoAudit] = []
+    for r in report.repos:
+        kept = tuple(
+            i for i in r.issues
+            if not (i.code == "dirty_worktree" and is_config_only_paths(i.paths))
+        )
+        if len(kept) != len(r.issues):
+            new_repos.append(RepoAudit(
+                name=r.name, path=r.path,
+                current_branch=r.current_branch, issues=kept,
+            ))
+        else:
+            new_repos.append(r)
+    return AuditReport(repos=tuple(new_repos))
+
+
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
