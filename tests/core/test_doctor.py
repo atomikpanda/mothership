@@ -660,3 +660,19 @@ def test_doctor_bundler_warns_cdk_from_asset(tmp_path):
     warns = [c for c in report.checks if c.name == "bundler/cdk"]
     assert warns and warns[0].status == "warn"
     assert _no_bundler_fail(report)
+
+
+def test_doctor_bundler_npm_no_warn_for_safe_allowlist(tmp_path):
+    # `files` is an allowlist — a package that names only `dist` cannot leak
+    # `.worktrees`/`.mothership`, so it must NOT warn (Greptile P1: no false positive).
+    (tmp_path / "package.json").write_text('{"name":"x","files":["dist"]}')
+    report = _bundler_report(tmp_path)
+    assert not [c for c in report.checks if c.name == "bundler/npm"]
+
+
+def test_doctor_bundler_npm_warns_when_files_lists_worktrees(tmp_path):
+    (tmp_path / "package.json").write_text('{"name":"x","files":["dist",".worktrees"]}')
+    report = _bundler_report(tmp_path)
+    warns = [c for c in report.checks if c.name == "bundler/npm"]
+    assert warns and warns[0].status == "warn"
+    assert _no_bundler_fail(report)

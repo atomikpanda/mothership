@@ -427,7 +427,9 @@ class DoctorChecker:
                                  "`.worktrees`/`.mothership`" + heur),
                     ))
 
-        # npm pack (`files` allowlist)
+        # npm pack — the `files` field is an ALLOWLIST: `npm pack` ships only what it
+        # names, so a `files` list is the SAFE case (it's what protects the package).
+        # `.worktrees`/`.mothership` leak ONLY if they are explicitly listed in `files`.
         pkg = ws / "package.json"
         if pkg.exists():
             try:
@@ -435,18 +437,29 @@ class DoctorChecker:
                 data = _json.loads(pkg.read_text())
             except Exception:
                 data = {}
-            if isinstance(data, dict) and "files" in data:
+            files = data.get("files") if isinstance(data, dict) else None
+            if isinstance(files, list) and any(
+                any(tok in str(entry) for tok in tokens) for entry in files
+            ):
                 results.append(CheckResult(
                     name="bundler/npm", status="warn",
-                    message=("package.json declares `files` for `npm pack` — confirm "
-                             "it does not bundle `.worktrees`/`.mothership`" + heur),
+                    message=("package.json `files` explicitly lists `.worktrees`/"
+                             "`.mothership` — `npm pack` will ship them" + heur),
                 ))
 
-        # CDK Code.fromAsset — shallow scan of workspace-root files only
-        for f in ws.iterdir():
+        # CDK Code.fromAsset — shallow scan of workspace-root files only. Bounded so a
+        # filesystem error can't crash `mship doctor` and a huge minified bundle isn't
+        # read into memory.
+        try:
+            root_files = list(ws.iterdir())
+        except OSError:
+            root_files = []
+        for f in root_files:
             if not f.is_file() or f.suffix not in (".ts", ".js", ".py"):
                 continue
             try:
+                if f.stat().st_size > 512_000:  # skip large/minified files
+                    continue
                 text = f.read_text()
             except OSError:
                 continue
