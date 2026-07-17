@@ -19,11 +19,25 @@ def register(app: typer.Typer, get_container):
         # container singleton keeps require_paths=True for spawn/finish/exec.
         config = ConfigLoader.load(container.config_path(), require_paths=False)
         shell = container.shell()
+
+        # issue 366 #6: resolve which config is live + how it resolved, to report.
+        from pathlib import Path
+        config_path = container.config_path()
+        config_source = None
+        try:
+            res = ConfigLoader.discover_with_source(Path.cwd())
+            if str(res.path.resolve()) == str(Path(config_path).resolve()):
+                config_source = res.source
+        except Exception:
+            config_source = None
+
         checker = DoctorChecker(
             config,
             shell,
             state_dir=container.state_dir(),
             workspace_root=container.config_path().parent,
+            config_path=config_path,
+            config_source=config_source,
         )
         report = checker.run()
 
@@ -61,6 +75,8 @@ def register(app: typer.Typer, get_container):
                 "checks": [{"name": c.name, "status": c.status, "message": c.message} for c in report.checks],
                 "warnings": report.warnings,
                 "errors": report.errors,
+                "config_path": str(Path(config_path).resolve()),
+                "config_resolution_source": config_source,
             })
 
         if not report.ok:

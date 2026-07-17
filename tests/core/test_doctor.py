@@ -594,3 +594,22 @@ def test_doctor_warns_when_workspace_gitignore_missing_worktrees(tmp_path):
     report = checker.run()
     relevant = [c for c in report.checks if "worktrees" in c.message.lower()]
     assert any(c.status == "warn" for c in relevant), [c.message for c in report.checks]
+
+
+def test_doctor_appends_config_resolution_check(tmp_path):
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\nrepos:\n  a:\n    path: ./a\n    type: service\n"
+    )
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    config = ConfigLoader.load(tmp_path / "mothership.yaml")
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    report = DoctorChecker(
+        config, mock_shell,
+        config_path=tmp_path / "mothership.yaml", config_source="walk-up",
+    ).run()
+    cfg_checks = [c for c in report.checks if c.name == "config"]
+    assert cfg_checks and cfg_checks[0].status == "pass"
+    assert "walk-up" in cfg_checks[0].message
+    assert str((tmp_path / "mothership.yaml").resolve()) in cfg_checks[0].message

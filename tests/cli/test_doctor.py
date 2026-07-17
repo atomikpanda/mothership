@@ -88,3 +88,35 @@ def test_doctor_loads_config_with_require_paths_false(workspace: Path):
         container.config.reset()
         container.state_manager.reset()
         container.shell.reset_override()
+
+
+def test_doctor_json_includes_config_path_and_source(workspace, monkeypatch):
+    import json
+    monkeypatch.delenv("MSHIP_WORKSPACE", raising=False)
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(workspace / "mothership.yaml")
+    container.state_dir.override(workspace / ".mothership")
+    (workspace / ".mothership").mkdir(exist_ok=True)
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = lambda cmd, cwd, env=None: (
+        ShellResult(returncode=0, stdout="test\nrun\nlint\nsetup\n", stderr="") if "task --list" in cmd
+        else ShellResult(returncode=0, stdout="Logged in", stderr="") if "gh auth" in cmd
+        else ShellResult(returncode=0, stdout="", stderr="")
+    )
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    container.shell.override(mock_shell)
+    monkeypatch.chdir(workspace)
+    try:
+        result = runner.invoke(app, ["doctor"])
+        data = json.loads(result.output)
+        assert data["config_path"] == str((workspace / "mothership.yaml").resolve())
+        assert data["config_resolution_source"] == "walk-up"
+        for k in ("checks", "warnings", "errors"):  # ac10: existing keys intact
+            assert k in data
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+        container.shell.reset_override()

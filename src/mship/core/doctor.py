@@ -119,14 +119,29 @@ class DoctorChecker:
         *,
         state_dir: Path | None = None,
         workspace_root: Path | None = None,
+        config_path: Path | None = None,
+        config_source: str | None = None,
     ) -> None:
         self._config = config
         self._shell = shell
         self._state_dir = state_dir
         self._workspace_root = workspace_root
+        self._config_path = config_path
+        self._config_source = config_source
 
     def run(self) -> DoctorReport:
         report = DoctorReport()
+
+        # issue 366 #6: report which config is live and how it resolved.
+        if self._config_path is not None:
+            report.checks.append(CheckResult(
+                name="config",
+                status="pass",
+                message=(
+                    f"config: {Path(self._config_path).resolve()} "
+                    f"(resolved via {self._config_source or 'unknown'})"
+                ),
+            ))
 
         for name, repo in self._config.repos.items():
             # Resolve effective path (handles git_root subdir repos)
