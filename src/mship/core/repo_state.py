@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Literal
 
@@ -14,6 +14,7 @@ class Issue:
     code: str
     severity: Severity
     message: str
+    paths: tuple[str, ...] = field(default=(), compare=False)
 
 
 @dataclass(frozen=True)
@@ -254,6 +255,7 @@ def _probe_dirty(
         return ()
     untracked = 0
     modified = 0
+    modified_paths: list[str] = []
     for line in out.splitlines():
         if not line.strip():
             continue
@@ -264,11 +266,18 @@ def _probe_dirty(
             untracked += 1
         else:
             modified += 1
+            path_part = line[3:].strip()
+            if " -> " in path_part:  # rename/copy: record the destination
+                path_part = path_part.split(" -> ", 1)[1]
+            path_part = path_part.strip().strip('"')
+            if path_part:
+                modified_paths.append(path_part)
     issues: list[Issue] = []
     if modified:
         issues.append(Issue(
             "dirty_worktree", "error",
             f"{modified} modified tracked file" + ("s" if modified != 1 else ""),
+            paths=tuple(modified_paths),
         ))
     if untracked:
         issues.append(Issue(
@@ -304,6 +313,7 @@ def _enrich_active_task(
                 i.message + " — a task is active for this repo; "
                 "edit in its worktree, not the main checkout "
                 "(see `mship worktrees`)",
+                paths=i.paths,
             ))
         else:
             out.append(i)

@@ -666,3 +666,45 @@ def test_audit_passive_dirty_worktree_warns(tmp_path):
     )
     codes = [i.code for i in issues["shared"]]
     assert "passive_dirty_worktree" in codes
+
+
+# ---------------------------------------------------------------------------
+# issue 366 #5: dirty_worktree carries modified paths; config-only filter
+# ---------------------------------------------------------------------------
+
+def test_probe_dirty_records_modified_paths(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    (audit_workspace / "cli" / "Taskfile.yml").write_text(
+        "version: '3'\ntasks:\n  x:\n    cmds:\n      - echo x\n"
+    )
+    rep = audit_repos(cfg, shell, names=["cli"])
+    (repo,) = [r for r in rep.repos if r.name == "cli"]
+    dirty = [i for i in repo.issues if i.code == "dirty_worktree"]
+    assert dirty, [i.code for i in repo.issues]
+    assert "Taskfile.yml" in dirty[0].paths
+
+
+def test_probe_dirty_records_multiple_paths(audit_workspace):
+    cfg, shell = _load(audit_workspace)
+    (audit_workspace / "cli" / "README.md").write_text("changed\n")
+    (audit_workspace / "cli" / "Taskfile.yml").write_text("version: '3'\ntasks: {x: {cmds: [echo]}}\n")
+    rep = audit_repos(cfg, shell, names=["cli"])
+    (repo,) = [r for r in rep.repos if r.name == "cli"]
+    (dirty,) = [i for i in repo.issues if i.code == "dirty_worktree"]
+    assert set(dirty.paths) == {"README.md", "Taskfile.yml"}
+
+
+def test_enrich_active_task_preserves_paths():
+    from mship.core.repo_state import Issue, _enrich_active_task
+    issues = (Issue("dirty_worktree", "error", "1 modified tracked file",
+                    paths=("mothership.yaml",)),)
+    out = _enrich_active_task(issues, has_active_task=True)
+    assert out[0].paths == ("mothership.yaml",)
+    assert "worktree" in out[0].message  # hint still appended
+
+
+def test_issue_equality_ignores_paths():
+    from mship.core.repo_state import Issue
+    a = Issue("dirty_worktree", "error", "x")
+    b = Issue("dirty_worktree", "error", "x", paths=("a", "b"))
+    assert a == b  # paths is compare=False → existing equality preserved
