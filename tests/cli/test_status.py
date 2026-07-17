@@ -485,3 +485,16 @@ def test_status_reports_config_path_and_source(workspace, monkeypatch):
         container.state_dir.reset_override()
         container.config.reset()
         container.state_manager.reset()
+
+
+def test_status_json_keys_are_additive(configured_app, monkeypatch):
+    monkeypatch.delenv("MSHIP_WORKSPACE", raising=False)
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    # Pre-existing keys preserved (no rename/removal):
+    for k in ("workspace", "active_tasks", "resolved_task", "resolution_source"):
+        assert k in payload, k
+    # New additive keys present:
+    assert "config_path" in payload
+    assert "config_resolution_source" in payload

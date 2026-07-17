@@ -120,3 +120,17 @@ def test_doctor_json_includes_config_path_and_source(workspace, monkeypatch):
         container.config.reset()
         container.state_manager.reset()
         container.shell.reset_override()
+
+
+def test_doctor_json_keys_are_additive(configured_doctor_app, monkeypatch):
+    import json
+    monkeypatch.delenv("MSHIP_WORKSPACE", raising=False)
+    result = runner.invoke(app, ["doctor"])
+    data = json.loads(result.output)
+    for k in ("checks", "warnings", "errors"):      # pre-existing keys intact
+        assert k in data, k
+    assert "config_path" in data                     # new additive keys
+    assert "config_resolution_source" in data
+    # Each check object keeps its stable schema:
+    for c in data["checks"]:
+        assert set(c.keys()) == {"name", "status", "message"}
