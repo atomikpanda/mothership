@@ -104,6 +104,59 @@ def test_pair_errors_without_relay(workspace_no_relay):
     assert "relay" in r.output.lower()
 
 
+def test_pair_with_relay_host_flag_no_block(workspace_no_relay, tmp_path, monkeypatch):
+    """ac1: --relay-host prints a valid link with NO relay: block (no 'No relay
+    configured' exit)."""
+    fake_home = tmp_path / "home"
+    (fake_home / ".mothership").mkdir(parents=True)
+    key = fake_home / ".mothership" / "relay_ed25519"
+    key.write_text("PRIV\n")
+    (Path(str(key) + ".pub")).write_text("ssh-ed25519 AAAA mship-relay\n")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    (workspace_no_relay / ".mothership" / "serve-token").write_text("flag-token\n")
+
+    r = runner.invoke(app, ["pair", "--relay-host", "flag.relay.com"])
+    assert r.exit_code == 0, r.output
+    assert "groundcontrol://add?" in r.output
+    assert "flag.relay.com" in r.output
+    assert "flag-token" in r.output
+
+
+def test_pair_flag_overrides_config_and_record(relay_configured_workspace, tmp_path, monkeypatch):
+    """ac6: --relay-host wins over config.relay.host AND a live runtime record."""
+    import os
+
+    from mship.core.relay.runtime import RelayRuntimeRecord, write_runtime_record
+
+    fake_home = tmp_path / "home"
+    (fake_home / ".mothership").mkdir(parents=True)
+    key = fake_home / ".mothership" / "relay_ed25519"
+    key.write_text("PRIV\n")
+    (Path(str(key) + ".pub")).write_text("ssh-ed25519 AAAA mship-relay\n")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    write_runtime_record(
+        relay_configured_workspace,
+        RelayRuntimeRecord(host="record.relay.com", pid=os.getpid()),
+    )
+
+    r = runner.invoke(app, ["pair", "--relay-host", "flag.relay.com"])
+    assert r.exit_code == 0, r.output
+    assert "flag.relay.com" in r.output
+    assert "relay.example.com" not in r.output   # config host lost
+    assert "record.relay.com" not in r.output    # record host lost
+
+
+def test_pair_no_relay_error_names_flag_and_serve(workspace_no_relay):
+    """ac5: nothing resolves → non-zero + actionable message naming --relay-host +
+    serve; never a partial/empty link."""
+    r = runner.invoke(app, ["pair"])
+    assert r.exit_code != 0
+    assert "--relay-host" in r.output
+    assert "serve" in r.output.lower()
+    assert "groundcontrol://add" not in r.output
+
+
 # --- mship relay setup ---
 
 
