@@ -108,3 +108,48 @@ def live_runtime_record(
         return None
     alive = (pid_alive or _pid_alive)(record.pid)
     return record if alive else None
+
+
+@dataclass(frozen=True)
+class ResolvedRelay:
+    host: str
+    ssh_port: int
+    user: str | None
+    source: str  # "flag" | "config" | "record"
+
+
+def resolve_relay(
+    *,
+    flag_host: str | None,
+    config_relay: RelayConfig | None,
+    record: RelayRuntimeRecord | None,
+) -> ResolvedRelay | None:
+    """Resolve the relay host with fixed precedence: flag > config > live record.
+
+    `record` should already be liveness-filtered (see `live_runtime_record`) — this
+    function is pure precedence. Returns None when nothing resolves (caller emits an
+    actionable error). An explicit `flag_host` overrides host but inherits
+    ssh_port/user from `config_relay` when present, mirroring the RelayConfig
+    substitution in `_serve_with_relay` (serve.py:197-201).
+    """
+    if flag_host:
+        if config_relay is not None:
+            return ResolvedRelay(
+                host=flag_host,
+                ssh_port=config_relay.ssh_port,
+                user=config_relay.user,
+                source="flag",
+            )
+        return ResolvedRelay(host=flag_host, ssh_port=2222, user=None, source="flag")
+    if config_relay is not None:
+        return ResolvedRelay(
+            host=config_relay.host,
+            ssh_port=config_relay.ssh_port,
+            user=config_relay.user,
+            source="config",
+        )
+    if record is not None:
+        return ResolvedRelay(
+            host=record.host, ssh_port=record.ssh_port, user=record.user, source="record"
+        )
+    return None

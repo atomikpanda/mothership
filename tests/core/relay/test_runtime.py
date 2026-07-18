@@ -93,3 +93,64 @@ def test_default_pid_alive_true_for_current_process(tmp_path):
 
     write_runtime_record(tmp_path, RelayRuntimeRecord(host="h", pid=os.getpid()))
     assert live_runtime_record(tmp_path) is not None  # real _pid_alive on this pid
+
+
+def test_resolve_flag_only():
+    from mship.core.relay.runtime import ResolvedRelay, resolve_relay
+
+    r = resolve_relay(flag_host="flag.host", config_relay=None, record=None)
+    assert r == ResolvedRelay(host="flag.host", ssh_port=2222, user=None, source="flag")
+
+
+def test_resolve_config_only():
+    from mship.core.relay.config import RelayConfig
+    from mship.core.relay.runtime import ResolvedRelay, resolve_relay
+
+    cfg = RelayConfig(host="cfg.host", ssh_port=2200, user="tunnel")
+    r = resolve_relay(flag_host=None, config_relay=cfg, record=None)
+    assert r == ResolvedRelay(host="cfg.host", ssh_port=2200, user="tunnel", source="config")
+
+
+def test_resolve_record_only():
+    from mship.core.relay.runtime import ResolvedRelay, resolve_relay
+
+    rec = RelayRuntimeRecord(host="rec.host", pid=1, ssh_port=2019, user="u")
+    r = resolve_relay(flag_host=None, config_relay=None, record=rec)
+    assert r == ResolvedRelay(host="rec.host", ssh_port=2019, user="u", source="record")
+
+
+def test_resolve_flag_beats_config_and_record():
+    from mship.core.relay.config import RelayConfig
+    from mship.core.relay.runtime import resolve_relay
+
+    cfg = RelayConfig(host="cfg.host", ssh_port=2200, user="cu")
+    rec = RelayRuntimeRecord(host="rec.host", pid=1)
+    r = resolve_relay(flag_host="flag.host", config_relay=cfg, record=rec)
+    assert r.host == "flag.host" and r.source == "flag"
+    # Flag inherits ssh_port/user from config when present (mirrors _serve_with_relay
+    # RelayConfig substitution at serve.py:197-201).
+    assert r.ssh_port == 2200 and r.user == "cu"
+
+
+def test_resolve_flag_without_config_uses_default_ssh_port():
+    from mship.core.relay.runtime import ResolvedRelay, resolve_relay
+
+    rec = RelayRuntimeRecord(host="rec.host", pid=1)
+    r = resolve_relay(flag_host="flag.host", config_relay=None, record=rec)
+    assert r == ResolvedRelay(host="flag.host", ssh_port=2222, user=None, source="flag")
+
+
+def test_resolve_config_beats_record():
+    from mship.core.relay.config import RelayConfig
+    from mship.core.relay.runtime import resolve_relay
+
+    cfg = RelayConfig(host="cfg.host")
+    rec = RelayRuntimeRecord(host="rec.host", pid=1)
+    r = resolve_relay(flag_host=None, config_relay=cfg, record=rec)
+    assert r.host == "cfg.host" and r.source == "config"
+
+
+def test_resolve_nothing_returns_none():
+    from mship.core.relay.runtime import resolve_relay
+
+    assert resolve_relay(flag_host=None, config_relay=None, record=None) is None
