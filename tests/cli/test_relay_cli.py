@@ -223,6 +223,42 @@ def test_pair_ignores_stale_record(workspace_no_relay, monkeypatch):
     assert "--relay-host" in r.output                # actionable fallback message
 
 
+def test_pair_relay_block_unchanged_ignores_record(relay_configured_workspace, tmp_path, monkeypatch):
+    """ac8: with a relay: block and no flag, `mship pair` behaves exactly as today —
+    it uses config.relay.host, prints the same explanatory note, and ignores any live
+    serve record (config > record)."""
+    import os
+
+    from mship.core.relay.link import build_relay_pair_link
+    from mship.core.relay.runtime import RelayRuntimeRecord, write_runtime_record
+
+    fake_home = tmp_path / "home"
+    (fake_home / ".mothership").mkdir(parents=True)
+    key = fake_home / ".mothership" / "relay_ed25519"
+    key.write_text("PRIV\n")
+    (Path(str(key) + ".pub")).write_text("ssh-ed25519 AAAA mship-relay\n")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    # A live record with a DIFFERENT host must NOT override the relay: block.
+    write_runtime_record(
+        relay_configured_workspace,
+        RelayRuntimeRecord(host="other.relay.com", pid=os.getpid()),
+    )
+
+    expected = build_relay_pair_link(
+        workspace="Mship Workspace",
+        host="relay.example.com",  # the configured block host
+        workspace_root=relay_configured_workspace,
+        home=fake_home,
+    )
+
+    r = runner.invoke(app, ["pair"])
+    assert r.exit_code == 0, r.output
+    assert expected.link in r.output            # exactly today's link
+    assert "other.relay.com" not in r.output    # record ignored (config wins)
+    assert "opaque subdomain" in r.output       # the same explanatory note as today
+
+
 # --- mship relay setup ---
 
 
