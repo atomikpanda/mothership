@@ -449,6 +449,21 @@ class WorkspaceConfig(BaseModel):
                 adjacency[dep.repo].append(name)
                 in_degree[name] += 1
 
+        # git_root is an implicit parent->child ordering edge (mirrors
+        # DependencyGraph + worktree passive expansion). Fold it into cycle
+        # detection so an opposite-direction `parent depends_on child` is rejected
+        # as the cycle it is, instead of being silently resolved wrong-way. See
+        # issue #366 finding #3 / ac13. (git_root ref validity is checked later by
+        # validate_git_root_refs; guard against unknown parents here.)
+        for name, repo in self.repos.items():
+            parent = repo.git_root
+            if parent is None or parent not in in_degree:
+                continue
+            if any(dep.repo == parent for dep in repo.depends_on):
+                continue  # already counted as an explicit depends_on edge
+            adjacency[parent].append(name)
+            in_degree[name] += 1
+
         queue = [name for name, degree in in_degree.items() if degree == 0]
         visited = 0
         while queue:

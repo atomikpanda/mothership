@@ -1232,3 +1232,35 @@ def test_load_git_root_child_accepts_yaml_spelling(tmp_path: Path):
     config = ConfigLoader.load(cfg)
     assert config.repos["web"].git_root == "mono"
 
+
+def test_git_root_opposite_direction_depends_on_rejected_as_cycle(tmp_path: Path):
+    """ac13: a parent that `depends_on` its own git_root child forms a cycle once
+    the implicit git_root ordering edge is folded in — rejected at load."""
+    root = tmp_path / "mono"; root.mkdir()
+    (root / "Taskfile.yml").write_text("version: '3'")
+    web = root / "web"; web.mkdir()
+    (web / "Taskfile.yml").write_text("version: '3'")
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: mono\nrepos:\n"
+        "  mono:\n    path: ./mono\n    type: service\n    depends_on: [web]\n"
+        "  web:\n    path: web\n    type: service\n    git_root: mono\n"
+    )
+    with pytest.raises(ValueError, match="[Cc]ircular"):
+        ConfigLoader.load(cfg)
+
+
+def test_git_root_child_depends_on_parent_still_loads(tmp_path: Path):
+    """Same-direction (child depends_on parent) is NOT a cycle — no regression."""
+    root = tmp_path / "mono"; root.mkdir()
+    (root / "Taskfile.yml").write_text("version: '3'")
+    web = root / "web"; web.mkdir()
+    (web / "Taskfile.yml").write_text("version: '3'")
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: mono\nrepos:\n"
+        "  mono:\n    path: ./mono\n    type: service\n"
+        "  web:\n    path: web\n    type: service\n    git_root: mono\n    depends_on: [mono]\n"
+    )
+    assert ConfigLoader.load(cfg).repos["web"].git_root == "mono"
+
