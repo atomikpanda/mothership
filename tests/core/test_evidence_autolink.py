@@ -38,3 +38,49 @@ def test_testrun_refs_attach_to_every_criterion():
         EvidenceLink("ac1", "test", "test-runs/1.mothership"),
         EvidenceLink("ac2", "test", "test-runs/1.mothership"),
     }
+
+
+def test_commit_attaches_to_named_criterion():  # ac2
+    spec = _spec([AcceptanceCriterion(id="ac1", text="x"),
+                  AcceptanceCriterion(id="ac2", text="y")])
+    links = compute_evidence_links(spec, commits=[("sha1", "implement ac2 logic")],
+                                   test_run_refs=[])
+    assert links == [EvidenceLink("ac2", "commit", "sha1")]
+
+
+def test_commit_naming_multiple_ids_attaches_to_all():  # ac3
+    spec = _spec([AcceptanceCriterion(id="ac1", text="x"),
+                  AcceptanceCriterion(id="ac3", text="z")])
+    links = compute_evidence_links(spec, commits=[("sha1", "ac1 and ac3 together")],
+                                   test_run_refs=[])
+    assert set(links) == {EvidenceLink("ac1", "commit", "sha1"),
+                          EvidenceLink("ac3", "commit", "sha1")}
+
+
+def test_commit_naming_no_id_is_noop():  # ac4
+    spec = _spec([AcceptanceCriterion(id="ac1", text="x")])
+    links = compute_evidence_links(spec, commits=[("sha1", "refactor internals")],
+                                   test_run_refs=[])
+    assert links == []
+
+
+def test_word_boundary_ac7_does_not_attach_to_ac70():  # ac5
+    spec = _spec([AcceptanceCriterion(id="ac7", text="x"),
+                  AcceptanceCriterion(id="ac70", text="y")])
+    links = compute_evidence_links(spec, commits=[("sha1", "handles ac7")],
+                                   test_run_refs=[])
+    assert links == [EvidenceLink("ac7", "commit", "sha1")]
+
+
+def test_word_boundary_substring_is_not_a_reference():  # ac5
+    spec = _spec([AcceptanceCriterion(id="ac7", text="x")])
+    links = compute_evidence_links(spec, commits=[("sha1", "patch mac7book in reactor")],
+                                   test_run_refs=[])
+    assert links == []
+
+
+def test_unknown_ac_id_in_commit_is_ignored():  # ac5 (intersect with real ids)
+    spec = _spec([AcceptanceCriterion(id="ac1", text="x")])
+    links = compute_evidence_links(spec, commits=[("sha1", "touches ac9")],
+                                   test_run_refs=[])
+    assert links == []

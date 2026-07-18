@@ -43,10 +43,19 @@ def extract_ac_ids(message: str) -> set[str]:
 def compute_evidence_links(spec, commits, test_run_refs) -> list[EvidenceLink]:
     """Plan the evidence links to add for `spec` (pure -- no mutation).
 
-    Every ref in `test_run_refs` becomes a `test` link on EVERY acceptance
-    criterion. (Commit handling and de-duplication are added in later tasks.)"""
+    - every ref in `test_run_refs` -> a `test` link on EVERY acceptance criterion;
+    - every `(sha, message)` in `commits` -> a `commit` link on each acceptance
+      criterion whose id is named (word-boundary) in the message.
+
+    (De-duplication is added in the next task.)"""
+    id_by_lower = {c.id.lower(): c.id for c in spec.acceptance_criteria}
     links: list[EvidenceLink] = []
     for ref in test_run_refs:
         for c in spec.acceptance_criteria:
             links.append(EvidenceLink(criterion_id=c.id, kind="test", ref=ref))
+    for sha, message in commits:
+        for token in extract_ac_ids(message):
+            criterion_id = id_by_lower.get(token)
+            if criterion_id is not None:
+                links.append(EvidenceLink(criterion_id=criterion_id, kind="commit", ref=sha))
     return links
