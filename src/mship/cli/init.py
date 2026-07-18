@@ -4,7 +4,7 @@ from typing import Optional
 import typer
 
 from mship.cli.output import Output
-from mship.core.config import unique_git_roots
+from mship.core.config import unique_git_roots, resolve_go_task_files
 from mship.core.init import WorkspaceInitializer, DetectedRepo
 from mship.core.claude_settings import install_session_hook, install_pretooluse_guard_hook, install_stop_hook
 
@@ -128,12 +128,15 @@ def register(app: typer.Typer, get_container):
 
         # Scaffold Taskfiles
         created_taskfiles: list[str] = []
+        rename_notes: list[tuple[str, Path]] = []
         if scaffold_taskfiles:
             for rd in repos_data:
                 repo_path = Path(rd["path"])
-                if not (repo_path / "Taskfile.yml").exists():
-                    initializer.write_taskfile(repo_path)
+                result = initializer.write_taskfile(repo_path)
+                if result.wrote:
                     created_taskfiles.append(str(repo_path))
+                elif result.needs_rename and result.existing is not None:
+                    rename_notes.append((str(repo_path), result.existing))
 
         # Install pre-commit hooks on each effective git root
         from mship.core.hooks import install_hook
@@ -149,11 +152,21 @@ def register(app: typer.Typer, get_container):
             output.success(f"Created: {config_path}")
             for tf in created_taskfiles:
                 output.success(f"Created: {tf}/Taskfile.yml")
+            for repo_dir, existing in rename_notes:
+                output.warning(
+                    f"{repo_dir}: found existing go-task file {existing.name} — "
+                    f"mship left it untouched (no shadowing Taskfile.yml written). "
+                    f"Rename it to Taskfile.yml so go-task and mship resolve the "
+                    f"same file."
+                )
             output.print("\nRun `mship status` to verify your workspace.")
         else:
             output.json({
                 "config": str(config_path),
                 "taskfiles_created": created_taskfiles,
+                "taskfile_rename_suggested": [
+                    {"repo_dir": d, "existing": str(p)} for d, p in rename_notes
+                ],
             })
 
 
@@ -269,13 +282,20 @@ def _run_interactive(
     created_taskfiles: list[str] = []
     for rd in repos_data:
         repo_path = Path(rd["path"])
-        if not (repo_path / "Taskfile.yml").exists():
-            scaffold = inquirer.confirm(
-                message=f'"{rd["name"]}" has no Taskfile.yml. Create a starter?',
-                default=True,
-            ).execute()
-            if scaffold:
-                initializer.write_taskfile(repo_path)
+        existing = resolve_go_task_files(repo_path)
+        if existing:
+            note = f'"{rd["name"]}" already has {existing[0].name}'
+            if existing[0].name != "Taskfile.yml":
+                note += " — rename it to Taskfile.yml so go-task and mship resolve the same file"
+            output.print(note)
+            continue
+        scaffold = inquirer.confirm(
+            message=f'"{rd["name"]}" has no go-task file. Create a starter Taskfile.yml?',
+            default=True,
+        ).execute()
+        if scaffold:
+            result = initializer.write_taskfile(repo_path)
+            if result.wrote:
                 created_taskfiles.append(rd["name"])
 
     # 7. Env runner
