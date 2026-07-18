@@ -1191,10 +1191,7 @@ def test_top_level_absolute_path_still_allowed(tmp_path: Path):
     assert r.path.is_absolute()
 
 
-import pytest as _pytest  # noqa: F401 (pytest already imported at top)
-
-
-@_pytest.mark.parametrize("fname", [
+@pytest.mark.parametrize("fname", [
     "Taskfile.yml", "Taskfile.yaml", "taskfile.yml", "taskfile.yaml",
     "Taskfile.dist.yml", "Taskfile.dist.yaml", "taskfile.dist.yml", "taskfile.dist.yaml",
 ])
