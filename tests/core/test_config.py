@@ -1149,3 +1149,115 @@ def test_discover_with_source_hub_worktree_prefers_marker_over_own_yaml(tmp_path
     assert res.path == root / "mothership.yaml"     # NOT the worktree's own copy
     assert res.source == "marker"
 
+
+def test_git_root_child_absolute_path_rejected():
+    """#366 #2: an absolute git_root child path silently resolves to the SOURCE
+    checkout (pathlib drops the left operand on `/`); reject at construction."""
+    from mship.core.config import RepoConfig
+    with pytest.raises(ValueError) as exc:
+        RepoConfig(path=Path("/abs/child"), type="library", git_root="mono")
+    msg = str(exc.value)
+    assert "/abs/child" in msg
+    assert "absolute" in msg.lower()
+    assert "git_root" in msg
+
+
+def test_git_root_child_parent_escape_rejected():
+    """ac8: a `..`-bearing git_root child path escapes the parent worktree."""
+    from mship.core.config import RepoConfig
+    with pytest.raises(ValueError) as exc:
+        RepoConfig(path=Path("../sibling"), type="library", git_root="mono")
+    assert ".." in str(exc.value)
+    assert "git_root" in str(exc.value)
+
+
+def test_git_root_child_relative_path_ok_and_nests(tmp_path: Path):
+    """ac9: a relative git_root child still constructs and resolves nested under
+    the parent worktree — no regression for valid monorepo configs."""
+    from mship.core.config import RepoConfig
+    child = RepoConfig(path=Path("web"), type="service", git_root="root")
+    assert str(child.path) == "web"
+    parent_path = tmp_path / "monorepo"
+    effective = (parent_path / child.path).resolve()
+    assert effective == (parent_path / "web").resolve()
+    assert str(effective).startswith(str(parent_path.resolve()))
+
+
+def test_top_level_absolute_path_still_allowed(tmp_path: Path):
+    """Non-goal guard: TOP-LEVEL (no git_root) repos may still use absolute paths
+    (what `init --detect` emits). The validator must only constrain git_root children."""
+    from mship.core.config import RepoConfig
+    r = RepoConfig(path=(tmp_path / "svc"), type="service")
+    assert r.path.is_absolute()
+
+
+@pytest.mark.parametrize("fname", [
+    "Taskfile.yml", "Taskfile.yaml", "taskfile.yml", "taskfile.yaml",
+    "Taskfile.dist.yml", "Taskfile.dist.yaml", "taskfile.dist.yml", "taskfile.dist.yaml",
+])
+def test_resolve_go_task_files_matches_full_set(tmp_path: Path, fname: str):
+    from mship.core.config import resolve_go_task_files
+    (tmp_path / fname).write_text("version: '3'\n")
+    found = resolve_go_task_files(tmp_path)
+    assert [p.name for p in found] == [fname]
+
+
+def test_load_accepts_taskfile_yaml_spelling(tmp_path: Path):
+    """ac4: a top-level repo whose go-task file is `Taskfile.yaml` (not `.yml`)
+    loads instead of raising 'has no Taskfile.yml'."""
+    repo = tmp_path / "svc"
+    repo.mkdir()
+    (repo / "Taskfile.yaml").write_text("version: '3'\ntasks: {}\n")
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text("workspace: t\nrepos:\n  svc:\n    path: ./svc\n    type: service\n")
+    config = ConfigLoader.load(cfg)
+    assert "svc" in config.repos
+
+
+def test_load_git_root_child_accepts_yaml_spelling(tmp_path: Path):
+    """ac4 second pass: the git_root subdir check also accepts `.yaml`."""
+    root = tmp_path / "mono"; root.mkdir()
+    (root / "Taskfile.yml").write_text("version: '3'\n")
+    web = root / "web"; web.mkdir()
+    (web / "Taskfile.yaml").write_text("version: '3'\n")
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: mono\nrepos:\n"
+        "  mono:\n    path: ./mono\n    type: service\n"
+        "  web:\n    path: web\n    type: service\n    git_root: mono\n"
+    )
+    config = ConfigLoader.load(cfg)
+    assert config.repos["web"].git_root == "mono"
+
+
+def test_git_root_opposite_direction_depends_on_rejected_as_cycle(tmp_path: Path):
+    """ac13: a parent that `depends_on` its own git_root child forms a cycle once
+    the implicit git_root ordering edge is folded in — rejected at load."""
+    root = tmp_path / "mono"; root.mkdir()
+    (root / "Taskfile.yml").write_text("version: '3'")
+    web = root / "web"; web.mkdir()
+    (web / "Taskfile.yml").write_text("version: '3'")
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: mono\nrepos:\n"
+        "  mono:\n    path: ./mono\n    type: service\n    depends_on: [web]\n"
+        "  web:\n    path: web\n    type: service\n    git_root: mono\n"
+    )
+    with pytest.raises(ValueError, match="[Cc]ircular"):
+        ConfigLoader.load(cfg)
+
+
+def test_git_root_child_depends_on_parent_still_loads(tmp_path: Path):
+    """Same-direction (child depends_on parent) is NOT a cycle — no regression."""
+    root = tmp_path / "mono"; root.mkdir()
+    (root / "Taskfile.yml").write_text("version: '3'")
+    web = root / "web"; web.mkdir()
+    (web / "Taskfile.yml").write_text("version: '3'")
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: mono\nrepos:\n"
+        "  mono:\n    path: ./mono\n    type: service\n"
+        "  web:\n    path: web\n    type: service\n    git_root: mono\n    depends_on: [mono]\n"
+    )
+    assert ConfigLoader.load(cfg).repos["web"].git_root == "mono"
+

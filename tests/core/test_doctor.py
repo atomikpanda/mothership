@@ -676,3 +676,37 @@ def test_doctor_bundler_npm_warns_when_files_lists_worktrees(tmp_path):
     warns = [c for c in report.checks if c.name == "bundler/npm"]
     assert warns and warns[0].status == "warn"
     assert _no_bundler_fail(report)
+
+
+def _doctor_shell():
+    s = MagicMock(spec=ShellRunner)
+    s.run.side_effect = lambda cmd, cwd, env=None: (
+        ShellResult(returncode=0, stdout="test\nrun\nlint\nsetup\n", stderr="")
+        if "task --list" in cmd else ShellResult(returncode=0, stdout="", stderr="")
+    )
+    return s
+
+
+def test_doctor_warns_on_multiple_go_task_files(tmp_path: Path):
+    """ac5: >1 go-task file resolving in a repo dir → a warning naming them."""
+    repo = tmp_path / "svc"; repo.mkdir()
+    (repo / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    (repo / "Taskfile.yaml").write_text("version: '3'\ntasks: {}\n")
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text("workspace: t\nrepos:\n  svc:\n    path: ./svc\n    type: service\n")
+    report = DoctorChecker(ConfigLoader.load(cfg), _doctor_shell()).run()
+    tf = next(c for c in report.checks if c.name == "svc/taskfile")
+    assert tf.status == "warn"
+    assert "Taskfile.yml" in tf.message and "Taskfile.yaml" in tf.message
+
+
+def test_doctor_accepts_taskfile_yaml_only(tmp_path: Path):
+    """A repo with only Taskfile.yaml passes the presence check (not fail)."""
+    repo = tmp_path / "svc"; repo.mkdir()
+    (repo / "Taskfile.yaml").write_text("version: '3'\ntasks: {}\n")
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text("workspace: t\nrepos:\n  svc:\n    path: ./svc\n    type: service\n")
+    report = DoctorChecker(ConfigLoader.load(cfg), _doctor_shell()).run()
+    tf = next(c for c in report.checks if c.name == "svc/taskfile")
+    assert tf.status == "pass"
+    assert "Taskfile.yaml" in tf.message

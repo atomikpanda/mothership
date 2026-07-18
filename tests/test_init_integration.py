@@ -80,3 +80,21 @@ def test_init_detect_then_status(tmp_path: Path, monkeypatch):
         data = yaml.safe_load(f)
     assert "frontend" in data["repos"]
     assert "backend" in data["repos"]
+
+
+def test_init_scaffold_does_not_shadow_existing_taskfile_yaml(tmp_path: Path, monkeypatch):
+    """ac1: `mship init --scaffold-taskfiles` against a repo that has only
+    `Taskfile.yaml` writes NO shadowing `Taskfile.yml` and reports a rename offer."""
+    svc = tmp_path / "svc"; svc.mkdir()
+    (svc / ".git").mkdir()
+    (svc / "Taskfile.yaml").write_text(
+        "version: '3'\ntasks:\n  test:\n    cmds:\n      - echo ok\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, [
+        "init", "--name", "t", "--repo", "./svc:service", "--scaffold-taskfiles",
+    ])
+    assert result.exit_code == 0, result.output
+    assert not (svc / "Taskfile.yml").exists()          # no shadow stub
+    assert "Taskfile.yaml" in result.output             # the existing file is named
+    assert "rename" in result.output.lower()            # rename is offered

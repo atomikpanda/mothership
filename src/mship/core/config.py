@@ -20,6 +20,31 @@ class ConfigResolution:
     source: str
 
 
+# go-task's Taskfile resolution set — the filenames `task` auto-discovers in a
+# directory, in go-task's own precedence order (highest first). mship must treat
+# ALL of these as "a go-task file exists here" so it never shadows an existing
+# `Taskfile.yaml` (etc.) with a generated `Taskfile.yml` stub, and so config
+# load / doctor accept any valid spelling. See issue #366 finding #1.
+GO_TASK_FILENAMES: tuple[str, ...] = (
+    "Taskfile.yml",
+    "Taskfile.yaml",
+    "taskfile.yml",
+    "taskfile.yaml",
+    "Taskfile.dist.yml",
+    "Taskfile.dist.yaml",
+    "taskfile.dist.yml",
+    "taskfile.dist.yaml",
+)
+
+
+def resolve_go_task_files(directory: Path) -> list[Path]:
+    """Existing go-task files in `directory`, in go-task resolution order.
+
+    Empty list == no go-task file. More than one == an ambiguous directory where
+    the file `task` actually runs depends on go-task's precedence (doctor warns)."""
+    return [directory / name for name in GO_TASK_FILENAMES if (directory / name).is_file()]
+
+
 class Dependency(BaseModel):
     repo: str
     type: Literal["compile", "runtime"] = "compile"
@@ -230,6 +255,32 @@ class RepoConfig(BaseModel):
                 )
         return self
 
+    @model_validator(mode="after")
+    def validate_git_root_child_path(self) -> "RepoConfig":
+        """A git_root child's `path` is joined onto its parent's worktree
+        (`parent.path / child.path`, config.py + worktree.py + doctor.py).
+        pathlib DISCARDS the left operand when the right side is absolute, so an
+        ABSOLUTE child path silently resolves to the source checkout instead of
+        the task worktree; a `..` escapes the parent. Reject both at model
+        construction — mirroring validate_bind_files — so it fires independent of
+        ConfigLoader.load's `require_paths` flag. See issue #366 finding #2."""
+        if self.git_root is None:
+            return self
+        if self.path.is_absolute():
+            raise ValueError(
+                f"repo path {str(self.path)!r} is absolute but git_root="
+                f"{self.git_root!r} is set; git_root child paths must be relative "
+                f"to the parent worktree (an absolute path resolves to the source "
+                f"checkout, not the task worktree)"
+            )
+        if ".." in self.path.parts:
+            raise ValueError(
+                f"repo path {str(self.path)!r} contains '..' but git_root="
+                f"{self.git_root!r} is set; git_root child paths must stay inside "
+                f"the parent worktree"
+            )
+        return self
+
 
 class AuditPolicy(BaseModel):
     block_spawn: bool = True
@@ -398,6 +449,21 @@ class WorkspaceConfig(BaseModel):
                 adjacency[dep.repo].append(name)
                 in_degree[name] += 1
 
+        # git_root is an implicit parent->child ordering edge (mirrors
+        # DependencyGraph + worktree passive expansion). Fold it into cycle
+        # detection so an opposite-direction `parent depends_on child` is rejected
+        # as the cycle it is, instead of being silently resolved wrong-way. See
+        # issue #366 finding #3 / ac13. (git_root ref validity is checked later by
+        # validate_git_root_refs; guard against unknown parents here.)
+        for name, repo in self.repos.items():
+            parent = repo.git_root
+            if parent is None or parent not in in_degree:
+                continue
+            if any(dep.repo == parent for dep in repo.depends_on):
+                continue  # already counted as an explicit depends_on edge
+            adjacency[parent].append(name)
+            in_degree[name] += 1
+
         queue = [name for name, degree in in_degree.items() if degree == 0]
         visited = 0
         while queue:
@@ -481,9 +547,10 @@ class ConfigLoader:
             if require_paths:
                 if not resolved.is_dir():
                     raise ValueError(f"Repo '{name}' path does not exist: {resolved}")
-                if not (resolved / "Taskfile.yml").exists():
+                if not resolve_go_task_files(resolved):
                     raise ValueError(
-                        f"Repo '{name}' at {resolved} has no Taskfile.yml"
+                        f"Repo '{name}' at {resolved} has no go-task file "
+                        f"(looked for one of: {', '.join(GO_TASK_FILENAMES)})"
                     )
 
         # Second pass: git_root repos validated against their parent's path.
@@ -497,9 +564,10 @@ class ConfigLoader:
                     raise ValueError(
                         f"Repo '{name}' subdirectory does not exist: {effective}"
                     )
-                if not (effective / "Taskfile.yml").exists():
+                if not resolve_go_task_files(effective):
                     raise ValueError(
-                        f"Repo '{name}' at {effective} has no Taskfile.yml"
+                        f"Repo '{name}' at {effective} has no go-task file "
+                        f"(looked for one of: {', '.join(GO_TASK_FILENAMES)})"
                     )
 
         return config

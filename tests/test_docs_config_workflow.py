@@ -35,3 +35,15 @@ def test_skill_documents_bundler_caveat():
     t = _text(SKILL)
     assert ".worktrees" in t and ".mothership" in t
     assert "bundl" in t and "gitignore" in t
+
+
+CONFIGURATION = Path(__file__).resolve().parent.parent / "docs" / "configuration.md"
+
+
+def test_configuration_documents_git_root_relative_and_autoorder():
+    """ac15: docs state git_root children need relative paths and that git_root
+    parents are auto-ordered before their children (no hand-added depends_on)."""
+    t = CONFIGURATION.read_text().lower()
+    assert "relative" in t
+    assert "absolute" in t          # the constraint (no absolute child paths) is stated
+    assert "auto" in t and "order" in t   # auto-ordered before children
