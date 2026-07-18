@@ -1190,3 +1190,45 @@ def test_top_level_absolute_path_still_allowed(tmp_path: Path):
     r = RepoConfig(path=(tmp_path / "svc"), type="service")
     assert r.path.is_absolute()
 
+
+import pytest as _pytest  # noqa: F401 (pytest already imported at top)
+
+
+@_pytest.mark.parametrize("fname", [
+    "Taskfile.yml", "Taskfile.yaml", "taskfile.yml", "taskfile.yaml",
+    "Taskfile.dist.yml", "Taskfile.dist.yaml", "taskfile.dist.yml", "taskfile.dist.yaml",
+])
+def test_resolve_go_task_files_matches_full_set(tmp_path: Path, fname: str):
+    from mship.core.config import resolve_go_task_files
+    (tmp_path / fname).write_text("version: '3'\n")
+    found = resolve_go_task_files(tmp_path)
+    assert [p.name for p in found] == [fname]
+
+
+def test_load_accepts_taskfile_yaml_spelling(tmp_path: Path):
+    """ac4: a top-level repo whose go-task file is `Taskfile.yaml` (not `.yml`)
+    loads instead of raising 'has no Taskfile.yml'."""
+    repo = tmp_path / "svc"
+    repo.mkdir()
+    (repo / "Taskfile.yaml").write_text("version: '3'\ntasks: {}\n")
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text("workspace: t\nrepos:\n  svc:\n    path: ./svc\n    type: service\n")
+    config = ConfigLoader.load(cfg)
+    assert "svc" in config.repos
+
+
+def test_load_git_root_child_accepts_yaml_spelling(tmp_path: Path):
+    """ac4 second pass: the git_root subdir check also accepts `.yaml`."""
+    root = tmp_path / "mono"; root.mkdir()
+    (root / "Taskfile.yml").write_text("version: '3'\n")
+    web = root / "web"; web.mkdir()
+    (web / "Taskfile.yaml").write_text("version: '3'\n")
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: mono\nrepos:\n"
+        "  mono:\n    path: ./mono\n    type: service\n"
+        "  web:\n    path: web\n    type: service\n    git_root: mono\n"
+    )
+    config = ConfigLoader.load(cfg)
+    assert config.repos["web"].git_root == "mono"
+

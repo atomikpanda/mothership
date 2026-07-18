@@ -20,6 +20,31 @@ class ConfigResolution:
     source: str
 
 
+# go-task's Taskfile resolution set — the filenames `task` auto-discovers in a
+# directory, in go-task's own precedence order (highest first). mship must treat
+# ALL of these as "a go-task file exists here" so it never shadows an existing
+# `Taskfile.yaml` (etc.) with a generated `Taskfile.yml` stub, and so config
+# load / doctor accept any valid spelling. See issue #366 finding #1.
+GO_TASK_FILENAMES: tuple[str, ...] = (
+    "Taskfile.yml",
+    "Taskfile.yaml",
+    "taskfile.yml",
+    "taskfile.yaml",
+    "Taskfile.dist.yml",
+    "Taskfile.dist.yaml",
+    "taskfile.dist.yml",
+    "taskfile.dist.yaml",
+)
+
+
+def resolve_go_task_files(directory: Path) -> list[Path]:
+    """Existing go-task files in `directory`, in go-task resolution order.
+
+    Empty list == no go-task file. More than one == an ambiguous directory where
+    the file `task` actually runs depends on go-task's precedence (doctor warns)."""
+    return [directory / name for name in GO_TASK_FILENAMES if (directory / name).is_file()]
+
+
 class Dependency(BaseModel):
     repo: str
     type: Literal["compile", "runtime"] = "compile"
@@ -507,9 +532,10 @@ class ConfigLoader:
             if require_paths:
                 if not resolved.is_dir():
                     raise ValueError(f"Repo '{name}' path does not exist: {resolved}")
-                if not (resolved / "Taskfile.yml").exists():
+                if not resolve_go_task_files(resolved):
                     raise ValueError(
-                        f"Repo '{name}' at {resolved} has no Taskfile.yml"
+                        f"Repo '{name}' at {resolved} has no go-task file "
+                        f"(looked for one of: {', '.join(GO_TASK_FILENAMES)})"
                     )
 
         # Second pass: git_root repos validated against their parent's path.
@@ -523,9 +549,10 @@ class ConfigLoader:
                     raise ValueError(
                         f"Repo '{name}' subdirectory does not exist: {effective}"
                     )
-                if not (effective / "Taskfile.yml").exists():
+                if not resolve_go_task_files(effective):
                     raise ValueError(
-                        f"Repo '{name}' at {effective} has no Taskfile.yml"
+                        f"Repo '{name}' at {effective} has no go-task file "
+                        f"(looked for one of: {', '.join(GO_TASK_FILENAMES)})"
                     )
 
         return config
