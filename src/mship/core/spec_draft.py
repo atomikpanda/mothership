@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 from mship.core.spec import AcceptanceCriterion, OpenQuestion, Spec, SpecDraft
@@ -187,16 +188,69 @@ def apply_draft(spec: Spec, draft: SpecDraft) -> Spec:
     return spec
 
 
+_PROSE_SECTIONS = {
+    "problem": "problem",
+    "user story": "user_story",
+    "approach": "approach",
+}
+_LIST_SECTIONS = {
+    "acceptance criteria": "acceptance_criteria",
+    "open questions": "open_questions",
+    "non-goals": "non_goals",
+    "non goals": "non_goals",
+    "risks": "risks",
+    "affected repos": "affected_repos",
+    "affected repositories": "affected_repos",
+}
+_BULLET_RE = re.compile(r"^\s*-\s+(.*)$")
+_CHECKBOX_RE = re.compile(r"^\[[ xX]\]\s+(.*)$")
+_ID_BACKTICK_RE = re.compile(r"^`[A-Za-z]+\d+`\s+(.*)$")
+_ID_BRACKET_RE = re.compile(r"^\[[A-Za-z]+\d+\]\s+(.*)$")
+
+
+def _parse_list_items(heading: str, raw: str) -> list[str]:
+    """Extract bullet-item text from a list section, stripping an optional
+    `[ ]`/`[x]` checkbox and an optional `` `acN` `` / `[acN]` id token. The
+    `\\d+` requirement on ids means real prose like `` `code` does X `` is never
+    mistaken for an id."""
+    items: list[str] = []
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        m = _BULLET_RE.match(line)
+        if m is None:
+            continue  # tolerant here; Task 5 makes malformed lines loud
+        text = m.group(1).strip()
+        cb = _CHECKBOX_RE.match(text)
+        if cb is not None:
+            text = cb.group(1).strip()
+        idm = _ID_BACKTICK_RE.match(text) or _ID_BRACKET_RE.match(text)
+        if idm is not None:
+            text = idm.group(1).strip()
+        if text:
+            items.append(text)
+    return items
+
+
 def parse_spec_markdown(text: str) -> SpecDraft:
     """Parse a rendered spec markdown document back into a SpecDraft.
 
-    Inverse of the `## Problem` / `## User story` / `## Approach` body rendering
-    (see `render_body`). Reuses `parse_body_sections` to split by `## ` headings.
+    Inverse of the body/section rendering used across mship. Reuses
+    `parse_body_sections` to split by `## ` headings, maps known headings to
+    SpecDraft fields, and parses list sections into text-only items (ids are
+    re-derived positionally by `apply_draft`, matching the JSON path).
     """
     sections = parse_body_sections(text)
-    by_key = {heading.strip().lower(): body.strip() for heading, body in sections.items()}
-    return SpecDraft(
-        problem=by_key.get("problem", ""),
-        user_story=by_key.get("user story", ""),
-        approach=by_key.get("approach", ""),
-    )
+    fields: dict[str, object] = {
+        "problem": "", "user_story": "", "approach": "",
+        "non_goals": [], "risks": [], "affected_repos": [],
+        "acceptance_criteria": [], "open_questions": [],
+    }
+    for heading, body in sections.items():
+        key = heading.strip().lower()
+        if key in _PROSE_SECTIONS:
+            fields[_PROSE_SECTIONS[key]] = body.strip()
+        elif key in _LIST_SECTIONS:
+            fields[_LIST_SECTIONS[key]] = _parse_list_items(heading.strip(), body)
+        # else: unknown heading — additional_sections handled in Task 3
+    return SpecDraft(**fields)
