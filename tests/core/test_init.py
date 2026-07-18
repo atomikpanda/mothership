@@ -284,3 +284,25 @@ def test_generate_config_passes_git_root(tmp_path: Path):
     )
     assert config.repos["root"].git_root is None
     assert config.repos["web"].git_root == "root"
+
+
+def test_write_config_emits_git_root(tmp_path: Path):
+    """write_config serializes git_root for subdir children and omits it for
+    standalone repos. See spec mship-init-detect-monorepo ac1."""
+    init = WorkspaceInitializer()
+    config = init.generate_config(
+        workspace_name="mono",
+        repos=[
+            {"name": "root", "path": ".", "type": "service", "depends_on": []},
+            {"name": "web", "path": "web", "type": "service",
+             "git_root": "root", "depends_on": []},
+        ],
+        env_runner=None,
+    )
+    out = tmp_path / "mothership.yaml"
+    init.write_config(out, config)
+    data = yaml.safe_load(out.read_text())
+    assert data["repos"]["web"]["git_root"] == "root"
+    assert data["repos"]["web"]["path"] == "web"
+    assert data["repos"]["root"]["path"] == "."
+    assert "git_root" not in data["repos"]["root"]

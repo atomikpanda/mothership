@@ -163,6 +163,8 @@ tasks:
                 "path": str(repo.path),
                 "type": repo.type,
             }
+            if repo.git_root is not None:
+                repo_data["git_root"] = repo.git_root
             if repo.depends_on:
                 serialized_deps = []
                 for dep in repo.depends_on:
