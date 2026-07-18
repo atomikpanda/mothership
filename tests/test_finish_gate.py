@@ -388,3 +388,52 @@ def test_finish_appends_acceptance_block_to_pr_body(finish_gate_workspace):
     assert "Acceptance criteria" in create_cmds[0]      # block injected into the PR body
     assert "test:test-runs/1" in create_cmds[0]         # the evidence ref renders end-to-end
     assert "ac1" in create_cmds[0]                        # the criterion id is listed
+
+
+def test_finish_autolinks_testrun_and_commit_evidence(finish_gate_workspace):
+    """Spec 377 ac1/ac2/ac10: a spec-bound finish attaches the passing test-run to
+    every AC and each implementing commit to the AC(s) it names -- persisted."""
+    from mship.core.state import TestResult
+
+    workspace, mock_shell = finish_gate_workspace
+    wi = _seed_feature_with_ac(workspace)  # ev-spec, ac1, no evidence
+    runner.invoke(app, ["spawn", "--work-item", wi.id, "auto link", "--repos", "shared"])
+    _write_plan(workspace, "auto-link")
+
+    now = datetime.now(timezone.utc)
+
+    def _seed_tests(s):
+        t = s.tasks["auto-link"]
+        t.test_iteration = 1
+        t.test_results = {"shared": TestResult(status="pass", at=now)}
+
+    StateManager(workspace / ".mothership").mutate(_seed_tests)
+
+    sha = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+
+    def _run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc\trefs/heads/main\n", stderr="")
+        if "git log --format=%H" in cmd:
+            return ShellResult(returncode=0, stdout=f"{sha}\x1fimplement ac1 handling\x1e\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://github.com/org/shared/pull/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = _run
+
+    result = runner.invoke(app, ["finish", "--task", "auto-link"])
+    assert result.exit_code == 0, result.output
+
+    spec = SpecStore(workspace / "specs").find_by_id("ev-spec")
+    refs = {(e.kind, e.ref) for e in spec.acceptance_criteria[0].evidence}
+    assert ("test", "test-runs/1.shared") in refs  # ac1 + ac10
+    assert ("commit", sha) in refs                  # ac2
