@@ -47,16 +47,23 @@ repos:
     path: .
     type: service
   web:
-    path: web              # relative — interpreted against backend's worktree
+    path: web              # relative — required; interpreted against backend's worktree
     type: service
-    git_root: backend
-    depends_on: [backend]
+    git_root: backend      # backend is auto-ordered before web (no depends_on needed)
 ```
 
 Rules:
 - `git_root` must reference another repo in the workspace.
 - The referenced repo cannot itself have `git_root` set (no chaining).
-- The subdirectory must exist and contain a `Taskfile.yml`.
+- A `git_root` child's `path` **must be relative** and must not contain `..`; an
+  absolute path would resolve to the source checkout instead of the task worktree
+  and is rejected at config load.
+- A `git_root` parent is **auto-ordered before its children** — it is materialized
+  first automatically, so you do NOT need to hand-add `depends_on: [parent]`.
+  (Declaring `parent depends_on child` is the opposite order and is rejected as a
+  dependency cycle.)
+- The subdirectory must exist and contain a go-task file (`Taskfile.yml`,
+  `Taskfile.yaml`, or another resolution-set spelling).
 - Subdirectory services still have their own `depends_on`, `tags`, `tasks`, and `start_mode`.
 
 ## Service start modes (`start_mode`)
