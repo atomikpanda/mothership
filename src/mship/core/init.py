@@ -80,13 +80,29 @@ class WorkspaceInitializer:
     def plan_detected_repos(
         self, workspace_path: Path, detected: list[DetectedRepo]
     ) -> list[dict]:
-        """Turn detected repos into config-entry dicts with RELATIVE paths.
+        """Classify detected repos into config-entry dicts with RELATIVE paths
+        and, for non-git subdirs of a git-owning root, a `git_root` back-ref.
 
-        The workspace root (path == workspace_path) is emitted standalone with
-        `path: '.'`; every detected subdir becomes a git_root child of the root
-        with a path relative to the root. (Refined for ac3/ac8 in later tasks.)
+        Rules (spec mship-init-detect-monorepo / issue #366 finding #4):
+        - The workspace root (path == workspace_path), if detected, is emitted
+          standalone with `path: '.'` and no git_root.
+        - A subdir owning its own `.git` (a `.git` dir OR a submodule gitlink
+          `.git` file — both make `_find_markers` record ".git") stays standalone
+          with a path relative to the root and no git_root (ac3).
+        - A subdir with NO `.git`, when the root IS a git owner, becomes a
+          `git_root: <root-name>` child with a path relative to the root (ac1).
+          Single-level detection: the parent IS the root, so relative-to-root
+          equals the `(parent.path / child.path)` resolution contract.
+        - If the root is not a git owner, non-git subdirs fall back to standalone
+          emission — never point git_root at a non-git root (ac8).
+        All emitted paths are relative for portability (ac2).
         """
+        root_repo = next(
+            (d for d in detected if d.path == workspace_path), None
+        )
+        root_is_git_owner = root_repo is not None and ".git" in root_repo.markers
         root_name = workspace_path.name
+
         entries: list[dict] = []
         for d in detected:
             if d.path == workspace_path:
@@ -99,7 +115,8 @@ class WorkspaceInitializer:
                 })
                 continue
             rel = d.path.relative_to(workspace_path)
-            git_root = None if ".git" in d.markers else root_name
+            has_own_git = ".git" in d.markers
+            git_root = None if (has_own_git or not root_is_git_owner) else root_name
             entries.append({
                 "name": d.path.name,
                 "path": str(rel),

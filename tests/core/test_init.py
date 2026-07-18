@@ -377,3 +377,24 @@ def test_plan_detected_repos_subdir_with_own_git_is_standalone(tmp_path: Path):
     assert by_name["submodule"]["git_root"] is None
     assert by_name["submodule"]["path"] == "submodule"
     assert by_name["infra"]["git_root"] == tmp_path.name
+
+
+def test_plan_detected_repos_root_not_git_falls_back_to_standalone(tmp_path: Path):
+    """ac8: when the workspace root has no .git, a markerless subdir does NOT get
+    a git_root pointing at the non-git root — it falls back to standalone."""
+    # No .git at root; give it a non-git marker so it is still detected.
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='root'\n")
+    for sub in ("web", "infra"):
+        d = tmp_path / sub
+        d.mkdir()
+        (d / "package.json").write_text("{}")
+
+    init = WorkspaceInitializer()
+    detected = init.detect_repos(tmp_path)
+    by_name = {e["name"]: e for e in init.plan_detected_repos(tmp_path, detected)}
+
+    for sub in ("web", "infra"):
+        assert by_name[sub]["git_root"] is None
+        assert by_name[sub]["path"] == sub
+    assert by_name[tmp_path.name]["path"] == "."
+    assert by_name[tmp_path.name]["git_root"] is None
