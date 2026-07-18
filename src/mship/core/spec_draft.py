@@ -185,3 +185,18 @@ def apply_draft(spec: Spec, draft: SpecDraft) -> Spec:
         for i, t in enumerate(draft.open_questions)
     ]
     return spec
+
+
+def parse_spec_markdown(text: str) -> SpecDraft:
+    """Parse a rendered spec markdown document back into a SpecDraft.
+
+    Inverse of the `## Problem` / `## User story` / `## Approach` body rendering
+    (see `render_body`). Reuses `parse_body_sections` to split by `## ` headings.
+    """
+    sections = parse_body_sections(text)
+    by_key = {heading.strip().lower(): body.strip() for heading, body in sections.items()}
+    return SpecDraft(
+        problem=by_key.get("problem", ""),
+        user_story=by_key.get("user story", ""),
+        approach=by_key.get("approach", ""),
+    )
