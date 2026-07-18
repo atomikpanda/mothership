@@ -107,16 +107,12 @@ def register(app: typer.Typer, get_container):
         # Auto-detect
         if detect:
             detected = initializer.detect_repos(cwd)
+            planned = initializer.plan_detected_repos(cwd, detected)
             existing_paths = {Path(rd["path"]).resolve() for rd in repos_data}
-            for d in detected:
-                if d.path.resolve() not in existing_paths:
-                    repo_name = d.path.name if d.path != cwd else cwd.name
-                    repos_data.append({
-                        "name": repo_name,
-                        "path": d.path,
-                        "type": "service",
-                        "depends_on": [],
-                    })
+            for entry in planned:
+                abspath = (cwd / entry["path"]).resolve()
+                if abspath not in existing_paths:
+                    repos_data.append(entry)
 
         try:
             config = initializer.generate_config(name, repos_data, env_runner)
@@ -131,7 +127,7 @@ def register(app: typer.Typer, get_container):
         rename_notes: list[tuple[str, Path]] = []
         if scaffold_taskfiles:
             for rd in repos_data:
-                repo_path = Path(rd["path"])
+                repo_path = (cwd / rd["path"]).resolve()
                 result = initializer.write_taskfile(repo_path)
                 if result.wrote:
                     created_taskfiles.append(str(repo_path))

@@ -55,6 +55,33 @@ def test_init_detect(init_workspace: Path, monkeypatch):
     assert "auth-service" in data["repos"]
 
 
+def test_init_detect_emits_git_root_for_single_git_monorepo(tmp_path: Path, monkeypatch):
+    """ac1/ac2: `init --detect` on a single-git monorepo emits the root as
+    `path: .` (no git_root) and each markerless subdir as a git_root child with
+    a relative path."""
+    import subprocess
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='root'\n")
+    for sub in ("web", "infra"):
+        d = tmp_path / sub
+        d.mkdir()
+        (d / "package.json").write_text("{}")
+
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["init", "--name", "mono", "--detect"])
+    assert result.exit_code == 0, result.output
+
+    data = yaml.safe_load((tmp_path / "mothership.yaml").read_text())
+    root_name = tmp_path.name
+    assert data["repos"][root_name]["path"] == "."
+    assert "git_root" not in data["repos"][root_name]
+    for sub in ("web", "infra"):
+        assert data["repos"][sub]["path"] == sub
+        assert data["repos"][sub]["git_root"] == root_name
+    for repo in data["repos"].values():          # ac2
+        assert not str(repo["path"]).startswith("/")
+
+
 def test_init_already_exists(init_workspace: Path, monkeypatch):
     monkeypatch.chdir(init_workspace)
     (init_workspace / "mothership.yaml").write_text("workspace: existing")
