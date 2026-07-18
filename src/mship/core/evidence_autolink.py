@@ -15,12 +15,19 @@ persists with `SpecStore`.
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass
 
 # `\b` word boundaries make `ac7` match the standalone token `ac7` but never the
 # longer id `ac70` (`\d+` is greedy up to a boundary) nor an `ac7` buried inside
 # another word (e.g. `mac7book`). Case-insensitive so `AC7` in a subject matches.
 _AC_TOKEN_RE = re.compile(r"\bac\d+\b", re.IGNORECASE)
+
+# Record/field separators for the `git log` format below. These control chars
+# never appear in shas or human commit prose, so they delimit multi-line commit
+# bodies unambiguously.
+_FIELD_SEP = "\x1f"   # US -- between sha and message within one commit record
+_COMMIT_SEP = "\x1e"  # RS -- between commit records
 
 
 @dataclass(frozen=True)
@@ -91,3 +98,28 @@ def test_run_refs_for_task(task) -> list[str]:
         if getattr(result, "status", None) == "pass":
             refs.append(f"test-runs/{iteration}.{repo}")
     return refs
+
+
+def commits_since_base(shell, repo_path, base, branch) -> list[tuple[str, str]]:
+    """Return `(sha, message)` for each commit on `branch` since `origin/<base>`
+    (git log default order). Mirrors the `origin/<base>..<branch>` range that
+    `mship finish` already uses for its subject scan. Returns `[]` on any git
+    failure (fail-open: a missing branch simply yields no commit evidence)."""
+    eff_base = base or "HEAD"
+    rng = f"origin/{eff_base}..{branch}"
+    result = shell.run(
+        f"git log --format=%H{_FIELD_SEP}%B{_COMMIT_SEP} {shlex.quote(rng)}",
+        cwd=repo_path,
+    )
+    if result.returncode != 0:
+        return []
+    commits: list[tuple[str, str]] = []
+    for record in result.stdout.split(_COMMIT_SEP):
+        record = record.strip()
+        if not record:
+            continue
+        sha, _, message = record.partition(_FIELD_SEP)
+        sha = sha.strip()
+        if sha:
+            commits.append((sha, message.strip()))
+    return commits

@@ -149,3 +149,34 @@ def test_test_run_refs_only_for_passing_repos():  # ac10
 def test_test_run_refs_empty_without_iteration():
     task = _task(test_iteration=0, test_results={})
     assert test_run_refs_for_task(task) == []
+
+
+from pathlib import Path
+
+from mship.core.evidence_autolink import commits_since_base
+from mship.util.shell import ShellResult
+
+
+class _FakeShell:
+    def __init__(self, result):
+        self._result = result
+        self.calls = []
+
+    def run(self, cmd, cwd=None, env=None):
+        self.calls.append((cmd, cwd))
+        return self._result
+
+
+def test_commits_since_base_parses_nul_separated_records():
+    # git separates records with \x1e and the sha from the (possibly multi-line)
+    # body with \x1f; a trailing newline per record is tolerated.
+    stdout = "sha1\x1fimplement ac1\nmore body\x1e\nsha2\x1ffix ac2\x1e\n"
+    shell = _FakeShell(ShellResult(returncode=0, stdout=stdout, stderr=""))
+    commits = commits_since_base(shell, Path("/repo"), "main", "feat")
+    assert commits == [("sha1", "implement ac1\nmore body"), ("sha2", "fix ac2")]
+    assert "origin/main..feat" in shell.calls[0][0]
+
+
+def test_commits_since_base_empty_on_git_failure():
+    shell = _FakeShell(ShellResult(returncode=128, stdout="", stderr="fatal"))
+    assert commits_since_base(shell, Path("/repo"), "main", "feat") == []
