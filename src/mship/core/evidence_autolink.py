@@ -38,3 +38,15 @@ def extract_ac_ids(message: str) -> set[str]:
     inside a larger word (`mac7book`) and the longer id `ac70` when only `ac7`
     is written are excluded by the word-boundary anchors."""
     return {m.group(0).lower() for m in _AC_TOKEN_RE.finditer(message or "")}
+
+
+def compute_evidence_links(spec, commits, test_run_refs) -> list[EvidenceLink]:
+    """Plan the evidence links to add for `spec` (pure -- no mutation).
+
+    Every ref in `test_run_refs` becomes a `test` link on EVERY acceptance
+    criterion. (Commit handling and de-duplication are added in later tasks.)"""
+    links: list[EvidenceLink] = []
+    for ref in test_run_refs:
+        for c in spec.acceptance_criteria:
+            links.append(EvidenceLink(criterion_id=c.id, kind="test", ref=ref))
+    return links

@@ -24,3 +24,17 @@ def test_extract_ac_ids_word_boundary_excludes_longer_id_and_substrings():
 
 def test_extract_ac_ids_empty_message():
     assert extract_ac_ids("") == set()
+
+
+from mship.core.evidence_autolink import EvidenceLink, compute_evidence_links
+
+
+def test_testrun_refs_attach_to_every_criterion():
+    spec = _spec([AcceptanceCriterion(id="ac1", text="x"),
+                  AcceptanceCriterion(id="ac2", text="y")])
+    links = compute_evidence_links(spec, commits=[],
+                                   test_run_refs=["test-runs/1.mothership"])
+    assert set(links) == {
+        EvidenceLink("ac1", "test", "test-runs/1.mothership"),
+        EvidenceLink("ac2", "test", "test-runs/1.mothership"),
+    }
