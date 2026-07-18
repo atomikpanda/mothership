@@ -15,6 +15,21 @@ class DependencyGraph:
                 self._forward[dep_name].append(name)
                 self._reverse[name].append(dep_name)
 
+        # git_root implies an ordering edge: a subdirectory child nests inside its
+        # parent's worktree, so the parent must be materialized first. Add a
+        # parent->child edge (deduped against an explicit depends_on) so topo_sort
+        # emits the parent first and direct_deps(child) includes it — this is what
+        # pulls a git_root parent into passive worktree expansion even when the
+        # child never declared depends_on. See issue #366 finding #3.
+        for name, repo in config.repos.items():
+            parent = repo.git_root
+            if parent is None or parent not in self._forward:
+                continue
+            if name not in self._forward[parent]:
+                self._forward[parent].append(name)
+            if parent not in self._reverse[name]:
+                self._reverse[name].append(parent)
+
     def topo_sort(self, repos: list[str] | None = None) -> list[str]:
         """Return repos in dependency order (dependencies first)."""
         target_set = set(repos) if repos else set(self._config.repos.keys())

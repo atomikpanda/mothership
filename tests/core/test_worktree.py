@@ -1846,3 +1846,43 @@ def test_spawn_git_root_parent_unmaterialized_raises(tmp_path: Path, monkeypatch
     msg = str(exc.value)
     assert "web" in msg and "root" in msg
     assert "checkout" in msg.lower()
+
+
+def test_spawn_only_git_root_child_materializes_parent(tmp_path: Path):
+    """ac11/ac14: spawning ONLY a git_root child (no depends_on to its parent)
+    materializes the parent so the child nests under .worktrees/<slug>/<parent>/,
+    NEVER the source checkout."""
+    root = tmp_path / "monorepo"; root.mkdir()
+    (root / "Taskfile.yml").write_text("version: '3'")
+    web = root / "web"; web.mkdir()
+    (web / "Taskfile.yml").write_text("version: '3'")
+    git_env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t.com",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t.com"}
+    subprocess.run(["git", "init", "-b", "main", str(root)], check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True, capture_output=True, env=git_env)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=root, check=True, capture_output=True, env=git_env)
+
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: mono\nrepos:\n"
+        "  root:\n    path: ./monorepo\n    type: service\n    base_branch: main\n"
+        "  web:\n    path: web\n    type: service\n    git_root: root\n    base_branch: main\n"
+    )
+    config = ConfigLoader.load(cfg)
+    graph = DependencyGraph(config)
+    state_dir = tmp_path / ".mothership"; state_dir.mkdir()
+    state_mgr = StateManager(state_dir)
+    shell = MagicMock(spec=ShellRunner)
+    shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    mgr = WorktreeManager(config, graph, state_mgr, GitRunner(), shell, MagicMock(spec=LogManager))
+
+    mgr.spawn("child only", repos=["web"], workspace_root=tmp_path, offline=True)
+
+    task = state_mgr.load().tasks["child-only"]
+    assert "root" in task.worktrees            # parent pulled in via implicit edge
+    root_wt = Path(task.worktrees["root"])
+    assert root_wt == tmp_path / ".worktrees" / "child-only" / "root"
+    web_wt = Path(task.worktrees["web"])
+    assert web_wt == root_wt / "web"
+    assert (tmp_path / ".worktrees" / "child-only") in web_wt.parents
+    assert not str(web_wt).startswith(str(root.resolve()))   # NOT the source checkout

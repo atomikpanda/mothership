@@ -120,3 +120,36 @@ repos:
     tiers = graph.topo_tiers()
     assert len(tiers) == 1
     assert set(tiers[0]) == {"shared", "auth-service", "api-gateway"}
+
+
+def _write_monorepo_cfg(tmp_path: Path, child_extra: str = "") -> Path:
+    root = tmp_path / "mono"; root.mkdir()
+    (root / "Taskfile.yml").write_text("version: '3'")
+    web = root / "web"; web.mkdir()
+    (web / "Taskfile.yml").write_text("version: '3'")
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: mono\nrepos:\n"
+        "  mono:\n    path: ./mono\n    type: service\n"
+        f"  web:\n    path: web\n    type: service\n    git_root: mono\n{child_extra}"
+    )
+    return cfg
+
+
+def test_git_root_adds_implicit_ordering_edge(tmp_path: Path):
+    """ac10: a git_root child with NO explicit depends_on still gets an implicit
+    parent->child edge: topo_sort emits parent first; direct_deps includes it."""
+    config = ConfigLoader.load(_write_monorepo_cfg(tmp_path))
+    graph = DependencyGraph(config)
+    order = graph.topo_sort()
+    assert order.index("mono") < order.index("web")
+    assert "mono" in graph.direct_deps("web")
+
+
+def test_git_root_edge_deduped_when_also_depends_on(tmp_path: Path):
+    """ac10: when the parent is ALSO an explicit depends_on target, the edge is
+    not duplicated."""
+    config = ConfigLoader.load(_write_monorepo_cfg(tmp_path, "    depends_on: [mono]\n"))
+    graph = DependencyGraph(config)
+    assert graph.direct_deps("web").count("mono") == 1
+    assert graph.topo_sort().index("mono") < graph.topo_sort().index("web")
