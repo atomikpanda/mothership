@@ -248,3 +248,91 @@ def test_serve_refuses_when_gh_app_key_unreadable(_configured, monkeypatch, tmp_
     assert "not a readable file" in result.output or "Refusing to start" in result.output
     # Serve never started — no silent identity downgrade.
     assert called["create_app"] is False
+
+
+def test_serve_relay_writes_and_clears_runtime_record(tmp_path, monkeypatch):
+    """ac2 producer / ac7 clean-shutdown: `_serve_with_relay` writes
+    .mothership/relay-runtime.json (host + own pid) before serving and unlinks it
+    in the finally teardown."""
+    import os
+
+    from mship.cli.output import Output
+    from mship.cli.serve import _serve_with_relay
+    from mship.core.config import RepoConfig, WorkspaceConfig
+    from mship.core.relay.runtime import read_runtime_record
+    from mship.core.state import StateManager
+
+    monkeypatch.setenv("MSHIP_PR_WATCH_INTERVAL", "0")
+
+    repo_dir = tmp_path / "api"
+    repo_dir.mkdir()
+    (tmp_path / ".mothership").mkdir()
+    config = WorkspaceConfig(
+        workspace="t",
+        repos={"api": RepoConfig(path=repo_dir, type="service", tasks={"run": "start"})},
+    )
+
+    class _FakeContainer:
+        def __init__(self, state_dir):
+            self._sm = StateManager(state_dir)
+
+        def state_manager(self):
+            return self._sm
+
+        def log_manager(self):
+            return None
+
+        def worktree_manager(self):
+            return None
+
+    class _FakeSup:
+        restart_count = 0
+
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def tick(self):
+            pass
+
+        def recent_output(self):
+            return ""
+
+    monkeypatch.setattr("mship.core.relay.token.ensure_serve_token", lambda root: "tok")
+    monkeypatch.setattr("mship.core.relay.keys.ensure_relay_key", lambda home=None: tmp_path / "key")
+    monkeypatch.setattr("mship.core.relay.keys.ensure_subdomain_secret", lambda home=None: b"\x00" * 32)
+    monkeypatch.setattr("mship.core.relay.keys.relay_public_key", lambda key_path: "ssh-ed25519 AAAAfake")
+    monkeypatch.setattr("mship.core.relay.tunnel.device_id", lambda pub: "dev")
+    monkeypatch.setattr("mship.core.relay.tunnel.device_subdomain", lambda ws, dev, secret: "sub")
+    monkeypatch.setattr("mship.core.relay.tunnel.build_tunnel_argv", lambda *a, **k: ["true"])
+    monkeypatch.setattr("mship.core.relay.tunnel.TunnelSupervisor", _FakeSup)
+    monkeypatch.setattr("mship.core.relay.health.wait_until_reachable", lambda *a, **k: (True, ""))
+
+    seen: dict = {}
+
+    def _capture_run(api, **kw):
+        seen["during"] = read_runtime_record(tmp_path)  # record must exist WHILE serving
+
+    monkeypatch.setattr("uvicorn.run", _capture_run)
+
+    _serve_with_relay(
+        container=_FakeContainer(tmp_path / ".mothership"),
+        config=config,
+        workspace_root=tmp_path,
+        output=Output(),
+        relay_host_override="relay.example.test",
+        port=47199,
+        relay_tick=0.01,
+    )
+
+    during = seen["during"]
+    assert during is not None
+    assert during.host == "relay.example.test"
+    assert during.pid == os.getpid()
+    # ac7 clean-shutdown side: record unlinked in the finally teardown.
+    assert read_runtime_record(tmp_path) is None

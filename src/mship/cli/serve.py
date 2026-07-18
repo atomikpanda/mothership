@@ -168,6 +168,7 @@ def _serve_with_relay(
     uvicorn blocks in the main thread; the tunnel supervisor is ticked from a
     background daemon thread on an interval and torn down on shutdown.
     """
+    import os
     import threading
 
     import segno
@@ -177,6 +178,11 @@ def _serve_with_relay(
     from mship.core.relay.health import wait_until_reachable
     from mship.core.relay.keys import ensure_relay_key
     from mship.core.relay.link import build_relay_pair_link
+    from mship.core.relay.runtime import (
+        RelayRuntimeRecord,
+        clear_runtime_record,
+        write_runtime_record,
+    )
     from mship.core.relay.token import ensure_serve_token
     from mship.core.relay.tunnel import TunnelSupervisor, build_tunnel_argv
     from mship.core.serve import create_app
@@ -237,6 +243,21 @@ def _serve_with_relay(
 
     log_path = workspace_root / ".mothership" / "relay-tunnel.log"
     log_path.unlink(missing_ok=True)                      # fresh per run
+    # Persist the effective relay host so `mship pair` in this workspace can
+    # auto-discover it (spec mship-pair-relay-host). Gitignored, mode 0600, no
+    # secret (the token stays in serve-token). Unlinked in the finally teardown.
+    write_runtime_record(
+        workspace_root,
+        RelayRuntimeRecord(
+            host=rc.host,
+            pid=os.getpid(),
+            subdomain=subdomain,
+            url=public_url,
+            workspace=workspace,
+            ssh_port=rc.ssh_port,
+            user=rc.user,
+        ),
+    )
     sup = TunnelSupervisor(argv=argv, log_path=log_path)
     sup.start()
 
@@ -311,3 +332,4 @@ def _serve_with_relay(
     finally:
         stop_event.set()
         sup.stop()
+        clear_runtime_record(workspace_root)
