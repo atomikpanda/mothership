@@ -69,3 +69,26 @@ def test_detected_monorepo_config_loads_with_require_paths(tmp_path: Path, monke
     monkeypatch.chdir(tmp_path)
     reloaded = ConfigLoader.load(cfg_path, require_paths=True)
     assert set(reloaded.repos) == set(config.repos)
+
+
+def test_detected_monorepo_doctor_no_not_a_git_repository(tmp_path: Path, monkeypatch):
+    """ac4: doctor on a freshly detected single-git monorepo reports NO
+    'not a git repository' for the subdir repos — the git check resolves through
+    git_root to the root (doctor.py:186-191)."""
+    from mship.core.doctor import DoctorChecker
+    from mship.util.shell import ShellRunner, ShellResult
+
+    root = _build_single_git_monorepo(tmp_path)
+    cfg_path = _init_detect(root, monkeypatch)
+    config = ConfigLoader.load(cfg_path, require_paths=True)
+
+    shell = MagicMock(spec=ShellRunner)
+    shell.run.return_value = ShellResult(
+        returncode=0, stdout="test\nrun\nlint\nsetup\n", stderr=""
+    )
+    report = DoctorChecker(config, shell).run()
+
+    for name in (root.name, "web", "infra"):
+        git_check = next(c for c in report.checks if c.name == f"{name}/git")
+        assert git_check.status == "pass", git_check.message
+        assert "not a git repository" not in git_check.message
