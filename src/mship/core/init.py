@@ -80,9 +80,23 @@ class WorkspaceInitializer:
     def _find_markers(self, path: Path) -> list[str]:
         markers: list[str] = []
         for marker in REPO_MARKERS:
-            if (path / marker).exists():
-                markers.append(marker)
+            target = path / marker
+            if not target.exists():
+                continue
+            if marker == "Taskfile.yml" and self._is_generated_stub(target):
+                # A dir whose only marker is mship's OWN generated stub Taskfile
+                # must not be re-promoted to a repo on a later `init --detect`.
+                # Match by content (not filename) so a hand-written Taskfile.yml
+                # still counts. See issue #366 finding #1.
+                continue
+            markers.append(marker)
         return markers
+
+    def _is_generated_stub(self, taskfile: Path) -> bool:
+        try:
+            return taskfile.read_text() == self.TASKFILE_TEMPLATE
+        except OSError:
+            return False
 
     TASKFILE_TEMPLATE = """\
 version: '3'

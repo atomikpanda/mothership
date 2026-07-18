@@ -235,3 +235,35 @@ def test_write_taskfile_writes_when_absent(tmp_path: Path):
     assert result.wrote is True
     assert (repo / "Taskfile.yml").exists()
     assert result.needs_rename is False
+
+
+def test_detect_ignores_lone_generated_stub_taskfile(tmp_path: Path):
+    """ac6: a dir whose ONLY marker is a mship-generated stub Taskfile is NOT
+    promoted (so re-running `init --detect` ignores mship's own stubs)."""
+    init = WorkspaceInitializer()
+    stub_dir = tmp_path / "stubonly"; stub_dir.mkdir()
+    (stub_dir / "Taskfile.yml").write_text(init.TASKFILE_TEMPLATE)
+    assert "stubonly" not in [r.path.name for r in init.detect_repos(tmp_path)]
+
+
+def test_detect_keeps_handwritten_taskfile(tmp_path: Path):
+    init = WorkspaceInitializer()
+    real = tmp_path / "realsvc"; real.mkdir()
+    (real / "Taskfile.yml").write_text(
+        "version: '3'\ntasks:\n  test:\n    cmds:\n      - pytest\n"
+    )
+    repos = init.detect_repos(tmp_path)
+    svc = next(r for r in repos if r.path.name == "realsvc")
+    assert "Taskfile.yml" in svc.markers
+
+
+def test_detect_stub_dir_with_other_marker_still_promoted(tmp_path: Path):
+    """A stub Taskfile PLUS a real marker (.git) is still a repo — only a LONE
+    stub is ignored, and the stub itself is not counted among the markers."""
+    init = WorkspaceInitializer()
+    d = tmp_path / "svc"; d.mkdir()
+    (d / ".git").mkdir()
+    (d / "Taskfile.yml").write_text(init.TASKFILE_TEMPLATE)
+    svc = next(r for r in init.detect_repos(tmp_path) if r.path.name == "svc")
+    assert ".git" in svc.markers
+    assert "Taskfile.yml" not in svc.markers
