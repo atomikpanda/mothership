@@ -230,6 +230,32 @@ class RepoConfig(BaseModel):
                 )
         return self
 
+    @model_validator(mode="after")
+    def validate_git_root_child_path(self) -> "RepoConfig":
+        """A git_root child's `path` is joined onto its parent's worktree
+        (`parent.path / child.path`, config.py + worktree.py + doctor.py).
+        pathlib DISCARDS the left operand when the right side is absolute, so an
+        ABSOLUTE child path silently resolves to the source checkout instead of
+        the task worktree; a `..` escapes the parent. Reject both at model
+        construction — mirroring validate_bind_files — so it fires independent of
+        ConfigLoader.load's `require_paths` flag. See issue #366 finding #2."""
+        if self.git_root is None:
+            return self
+        if self.path.is_absolute():
+            raise ValueError(
+                f"repo path {str(self.path)!r} is absolute but git_root="
+                f"{self.git_root!r} is set; git_root child paths must be relative "
+                f"to the parent worktree (an absolute path resolves to the source "
+                f"checkout, not the task worktree)"
+            )
+        if ".." in self.path.parts:
+            raise ValueError(
+                f"repo path {str(self.path)!r} contains '..' but git_root="
+                f"{self.git_root!r} is set; git_root child paths must stay inside "
+                f"the parent worktree"
+            )
+        return self
+
 
 class AuditPolicy(BaseModel):
     block_spawn: bool = True

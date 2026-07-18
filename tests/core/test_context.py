@@ -432,7 +432,7 @@ def test_main_checkout_clean_skips_git_root_children(tmp_path: Path):
         workspace="t",
         repos={
             "mono": RepoConfig(path=parent_dir, type="service"),
-            "pkg": RepoConfig(path=child_dir, type="library", git_root="mono"),
+            "pkg": RepoConfig(path=Path("pkg"), type="library", git_root="mono"),
         },
     )
 

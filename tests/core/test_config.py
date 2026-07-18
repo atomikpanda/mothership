@@ -1149,3 +1149,44 @@ def test_discover_with_source_hub_worktree_prefers_marker_over_own_yaml(tmp_path
     assert res.path == root / "mothership.yaml"     # NOT the worktree's own copy
     assert res.source == "marker"
 
+
+def test_git_root_child_absolute_path_rejected():
+    """#366 #2: an absolute git_root child path silently resolves to the SOURCE
+    checkout (pathlib drops the left operand on `/`); reject at construction."""
+    from mship.core.config import RepoConfig
+    with pytest.raises(ValueError) as exc:
+        RepoConfig(path=Path("/abs/child"), type="library", git_root="mono")
+    msg = str(exc.value)
+    assert "/abs/child" in msg
+    assert "absolute" in msg.lower()
+    assert "git_root" in msg
+
+
+def test_git_root_child_parent_escape_rejected():
+    """ac8: a `..`-bearing git_root child path escapes the parent worktree."""
+    from mship.core.config import RepoConfig
+    with pytest.raises(ValueError) as exc:
+        RepoConfig(path=Path("../sibling"), type="library", git_root="mono")
+    assert ".." in str(exc.value)
+    assert "git_root" in str(exc.value)
+
+
+def test_git_root_child_relative_path_ok_and_nests(tmp_path: Path):
+    """ac9: a relative git_root child still constructs and resolves nested under
+    the parent worktree — no regression for valid monorepo configs."""
+    from mship.core.config import RepoConfig
+    child = RepoConfig(path=Path("web"), type="service", git_root="root")
+    assert str(child.path) == "web"
+    parent_path = tmp_path / "monorepo"
+    effective = (parent_path / child.path).resolve()
+    assert effective == (parent_path / "web").resolve()
+    assert str(effective).startswith(str(parent_path.resolve()))
+
+
+def test_top_level_absolute_path_still_allowed(tmp_path: Path):
+    """Non-goal guard: TOP-LEVEL (no git_root) repos may still use absolute paths
+    (what `init --detect` emits). The validator must only constrain git_root children."""
+    from mship.core.config import RepoConfig
+    r = RepoConfig(path=(tmp_path / "svc"), type="service")
+    assert r.path.is_absolute()
+
