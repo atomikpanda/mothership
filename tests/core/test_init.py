@@ -199,3 +199,39 @@ def test_write_taskfile_does_not_overwrite(tmp_path: Path):
     init = WorkspaceInitializer()
     init.write_taskfile(repo)
     assert existing.read_text() == "original content"
+
+
+def test_taskfile_template_commands_all_exit_nonzero():
+    """ac3: every generated task fails (exit 1) — an unedited stub can NEVER
+    fabricate a passing `mship test`; no exit-0 `echo` no-ops remain."""
+    tmpl = WorkspaceInitializer.TASKFILE_TEMPLATE
+    assert "exit 1" in tmpl
+    assert "echo" not in tmpl
+    parsed = yaml.safe_load(tmpl)
+    for task_name in ("test", "run", "lint", "setup"):
+        assert parsed["tasks"][task_name]["cmds"] == ["exit 1"], task_name
+
+
+@pytest.mark.parametrize("fname", [
+    "Taskfile.yml", "Taskfile.yaml", "taskfile.yml", "taskfile.yaml",
+    "Taskfile.dist.yml", "Taskfile.dist.yaml", "taskfile.dist.yml", "taskfile.dist.yaml",
+])
+def test_write_taskfile_suppressed_by_existing_go_task_file(tmp_path: Path, fname: str):
+    """ac1/ac2: an existing go-task file (any resolution-set spelling) suppresses
+    the stub; NO shadowing Taskfile.yml is written; result reports the existing file."""
+    repo = tmp_path / "svc"; repo.mkdir()
+    (repo / fname).write_text("version: '3'\ntasks: {}\n")
+    result = WorkspaceInitializer().write_taskfile(repo)
+    assert result.wrote is False
+    assert result.existing is not None and result.existing.name == fname
+    if fname != "Taskfile.yml":
+        assert not (repo / "Taskfile.yml").exists()   # no shadow stub written
+        assert result.needs_rename is True
+
+
+def test_write_taskfile_writes_when_absent(tmp_path: Path):
+    repo = tmp_path / "svc"; repo.mkdir()
+    result = WorkspaceInitializer().write_taskfile(repo)
+    assert result.wrote is True
+    assert (repo / "Taskfile.yml").exists()
+    assert result.needs_rename is False
