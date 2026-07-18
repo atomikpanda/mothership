@@ -100,3 +100,28 @@ def test_tolerates_reorder_alt_markers_and_empty_optional_sections():
     assert draft.acceptance_criteria == ["first", "second", "third"]
     assert draft.non_goals == ["out of scope"]
     assert draft.risks == []  # empty optional section → empty list, no error
+
+
+import pytest
+
+
+def test_missing_required_section_raises_naming_it():
+    text = "## Problem\n\nP\n\n## User story\n\nU\n"  # no Approach
+    with pytest.raises(ValueError) as exc:
+        parse_spec_markdown(text)
+    assert "Approach" in str(exc.value)
+
+
+def test_non_markdown_junk_raises():
+    with pytest.raises(ValueError):
+        parse_spec_markdown("this is not a spec at all")
+
+
+def test_malformed_list_section_raises_naming_section():
+    text = (
+        "## Problem\n\nP\n\n## User story\n\nU\n\n## Approach\n\nA\n\n"
+        "## Acceptance criteria\n\nnot a bullet line\n"
+    )
+    with pytest.raises(ValueError) as exc:
+        parse_spec_markdown(text)
+    assert "Acceptance criteria" in str(exc.value)

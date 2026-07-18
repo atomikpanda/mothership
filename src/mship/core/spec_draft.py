@@ -219,7 +219,10 @@ def _parse_list_items(heading: str, raw: str) -> list[str]:
             continue
         m = _BULLET_RE.match(line)
         if m is None:
-            continue  # tolerant here; Task 5 makes malformed lines loud
+            raise ValueError(
+                f"cannot parse spec markdown: '{heading}' section has a "
+                f"non-list line: {line.strip()!r}"
+            )
         text = m.group(1).strip()
         cb = _CHECKBOX_RE.match(text)
         if cb is not None:
@@ -242,6 +245,12 @@ def parse_spec_markdown(text: str) -> SpecDraft:
     how `render_body` appends extras after Approach).
     """
     sections = parse_body_sections(text)
+    present = {heading.strip().lower() for heading in sections}
+    missing = [name for name in ("Problem", "User story", "Approach") if name.lower() not in present]
+    if missing:
+        raise ValueError(
+            "cannot parse spec markdown: missing required section(s): " + ", ".join(missing)
+        )
     fields: dict[str, object] = {
         "problem": "", "user_story": "", "approach": "",
         "non_goals": [], "risks": [], "affected_repos": [],
