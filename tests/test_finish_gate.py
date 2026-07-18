@@ -437,3 +437,30 @@ def test_finish_autolinks_testrun_and_commit_evidence(finish_gate_workspace):
     refs = {(e.kind, e.ref) for e in spec.acceptance_criteria[0].evidence}
     assert ("test", "test-runs/1.shared") in refs  # ac1 + ac10
     assert ("commit", sha) in refs                  # ac2
+
+
+def test_finish_autolink_noop_without_bound_spec(finish_gate_workspace):
+    """Spec 377 ac8: a bug WI (no bound spec) finishes without any evidence work
+    and without error -- the `if bound_spec is not None` guard skips auto-link."""
+    from mship.core.state import TestResult
+
+    workspace, _ = finish_gate_workspace
+    items = WorkItemStore(workspace / ".mothership" / "workitems")
+    wi = items.create(title="fix it", kind="bug", workspace="ws",
+                      now=datetime.now(timezone.utc))
+    runner.invoke(app, ["spawn", "--work-item", wi.id, "auto noop", "--repos", "shared"])
+
+    now = datetime.now(timezone.utc)
+
+    def _seed_tests(s):
+        t = s.tasks["auto-noop"]
+        t.test_iteration = 1
+        t.test_results = {"shared": TestResult(status="pass", at=now)}
+
+    StateManager(workspace / ".mothership").mutate(_seed_tests)
+
+    result = runner.invoke(app, ["finish", "--task", "auto-noop"])
+    assert result.exit_code == 0, result.output
+    state = StateManager(workspace / ".mothership").load()
+    assert state.tasks["auto-noop"].pr_urls.get("shared") == "https://github.com/org/shared/pull/1"
+    assert SpecStore(workspace / "specs").list() == []  # no spec created or touched
