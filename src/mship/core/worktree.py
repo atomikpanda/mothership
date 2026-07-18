@@ -556,7 +556,15 @@ class WorktreeManager:
                 # Subdirectory child: nested inside parent's hub worktree.
                 parent_wt = worktrees.get(repo_config.git_root)
                 if parent_wt is None:
-                    parent_wt = self._config.repos[repo_config.git_root].path
+                    raise ValueError(
+                        f"git_root parent '{repo_config.git_root}' of repo "
+                        f"'{repo_name}' was not materialized in this spawn — "
+                        f"refusing to nest the child under the source checkout "
+                        f"({self._config.repos[repo_config.git_root].path}). "
+                        f"Include '{repo_config.git_root}' in the spawn scope, or "
+                        f"keep it reachable as a git_root/depends_on parent so it "
+                        f"is created first."
+                    )
                 effective = parent_wt / repo_config.path
                 worktrees[repo_name] = effective
 
