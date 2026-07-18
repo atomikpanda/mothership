@@ -77,6 +77,37 @@ class WorkspaceInitializer:
 
         return repos
 
+    def plan_detected_repos(
+        self, workspace_path: Path, detected: list[DetectedRepo]
+    ) -> list[dict]:
+        """Turn detected repos into config-entry dicts with RELATIVE paths.
+
+        The workspace root (path == workspace_path) is emitted standalone with
+        `path: '.'`; every detected subdir becomes a git_root child of the root
+        with a path relative to the root. (Refined for ac3/ac8 in later tasks.)
+        """
+        root_name = workspace_path.name
+        entries: list[dict] = []
+        for d in detected:
+            if d.path == workspace_path:
+                entries.append({
+                    "name": root_name,
+                    "path": ".",
+                    "type": "service",
+                    "git_root": None,
+                    "depends_on": [],
+                })
+                continue
+            rel = d.path.relative_to(workspace_path)
+            entries.append({
+                "name": d.path.name,
+                "path": str(rel),
+                "type": "service",
+                "git_root": root_name,
+                "depends_on": [],
+            })
+        return entries
+
     def _find_markers(self, path: Path) -> list[str]:
         markers: list[str] = []
         for marker in REPO_MARKERS:

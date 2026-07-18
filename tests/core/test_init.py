@@ -306,3 +306,41 @@ def test_write_config_emits_git_root(tmp_path: Path):
     assert data["repos"]["web"]["path"] == "web"
     assert data["repos"]["root"]["path"] == "."
     assert "git_root" not in data["repos"]["root"]
+
+
+def test_plan_detected_repos_single_git_monorepo(tmp_path: Path):
+    """ac1/ac2: a single-git monorepo emits the root as `path: .` (no git_root)
+    and each markerless subdir as a git_root child with a RELATIVE path; the
+    emitted plan builds a valid WorkspaceConfig (git_root refs, no chaining)."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='root'\n")
+    for sub in ("web", "infra"):
+        d = tmp_path / sub
+        d.mkdir()
+        (d / "package.json").write_text("{}")
+
+    init = WorkspaceInitializer()
+    detected = init.detect_repos(tmp_path)
+    planned = init.plan_detected_repos(tmp_path, detected)
+    by_name = {e["name"]: e for e in planned}
+
+    root_name = tmp_path.name
+    assert by_name[root_name]["path"] == "."
+    assert by_name[root_name]["git_root"] is None
+    for sub in ("web", "infra"):
+        assert by_name[sub]["path"] == sub
+        assert by_name[sub]["git_root"] == root_name
+
+    # ac2: no emitted path is absolute
+    for e in planned:
+        assert not e["path"].startswith("/")
+        assert str(tmp_path) not in e["path"]
+
+    # Regression guard (spec testing #5): generate_config runs the
+    # WorkspaceConfig validators (git_root refs, no chaining, cycles) at
+    # construction — must not raise.
+    config = init.generate_config("mono", planned, env_runner=None)
+    assert config.repos[root_name].git_root is None
+    for sub in ("web", "infra"):
+        assert config.repos[sub].git_root == root_name
+        assert config.repos[config.repos[sub].git_root].git_root is None
