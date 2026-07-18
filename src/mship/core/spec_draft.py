@@ -202,7 +202,7 @@ _LIST_SECTIONS = {
     "affected repos": "affected_repos",
     "affected repositories": "affected_repos",
 }
-_BULLET_RE = re.compile(r"^\s*-\s+(.*)$")
+_BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+(.*)$")
 _CHECKBOX_RE = re.compile(r"^\[[ xX]\]\s+(.*)$")
 _ID_BACKTICK_RE = re.compile(r"^`[A-Za-z]+\d+`\s+(.*)$")
 _ID_BRACKET_RE = re.compile(r"^\[[A-Za-z]+\d+\]\s+(.*)$")

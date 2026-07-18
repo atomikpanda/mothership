@@ -78,3 +78,25 @@ def test_round_trips_render_body_with_additional_sections():
     )
     parsed = parse_spec_markdown(body)
     assert parsed == draft  # full SpecDraft equality (empty lists on both sides)
+
+
+def test_tolerates_reorder_alt_markers_and_empty_optional_sections():
+    # Sections out of canonical order; `*` and `1.`/`2.` bullet markers;
+    # an empty optional section; a `- [ac1]` (bracket-id) AC form.
+    text = (
+        "## Approach\n\nA\n\n"
+        "## Acceptance criteria\n\n"
+        "* [ac1] first\n"
+        "1. second\n"
+        "2. third\n\n"
+        "## Problem\n\nP\n\n"
+        "## Risks\n\n\n"          # heading present, no items
+        "## Non-goals\n\n"
+        "+ out of scope\n\n"
+        "## User story\n\nU\n"
+    )
+    draft = parse_spec_markdown(text)
+    assert draft.problem == "P" and draft.user_story == "U" and draft.approach == "A"
+    assert draft.acceptance_criteria == ["first", "second", "third"]
+    assert draft.non_goals == ["out of scope"]
+    assert draft.risks == []  # empty optional section → empty list, no error
