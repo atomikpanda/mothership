@@ -205,6 +205,24 @@ def test_pair_autodiscovers_live_serve_record_byte_for_byte(workspace_no_relay, 
     assert p["workspace"] == "test-platform"
 
 
+def test_pair_ignores_stale_record(workspace_no_relay, monkeypatch):
+    """ac7: a record whose pid is dead is ignored — pair does NOT print a link
+    derived from it and falls through to the clear error (no relay: block, no flag)."""
+    from mship.core.relay.runtime import RelayRuntimeRecord, write_runtime_record
+
+    write_runtime_record(
+        workspace_no_relay, RelayRuntimeRecord(host="dead.relay.com", pid=424242)
+    )
+    # Force the record's pid to read as dead, deterministically.
+    monkeypatch.setattr("mship.core.relay.runtime._pid_alive", lambda pid: False)
+
+    r = runner.invoke(app, ["pair"])
+    assert r.exit_code != 0
+    assert "dead.relay.com" not in r.output          # never a stale link
+    assert "groundcontrol://add" not in r.output
+    assert "--relay-host" in r.output                # actionable fallback message
+
+
 # --- mship relay setup ---
 
 
