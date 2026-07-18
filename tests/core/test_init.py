@@ -344,3 +344,36 @@ def test_plan_detected_repos_single_git_monorepo(tmp_path: Path):
     for sub in ("web", "infra"):
         assert config.repos[sub].git_root == root_name
         assert config.repos[config.repos[sub].git_root].git_root is None
+
+
+def test_plan_detected_repos_subdir_with_own_git_is_standalone(tmp_path: Path):
+    """ac3: a subdir with its OWN .git (a directory OR a submodule gitlink FILE)
+    stays standalone (no git_root); a sibling without .git still attaches."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='root'\n")
+
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / ".git").mkdir()                       # independent nested repo
+    (nested / "package.json").write_text("{}")
+
+    submodule = tmp_path / "submodule"
+    submodule.mkdir()
+    (submodule / ".git").write_text(                # submodule gitlink FILE
+        "gitdir: ../.git/modules/submodule\n"
+    )
+    (submodule / "package.json").write_text("{}")
+
+    infra = tmp_path / "infra"
+    infra.mkdir()
+    (infra / "package.json").write_text("{}")
+
+    init = WorkspaceInitializer()
+    detected = init.detect_repos(tmp_path)
+    by_name = {e["name"]: e for e in init.plan_detected_repos(tmp_path, detected)}
+
+    assert by_name["nested"]["git_root"] is None
+    assert by_name["nested"]["path"] == "nested"
+    assert by_name["submodule"]["git_root"] is None
+    assert by_name["submodule"]["path"] == "submodule"
+    assert by_name["infra"]["git_root"] == tmp_path.name

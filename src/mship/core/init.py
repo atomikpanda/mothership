@@ -99,11 +99,12 @@ class WorkspaceInitializer:
                 })
                 continue
             rel = d.path.relative_to(workspace_path)
+            git_root = None if ".git" in d.markers else root_name
             entries.append({
                 "name": d.path.name,
                 "path": str(rel),
                 "type": "service",
-                "git_root": root_name,
+                "git_root": git_root,
                 "depends_on": [],
             })
         return entries
