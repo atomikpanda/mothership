@@ -869,3 +869,66 @@ def test_spec_apply_stamps_bound_task_activity(configured_app_with_task: Path, t
     assert result.exit_code == 0, result.output
     state = StateManager(configured_app_with_task / ".mothership").load()
     assert state.tasks["add-labels"].last_activity_at is not None
+
+
+# --- spec apply --from-file (#298 item 1) ---
+
+
+def _draft_md() -> str:
+    return (
+        "## Problem\n\nP\n\n"
+        "## User story\n\nU\n\n"
+        "## Approach\n\nA\n\n"
+        "## Acceptance criteria\n\n"
+        "- [ ] `ac1` view questions\n\n"
+        "## Open questions\n\n"
+        "- Android?\n\n"
+        "## Non-goals\n\n"
+        "- chat\n\n"
+        "## Affected repos\n\n"
+        "- mothership\n"
+    )
+
+
+def test_spec_apply_from_file_merges_and_advances_status(configured_app_with_task: Path, tmp_path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    mf = tmp_path / "draft.md"
+    mf.write_text(_draft_md())
+    result = runner.invoke(app, ["spec", "apply", "dq", "--from-file", str(mf)])
+    assert result.exit_code == 0, result.output
+    spec = _store(configured_app_with_task).find_by_id("dq")
+    assert spec.status == "needs_review"
+    assert [c.id for c in spec.acceptance_criteria] == ["ac1"]
+    assert spec.acceptance_criteria[0].text == "view questions"
+    assert spec.non_goals == ["chat"]
+    assert spec.affected_repos == ["mothership"]
+    assert "## Problem" in spec.body
+
+
+def test_spec_apply_requires_exactly_one_source(configured_app_with_task: Path, tmp_path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    # Neither source.
+    neither = runner.invoke(app, ["spec", "apply", "dq"])
+    assert neither.exit_code != 0
+    assert "exactly one" in neither.output.lower()
+    # Both sources.
+    jf = tmp_path / "d.json"; jf.write_text(_draft_json())
+    mf = tmp_path / "d.md"; mf.write_text(_draft_md())
+    both = runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf), "--from-file", str(mf)])
+    assert both.exit_code != 0
+    assert "exactly one" in both.output.lower()
+
+
+def test_spec_apply_from_file_missing_file_errors(configured_app_with_task: Path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    result = runner.invoke(app, ["spec", "apply", "dq", "--from-file", "/no/such/file.md"])
+    assert result.exit_code != 0
+    assert "from-file" in result.output or "read" in result.output.lower()
+
+
+def test_spec_apply_from_file_malformed_markdown_errors(configured_app_with_task: Path, tmp_path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    mf = tmp_path / "bad.md"
+    mf.write_text("just some notes, no headings")  # missing required sections
+    result = runner.invoke(app, ["spec", "apply", "dq", "--from-file", str(mf)])
+    assert result.exit_code != 0

@@ -126,32 +126,55 @@ def register(parent: typer.Typer, get_container):
     @spec_app.command("apply")
     def apply(
         spec_id: str = typer.Argument(..., help="Spec id to apply the draft to."),
-        from_json: str = typer.Option(..., "--from-json", help="Path to the draft JSON, or - for stdin."),
+        from_json: Optional[str] = typer.Option(None, "--from-json", help="Path to the draft JSON, or - for stdin."),
+        from_file: Optional[str] = typer.Option(None, "--from-file", help="Path to a rendered spec markdown file, or - for stdin."),
         bypass_status_gate: bool = typer.Option(False, "--bypass-status-gate", help="Apply regardless of current status."),
     ):
-        """Ingest a SpecDraft JSON: render the body, set fields, advance to needs_review."""
+        """Ingest a drafted spec, render the body, set fields, advance to needs_review.
+
+        Provide exactly one source:
+          --from-json <file|->   a structured SpecDraft JSON payload
+          --from-file <file|->   a rendered spec markdown document (## Problem / ## Approach / …)
+        Both feed the SAME apply path; only the deserialization differs. Note the
+        markdown path recovers only the prose + list sections it renders — the
+        JSON path remains authoritative for anything a rendered body omits.
+        """
         import json
         import sys
         from datetime import datetime, timezone
         from pathlib import Path
         from pydantic import ValidationError
         from mship.core.spec import SpecDraft, InvalidTransition, validate_transition
-        from mship.core.spec_draft import apply_draft
+        from mship.core.spec_draft import apply_draft, parse_spec_markdown
         from mship.core.spec_store import SpecStore, SPECS_DIRNAME
 
         output = Output()
-        if from_json == "-":
+
+        if (from_json is None) == (from_file is None):
+            output.error("Provide exactly one of --from-json or --from-file.")
+            raise typer.Exit(1)
+
+        source_flag = "--from-json" if from_json is not None else "--from-file"
+        source_val = from_json if from_json is not None else from_file
+        if source_val == "-":
             raw = sys.stdin.read()
         else:
             try:
-                raw = Path(from_json).read_text()
+                raw = Path(source_val).read_text()
             except OSError as e:
-                output.error(f"Cannot read --from-json {from_json!r}: {e}")
+                output.error(f"Cannot read {source_flag} {source_val!r}: {e}")
                 raise typer.Exit(1)
+
         try:
-            draft = SpecDraft(**json.loads(raw))
+            if from_json is not None:
+                draft = SpecDraft(**json.loads(raw))
+            else:
+                draft = parse_spec_markdown(raw)
         except (json.JSONDecodeError, ValidationError) as e:
             output.error(f"Invalid draft JSON: {e}")
+            raise typer.Exit(1)
+        except ValueError as e:
+            output.error(f"Invalid spec markdown: {e}")
             raise typer.Exit(1)
 
         container = get_container()
