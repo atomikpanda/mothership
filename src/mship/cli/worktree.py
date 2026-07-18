@@ -1451,7 +1451,7 @@ def register(app: typer.Typer, get_container):
             from mship.core.evidence_autolink import (
                 commits_since_base,
                 compute_evidence_links,
-                test_run_refs_for_task,
+                passing_test_run_refs,
             )
             from mship.core.spec_review import set_criterion_evidence
             from mship.core.spec_store import SPECS_DIRNAME, SpecStore
@@ -1467,7 +1467,7 @@ def register(app: typer.Typer, get_container):
                     commits_since_base(shell, _al_path, _al_base, task.branch)
                 )
             _al_links = compute_evidence_links(
-                bound_spec, _al_commits, test_run_refs_for_task(task),
+                bound_spec, _al_commits, passing_test_run_refs(task),
             )
             if _al_links:
                 for _al_link in _al_links:

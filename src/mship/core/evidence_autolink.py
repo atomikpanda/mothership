@@ -84,7 +84,7 @@ def compute_evidence_links(spec, commits, test_run_refs) -> list[EvidenceLink]:
     return links
 
 
-def test_run_refs_for_task(task) -> list[str]:
+def passing_test_run_refs(task) -> list[str]:
     """Return `test-runs/<iteration>.<repo>` refs for every repo whose most recent
     recorded test result passed (spec 377 ac10). `task.test_iteration` is the run
     number; `task.test_results[repo].status == "pass"` selects the repos. Empty

@@ -1,7 +1,17 @@
 from datetime import datetime, timezone
+from pathlib import Path
 
-from mship.core.evidence_autolink import extract_ac_ids
+from mship.core.evidence_autolink import (
+    EvidenceLink,
+    commits_since_base,
+    compute_evidence_links,
+    extract_ac_ids,
+    passing_test_run_refs,
+)
 from mship.core.spec import AcceptanceCriterion, AcceptanceEvidence, Spec
+from mship.core.spec_review import set_criterion_evidence
+from mship.core.state import Task, TestResult
+from mship.util.shell import ShellResult
 
 
 def _spec(criteria):
@@ -24,9 +34,6 @@ def test_extract_ac_ids_word_boundary_excludes_longer_id_and_substrings():
 
 def test_extract_ac_ids_empty_message():
     assert extract_ac_ids("") == set()
-
-
-from mship.core.evidence_autolink import EvidenceLink, compute_evidence_links
 
 
 def test_testrun_refs_attach_to_every_criterion():
@@ -86,9 +93,6 @@ def test_unknown_ac_id_in_commit_is_ignored():  # ac5 (intersect with real ids)
     assert links == []
 
 
-from mship.core.spec_review import set_criterion_evidence
-
-
 def test_skips_evidence_that_already_exists():  # ac6 (dedup vs existing)
     spec = _spec([AcceptanceCriterion(
         id="ac1", text="x",
@@ -122,14 +126,6 @@ def test_idempotent_when_links_applied_then_recomputed():  # ac6
     assert sorted(e.kind for e in spec.acceptance_criteria[0].evidence) == ["commit", "test"]
 
 
-from mship.core.evidence_autolink import test_run_refs_for_task
-from mship.core.state import Task, TestResult
-
-# `test_run_refs_for_task` is a production helper, not a pytest test; its `test_`
-# prefix would otherwise make pytest try to collect the imported symbol.
-test_run_refs_for_task.__test__ = False
-
-
 def _task(**kw):
     base = dict(slug="t", description="d", phase="dev",
                 created_at=datetime(2026, 7, 18, tzinfo=timezone.utc),
@@ -143,18 +139,12 @@ def test_test_run_refs_only_for_passing_repos():  # ac10
     task = _task(test_iteration=3,
                  test_results={"mothership": TestResult(status="pass", at=now),
                                "web": TestResult(status="fail", at=now)})
-    assert test_run_refs_for_task(task) == ["test-runs/3.mothership"]
+    assert passing_test_run_refs(task) == ["test-runs/3.mothership"]
 
 
 def test_test_run_refs_empty_without_iteration():
     task = _task(test_iteration=0, test_results={})
-    assert test_run_refs_for_task(task) == []
-
-
-from pathlib import Path
-
-from mship.core.evidence_autolink import commits_since_base
-from mship.util.shell import ShellResult
+    assert passing_test_run_refs(task) == []
 
 
 class _FakeShell:
