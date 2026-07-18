@@ -243,21 +243,6 @@ def _serve_with_relay(
 
     log_path = workspace_root / ".mothership" / "relay-tunnel.log"
     log_path.unlink(missing_ok=True)                      # fresh per run
-    # Persist the effective relay host so `mship pair` in this workspace can
-    # auto-discover it (spec mship-pair-relay-host). Gitignored, mode 0600, no
-    # secret (the token stays in serve-token). Unlinked in the finally teardown.
-    write_runtime_record(
-        workspace_root,
-        RelayRuntimeRecord(
-            host=rc.host,
-            pid=os.getpid(),
-            subdomain=subdomain,
-            url=public_url,
-            workspace=workspace,
-            ssh_port=rc.ssh_port,
-            user=rc.user,
-        ),
-    )
     sup = TunnelSupervisor(argv=argv, log_path=log_path)
     sup.start()
 
@@ -326,6 +311,23 @@ def _serve_with_relay(
     typer.echo(segno.make(link).terminal(compact=True))
 
     try:
+        # Persist the effective relay host so `mship pair` in this workspace can
+        # auto-discover it (spec mship-pair-relay-host). Gitignored, mode 0600, no
+        # secret (the token stays in serve-token). Written INSIDE the try so the
+        # finally's clear_runtime_record always tears it down — even if an earlier
+        # startup step (e.g. sup.start) had raised, no stale record is left behind.
+        write_runtime_record(
+            workspace_root,
+            RelayRuntimeRecord(
+                host=rc.host,
+                pid=os.getpid(),
+                subdomain=subdomain,
+                url=public_url,
+                workspace=workspace,
+                ssh_port=rc.ssh_port,
+                user=rc.user,
+            ),
+        )
         uvicorn.run(api, host=host, port=port)
     except KeyboardInterrupt:
         pass

@@ -42,11 +42,20 @@ def _record_path(workspace_root: Path) -> Path:
 
 
 def write_runtime_record(workspace_root: Path, record: RelayRuntimeRecord) -> None:
-    """Persist `record` as 0600 JSON at `<workspace_root>/.mothership/relay-runtime.json`."""
+    """Persist `record` as 0600 JSON at `<workspace_root>/.mothership/relay-runtime.json`.
+
+    Created 0600 from the outset — no world-readable window between create and
+    chmod (the record carries subdomain/workspace/user, so a `write_text` + later
+    `chmod` would leak them to any local process during the TOCTOU gap)."""
     path = _record_path(workspace_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(asdict(record)))
-    path.chmod(0o600)
+    payload = json.dumps(asdict(record))
+    # Remove any prior file so O_CREAT's 0o600 mode always applies (O_CREAT does
+    # NOT re-mode an existing file), then create + write in one shot.
+    path.unlink(missing_ok=True)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(payload)
 
 
 def read_runtime_record(workspace_root: Path) -> RelayRuntimeRecord | None:
@@ -55,7 +64,10 @@ def read_runtime_record(workspace_root: Path) -> RelayRuntimeRecord | None:
     path = _record_path(workspace_root)
     try:
         data = json.loads(path.read_text())
-    except (FileNotFoundError, ValueError):
+    except (OSError, ValueError):
+        # OSError covers absent/unreadable/permission-denied; ValueError covers
+        # corrupt JSON. A bad record must NEVER raise (the docstring's contract) —
+        # it just means "no discoverable relay", so pair falls back cleanly.
         return None
     if not isinstance(data, dict) or "host" not in data or "pid" not in data:
         return None
