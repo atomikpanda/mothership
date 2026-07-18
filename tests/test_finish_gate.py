@@ -515,3 +515,53 @@ def test_finish_pr_body_renders_autolinked_evidence(finish_gate_workspace):
     assert "test:test-runs/1.shared" in body   # test-run rendered
     assert f"commit:{sha}" in body              # commit rendered
     assert "[x]" in body and "ac1" in body      # criterion checked + listed
+
+
+def test_finish_autolink_idempotent_across_two_runs(finish_gate_workspace):
+    """Spec 377 ac6: running finish twice does not duplicate evidence for the same
+    (ref, kind, criterion)."""
+    from mship.core.state import TestResult
+
+    workspace, mock_shell = finish_gate_workspace
+    wi = _seed_feature_with_ac(workspace)
+    runner.invoke(app, ["spawn", "--work-item", wi.id, "auto idem", "--repos", "shared"])
+    _write_plan(workspace, "auto-idem")
+
+    now = datetime.now(timezone.utc)
+
+    def _seed_tests(s):
+        t = s.tasks["auto-idem"]
+        t.test_iteration = 1
+        t.test_results = {"shared": TestResult(status="pass", at=now)}
+
+    StateManager(workspace / ".mothership").mutate(_seed_tests)
+
+    sha = "ffeeddccbbaa99887766554433221100ffeeddcc"
+
+    def _run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc\trefs/heads/main\n", stderr="")
+        if "git log --format=%H" in cmd:
+            return ShellResult(returncode=0, stdout=f"{sha}\x1fimplement ac1\x1e\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://github.com/org/shared/pull/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = _run
+
+    assert runner.invoke(app, ["finish", "--task", "auto-idem"]).exit_code == 0
+    assert runner.invoke(app, ["finish", "--task", "auto-idem"]).exit_code == 0
+
+    spec = SpecStore(workspace / "specs").find_by_id("ev-spec")
+    evidence = spec.acceptance_criteria[0].evidence
+    assert sorted(e.kind for e in evidence) == ["commit", "test"]  # exactly one each
+    assert [e.ref for e in evidence if e.kind == "test"] == ["test-runs/1.shared"]
+    assert [e.ref for e in evidence if e.kind == "commit"] == [sha]
