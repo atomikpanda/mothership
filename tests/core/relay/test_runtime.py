@@ -3,6 +3,7 @@ import json
 from mship.core.relay.runtime import (
     RelayRuntimeRecord,
     clear_runtime_record,
+    live_runtime_record,
     read_runtime_record,
     write_runtime_record,
 )
@@ -58,3 +59,37 @@ def test_clear_removes_record_idempotently(tmp_path):
     clear_runtime_record(tmp_path)
     assert read_runtime_record(tmp_path) is None
     clear_runtime_record(tmp_path)  # no error when already gone
+
+
+def test_live_record_returned_when_pid_alive(tmp_path):
+    write_runtime_record(tmp_path, RelayRuntimeRecord(host="h", pid=1234))
+    got = live_runtime_record(tmp_path, pid_alive=lambda pid: True)
+    assert got is not None and got.host == "h"
+
+
+def test_stale_record_ignored_when_pid_dead(tmp_path):
+    write_runtime_record(tmp_path, RelayRuntimeRecord(host="h", pid=1234))
+    assert live_runtime_record(tmp_path, pid_alive=lambda pid: False) is None
+
+
+def test_live_record_none_when_absent(tmp_path):
+    assert live_runtime_record(tmp_path, pid_alive=lambda pid: True) is None
+
+
+def test_live_record_checks_the_records_pid(tmp_path):
+    write_runtime_record(tmp_path, RelayRuntimeRecord(host="h", pid=777))
+    seen = {}
+
+    def fake_alive(pid):
+        seen["pid"] = pid
+        return True
+
+    live_runtime_record(tmp_path, pid_alive=fake_alive)
+    assert seen["pid"] == 777
+
+
+def test_default_pid_alive_true_for_current_process(tmp_path):
+    import os
+
+    write_runtime_record(tmp_path, RelayRuntimeRecord(host="h", pid=os.getpid()))
+    assert live_runtime_record(tmp_path) is not None  # real _pid_alive on this pid

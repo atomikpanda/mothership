@@ -76,3 +76,35 @@ def read_runtime_record(workspace_root: Path) -> RelayRuntimeRecord | None:
 def clear_runtime_record(workspace_root: Path) -> None:
     """Remove the record (idempotent — no error when already gone)."""
     _record_path(workspace_root).unlink(missing_ok=True)
+
+
+def _pid_alive(pid: int) -> bool:
+    """True if a process with `pid` exists (signal 0 probes without killing)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists but owned by another user
+    except (OverflowError, ValueError):
+        return False  # nonsense pid → treat as not alive
+    return True
+
+
+def live_runtime_record(
+    workspace_root: Path,
+    *,
+    pid_alive: Callable[[int], bool] | None = None,
+) -> RelayRuntimeRecord | None:
+    """The runtime record ONLY when present AND its pid is alive; else None.
+
+    A stale record (serve stopped / crashed / pid reused-away) is treated as absent
+    so pair never derives a link from a dead serve. `pid_alive` is injectable for
+    tests; the CLI leaves it None → module-level `_pid_alive` (so a test can also
+    monkeypatch `mship.core.relay.runtime._pid_alive`).
+    """
+    record = read_runtime_record(workspace_root)
+    if record is None:
+        return None
+    alive = (pid_alive or _pid_alive)(record.pid)
+    return record if alive else None
