@@ -120,3 +120,32 @@ def test_idempotent_when_links_applied_then_recomputed():  # ac6
     second = compute_evidence_links(spec, commits, refs)
     assert second == []  # nothing new on the second pass
     assert sorted(e.kind for e in spec.acceptance_criteria[0].evidence) == ["commit", "test"]
+
+
+from mship.core.evidence_autolink import test_run_refs_for_task
+from mship.core.state import Task, TestResult
+
+# `test_run_refs_for_task` is a production helper, not a pytest test; its `test_`
+# prefix would otherwise make pytest try to collect the imported symbol.
+test_run_refs_for_task.__test__ = False
+
+
+def _task(**kw):
+    base = dict(slug="t", description="d", phase="dev",
+                created_at=datetime(2026, 7, 18, tzinfo=timezone.utc),
+                affected_repos=["mothership"], branch="feat")
+    base.update(kw)
+    return Task(**base)
+
+
+def test_test_run_refs_only_for_passing_repos():  # ac10
+    now = datetime(2026, 7, 18, tzinfo=timezone.utc)
+    task = _task(test_iteration=3,
+                 test_results={"mothership": TestResult(status="pass", at=now),
+                               "web": TestResult(status="fail", at=now)})
+    assert test_run_refs_for_task(task) == ["test-runs/3.mothership"]
+
+
+def test_test_run_refs_empty_without_iteration():
+    task = _task(test_iteration=0, test_results={})
+    assert test_run_refs_for_task(task) == []

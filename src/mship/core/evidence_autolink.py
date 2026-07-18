@@ -75,3 +75,19 @@ def compute_evidence_links(spec, commits, test_run_refs) -> list[EvidenceLink]:
             if criterion_id is not None:
                 _add(criterion_id, "commit", sha)
     return links
+
+
+def test_run_refs_for_task(task) -> list[str]:
+    """Return `test-runs/<iteration>.<repo>` refs for every repo whose most recent
+    recorded test result passed (spec 377 ac10). `task.test_iteration` is the run
+    number; `task.test_results[repo].status == "pass"` selects the repos. Empty
+    when the task has never recorded a test iteration."""
+    iteration = getattr(task, "test_iteration", 0) or 0
+    if iteration <= 0:
+        return []
+    refs: list[str] = []
+    for repo in sorted(task.test_results):
+        result = task.test_results[repo]
+        if getattr(result, "status", None) == "pass":
+            refs.append(f"test-runs/{iteration}.{repo}")
+    return refs
