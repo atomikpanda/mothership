@@ -41,21 +41,37 @@ def extract_ac_ids(message: str) -> set[str]:
 
 
 def compute_evidence_links(spec, commits, test_run_refs) -> list[EvidenceLink]:
-    """Plan the evidence links to add for `spec` (pure -- no mutation).
+    """Plan the evidence links to add for `spec` (pure -- no mutation, no I/O).
 
     - every ref in `test_run_refs` -> a `test` link on EVERY acceptance criterion;
     - every `(sha, message)` in `commits` -> a `commit` link on each acceptance
       criterion whose id is named (word-boundary) in the message.
 
-    (De-duplication is added in the next task.)"""
+    De-duplicated against the spec's existing evidence and within the batch, so
+    the result never repeats an existing `(criterion, kind, ref)`. This is what
+    makes finish idempotent (ac6) and additive to manual evidence (ac7)."""
     id_by_lower = {c.id.lower(): c.id for c in spec.acceptance_criteria}
+    existing: set[tuple[str, str, str]] = {
+        (c.id, e.kind, e.ref)
+        for c in spec.acceptance_criteria
+        for e in c.evidence
+    }
+    seen: set[tuple[str, str, str]] = set()
     links: list[EvidenceLink] = []
+
+    def _add(criterion_id: str, kind: str, ref: str) -> None:
+        key = (criterion_id, kind, ref)
+        if key in existing or key in seen:
+            return
+        seen.add(key)
+        links.append(EvidenceLink(criterion_id=criterion_id, kind=kind, ref=ref))
+
     for ref in test_run_refs:
         for c in spec.acceptance_criteria:
-            links.append(EvidenceLink(criterion_id=c.id, kind="test", ref=ref))
+            _add(c.id, "test", ref)
     for sha, message in commits:
         for token in extract_ac_ids(message):
             criterion_id = id_by_lower.get(token)
             if criterion_id is not None:
-                links.append(EvidenceLink(criterion_id=criterion_id, kind="commit", ref=sha))
+                _add(criterion_id, "commit", sha)
     return links
