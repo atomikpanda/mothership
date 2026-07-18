@@ -175,19 +175,10 @@ def _serve_with_relay(
 
     from mship.core.relay.config import RelayConfig
     from mship.core.relay.health import wait_until_reachable
-    from mship.core.relay.keys import (
-        ensure_relay_key,
-        ensure_subdomain_secret,
-        relay_public_key,
-    )
-    from mship.core.relay.pairing import build_pair_link
+    from mship.core.relay.keys import ensure_relay_key
+    from mship.core.relay.link import build_relay_pair_link
     from mship.core.relay.token import ensure_serve_token
-    from mship.core.relay.tunnel import (
-        TunnelSupervisor,
-        build_tunnel_argv,
-        device_id,
-        device_subdomain,
-    )
+    from mship.core.relay.tunnel import TunnelSupervisor, build_tunnel_argv
     from mship.core.serve import create_app
     from mship.core.spec_store import SPECS_DIRNAME
 
@@ -232,13 +223,17 @@ def _serve_with_relay(
     )
 
     key_path = ensure_relay_key(home=Path.home())
-    dev = device_id(relay_public_key(key_path))
-    secret = ensure_subdomain_secret(home=Path.home())
-    subdomain = device_subdomain(workspace, dev, secret)  # opaque; was: subdomain_for(workspace)
+    pair_link = build_relay_pair_link(
+        workspace=workspace,
+        host=rc.host,
+        workspace_root=workspace_root,
+        home=Path.home(),
+    )
+    subdomain = pair_link.subdomain
     argv = build_tunnel_argv(rc, subdomain=subdomain, local_port=port, key_path=key_path)
 
-    public_url = f"https://{subdomain}.{rc.host}"
-    link = build_pair_link(url=public_url, token=token, workspace=workspace)
+    public_url = pair_link.url
+    link = pair_link.link
 
     log_path = workspace_root / ".mothership" / "relay-tunnel.log"
     log_path.unlink(missing_ok=True)                      # fresh per run

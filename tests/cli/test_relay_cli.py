@@ -226,6 +226,39 @@ def test_serve_relay_wires_tunnel_and_loopback(relay_configured_workspace, tmp_p
     assert "groundcontrol://add?" in r.output
 
 
+def test_serve_relay_prints_shared_builder_link(relay_configured_workspace, tmp_path, monkeypatch):
+    """ac3 (serve leg): `serve --relay` prints EXACTLY build_relay_pair_link(...).link,
+    so the serve and pair paths are the same builder — byte-for-byte identical."""
+    from mship.core.relay.link import build_relay_pair_link
+
+    fake_home = tmp_path / "home"
+    (fake_home / ".mothership").mkdir(parents=True)
+    key = fake_home / ".mothership" / "relay_ed25519"
+    key.write_text("PRIV\n")
+    (Path(str(key) + ".pub")).write_text("ssh-ed25519 AAAA mship-relay\n")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    workspace_root = relay_configured_workspace  # config parent; seeds serve-token
+    expected = build_relay_pair_link(
+        workspace="Mship Workspace",
+        host="relay.example.com",
+        workspace_root=workspace_root,
+        home=fake_home,
+    )
+
+    fake_sup = MagicMock()
+    with patch("uvicorn.run", lambda *a, **k: None), \
+         patch("mship.core.relay.tunnel.TunnelSupervisor", lambda *a, **k: fake_sup):
+        r = runner.invoke(
+            app,
+            ["serve", "--relay", "--port", "47100", "--relay-tick", "0.01"],
+            catch_exceptions=False,
+        )
+
+    assert r.exit_code == 0, r.output
+    assert expected.link in r.output
+
+
 def test_relay_whoami_matches_known_workspace(tmp_path, monkeypatch):
     """`relay whoami` recovers the workspace by recomputing the opaque slug over
     candidate names on this machine; unrelated subdomains report no match."""
