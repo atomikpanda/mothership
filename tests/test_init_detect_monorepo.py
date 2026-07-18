@@ -92,3 +92,34 @@ def test_detected_monorepo_doctor_no_not_a_git_repository(tmp_path: Path, monkey
         git_check = next(c for c in report.checks if c.name == f"{name}/git")
         assert git_check.status == "pass", git_check.message
         assert "not a git repository" not in git_check.message
+
+
+def test_detected_monorepo_audit_no_not_a_git_repo(tmp_path: Path, monkeypatch):
+    """ac5/ac6: audit on the freshly detected monorepo reports NO not_a_git_repo
+    error (subdirs group under the root's git via _git_root_key), so `mship
+    spawn`'s audit gate (audit_gate.run_audit_gate) is not blocked by it."""
+    from mship.core.repo_state import audit_repos
+    from mship.util.shell import ShellRunner
+
+    root = _build_single_git_monorepo(tmp_path)
+    cfg_path = _init_detect(root, monkeypatch)
+    config = ConfigLoader.load(cfg_path, require_paths=True)
+
+    report = audit_repos(config, ShellRunner())
+
+    # ac5: no repo carries a not_a_git_repo error.
+    for repo in report.repos:
+        assert "not_a_git_repo" not in {i.code for i in repo.issues}, (
+            repo.name, [i.code for i in repo.issues]
+        )
+
+    # ac6: the exact error-code list the spawn audit gate keys off
+    # (audit_gate.run_audit_gate builds `<name>:<code>` for severity == error)
+    # contains no not_a_git_repo, so spawn is not blocked by it.
+    error_codes = [
+        f"{r.name}:{i.code}"
+        for r in report.repos
+        for i in r.issues
+        if i.severity == "error"
+    ]
+    assert not any(c.endswith(":not_a_git_repo") for c in error_codes)
