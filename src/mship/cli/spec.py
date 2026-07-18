@@ -171,10 +171,14 @@ def register(parent: typer.Typer, get_container):
             else:
                 draft = parse_spec_markdown(raw)
         except (json.JSONDecodeError, ValidationError) as e:
-            output.error(f"Invalid draft JSON: {e}")
+            # ValidationError can bubble from SpecDraft(...) on EITHER path, so
+            # label by the actual source flag rather than hard-coding "JSON"
+            # (a --from-file ValidationError must not read as a JSON error).
+            kind = "draft JSON" if from_json is not None else "spec markdown"
+            output.error(f"Invalid {kind} from {source_flag}: {e}")
             raise typer.Exit(1)
         except ValueError as e:
-            output.error(f"Invalid spec markdown: {e}")
+            output.error(f"Invalid spec markdown from {source_flag}: {e}")
             raise typer.Exit(1)
 
         container = get_container()
