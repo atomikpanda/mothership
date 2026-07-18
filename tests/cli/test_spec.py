@@ -932,3 +932,36 @@ def test_spec_apply_from_file_malformed_markdown_errors(configured_app_with_task
     mf.write_text("just some notes, no headings")  # missing required sections
     result = runner.invoke(app, ["spec", "apply", "dq", "--from-file", str(mf)])
     assert result.exit_code != 0
+
+
+# --- spec apply --from-json regression guard (#298 item 1) ---
+
+
+def test_regression_from_json_file_still_applies(configured_app_with_task: Path, tmp_path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    jf = tmp_path / "draft.json"; jf.write_text(_draft_json())
+    result = runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf)])
+    assert result.exit_code == 0, result.output
+    spec = _store(configured_app_with_task).find_by_id("dq")
+    assert spec.status == "needs_review"
+    assert [c.id for c in spec.acceptance_criteria] == ["ac1"]
+    assert "## Problem" in spec.body
+
+
+def test_regression_from_json_stdin_still_applies(configured_app_with_task: Path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    result = runner.invoke(app, ["spec", "apply", "dq", "--from-json", "-"], input=_draft_json())
+    assert result.exit_code == 0, result.output
+    assert _store(configured_app_with_task).find_by_id("dq").status == "needs_review"
+
+
+def test_regression_from_json_bad_payload_still_errors(configured_app_with_task: Path, tmp_path):
+    runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
+    jf = tmp_path / "bad.json"; jf.write_text("this is not json at all")
+    result = runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf)])
+    assert result.exit_code != 0
+    # A valid-JSON but schema-invalid payload still errors via the JSON path
+    # (never routed through the markdown parser).
+    jf2 = tmp_path / "partial.json"; jf2.write_text('{"problem": "only problem"}')
+    result2 = runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf2)])
+    assert result2.exit_code != 0
