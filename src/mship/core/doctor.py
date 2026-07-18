@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from mship.core import skill_install as _si
-from mship.core.config import WorkspaceConfig
+from mship.core.config import WorkspaceConfig, resolve_go_task_files, GO_TASK_FILENAMES
 from mship.util.shell import ShellRunner
 
 
@@ -158,11 +158,30 @@ class DoctorChecker:
                 report.checks.append(CheckResult(name=f"{name}/path", status="fail", message=f"path not found: {effective_path}"))
                 continue  # skip further checks for this repo
 
-            # Taskfile.yml
-            if (effective_path / "Taskfile.yml").exists():
-                report.checks.append(CheckResult(name=f"{name}/taskfile", status="pass", message="Taskfile.yml found"))
+            # go-task file(s) — accept any resolution-set spelling; warn when more
+            # than one resolves (go-task picks by precedence, so mship must not
+            # silently key off a different file than the one `task` runs). #366 #1.
+            go_task_files = resolve_go_task_files(effective_path)
+            if not go_task_files:
+                report.checks.append(CheckResult(
+                    name=f"{name}/taskfile", status="fail",
+                    message=f"no go-task file found (looked for one of: {', '.join(GO_TASK_FILENAMES)})",
+                ))
+            elif len(go_task_files) > 1:
+                listed = ", ".join(f.name for f in go_task_files)
+                report.checks.append(CheckResult(
+                    name=f"{name}/taskfile", status="warn",
+                    message=(
+                        f"multiple go-task files resolve in {effective_path}: {listed} "
+                        f"— go-task runs '{go_task_files[0].name}' by precedence; remove "
+                        f"or rename the others so mship and go-task agree"
+                    ),
+                ))
             else:
-                report.checks.append(CheckResult(name=f"{name}/taskfile", status="fail", message="Taskfile.yml not found"))
+                report.checks.append(CheckResult(
+                    name=f"{name}/taskfile", status="pass",
+                    message=f"{go_task_files[0].name} found",
+                ))
 
             # Git — for git_root subdir repos, git lives at the parent's path, not the subdir
             git_check_path = self._config.repos[repo.git_root].path if repo.git_root else effective_path
