@@ -157,6 +157,54 @@ def test_pair_no_relay_error_names_flag_and_serve(workspace_no_relay):
     assert "groundcontrol://add" not in r.output
 
 
+def test_pair_autodiscovers_live_serve_record_byte_for_byte(workspace_no_relay, tmp_path, monkeypatch):
+    """ac2/ac3/ac4: bare `mship pair` with NO relay: block discovers the live serve
+    record's host and prints the SAME link the serve builder produces, same token."""
+    import os
+
+    from mship.core.relay.link import build_relay_pair_link
+    from mship.core.relay.pairing import parse_pair_link
+    from mship.core.relay.runtime import RelayRuntimeRecord, write_runtime_record
+    from mship.core.relay.token import ensure_serve_token
+
+    fake_home = tmp_path / "home"
+    (fake_home / ".mothership").mkdir(parents=True)
+    key = fake_home / ".mothership" / "relay_ed25519"
+    key.write_text("PRIV\n")
+    (Path(str(key) + ".pub")).write_text("ssh-ed25519 AAAA mship-relay\n")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    ws = workspace_no_relay
+    (ws / ".mothership" / "serve-token").write_text("shared-serve-token\n")
+
+    # The serve path: exactly what a running serve builds + prints (Task 5).
+    serve_side = build_relay_pair_link(
+        workspace="test-platform",
+        host="mship-relay.atomikpanda.com",
+        workspace_root=ws,
+        home=fake_home,
+    )
+
+    # Simulate the running serve having persisted its runtime record (pid alive).
+    write_runtime_record(
+        ws, RelayRuntimeRecord(host="mship-relay.atomikpanda.com", pid=os.getpid())
+    )
+
+    # The pair path: no flag, no relay: block → auto-discovery.
+    r = runner.invoke(app, ["pair"])
+    assert r.exit_code == 0, r.output
+
+    # ac3: byte-for-byte identical link.
+    assert serve_side.link in r.output
+    # ac4: token equals ensure_serve_token (the serve's token source).
+    assert serve_side.token == ensure_serve_token(ws) == "shared-serve-token"
+
+    p = parse_pair_link(serve_side.link)
+    assert p["url"] == serve_side.url
+    assert p["token"] == "shared-serve-token"
+    assert p["workspace"] == "test-platform"
+
+
 # --- mship relay setup ---
 
 
