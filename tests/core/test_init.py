@@ -267,3 +267,20 @@ def test_detect_stub_dir_with_other_marker_still_promoted(tmp_path: Path):
     svc = next(r for r in init.detect_repos(tmp_path) if r.path.name == "svc")
     assert ".git" in svc.markers
     assert "Taskfile.yml" not in svc.markers
+
+
+def test_generate_config_passes_git_root(tmp_path: Path):
+    """git_root from the repo dict must land on the RepoConfig (init --detect
+    monorepo emission). See spec mship-init-detect-monorepo ac1."""
+    init = WorkspaceInitializer()
+    config = init.generate_config(
+        workspace_name="mono",
+        repos=[
+            {"name": "root", "path": ".", "type": "service", "depends_on": []},
+            {"name": "web", "path": "web", "type": "service",
+             "git_root": "root", "depends_on": []},
+        ],
+        env_runner=None,
+    )
+    assert config.repos["root"].git_root is None
+    assert config.repos["web"].git_root == "root"

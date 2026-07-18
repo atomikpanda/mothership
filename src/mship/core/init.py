@@ -139,6 +139,7 @@ tasks:
                 path=Path(repo["path"]),
                 type=repo["type"],
                 depends_on=repo.get("depends_on", []),
+                git_root=repo.get("git_root"),
             )
 
         config = WorkspaceConfig(
