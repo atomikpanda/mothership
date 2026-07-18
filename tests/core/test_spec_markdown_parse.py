@@ -46,3 +46,35 @@ def test_parses_list_sections_stripping_checkboxes_and_ids():
     assert draft.non_goals == ["chat"]
     assert draft.risks == ["scope creep"]
     assert draft.affected_repos == ["mothership"]
+
+
+from mship.core.spec import BodySection
+from mship.core.spec_body import render_body
+
+
+def test_round_trips_render_body_prose_only():
+    draft = SpecDraft(
+        problem="the problem",
+        user_story="as a user, I want X, so that Y",
+        approach="the approach; key decisions",
+    )
+    body = render_body(draft.problem, draft.user_story, draft.approach)
+    assert parse_spec_markdown(body) == draft
+
+
+def test_round_trips_render_body_with_additional_sections():
+    draft = SpecDraft(
+        problem="the problem",
+        user_story="as a user, I want X, so that Y",
+        approach="the approach",
+        additional_sections=[
+            BodySection(heading="Architecture", body="the arch"),
+            BodySection(heading="Testing", body="the tests"),
+        ],
+    )
+    body = render_body(
+        draft.problem, draft.user_story, draft.approach,
+        additional_sections=[(s.heading, s.body) for s in draft.additional_sections],
+    )
+    parsed = parse_spec_markdown(body)
+    assert parsed == draft  # full SpecDraft equality (empty lists on both sides)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
-from mship.core.spec import AcceptanceCriterion, OpenQuestion, Spec, SpecDraft
+from mship.core.spec import AcceptanceCriterion, BodySection, OpenQuestion, Spec, SpecDraft
 from mship.core.spec_body import parse_body_sections, render_body
 from mship.util.slug import slugify
 
@@ -237,8 +237,9 @@ def parse_spec_markdown(text: str) -> SpecDraft:
 
     Inverse of the body/section rendering used across mship. Reuses
     `parse_body_sections` to split by `## ` headings, maps known headings to
-    SpecDraft fields, and parses list sections into text-only items (ids are
-    re-derived positionally by `apply_draft`, matching the JSON path).
+    SpecDraft fields, parses list sections into text-only items, and preserves
+    any other `## <Heading>` section as an additional_sections entry (matching
+    how `render_body` appends extras after Approach).
     """
     sections = parse_body_sections(text)
     fields: dict[str, object] = {
@@ -246,11 +247,13 @@ def parse_spec_markdown(text: str) -> SpecDraft:
         "non_goals": [], "risks": [], "affected_repos": [],
         "acceptance_criteria": [], "open_questions": [],
     }
+    additional: list[BodySection] = []
     for heading, body in sections.items():
         key = heading.strip().lower()
         if key in _PROSE_SECTIONS:
             fields[_PROSE_SECTIONS[key]] = body.strip()
         elif key in _LIST_SECTIONS:
             fields[_LIST_SECTIONS[key]] = _parse_list_items(heading.strip(), body)
-        # else: unknown heading — additional_sections handled in Task 3
-    return SpecDraft(**fields)
+        else:
+            additional.append(BodySection(heading=heading.strip(), body=body.strip()))
+    return SpecDraft(additional_sections=additional, **fields)
