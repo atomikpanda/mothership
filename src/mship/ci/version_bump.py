@@ -30,3 +30,14 @@ def bump_version(current: str, level: str) -> str:
     if level == "minor":
         return f"{major}.{minor + 1}.0"
     return f"{major}.{minor}.{patch + 1}"
+
+
+_LABEL_PREFIX = "semver:"
+
+
+def select_level(labels: Iterable[str]) -> str:
+    names = {label.strip().lower() for label in labels if label and label.strip()}
+    for level in _LEVELS:  # major, minor, patch -> precedence major > minor > patch
+        if f"{_LABEL_PREFIX}{level}" in names:
+            return level
+    return "patch"

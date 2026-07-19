@@ -1,7 +1,7 @@
 # tests/ci/test_version_bump.py
 import pytest
 
-from mship.ci.version_bump import VersionError, bump_version
+from mship.ci.version_bump import VersionError, bump_version, select_level
 
 
 @pytest.mark.parametrize(
@@ -27,3 +27,18 @@ def test_bump_version_rejects_bad_version():
 def test_bump_version_rejects_bad_level():
     with pytest.raises(VersionError):
         bump_version("1.2.3", "sideways")
+
+
+@pytest.mark.parametrize(
+    "labels,expected",
+    [
+        (["semver:minor"], "minor"),
+        (["semver:patch", "semver:minor"], "minor"),          # highest precedence wins
+        ([], "patch"),                                         # default
+        (["bug", "needs-review"], "patch"),                   # no semver label -> default
+        (["semver:major", "semver:patch"], "major"),
+        (["SemVer:Major"], "major"),                          # case-insensitive
+    ],
+)
+def test_select_level(labels, expected):
+    assert select_level(labels) == expected
