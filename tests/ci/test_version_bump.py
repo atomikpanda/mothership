@@ -6,6 +6,7 @@ import pytest
 from mship.ci.version_bump import (
     VersionError,
     bump_version,
+    main,
     read_current_version,
     rewrite_version_files,
     select_level,
@@ -104,3 +105,19 @@ def test_read_current_version_raises_when_absent(tmp_path):
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n', encoding="utf-8")
     with pytest.raises(VersionError):
         read_current_version(tmp_path / "pyproject.toml")
+
+
+def test_main_bumps_both_files_and_prints_new_version(tmp_path, capsys):
+    repo = _mini_repo(tmp_path, "0.5.0")
+    rc = main(["--labels", "bug,semver:minor", "--repo-root", str(repo)])
+    assert rc == 0
+    out = capsys.readouterr().out.strip()
+    assert out == "0.6.0"
+    assert 'version = "0.6.0"' in (repo / "pyproject.toml").read_text(encoding="utf-8")
+    assert '__version__ = "0.6.0"' in (repo / "src" / "mship" / "__init__.py").read_text(encoding="utf-8")
+
+
+def test_main_defaults_to_patch_when_no_semver_label(tmp_path, capsys):
+    repo = _mini_repo(tmp_path, "0.5.0")
+    main(["--labels", "", "--repo-root", str(repo)])
+    assert capsys.readouterr().out.strip() == "0.5.1"
