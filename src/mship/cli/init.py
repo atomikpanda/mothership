@@ -107,16 +107,12 @@ def register(app: typer.Typer, get_container):
         # Auto-detect
         if detect:
             detected = initializer.detect_repos(cwd)
+            planned = initializer.plan_detected_repos(cwd, detected)
             existing_paths = {Path(rd["path"]).resolve() for rd in repos_data}
-            for d in detected:
-                if d.path.resolve() not in existing_paths:
-                    repo_name = d.path.name if d.path != cwd else cwd.name
-                    repos_data.append({
-                        "name": repo_name,
-                        "path": d.path,
-                        "type": "service",
-                        "depends_on": [],
-                    })
+            for entry in planned:
+                abspath = (cwd / entry["path"]).resolve()
+                if abspath not in existing_paths:
+                    repos_data.append(entry)
 
         try:
             config = initializer.generate_config(name, repos_data, env_runner)
@@ -131,7 +127,7 @@ def register(app: typer.Typer, get_container):
         rename_notes: list[tuple[str, Path]] = []
         if scaffold_taskfiles:
             for rd in repos_data:
-                repo_path = Path(rd["path"])
+                repo_path = (cwd / rd["path"]).resolve()
                 result = initializer.write_taskfile(repo_path)
                 if result.wrote:
                     created_taskfiles.append(str(repo_path))
@@ -251,7 +247,14 @@ def _run_interactive(
         output.error("No repos selected. Aborting.")
         raise typer.Exit(code=1)
 
-    # 4. Repo types
+    # 4. Repo types — classify through plan_detected_repos so the interactive
+    #    wizard emits the SAME relative-path + git_root monorepo config as
+    #    `--detect` (issue #366 finding #4); the user's per-repo type choice
+    #    overrides the classifier's default. Without this, plain `mship init` in
+    #    a TTY on a single-git monorepo produced the broken git_root-less config
+    #    this fix removes for --detect.
+    planned = initializer.plan_detected_repos(cwd, selected)
+    planned_by_name = {p["name"]: p for p in planned}
     repos_data: list[dict] = []
     for det in selected:
         repo_name = det.path.name if det.path != cwd else cwd.name
@@ -260,12 +263,14 @@ def _run_interactive(
             choices=["library", "service"],
             default="service",
         ).execute()
-        repos_data.append({
+        entry = dict(planned_by_name.get(repo_name, {
             "name": repo_name,
-            "path": det.path,
-            "type": repo_type,
+            "path": str(det.path),
+            "git_root": None,
             "depends_on": [],
-        })
+        }))
+        entry["type"] = repo_type
+        repos_data.append(entry)
 
     # 5. Dependencies
     repo_names = [r["name"] for r in repos_data]
@@ -281,7 +286,7 @@ def _run_interactive(
     # 6. Taskfile scaffolding
     created_taskfiles: list[str] = []
     for rd in repos_data:
-        repo_path = Path(rd["path"])
+        repo_path = (cwd / rd["path"]).resolve()
         existing = resolve_go_task_files(repo_path)
         if existing:
             note = f'"{rd["name"]}" already has {existing[0].name}'

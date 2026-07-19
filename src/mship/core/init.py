@@ -77,6 +77,67 @@ class WorkspaceInitializer:
 
         return repos
 
+    def plan_detected_repos(
+        self, workspace_path: Path, detected: list[DetectedRepo]
+    ) -> list[dict]:
+        """Classify detected repos into config-entry dicts with RELATIVE paths
+        and, for non-git subdirs of a git-owning root, a `git_root` back-ref.
+
+        Rules (spec mship-init-detect-monorepo / issue #366 finding #4):
+        - The workspace root (path == workspace_path), if detected, is emitted
+          standalone with `path: '.'` and no git_root.
+        - A subdir owning its own `.git` (a `.git` dir OR a submodule gitlink
+          `.git` file — both make `_find_markers` record ".git") stays standalone
+          with a path relative to the root and no git_root (ac3).
+        - A subdir with NO `.git`, when the root IS a git owner, becomes a
+          `git_root: <root-name>` child with a path relative to the root (ac1).
+          Single-level detection: the parent IS the root, so relative-to-root
+          equals the `(parent.path / child.path)` resolution contract.
+        - If the root is not a git owner, non-git subdirs fall back to standalone
+          emission — never point git_root at a non-git root (ac8).
+        - A repo OUTSIDE the workspace root (e.g. a manually-added path in the
+          interactive wizard) cannot be a git_root child of it and has no path
+          relative to it, so it is emitted standalone with its absolute path.
+        Detected subdir paths are relative for portability (ac2).
+        """
+        root_repo = next(
+            (d for d in detected if d.path == workspace_path), None
+        )
+        root_is_git_owner = root_repo is not None and ".git" in root_repo.markers
+        root_name = workspace_path.name
+
+        entries: list[dict] = []
+        for d in detected:
+            if d.path == workspace_path:
+                entries.append({
+                    "name": root_name,
+                    "path": ".",
+                    "type": "service",
+                    "git_root": None,
+                    "depends_on": [],
+                })
+                continue
+            if not d.path.is_relative_to(workspace_path):
+                entries.append({
+                    "name": d.path.name,
+                    "path": str(d.path),
+                    "type": "service",
+                    "git_root": None,
+                    "depends_on": [],
+                })
+                continue
+            rel = d.path.relative_to(workspace_path)
+            has_own_git = ".git" in d.markers
+            git_root = None if (has_own_git or not root_is_git_owner) else root_name
+            entries.append({
+                "name": d.path.name,
+                "path": str(rel),
+                "type": "service",
+                "git_root": git_root,
+                "depends_on": [],
+            })
+        return entries
+
     def _find_markers(self, path: Path) -> list[str]:
         markers: list[str] = []
         for marker in REPO_MARKERS:
@@ -139,6 +200,7 @@ tasks:
                 path=Path(repo["path"]),
                 type=repo["type"],
                 depends_on=repo.get("depends_on", []),
+                git_root=repo.get("git_root"),
             )
 
         config = WorkspaceConfig(
@@ -162,6 +224,8 @@ tasks:
                 "path": str(repo.path),
                 "type": repo.type,
             }
+            if repo.git_root is not None:
+                repo_data["git_root"] = repo.git_root
             if repo.depends_on:
                 serialized_deps = []
                 for dep in repo.depends_on:

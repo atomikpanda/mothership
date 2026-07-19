@@ -267,3 +267,151 @@ def test_detect_stub_dir_with_other_marker_still_promoted(tmp_path: Path):
     svc = next(r for r in init.detect_repos(tmp_path) if r.path.name == "svc")
     assert ".git" in svc.markers
     assert "Taskfile.yml" not in svc.markers
+
+
+def test_generate_config_passes_git_root(tmp_path: Path):
+    """git_root from the repo dict must land on the RepoConfig (init --detect
+    monorepo emission). See spec mship-init-detect-monorepo ac1."""
+    init = WorkspaceInitializer()
+    config = init.generate_config(
+        workspace_name="mono",
+        repos=[
+            {"name": "root", "path": ".", "type": "service", "depends_on": []},
+            {"name": "web", "path": "web", "type": "service",
+             "git_root": "root", "depends_on": []},
+        ],
+        env_runner=None,
+    )
+    assert config.repos["root"].git_root is None
+    assert config.repos["web"].git_root == "root"
+
+
+def test_write_config_emits_git_root(tmp_path: Path):
+    """write_config serializes git_root for subdir children and omits it for
+    standalone repos. See spec mship-init-detect-monorepo ac1."""
+    init = WorkspaceInitializer()
+    config = init.generate_config(
+        workspace_name="mono",
+        repos=[
+            {"name": "root", "path": ".", "type": "service", "depends_on": []},
+            {"name": "web", "path": "web", "type": "service",
+             "git_root": "root", "depends_on": []},
+        ],
+        env_runner=None,
+    )
+    out = tmp_path / "mothership.yaml"
+    init.write_config(out, config)
+    data = yaml.safe_load(out.read_text())
+    assert data["repos"]["web"]["git_root"] == "root"
+    assert data["repos"]["web"]["path"] == "web"
+    assert data["repos"]["root"]["path"] == "."
+    assert "git_root" not in data["repos"]["root"]
+
+
+def test_plan_detected_repos_single_git_monorepo(tmp_path: Path):
+    """ac1/ac2: a single-git monorepo emits the root as `path: .` (no git_root)
+    and each markerless subdir as a git_root child with a RELATIVE path; the
+    emitted plan builds a valid WorkspaceConfig (git_root refs, no chaining)."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='root'\n")
+    for sub in ("web", "infra"):
+        d = tmp_path / sub
+        d.mkdir()
+        (d / "package.json").write_text("{}")
+
+    init = WorkspaceInitializer()
+    detected = init.detect_repos(tmp_path)
+    planned = init.plan_detected_repos(tmp_path, detected)
+    by_name = {e["name"]: e for e in planned}
+
+    root_name = tmp_path.name
+    assert by_name[root_name]["path"] == "."
+    assert by_name[root_name]["git_root"] is None
+    for sub in ("web", "infra"):
+        assert by_name[sub]["path"] == sub
+        assert by_name[sub]["git_root"] == root_name
+
+    # ac2: no emitted path is absolute
+    for e in planned:
+        assert not e["path"].startswith("/")
+        assert str(tmp_path) not in e["path"]
+
+    # Regression guard (spec testing #5): generate_config runs the
+    # WorkspaceConfig validators (git_root refs, no chaining, cycles) at
+    # construction — must not raise.
+    config = init.generate_config("mono", planned, env_runner=None)
+    assert config.repos[root_name].git_root is None
+    for sub in ("web", "infra"):
+        assert config.repos[sub].git_root == root_name
+        assert config.repos[config.repos[sub].git_root].git_root is None
+
+
+def test_plan_detected_repos_subdir_with_own_git_is_standalone(tmp_path: Path):
+    """ac3: a subdir with its OWN .git (a directory OR a submodule gitlink FILE)
+    stays standalone (no git_root); a sibling without .git still attaches."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='root'\n")
+
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / ".git").mkdir()                       # independent nested repo
+    (nested / "package.json").write_text("{}")
+
+    submodule = tmp_path / "submodule"
+    submodule.mkdir()
+    (submodule / ".git").write_text(                # submodule gitlink FILE
+        "gitdir: ../.git/modules/submodule\n"
+    )
+    (submodule / "package.json").write_text("{}")
+
+    infra = tmp_path / "infra"
+    infra.mkdir()
+    (infra / "package.json").write_text("{}")
+
+    init = WorkspaceInitializer()
+    detected = init.detect_repos(tmp_path)
+    by_name = {e["name"]: e for e in init.plan_detected_repos(tmp_path, detected)}
+
+    assert by_name["nested"]["git_root"] is None
+    assert by_name["nested"]["path"] == "nested"
+    assert by_name["submodule"]["git_root"] is None
+    assert by_name["submodule"]["path"] == "submodule"
+    assert by_name["infra"]["git_root"] == tmp_path.name
+
+
+def test_plan_detected_repos_root_not_git_falls_back_to_standalone(tmp_path: Path):
+    """ac8: when the workspace root has no .git, a markerless subdir does NOT get
+    a git_root pointing at the non-git root — it falls back to standalone."""
+    # No .git at root; give it a non-git marker so it is still detected.
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='root'\n")
+    for sub in ("web", "infra"):
+        d = tmp_path / sub
+        d.mkdir()
+        (d / "package.json").write_text("{}")
+
+    init = WorkspaceInitializer()
+    detected = init.detect_repos(tmp_path)
+    by_name = {e["name"]: e for e in init.plan_detected_repos(tmp_path, detected)}
+
+    for sub in ("web", "infra"):
+        assert by_name[sub]["git_root"] is None
+        assert by_name[sub]["path"] == sub
+    assert by_name[tmp_path.name]["path"] == "."
+    assert by_name[tmp_path.name]["git_root"] is None
+
+
+def test_plan_detected_repos_out_of_tree_repo_is_standalone_absolute(tmp_path: Path):
+    """A repo OUTSIDE the workspace root (the interactive wizard's manual-add
+    case) cannot be a git_root child of it and has no path relative to it, so it
+    is emitted standalone with its absolute path — never raising on relative_to."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='root'\n")
+    outside = tmp_path.parent / "outside-repo"
+    detected = [
+        DetectedRepo(path=tmp_path, markers=[".git", "pyproject.toml"]),
+        DetectedRepo(path=outside, markers=[]),
+    ]
+    by_name = {e["name"]: e for e in WorkspaceInitializer().plan_detected_repos(tmp_path, detected)}
+    assert by_name["outside-repo"]["git_root"] is None
+    assert by_name["outside-repo"]["path"] == str(outside)
+    assert by_name[tmp_path.name]["path"] == "."
