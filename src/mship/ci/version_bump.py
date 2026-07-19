@@ -8,10 +8,20 @@ level, and rewrites both files in place.
 from __future__ import annotations
 
 import re
+import tomllib
+from pathlib import Path
 from typing import Iterable
 
 _LEVELS = ("major", "minor", "patch")  # highest-precedence first
 _VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+
+# In-place single-line substitutions that preserve all other formatting.
+_PYPROJECT_VERSION_RE = re.compile(
+    r'(?P<pre>^version\s*=\s*")(?P<ver>\d+\.\d+\.\d+)(?P<post>")', re.MULTILINE
+)
+_INIT_VERSION_RE = re.compile(
+    r'(?P<pre>^__version__\s*=\s*")(?P<ver>\d+\.\d+\.\d+)(?P<post>")', re.MULTILINE
+)
 
 
 class VersionError(ValueError):
@@ -41,3 +51,31 @@ def select_level(labels: Iterable[str]) -> str:
         if f"{_LABEL_PREFIX}{level}" in names:
             return level
     return "patch"
+
+
+def read_current_version(pyproject_path: Path) -> str:
+    data = tomllib.loads(Path(pyproject_path).read_text(encoding="utf-8"))
+    try:
+        return data["project"]["version"]
+    except (KeyError, TypeError) as exc:
+        raise VersionError(f"no [project].version in {pyproject_path}") from exc
+
+
+def _sub_once(text: str, pattern: re.Pattern[str], new_version: str, where: Path) -> str:
+    new_text, n = pattern.subn(
+        lambda m: f"{m.group('pre')}{new_version}{m.group('post')}", text, count=1
+    )
+    if n != 1:
+        raise VersionError(f"could not find a version line to update in {where}")
+    return new_text
+
+
+def rewrite_version_files(repo_root: Path, new_version: str) -> None:
+    repo_root = Path(repo_root)
+    pyproject = repo_root / "pyproject.toml"
+    init = repo_root / "src" / "mship" / "__init__.py"
+    # Compute BOTH substitutions before writing EITHER, so a failure leaves both files intact.
+    new_py = _sub_once(pyproject.read_text(encoding="utf-8"), _PYPROJECT_VERSION_RE, new_version, pyproject)
+    new_init = _sub_once(init.read_text(encoding="utf-8"), _INIT_VERSION_RE, new_version, init)
+    pyproject.write_text(new_py, encoding="utf-8")
+    init.write_text(new_init, encoding="utf-8")
