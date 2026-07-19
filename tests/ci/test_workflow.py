@@ -40,3 +40,13 @@ def test_bump_commit_uses_skip_ci_and_tags():
     assert "[skip ci]" in raw
     assert "python -m mship.ci.version_bump" in raw
     assert "git tag" in raw
+
+
+def test_labels_passed_via_env_not_interpolated_into_shell():
+    # Guard against script injection: the labels expression must be assigned to
+    # an env var and referenced as a shell variable, never interpolated straight
+    # into the run command (Greptile P1 security).
+    raw = WORKFLOW.read_text(encoding="utf-8")
+    assert "PR_LABELS:" in raw
+    assert '--labels "$PR_LABELS"' in raw
+    assert '--labels "${{' not in raw

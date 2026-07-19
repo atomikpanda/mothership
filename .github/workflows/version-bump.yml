@@ -32,9 +32,11 @@ jobs:
         id: bump
         env:
           PYTHONPATH: src
+          # Pass PR label names through env, never interpolated into the shell
+          # command, so a crafted label name cannot inject shell (contents:write).
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: |
-          NEW_VERSION="$(python -m mship.ci.version_bump \
-            --labels "${{ join(github.event.pull_request.labels.*.name, ',') }}")"
+          NEW_VERSION="$(python -m mship.ci.version_bump --labels "$PR_LABELS")"
           echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Commit, tag, and push

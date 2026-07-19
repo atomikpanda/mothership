@@ -121,3 +121,39 @@ def test_main_defaults_to_patch_when_no_semver_label(tmp_path, capsys):
     repo = _mini_repo(tmp_path, "0.5.0")
     main(["--labels", "", "--repo-root", str(repo)])
     assert capsys.readouterr().out.strip() == "0.5.1"
+
+
+def test_rewrite_only_touches_project_table_version(tmp_path):
+    # A [tool.*] section with its own version key appears BEFORE [project];
+    # only the [project] version must be bumped (Greptile P2).
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.other]\nversion = "9.9.9"\n\n[project]\nname = "mship"\nversion = "0.5.0"\n',
+        encoding="utf-8",
+    )
+    pkg = tmp_path / "src" / "mship"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text('__version__ = "0.5.0"\n', encoding="utf-8")
+
+    rewrite_version_files(tmp_path, "0.6.0")
+
+    py = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'version = "9.9.9"' in py                      # tool section untouched
+    assert '[project]\nname = "mship"\nversion = "0.6.0"' in py
+    assert py.count('version = "0.6.0"') == 1             # only the project version bumped
+
+
+def test_main_returns_nonzero_on_bad_version(tmp_path, capsys):
+    # main() catches VersionError and reports cleanly instead of a traceback,
+    # while still exiting non-zero (Greptile P2 + AC4).
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "mship"\nversion = "1.2"\n', encoding="utf-8"
+    )
+    pkg = tmp_path / "src" / "mship"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text('__version__ = "1.2"\n', encoding="utf-8")
+
+    rc = main(["--labels", "", "--repo-root", str(tmp_path)])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured.out.strip() == ""                    # nothing on stdout
+    assert "failed" in captured.err.lower()

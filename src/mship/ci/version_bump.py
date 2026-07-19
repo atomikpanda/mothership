@@ -18,9 +18,10 @@ _LEVELS = ("major", "minor", "patch")  # highest-precedence first
 _VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
 # In-place single-line substitutions that preserve all other formatting.
-_PYPROJECT_VERSION_RE = re.compile(
-    r'(?P<pre>^version\s*=\s*")(?P<ver>\d+\.\d+\.\d+)(?P<post>")', re.MULTILINE
-)
+# pyproject is rewritten per-line and scoped to the [project] table (see
+# _rewrite_pyproject_version) so a `version = "..."` key in some [tool.*]
+# section can never be mistaken for the project version.
+_BARE_VERSION_RE = re.compile(r'(?P<pre>^version\s*=\s*")(?P<ver>\d+\.\d+\.\d+)(?P<post>")')
 _INIT_VERSION_RE = re.compile(
     r'(?P<pre>^__version__\s*=\s*")(?P<ver>\d+\.\d+\.\d+)(?P<post>")', re.MULTILINE
 )
@@ -72,12 +73,34 @@ def _sub_once(text: str, pattern: re.Pattern[str], new_version: str, where: Path
     return new_text
 
 
+def _rewrite_pyproject_version(text: str, new_version: str, where: Path) -> str:
+    """Rewrite the version line inside the [project] table only.
+
+    tomllib gives us the current value; this keeps the write scoped to the same
+    table so a `version = "..."` key in a [tool.*] section (even one that
+    appears before [project]) is never touched.
+    """
+    lines = text.splitlines(keepends=True)
+    in_project = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_project = stripped == "[project]"
+            continue
+        if in_project and _BARE_VERSION_RE.match(line):
+            lines[i] = _BARE_VERSION_RE.sub(
+                lambda m: f"{m.group('pre')}{new_version}{m.group('post')}", line, count=1
+            )
+            return "".join(lines)
+    raise VersionError(f"no [project].version line to update in {where}")
+
+
 def rewrite_version_files(repo_root: Path, new_version: str) -> None:
     repo_root = Path(repo_root)
     pyproject = repo_root / "pyproject.toml"
     init = repo_root / "src" / "mship" / "__init__.py"
     # Compute BOTH substitutions before writing EITHER, so a failure leaves both files intact.
-    new_py = _sub_once(pyproject.read_text(encoding="utf-8"), _PYPROJECT_VERSION_RE, new_version, pyproject)
+    new_py = _rewrite_pyproject_version(pyproject.read_text(encoding="utf-8"), new_version, pyproject)
     new_init = _sub_once(init.read_text(encoding="utf-8"), _INIT_VERSION_RE, new_version, init)
     pyproject.write_text(new_py, encoding="utf-8")
     init.write_text(new_init, encoding="utf-8")
@@ -92,9 +115,13 @@ def main(argv: list[str] | None = None) -> int:
     labels = re.split(r"[,\n]", args.labels)
     level = select_level(labels)
     repo_root = Path(args.repo_root).resolve()
-    current = read_current_version(repo_root / "pyproject.toml")
-    new_version = bump_version(current, level)
-    rewrite_version_files(repo_root, new_version)
+    try:
+        current = read_current_version(repo_root / "pyproject.toml")
+        new_version = bump_version(current, level)
+        rewrite_version_files(repo_root, new_version)
+    except VersionError as exc:
+        print(f"version-bump failed: {exc}", file=sys.stderr)
+        return 1
     print(new_version)
     return 0
 
