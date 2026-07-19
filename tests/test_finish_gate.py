@@ -388,3 +388,180 @@ def test_finish_appends_acceptance_block_to_pr_body(finish_gate_workspace):
     assert "Acceptance criteria" in create_cmds[0]      # block injected into the PR body
     assert "test:test-runs/1" in create_cmds[0]         # the evidence ref renders end-to-end
     assert "ac1" in create_cmds[0]                        # the criterion id is listed
+
+
+def test_finish_autolinks_testrun_and_commit_evidence(finish_gate_workspace):
+    """Spec 377 ac1/ac2/ac10: a spec-bound finish attaches the passing test-run to
+    every AC and each implementing commit to the AC(s) it names -- persisted."""
+    from mship.core.state import TestResult
+
+    workspace, mock_shell = finish_gate_workspace
+    wi = _seed_feature_with_ac(workspace)  # ev-spec, ac1, no evidence
+    runner.invoke(app, ["spawn", "--work-item", wi.id, "auto link", "--repos", "shared"])
+    _write_plan(workspace, "auto-link")
+
+    now = datetime.now(timezone.utc)
+
+    def _seed_tests(s):
+        t = s.tasks["auto-link"]
+        t.test_iteration = 1
+        t.test_results = {"shared": TestResult(status="pass", at=now)}
+
+    StateManager(workspace / ".mothership").mutate(_seed_tests)
+
+    sha = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+
+    def _run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc\trefs/heads/main\n", stderr="")
+        if "git log --format=%H" in cmd:
+            return ShellResult(returncode=0, stdout=f"{sha}\x1fimplement ac1 handling\x1e\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://github.com/org/shared/pull/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = _run
+
+    result = runner.invoke(app, ["finish", "--task", "auto-link"])
+    assert result.exit_code == 0, result.output
+
+    spec = SpecStore(workspace / "specs").find_by_id("ev-spec")
+    refs = {(e.kind, e.ref) for e in spec.acceptance_criteria[0].evidence}
+    assert ("test", "test-runs/1.shared") in refs  # ac1 + ac10
+    assert ("commit", sha) in refs                  # ac2
+
+
+def test_finish_autolink_noop_without_bound_spec(finish_gate_workspace):
+    """Spec 377 ac8: a bug WI (no bound spec) finishes without any evidence work
+    and without error -- the `if bound_spec is not None` guard skips auto-link."""
+    from mship.core.state import TestResult
+
+    workspace, _ = finish_gate_workspace
+    items = WorkItemStore(workspace / ".mothership" / "workitems")
+    wi = items.create(title="fix it", kind="bug", workspace="ws",
+                      now=datetime.now(timezone.utc))
+    runner.invoke(app, ["spawn", "--work-item", wi.id, "auto noop", "--repos", "shared"])
+
+    now = datetime.now(timezone.utc)
+
+    def _seed_tests(s):
+        t = s.tasks["auto-noop"]
+        t.test_iteration = 1
+        t.test_results = {"shared": TestResult(status="pass", at=now)}
+
+    StateManager(workspace / ".mothership").mutate(_seed_tests)
+
+    result = runner.invoke(app, ["finish", "--task", "auto-noop"])
+    assert result.exit_code == 0, result.output
+    state = StateManager(workspace / ".mothership").load()
+    assert state.tasks["auto-noop"].pr_urls.get("shared") == "https://github.com/org/shared/pull/1"
+    assert SpecStore(workspace / "specs").list() == []  # no spec created or touched
+
+
+def test_finish_pr_body_renders_autolinked_evidence(finish_gate_workspace):
+    """Spec 377 ac9: the PR body's acceptance block (unchanged renderer) shows the
+    auto-attached test:/commit: refs with a checked box."""
+    from mship.core.state import TestResult
+
+    workspace, mock_shell = finish_gate_workspace
+    wi = _seed_feature_with_ac(workspace)
+    runner.invoke(app, ["spawn", "--work-item", wi.id, "auto body", "--repos", "shared"])
+    _write_plan(workspace, "auto-body")
+
+    now = datetime.now(timezone.utc)
+
+    def _seed_tests(s):
+        t = s.tasks["auto-body"]
+        t.test_iteration = 1
+        t.test_results = {"shared": TestResult(status="pass", at=now)}
+
+    StateManager(workspace / ".mothership").mutate(_seed_tests)
+
+    sha = "0011223344556677889900112233445566778899"
+
+    def _run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc\trefs/heads/main\n", stderr="")
+        if "git log --format=%H" in cmd:
+            return ShellResult(returncode=0, stdout=f"{sha}\x1fimplement ac1\x1e\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://github.com/org/shared/pull/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = _run
+
+    result = runner.invoke(app, ["finish", "--task", "auto-body"])
+    assert result.exit_code == 0, result.output
+    create_cmds = [c.args[0] for c in mock_shell.run.call_args_list if "gh pr create" in c.args[0]]
+    assert create_cmds, "expected a gh pr create call"
+    body = create_cmds[0]
+    assert "## Acceptance criteria" in body
+    assert "test:test-runs/1.shared" in body   # test-run rendered
+    assert f"commit:{sha}" in body              # commit rendered
+    assert "[x]" in body and "ac1" in body      # criterion checked + listed
+
+
+def test_finish_autolink_idempotent_across_two_runs(finish_gate_workspace):
+    """Spec 377 ac6: running finish twice does not duplicate evidence for the same
+    (ref, kind, criterion)."""
+    from mship.core.state import TestResult
+
+    workspace, mock_shell = finish_gate_workspace
+    wi = _seed_feature_with_ac(workspace)
+    runner.invoke(app, ["spawn", "--work-item", wi.id, "auto idem", "--repos", "shared"])
+    _write_plan(workspace, "auto-idem")
+
+    now = datetime.now(timezone.utc)
+
+    def _seed_tests(s):
+        t = s.tasks["auto-idem"]
+        t.test_iteration = 1
+        t.test_results = {"shared": TestResult(status="pass", at=now)}
+
+    StateManager(workspace / ".mothership").mutate(_seed_tests)
+
+    sha = "ffeeddccbbaa99887766554433221100ffeeddcc"
+
+    def _run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc\trefs/heads/main\n", stderr="")
+        if "git log --format=%H" in cmd:
+            return ShellResult(returncode=0, stdout=f"{sha}\x1fimplement ac1\x1e\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="0\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://github.com/org/shared/pull/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = _run
+
+    assert runner.invoke(app, ["finish", "--task", "auto-idem"]).exit_code == 0
+    assert runner.invoke(app, ["finish", "--task", "auto-idem"]).exit_code == 0
+
+    spec = SpecStore(workspace / "specs").find_by_id("ev-spec")
+    evidence = spec.acceptance_criteria[0].evidence
+    assert sorted(e.kind for e in evidence) == ["commit", "test"]  # exactly one each
+    assert [e.ref for e in evidence if e.kind == "test"] == ["test-runs/1.shared"]
+    assert [e.ref for e in evidence if e.kind == "commit"] == [sha]

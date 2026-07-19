@@ -1438,6 +1438,45 @@ def register(app: typer.Typer, get_container):
                     "`mship spec evidence <spec> <ac> <ref>`."
                 )
 
+        # --- Auto-link acceptance-criterion evidence (spec 377) ---
+        # For a spec-bound task, attach the passing test-run(s) to EVERY acceptance
+        # criterion and each implementing commit to the AC(s) its message names --
+        # BEFORE build_acceptance_block renders below. Placed AFTER the evidence
+        # gate on purpose: it must not silently satisfy `--require-evidence` via an
+        # auto-attached test-run (that gate is out of scope for 377). Idempotent +
+        # additive; no bound spec => skipped entirely.
+        if bound_spec is not None:
+            from datetime import datetime as _dt_al, timezone as _tz_al
+
+            from mship.core.evidence_autolink import (
+                commits_since_base,
+                compute_evidence_links,
+                passing_test_run_refs,
+            )
+            from mship.core.spec_review import set_criterion_evidence
+            from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+
+            _al_commits: list[tuple[str, str]] = []
+            for _al_repo, _al_base in effective_bases.items():
+                _al_path = config.repos[_al_repo].path
+                if _al_repo in task.worktrees:
+                    _al_wt = Path(task.worktrees[_al_repo])
+                    if _al_wt.exists():
+                        _al_path = _al_wt
+                _al_commits.extend(
+                    commits_since_base(shell, _al_path, _al_base, task.branch)
+                )
+            _al_links = compute_evidence_links(
+                bound_spec, _al_commits, passing_test_run_refs(task),
+            )
+            if _al_links:
+                for _al_link in _al_links:
+                    set_criterion_evidence(
+                        bound_spec, _al_link.criterion_id, _al_link.kind, _al_link.ref,
+                    )
+                bound_spec.updated_at = _dt_al.now(_tz_al.utc)
+                SpecStore(workspace_root / SPECS_DIRNAME).save(bound_spec)
+
         # Render the acceptance-criteria PR-body section once (reuses bound_spec
         # from the gate above). Empty string when there's no bound spec or no ACs.
         from mship.core.pr import build_acceptance_block
