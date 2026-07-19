@@ -265,3 +265,62 @@ def test_install_hooks_refreshed_vs_up_to_date_labels(tmp_path: Path, monkeypatc
         container.state_dir.reset_override()
         container.config.reset()
         container.state_manager.reset()
+
+
+def test_interactive_wizard_emits_git_root_for_single_git_monorepo(tmp_path: Path, monkeypatch):
+    """The interactive wizard (plain `mship init` in a TTY) emits the SAME
+    relative-path + git_root monorepo config as `--detect` on a single-git
+    monorepo — closes the interactive-vs-detect divergence (issue #366 #4)."""
+    import subprocess
+
+    import InquirerPy.inquirer  # noqa: F401  (import so the patch target exists)
+    from mship.cli.init import _run_interactive
+    from mship.cli.output import Output
+    from mship.core.init import WorkspaceInitializer
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='root'\n")
+    for sub in ("web", "infra"):
+        (tmp_path / sub).mkdir()
+        (tmp_path / sub / "package.json").write_text("{}")
+
+    class _Prompt:
+        def __init__(self, val):
+            self._val = val
+
+        def execute(self):
+            return self._val
+
+    class _FakeInquirer:
+        # workspace name, then the manual-add loop (blank == stop)
+        def text(self, message="", default="", **kw):
+            return _Prompt("mono") if "Workspace name" in message else _Prompt("")
+
+        # select-repos (take all) vs depends_on (none)
+        def checkbox(self, message="", choices=None, **kw):
+            if "Select repos" in message:
+                return _Prompt([c["value"] for c in (choices or [])])
+            return _Prompt([])
+
+        # per-repo type vs env_runner
+        def select(self, message="", choices=None, default=None, **kw):
+            return _Prompt("service") if "type is" in message else _Prompt(None)
+
+        # taskfile scaffolding prompt
+        def confirm(self, message="", default=True, **kw):
+            return _Prompt(False)
+
+    monkeypatch.setattr("InquirerPy.inquirer", _FakeInquirer())
+
+    _run_interactive(
+        WorkspaceInitializer(), Output(), tmp_path,
+        tmp_path / "mothership.yaml", None, False,
+    )
+
+    data = yaml.safe_load((tmp_path / "mothership.yaml").read_text())
+    root_name = tmp_path.name
+    assert data["repos"][root_name]["path"] == "."
+    assert "git_root" not in data["repos"][root_name]
+    for sub in ("web", "infra"):
+        assert data["repos"][sub]["path"] == sub
+        assert data["repos"][sub]["git_root"] == root_name

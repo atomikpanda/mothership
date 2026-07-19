@@ -398,3 +398,20 @@ def test_plan_detected_repos_root_not_git_falls_back_to_standalone(tmp_path: Pat
         assert by_name[sub]["path"] == sub
     assert by_name[tmp_path.name]["path"] == "."
     assert by_name[tmp_path.name]["git_root"] is None
+
+
+def test_plan_detected_repos_out_of_tree_repo_is_standalone_absolute(tmp_path: Path):
+    """A repo OUTSIDE the workspace root (the interactive wizard's manual-add
+    case) cannot be a git_root child of it and has no path relative to it, so it
+    is emitted standalone with its absolute path — never raising on relative_to."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='root'\n")
+    outside = tmp_path.parent / "outside-repo"
+    detected = [
+        DetectedRepo(path=tmp_path, markers=[".git", "pyproject.toml"]),
+        DetectedRepo(path=outside, markers=[]),
+    ]
+    by_name = {e["name"]: e for e in WorkspaceInitializer().plan_detected_repos(tmp_path, detected)}
+    assert by_name["outside-repo"]["git_root"] is None
+    assert by_name["outside-repo"]["path"] == str(outside)
+    assert by_name[tmp_path.name]["path"] == "."

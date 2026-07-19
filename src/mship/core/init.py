@@ -95,7 +95,10 @@ class WorkspaceInitializer:
           equals the `(parent.path / child.path)` resolution contract.
         - If the root is not a git owner, non-git subdirs fall back to standalone
           emission — never point git_root at a non-git root (ac8).
-        All emitted paths are relative for portability (ac2).
+        - A repo OUTSIDE the workspace root (e.g. a manually-added path in the
+          interactive wizard) cannot be a git_root child of it and has no path
+          relative to it, so it is emitted standalone with its absolute path.
+        Detected subdir paths are relative for portability (ac2).
         """
         root_repo = next(
             (d for d in detected if d.path == workspace_path), None
@@ -109,6 +112,15 @@ class WorkspaceInitializer:
                 entries.append({
                     "name": root_name,
                     "path": ".",
+                    "type": "service",
+                    "git_root": None,
+                    "depends_on": [],
+                })
+                continue
+            if not d.path.is_relative_to(workspace_path):
+                entries.append({
+                    "name": d.path.name,
+                    "path": str(d.path),
                     "type": "service",
                     "git_root": None,
                     "depends_on": [],
