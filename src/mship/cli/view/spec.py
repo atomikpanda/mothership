@@ -37,12 +37,13 @@ class SpecView(ViewApp):
         log_manager=None,
         cli_task: Optional[str] = None,
         cwd: Optional[Path] = None,
+        header_provider=None,
         **kw,
     ):
         # Strip SpecView-specific kwargs before passing to super
         for k in ("workspace_root", "name_or_path", "task",
                   "state_manager", "state", "log_manager",
-                  "cli_task", "cwd"):
+                  "cli_task", "cwd", "header_provider"):
             kw.pop(k, None)
         super().__init__(**kw)
         self._workspace_root = workspace_root
@@ -53,6 +54,7 @@ class SpecView(ViewApp):
         self._log_manager = log_manager
         self._cli_task = cli_task
         self._cwd = cwd if cwd is not None else Path.cwd()
+        self._header_provider = header_provider
         self._markdown: Markdown | None = None
         self._error_static: Static | None = None
         self._body: VerticalScroll | None = None
@@ -131,6 +133,9 @@ class SpecView(ViewApp):
                 state=state,
             )
             source = path.read_text()
+            header = self._header_provider() if self._header_provider else None
+            if header:
+                source = f"**{header}**\n\n{source}"
             self._last_source = source
             self._last_error = ""
             self._markdown.update(source)
@@ -271,6 +276,8 @@ def register(app: typer.Typer, get_container):
         web: bool = typer.Option(False, "--web", help="Serve rendered HTML on localhost"),
         port: Optional[int] = typer.Option(None, "--port", help="Explicit port for --web"),
         task: Optional[str] = typer.Option(None, "--task", help="Narrow to one task's worktrees"),
+        workitem: Optional[str] = typer.Option(None, "--workitem", help="Select the spec linked to this WorkItem id"),
+        status: Optional[str] = typer.Option(None, "--status", help="Select the newest spec with this status"),
     ):
         """Render a spec file (newest by default)."""
         from pathlib import Path as _P
@@ -286,13 +293,53 @@ def register(app: typer.Typer, get_container):
         workspace_root = _P(container.config_path()).parent
         state = container.state_manager().load()
 
+        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+        from mship.core.workitem_store import WorkItemStore
+        from mship.core.view.spec_selection import (
+            SpecSelectionError, SpecSelector, load_canonical_specs, select_spec,
+        )
+        from mship.core.view.headers import header_for_spec
+        from mship.cli.view._workitems import load_workitem_index
+
+        active_selectors = [n for n, v in (("--workitem", workitem), ("--status", status)) if v is not None]
+        if len(active_selectors) > 1:
+            typer.echo("Error: --workitem and --status are mutually exclusive.", err=True)
+            raise typer.Exit(code=1)
+        if active_selectors and name_or_path is not None:
+            typer.echo(f"Error: {active_selectors[0]} and an explicit spec name are mutually exclusive.", err=True)
+            raise typer.Exit(code=1)
+        if active_selectors and task is not None:
+            typer.echo(f"Error: {active_selectors[0]} and --task are mutually exclusive.", err=True)
+            raise typer.Exit(code=1)
+
+        specs_dir = workspace_root / SPECS_DIRNAME
+        canonical_path: Optional[_P] = None
+        canonical_spec_id: Optional[str] = None
+        selector: Optional[SpecSelector] = None
+        if active_selectors:
+            selector = SpecSelector(work_item_id=workitem, status=status)
+        elif name_or_path is None and task is None and load_canonical_specs(specs_dir):
+            # AC1/AC2: deterministic canonical default (newest by created_at), not
+            # worktree/mtime. Only engages when the canonical store has real specs;
+            # otherwise fall through to the legacy task/worktree resolution below.
+            selector = SpecSelector()
+        if selector is not None:
+            items = WorkItemStore(_P(container.state_dir()) / "workitems")
+            try:
+                spec = select_spec(load_canonical_specs(specs_dir), items.list(), selector)
+            except SpecSelectionError as e:
+                typer.echo(f"Error: {e}", err=True)
+                raise typer.Exit(code=1)
+            canonical_path = SpecStore(specs_dir).path_for(spec)
+            canonical_spec_id = spec.id
+
         # Resolve target task. If the user specified an explicit spec name,
         # skip task resolution entirely (rendering is name-driven). If --watch
         # is set, defer task resolution into the view so resolver errors
         # become placeholder text instead of exit-1.
         resolved_task_slug: Optional[str] = None
         cli_task_for_view: Optional[str] = None
-        if name_or_path is None:
+        if canonical_path is None and name_or_path is None:
             if watch:
                 cli_task_for_view = task
             elif task is not None:
@@ -316,7 +363,7 @@ def register(app: typer.Typer, get_container):
         # --web still requires a resolvable spec path at request time.
         if web:
             try:
-                path = find_spec(
+                path = canonical_path or find_spec(
                     workspace_root, name_or_path, task=resolved_task_slug, state=state,
                 )
             except SpecNotFoundError as e:
@@ -331,7 +378,7 @@ def register(app: typer.Typer, get_container):
         from mship.cli.output import Output
         if not Output().is_tty:
             try:
-                path = find_spec(
+                path = canonical_path or find_spec(
                     workspace_root, name_or_path, task=resolved_task_slug, state=state,
                 )
             except SpecNotFoundError as e:
@@ -340,14 +387,18 @@ def register(app: typer.Typer, get_container):
             typer.echo(path.read_text(), nl=False)
             return
 
+        header_provider = None
+        if canonical_spec_id is not None:
+            header_provider = lambda: header_for_spec(canonical_spec_id, load_workitem_index(container))
         view = SpecView(
             workspace_root=workspace_root,
-            name_or_path=name_or_path,
+            name_or_path=str(canonical_path) if canonical_path is not None else name_or_path,
             task=resolved_task_slug,
             state_manager=container.state_manager(),
             log_manager=container.log_manager(),
             cli_task=cli_task_for_view,
             cwd=_P.cwd(),
+            header_provider=header_provider,
             watch=watch,
             interval=interval,
         )
