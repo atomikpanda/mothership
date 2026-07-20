@@ -471,3 +471,123 @@ def test_spec_cli_explicit_task_still_exits_on_unknown(tmp_path):
         assert "nope" in result.output
     finally:
         _reset_overrides()
+
+
+# --- PR1: canonical selection (AC1, AC2) + spec header (AC9) ---
+from mship.core.spec import Spec as _Spec
+from mship.core.spec_store import SPECS_DIRNAME as _SPECS_DIRNAME, SpecStore as _SpecStore
+from mship.core.state import Task as _Task
+from mship.core.workitem import WorkItem as _WorkItem
+from mship.core.workitem_store import WorkItemStore as _WorkItemStore
+
+
+def _seed_canonical(tmp_path, spec_id, *, status="draft", day=1, body="", wi_id=None):
+    now = datetime(2026, 7, day, tzinfo=timezone.utc)
+    _SpecStore(tmp_path / _SPECS_DIRNAME).save(_Spec(
+        id=spec_id, title=spec_id, status=status,
+        created_at=now, updated_at=now, body=body))
+    if wi_id is not None:
+        _WorkItemStore(tmp_path / ".mothership" / "workitems").save(_WorkItem(
+            id=wi_id, title=spec_id, workspace="t", kind="feature",
+            created_at=now, updated_at=now, spec_id=spec_id))
+
+
+def test_spec_cli_selects_by_workitem(tmp_path):
+    runner = CliRunner()
+    _setup_workspace(tmp_path)
+    _seed_canonical(tmp_path, "spec-wi", body="Canonical body for wi-7\n", wi_id="wi-7")
+    _seed_canonical(tmp_path, "spec-other", day=9, body="Other body\n")
+    try:
+        result = runner.invoke(app, ["view", "spec", "--workitem", "wi-7"])
+        assert result.exit_code == 0, result.output
+        assert "Canonical body for wi-7" in result.output
+        assert "Other body" not in result.output
+    finally:
+        _reset_overrides()
+
+
+def test_spec_cli_selects_by_status(tmp_path):
+    runner = CliRunner()
+    _setup_workspace(tmp_path)
+    _seed_canonical(tmp_path, "spec-review", status="needs_review", body="Review me\n")
+    _seed_canonical(tmp_path, "spec-approved", status="approved", day=9, body="Approved\n")
+    try:
+        result = runner.invoke(app, ["view", "spec", "--status", "needs_review"])
+        assert result.exit_code == 0, result.output
+        assert "Review me" in result.output
+        assert "Approved" not in result.output
+    finally:
+        _reset_overrides()
+
+
+def test_spec_cli_default_is_newest_by_created_at(tmp_path):
+    runner = CliRunner()
+    _setup_workspace(tmp_path)
+    _seed_canonical(tmp_path, "spec-old", day=1, body="Old body\n")
+    _seed_canonical(tmp_path, "spec-new", day=9, body="Newest body\n")
+    try:
+        result = runner.invoke(app, ["view", "spec"])
+        assert result.exit_code == 0, result.output
+        assert "Newest body" in result.output
+    finally:
+        _reset_overrides()
+
+
+def test_spec_cli_default_ignores_task_worktree(tmp_path):
+    """AC1: a spec that lives only in the canonical <root>/specs store renders
+    even though the (only) task's worktree has no specs dir."""
+    runner = CliRunner()
+    _setup_workspace(tmp_path)
+    wt = tmp_path / "wt-feature"
+    wt.mkdir()
+    StateManager(tmp_path / ".mothership").save(WorkspaceState(tasks={"a": _Task(
+        slug="a", description="d", phase="dev",
+        created_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        affected_repos=["r"], branch="feat/a", worktrees={"r": wt})}))
+    _seed_canonical(tmp_path, "spec-canonical", body="Only in canonical store\n")
+    try:
+        result = runner.invoke(app, ["view", "spec"])
+        assert result.exit_code == 0, result.output
+        assert "Only in canonical store" in result.output
+    finally:
+        _reset_overrides()
+
+
+def test_spec_cli_workitem_status_mutually_exclusive(tmp_path):
+    runner = CliRunner()
+    _setup_workspace(tmp_path)
+    try:
+        result = runner.invoke(app, ["view", "spec", "--workitem", "x", "--status", "y"])
+        assert result.exit_code != 0
+        assert "mutually exclusive" in result.output.lower()
+    finally:
+        _reset_overrides()
+
+
+def test_spec_cli_unknown_workitem_exits_1(tmp_path):
+    runner = CliRunner()
+    _setup_workspace(tmp_path)
+    _seed_canonical(tmp_path, "spec-x", body="x\n")
+    try:
+        result = runner.invoke(app, ["view", "spec", "--workitem", "wi-missing"])
+        assert result.exit_code == 1, result.output
+        assert "wi-missing" in result.output
+    finally:
+        _reset_overrides()
+
+
+@pytest.mark.asyncio
+async def test_spec_view_renders_workitem_header(tmp_path):
+    specs = tmp_path / "docs" / "superpowers" / "specs"
+    specs.mkdir(parents=True)
+    (specs / "s.md").write_text("# Hello\n\nBody text.\n")
+    view = SpecView(
+        workspace_root=tmp_path, name_or_path=None,
+        header_provider=lambda: "◆ wi-1  ·  Overhaul  ·  [ready]",
+        watch=False, interval=1.0,
+    )
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        text = view.rendered_text()
+        assert "wi-1" in text and "Overhaul" in text
+        assert "Body text" in text

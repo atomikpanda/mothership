@@ -302,3 +302,61 @@ async def test_logs_view_non_watch_with_task_slug_does_not_call_resolver(tmp_pat
     async with view.run_test() as pilot:
         await pilot.pause()
         assert "ok" in view.rendered_text()
+
+
+# --- PR1: WorkItem/phase header (AC9) ---
+from datetime import datetime as _dt, timezone as _tz
+
+from mship.core.workitem import WorkItem as _WorkItem
+from mship.core.view.workitem_index import build_workitem_index as _bwi
+
+
+class _HeaderTask:
+    def __init__(self, slug, phase):
+        self.slug = slug
+        self.phase = phase
+
+
+class _HeaderState:
+    def __init__(self, task):
+        self.tasks = {task.slug: task}
+
+
+class _HeaderStateMgr:
+    def __init__(self, task):
+        self._task = task
+
+    def load(self):
+        return _HeaderState(self._task)
+
+
+def test_journal_prepends_workitem_header():
+    now = _dt(2026, 7, 1, tzinfo=_tz.utc)
+    entries = [_Entry(now, "did a thing")]
+    wi = _WorkItem(id="wi-1", title="Overhaul", workspace="ws", kind="feature",
+                   created_at=now, updated_at=now, task_slugs=["t1"])
+    workitems = _bwi([wi], {}, {}, {})
+    view = LogsView(
+        state_manager=_HeaderStateMgr(_HeaderTask("t1", "dev")),
+        log_manager=_FakeLogMgr(entries),
+        task_slug="t1",
+        workitem_loader=lambda: workitems,
+        watch=False, interval=1.0,
+    )
+    text = view.gather()
+    assert "wi-1" in text and "Overhaul" in text
+    assert "task t1 [dev]" in text
+    assert "did a thing" in text  # journal body preserved
+
+
+def test_journal_no_header_without_loader():
+    now = _dt(2026, 7, 1, tzinfo=_tz.utc)
+    view = LogsView(
+        state_manager=_FakeStateMgr(),
+        log_manager=_FakeLogMgr([_Entry(now, "hello")]),
+        task_slug="t1",
+        watch=False, interval=1.0,
+    )
+    text = view.gather()
+    assert "◆" not in text
+    assert "hello" in text

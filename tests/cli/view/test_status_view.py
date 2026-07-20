@@ -230,3 +230,46 @@ def test_status_cli_rejects_unknown_task(tmp_path: Path):
         container.config.reset()
         container.state_manager.reset_override()
         container.state_manager.reset()
+
+
+# --- PR1: WorkItem grouping (AC5) ---
+from mship.core.workitem import WorkItem as _WorkItem
+from mship.core.view.workitem_index import build_workitem_index as _bwi
+
+
+def test_status_view_groups_tasks_under_workitem(tmp_path):
+    from mship.cli.view.status import StatusView
+    now = datetime.now(timezone.utc)
+    tasks = {"a": _task("a", phase="dev"), "b": _task("b", phase="review"),
+             "c": _task("c", phase="plan")}
+
+    class SM:
+        def load(self):
+            return WorkspaceState(tasks=tasks)
+
+    wi = _WorkItem(id="wi-1", title="Overhaul", workspace="ws", kind="feature",
+                   created_at=now, updated_at=now, task_slugs=["a", "b"])
+    workitems = _bwi([wi], {}, tasks, {})
+
+    view = StatusView(state_manager=SM(), workspace_root=tmp_path, task_filter=None,
+                      workitem_loader=lambda: workitems)
+    text = view.gather()
+    assert "wi-1" in text and "Overhaul" in text
+    # Grouped tasks appear with their own phase lines.
+    assert "Task:   a" in text and "Task:   b" in text
+    assert "Phase:  dev" in text and "Phase:  review" in text
+    # Unlinked task 'c' still shown (trailing ungrouped block).
+    assert "Task:   c" in text
+
+
+def test_status_view_without_loader_is_flat(tmp_path):
+    from mship.cli.view.status import StatusView
+
+    class SM:
+        def load(self):
+            return WorkspaceState(tasks={"a": _task("a"), "b": _task("b")})
+
+    view = StatusView(state_manager=SM(), workspace_root=tmp_path, task_filter=None)
+    text = view.gather()
+    assert "Task:   a" in text and "Task:   b" in text
+    assert "◆" not in text  # no WorkItem header without a loader

@@ -6,6 +6,12 @@ import typer
 from mship.cli.view._base import ViewApp
 from mship.core.state import Task, WorkspaceState
 from mship.core.view.task_index import build_task_index
+from mship.core.view.status_grouping import WorkItemTaskGroup, group_tasks_by_workitem
+
+
+def _render_group_header(group: WorkItemTaskGroup) -> str:
+    title = group.title or "(untitled)"
+    return f"◆ {group.work_item_id}  ·  {title}  ·  [{group.phase}]"
 
 
 def _render_task(task: Task, open_questions: list[str] | None = None) -> str:
@@ -48,12 +54,13 @@ def _render_task(task: Task, open_questions: list[str] | None = None) -> str:
 
 class StatusView(ViewApp):
     def __init__(self, state_manager, workspace_root: Path, task_filter: Optional[str],
-                 log_manager=None, **kw):
+                 log_manager=None, workitem_loader=None, **kw):
         super().__init__(**kw)
         self._state_manager = state_manager
         self._workspace_root = workspace_root
         self._task_filter = task_filter
         self._log_manager = log_manager
+        self._workitem_loader = workitem_loader
 
     def _open_questions(self, slug: str) -> list[str]:
         if self._log_manager is None:
@@ -74,8 +81,15 @@ class StatusView(ViewApp):
         index = build_task_index(state, self._workspace_root)
         if not index:
             return "No tasks. Run `mship spawn \"…\"` to start one."
-        blocks = [_render_task(state.tasks[s.slug], self._open_questions(s.slug)) for s in index]
-        return "\n\n─────────────\n\n".join(blocks)
+        workitems = self._workitem_loader() if self._workitem_loader is not None else []
+        groups = group_tasks_by_workitem(index, workitems)
+        blocks: list[str] = []
+        for g in groups:
+            body = "\n\n─────────────\n\n".join(
+                _render_task(state.tasks[t.slug], self._open_questions(t.slug)) for t in g.tasks
+            )
+            blocks.append(f"{_render_group_header(g)}\n\n{body}" if g.work_item_id is not None else body)
+        return "\n\n═════════════\n\n".join(blocks)
 
 
 def register(app: typer.Typer, get_container):
@@ -96,11 +110,13 @@ def register(app: typer.Typer, get_container):
             t = resolve_or_exit(state, task)
             task_slug = t.slug
         workspace_root = _P(container.config_path()).parent
+        from mship.cli.view._workitems import load_workitem_index
         view = StatusView(
             state_manager=container.state_manager(),
             workspace_root=workspace_root,
             task_filter=task_slug,
             log_manager=container.log_manager(),
+            workitem_loader=lambda: load_workitem_index(container),
             watch=watch,
             interval=interval,
         )
