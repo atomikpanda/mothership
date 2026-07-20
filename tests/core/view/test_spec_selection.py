@@ -95,3 +95,45 @@ def test_select_spec_precedence_workitem_over_status_over_default():
     assert select_spec(specs, items, SpecSelector(work_item_id="wi-1")).id == "s-wi"
     assert select_spec(specs, items, SpecSelector(status="needs_review")).id == "s-nr"
     assert select_spec(specs, items, SpecSelector()).id == "s-new"
+
+
+# --- Task 2: canonical read is branch/worktree independent (AC1) ---
+
+from mship.core.spec_store import SpecStore
+from mship.core.view.spec_selection import load_canonical_specs
+
+
+def _seed(store_dir, spec_id, *, created):
+    store = SpecStore(store_dir)
+    return store.save(Spec(id=spec_id, title=spec_id, status="draft",
+                           created_at=created, updated_at=created,
+                           body=f"Body of {spec_id}\n"))
+
+
+def test_load_canonical_specs_reads_only_the_workspace_store(tmp_path):
+    # Canonical store at <root>/specs.
+    _seed(tmp_path / "specs", "canonical-one", created=_dt(3))
+    # A task worktree with its OWN legacy specs dir that must be ignored (AC1).
+    wt_specs = tmp_path / "wt-feature" / "docs" / "superpowers" / "specs"
+    wt_specs.mkdir(parents=True)
+    (wt_specs / "worktree-only.md").write_text("# worktree only\n")
+
+    specs = load_canonical_specs(tmp_path / "specs")
+    assert [s.id for s in specs] == ["canonical-one"]
+
+
+def test_load_canonical_specs_skips_unparseable(tmp_path):
+    _seed(tmp_path / "specs", "good", created=_dt(2))
+    (tmp_path / "specs" / "raw-no-frontmatter.md").write_text("# no frontmatter\n")
+    assert [s.id for s in load_canonical_specs(tmp_path / "specs")] == ["good"]
+
+
+def test_load_canonical_specs_missing_dir_is_empty(tmp_path):
+    assert load_canonical_specs(tmp_path / "specs") == []
+
+
+def test_select_default_over_canonical_store_round_trip(tmp_path):
+    _seed(tmp_path / "specs", "older", created=_dt(1))
+    _seed(tmp_path / "specs", "newest", created=_dt(8))
+    specs = load_canonical_specs(tmp_path / "specs")
+    assert select_default(specs).id == "newest"
