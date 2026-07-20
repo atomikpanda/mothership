@@ -12,6 +12,7 @@ from mship.core.task_resolver import (
     UnknownTaskError,
     resolve_task,
 )
+from mship.core.view.headers import header_for_task
 
 
 class LogsView(ViewApp):
@@ -25,6 +26,7 @@ class LogsView(ViewApp):
         all_: bool = False,
         cli_task: Optional[str] = None,
         cwd: Optional[Path] = None,
+        workitem_loader=None,
         **kw,
     ):
         super().__init__(**kw)
@@ -35,6 +37,14 @@ class LogsView(ViewApp):
         self._all = all_
         self._cli_task = cli_task
         self._cwd = cwd if cwd is not None else Path.cwd()
+        self._workitem_loader = workitem_loader
+
+    def _header(self, slug: str) -> str | None:
+        if self._workitem_loader is None:
+            return None
+        task = self._state_manager.load().tasks.get(slug)
+        phase = getattr(task, "phase", None) if task is not None else None
+        return header_for_task(slug, phase, self._workitem_loader())
 
     def _resolve_slug(self) -> str:
         """Return the task slug to render for this tick.
@@ -84,25 +94,28 @@ class LogsView(ViewApp):
         if scope is not None:
             entries = [e for e in entries if e.repo is None or e.repo == scope]
         if not entries:
-            return f"Log for {slug} is empty"
-        lines = []
-        for entry in entries:
-            ts = entry.timestamp.strftime("%Y-%m-%d %H:%M:%S")
-            meta_parts: list[str] = []
-            if entry.repo:
-                meta_parts.append(f"repo={entry.repo}")
-            if entry.iteration is not None:
-                meta_parts.append(f"iter={entry.iteration}")
-            if entry.test_state:
-                meta_parts.append(f"test={entry.test_state}")
-            if entry.action:
-                meta_parts.append(f"action={entry.action}")
-            meta = f"  [{' '.join(meta_parts)}]" if meta_parts else ""
-            lines.append(f"{ts}{meta}")
-            lines.append(f"  {entry.message}")
-            if entry.open_question:
-                lines.append(f"  ⚠ open: {entry.open_question}")
-        return "\n".join(lines)
+            body = f"Log for {slug} is empty"
+        else:
+            lines = []
+            for entry in entries:
+                ts = entry.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+                meta_parts: list[str] = []
+                if entry.repo:
+                    meta_parts.append(f"repo={entry.repo}")
+                if entry.iteration is not None:
+                    meta_parts.append(f"iter={entry.iteration}")
+                if entry.test_state:
+                    meta_parts.append(f"test={entry.test_state}")
+                if entry.action:
+                    meta_parts.append(f"action={entry.action}")
+                meta = f"  [{' '.join(meta_parts)}]" if meta_parts else ""
+                lines.append(f"{ts}{meta}")
+                lines.append(f"  {entry.message}")
+                if entry.open_question:
+                    lines.append(f"  ⚠ open: {entry.open_question}")
+            body = "\n".join(lines)
+        header = self._header(slug)
+        return f"{header}\n\n{body}" if header else body
 
 
 def register(app: typer.Typer, get_container):
@@ -132,6 +145,7 @@ def register(app: typer.Typer, get_container):
             if not all_ and t.active_repo is not None:
                 scope = t.active_repo
 
+        from mship.cli.view._workitems import load_workitem_index
         view = LogsView(
             state_manager=container.state_manager(),
             log_manager=container.log_manager(),
@@ -140,6 +154,7 @@ def register(app: typer.Typer, get_container):
             all_=all_,
             cli_task=cli_task,
             cwd=Path.cwd(),
+            workitem_loader=lambda: load_workitem_index(container),
             watch=watch,
             interval=interval,
         )
