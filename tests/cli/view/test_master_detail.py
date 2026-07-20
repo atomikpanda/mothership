@@ -54,3 +54,52 @@ async def test_tab_toggles_focus_between_panes():
         await pilot.press("tab")
         await pilot.pause()
         assert view.focus_target() == "master"
+
+
+@pytest.mark.asyncio
+async def test_j_k_move_selection_when_master_focused():
+    rows = [ListRow("a", "Alpha", "dA"), ListRow("b", "Bravo", "dB"),
+            ListRow("c", "Cara", "dC")]
+    view = _DemoView(rows)
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        view._master.focus()
+        await pilot.pause()
+        assert view.selected_key() == "a"
+        await pilot.press("j")
+        await pilot.pause()
+        assert view.selected_key() == "b"
+        assert view.detail_text() == "dB"
+        await pilot.press("k")
+        await pilot.pause()
+        assert view.selected_key() == "a"
+        assert view.detail_text() == "dA"
+
+
+@pytest.mark.asyncio
+async def test_enter_drills_into_detail():
+    view = _DemoView([ListRow("a", "Alpha", "dA")])
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        view._master.focus()
+        await pilot.pause()
+        assert view.focus_target() == "master"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert view.focus_target() == "detail"
+
+
+@pytest.mark.asyncio
+async def test_j_scrolls_detail_when_detail_focused():
+    long_detail = "\n".join(f"line {i}" for i in range(200))
+    view = _DemoView([ListRow("a", "Alpha", long_detail)])
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("tab")  # focus the detail pane
+        await pilot.pause()
+        assert view.focus_target() == "detail"
+        assert view.detail_scroll_y() == 0
+        for _ in range(5):
+            await pilot.press("j")
+        await pilot.pause()
+        assert view.detail_scroll_y() > 0

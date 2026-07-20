@@ -113,6 +113,11 @@ class MasterDetailApp(App):
         )
         await self._master.clear()
         await self._master.extend([ListItem(Label(r.label)) for r in self._visible])
+        # Textual's ListView starts with index=None (nothing highlighted) until a
+        # cursor move; set it explicitly so the first row is genuinely highlighted
+        # on mount and j/k/enter operate on a real cursor (not None).
+        if self._visible:
+            self._master.index = 0
         self.call_after_refresh(self._update_detail)
 
     def _current_index(self) -> int | None:
@@ -145,6 +150,30 @@ class MasterDetailApp(App):
         else:
             self._detail.focus()
 
+    # --- navigation ---
+    def action_nav_down(self) -> None:
+        if self._detail_focused():
+            assert self._detail is not None
+            self._detail.scroll_relative(y=1, animate=False)
+        elif self._master is not None:
+            self._master.action_cursor_down()
+
+    def action_nav_up(self) -> None:
+        if self._detail_focused():
+            assert self._detail is not None
+            self._detail.scroll_relative(y=-1, animate=False)
+        elif self._master is not None:
+            self._master.action_cursor_up()
+
+    def action_drill(self) -> None:
+        # Enter drills into the highlighted entity: focus the detail pane so it
+        # can be scrolled/read. (Cross-entity open/copy is a later PR.)
+        if self._detail is not None:
+            self._detail.focus()
+
+    def on_list_view_selected(self, event) -> None:  # Textual: ListView.Selected (enter)
+        self.action_drill()
+
     # --- test helpers ---
     _ANSI = re.compile(r"\x1b\[[0-9;]*[mKHFABCDJsu]")
 
@@ -169,3 +198,7 @@ class MasterDetailApp(App):
         if self._detail_focused():
             return "detail"
         return "master"
+
+    def detail_scroll_y(self) -> float:
+        assert self._detail is not None
+        return self._detail.scroll_y
