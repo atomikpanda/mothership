@@ -86,9 +86,12 @@ class MasterDetailApp(App):
 
     # --- lifecycle ---
     def compose(self) -> ComposeResult:
-        self._header = Static("")
+        # markup=False everywhere dynamic canonical text is shown: criterion text,
+        # task slugs, thread subjects etc. are user-authored and may contain Rich
+        # syntax like "[red]"; render them literally, never interpret/crash on it.
+        self._header = Static("", markup=False)
         self._master = ListView(id="master")
-        self._detail_static = Static("", expand=True)
+        self._detail_static = Static("", expand=True, markup=False)
         self._detail = VerticalScroll(self._detail_static, id="detail")
         self._filter_input = Input(placeholder="filter (/ to focus)…", id="filter")
         yield self._header
@@ -114,7 +117,9 @@ class MasterDetailApp(App):
             else list(self._rows)
         )
         await self._master.clear()
-        await self._master.extend([ListItem(Label(r.label)) for r in self._visible])
+        await self._master.extend(
+            [ListItem(Label(r.label, markup=False)) for r in self._visible]
+        )
         # Textual's ListView starts with index=None (nothing highlighted) until a
         # cursor move; set it explicitly so the first row is genuinely highlighted
         # on mount and j/k/enter operate on a real cursor (not None).

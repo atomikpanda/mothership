@@ -139,3 +139,17 @@ async def test_escape_closes_filter_and_refocuses_master():
         await pilot.press("escape")
         await pilot.pause()
         assert view.focus_target() == "master"
+
+
+@pytest.mark.asyncio
+async def test_rich_markup_in_canonical_text_is_shown_literally():
+    # Greptile #391: labels/detail/header come from user-authored canonical records
+    # and may contain Rich syntax like "[red]" or malformed "[". markup=False must
+    # render them literally without interpreting or crashing.
+    rows = [ListRow("a", "ac1 [red]danger[/red] text", "detail with [bold]x[/] and [oops")]
+    view = _DemoView(rows)
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        assert view.list_labels() == ["ac1 [red]danger[/red] text"]
+        assert "[bold]x[/]" in view.detail_text()
+        assert "[oops" in view.detail_text()   # malformed markup did not crash render
