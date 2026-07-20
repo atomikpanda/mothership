@@ -45,14 +45,16 @@ class MasterDetailApp(App):
     """
 
     # `tab` is priority so it beats Textual's built-in Screen `tab`->focus_next
-    # binding; every other key stays non-priority so it can be typed into the
+    # binding. `slash` is priority so the App consumes it to open/focus the filter
+    # BEFORE the (newly focused) Input can insert a stray "/" character into the
+    # filter value. Every other key stays non-priority so it can be typed into the
     # filter Input while that Input is focused.
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("ctrl+c", "quit", "Quit", show=False),
         Binding("r", "reload", "Refresh"),
         Binding("tab", "toggle_focus", "Switch pane", priority=True),
-        Binding("slash", "start_filter", "Filter"),
+        Binding("slash", "start_filter", "Filter", priority=True),
         Binding("enter", "drill", "Open"),
         Binding("j,down", "nav_down", "Down", show=False),
         Binding("k,up", "nav_up", "Up", show=False),
@@ -173,6 +175,24 @@ class MasterDetailApp(App):
 
     def on_list_view_selected(self, event) -> None:  # Textual: ListView.Selected (enter)
         self.action_drill()
+
+    # --- incremental filter ---
+    def action_start_filter(self) -> None:
+        if self._filter_input is not None:
+            self._filter_input.focus()
+
+    def action_close_filter(self) -> None:
+        if self._master is not None:
+            self._master.focus()
+
+    async def on_input_changed(self, event) -> None:  # Textual: Input.Changed
+        if event.input is self._filter_input:
+            self._filter = event.value
+            await self._apply_filter()
+
+    def on_input_submitted(self, event) -> None:  # Textual: Input.Submitted (enter)
+        if event.input is self._filter_input:
+            self.action_close_filter()
 
     # --- test helpers ---
     _ANSI = re.compile(r"\x1b\[[0-9;]*[mKHFABCDJsu]")

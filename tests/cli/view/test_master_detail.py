@@ -103,3 +103,39 @@ async def test_j_scrolls_detail_when_detail_focused():
             await pilot.press("j")
         await pilot.pause()
         assert view.detail_scroll_y() > 0
+
+
+@pytest.mark.asyncio
+async def test_slash_filters_list_incrementally():
+    rows = [ListRow("a", "Alpha", "dA"), ListRow("b", "Bravo", "dB"),
+            ListRow("c", "Alpaca", "dC")]
+    view = _DemoView(rows)
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        assert len(view.list_labels()) == 3
+        await pilot.press("slash")
+        await pilot.pause()
+        assert view.focus_target() == "filter"
+        for ch in "alp":
+            await pilot.press(ch)
+        await pilot.pause()
+        # "alp" (case-insensitive) matches Alpha and Alpaca, not Bravo.
+        assert set(view.list_labels()) == {"Alpha", "Alpaca"}
+        await pilot.press("enter")  # submit closes the filter, refocuses the list
+        await pilot.pause()
+        assert view.focus_target() == "master"
+        # Filter text persists; list stays filtered.
+        assert set(view.list_labels()) == {"Alpha", "Alpaca"}
+
+
+@pytest.mark.asyncio
+async def test_escape_closes_filter_and_refocuses_master():
+    view = _DemoView([ListRow("a", "Alpha", "dA")])
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("slash")
+        await pilot.pause()
+        assert view.focus_target() == "filter"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert view.focus_target() == "master"
