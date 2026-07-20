@@ -53,6 +53,7 @@ def assemble_queue(
     """
     specs: list[QueueItem] = []
     blocked: list[QueueItem] = []
+    prs: list[QueueItem] = []
     for s in summaries:
         if s.phase == "done":
             continue
@@ -73,4 +74,11 @@ def assemble_queue(
                     work_item_title=s.title, phase=s.phase,
                     task_slug=slug, blocked_reason=task.blocked_reason,
                 ))
-    return specs + blocked
+            for repo, url in task.pr_urls.items():
+                prs.append(QueueItem(
+                    kind="pr-awaiting", key=f"pr:{slug}:{repo}",
+                    workspace=s.workspace, work_item_id=s.id,
+                    work_item_title=s.title, phase=s.phase,
+                    task_slug=slug, repo=repo, pr_url=url,
+                ))
+    return specs + blocked + prs

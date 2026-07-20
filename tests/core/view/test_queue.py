@@ -70,3 +70,51 @@ def test_unblocked_task_is_not_in_queue():
                 affected_repos=["r"], branch="feat/a")
     summary = _summary(tasks=[task])
     assert assemble_queue([summary], _tasks_by_slug(task)) == []
+
+
+def test_recorded_pr_urls_become_pr_queue_items():
+    task = Task(slug="a", description="d", phase="review", created_at=_now(),
+                affected_repos=["r"], branch="feat/a",
+                pr_urls={"r": "https://gh/pr/1"}, finished_at=_now())
+    summary = _summary(tasks=[task])
+    items = assemble_queue([summary], _tasks_by_slug(task))
+    assert [i.kind for i in items] == ["pr-awaiting"]
+    it = items[0]
+    assert it.key == "pr:a:r"
+    assert it.repo == "r"
+    assert it.pr_url == "https://gh/pr/1"
+    assert it.task_slug == "a"
+
+
+def test_done_workitem_prs_are_excluded():
+    # A closed/merged item derives phase "done" (terminal spec status). Its
+    # recorded pr_urls must NOT show as awaiting action — no live gh call needed.
+    task = Task(slug="a", description="d", phase="review", created_at=_now(),
+                affected_repos=["r"], branch="feat/a",
+                pr_urls={"r": "https://gh/pr/1"}, finished_at=_now())
+    spec = Spec(id="spec-1", title="done spec", status="implemented",
+                created_at=_now(), updated_at=_now(), body="b\n")
+    wi = WorkItem(id="wi-1", title="Overhaul", workspace="ws", kind="feature",
+                  created_at=_now(), updated_at=_now(), spec_id="spec-1",
+                  task_slugs=["a"])
+    summary = build_workitem_index([wi], {"spec-1": spec}, {"a": task}, {})[0]
+    assert summary.phase == "done"
+    assert assemble_queue([summary], _tasks_by_slug(task)) == []
+
+
+def test_queue_order_is_specs_then_blocked_then_prs():
+    spec = Spec(id="spec-1", title="Overhaul spec", status="needs_review",
+                created_at=_now(), updated_at=_now(), body="b\n")
+    blocked = Task(slug="a", description="d", phase="dev", created_at=_now(),
+                   affected_repos=["r"], branch="feat/a", blocked_reason="x")
+    pr = Task(slug="b", description="d", phase="review", created_at=_now(),
+              affected_repos=["r"], branch="feat/b",
+              pr_urls={"r": "https://gh/pr/9"}, finished_at=_now())
+    wi = WorkItem(id="wi-1", title="Overhaul", workspace="ws", kind="feature",
+                  created_at=_now(), updated_at=_now(), spec_id="spec-1",
+                  task_slugs=["a", "b"])
+    summary = build_workitem_index(
+        [wi], {"spec-1": spec}, {"a": blocked, "b": pr}, {})[0]
+    items = assemble_queue([summary], _tasks_by_slug(blocked, pr))
+    assert [i.kind for i in items] == [
+        "spec-needs-review", "blocked-task", "pr-awaiting"]
