@@ -43,3 +43,25 @@ def _resolve_queue(container) -> list[QueueItem]:
     summaries = load_workitem_index(container)
     tasks = container.state_manager().load().tasks
     return assemble_queue(summaries, tasks)
+
+
+def register(app: "typer.Typer", get_container):
+    @app.command()
+    def queue():
+        """Cross-workspace attention/triage queue: specs awaiting review, blocked
+        tasks, and PRs awaiting action — each a navigable row with a detail pane.
+        Read-only (navigate + view)."""
+        from mship.cli.output import Output
+        from mship.core.view.queue import render_text
+
+        container = get_container()
+        items = _resolve_queue(container)
+
+        # Non-TTY short-circuit (mirrors `mship view workitem`): the Textual TUI
+        # hangs when stdout isn't a terminal (agent pipes, CI, CliRunner). Print
+        # the flat queue text and exit instead.
+        if not Output().is_tty:
+            typer.echo(render_text(items))
+            return
+
+        QueueView(items).run()
