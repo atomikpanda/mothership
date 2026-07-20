@@ -59,9 +59,11 @@ class DiffView(ViewApp):
         scope_to_active_path: Path | None = None,
         resolve_paths: Callable[[], tuple[list[Path], Path | None]] | None = None,
         base_branch_by_path: dict[Path, str | None] | None = None,
+        header_provider: Callable[[], str | None] | None = None,
         **kw,
     ):
         super().__init__(**kw)
+        self._header_provider = header_provider
         self._resolve_paths = resolve_paths
         self._base_branch_by_path: dict[Path, str | None] = dict(base_branch_by_path or {})
         if resolve_paths is None:
@@ -89,17 +91,20 @@ class DiffView(ViewApp):
         self._test_override: dict[Path, WorktreeDiff] | None = None
 
         # Widget refs (populated in compose)
+        self._header: Static | None = None
         self._tree: Tree | None = None
         self._diff_static: Static | None = None
         self._diff_scroll: VerticalScroll | None = None
 
     # --- Textual lifecycle ---
     def compose(self) -> ComposeResult:
+        self._header = Static("")
         self._tree = Tree("diff", id="diff-tree")
         self._tree.root.expand()
         self._tree.show_root = False
         self._diff_static = Static("", expand=True)
         self._diff_scroll = VerticalScroll(self._diff_static)
+        yield self._header
         yield Horizontal(self._tree, self._diff_scroll)
 
     def on_mount(self) -> None:
@@ -123,6 +128,9 @@ class DiffView(ViewApp):
 
     # --- Refresh ---
     def _refresh_content(self) -> None:
+        if self._header is not None:
+            text = self._header_provider() if self._header_provider else None
+            self._header.update(text or "")
         if self._resolve_paths is not None:
             all_paths, scope_path = self._resolve_paths()
             self._paths = self._apply_scope(all_paths, scope_path)
@@ -314,6 +322,10 @@ class DiffView(ViewApp):
         assert self._diff_static is not None
         return str(self._diff_static.content)
 
+    def header_text(self) -> str:
+        assert self._header is not None
+        return str(self._header.content)
+
     def is_worktree_collapsed(self, worktree: Path) -> bool:
         assert self._tree is not None
         for child in self._tree.root.children:
@@ -366,9 +378,21 @@ def register(app: typer.Typer, get_container):
         base_by_path: dict[Path, str | None] = {}
         for p in t.worktrees.values():
             base_by_path[Path(p)] = t.base_branch
+
+        from mship.cli.view._workitems import load_workitem_index
+        from mship.core.view.headers import header_for_task
+
+        def _header() -> str | None:
+            fresh = state_mgr.load()
+            task_obj = fresh.tasks.get(target_task)
+            if task_obj is None:
+                return None
+            return header_for_task(target_task, task_obj.phase, load_workitem_index(container))
+
         view = DiffView(
             resolve_paths=_resolver,
             base_branch_by_path=base_by_path,
+            header_provider=_header,
             watch=watch,
             interval=interval,
         )

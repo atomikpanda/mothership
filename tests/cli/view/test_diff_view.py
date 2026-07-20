@@ -312,3 +312,31 @@ def test_diff_cli_rejects_unknown_task(tmp_path: Path):
         container.config.reset()
         container.state_manager.reset_override()
         container.state_manager.reset()
+
+
+# --- PR1: WorkItem/phase header (AC9) ---
+@pytest.mark.asyncio
+async def test_diff_view_renders_workitem_header(tmp_path):
+    wa = tmp_path / "a"
+    view = DiffView(
+        worktree_paths=[wa], use_delta=False,
+        header_provider=lambda: "◆ wi-1  ·  Overhaul  ·  [in_flight]  —  task a [dev]",
+        watch=False, interval=1.0,
+    )
+    _seed(view, {wa: [_fd("f.py", "diff --git a/f.py b/f.py\n+++ b/f.py\n+x\n")]})
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        assert "wi-1" in view.header_text()
+        assert "Overhaul" in view.header_text()
+        # Tree/diff still populated as before.
+        assert any("f.py" in l for l in view.tree_labels())
+
+
+@pytest.mark.asyncio
+async def test_diff_view_no_header_by_default(tmp_path):
+    wa = tmp_path / "a"
+    view = DiffView(worktree_paths=[wa], use_delta=False, watch=False, interval=1.0)
+    _seed(view, {wa: [_fd("f.py", "diff --git a/f.py b/f.py\n+++ b/f.py\n+x\n")]})
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        assert view.header_text() == ""
