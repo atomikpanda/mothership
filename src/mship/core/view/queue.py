@@ -52,6 +52,7 @@ def assemble_queue(
     is no longer awaiting a human.
     """
     specs: list[QueueItem] = []
+    blocked: list[QueueItem] = []
     for s in summaries:
         if s.phase == "done":
             continue
@@ -61,4 +62,15 @@ def assemble_queue(
                 workspace=s.workspace, work_item_id=s.id,
                 work_item_title=s.title, phase=s.phase, spec_id=s.spec_id,
             ))
-    return specs
+        for slug in s.task_slugs:
+            task = tasks_by_slug.get(slug)
+            if task is None:
+                continue
+            if task.blocked_reason is not None:
+                blocked.append(QueueItem(
+                    kind="blocked-task", key=f"block:{slug}",
+                    workspace=s.workspace, work_item_id=s.id,
+                    work_item_title=s.title, phase=s.phase,
+                    task_slug=slug, blocked_reason=task.blocked_reason,
+                ))
+    return specs + blocked

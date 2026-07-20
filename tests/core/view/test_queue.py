@@ -49,3 +49,24 @@ def test_approved_spec_is_not_in_queue():
                 created_at=_now(), updated_at=_now(), body="b\n")
     items = assemble_queue([_summary(spec=spec)], {})
     assert items == []
+
+
+def test_blocked_task_becomes_a_blocked_queue_item():
+    task = Task(slug="a", description="d", phase="dev", created_at=_now(),
+                affected_repos=["r"], branch="feat/a",
+                blocked_reason="waiting on API key")
+    summary = _summary(tasks=[task])
+    items = assemble_queue([summary], _tasks_by_slug(task))
+    assert [i.kind for i in items] == ["blocked-task"]
+    it = items[0]
+    assert it.key == "block:a"
+    assert it.task_slug == "a"
+    assert it.blocked_reason == "waiting on API key"
+    assert it.work_item_id == "wi-1"
+
+
+def test_unblocked_task_is_not_in_queue():
+    task = Task(slug="a", description="d", phase="dev", created_at=_now(),
+                affected_repos=["r"], branch="feat/a")
+    summary = _summary(tasks=[task])
+    assert assemble_queue([summary], _tasks_by_slug(task)) == []
