@@ -82,3 +82,69 @@ def assemble_queue(
                     task_slug=slug, repo=repo, pr_url=url,
                 ))
     return specs + blocked + prs
+
+
+# --- formatters (shared by render_text + the TUI row builder) ---
+
+# The read-only note surfaced in detail panes for items that will grow inline
+# actions in a later PR (approve / request-changes — AC7).
+_ACTION_DEFERRED = "  action: approve / request-changes (deferred — read-only in this view)"
+
+
+def _context_lines(item: QueueItem) -> list[str]:
+    return [
+        f"  work item: {item.work_item_id}  ·  {item.work_item_title}  [{item.phase}]",
+        f"  workspace: {item.workspace}",
+    ]
+
+
+def queue_label(item: QueueItem) -> str:
+    if item.kind == "spec-needs-review":
+        return f"[needs-review]  {item.spec_id}  ·  {item.work_item_title}"
+    if item.kind == "blocked-task":
+        return f"[blocked]  {item.task_slug}  —  {item.blocked_reason}"
+    return f"[PR]  {item.repo}  ({item.task_slug})"
+
+
+def queue_detail(item: QueueItem) -> str:
+    if item.kind == "spec-needs-review":
+        lines = [f"spec {item.spec_id}  [needs_review]", f"  {item.work_item_title}"]
+        lines += _context_lines(item)
+        lines.append(_ACTION_DEFERRED)
+        return "\n".join(lines)
+    if item.kind == "blocked-task":
+        lines = [f"task {item.task_slug}  [BLOCKED]", f"  reason: {item.blocked_reason}"]
+        lines += _context_lines(item)
+        return "\n".join(lines)
+    lines = [f"PR ({item.repo}, task {item.task_slug})", f"  {item.pr_url}"]
+    lines += _context_lines(item)
+    lines.append(_ACTION_DEFERRED)
+    return "\n".join(lines)
+
+
+def queue_header(items: list[QueueItem]) -> str:
+    n_spec = sum(1 for i in items if i.kind == "spec-needs-review")
+    n_block = sum(1 for i in items if i.kind == "blocked-task")
+    n_pr = sum(1 for i in items if i.kind == "pr-awaiting")
+    return (
+        f"◆ queue  ·  {len(items)} needing attention  ·  "
+        f"{n_spec} specs · {n_block} blocked · {n_pr} PRs"
+    )
+
+
+def render_text(items: list[QueueItem]) -> str:
+    """Flat text dump of the whole queue — the non-TTY short-circuit output
+    (agent pipes / CI), mirroring workitem_cockpit.render_text."""
+    parts: list[str] = [queue_header(items), ""]
+    for title, kind in (
+        ("SPECS NEEDS REVIEW", "spec-needs-review"),
+        ("BLOCKED TASKS", "blocked-task"),
+        ("PRS AWAITING ACTION", "pr-awaiting"),
+    ):
+        parts.append(title)
+        section = [i for i in items if i.kind == kind]
+        parts.extend(queue_detail(i) for i in section)
+        if not section:
+            parts.append("(none)")
+        parts.append("")
+    return "\n".join(parts).rstrip("\n")

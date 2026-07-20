@@ -118,3 +118,60 @@ def test_queue_order_is_specs_then_blocked_then_prs():
     items = assemble_queue([summary], _tasks_by_slug(blocked, pr))
     assert [i.kind for i in items] == [
         "spec-needs-review", "blocked-task", "pr-awaiting"]
+
+
+from mship.core.view.queue import (
+    QueueItem, queue_detail, queue_header, queue_label, render_text)
+
+
+def _spec_item():
+    return QueueItem(kind="spec-needs-review", key="spec:wi-1", workspace="ws",
+                     work_item_id="wi-1", work_item_title="Overhaul",
+                     phase="shaping", spec_id="spec-1")
+
+
+def _blocked_item():
+    return QueueItem(kind="blocked-task", key="block:a", workspace="ws",
+                     work_item_id="wi-1", work_item_title="Overhaul",
+                     phase="in_flight", task_slug="a",
+                     blocked_reason="waiting on API key")
+
+
+def _pr_item():
+    return QueueItem(kind="pr-awaiting", key="pr:b:r", workspace="ws",
+                     work_item_id="wi-1", work_item_title="Overhaul",
+                     phase="review", task_slug="b", repo="r",
+                     pr_url="https://gh/pr/9")
+
+
+def test_queue_labels_communicate_kind():
+    assert "needs-review" in queue_label(_spec_item())
+    assert "spec-1" in queue_label(_spec_item())
+    assert "blocked" in queue_label(_blocked_item())
+    assert "a" in queue_label(_blocked_item())
+    assert "PR" in queue_label(_pr_item())
+    assert "r" in queue_label(_pr_item())
+
+
+def test_queue_detail_carries_specifics_and_workitem_context():
+    assert "waiting on API key" in queue_detail(_blocked_item())
+    assert "wi-1" in queue_detail(_blocked_item())
+    assert "https://gh/pr/9" in queue_detail(_pr_item())
+    assert "spec-1" in queue_detail(_spec_item())
+
+
+def test_queue_header_counts_by_kind():
+    header = queue_header([_spec_item(), _blocked_item(), _pr_item()])
+    assert "3" in header
+    assert "queue" in header.lower()
+
+
+def test_render_text_has_all_sections():
+    txt = render_text([_spec_item(), _blocked_item(), _pr_item()])
+    assert "SPECS" in txt and "BLOCKED" in txt and "PRS" in txt
+    assert "spec-1" in txt and "waiting on API key" in txt and "https://gh/pr/9" in txt
+
+
+def test_render_text_empty_queue_shows_none():
+    txt = render_text([])
+    assert "(none)" in txt
