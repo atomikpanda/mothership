@@ -133,6 +133,18 @@ class MasterDetailApp(App):
     async def action_reload(self) -> None:
         await self.reload_rows()
 
+    # --- focus model ---
+    def _detail_focused(self) -> bool:
+        return self._detail is not None and self._detail.has_focus
+
+    def action_toggle_focus(self) -> None:
+        if self._master is None or self._detail is None:
+            return
+        if self._detail_focused():
+            self._master.focus()
+        else:
+            self._detail.focus()
+
     # --- test helpers ---
     _ANSI = re.compile(r"\x1b\[[0-9;]*[mKHFABCDJsu]")
 
@@ -150,3 +162,10 @@ class MasterDetailApp(App):
     def selected_key(self) -> str | None:
         idx = self._current_index()
         return None if idx is None else self._visible[idx].key
+
+    def focus_target(self) -> str:
+        if self._filter_input is not None and self._filter_input.has_focus:
+            return "filter"
+        if self._detail_focused():
+            return "detail"
+        return "master"

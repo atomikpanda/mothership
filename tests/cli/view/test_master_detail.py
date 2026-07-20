@@ -38,3 +38,19 @@ async def test_empty_rows_render_without_error():
         assert view.list_labels() == []
         assert view.selected_key() is None
         assert view.detail_text() == ""
+
+
+@pytest.mark.asyncio
+async def test_tab_toggles_focus_between_panes():
+    view = _DemoView([ListRow("a", "Alpha", "Detail A")])
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        view._master.focus()
+        await pilot.pause()
+        assert view.focus_target() == "master"
+        await pilot.press("tab")
+        await pilot.pause()
+        assert view.focus_target() == "detail"
+        await pilot.press("tab")
+        await pilot.pause()
+        assert view.focus_target() == "master"
