@@ -22,21 +22,30 @@ def _sort_key(spec: Spec) -> tuple:
     return (spec.created_at, spec.id)
 
 
-def load_canonical_specs(specs_dir: Path) -> list[Spec]:
-    """Parse every spec in the canonical `<workspace_root>/specs` store, skipping
-    unparseable files. Reads ONLY the workspace-root store, never a per-task
-    worktree, so the result is branch/worktree independent (AC1). Sorted by
-    (created_at, id) ascending."""
+def scan_canonical_specs(specs_dir: Path) -> list[tuple[Spec, Path]]:
+    """Parse every spec in the canonical `<workspace_root>/specs` store and return
+    (spec, real_path) pairs sorted by (created_at, id). Skips files that are
+    unreadable (OSError), invalid UTF-8 (UnicodeError), or unparseable
+    (SpecParseError) so one bad file never aborts selection. Reads ONLY the
+    workspace-root store, never a per-task worktree, so the result is
+    branch/worktree independent (AC1). Returning the real path (not a
+    reconstruction) keeps rendering correct even if a file's name diverges from
+    `<date>-<id>.md`."""
     from mship.core.spec_store import SpecParseError, parse_spec
     if not specs_dir.is_dir():
         return []
-    out: list[Spec] = []
+    out: list[tuple[Spec, Path]] = []
     for p in sorted(specs_dir.glob("*.md")):
         try:
-            out.append(parse_spec(p.read_text()))
-        except SpecParseError:
+            out.append((parse_spec(p.read_text()), p))
+        except (OSError, UnicodeError, SpecParseError):
             continue
-    return sorted(out, key=_sort_key)
+    return sorted(out, key=lambda sp: _sort_key(sp[0]))
+
+
+def load_canonical_specs(specs_dir: Path) -> list[Spec]:
+    """The specs from `scan_canonical_specs`, without their paths (for selection)."""
+    return [spec for spec, _ in scan_canonical_specs(specs_dir)]
 
 
 @dataclass(frozen=True)

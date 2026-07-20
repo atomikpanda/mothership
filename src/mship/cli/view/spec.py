@@ -293,10 +293,11 @@ def register(app: typer.Typer, get_container):
         workspace_root = _P(container.config_path()).parent
         state = container.state_manager().load()
 
-        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+        from mship.core.spec_store import SPECS_DIRNAME
         from mship.core.workitem_store import WorkItemStore
         from mship.core.view.spec_selection import (
-            SpecSelectionError, SpecSelector, load_canonical_specs, select_spec,
+            SpecSelectionError, SpecSelector, load_canonical_specs,
+            scan_canonical_specs, select_spec,
         )
         from mship.core.view.headers import header_for_spec
         from mship.cli.view._workitems import load_workitem_index
@@ -325,12 +326,15 @@ def register(app: typer.Typer, get_container):
             selector = SpecSelector()
         if selector is not None:
             items = WorkItemStore(_P(container.state_dir()) / "workitems")
+            scanned = scan_canonical_specs(specs_dir)
             try:
-                spec = select_spec(load_canonical_specs(specs_dir), items.list(), selector)
+                spec = select_spec([s for s, _ in scanned], items.list(), selector)
             except SpecSelectionError as e:
                 typer.echo(f"Error: {e}", err=True)
                 raise typer.Exit(code=1)
-            canonical_path = SpecStore(specs_dir).path_for(spec)
+            # Use the REAL path the spec was read from, not a reconstruction, so a
+            # file whose name diverges from <date>-<id>.md still renders.
+            canonical_path = next((p for s, p in scanned if s.id == spec.id), None)
             canonical_spec_id = spec.id
 
         # Resolve target task. If the user specified an explicit spec name,

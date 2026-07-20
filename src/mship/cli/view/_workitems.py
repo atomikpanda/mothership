@@ -14,18 +14,23 @@ from mship.core.workitem_store import WorkItemStore
 def load_workitem_index(container) -> list[WorkItemSummary]:
     """Build the WorkItem index (derived phase + attention + task_slugs + spec_id)
     from the canonical stores under the workspace root and state dir. Best-effort:
-    any store-scan failure degrades to an empty index so a view never crashes."""
+    a failure loading the core stores (workitems / specs / tasks) degrades to an
+    empty index so a view never crashes."""
     try:
         state_dir = Path(container.state_dir())
         workspace_root = Path(container.config_path()).parent
-        items = WorkItemStore(state_dir / "workitems")
-        specs = SpecStore(workspace_root / SPECS_DIRNAME)
-        msgs = MessageStore(state_dir / "messages")
-        return build_workitem_index(
-            items.list(),
-            {s.id: s for s in specs.list()},
-            dict(container.state_manager().load().tasks),
-            {t.id: t for t in msgs.list()},
-        )
+        items = WorkItemStore(state_dir / "workitems").list()
+        specs = {s.id: s for s in SpecStore(workspace_root / SPECS_DIRNAME).list()}
+        tasks = dict(container.state_manager().load().tasks)
+    except Exception:
+        return []
+    # Threads only add per-item thread links; a broken message store must NOT
+    # erase the WorkItem grouping/headers already built from items/specs/tasks.
+    try:
+        threads = {t.id: t for t in MessageStore(state_dir / "messages").list()}
+    except Exception:
+        threads = {}
+    try:
+        return build_workitem_index(items, specs, tasks, threads)
     except Exception:
         return []

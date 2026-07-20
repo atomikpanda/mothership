@@ -72,3 +72,22 @@ def test_load_workitem_index_empty_workspace_is_empty(tmp_path):
         assert load_workitem_index(container) == []
     finally:
         _teardown()
+
+
+def test_load_workitem_index_survives_broken_message_store(tmp_path, monkeypatch):
+    # Greptile #390 (F3): a broken message store must degrade only thread-links,
+    # NOT erase the WorkItem grouping/headers built from items/specs/tasks.
+    _setup(tmp_path)
+    try:
+        from mship.core import message_store as _ms
+
+        def _boom(self):
+            raise ValueError("corrupt message entry")
+
+        monkeypatch.setattr(_ms.MessageStore, "list", _boom)
+        index = load_workitem_index(container)
+        assert [s.id for s in index] == ["wi-1"]   # grouping intact despite bad messages
+        assert index[0].task_slugs == ["a"]
+        assert index[0].spec_id == "spec-1"
+    finally:
+        _teardown()

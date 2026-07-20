@@ -137,3 +137,32 @@ def test_select_default_over_canonical_store_round_trip(tmp_path):
     _seed(tmp_path / "specs", "newest", created=_dt(8))
     specs = load_canonical_specs(tmp_path / "specs")
     assert select_default(specs).id == "newest"
+
+
+# --- Greptile #390 hardening: unreadable file + real-path (F1, F2) ---
+from mship.core.spec_store import serialize_spec
+from mship.core.view.spec_selection import scan_canonical_specs
+
+
+def test_load_canonical_specs_skips_invalid_utf8(tmp_path):
+    # F1: a non-UTF-8 / unreadable file must be skipped, not crash the scan.
+    specs = tmp_path / "specs"
+    _seed(specs, "good", created=_dt(2))
+    (specs / "bad-bytes.md").write_bytes(b"\xff\xfe not utf8 \x80\x81")
+    assert [s.id for s in load_canonical_specs(specs)] == ["good"]
+
+
+def test_scan_returns_real_path_even_when_filename_diverges(tmp_path):
+    # F2: a hand-named file (not <date>-<id>.md) must resolve to its real path,
+    # not a reconstruction that would fail to read.
+    specs = tmp_path / "specs"
+    specs.mkdir()
+    spec = Spec(id="hand", title="hand", status="draft",
+                created_at=_dt(3), updated_at=_dt(3), body="Hand body\n")
+    (specs / "totally-different-name.md").write_text(serialize_spec(spec))
+    scanned = scan_canonical_specs(specs)
+    assert len(scanned) == 1
+    got_spec, got_path = scanned[0]
+    assert got_spec.id == "hand"
+    assert got_path.name == "totally-different-name.md"
+    assert got_path.read_text().startswith("---")  # the real, readable file
