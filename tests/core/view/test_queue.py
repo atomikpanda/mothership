@@ -175,3 +175,12 @@ def test_render_text_has_all_sections():
 def test_render_text_empty_queue_shows_none():
     txt = render_text([])
     assert "(none)" in txt
+
+
+def test_queue_detail_shows_live_action_hint():
+    from mship.core.view.queue import QueueItem, queue_detail
+    item = QueueItem(kind="spec-needs-review", key="k", workspace="w",
+                     work_item_id="wi-1", work_item_title="T", phase="shaping", spec_id="spec-1")
+    d = queue_detail(item)
+    assert "a: approve" in d and "R: request-changes" in d
+    assert "deferred" not in d

@@ -95,9 +95,10 @@ def assemble_queue(
 
 # --- formatters (shared by render_text + the TUI row builder) ---
 
-# The read-only note surfaced in detail panes for items that will grow inline
-# actions in a later PR (approve / request-changes — AC7).
-_ACTION_DEFERRED = "  action: approve / request-changes (deferred — read-only in this view)"
+# The live inline-action hints surfaced in detail panes (PR4). Spec-needs-review
+# rows can be approved / bounced / opened / copied; PR rows can be opened / copied.
+_ACTION_HINT = "  actions: a: approve · R: request-changes · enter: open · y: copy"
+_PR_ACTION_HINT = "  actions: o: open · y: copy"
 
 
 def _context_lines(item: QueueItem) -> list[str]:
@@ -119,7 +120,7 @@ def queue_detail(item: QueueItem) -> str:
     if item.kind == "spec-needs-review":
         lines = [f"spec {item.spec_id}  [needs_review]", f"  {item.work_item_title}"]
         lines += _context_lines(item)
-        lines.append(_ACTION_DEFERRED)
+        lines.append(_ACTION_HINT)
         return "\n".join(lines)
     if item.kind == "blocked-task":
         lines = [f"task {item.task_slug}  [BLOCKED]", f"  reason: {item.blocked_reason}"]
@@ -127,7 +128,7 @@ def queue_detail(item: QueueItem) -> str:
         return "\n".join(lines)
     lines = [f"PR ({item.repo}, task {item.task_slug})", f"  {item.pr_url}"]
     lines += _context_lines(item)
-    lines.append(_ACTION_DEFERRED)
+    lines.append(_PR_ACTION_HINT)
     return "\n".join(lines)
 
 
