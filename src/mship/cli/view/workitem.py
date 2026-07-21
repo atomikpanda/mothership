@@ -210,12 +210,7 @@ def _resolve_cockpit(container, item_id: str) -> WorkItemCockpit | None:
 
 
 def register(app: "typer.Typer", get_container):
-    @app.command()
-    def workitem(
-        item_id: str = typer.Argument(..., help="WorkItem id to open (e.g. wi-...)"),
-    ):
-        """Single-WorkItem cockpit: spec (status + phase), acceptance criteria with
-        evidence, tasks + worktrees, and linked PRs + threads."""
+    def _run_item_cockpit(item_id: str) -> None:
         from mship.cli.output import Output
         from mship.core.view.workitem_cockpit import render_text
 
@@ -236,3 +231,22 @@ def register(app: "typer.Typer", get_container):
         workspace_root = Path(container.config_path()).parent
         store = SpecStore(workspace_root / SPECS_DIRNAME)
         WorkItemCockpitView(cockpit, spec_store=store).run()
+
+    @app.command(name="item")
+    def item(
+        item_id: str = typer.Argument(..., help="WorkItem id to open (e.g. wi-...)"),
+    ):
+        """Single-WorkItem cockpit: spec (status + phase), acceptance criteria with
+        evidence, tasks + worktrees, and linked PRs + threads."""
+        _run_item_cockpit(item_id)
+
+    @app.command(name="workitem", hidden=True)
+    def workitem(
+        item_id: str = typer.Argument(..., help="Deprecated alias for `view item`."),
+    ):
+        """Deprecated: use `mship view item <id>`."""
+        typer.echo(
+            "Note: `mship view workitem` is deprecated; use `mship view item`.",
+            err=True,
+        )
+        _run_item_cockpit(item_id)

@@ -116,17 +116,29 @@ def _reset():
     container.state_manager.reset()
 
 
-def test_workitem_registered_in_view_help():
+def test_item_and_items_registered_in_view_help():
     result = CliRunner().invoke(app, ["view", "--help"])
     assert result.exit_code == 0
-    assert "workitem" in result.stdout
+    assert "item" in result.stdout
+
+
+def test_workitem_alias_still_renders_cockpit(tmp_path):
+    _seed_workspace(tmp_path)
+    try:
+        result = CliRunner().invoke(app, ["view", "workitem", "wi-1"])
+        assert result.exit_code == 0, result.output
+        assert "wi-1" in result.output and "Overhaul" in result.output
+        assert "deprecated" in result.output.lower()
+        assert "mship view item" in result.output
+    finally:
+        _reset()
 
 
 def test_workitem_cli_renders_cockpit_text(tmp_path):
     _seed_workspace(tmp_path)
     try:
         # CliRunner stdout is not a TTY -> non-TTY text short-circuit (no TUI hang).
-        result = CliRunner().invoke(app, ["view", "workitem", "wi-1"])
+        result = CliRunner().invoke(app, ["view", "item", "wi-1"])
         assert result.exit_code == 0, result.output
         assert "wi-1" in result.output and "Overhaul" in result.output
         assert "needs_review" in result.output
@@ -141,7 +153,7 @@ def test_workitem_cli_renders_cockpit_text(tmp_path):
 def test_workitem_cli_unknown_id_exits_1(tmp_path):
     _seed_workspace(tmp_path)
     try:
-        result = CliRunner().invoke(app, ["view", "workitem", "wi-missing"])
+        result = CliRunner().invoke(app, ["view", "item", "wi-missing"])
         assert result.exit_code == 1
         assert "wi-missing" in result.output
     finally:
