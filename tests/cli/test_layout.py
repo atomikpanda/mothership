@@ -10,6 +10,7 @@ from mship.cli.layout import (
     _LAYOUT_TAIL,
     _TEMPLATE,
     render_serve_layout,
+    render_workitem_layout,
     serve_cli_args,
 )
 
@@ -30,10 +31,22 @@ def test_template_reconstructs_from_parts():
     assert _TEMPLATE == _LAYOUT_HEAD + _BASE_TABS + _LAYOUT_TAIL
 
 
-def test_base_tabs_has_all_four_tabs():
+def test_base_layout_has_no_phase_tabs():
+    # The legacy Plan/Dev/Review/Run base tabs were removed: the base is Overview
+    # only (the phase sub-tabs now live inside each WorkItem's dedicated tab).
+    assert _BASE_TABS == ""
     for name in ("Plan", "Dev", "Review", "Run"):
-        assert f'tab name="{name}"' in _BASE_TABS
-    assert 'name="Serve"' not in _BASE_TABS
+        assert f'tab name="{name}"' not in _TEMPLATE
+    assert 'tab name="Overview" focus=true' in _TEMPLATE
+
+
+def test_render_workitem_layout_keeps_all_four_phase_subtabs():
+    # Removing the base phase tabs must NOT remove the per-item phase sub-tabs.
+    kdl = render_workitem_layout(
+        name="wi-1", worktree="/wt/a", item_id="wi-1", task_slug="a",
+        chat_command=None, default_phase="Dev")
+    for phase in ("Plan", "Dev", "Review", "Run"):
+        assert f'swap_tiled_layout name="{phase}"' in kdl
 
 
 # --- Task 2: pure builders -----------------------------------------------------
@@ -52,28 +65,23 @@ def test_serve_cli_args_mapping():
     ]
 
 
-def test_render_serve_layout_no_args_has_base_tabs_plus_serve():
+def test_render_serve_layout_no_args_is_overview_plus_serve():
     kdl = render_serve_layout([])
-    for name in ("Plan", "Dev", "Review", "Run", "Serve"):
-        assert f'tab name="{name}"' in kdl
+    # Base is Overview only; serve appends a Serve tab. No legacy phase tabs.
+    assert 'tab name="Overview" focus=true' in kdl
+    assert 'tab name="Serve"' in kdl
+    for name in ("Plan", "Dev", "Review", "Run"):
+        assert f'tab name="{name}"' not in kdl
     assert 'command="mship"' in kdl
     assert 'args "serve";' in kdl
-    # Serve tab comes AFTER Run, and Overview is the launchpad and keeps focus.
-    assert 'tab name="Overview" focus=true' in kdl
-    assert kdl.index('tab name="Run"') < kdl.index('tab name="Serve"')
+    # Serve tab comes AFTER Overview, and Overview is the launchpad and keeps focus.
+    assert kdl.index('tab name="Overview"') < kdl.index('tab name="Serve"')
 
 
 def test_template_has_overview_launchpad_tab():
     assert 'tab name="Overview" focus=true' in _TEMPLATE
-    start = _TEMPLATE.index('tab name="Overview"')
-    end = _TEMPLATE.index('tab name="Plan"', start)
-    overview = _TEMPLATE[start:end]
-    assert '"view" "queue"' in overview
-    assert '"view" "items"' in overview
-
-
-def test_overview_precedes_plan():
-    assert _TEMPLATE.index('tab name="Overview"') < _TEMPLATE.index('tab name="Plan"')
+    assert '"view" "queue"' in _TEMPLATE
+    assert '"view" "items"' in _TEMPLATE
 
 
 def test_render_serve_layout_threads_flags():
@@ -190,16 +198,7 @@ def test_launch_serve_flag_implies_serve(tmp_path, monkeypatch):
     assert 'args "serve" "--relay";' in body
 
 
-# --- pre-existing structural assertion ----------------------------------------
-
-def test_review_tab_has_journal_pane():
-    """The Review tab must include a Shell pane and a Journal pane wired to
-    `mship view journal --watch`."""
-    assert 'tab name="Review"' in _TEMPLATE
-    start = _TEMPLATE.index('tab name="Review"')
-    end = _TEMPLATE.index('tab name="Run"', start)
-    review_block = _TEMPLATE[start:end]
-
-    assert 'name="Shell"' in review_block, review_block
-    assert 'name="Journal"' in review_block, review_block
-    assert '"view" "journal" "--watch"' in review_block, review_block
+# The former `test_review_tab_has_journal_pane` asserted on the base _TEMPLATE
+# Review tab, which no longer exists (base is Overview-only). The per-item Review
+# phase sub-tab's journal/diff panes are covered by test_layout_focus.py
+# (test_kdl_bakes_shipped_view_commands_with_item_and_task).

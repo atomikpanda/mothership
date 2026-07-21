@@ -199,6 +199,8 @@ def test_focus_outside_zellij_noops_with_message(tmp_path, monkeypatch):
 
 
 def test_focus_creates_tab_when_absent(tmp_path, monkeypatch):
+    # HOME is isolated so the layout KDL cache write lands in tmp, not real ~/.cache.
+    monkeypatch.setenv("HOME", str(tmp_path))
     wt = tmp_path / "wt-a"
     _seed_focus(tmp_path, {"r": wt})
     calls = _patch_zellij(monkeypatch, in_session=True, existing=["Overview"])
@@ -210,10 +212,32 @@ def test_focus_creates_tab_when_absent(tmp_path, monkeypatch):
         assert args[0] == "new-tab"
         assert "--name" in args and "wi-1" in args
         assert "--cwd" in args and str(wt) in args
-        kdl = args[args.index("--layout-string") + 1]
+        # Portable delivery: KDL goes via a cache FILE (--layout <name> --layout-dir
+        # <dir>), never --layout-string (which older zellij lacks).
+        assert "--layout-string" not in args
+        assert "--layout" in args and "--layout-dir" in args
+        layout_name = args[args.index("--layout") + 1]
+        layout_dir = Path(args[args.index("--layout-dir") + 1])
+        assert layout_name == "wi-1"
+        kdl = (layout_dir / f"{layout_name}.kdl").read_text()
         assert 'tab name="wi-1"' in kdl and 'name="Agent"' in kdl
     finally:
         _reset_focus()
+
+
+def test_write_workitem_layout_file_writes_stable_named_kdl(tmp_path, monkeypatch):
+    # The pure helper: writes <cache>/<item_id>.kdl and returns (name, dir) that
+    # `new-tab --layout <name> --layout-dir <dir>` resolves by name.
+    from mship.cli.layout import write_workitem_layout_file
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    name, cache_dir = write_workitem_layout_file("wi-1", "layout { }\n")
+    assert name == "wi-1"
+    assert (cache_dir / "wi-1.kdl").read_text() == "layout { }\n"
+    # Re-writing overwrites the same stable path (no accumulation, no delete-race).
+    name2, cache_dir2 = write_workitem_layout_file("wi-1", "layout { changed }\n")
+    assert cache_dir2 == cache_dir
+    assert (cache_dir / "wi-1.kdl").read_text() == "layout { changed }\n"
 
 
 def test_focus_switches_to_existing_tab(tmp_path, monkeypatch):
@@ -302,6 +326,7 @@ def test_focus_errors_when_tab_query_fails(tmp_path, monkeypatch):
 
 
 def test_focus_new_tab_failure_reports_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
     _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
     _patch_zellij(monkeypatch, in_session=True, existing=["Overview"], action_ok=False)
     try:

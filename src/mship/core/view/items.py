@@ -13,15 +13,26 @@ def _attention_marker(s: WorkItemSummary) -> str:
     return " "
 
 
+# A done WorkItem has no cockpit tab (tabs auto-close on done, so `mship layout
+# focus` is a no-op) — mark it so pressing enter on it isn't a silent surprise.
+_DONE_MARKER = "· done (no tab)"
+
+
 def items_label(s: WorkItemSummary) -> str:
-    return f"{_attention_marker(s)} {s.id}  {s.title or '(untitled)'}  [{s.phase}]"
+    label = f"{_attention_marker(s)} {s.id}  {s.title or '(untitled)'}  [{s.phase}]"
+    if s.phase == "done":
+        label += f"  {_DONE_MARKER}"
+    return label
 
 
 def items_detail(s: WorkItemSummary) -> str:
     a = s.attention
+    phase_line = f"phase: {s.phase}"
+    if s.phase == "done":
+        phase_line += "  (done — no cockpit tab; enter is a no-op)"
     lines = [
         f"{s.id}  {s.title}",
-        f"phase: {s.phase}",
+        phase_line,
         f"spec: {s.spec_id or '(none)'}",
         f"tasks: {', '.join(s.task_slugs) or '(none)'}",
         f"attention: approval={a.needs_approval} decision={a.needs_decision} "

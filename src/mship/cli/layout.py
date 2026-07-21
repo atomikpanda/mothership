@@ -23,59 +23,19 @@ layout {
             pane size="50%" name="Items" command="mship" close_on_exit=false { args "view" "items"; }
         }
     }
-
-    tab name="Plan" {
-        pane split_direction="vertical" {
-            pane size="50%" name="Agent"
-            pane split_direction="horizontal" size="50%" {
-                pane name="Specs" command="mship" close_on_exit=false { args "view" "spec" "--watch"; }
-                pane name="Status" command="mship" close_on_exit=false { args "view" "status" "--watch"; }
-            }
-        }
-    }
-
-    tab name="Dev" {
-        pane split_direction="vertical" {
-            pane size="60%" name="Editor" command="sh" close_on_exit=false {
-                args "-c" "${EDITOR:-$(command -v nvim || command -v vim || command -v vi)} ."
-            }
-            pane split_direction="horizontal" size="40%" {
-                pane name="Journal" command="mship" close_on_exit=false { args "view" "journal" "--watch"; }
-                pane name="Status" command="mship" close_on_exit=false { args "view" "status" "--watch"; }
-            }
-        }
-    }
-
-    tab name="Review" {
-        pane split_direction="vertical" {
-            pane size="70%" name="Diff" command="mship" close_on_exit=false { args "view" "diff" "--watch"; }
-            pane size="30%" split_direction="horizontal" {
-                pane name="Shell"
-                pane name="Journal" command="mship" close_on_exit=false { args "view" "journal" "--watch"; }
-            }
-        }
-    }
-
-    tab name="Run" {
-        pane split_direction="vertical" {
-            pane size="60%" name="Shell"
-            pane split_direction="horizontal" size="40%" {
-                pane name="Journal" command="mship" close_on_exit=false { args "view" "journal" "--watch"; }
-                pane name="Status" command="mship" close_on_exit=false { args "view" "status" "--watch"; }
-            }
-        }
-    }
 }
 """
 
 # Composable parts, sliced from _TEMPLATE at stable markers so the normal layout
 # is reconstructed byte-for-byte (_LAYOUT_HEAD + _BASE_TABS + _LAYOUT_TAIL == _TEMPLATE)
-# while the serve layout can reuse the base tabs and append a Serve tab. The final
-# layout-closing "}" is the only brace at column 0, so `\n}\n` locates it uniquely.
-_plan_idx = _TEMPLATE.index('    tab name="Plan"')
+# while the serve layout can splice a Serve tab in before the layout close. The base
+# has NO phase tabs anymore — Overview is the only base tab (the Plan/Dev/Review/Run
+# phase sub-tabs live inside each WorkItem's dedicated tab, see render_workitem_layout).
+# The final layout-closing "}" is the only brace at column 0, so `\n}\n` locates it
+# uniquely; _BASE_TABS is therefore empty and the head is everything up to that brace.
 _close_idx = _TEMPLATE.rindex("\n}\n") + 1
-_LAYOUT_HEAD = _TEMPLATE[:_plan_idx]
-_BASE_TABS = _TEMPLATE[_plan_idx:_close_idx]
+_LAYOUT_HEAD = _TEMPLATE[:_close_idx]
+_BASE_TABS = ""
 _LAYOUT_TAIL = _TEMPLATE[_close_idx:]
 
 
@@ -294,6 +254,27 @@ def _serve_launch_path() -> Path:
     return Path.home() / ".config" / "zellij" / "mothership-serve-launch.kdl"
 
 
+def _layout_cache_dir() -> Path:
+    """mship-owned cache dir for per-WorkItem layout KDL files that `zellij action
+    new-tab --layout <name> --layout-dir <dir>` resolves by name."""
+    return Path.home() / ".cache" / "mship" / "layouts"
+
+
+def write_workitem_layout_file(item_id: str, kdl: str) -> tuple[str, Path]:
+    """Write a WorkItem's layout KDL to a stable cache file and return
+    (layout_name, layout_dir) for `new-tab --layout <name> --layout-dir <dir>`.
+
+    Delivering the KDL via a file (resolved by name) rather than `--layout-string`
+    keeps this portable to older zellij that lack `--layout-string` (the operator's
+    version). The path is stable and keyed by item_id (overwritten on re-focus) — NOT
+    a delete-on-close tempfile — so zellij's server can read it after we return
+    without racing a cleanup delete."""
+    cache_dir = _layout_cache_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / f"{item_id}.kdl").write_text(kdl)
+    return item_id, cache_dir
+
+
 def _in_zellij() -> bool:
     """Seam: are we inside a zellij session? ($ZELLIJ is set by zellij)."""
     return bool(os.environ.get("ZELLIJ"))
@@ -417,8 +398,12 @@ def register(app: typer.Typer, get_container):
             chat_command=resolve_chat_command(chat_command, os.environ),
             default_phase=default_phase_tab(summary.phase),
         )
-        if _run_zellij_action(["new-tab", "--layout-string", kdl, "--name", name,
-                               "--cwd", str(worktree)]):
+        # Deliver the KDL via a cache file (`--layout <name> --layout-dir <dir>`)
+        # rather than `--layout-string`, which older zellij (the operator's) lacks.
+        layout_name, layout_dir = write_workitem_layout_file(item_id, kdl)
+        if _run_zellij_action(["new-tab", "--layout", layout_name,
+                               "--layout-dir", str(layout_dir),
+                               "--name", name, "--cwd", str(worktree)]):
             typer.echo(f"Opened {item_id}.")
             return
         typer.echo(f"Error: could not open tab for {item_id}.", err=True)

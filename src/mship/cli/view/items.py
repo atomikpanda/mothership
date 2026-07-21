@@ -27,7 +27,10 @@ class ItemsView(MasterDetailApp):
                 for s in self._summaries]
 
     def header_line(self) -> str | None:
-        return f"WorkItems ({len(self._summaries)})"
+        # Visible affordance: the operator kept not realizing enter opens the tab
+        # (the hint used to live only in the command docstring).
+        return (f"WorkItems ({len(self._summaries)})  ·  "
+                "enter: open cockpit tab · y: copy id")
 
     def _do_open_entity(self) -> bool:
         key = self.selected_key()

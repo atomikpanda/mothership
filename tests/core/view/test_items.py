@@ -39,3 +39,22 @@ def test_items_detail_lists_links():
 def test_items_render_text_lists_all():
     text = items_render_text([_summary(id="wi-1"), _summary(id="wi-2", title="Second")])
     assert "wi-1" in text and "wi-2" in text and "Second" in text
+
+
+def test_done_item_label_marked_as_no_tab():
+    # A done WorkItem has no cockpit tab; the row must say so, non-done rows must not.
+    done = items_label(_summary(phase="done"))
+    assert "done (no tab)" in done
+    not_done = items_label(_summary(phase="in_flight"))
+    assert "no tab" not in not_done
+
+
+def test_done_item_render_text_marked_as_no_tab():
+    text = items_render_text([_summary(id="wi-1", phase="done")])
+    assert "done (no tab)" in text
+
+
+def test_done_item_detail_explains_no_tab():
+    detail = items_detail(_summary(phase="done"))
+    assert "no cockpit tab" in detail
+    assert "no cockpit tab" not in items_detail(_summary(phase="in_flight"))
