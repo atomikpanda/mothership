@@ -431,11 +431,10 @@ def register(parent: typer.Typer, get_container):
         bypass_gate: bool = typer.Option(False, "--bypass-gate", help="Approve despite unmet review gate."),
     ):
         """Approve a spec (gate: all criteria approved + all questions answered)."""
-        from datetime import datetime, timezone
         from pathlib import Path
-        from mship.core.spec import InvalidTransition, validate_transition
+        from mship.core.spec import InvalidTransition
         from mship.core.spec_store import SpecStore, SPECS_DIRNAME
-        from mship.core.spec_approve import approval_blockers
+        from mship.core.spec_transition import ApprovalBlocked, approve_spec
         output = Output()
         container = get_container()
         store = SpecStore(Path(container.config_path()).parent / SPECS_DIRNAME)
@@ -443,20 +442,15 @@ def register(parent: typer.Typer, get_container):
         if spec is None:
             output.error(f"No spec with id {spec_id!r}.")
             raise typer.Exit(1)
-        if not bypass_gate:
-            blockers = approval_blockers(spec)
-            if blockers:
-                output.error("Cannot approve — " + "; ".join(blockers) + ". Use --bypass-gate to override.")
-                raise typer.Exit(1)
         try:
-            validate_transition(spec.status, "approved")
+            approve_spec(spec, store, bypass_gate=bypass_gate)
+        except ApprovalBlocked as e:
+            output.error("Cannot approve — " + "; ".join(e.blockers) + ". Use --bypass-gate to override.")
+            raise typer.Exit(1)
         except InvalidTransition as e:
             output.error(str(e))
             raise typer.Exit(1)
-        spec.status = "approved"
-        spec.clarification_reason = None  # an approved spec carries no pending request-changes reason
-        spec.updated_at = datetime.now(timezone.utc)
-        path = store.save(spec)
+        path = store.path_for(spec)
         if output.human_mode:
             output.success(f"Approved: {path}")
         else:
@@ -580,10 +574,10 @@ def register(parent: typer.Typer, get_container):
         MOS-240: `needs_clarification` is gone; "needs clarification" is now the
         non-null `clarification_reason` carried by the editable `draft` status.
         """
-        from datetime import datetime, timezone
         from pathlib import Path
-        from mship.core.spec import InvalidTransition, validate_transition
+        from mship.core.spec import InvalidTransition
         from mship.core.spec_store import SpecStore, SPECS_DIRNAME
+        from mship.core.spec_transition import request_changes_spec
         output = Output()
         container = get_container()
         store = SpecStore(Path(container.config_path()).parent / SPECS_DIRNAME)
@@ -592,14 +586,10 @@ def register(parent: typer.Typer, get_container):
             output.error(f"No spec with id {spec_id!r}.")
             raise typer.Exit(1)
         try:
-            validate_transition(spec.status, "draft")
+            request_changes_spec(spec, store, reason)
         except InvalidTransition as e:
             output.error(str(e))
             raise typer.Exit(1)
-        spec.status = "draft"
-        spec.clarification_reason = reason
-        spec.updated_at = datetime.now(timezone.utc)
-        store.save(spec)
         # MOS-215: the reason is persisted on the spec (surfaced by `spec
         # show`/`review`) in addition to being journaled to the task log.
         try:
