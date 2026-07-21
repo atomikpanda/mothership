@@ -6,12 +6,10 @@ from typer.testing import CliRunner
 from mship.cli import app
 from mship.cli.layout import (
     _BASE_TABS,
-    _DEFAULT_TAB_TEMPLATE,
     _LAYOUT_HEAD,
     _LAYOUT_TAIL,
     _TEMPLATE,
     render_serve_layout,
-    render_workitem_layout,
     serve_cli_args,
 )
 
@@ -40,39 +38,6 @@ def test_base_layout_has_no_phase_tabs():
         assert f'tab name="{name}"' not in _TEMPLATE
     assert 'tab name="Overview"' in _TEMPLATE
     assert 'tab name="Cockpit" focus=true' in _TEMPLATE
-
-
-def test_render_workitem_layout_keeps_all_four_phase_subtabs():
-    # Removing the base phase tabs must NOT remove the per-item phase sub-tabs.
-    kdl = render_workitem_layout(
-        name="wi-1", worktree="/wt/a", item_id="wi-1", task_slug="a",
-        chat_command=None, default_phase="Dev")
-    for phase in ("Plan", "Dev", "Review", "Run"):
-        assert f'swap_tiled_layout name="{phase}"' in kdl
-
-
-def test_render_workitem_layout_has_tab_bar_framing():
-    # A focus tab is opened from this layout via `new-tab --layout`; without a
-    # default_tab_template it renders with NO tab bar/status bar (you lose the tab
-    # bar when switching into a focus tab). It must carry the same frame as the base.
-    kdl = render_workitem_layout(
-        name="wi-1", worktree="/wt/a", item_id="wi-1", task_slug="a",
-        chat_command=None, default_phase="Dev")
-    assert "default_tab_template {" in kdl
-    assert 'plugin location="zellij:tab-bar"' in kdl
-    assert 'plugin location="zellij:status-bar"' in kdl
-    # The template must come before the tab it frames.
-    assert kdl.index("default_tab_template") < kdl.index('tab name="wi-1"')
-
-
-def test_workitem_layout_tab_template_matches_base():
-    # The per-item frame is the SAME block the base layout uses — keep them in sync
-    # via the shared constant so the two can't drift.
-    assert _DEFAULT_TAB_TEMPLATE in _TEMPLATE
-    kdl = render_workitem_layout(
-        name="wi-1", worktree="/wt/a", item_id="wi-1", task_slug="a",
-        chat_command=None, default_phase="Dev")
-    assert _DEFAULT_TAB_TEMPLATE in kdl
 
 
 # --- Task 2: pure builders -----------------------------------------------------

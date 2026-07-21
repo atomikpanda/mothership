@@ -1,5 +1,4 @@
 import os
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional
@@ -128,43 +127,6 @@ _LAYOUT_HEAD = _TEMPLATE[:_close_idx]
 _BASE_TABS = ""
 _LAYOUT_TAIL = _TEMPLATE[_close_idx:]
 
-# The tab-bar (top) + status-bar (bottom) frame every tab via default_tab_template.
-# A per-item focus tab (render_workitem_layout) is opened with `new-tab --layout`
-# from its OWN layout doc, so it must carry the same block or it renders with NO
-# tab bar. Sliced verbatim from _TEMPLATE so the two can never drift. (Dead after
-# Task 12 removes render_workitem_layout.)
-_DEFAULT_TAB_TEMPLATE = _TEMPLATE[
-    _TEMPLATE.index("    default_tab_template {") : _TEMPLATE.index('    tab name="Overview"')
-]
-
-
-def tab_name_for(item_id: str) -> str:
-    """Deterministic zellij tab name for a WorkItem. The id verbatim: the same
-    item always maps to the same tab, so focus reconciles rather than duplicates."""
-    return item_id
-
-
-def decide_focus_action(tab_name: str, existing_tab_names: list[str], *, is_done: bool) -> str:
-    """Pure go-vs-create-vs-close decision for `mship layout focus`.
-    Returns "close" | "noop" | "go-to" | "create"."""
-    exists = tab_name in existing_tab_names
-    if is_done:
-        return "close" if exists else "noop"
-    return "go-to" if exists else "create"
-
-
-_PHASES = ("Plan", "Dev", "Review", "Run")
-
-_PHASE_FROM_WORKITEM = {
-    "inbox": "Plan", "shaping": "Plan", "ready": "Plan",
-    "in_flight": "Dev", "review": "Review", "done": "Run",
-}
-
-
-def default_phase_tab(workitem_phase: str) -> str:
-    """Map a WorkItem's derived phase to the sub-tab that opens focused."""
-    return _PHASE_FROM_WORKITEM.get(workitem_phase, "Plan")
-
 
 def resolve_chat_command(explicit: str | None, env: Mapping[str, str]) -> str | None:
     """Configurable agent/chat command. None -> a bare pane = the operator's shell
@@ -172,96 +134,6 @@ def resolve_chat_command(explicit: str | None, env: Mapping[str, str]) -> str | 
     if explicit:
         return explicit
     return env.get("MSHIP_CHAT_COMMAND") or None
-
-
-def _mship_pane(name: str, tokens: list[str]) -> str:
-    args = " ".join(_kdl_quote(t) for t in tokens)
-    return (f'                pane name="{name}" command="mship" close_on_exit=false '
-            f'{{ args {args}; }}\n')
-
-
-def _phase_panes(phase: str, item_id: str, task_slug: str | None) -> str:
-    """The ambient view panes for one phase sub-tab, baking the item/task in. Panes
-    that need a task fall back to a Shell pane when the item has no task yet.
-
-    NOTE (deviation): `mship view logs` does not exist — the run/journal view is
-    registered as `view journal` (in cli/view/logs.py). The Run phase therefore
-    tails `view journal`, not a nonexistent `view logs`."""
-    shell = '                pane name="Shell"\n'
-    if phase == "Plan":
-        return (_mship_pane("Spec", ["view", "spec", "--workitem", item_id, "--watch"])
-                + _mship_pane("Item", ["view", "item", item_id]))
-    if phase == "Dev":
-        if task_slug is None:
-            return shell
-        return (_mship_pane("Diff", ["view", "diff", "--task", task_slug, "--watch"])
-                + _mship_pane("Journal", ["view", "journal", "--task", task_slug, "--watch"]))
-    if phase == "Review":
-        item = _mship_pane("Item", ["view", "item", item_id])
-        if task_slug is None:
-            return item
-        return _mship_pane("Diff", ["view", "diff", "--task", task_slug, "--watch"]) + item
-    if phase == "Run":
-        if task_slug is None:
-            return shell
-        return _mship_pane("Logs", ["view", "journal", "--task", task_slug, "--watch"]) + shell
-    return shell
-
-
-def _agent_pane(chat_command: str | None) -> str:
-    if chat_command is None:
-        return '            pane name="Agent" focus=true\n'
-    cmd = _kdl_quote(chat_command)
-    return ('            pane name="Agent" focus=true command="sh" close_on_exit=false '
-            f'{{ args "-c" {cmd}; }}\n')
-
-
-def _editor_pane() -> str:
-    return ('            pane name="Editor" command="sh" close_on_exit=false {\n'
-            '                args "-c" "${EDITOR:-$(command -v nvim || command -v vim || command -v vi)} ."\n'
-            '            }\n')
-
-
-def _phase_swap(phase: str, item_id: str, task_slug: str | None,
-                chat_command: str | None) -> str:
-    return (f'    swap_tiled_layout name="{phase}" {{\n'
-            '        tab {\n'
-            '            pane split_direction="vertical" {\n'
-            + _agent_pane(chat_command)
-            + '                pane split_direction="horizontal" size="50%" {\n'
-            + _phase_panes(phase, item_id, task_slug)
-            + '                }\n'
-            + '            }\n'
-            + _editor_pane()
-            + '        }\n'
-            '    }\n')
-
-
-def render_workitem_layout(
-    *, name: str, worktree: str, item_id: str, task_slug: str | None,
-    chat_command: str | None, default_phase: str,
-) -> str:
-    """A per-WorkItem tab KDL: chat-first Agent pane + Editor pane, all cd'd to the
-    worktree, with Plan/Dev/Review/Run phase sub-tabs (zellij swap layouts) whose
-    panes are the shipped `mship view` commands baked to this item/task. Includes the
-    same default_tab_template as the base layout so the focus tab shows the tab-bar /
-    status-bar. Reuses _kdl_quote so paths/commands can't break out of the KDL string."""
-    base_phase = default_phase if default_phase in _PHASES else "Plan"
-    parts = [f'layout {{\n    cwd {_kdl_quote(worktree)}\n\n',
-             _DEFAULT_TAB_TEMPLATE,
-             f'    tab name="{name}" focus=true {{\n',
-             '        pane split_direction="vertical" {\n',
-             _agent_pane(chat_command),
-             '            pane split_direction="horizontal" size="50%" {\n',
-             _phase_panes(base_phase, item_id, task_slug),
-             '            }\n',
-             '        }\n',
-             _editor_pane(),
-             '    }\n\n']
-    for phase in _PHASES:
-        parts.append(_phase_swap(phase, item_id, task_slug, chat_command))
-    parts.append('}\n')
-    return "".join(parts)
 
 
 def resolve_focus_target(container, item_id: str):
@@ -333,47 +205,9 @@ def _serve_launch_path() -> Path:
     return Path.home() / ".config" / "zellij" / "mothership-serve-launch.kdl"
 
 
-def _layout_cache_dir() -> Path:
-    """mship-owned cache dir for per-WorkItem layout KDL files that `zellij action
-    new-tab --layout <name> --layout-dir <dir>` resolves by name."""
-    return Path.home() / ".cache" / "mship" / "layouts"
-
-
-def write_workitem_layout_file(item_id: str, kdl: str) -> tuple[str, Path]:
-    """Write a WorkItem's layout KDL to a stable cache file and return
-    (layout_name, layout_dir) for `new-tab --layout <name> --layout-dir <dir>`.
-
-    Delivering the KDL via a file (resolved by name) rather than `--layout-string`
-    keeps this portable to older zellij that lack `--layout-string` (the operator's
-    version). The path is stable and keyed by item_id (overwritten on re-focus) — NOT
-    a delete-on-close tempfile — so zellij's server can read it after we return
-    without racing a cleanup delete."""
-    cache_dir = _layout_cache_dir()
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    (cache_dir / f"{item_id}.kdl").write_text(kdl)
-    return item_id, cache_dir
-
-
 def _in_zellij() -> bool:
     """Seam: are we inside a zellij session? ($ZELLIJ is set by zellij)."""
     return bool(os.environ.get("ZELLIJ"))
-
-
-def _query_tab_names() -> list[str] | None:
-    """Seam: the current session's tab names via `zellij action query-tab-names`.
-    Returns None if the query itself FAILED, so callers don't mistake a failure
-    for an empty session (which would create duplicate tabs / report wrong state)."""
-    out = subprocess.run(["zellij", "action", "query-tab-names"],
-                         capture_output=True, text=True, check=False)
-    if out.returncode != 0:
-        return None
-    return [line for line in out.stdout.splitlines() if line.strip()]
-
-
-def _run_zellij_action(args: list[str]) -> bool:
-    """Seam: run one `zellij action <args>`; returns True on success (exit 0), so
-    callers can report real outcomes and never `close-tab` after a failed go-to."""
-    return subprocess.run(["zellij", "action", *args], check=False).returncode == 0
 
 
 def register(app: typer.Typer, get_container):
@@ -478,29 +312,5 @@ def register(app: typer.Typer, get_container):
         if not _in_zellij():
             typer.echo("Not inside a zellij session; run `mship layout launch` "
                        "to open the cockpit. (focus recorded)")
-
-    @layout_app.command()
-    def close(
-        item_id: str = typer.Argument(..., help="WorkItem id whose tab to close."),
-    ):
-        """Explicitly close a WorkItem's zellij tab so tabs don't accumulate (AC7)."""
-        if not _in_zellij():
-            typer.echo("Not inside a zellij session ($ZELLIJ unset). (no-op)")
-            return
-        name = tab_name_for(item_id)
-        existing = _query_tab_names()
-        if existing is None:
-            typer.echo("Error: could not query zellij tabs.", err=True)
-            raise typer.Exit(code=1)
-        if name not in existing:
-            typer.echo(f"No open tab for {item_id}.")
-            return
-        # Close only after a successful go-to, so a failed go-to can't close the
-        # active tab (Overview or an unrelated item) instead of the target.
-        if _run_zellij_action(["go-to-tab-name", name]) and _run_zellij_action(["close-tab"]):
-            typer.echo(f"Closed tab for {item_id}.")
-            return
-        typer.echo(f"Error: could not close tab for {item_id}.", err=True)
-        raise typer.Exit(code=1)
 
     app.add_typer(layout_app, rich_help_panel="Setup")
