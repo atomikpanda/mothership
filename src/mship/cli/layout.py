@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 import typer
 
@@ -106,6 +106,115 @@ def decide_focus_action(tab_name: str, existing_tab_names: list[str], *, is_done
     if is_done:
         return "close" if exists else "noop"
     return "go-to" if exists else "create"
+
+
+_PHASES = ("Plan", "Dev", "Review", "Run")
+
+_PHASE_FROM_WORKITEM = {
+    "inbox": "Plan", "shaping": "Plan", "ready": "Plan",
+    "in_flight": "Dev", "review": "Review", "done": "Run",
+}
+
+
+def default_phase_tab(workitem_phase: str) -> str:
+    """Map a WorkItem's derived phase to the sub-tab that opens focused."""
+    return _PHASE_FROM_WORKITEM.get(workitem_phase, "Plan")
+
+
+def resolve_chat_command(explicit: str | None, env: Mapping[str, str]) -> str | None:
+    """Configurable agent/chat command. None -> a bare pane = the operator's shell
+    in the tab cwd (mship does NOT hardcode a specific agent)."""
+    if explicit:
+        return explicit
+    return env.get("MSHIP_CHAT_COMMAND") or None
+
+
+def _mship_pane(name: str, tokens: list[str]) -> str:
+    args = " ".join(_kdl_quote(t) for t in tokens)
+    return (f'                pane name="{name}" command="mship" close_on_exit=false '
+            f'{{ args {args}; }}\n')
+
+
+def _phase_panes(phase: str, item_id: str, task_slug: str | None) -> str:
+    """The ambient view panes for one phase sub-tab, baking the item/task in. Panes
+    that need a task fall back to a Shell pane when the item has no task yet.
+
+    NOTE (deviation): `mship view logs` does not exist — the run/journal view is
+    registered as `view journal` (in cli/view/logs.py). The Run phase therefore
+    tails `view journal`, not a nonexistent `view logs`."""
+    shell = '                pane name="Shell"\n'
+    if phase == "Plan":
+        return (_mship_pane("Spec", ["view", "spec", "--workitem", item_id, "--watch"])
+                + _mship_pane("Item", ["view", "item", item_id]))
+    if phase == "Dev":
+        if task_slug is None:
+            return shell
+        return (_mship_pane("Diff", ["view", "diff", "--task", task_slug, "--watch"])
+                + _mship_pane("Journal", ["view", "journal", "--task", task_slug, "--watch"]))
+    if phase == "Review":
+        item = _mship_pane("Item", ["view", "item", item_id])
+        if task_slug is None:
+            return item
+        return _mship_pane("Diff", ["view", "diff", "--task", task_slug, "--watch"]) + item
+    if phase == "Run":
+        if task_slug is None:
+            return shell
+        return _mship_pane("Logs", ["view", "journal", "--task", task_slug, "--watch"]) + shell
+    return shell
+
+
+def _agent_pane(chat_command: str | None) -> str:
+    if chat_command is None:
+        return '            pane name="Agent" focus=true\n'
+    cmd = _kdl_quote(chat_command)
+    return ('            pane name="Agent" focus=true command="sh" close_on_exit=false '
+            f'{{ args "-c" {cmd}; }}\n')
+
+
+def _editor_pane() -> str:
+    return ('            pane name="Editor" command="sh" close_on_exit=false {\n'
+            '                args "-c" "${EDITOR:-$(command -v nvim || command -v vim || command -v vi)} ."\n'
+            '            }\n')
+
+
+def _phase_swap(phase: str, item_id: str, task_slug: str | None,
+                chat_command: str | None) -> str:
+    return (f'    swap_tiled_layout name="{phase}" {{\n'
+            '        tab {\n'
+            '            pane split_direction="vertical" {\n'
+            + _agent_pane(chat_command)
+            + '                pane split_direction="horizontal" size="50%" {\n'
+            + _phase_panes(phase, item_id, task_slug)
+            + '                }\n'
+            + '            }\n'
+            + _editor_pane()
+            + '        }\n'
+            '    }\n')
+
+
+def render_workitem_layout(
+    *, name: str, worktree: str, item_id: str, task_slug: str | None,
+    chat_command: str | None, default_phase: str,
+) -> str:
+    """A per-WorkItem tab KDL: chat-first Agent pane + Editor pane, all cd'd to the
+    worktree, with Plan/Dev/Review/Run phase sub-tabs (zellij swap layouts) whose
+    panes are the shipped `mship view` commands baked to this item/task. Reuses
+    _kdl_quote so paths/commands can't break out of the KDL string."""
+    base_phase = default_phase if default_phase in _PHASES else "Plan"
+    parts = [f'layout {{\n    cwd {_kdl_quote(worktree)}\n\n',
+             f'    tab name="{name}" focus=true {{\n',
+             '        pane split_direction="vertical" {\n',
+             _agent_pane(chat_command),
+             '            pane split_direction="horizontal" size="50%" {\n',
+             _phase_panes(base_phase, item_id, task_slug),
+             '            }\n',
+             '        }\n',
+             _editor_pane(),
+             '    }\n\n']
+    for phase in _PHASES:
+        parts.append(_phase_swap(phase, item_id, task_slug, chat_command))
+    parts.append('}\n')
+    return "".join(parts)
 
 
 def _serve_tab(serve_args: list[str]) -> str:
