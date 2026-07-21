@@ -93,6 +93,21 @@ def _kdl_quote(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def tab_name_for(item_id: str) -> str:
+    """Deterministic zellij tab name for a WorkItem. The id verbatim: the same
+    item always maps to the same tab, so focus reconciles rather than duplicates."""
+    return item_id
+
+
+def decide_focus_action(tab_name: str, existing_tab_names: list[str], *, is_done: bool) -> str:
+    """Pure go-vs-create-vs-close decision for `mship layout focus`.
+    Returns "close" | "noop" | "go-to" | "create"."""
+    exists = tab_name in existing_tab_names
+    if is_done:
+        return "close" if exists else "noop"
+    return "go-to" if exists else "create"
+
+
 def _serve_tab(serve_args: list[str]) -> str:
     """The Serve tab KDL block: one pane running `mship serve <serve_args>`."""
     tokens = " ".join(_kdl_quote(a) for a in ["serve", *serve_args])
