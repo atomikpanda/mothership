@@ -403,27 +403,32 @@ def register(app: typer.Typer, get_container):
 
     @layout_app.command()
     def launch(
-        serve: bool = typer.Option(False, "--serve", help="Open the serve layout (adds a Serve tab running `mship serve`)."),
+        serve: bool = typer.Option(False, "--serve", help="Add a Serve tab running `mship serve`."),
         host: Optional[str] = typer.Option(None, "--host", help="serve --host (implies --serve)."),
         port: Optional[int] = typer.Option(None, "--port", help="serve --port (implies --serve)."),
-        relay: bool = typer.Option(False, "--relay", help="serve --relay (implies --serve). Collides with a separately-running serve."),
+        relay: bool = typer.Option(False, "--relay", help="serve --relay (implies --serve)."),
         relay_host: Optional[str] = typer.Option(None, "--relay-host", help="serve --relay-host (implies --serve)."),
+        chat_command: Optional[str] = typer.Option(
+            None, "--chat-command", help="Command for the Agent pane. Default: your shell."),
     ):
-        """Launch zellij with the mothership layout (replaces current process).
+        """Launch zellij with the v2 cockpit layout (replaces current process).
 
-        With --serve (or any serve flag) launches the serve layout — the normal
-        tabs plus a Serve tab running `mship serve <flags>`. WARNING: starting a
-        serve here collides with a separately-running `mship serve` (same relay
-        subdomain / bind), so use it only when no standalone serve is up.
-        """
+        Renders an effective cockpit: the Agent pane runs your shell (or
+        --chat-command / $MSHIP_CHAT_COMMAND) beside the fixed rich stack of
+        `mship view … --follow` panes. With any serve flag, also adds a Serve tab
+        running `mship serve`."""
         serve_selected = (
             serve or host is not None or port is not None or relay or relay_host is not None
         )
-        if not serve_selected:
-            os.execvp("zellij", ["zellij", "--layout", "mothership"])
-            return
-        args = serve_cli_args(host=host, port=port, relay=relay, relay_host=relay_host)
-        kdl = render_serve_layout(args)
+        kdl = render_cockpit_layout(
+            chat_command=resolve_chat_command(chat_command, os.environ),
+        )
+        if serve_selected:
+            args = serve_cli_args(host=host, port=port, relay=relay, relay_host=relay_host)
+            # Splice the Serve tab in exactly as render_serve_layout does.
+            close_idx = kdl.rindex("\n}\n") + 1
+            kdl = kdl[:close_idx] + _serve_tab(args) + kdl[close_idx:]
+
         path = _serve_launch_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(kdl)

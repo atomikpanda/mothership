@@ -191,11 +191,29 @@ def _capture_launch(monkeypatch, argv):
     return captured
 
 
-def test_layout_launch_execs_zellij(tmp_path, monkeypatch):
+def test_launch_renders_cockpit_temp_layout(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     cap = _capture_launch(monkeypatch, ["layout", "launch"])
-    assert cap["file"] == "zellij"
-    assert cap["args"] == ["zellij", "--layout", "mothership"]
+    assert cap["args"][0:2] == ["zellij", "--layout"]
+    body = Path(cap["args"][2]).read_text()
+    assert 'tab name="Cockpit" focus=true' in body
+    assert 'pane stacked=true {' in body
+    assert '"view" "diff" "--follow"' in body
+
+
+def test_launch_threads_chat_command(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cap = _capture_launch(monkeypatch, ["layout", "launch", "--chat-command", "claude"])
+    body = Path(cap["args"][2]).read_text()
+    assert '"-c" "claude"' in body
+
+
+def test_launch_serve_still_adds_serve_tab(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cap = _capture_launch(monkeypatch, ["layout", "launch", "--serve"])
+    body = Path(cap["args"][2]).read_text()
+    assert 'tab name="Serve"' in body
+    assert 'tab name="Cockpit"' in body
 
 
 def test_launch_serve_renders_temp_layout(tmp_path, monkeypatch):
