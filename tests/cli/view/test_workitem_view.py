@@ -187,3 +187,35 @@ async def test_cockpit_copy_pr_url(tmp_path):
         await pilot.press("y")
         await pilot.pause()
         assert "https://gh/pr/1" in view.last_action()
+
+
+# --- Greptile #394 F3: cockpit enter navigates on non-spec rows too ---
+@pytest.mark.asyncio
+async def test_cockpit_enter_opens_pr_row_in_browser(monkeypatch):
+    import mship.cli.view.workitem as wv
+    opened = {}
+    monkeypatch.setattr(wv.webbrowser, "open", lambda u: opened.setdefault("u", u))
+    view = WorkItemCockpitView(_cockpit())
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        view._master.focus()
+        for _ in range(3):        # spec(0) ac1(1) task(2) PR(3)
+            await pilot.press("j")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert opened.get("u") == "https://gh/pr/1"
+
+
+@pytest.mark.asyncio
+async def test_cockpit_enter_opens_task_detail_in_process():
+    from mship.cli.view._modals import EntityScreen
+    view = WorkItemCockpitView(_cockpit())
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        view._master.focus()
+        await pilot.press("j"); await pilot.press("j")   # -> task row
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(view.screen, EntityScreen)

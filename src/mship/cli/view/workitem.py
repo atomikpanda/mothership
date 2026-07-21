@@ -156,13 +156,27 @@ class WorkItemCockpitView(MasterDetailApp):
             self._announce("Nothing to copy here.")
 
     def _do_open_entity(self) -> bool:
-        if self.selected_key() != "spec" or self._spec_store is None:
+        # enter opens the linked entity for EVERY cockpit row: the spec opens its
+        # full body, a PR opens in the browser, and any other row (task, thread,
+        # criterion) opens its detail in a focused in-process screen.
+        key = self.selected_key()
+        if key is None:
             return False
-        spec = self._spec_store.find_by_id(self._cockpit.spec_id) if self._cockpit.spec_id else None
-        if spec is None:
-            return False
-        self.push_screen(EntityScreen(self._cockpit.spec_id, spec.body))
-        return True
+        if key == "spec" and self._spec_store is not None and self._cockpit.spec_id:
+            spec = self._spec_store.find_by_id(self._cockpit.spec_id)
+            if spec is not None:
+                self.push_screen(EntityScreen(self._cockpit.spec_id, spec.body))
+                return True
+        pr = self._selected_pr()
+        if pr is not None:
+            webbrowser.open(pr.url)
+            self._announce(f"Opened {pr.url}")
+            return True
+        row = next((r for r in self.list_rows() if r.key == key), None)
+        if row is not None:
+            self.push_screen(EntityScreen(key, row.detail))
+            return True
+        return False
 
 
 def _resolve_cockpit(container, item_id: str) -> WorkItemCockpit | None:

@@ -210,3 +210,34 @@ async def test_queue_open_and_copy_pr(tmp_path, monkeypatch):
         await pilot.press("y")
         await pilot.pause()
         assert "https://gh/pr/9" in view.last_action()
+
+
+# --- Greptile #394 F2: enter navigates on every row type, not just spec rows ---
+@pytest.mark.asyncio
+async def test_queue_enter_opens_pr_row_in_browser(tmp_path, monkeypatch):
+    import mship.cli.view.queue as qv
+    opened = {}
+    monkeypatch.setattr(qv.webbrowser, "open", lambda u: opened.setdefault("u", u))
+    view = QueueView(_items())
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        view._master.focus()
+        await pilot.press("j"); await pilot.press("j")   # -> PR row
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert opened["u"] == "https://gh/pr/9"
+
+
+@pytest.mark.asyncio
+async def test_queue_enter_opens_blocked_task_detail_in_process(tmp_path):
+    from mship.cli.view._modals import EntityScreen
+    view = QueueView(_items())
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        view._master.focus()
+        await pilot.press("j")   # -> blocked-task row
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(view.screen, EntityScreen)

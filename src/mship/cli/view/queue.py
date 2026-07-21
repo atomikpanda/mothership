@@ -97,13 +97,22 @@ class QueueView(MasterDetailApp):
             self._announce("Nothing to copy here.")
 
     def _do_open_entity(self) -> bool:
+        # enter opens the linked entity for EVERY row type: a needs_review spec
+        # opens its full body, a PR row opens in the browser, and any other row
+        # (blocked task) opens its detail in a focused in-process screen.
         item = self._selected()
-        if item is None or item.kind != "spec-needs-review" or self._spec_store is None:
+        if item is None:
             return False
-        spec = self._spec_store.find_by_id(item.spec_id)
-        if spec is None:
-            return False
-        self.push_screen(EntityScreen(item.spec_id, spec.body))
+        if item.kind == "spec-needs-review" and self._spec_store is not None:
+            spec = self._spec_store.find_by_id(item.spec_id)
+            if spec is not None:
+                self.push_screen(EntityScreen(item.spec_id, spec.body))
+                return True
+        if item.pr_url:
+            webbrowser.open(item.pr_url)
+            self._announce(f"Opened {item.pr_url}")
+            return True
+        self.push_screen(EntityScreen(item.key, queue_detail(item)))
         return True
 
 
