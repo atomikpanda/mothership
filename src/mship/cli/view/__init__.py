@@ -9,6 +9,7 @@ def register(parent: typer.Typer, get_container):
     from mship.cli.view import diff as _diff
     from mship.cli.view import spec as _spec
     from mship.cli.view import workitem as _workitem
+    from mship.cli.view import items as _items
     from mship.cli.view import queue as _queue
 
     _status.register(app, get_container)
@@ -16,6 +17,7 @@ def register(parent: typer.Typer, get_container):
     _diff.register(app, get_container)
     _spec.register(app, get_container)
     _workitem.register(app, get_container)
+    _items.register(app, get_container)
     _queue.register(app, get_container)
 
     parent.add_typer(app, name="view", rich_help_panel="Inspection")
