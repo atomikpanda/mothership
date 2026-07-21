@@ -1,4 +1,5 @@
 import os
+import subprocess
 from pathlib import Path
 from typing import Mapping, Optional
 
@@ -286,6 +287,23 @@ def _serve_launch_path() -> Path:
     return Path.home() / ".config" / "zellij" / "mothership-serve-launch.kdl"
 
 
+def _in_zellij() -> bool:
+    """Seam: are we inside a zellij session? ($ZELLIJ is set by zellij)."""
+    return bool(os.environ.get("ZELLIJ"))
+
+
+def _query_tab_names() -> list[str]:
+    """Seam: the current session's tab names via `zellij action query-tab-names`."""
+    out = subprocess.run(["zellij", "action", "query-tab-names"],
+                         capture_output=True, text=True, check=False)
+    return [line for line in out.stdout.splitlines() if line.strip()]
+
+
+def _run_zellij_action(args: list[str]) -> None:
+    """Seam: run one `zellij action <args>`. Best-effort (check=False)."""
+    subprocess.run(["zellij", "action", *args], check=False)
+
+
 def register(app: typer.Typer, get_container):
     layout_app = typer.Typer(name="layout", help="Manage the zellij layout for mothership.", no_args_is_help=True)
 
@@ -338,5 +356,48 @@ def register(app: typer.Typer, get_container):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(kdl)
         os.execvp("zellij", ["zellij", "--layout", str(path)])
+
+    @layout_app.command()
+    def focus(
+        item_id: str = typer.Argument(..., help="WorkItem id to focus (e.g. wi-...)."),
+        chat_command: Optional[str] = typer.Option(
+            None, "--chat-command",
+            help="Command for the Agent pane. Default: your shell in the worktree."),
+    ):
+        """Open or switch to a WorkItem's zellij tab (chat-first, phase sub-tabs).
+
+        No-ops with a message when not inside a zellij session. Closes the tab
+        instead of opening it when the item has reached `done` (AC7)."""
+        if not _in_zellij():
+            typer.echo("Not inside a zellij session ($ZELLIJ unset); "
+                       "run `mship layout launch` first. (no-op)")
+            return
+        target = resolve_focus_target(get_container(), item_id)
+        if target is None:
+            typer.echo(f"Error: unknown work item: {item_id}", err=True)
+            raise typer.Exit(code=1)
+        summary, task_slug, worktree = target
+        name = tab_name_for(item_id)
+        action = decide_focus_action(name, _query_tab_names(), is_done=summary.phase == "done")
+        if action == "noop":
+            typer.echo(f"{item_id} is done; no tab to focus.")
+            return
+        if action == "close":
+            _run_zellij_action(["go-to-tab-name", name])
+            _run_zellij_action(["close-tab"])
+            typer.echo(f"Closed tab for done item {item_id}.")
+            return
+        if action == "go-to":
+            _run_zellij_action(["go-to-tab-name", name])
+            typer.echo(f"Switched to {item_id}.")
+            return
+        kdl = render_workitem_layout(
+            name=name, worktree=str(worktree), item_id=item_id, task_slug=task_slug,
+            chat_command=resolve_chat_command(chat_command, os.environ),
+            default_phase=default_phase_tab(summary.phase),
+        )
+        _run_zellij_action(["new-tab", "--layout-string", kdl, "--name", name,
+                            "--cwd", str(worktree)])
+        typer.echo(f"Opened {item_id}.")
 
     app.add_typer(layout_app, rich_help_panel="Setup")

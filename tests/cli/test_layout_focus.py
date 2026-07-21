@@ -162,3 +162,71 @@ def test_resolve_focus_target_no_worktree_falls_back_to_workspace_root(tmp_path)
         assert worktree == tmp_path   # workspace root (config_path parent)
     finally:
         _reset_focus()
+
+
+# --- Task 6: mship layout focus driver ---------------------------------------
+import mship.cli.layout as layout_mod
+from mship.cli import app
+from typer.testing import CliRunner
+
+runner = CliRunner()
+
+
+def _patch_zellij(monkeypatch, *, in_session, existing):
+    calls = []
+    monkeypatch.setattr(layout_mod, "_in_zellij", lambda: in_session)
+    monkeypatch.setattr(layout_mod, "_query_tab_names", lambda: list(existing))
+    monkeypatch.setattr(layout_mod, "_run_zellij_action", lambda args: calls.append(args))
+    return calls
+
+
+def test_focus_outside_zellij_noops_with_message(tmp_path, monkeypatch):
+    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
+    calls = _patch_zellij(monkeypatch, in_session=False, existing=[])
+    try:
+        result = runner.invoke(app, ["layout", "focus", "wi-1"])
+        assert result.exit_code == 0, result.output
+        assert "zellij" in result.output.lower()
+        assert calls == []   # no zellij action attempted
+    finally:
+        _reset_focus()
+
+
+def test_focus_creates_tab_when_absent(tmp_path, monkeypatch):
+    wt = tmp_path / "wt-a"
+    _seed_focus(tmp_path, {"r": wt})
+    calls = _patch_zellij(monkeypatch, in_session=True, existing=["Overview"])
+    try:
+        result = runner.invoke(app, ["layout", "focus", "wi-1"])
+        assert result.exit_code == 0, result.output
+        assert len(calls) == 1
+        args = calls[0]
+        assert args[0] == "new-tab"
+        assert "--name" in args and "wi-1" in args
+        assert "--cwd" in args and str(wt) in args
+        kdl = args[args.index("--layout-string") + 1]
+        assert 'tab name="wi-1"' in kdl and 'name="Agent"' in kdl
+    finally:
+        _reset_focus()
+
+
+def test_focus_switches_to_existing_tab(tmp_path, monkeypatch):
+    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
+    calls = _patch_zellij(monkeypatch, in_session=True, existing=["wi-1"])
+    try:
+        result = runner.invoke(app, ["layout", "focus", "wi-1"])
+        assert result.exit_code == 0, result.output
+        assert calls == [["go-to-tab-name", "wi-1"]]
+    finally:
+        _reset_focus()
+
+
+def test_focus_unknown_id_exits_1(tmp_path, monkeypatch):
+    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
+    _patch_zellij(monkeypatch, in_session=True, existing=[])
+    try:
+        result = runner.invoke(app, ["layout", "focus", "wi-missing"])
+        assert result.exit_code == 1
+        assert "wi-missing" in result.output
+    finally:
+        _reset_focus()
