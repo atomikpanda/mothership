@@ -11,3 +11,4 @@ def test_view_command_exists():
     assert "journal" in result.stdout
     assert "diff" in result.stdout
     assert "spec" in result.stdout
+    assert "queue" in result.stdout
