@@ -54,13 +54,14 @@ def _render_task(task: Task, open_questions: list[str] | None = None) -> str:
 
 class StatusView(ViewApp):
     def __init__(self, state_manager, workspace_root: Path, task_filter: Optional[str],
-                 log_manager=None, workitem_loader=None, **kw):
+                 log_manager=None, workitem_loader=None, task_provider=None, **kw):
         super().__init__(**kw)
         self._state_manager = state_manager
         self._workspace_root = workspace_root
         self._task_filter = task_filter
         self._log_manager = log_manager
         self._workitem_loader = workitem_loader
+        self._task_provider = task_provider
 
     def _open_questions(self, slug: str) -> list[str]:
         if self._log_manager is None:
@@ -73,10 +74,16 @@ class StatusView(ViewApp):
 
     def gather(self) -> str:
         state: WorkspaceState = self._state_manager.load()
-        if self._task_filter is not None:
-            task = state.tasks.get(self._task_filter)
+        task_filter = self._task_filter
+        if self._task_provider is not None:
+            task_filter = self._task_provider()
+            if task_filter is None:
+                from mship.cli.view._follow import follow_hint
+                return follow_hint()
+        if task_filter is not None:
+            task = state.tasks.get(task_filter)
             if task is None:
-                return f"Unknown task: {self._task_filter}"
+                return f"Unknown task: {task_filter}"
             return _render_task(task, self._open_questions(task.slug))
         index = build_task_index(state, self._workspace_root)
         if not index:
@@ -98,19 +105,52 @@ def register(app: typer.Typer, get_container):
         task: Optional[str] = typer.Option(None, "--task", help="Narrow to one task slug"),
         watch: bool = typer.Option(False, "--watch"),
         interval: float = typer.Option(2.0, "--interval"),
+        follow: bool = typer.Option(False, "--follow", help="Track the workspace CURRENT FOCUS (cockpit-v2)."),
     ):
         """Live workspace status view (all tasks by default)."""
         from pathlib import Path as _P
         from mship.cli._resolve import resolve_or_exit
+        from mship.cli.view._workitems import load_workitem_index
 
         container = get_container()
+        workspace_root = _P(container.config_path()).parent
+
+        if follow:
+            if task is not None:
+                typer.echo("Error: --follow and --task are mutually exclusive.", err=True)
+                raise typer.Exit(code=1)
+            from mship.cli.view._follow import read_focused_id
+            from mship.cli.layout import resolve_focus_target
+            from mship.cli.output import Output
+
+            def _task_provider() -> Optional[str]:
+                item_id = read_focused_id(container)
+                if item_id is None:
+                    return None
+                target = resolve_focus_target(container, item_id)
+                return target[1] if target is not None else None
+
+            view = StatusView(
+                state_manager=container.state_manager(),
+                workspace_root=workspace_root,
+                task_filter=None,
+                log_manager=container.log_manager(),
+                workitem_loader=lambda: load_workitem_index(container),
+                task_provider=_task_provider,
+                watch=True,
+                interval=interval,
+            )
+            if not Output().is_tty:
+                typer.echo(view.gather())
+                return
+            view.run()
+            return
+
         task_slug: Optional[str] = None
         if task is not None:
             state = container.state_manager().load()
             t = resolve_or_exit(state, task)
             task_slug = t.slug
-        workspace_root = _P(container.config_path()).parent
-        from mship.cli.view._workitems import load_workitem_index
         view = StatusView(
             state_manager=container.state_manager(),
             workspace_root=workspace_root,
