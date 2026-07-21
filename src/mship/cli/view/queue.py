@@ -123,7 +123,8 @@ def register(app: "typer.Typer", get_container):
     def queue():
         """This workspace's attention/triage queue: specs awaiting review, blocked
         tasks, and PRs awaiting action — each a navigable row with a detail pane.
-        Read-only (navigate + view)."""
+        Curated inline actions: a approve · R request-changes · enter open · o
+        open-in-browser · y copy."""
         from mship.cli.output import Output
         from mship.core.view.queue import render_text
 
