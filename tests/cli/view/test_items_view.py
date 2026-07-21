@@ -78,6 +78,25 @@ async def test_items_view_lists_and_enter_focuses(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_items_view_shows_enter_and_copy_hint():
+    # The operator kept not realizing enter opens the tab — the hint must be
+    # visible on-screen, not just in the command docstring.
+    from mship.core.view.workitem_index import Attention, WorkItemSummary
+    import mship.cli.view.items as iv
+
+    s = WorkItemSummary(
+        id="wi-1", title="Overhaul", kind="feature", workspace="t", phase="in_flight",
+        attention=Attention(False, False, False, False, 0, 1),
+        created_at=_now(), updated_at=_now(), spec_id="spec-1", task_slugs=["a"], thread_ids=[])
+    view = iv.ItemsView([s])
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        header = view.header_text()
+        assert "enter" in header.lower()
+        assert "copy" in header.lower()
+
+
+@pytest.mark.asyncio
 async def test_items_enter_announces_focus_failure(monkeypatch):
     # Greptile #396: a failed `mship layout focus` must not report success.
     from mship.core.view.workitem_index import Attention, WorkItemSummary
