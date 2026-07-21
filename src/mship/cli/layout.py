@@ -38,6 +38,16 @@ _LAYOUT_HEAD = _TEMPLATE[:_close_idx]
 _BASE_TABS = ""
 _LAYOUT_TAIL = _TEMPLATE[_close_idx:]
 
+# The tab-bar (top) + status-bar (bottom) frame the base layout applies to every
+# tab via default_tab_template. A per-item focus tab (render_workitem_layout) is
+# opened with `new-tab --layout` from its OWN layout doc, so it must carry the same
+# block or it renders with NO tab bar — you'd lose the tab bar the moment you switch
+# into a focus tab. Sliced verbatim from _TEMPLATE so the two can never drift
+# (guarded by test_workitem_layout_tab_template_matches_base).
+_DEFAULT_TAB_TEMPLATE = _TEMPLATE[
+    _TEMPLATE.index("    default_tab_template {") : _TEMPLATE.index('    tab name="Overview"')
+]
+
 
 def serve_cli_args(
     *, host: Optional[str], port: Optional[int], relay: bool, relay_host: Optional[str]
@@ -166,10 +176,12 @@ def render_workitem_layout(
 ) -> str:
     """A per-WorkItem tab KDL: chat-first Agent pane + Editor pane, all cd'd to the
     worktree, with Plan/Dev/Review/Run phase sub-tabs (zellij swap layouts) whose
-    panes are the shipped `mship view` commands baked to this item/task. Reuses
-    _kdl_quote so paths/commands can't break out of the KDL string."""
+    panes are the shipped `mship view` commands baked to this item/task. Includes the
+    same default_tab_template as the base layout so the focus tab shows the tab-bar /
+    status-bar. Reuses _kdl_quote so paths/commands can't break out of the KDL string."""
     base_phase = default_phase if default_phase in _PHASES else "Plan"
     parts = [f'layout {{\n    cwd {_kdl_quote(worktree)}\n\n',
+             _DEFAULT_TAB_TEMPLATE,
              f'    tab name="{name}" focus=true {{\n',
              '        pane split_direction="vertical" {\n',
              _agent_pane(chat_command),
