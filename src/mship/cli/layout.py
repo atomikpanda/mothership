@@ -17,7 +17,14 @@ layout {
         }
     }
 
-    tab name="Plan" focus=true {
+    tab name="Overview" focus=true {
+        pane split_direction="vertical" {
+            pane size="50%" name="Queue" command="mship" close_on_exit=false { args "view" "queue"; }
+            pane size="50%" name="Items" command="mship" close_on_exit=false { args "view" "items"; }
+        }
+    }
+
+    tab name="Plan" {
         pane split_direction="vertical" {
             pane size="50%" name="Agent"
             pane split_direction="horizontal" size="50%" {

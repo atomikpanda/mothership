@@ -58,9 +58,22 @@ def test_render_serve_layout_no_args_has_base_tabs_plus_serve():
         assert f'tab name="{name}"' in kdl
     assert 'command="mship"' in kdl
     assert 'args "serve";' in kdl
-    # Serve tab comes AFTER Run, and Plan keeps focus.
+    # Serve tab comes AFTER Run, and Overview is the launchpad and keeps focus.
+    assert 'tab name="Overview" focus=true' in kdl
     assert kdl.index('tab name="Run"') < kdl.index('tab name="Serve"')
-    assert 'tab name="Plan" focus=true' in kdl
+
+
+def test_template_has_overview_launchpad_tab():
+    assert 'tab name="Overview" focus=true' in _TEMPLATE
+    start = _TEMPLATE.index('tab name="Overview"')
+    end = _TEMPLATE.index('tab name="Plan"', start)
+    overview = _TEMPLATE[start:end]
+    assert '"view" "queue"' in overview
+    assert '"view" "items"' in overview
+
+
+def test_overview_precedes_plan():
+    assert _TEMPLATE.index('tab name="Overview"') < _TEMPLATE.index('tab name="Plan"')
 
 
 def test_render_serve_layout_threads_flags():
