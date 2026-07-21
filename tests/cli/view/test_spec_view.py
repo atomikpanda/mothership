@@ -591,3 +591,26 @@ async def test_spec_view_renders_workitem_header(tmp_path):
         text = view.rendered_text()
         assert "wi-1" in text and "Overhaul" in text
         assert "Body text" in text
+
+
+# --- PR4: inline approve/request-changes on the spec stream view (AC7) ---
+
+
+@pytest.mark.asyncio
+async def test_spec_view_approve_writes_via_store(tmp_path):
+    from mship.core.spec import AcceptanceCriterion, Spec
+    from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+    store = SpecStore(tmp_path / SPECS_DIRNAME)
+    p = store.save(Spec(id="spec-1", title="t", status="needs_review",
+                        created_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                        updated_at=datetime(2026, 7, 1, tzinfo=timezone.utc), body="# body\n",
+                        acceptance_criteria=[AcceptanceCriterion(id="ac1", text="x", verdict="approved")],
+                        open_questions=[]))
+    view = SpecView(workspace_root=tmp_path, name_or_path=str(p),
+                    spec_store=store, spec_id="spec-1")
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("a")
+        await pilot.pause()
+        assert store.find_by_id("spec-1").status == "approved"
+        assert "approved" in view.last_action().lower()
