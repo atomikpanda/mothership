@@ -27,6 +27,7 @@ class LogsView(ViewApp):
         cli_task: Optional[str] = None,
         cwd: Optional[Path] = None,
         workitem_loader=None,
+        slug_provider=None,
         **kw,
     ):
         super().__init__(**kw)
@@ -38,6 +39,7 @@ class LogsView(ViewApp):
         self._cli_task = cli_task
         self._cwd = cwd if cwd is not None else Path.cwd()
         self._workitem_loader = workitem_loader
+        self._slug_provider = slug_provider
 
     def _header(self, slug: str) -> str | None:
         if self._workitem_loader is None:
@@ -69,10 +71,16 @@ class LogsView(ViewApp):
         return task.slug
 
     def gather(self) -> str:
-        try:
-            slug = self._resolve_slug()
-        except (NoActiveTaskError, AmbiguousTaskError, UnknownTaskError) as err:
-            return placeholder_for(err)
+        if self._slug_provider is not None:
+            slug = self._slug_provider()
+            if slug is None:
+                from mship.cli.view._follow import follow_hint
+                return follow_hint()
+        else:
+            try:
+                slug = self._resolve_slug()
+            except (NoActiveTaskError, AmbiguousTaskError, UnknownTaskError) as err:
+                return placeholder_for(err)
 
         scope = self._scope_to_repo
         # Watch mode re-reads state per tick so scoping follows `mship switch`.
@@ -125,9 +133,43 @@ def register(app: typer.Typer, get_container):
         watch: bool = typer.Option(False, "--watch"),
         interval: float = typer.Option(2.0, "--interval"),
         all_: bool = typer.Option(False, "--all", help="Show all log entries, ignore active_repo"),
+        follow: bool = typer.Option(False, "--follow", help="Track the workspace CURRENT FOCUS (cockpit-v2)."),
     ):
         """Live tail of a task's journal."""
         container = get_container()
+        from mship.cli.view._workitems import load_workitem_index
+
+        if follow:
+            if task is not None:
+                typer.echo("Error: --follow and --task are mutually exclusive.", err=True)
+                raise typer.Exit(code=1)
+            from mship.cli.view._follow import follow_hint, read_focused_id
+            from mship.cli.layout import resolve_focus_target
+            from mship.cli.output import Output
+
+            def _slug() -> Optional[str]:
+                item_id = read_focused_id(container)
+                if item_id is None:
+                    return None
+                target = resolve_focus_target(container, item_id)
+                return target[1] if target is not None else None
+
+            view = LogsView(
+                state_manager=container.state_manager(),
+                log_manager=container.log_manager(),
+                task_slug=None,
+                all_=all_,
+                cwd=Path.cwd(),
+                workitem_loader=lambda: load_workitem_index(container),
+                slug_provider=_slug,
+                watch=True,
+                interval=interval,
+            )
+            if not Output().is_tty:
+                typer.echo(view.gather())
+                return
+            view.run()
+            return
 
         if watch:
             # Watch mode: defer task resolution into the view so resolver
@@ -145,7 +187,6 @@ def register(app: typer.Typer, get_container):
             if not all_ and t.active_repo is not None:
                 scope = t.active_repo
 
-        from mship.cli.view._workitems import load_workitem_index
         view = LogsView(
             state_manager=container.state_manager(),
             log_manager=container.log_manager(),
