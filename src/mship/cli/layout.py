@@ -194,15 +194,17 @@ def _serve_target_path() -> Path:
     return Path.home() / ".config" / "zellij" / "layouts" / "mothership-serve.kdl"
 
 
-def _serve_launch_path() -> Path:
-    """Deterministic per-user path for the launch-time effective serve layout.
+def _launch_layout_path() -> Path:
+    """Per-PROCESS path for the launch-time effective cockpit layout, keyed by PID.
 
-    A fixed path (overwritten each launch, outside the layouts/ picker dir) rather
-    than a unique tempfile: `os.execvp` replaces the process, so no cleanup runs
-    after it — a unique temp would orphan one .kdl per launch. Overwriting one file
-    keeps it bounded.
+    Two concurrent `mship layout launch` invocations (different --chat-command /
+    serve args) are different processes with different PIDs, so they write to
+    DIFFERENT files and can't race on a shared path before zellij reads it. `os.execvp`
+    replaces the process so no cleanup runs after it, but keying on the PID (rather
+    than a unique tempfile) keeps the set of orphaned .kdl files bounded — PIDs
+    recycle and each launch overwrites its own file.
     """
-    return Path.home() / ".config" / "zellij" / "mothership-serve-launch.kdl"
+    return Path.home() / ".config" / "zellij" / f"mothership-launch-{os.getpid()}.kdl"
 
 
 def _in_zellij() -> bool:
@@ -263,7 +265,7 @@ def register(app: typer.Typer, get_container):
             close_idx = kdl.rindex("\n}\n") + 1
             kdl = kdl[:close_idx] + _serve_tab(args) + kdl[close_idx:]
 
-        path = _serve_launch_path()
+        path = _launch_layout_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(kdl)
         os.execvp("zellij", ["zellij", "--layout", str(path)])

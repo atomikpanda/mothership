@@ -97,6 +97,18 @@ def test_layout_init_writes_file(tmp_path: Path, monkeypatch):
     assert _expected_path(tmp_path).read_text() == _TEMPLATE
 
 
+def test_launch_layout_path_is_process_keyed(tmp_path: Path, monkeypatch):
+    # Per-PID path so two concurrent `mship layout launch` processes write DIFFERENT
+    # files and can't race on a shared path before zellij reads it.
+    import os as _os
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from mship.cli.layout import _launch_layout_path
+    p = _launch_layout_path()
+    assert str(_os.getpid()) in p.name
+    assert p.suffix == ".kdl"
+    assert "mothership-serve-launch.kdl" not in str(p)  # not the old shared path
+
+
 def test_init_writes_both_layouts(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     result = runner.invoke(app, ["layout", "init"])
