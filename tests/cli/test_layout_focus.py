@@ -230,3 +230,54 @@ def test_focus_unknown_id_exits_1(tmp_path, monkeypatch):
         assert "wi-missing" in result.output
     finally:
         _reset_focus()
+
+
+# --- Task 8: explicit close + close-on-done lifecycle ------------------------
+def test_close_closes_existing_tab(tmp_path, monkeypatch):
+    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
+    calls = _patch_zellij(monkeypatch, in_session=True, existing=["wi-1"])
+    try:
+        result = runner.invoke(app, ["layout", "close", "wi-1"])
+        assert result.exit_code == 0, result.output
+        assert calls == [["go-to-tab-name", "wi-1"], ["close-tab"]]
+    finally:
+        _reset_focus()
+
+
+def test_close_no_tab_is_noop(tmp_path, monkeypatch):
+    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
+    calls = _patch_zellij(monkeypatch, in_session=True, existing=["Overview"])
+    try:
+        result = runner.invoke(app, ["layout", "close", "wi-1"])
+        assert result.exit_code == 0, result.output
+        assert calls == []
+    finally:
+        _reset_focus()
+
+
+def test_close_outside_zellij_noops(tmp_path, monkeypatch):
+    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
+    calls = _patch_zellij(monkeypatch, in_session=False, existing=["wi-1"])
+    try:
+        result = runner.invoke(app, ["layout", "close", "wi-1"])
+        assert result.exit_code == 0
+        assert "zellij" in result.output.lower()
+        assert calls == []
+    finally:
+        _reset_focus()
+
+
+def test_focus_done_item_closes_its_tab(tmp_path, monkeypatch):
+    # A done item (terminal spec status) whose tab exists is closed, not re-opened.
+    from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
+    spec = SpecStore(tmp_path / SPECS_DIRNAME).find_by_id("spec-1")
+    SpecStore(tmp_path / SPECS_DIRNAME).save(spec.model_copy(update={"status": "archived"}))
+    calls = _patch_zellij(monkeypatch, in_session=True, existing=["wi-1"])
+    try:
+        result = runner.invoke(app, ["layout", "focus", "wi-1"])
+        assert result.exit_code == 0, result.output
+        assert calls == [["go-to-tab-name", "wi-1"], ["close-tab"]]
+        assert "done" in result.output.lower() or "closed" in result.output.lower()
+    finally:
+        _reset_focus()

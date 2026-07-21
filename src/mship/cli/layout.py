@@ -407,4 +407,20 @@ def register(app: typer.Typer, get_container):
                             "--cwd", str(worktree)])
         typer.echo(f"Opened {item_id}.")
 
+    @layout_app.command()
+    def close(
+        item_id: str = typer.Argument(..., help="WorkItem id whose tab to close."),
+    ):
+        """Explicitly close a WorkItem's zellij tab so tabs don't accumulate (AC7)."""
+        if not _in_zellij():
+            typer.echo("Not inside a zellij session ($ZELLIJ unset). (no-op)")
+            return
+        name = tab_name_for(item_id)
+        if name not in _query_tab_names():
+            typer.echo(f"No open tab for {item_id}.")
+            return
+        _run_zellij_action(["go-to-tab-name", name])
+        _run_zellij_action(["close-tab"])
+        typer.echo(f"Closed tab for {item_id}.")
+
     app.add_typer(layout_app, rich_help_panel="Setup")
