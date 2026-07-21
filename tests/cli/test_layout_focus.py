@@ -92,3 +92,73 @@ def test_kdl_without_task_degrades_task_scoped_panes():
     kdl = _kdl(task_slug=None)
     assert "--task" not in kdl
     assert 'name="Shell"' in kdl   # task-scoped panes fall back to a shell
+
+
+# --- Task 5: resolve_focus_target --------------------------------------------
+from datetime import datetime, timezone
+from pathlib import Path
+
+from mship.cli import container
+from mship.cli.layout import resolve_focus_target
+from mship.core.spec import Spec
+from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+from mship.core.state import StateManager, Task, WorkspaceState
+from mship.core.workitem import WorkItem
+from mship.core.workitem_store import WorkItemStore
+
+
+def _dt():
+    return datetime(2026, 7, 1, tzinfo=timezone.utc)
+
+
+def _seed_focus(tmp_path, worktrees):
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    (tmp_path / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    SpecStore(tmp_path / SPECS_DIRNAME).save(Spec(
+        id="spec-1", title="Overhaul", status="approved",
+        created_at=_dt(), updated_at=_dt(), body="b\n"))
+    WorkItemStore(state_dir / "workitems").save(WorkItem(
+        id="wi-1", title="Overhaul", workspace="t", kind="feature",
+        created_at=_dt(), updated_at=_dt(), spec_id="spec-1", task_slugs=["a"]))
+    StateManager(state_dir).save(WorkspaceState(tasks={"a": Task(
+        slug="a", description="d", phase="dev", created_at=_dt(),
+        affected_repos=["r"], branch="feat/a", worktrees=worktrees, work_item_id="wi-1")}))
+    container.config.reset(); container.state_manager.reset()
+    container.config_path.override(tmp_path / "mothership.yaml")
+    container.state_dir.override(state_dir)
+
+
+def _reset_focus():
+    container.config_path.reset_override(); container.state_dir.reset_override()
+    container.config.reset_override(); container.config.reset()
+    container.state_manager.reset_override(); container.state_manager.reset()
+
+
+def test_resolve_focus_target_returns_worktree_and_task(tmp_path):
+    wt = tmp_path / "wt-a"
+    _seed_focus(tmp_path, {"r": wt})
+    try:
+        summary, task_slug, worktree = resolve_focus_target(container, "wi-1")
+        assert summary.id == "wi-1"
+        assert task_slug == "a"
+        assert worktree == wt
+    finally:
+        _reset_focus()
+
+
+def test_resolve_focus_target_unknown_id_is_none(tmp_path):
+    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
+    try:
+        assert resolve_focus_target(container, "wi-missing") is None
+    finally:
+        _reset_focus()
+
+
+def test_resolve_focus_target_no_worktree_falls_back_to_workspace_root(tmp_path):
+    _seed_focus(tmp_path, {})
+    try:
+        summary, task_slug, worktree = resolve_focus_target(container, "wi-1")
+        assert worktree == tmp_path   # workspace root (config_path parent)
+    finally:
+        _reset_focus()

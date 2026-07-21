@@ -217,6 +217,39 @@ def render_workitem_layout(
     return "".join(parts)
 
 
+def resolve_focus_target(container, item_id: str):
+    """Resolve (WorkItemSummary, primary task_slug|None, worktree cwd) for an item,
+    or None if the id is unknown. Reuses load_workitem_index + dispatch.resolve_repo
+    (active_repo > sole worktree). Falls back to the workspace root when the item has
+    no usable worktree yet."""
+    from mship.cli.view._workitems import load_workitem_index
+    from mship.core.dispatch import resolve_repo
+
+    summary = next((s for s in load_workitem_index(container) if s.id == item_id), None)
+    if summary is None:
+        return None
+
+    state = container.state_manager().load()
+    task_slug: str | None = None
+    worktree: Path | None = None
+    for slug in summary.task_slugs:
+        task = state.tasks.get(slug)
+        if task is None:
+            continue
+        task_slug = task_slug or slug
+        try:
+            repo = resolve_repo(task, None)
+        except ValueError:
+            continue
+        worktree = Path(task.worktrees[repo])
+        task_slug = slug
+        break
+
+    if worktree is None:
+        worktree = Path(container.config_path()).parent
+    return summary, task_slug, worktree
+
+
 def _serve_tab(serve_args: list[str]) -> str:
     """The Serve tab KDL block: one pane running `mship serve <serve_args>`."""
     tokens = " ".join(_kdl_quote(a) for a in ["serve", *serve_args])
