@@ -59,6 +59,13 @@ class MasterDetailApp(App):
         Binding("j,down", "nav_down", "Down", show=False),
         Binding("k,up", "nav_up", "Up", show=False),
         Binding("escape", "close_filter", "Close filter", show=False),
+        # Curated action keys (PR4). Non-priority so they type into the filter Input
+        # when it is focused (consistent with q/r); default to a visible no-op —
+        # subclasses opt in per view. show=False keeps the footer uncluttered.
+        Binding("a", "approve", "Approve", show=False),
+        Binding("R", "request_changes", "Req-changes", show=False),
+        Binding("o", "open_external", "Open↗", show=False),
+        Binding("y", "copy_id", "Copy", show=False),
     ]
 
     def __init__(self, **kw) -> None:
@@ -71,6 +78,7 @@ class MasterDetailApp(App):
         self._filter: str = ""
         self._rows: list[ListRow] = []       # all rows (unfiltered)
         self._visible: list[ListRow] = []    # rows after the active filter
+        self._last_action_message: str = ""  # last curated-action feedback (PR4)
 
     # --- subclass hooks ---
     def list_rows(self) -> list[ListRow]:
@@ -173,10 +181,51 @@ class MasterDetailApp(App):
             self._master.action_cursor_up()
 
     def action_drill(self) -> None:
-        # Enter drills into the highlighted entity: focus the detail pane so it
-        # can be scrolled/read. (Cross-entity open/copy is a later PR.)
+        # Enter opens the highlighted entity's linked target in-process if the view
+        # provides one (PR4); otherwise it drills into the detail pane so it can be
+        # scrolled/read (unchanged base behavior).
+        if self._do_open_entity():
+            return
         if self._detail is not None:
             self._detail.focus()
+
+    # --- curated action hooks (PR4) ---
+    # The base wires the a/R/o/y keys to these hooks; the defaults are safe,
+    # visible no-ops so every master/detail view inherits the keys but does
+    # nothing unsafe unless it opts in by overriding a hook.
+    def last_action(self) -> str:
+        return self._last_action_message
+
+    def _announce(self, msg: str) -> None:
+        self._last_action_message = msg
+        self.notify(msg)
+
+    def _do_approve(self) -> None:
+        self._announce("Approve is not available here.")
+
+    def _do_request_changes(self) -> None:
+        self._announce("Request-changes is not available here.")
+
+    def _do_open_external(self) -> None:
+        self._announce("Nothing to open here.")
+
+    def _do_copy(self) -> None:
+        self._announce("Nothing to copy here.")
+
+    def _do_open_entity(self) -> bool:
+        return False   # no cross-entity target; action_drill falls back to detail focus
+
+    def action_approve(self) -> None:
+        self._do_approve()
+
+    def action_request_changes(self) -> None:
+        self._do_request_changes()
+
+    def action_open_external(self) -> None:
+        self._do_open_external()
+
+    def action_copy_id(self) -> None:
+        self._do_copy()
 
     def on_list_view_selected(self, event) -> None:  # Textual: ListView.Selected (enter)
         self.action_drill()

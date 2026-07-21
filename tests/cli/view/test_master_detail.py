@@ -153,3 +153,33 @@ async def test_rich_markup_in_canonical_text_is_shown_literally():
         assert view.list_labels() == ["ac1 [red]danger[/red] text"]
         assert "[bold]x[/]" in view.detail_text()
         assert "[oops" in view.detail_text()   # malformed markup did not crash render
+
+
+@pytest.mark.asyncio
+async def test_action_keys_default_to_visible_noop():
+    view = _DemoView([ListRow("a", "Alpha", "dA")])
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        view._master.focus()
+        await pilot.pause()
+        await pilot.press("a")
+        await pilot.pause()
+        assert "not available" in view.last_action().lower()
+        await pilot.press("o")
+        await pilot.pause()
+        assert "nothing to open" in view.last_action().lower()
+        await pilot.press("y")
+        await pilot.pause()
+        assert "nothing to copy" in view.last_action().lower()
+
+
+@pytest.mark.asyncio
+async def test_enter_still_drills_when_no_open_target():
+    view = _DemoView([ListRow("a", "Alpha", "dA")])
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        view._master.focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert view.focus_target() == "detail"   # unchanged base behavior
