@@ -27,19 +27,19 @@ class ItemsView(MasterDetailApp):
                 for s in self._summaries]
 
     def header_line(self) -> str | None:
-        # Visible affordance: the operator kept not realizing enter opens the tab
-        # (the hint used to live only in the command docstring).
+        # Visible affordance: enter sets the workspace CURRENT FOCUS; the cockpit's
+        # --follow panes re-scope to it (no tab is opened anymore, cockpit-v2 ac5a/ac6).
         return (f"WorkItems ({len(self._summaries)})  ·  "
-                "enter: open cockpit tab · y: copy id")
+                "enter: set focus · y: copy id")
 
     def _do_open_entity(self) -> bool:
         key = self.selected_key()
         if key is None:
             return False
         if _focus_workitem(key):
-            self._announce(f"Focusing {key}")
+            self._announce(f"Focused {key}")
         else:
-            self._announce(f"Could not focus {key} (is zellij running?)")
+            self._announce(f"Could not focus {key} (unknown id?)")
         return True
 
     def _do_copy(self) -> None:
@@ -55,7 +55,8 @@ def register(app: "typer.Typer", get_container):
     @app.command()
     def items():
         """This workspace's WorkItems as a navigable picker: id, title, derived
-        phase, and attention. enter focuses the item's zellij tab · y copies id."""
+        phase, and attention. enter sets this item as the workspace CURRENT FOCUS ·
+        y copies id."""
         from mship.cli.view._workitems import load_workitem_index
         from mship.cli.output import Output
 

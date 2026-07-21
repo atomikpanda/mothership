@@ -78,12 +78,9 @@ async def test_items_view_lists_and_enter_focuses(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_items_view_shows_enter_and_copy_hint():
-    # The operator kept not realizing enter opens the tab — the hint must be
-    # visible on-screen, not just in the command docstring.
+async def test_items_view_header_says_set_focus():
     from mship.core.view.workitem_index import Attention, WorkItemSummary
     import mship.cli.view.items as iv
-
     s = WorkItemSummary(
         id="wi-1", title="Overhaul", kind="feature", workspace="t", phase="in_flight",
         attention=Attention(False, False, False, False, 0, 1),
@@ -91,9 +88,9 @@ async def test_items_view_shows_enter_and_copy_hint():
     view = iv.ItemsView([s])
     async with view.run_test() as pilot:
         await pilot.pause()
-        header = view.header_text()
-        assert "enter" in header.lower()
-        assert "copy" in header.lower()
+        header = view.header_text().lower()
+        assert "focus" in header
+        assert "copy" in header
 
 
 @pytest.mark.asyncio
