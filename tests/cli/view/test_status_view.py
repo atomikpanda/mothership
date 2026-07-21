@@ -273,3 +273,65 @@ def test_status_view_without_loader_is_flat(tmp_path):
     text = view.gather()
     assert "Task:   a" in text and "Task:   b" in text
     assert "◆" not in text  # no WorkItem header without a loader
+
+
+# --- cockpit-v2 Task 6: status --follow ---
+from typer.testing import CliRunner as _CliRunner
+
+from mship.cli import app as _app6, container as _c6
+from mship.core.focus import focus_path, write_focus
+from mship.core.spec import Spec as _Spec6
+from mship.core.spec_store import SPECS_DIRNAME as _SPECS6, SpecStore as _SpecStore6
+from mship.core.state import StateManager as _SM6, Task as _Task6, WorkspaceState as _WS6
+from mship.core.workitem import WorkItem as _WI6
+from mship.core.workitem_store import WorkItemStore as _WIS6
+
+
+def _now_dt6():
+    return datetime(2026, 7, 21, tzinfo=timezone.utc)
+
+
+def _seed_follow(tmp_path, worktrees):
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    (tmp_path / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    _SpecStore6(tmp_path / _SPECS6).save(_Spec6(
+        id="spec-1", title="T", status="approved",
+        created_at=_now_dt6(), updated_at=_now_dt6(), body="b\n"))
+    _WIS6(state_dir / "workitems").save(_WI6(
+        id="wi-1", title="T", workspace="t", kind="feature",
+        created_at=_now_dt6(), updated_at=_now_dt6(), spec_id="spec-1", task_slugs=["a"]))
+    _SM6(state_dir).save(_WS6(tasks={"a": _Task6(
+        slug="a", description="d", phase="dev", created_at=_now_dt6(),
+        affected_repos=["r"], branch="feat/a", worktrees=worktrees, work_item_id="wi-1")}))
+    _c6.config.reset(); _c6.state_manager.reset()
+    _c6.config_path.override(tmp_path / "mothership.yaml")
+    _c6.state_dir.override(state_dir)
+    return state_dir
+
+
+def _reset_follow():
+    _c6.config_path.reset_override(); _c6.state_dir.reset_override()
+    _c6.config.reset_override(); _c6.config.reset()
+    _c6.state_manager.reset_override(); _c6.state_manager.reset()
+
+
+def test_status_follow_no_focus_prints_hint(tmp_path):
+    _seed_follow(tmp_path, {"r": tmp_path})
+    try:
+        result = _CliRunner().invoke(_app6, ["view", "status", "--follow"])
+        assert result.exit_code == 0, result.output
+        assert "no workitem focused" in result.output.lower()
+    finally:
+        _reset_follow()
+
+
+def test_status_follow_scopes_to_focused_task(tmp_path):
+    state_dir = _seed_follow(tmp_path, {"r": tmp_path})
+    write_focus(focus_path(state_dir), "wi-1")
+    try:
+        result = _CliRunner().invoke(_app6, ["view", "status", "--follow"])
+        assert result.exit_code == 0, result.output
+        assert "feat/a" in result.output   # the focused task's branch
+    finally:
+        _reset_follow()

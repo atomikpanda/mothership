@@ -360,3 +360,66 @@ def test_journal_no_header_without_loader():
     text = view.gather()
     assert "◆" not in text
     assert "hello" in text
+
+
+# --- cockpit-v2 Task 5: journal --follow ---
+from typer.testing import CliRunner as _CliRunner
+
+from mship.cli import app as _app, container as _c5
+from mship.core.focus import focus_path, write_focus
+from mship.core.spec import Spec as _Spec5
+from mship.core.spec_store import SPECS_DIRNAME as _SPECS5, SpecStore as _SpecStore5
+from mship.core.state import StateManager as _SM5, Task as _Task5, WorkspaceState as _WS5
+from mship.core.workitem import WorkItem as _WI5
+from mship.core.workitem_store import WorkItemStore as _WIS5
+
+
+def _now_dt5():
+    return datetime(2026, 7, 21, tzinfo=timezone.utc)
+
+
+def _seed_follow(tmp_path, worktrees):
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    (tmp_path / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    _SpecStore5(tmp_path / _SPECS5).save(_Spec5(
+        id="spec-1", title="T", status="approved",
+        created_at=_now_dt5(), updated_at=_now_dt5(), body="b\n"))
+    _WIS5(state_dir / "workitems").save(_WI5(
+        id="wi-1", title="T", workspace="t", kind="feature",
+        created_at=_now_dt5(), updated_at=_now_dt5(), spec_id="spec-1", task_slugs=["a"]))
+    _SM5(state_dir).save(_WS5(tasks={"a": _Task5(
+        slug="a", description="d", phase="dev", created_at=_now_dt5(),
+        affected_repos=["r"], branch="feat/a", worktrees=worktrees, work_item_id="wi-1")}))
+    _c5.config.reset(); _c5.state_manager.reset()
+    _c5.config_path.override(tmp_path / "mothership.yaml")
+    _c5.state_dir.override(state_dir)
+    return state_dir
+
+
+def _reset_follow():
+    _c5.config_path.reset_override(); _c5.state_dir.reset_override()
+    _c5.config.reset_override(); _c5.config.reset()
+    _c5.state_manager.reset_override(); _c5.state_manager.reset()
+
+
+def test_journal_follow_no_focus_prints_hint(tmp_path):
+    _seed_follow(tmp_path, {"r": tmp_path})
+    try:
+        result = _CliRunner().invoke(_app, ["view", "journal", "--follow"])
+        assert result.exit_code == 0, result.output
+        assert "no workitem focused" in result.output.lower()
+    finally:
+        _reset_follow()
+
+
+def test_journal_follow_renders_focused_task_journal(tmp_path):
+    state_dir = _seed_follow(tmp_path, {"r": tmp_path})
+    write_focus(focus_path(state_dir), "wi-1")
+    _c5.log_manager().append("a", "hello journal")   # LogManager append API
+    try:
+        result = _CliRunner().invoke(_app, ["view", "journal", "--follow"])
+        assert result.exit_code == 0, result.output
+        assert "hello journal" in result.output
+    finally:
+        _reset_follow()

@@ -1,97 +1,11 @@
-from mship.cli.layout import decide_focus_action, tab_name_for
-
-
-def test_tab_name_is_deterministic_and_id_based():
-    assert tab_name_for("wi-20260721-abc") == tab_name_for("wi-20260721-abc")
-    assert "wi-20260721-abc" in tab_name_for("wi-20260721-abc")
-
-
-def test_decision_create_when_absent():
-    assert decide_focus_action("wi-1", [], is_done=False) == "create"
-
-
-def test_decision_go_to_when_present():
-    assert decide_focus_action("wi-1", ["other", "wi-1"], is_done=False) == "go-to"
-
-
-def test_decision_close_when_done_and_present():
-    assert decide_focus_action("wi-1", ["wi-1"], is_done=True) == "close"
-
-
-def test_decision_noop_when_done_and_absent():
-    assert decide_focus_action("wi-1", ["other"], is_done=True) == "noop"
-
-
-# --- Task 4: per-WorkItem KDL renderer ---------------------------------------
-from mship.cli.layout import (
-    default_phase_tab, render_workitem_layout, resolve_chat_command,
-)
+# --- resolve_chat_command (kept: used by cockpit launch) ---------------------
+from mship.cli.layout import resolve_chat_command
 
 
 def test_resolve_chat_command_precedence():
     assert resolve_chat_command("claude", {}) == "claude"
     assert resolve_chat_command(None, {"MSHIP_CHAT_COMMAND": "my-agent"}) == "my-agent"
     assert resolve_chat_command(None, {}) is None  # default: bare shell pane
-
-
-def test_default_phase_tab_mapping():
-    assert default_phase_tab("shaping") == "Plan"
-    assert default_phase_tab("ready") == "Plan"
-    assert default_phase_tab("in_flight") == "Dev"
-    assert default_phase_tab("review") == "Review"
-    assert default_phase_tab("done") == "Run"
-    assert default_phase_tab("something-else") == "Plan"
-
-
-def _kdl(**over):
-    base = dict(name="wi-1", worktree="/wt/a", item_id="wi-1", task_slug="a",
-                chat_command=None, default_phase="Dev")
-    base.update(over)
-    return render_workitem_layout(**base)
-
-
-def test_kdl_is_chat_first_with_editor_and_cwd():
-    kdl = _kdl()
-    assert 'tab name="wi-1" focus=true' in kdl
-    assert 'cwd "/wt/a"' in kdl
-    assert 'name="Agent"' in kdl
-    assert 'name="Editor"' in kdl
-    # Default chat command == bare shell pane (no command= on Agent).
-    assert 'name="Agent" focus=true {' not in kdl  # bare pane has no child block
-
-
-def test_kdl_configurable_chat_command():
-    kdl = _kdl(chat_command="claude")
-    assert 'name="Agent"' in kdl and 'command="sh"' in kdl
-    assert '"-c" "claude"' in kdl
-
-
-def test_kdl_has_all_four_phase_subtabs():
-    kdl = _kdl()
-    for phase in ("Plan", "Dev", "Review", "Run"):
-        assert f'swap_tiled_layout name="{phase}"' in kdl
-
-
-def test_kdl_bakes_shipped_view_commands_with_item_and_task():
-    kdl = _kdl()
-    assert '"view" "spec" "--workitem" "wi-1" "--watch"' in kdl   # Plan
-    assert '"view" "diff" "--task" "a" "--watch"' in kdl           # Dev/Review
-    assert '"view" "journal" "--task" "a" "--watch"' in kdl        # Dev + Run
-    assert '"view" "item" "wi-1"' in kdl                            # Review (PR/checks)
-    # NOTE: `mship view logs` does not exist — the only run/journal view command is
-    # `view journal` (logs.py registers it as `journal`). The Run sub-tab therefore
-    # tails `view journal` (asserted above), not a nonexistent `view logs`.
-
-
-def test_kdl_escapes_worktree_path():
-    kdl = _kdl(worktree='/wt/ba"d')
-    assert 'cwd "/wt/ba\\"d"' in kdl
-
-
-def test_kdl_without_task_degrades_task_scoped_panes():
-    kdl = _kdl(task_slug=None)
-    assert "--task" not in kdl
-    assert 'name="Shell"' in kdl   # task-scoped panes fall back to a shell
 
 
 # --- Task 5: resolve_focus_target --------------------------------------------
@@ -172,189 +86,84 @@ from typer.testing import CliRunner
 runner = CliRunner()
 
 
-def _patch_zellij(monkeypatch, *, in_session, existing, action_ok=True, query_ok=True):
-    calls = []
-
-    def _run(args):
-        calls.append(args)
-        return action_ok
-
+def _patch_zellij(monkeypatch, *, in_session, existing=None, action_ok=True, query_ok=True):
+    """Cockpit-v2: `layout focus` no longer runs any zellij action, so the only seam
+    left to control is `_in_zellij`. Returns an always-empty `calls` list so the
+    Task-2 tests can still assert 'no zellij action was attempted'."""
+    calls: list = []
     monkeypatch.setattr(layout_mod, "_in_zellij", lambda: in_session)
-    monkeypatch.setattr(layout_mod, "_query_tab_names",
-                        lambda: (list(existing) if query_ok else None))
-    monkeypatch.setattr(layout_mod, "_run_zellij_action", _run)
     return calls
 
 
-def test_focus_outside_zellij_noops_with_message(tmp_path, monkeypatch):
+# --- cockpit-v2 Task 2: focus sets the focus file, no tabs ---
+from mship.core.focus import focus_path, read_focus
+
+
+def test_focus_writes_focus_file_no_zellij(tmp_path, monkeypatch):
     _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
-    calls = _patch_zellij(monkeypatch, in_session=False, existing=[])
-    try:
-        result = runner.invoke(app, ["layout", "focus", "wi-1"])
-        assert result.exit_code == 0, result.output
-        assert "zellij" in result.output.lower()
-        assert calls == []   # no zellij action attempted
-    finally:
-        _reset_focus()
-
-
-def test_focus_creates_tab_when_absent(tmp_path, monkeypatch):
-    # HOME is isolated so the layout KDL cache write lands in tmp, not real ~/.cache.
-    monkeypatch.setenv("HOME", str(tmp_path))
-    wt = tmp_path / "wt-a"
-    _seed_focus(tmp_path, {"r": wt})
     calls = _patch_zellij(monkeypatch, in_session=True, existing=["Overview"])
     try:
         result = runner.invoke(app, ["layout", "focus", "wi-1"])
         assert result.exit_code == 0, result.output
-        assert len(calls) == 1
-        args = calls[0]
-        assert args[0] == "new-tab"
-        assert "--name" in args and "wi-1" in args
-        assert "--cwd" in args and str(wt) in args
-        # Portable delivery: KDL goes via a cache FILE (--layout <name> --layout-dir
-        # <dir>), never --layout-string (which older zellij lacks).
-        assert "--layout-string" not in args
-        assert "--layout" in args and "--layout-dir" in args
-        layout_name = args[args.index("--layout") + 1]
-        layout_dir = Path(args[args.index("--layout-dir") + 1])
-        assert layout_name == "wi-1"
-        kdl = (layout_dir / f"{layout_name}.kdl").read_text()
-        assert 'tab name="wi-1"' in kdl and 'name="Agent"' in kdl
+        assert read_focus(focus_path(tmp_path / ".mothership")).work_item_id == "wi-1"
+        assert calls == []   # NEVER touches zellij tabs anymore
     finally:
         _reset_focus()
 
 
-def test_write_workitem_layout_file_writes_stable_named_kdl(tmp_path, monkeypatch):
-    # The pure helper: writes <cache>/<item_id>.kdl and returns (name, dir) that
-    # `new-tab --layout <name> --layout-dir <dir>` resolves by name.
-    from mship.cli.layout import write_workitem_layout_file
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    name, cache_dir = write_workitem_layout_file("wi-1", "layout { }\n")
-    assert name == "wi-1"
-    assert (cache_dir / "wi-1.kdl").read_text() == "layout { }\n"
-    # Re-writing overwrites the same stable path (no accumulation, no delete-race).
-    name2, cache_dir2 = write_workitem_layout_file("wi-1", "layout { changed }\n")
-    assert cache_dir2 == cache_dir
-    assert (cache_dir / "wi-1.kdl").read_text() == "layout { changed }\n"
-
-
-def test_focus_switches_to_existing_tab(tmp_path, monkeypatch):
+def test_focus_show_prints_current_focus(tmp_path, monkeypatch):
     _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
-    calls = _patch_zellij(monkeypatch, in_session=True, existing=["wi-1"])
     try:
-        result = runner.invoke(app, ["layout", "focus", "wi-1"])
+        runner.invoke(app, ["layout", "focus", "wi-1"])
+        result = runner.invoke(app, ["layout", "focus", "--show"])
         assert result.exit_code == 0, result.output
-        assert calls == [["go-to-tab-name", "wi-1"]]
+        assert "wi-1" in result.output
     finally:
         _reset_focus()
 
 
-def test_focus_unknown_id_exits_1(tmp_path, monkeypatch):
+def test_focus_show_when_none(tmp_path, monkeypatch):
     _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
-    _patch_zellij(monkeypatch, in_session=True, existing=[])
+    try:
+        result = runner.invoke(app, ["layout", "focus", "--show"])
+        assert result.exit_code == 0, result.output
+        assert "no workitem" in result.output.lower()
+    finally:
+        _reset_focus()
+
+
+def test_focus_unknown_id_exits_1_no_write(tmp_path, monkeypatch):
+    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
     try:
         result = runner.invoke(app, ["layout", "focus", "wi-missing"])
         assert result.exit_code == 1
         assert "wi-missing" in result.output
+        assert read_focus(focus_path(tmp_path / ".mothership")) is None
     finally:
         _reset_focus()
 
 
-# --- Task 8: explicit close + close-on-done lifecycle ------------------------
-def test_close_closes_existing_tab(tmp_path, monkeypatch):
-    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
-    calls = _patch_zellij(monkeypatch, in_session=True, existing=["wi-1"])
-    try:
-        result = runner.invoke(app, ["layout", "close", "wi-1"])
-        assert result.exit_code == 0, result.output
-        assert calls == [["go-to-tab-name", "wi-1"], ["close-tab"]]
-    finally:
-        _reset_focus()
-
-
-def test_close_no_tab_is_noop(tmp_path, monkeypatch):
-    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
-    calls = _patch_zellij(monkeypatch, in_session=True, existing=["Overview"])
-    try:
-        result = runner.invoke(app, ["layout", "close", "wi-1"])
-        assert result.exit_code == 0, result.output
-        assert calls == []
-    finally:
-        _reset_focus()
-
-
-def test_close_outside_zellij_noops(tmp_path, monkeypatch):
-    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
-    calls = _patch_zellij(monkeypatch, in_session=False, existing=["wi-1"])
-    try:
-        result = runner.invoke(app, ["layout", "close", "wi-1"])
-        assert result.exit_code == 0
-        assert "zellij" in result.output.lower()
-        assert calls == []
-    finally:
-        _reset_focus()
-
-
-def test_focus_done_item_closes_its_tab(tmp_path, monkeypatch):
-    # A done item (terminal spec status) whose tab exists is closed, not re-opened.
+def test_focus_done_item_is_flagged_but_written(tmp_path, monkeypatch):
     from mship.core.spec_store import SPECS_DIRNAME, SpecStore
     _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
-    spec = SpecStore(tmp_path / SPECS_DIRNAME).find_by_id("spec-1")
-    SpecStore(tmp_path / SPECS_DIRNAME).save(spec.model_copy(update={"status": "archived"}))
-    calls = _patch_zellij(monkeypatch, in_session=True, existing=["wi-1"])
+    store = SpecStore(tmp_path / SPECS_DIRNAME)
+    store.save(store.find_by_id("spec-1").model_copy(update={"status": "archived"}))
     try:
         result = runner.invoke(app, ["layout", "focus", "wi-1"])
         assert result.exit_code == 0, result.output
-        assert calls == [["go-to-tab-name", "wi-1"], ["close-tab"]]
-        assert "done" in result.output.lower() or "closed" in result.output.lower()
+        assert "done" in result.output.lower()
+        assert read_focus(focus_path(tmp_path / ".mothership")).work_item_id == "wi-1"
     finally:
         _reset_focus()
 
 
-# --- Greptile #396: seams report failure; never close the wrong tab ---
-def test_focus_errors_when_tab_query_fails(tmp_path, monkeypatch):
+def test_focus_outside_zellij_still_writes_with_advisory(tmp_path, monkeypatch):
     _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
-    calls = _patch_zellij(monkeypatch, in_session=True, existing=[], query_ok=False)
+    monkeypatch.setattr("mship.cli.layout._in_zellij", lambda: False)
     try:
         result = runner.invoke(app, ["layout", "focus", "wi-1"])
-        assert result.exit_code == 1
-        assert calls == []   # can't read tab state -> attempt nothing (no dup tab)
-    finally:
-        _reset_focus()
-
-
-def test_focus_new_tab_failure_reports_error(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
-    _patch_zellij(monkeypatch, in_session=True, existing=["Overview"], action_ok=False)
-    try:
-        result = runner.invoke(app, ["layout", "focus", "wi-1"])
-        assert result.exit_code == 1
-        assert "could not open" in result.output.lower()
-    finally:
-        _reset_focus()
-
-
-def test_close_does_not_close_wrong_tab_when_go_to_fails(tmp_path, monkeypatch):
-    # go-to fails -> close-tab must NOT run (else it closes the active/wrong tab).
-    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
-    calls = _patch_zellij(monkeypatch, in_session=True, existing=["wi-1"], action_ok=False)
-    try:
-        result = runner.invoke(app, ["layout", "close", "wi-1"])
-        assert result.exit_code == 1
-        assert calls == [["go-to-tab-name", "wi-1"]]   # close-tab NOT called
-    finally:
-        _reset_focus()
-
-
-def test_close_errors_when_tab_query_fails(tmp_path, monkeypatch):
-    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
-    calls = _patch_zellij(monkeypatch, in_session=True, existing=["wi-1"], query_ok=False)
-    try:
-        result = runner.invoke(app, ["layout", "close", "wi-1"])
-        assert result.exit_code == 1
-        assert calls == []
+        assert result.exit_code == 0, result.output
+        assert read_focus(focus_path(tmp_path / ".mothership")).work_item_id == "wi-1"
+        assert "zellij" in result.output.lower()   # advisory, not an error
     finally:
         _reset_focus()

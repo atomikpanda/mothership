@@ -231,3 +231,64 @@ async def test_cockpit_enter_opens_task_detail_in_process():
         await pilot.press("enter")
         await pilot.pause()
         assert isinstance(view.screen, EntityScreen)
+
+
+# --- cockpit-v2 Task 8: item --follow ---
+from typer.testing import CliRunner as _CliRunner
+
+from mship.core.focus import focus_path, write_focus
+
+
+def _seed_follow(tmp_path, worktrees):
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    (tmp_path / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    SpecStore(tmp_path / SPECS_DIRNAME).save(Spec(
+        id="spec-1", title="T", status="approved",
+        created_at=_dt(), updated_at=_dt(), body="b\n"))
+    WorkItemStore(state_dir / "workitems").save(WorkItem(
+        id="wi-1", title="T", workspace="t", kind="feature",
+        created_at=_dt(), updated_at=_dt(), spec_id="spec-1", task_slugs=["a"]))
+    StateManager(state_dir).save(WorkspaceState(tasks={"a": Task(
+        slug="a", description="d", phase="dev", created_at=_dt(),
+        affected_repos=["r"], branch="feat/a", worktrees=worktrees, work_item_id="wi-1")}))
+    container.config.reset(); container.state_manager.reset()
+    container.config_path.override(tmp_path / "mothership.yaml")
+    container.state_dir.override(state_dir)
+    return state_dir
+
+
+def _reset_follow():
+    container.config_path.reset_override(); container.state_dir.reset_override()
+    container.config.reset_override(); container.config.reset()
+    container.state_manager.reset_override(); container.state_manager.reset()
+
+
+def test_item_follow_no_focus_prints_hint(tmp_path):
+    _seed_follow(tmp_path, {"r": tmp_path})   # non-TTY path -> render_text/hint
+    try:
+        result = _CliRunner().invoke(app, ["view", "item", "--follow"])
+        assert result.exit_code == 0, result.output
+        assert "no workitem focused" in result.output.lower()
+    finally:
+        _reset_follow()
+
+
+def test_item_follow_renders_focused_cockpit(tmp_path):
+    state_dir = _seed_follow(tmp_path, {"r": tmp_path})
+    write_focus(focus_path(state_dir), "wi-1")
+    try:
+        result = _CliRunner().invoke(app, ["view", "item", "--follow"])
+        assert result.exit_code == 0, result.output
+        assert "wi-1" in result.output
+    finally:
+        _reset_follow()
+
+
+@pytest.mark.asyncio
+async def test_followed_item_view_shows_hint_row_when_none():
+    from mship.cli.view.workitem import FollowedItemView
+    view = FollowedItemView(provider=lambda: None, interval=999)
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        assert "no workitem focused" in " ".join(view.list_labels()).lower()

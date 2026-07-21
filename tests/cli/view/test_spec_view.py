@@ -27,6 +27,22 @@ async def test_spec_view_missing_spec(tmp_path: Path):
         assert "Spec not found" in view.rendered_text()
 
 
+@pytest.mark.asyncio
+async def test_spec_follow_survives_spec_file_vanishing(tmp_path: Path):
+    # A --follow spec path can be deleted/renamed/replaced between the provider
+    # resolving it and the read (spec transitions rewrite the file). The pane must
+    # show the follow hint, not raise out of the timer callback (which would stop
+    # the pane from ever refreshing again).
+    from mship.cli.view._follow import follow_hint
+
+    missing = tmp_path / "gone-spec.md"  # provider hands back a path that isn't there
+    view = SpecView(workspace_root=tmp_path, name_or_path=None, watch=False,
+                    interval=1.0, path_provider=lambda: missing)
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        assert view._last_source == follow_hint()
+
+
 def test_serve_spec_web_serves_rendered_html(tmp_path: Path):
     spec = tmp_path / "s.md"
     spec.write_text("# Title\n\nBody.\n")
@@ -614,3 +630,75 @@ async def test_spec_view_approve_writes_via_store(tmp_path):
         await pilot.pause()
         assert store.find_by_id("spec-1").status == "approved"
         assert "approved" in view.last_action().lower()
+
+
+# --- cockpit-v2 Task 7: spec --follow ---
+from typer.testing import CliRunner as _CliRunner
+
+from mship.cli import app as _app7, container as _c7
+from mship.core.focus import focus_path, write_focus
+from mship.core.spec import Spec as _Spec7
+from mship.core.spec_store import SPECS_DIRNAME as _SPECS7, SpecStore as _SpecStore7
+from mship.core.state import StateManager as _SM7, Task as _Task7, WorkspaceState as _WS7
+from mship.core.workitem import WorkItem as _WI7
+from mship.core.workitem_store import WorkItemStore as _WIS7
+
+
+def _now_dt7():
+    return datetime(2026, 7, 21, tzinfo=timezone.utc)
+
+
+def _seed_follow_spec(tmp_path):
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    (tmp_path / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    _SpecStore7(tmp_path / _SPECS7).save(_Spec7(
+        id="spec-1", title="Overhaul", status="approved",
+        created_at=_now_dt7(), updated_at=_now_dt7(), body="Overhaul body\n"))
+    _WIS7(state_dir / "workitems").save(_WI7(
+        id="wi-1", title="Overhaul", workspace="t", kind="feature",
+        created_at=_now_dt7(), updated_at=_now_dt7(), spec_id="spec-1", task_slugs=["a"]))
+    _SM7(state_dir).save(_WS7(tasks={"a": _Task7(
+        slug="a", description="d", phase="dev", created_at=_now_dt7(),
+        affected_repos=["r"], branch="feat/a", worktrees={"r": tmp_path}, work_item_id="wi-1")}))
+    _c7.config.reset(); _c7.state_manager.reset()
+    _c7.config_path.override(tmp_path / "mothership.yaml")
+    _c7.state_dir.override(state_dir)
+    return state_dir
+
+
+def _reset_follow():
+    _c7.config_path.reset_override(); _c7.state_dir.reset_override()
+    _c7.config.reset_override(); _c7.config.reset()
+    _c7.state_manager.reset_override(); _c7.state_manager.reset()
+
+
+def test_spec_follow_no_focus_prints_hint(tmp_path):
+    _seed_follow_spec(tmp_path)   # writes specs/<id>.md + workitem + state, binds container
+    try:
+        result = _CliRunner().invoke(_app7, ["view", "spec", "--follow"])
+        assert result.exit_code == 0, result.output
+        assert "no workitem focused" in result.output.lower()
+    finally:
+        _reset_follow()
+
+
+def test_spec_follow_renders_focused_items_spec(tmp_path):
+    state_dir = _seed_follow_spec(tmp_path)
+    write_focus(focus_path(state_dir), "wi-1")
+    try:
+        result = _CliRunner().invoke(_app7, ["view", "spec", "--follow"])
+        assert result.exit_code == 0, result.output
+        assert "Overhaul body" in result.output   # the linked spec's body text
+    finally:
+        _reset_follow()
+
+
+def test_spec_follow_conflicts_with_workitem(tmp_path):
+    _seed_follow_spec(tmp_path)
+    try:
+        result = _CliRunner().invoke(_app7, ["view", "spec", "--follow", "--workitem", "wi-1"])
+        assert result.exit_code == 1
+        assert "mutually exclusive" in result.output.lower()
+    finally:
+        _reset_follow()

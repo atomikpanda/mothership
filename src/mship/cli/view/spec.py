@@ -53,13 +53,14 @@ class SpecView(ViewApp):
         header_provider=None,
         spec_store=None,
         spec_id: Optional[str] = None,
+        path_provider=None,
         **kw,
     ):
         # Strip SpecView-specific kwargs before passing to super
         for k in ("workspace_root", "name_or_path", "task",
                   "state_manager", "state", "log_manager",
                   "cli_task", "cwd", "header_provider",
-                  "spec_store", "spec_id"):
+                  "spec_store", "spec_id", "path_provider"):
             kw.pop(k, None)
         super().__init__(**kw)
         self._workspace_root = workspace_root
@@ -73,6 +74,7 @@ class SpecView(ViewApp):
         self._header_provider = header_provider
         self._spec_store = spec_store
         self._spec_id = spec_id
+        self._path_provider = path_provider
         self._last_action_message: str = ""
         self._markdown: Markdown | None = None
         self._error_static: Static | None = None
@@ -120,6 +122,39 @@ class SpecView(ViewApp):
         assert self._body is not None
         was_at_end = self._body.scroll_y >= (self._body.max_scroll_y - 1)
         prev_y = self._body.scroll_y
+
+        if self._path_provider is not None:
+            from mship.cli.view._follow import follow_hint
+            path = self._path_provider()
+            if path is None:
+                self._last_source = follow_hint()
+                self._last_error = ""
+                self._markdown.update(follow_hint())
+                self._error_static.update("")
+                self.call_after_refresh(self._restore_scroll, prev_y, was_at_end)
+                return
+            try:
+                source = path.read_text()
+            except OSError:
+                # The spec file can be deleted/renamed/replaced between the provider
+                # resolving it and this read (spec transitions rewrite the file). Show
+                # the hint and keep following — the next tick re-resolves; never raise
+                # out of the timer callback (that would stop the pane refreshing).
+                self._last_source = follow_hint()
+                self._last_error = ""
+                self._markdown.update(follow_hint())
+                self._error_static.update("")
+                self.call_after_refresh(self._restore_scroll, prev_y, was_at_end)
+                return
+            header = self._header_provider() if self._header_provider else None
+            if header:
+                source = f"**{header}**\n\n{source}"
+            self._last_source = source
+            self._last_error = ""
+            self._markdown.update(source)
+            self._error_static.update("")
+            self.call_after_refresh(self._restore_scroll, prev_y, was_at_end)
+            return
 
         state = self._current_state()
 
@@ -328,6 +363,7 @@ def register(app: typer.Typer, get_container):
         task: Optional[str] = typer.Option(None, "--task", help="Narrow to one task's worktrees"),
         workitem: Optional[str] = typer.Option(None, "--workitem", help="Select the spec linked to this WorkItem id"),
         status: Optional[str] = typer.Option(None, "--status", help="Select the newest spec with this status"),
+        follow: bool = typer.Option(False, "--follow", help="Track the workspace CURRENT FOCUS (cockpit-v2)."),
     ):
         """Render a spec file (newest by default)."""
         from pathlib import Path as _P
@@ -362,6 +398,68 @@ def register(app: typer.Typer, get_container):
         if active_selectors and task is not None:
             typer.echo(f"Error: {active_selectors[0]} and --task are mutually exclusive.", err=True)
             raise typer.Exit(code=1)
+
+        if follow:
+            conflicts = [n for n, v in (("--task", task), ("--workitem", workitem),
+                                        ("--status", status), ("name", name_or_path)) if v is not None]
+            if conflicts or web:
+                typer.echo(f"Error: --follow and {conflicts[0] if conflicts else '--web'} "
+                           "are mutually exclusive.", err=True)
+                raise typer.Exit(code=1)
+
+            from mship.core.view.spec_selection import (
+                SpecSelectionError, SpecSelector, scan_canonical_specs, select_spec)
+            from mship.core.spec_store import SPECS_DIRNAME
+            from mship.core.workitem_store import WorkItemStore
+            from mship.core.view.headers import header_for_spec
+            from mship.cli.view._follow import read_focused_id
+            from mship.cli.view._workitems import load_workitem_index
+            from mship.cli.output import Output
+
+            specs_dir = workspace_root / SPECS_DIRNAME
+            items = WorkItemStore(_P(container.state_dir()) / "workitems")
+
+            def _spec_path():
+                item_id = read_focused_id(container)
+                if item_id is None:
+                    return None
+                scanned = scan_canonical_specs(specs_dir)
+                try:
+                    chosen = select_spec([s for s, _ in scanned], items.list(),
+                                         SpecSelector(work_item_id=item_id))
+                except SpecSelectionError:
+                    return None
+                return next((p for s, p in scanned if s.id == chosen.id), None)
+
+            if not Output().is_tty:
+                path = _spec_path()
+                if path is None:
+                    from mship.cli.view._follow import follow_hint
+                    typer.echo(follow_hint())
+                    return
+                typer.echo(path.read_text(), nl=False)
+                return
+
+            def _header():
+                item_id = read_focused_id(container)
+                if item_id is None:
+                    return None
+                idx = load_workitem_index(container)
+                wi = next((w for w in idx if w.id == item_id), None)
+                return header_for_spec(wi.spec_id, idx) if (wi and wi.spec_id) else None
+
+            SpecView(
+                workspace_root=workspace_root,
+                name_or_path=None,
+                state_manager=container.state_manager(),
+                log_manager=container.log_manager(),
+                cwd=_P.cwd(),
+                header_provider=_header,
+                path_provider=_spec_path,
+                watch=True,
+                interval=interval,
+            ).run()
+            return
 
         specs_dir = workspace_root / SPECS_DIRNAME
         canonical_path: Optional[_P] = None

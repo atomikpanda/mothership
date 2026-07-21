@@ -340,3 +340,65 @@ async def test_diff_view_no_header_by_default(tmp_path):
     async with view.run_test() as pilot:
         await pilot.pause()
         assert view.header_text() == ""
+
+
+# --- cockpit-v2 Task 4: diff --follow ---
+from datetime import datetime, timezone
+from typer.testing import CliRunner as _CliRunner
+
+from mship.cli import app, container
+from mship.core.focus import focus_path, write_focus
+from mship.core.spec import Spec
+from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+from mship.core.state import StateManager, Task, WorkspaceState
+from mship.core.workitem import WorkItem
+from mship.core.workitem_store import WorkItemStore
+
+
+def _now_dt():
+    return datetime(2026, 7, 21, tzinfo=timezone.utc)
+
+
+def _seed_follow(tmp_path, worktrees):
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    (tmp_path / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    SpecStore(tmp_path / SPECS_DIRNAME).save(Spec(
+        id="spec-1", title="T", status="approved",
+        created_at=_now_dt(), updated_at=_now_dt(), body="b\n"))
+    WorkItemStore(state_dir / "workitems").save(WorkItem(
+        id="wi-1", title="T", workspace="t", kind="feature",
+        created_at=_now_dt(), updated_at=_now_dt(), spec_id="spec-1", task_slugs=["a"]))
+    StateManager(state_dir).save(WorkspaceState(tasks={"a": Task(
+        slug="a", description="d", phase="dev", created_at=_now_dt(),
+        affected_repos=["r"], branch="feat/a", worktrees=worktrees, work_item_id="wi-1")}))
+    container.config.reset(); container.state_manager.reset()
+    container.config_path.override(tmp_path / "mothership.yaml")
+    container.state_dir.override(state_dir)
+    return state_dir
+
+
+def _reset_follow():
+    container.config_path.reset_override(); container.state_dir.reset_override()
+    container.config.reset_override(); container.config.reset()
+    container.state_manager.reset_override(); container.state_manager.reset()
+
+
+def test_diff_follow_no_focus_prints_hint(tmp_path):
+    _seed_follow(tmp_path, {"r": tmp_path})
+    try:
+        result = _CliRunner().invoke(app, ["view", "diff", "--follow"])
+        assert result.exit_code == 0, result.output
+        assert "no workitem focused" in result.output.lower()
+    finally:
+        _reset_follow()
+
+
+def test_diff_follow_and_watch_are_exclusive(tmp_path):
+    _seed_follow(tmp_path, {"r": tmp_path})
+    try:
+        result = _CliRunner().invoke(app, ["view", "diff", "--follow", "--task", "a"])
+        assert result.exit_code == 1
+        assert "mutually exclusive" in result.output.lower()
+    finally:
+        _reset_follow()

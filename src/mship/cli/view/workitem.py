@@ -67,13 +67,16 @@ def build_rows(cockpit: WorkItemCockpit) -> list[ListRow]:
 
 
 class WorkItemCockpitView(MasterDetailApp):
-    def __init__(self, cockpit: WorkItemCockpit, spec_store=None, **kw) -> None:
+    def __init__(self, cockpit: WorkItemCockpit | None, spec_store=None, **kw) -> None:
         super().__init__(**kw)
         self._cockpit = cockpit
         self._spec_store = spec_store
-        self._spec_status = cockpit.spec_status
+        self._spec_status = cockpit.spec_status if cockpit is not None else None
 
     def list_rows(self) -> list[ListRow]:
+        if self._cockpit is None:
+            from mship.cli.view._follow import follow_hint
+            return [ListRow(key="hint", label=follow_hint(), detail=follow_hint())]
         rows = build_rows(self._cockpit)
         # Reflect the live spec status (relabels after an in-view approve / request-changes).
         if rows and self._spec_status is not None:
@@ -85,6 +88,9 @@ class WorkItemCockpitView(MasterDetailApp):
         return rows
 
     def header_line(self) -> str | None:
+        if self._cockpit is None:
+            from mship.cli.view._follow import follow_hint
+            return follow_hint()
         return f"◆ {self._cockpit.id}  ·  {self._cockpit.title}  ·  [{self._cockpit.phase}]"
 
     def _selected_task(self):
@@ -179,6 +185,25 @@ class WorkItemCockpitView(MasterDetailApp):
         return False
 
 
+class FollowedItemView(WorkItemCockpitView):
+    """`mship view item --follow`: re-resolve the focused WorkItem's cockpit on a
+    timer so the pane re-scopes on focus change AND re-renders on data change (ac2)."""
+    def __init__(self, provider, interval: float = 2.0, spec_store=None, **kw) -> None:
+        super().__init__(cockpit=None, spec_store=spec_store, **kw)
+        self._provider = provider
+        self._follow_interval = interval
+
+    async def on_mount(self) -> None:
+        await self._follow_tick()
+        self.set_interval(self._follow_interval, self._follow_tick)
+
+    async def _follow_tick(self) -> None:
+        cockpit = self._provider()
+        self._cockpit = cockpit
+        self._spec_status = cockpit.spec_status if cockpit is not None else None
+        await self.reload_rows()
+
+
 def _resolve_cockpit(container, item_id: str) -> WorkItemCockpit | None:
     """Resolve one WorkItem's cockpit from the canonical stores, or None if the id
     is unknown. Single entry point is the `WorkItemSummary` (from PR1's
@@ -232,12 +257,43 @@ def register(app: "typer.Typer", get_container):
         store = SpecStore(workspace_root / SPECS_DIRNAME)
         WorkItemCockpitView(cockpit, spec_store=store).run()
 
+    def _run_followed_item(interval: float) -> None:
+        from mship.cli.output import Output
+        from mship.cli.view._follow import follow_hint, read_focused_id
+        from mship.core.view.workitem_cockpit import render_text
+        from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+
+        container = get_container()
+
+        def _provider():
+            item_id = read_focused_id(container)
+            if item_id is None:
+                return None
+            return _resolve_cockpit(container, item_id)
+
+        if not Output().is_tty:
+            cockpit = _provider()
+            typer.echo(follow_hint() if cockpit is None else render_text(cockpit))
+            return
+
+        workspace_root = Path(container.config_path()).parent
+        store = SpecStore(workspace_root / SPECS_DIRNAME)
+        FollowedItemView(provider=_provider, interval=interval, spec_store=store).run()
+
     @app.command(name="item")
     def item(
-        item_id: str = typer.Argument(..., help="WorkItem id to open (e.g. wi-...)"),
+        item_id: Optional[str] = typer.Argument(None, help="WorkItem id to open (e.g. wi-...)"),
+        follow: bool = typer.Option(False, "--follow", help="Track the workspace CURRENT FOCUS (cockpit-v2)."),
+        interval: float = typer.Option(2.0, "--interval"),
     ):
         """Single-WorkItem cockpit: spec (status + phase), acceptance criteria with
         evidence, tasks + worktrees, and linked PRs + threads."""
+        if follow:
+            _run_followed_item(interval)
+            return
+        if item_id is None:
+            typer.echo("Error: provide a WorkItem id, or --follow.", err=True)
+            raise typer.Exit(code=1)
         _run_item_cockpit(item_id)
 
     @app.command(name="workitem", hidden=True)
