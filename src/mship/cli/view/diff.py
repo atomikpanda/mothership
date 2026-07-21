@@ -354,12 +354,81 @@ def register(app: typer.Typer, get_container):
         watch: bool = typer.Option(False, "--watch"),
         interval: float = typer.Option(2.0, "--interval"),
         all_: bool = typer.Option(False, "--all", help="Show all worktrees, ignore active_repo"),
+        follow: bool = typer.Option(False, "--follow", help="Track the workspace CURRENT FOCUS (cockpit-v2)."),
     ):
         """Live per-worktree git diff."""
         from mship.cli._resolve import resolve_or_exit
 
         container = get_container()
         state_mgr = container.state_manager()
+
+        if follow and task is not None:
+            typer.echo("Error: --follow and --task are mutually exclusive.", err=True)
+            raise typer.Exit(code=1)
+
+        from mship.cli.view._workitems import load_workitem_index
+        from mship.core.view.headers import header_for_task
+
+        if follow:
+            from mship.cli.view._follow import follow_hint, read_focused_id
+            from mship.cli.layout import resolve_focus_target
+            from mship.cli.output import Output
+
+            def _followed_task() -> Optional[str]:
+                item_id = read_focused_id(container)
+                if item_id is None:
+                    return None
+                target = resolve_focus_target(container, item_id)
+                if target is None:
+                    return None
+                return target[1]  # task_slug (may be None)
+
+            if not Output().is_tty:
+                slug = _followed_task()
+                if slug is None:
+                    typer.echo(follow_hint())
+                    return
+                task_obj = state_mgr.load().tasks.get(slug)
+                paths = list((task_obj.worktrees.values() if task_obj else []))
+                lines = []
+                for p in paths:
+                    try:
+                        wd = collect_worktree_diff(Path(p), base_branch=None)
+                        adds = sum(f.additions for f in wd.files)
+                        dels = sum(f.deletions for f in wd.files)
+                        lines.append(f"{p}: {len(wd.files)} files  +{adds} -{dels}")
+                    except Exception as e:  # noqa: BLE001
+                        lines.append(f"{p}: (error: {e})")
+                typer.echo("\n".join(lines) if lines else "No changes.")
+                return
+
+            def _resolver() -> tuple[list[Path], Path | None]:
+                slug = _followed_task()
+                if slug is None:
+                    return [], None
+                task_obj = state_mgr.load().tasks.get(slug)
+                if task_obj is None:
+                    return [], None
+                all_paths = [Path(p) for p in task_obj.worktrees.values()]
+                scope: Path | None = None
+                if not all_ and task_obj.active_repo is not None and task_obj.active_repo in task_obj.worktrees:
+                    scope = Path(task_obj.worktrees[task_obj.active_repo])
+                return all_paths, scope
+
+            def _header() -> str | None:
+                item_id = read_focused_id(container)
+                if item_id is None:
+                    return follow_hint()
+                slug = _followed_task()
+                if slug is None:
+                    return follow_hint()
+                task_obj = state_mgr.load().tasks.get(slug)
+                phase = getattr(task_obj, "phase", None) if task_obj else None
+                return header_for_task(slug, phase, load_workitem_index(container)) or follow_hint()
+
+            DiffView(resolve_paths=_resolver, header_provider=_header,
+                     watch=True, interval=interval).run()
+            return
 
         t = resolve_or_exit(state_mgr.load(), task)
         target_task = t.slug
@@ -378,9 +447,6 @@ def register(app: typer.Typer, get_container):
         base_by_path: dict[Path, str | None] = {}
         for p in t.worktrees.values():
             base_by_path[Path(p)] = t.base_branch
-
-        from mship.cli.view._workitems import load_workitem_index
-        from mship.core.view.headers import header_for_task
 
         def _header() -> str | None:
             fresh = state_mgr.load()
