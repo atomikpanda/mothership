@@ -299,16 +299,21 @@ def _in_zellij() -> bool:
     return bool(os.environ.get("ZELLIJ"))
 
 
-def _query_tab_names() -> list[str]:
-    """Seam: the current session's tab names via `zellij action query-tab-names`."""
+def _query_tab_names() -> list[str] | None:
+    """Seam: the current session's tab names via `zellij action query-tab-names`.
+    Returns None if the query itself FAILED, so callers don't mistake a failure
+    for an empty session (which would create duplicate tabs / report wrong state)."""
     out = subprocess.run(["zellij", "action", "query-tab-names"],
                          capture_output=True, text=True, check=False)
+    if out.returncode != 0:
+        return None
     return [line for line in out.stdout.splitlines() if line.strip()]
 
 
-def _run_zellij_action(args: list[str]) -> None:
-    """Seam: run one `zellij action <args>`. Best-effort (check=False)."""
-    subprocess.run(["zellij", "action", *args], check=False)
+def _run_zellij_action(args: list[str]) -> bool:
+    """Seam: run one `zellij action <args>`; returns True on success (exit 0), so
+    callers can report real outcomes and never `close-tab` after a failed go-to."""
+    return subprocess.run(["zellij", "action", *args], check=False).returncode == 0
 
 
 def register(app: typer.Typer, get_container):
@@ -385,27 +390,39 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=1)
         summary, task_slug, worktree = target
         name = tab_name_for(item_id)
-        action = decide_focus_action(name, _query_tab_names(), is_done=summary.phase == "done")
+        existing = _query_tab_names()
+        if existing is None:
+            typer.echo("Error: could not query zellij tabs.", err=True)
+            raise typer.Exit(code=1)
+        action = decide_focus_action(name, existing, is_done=summary.phase == "done")
         if action == "noop":
             typer.echo(f"{item_id} is done; no tab to focus.")
             return
         if action == "close":
-            _run_zellij_action(["go-to-tab-name", name])
-            _run_zellij_action(["close-tab"])
-            typer.echo(f"Closed tab for done item {item_id}.")
-            return
+            # Only close AFTER a successful go-to, so a vanished/failed target can
+            # never make close-tab remove the currently-active (wrong) tab.
+            if _run_zellij_action(["go-to-tab-name", name]) and _run_zellij_action(["close-tab"]):
+                typer.echo(f"Closed tab for done item {item_id}.")
+                return
+            typer.echo(f"Error: could not close tab for {item_id}.", err=True)
+            raise typer.Exit(code=1)
         if action == "go-to":
-            _run_zellij_action(["go-to-tab-name", name])
-            typer.echo(f"Switched to {item_id}.")
-            return
+            if _run_zellij_action(["go-to-tab-name", name]):
+                typer.echo(f"Switched to {item_id}.")
+                return
+            typer.echo(f"Error: could not switch to {item_id}.", err=True)
+            raise typer.Exit(code=1)
         kdl = render_workitem_layout(
             name=name, worktree=str(worktree), item_id=item_id, task_slug=task_slug,
             chat_command=resolve_chat_command(chat_command, os.environ),
             default_phase=default_phase_tab(summary.phase),
         )
-        _run_zellij_action(["new-tab", "--layout-string", kdl, "--name", name,
-                            "--cwd", str(worktree)])
-        typer.echo(f"Opened {item_id}.")
+        if _run_zellij_action(["new-tab", "--layout-string", kdl, "--name", name,
+                               "--cwd", str(worktree)]):
+            typer.echo(f"Opened {item_id}.")
+            return
+        typer.echo(f"Error: could not open tab for {item_id}.", err=True)
+        raise typer.Exit(code=1)
 
     @layout_app.command()
     def close(
@@ -416,11 +433,19 @@ def register(app: typer.Typer, get_container):
             typer.echo("Not inside a zellij session ($ZELLIJ unset). (no-op)")
             return
         name = tab_name_for(item_id)
-        if name not in _query_tab_names():
+        existing = _query_tab_names()
+        if existing is None:
+            typer.echo("Error: could not query zellij tabs.", err=True)
+            raise typer.Exit(code=1)
+        if name not in existing:
             typer.echo(f"No open tab for {item_id}.")
             return
-        _run_zellij_action(["go-to-tab-name", name])
-        _run_zellij_action(["close-tab"])
-        typer.echo(f"Closed tab for {item_id}.")
+        # Close only after a successful go-to, so a failed go-to can't close the
+        # active tab (Overview or an unrelated item) instead of the target.
+        if _run_zellij_action(["go-to-tab-name", name]) and _run_zellij_action(["close-tab"]):
+            typer.echo(f"Closed tab for {item_id}.")
+            return
+        typer.echo(f"Error: could not close tab for {item_id}.", err=True)
+        raise typer.Exit(code=1)
 
     app.add_typer(layout_app, rich_help_panel="Setup")

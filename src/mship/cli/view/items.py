@@ -11,10 +11,10 @@ from mship.cli.view._master_detail import ListRow, MasterDetailApp
 from mship.core.view.items import items_detail, items_label, items_render_text
 
 
-def _focus_workitem(item_id: str) -> None:
-    """Seam: fire `mship layout focus <id>` for the selected item. Best-effort;
-    a missing zellij / non-session degrades inside the focus command itself."""
-    subprocess.run(["mship", "layout", "focus", item_id], check=False)
+def _focus_workitem(item_id: str) -> bool:
+    """Seam: fire `mship layout focus <id>` for the selected item; returns True on
+    success (exit 0) so the picker can report a real outcome, not a false success."""
+    return subprocess.run(["mship", "layout", "focus", item_id], check=False).returncode == 0
 
 
 class ItemsView(MasterDetailApp):
@@ -33,8 +33,10 @@ class ItemsView(MasterDetailApp):
         key = self.selected_key()
         if key is None:
             return False
-        _focus_workitem(key)
-        self._announce(f"Focusing {key}")
+        if _focus_workitem(key):
+            self._announce(f"Focusing {key}")
+        else:
+            self._announce(f"Could not focus {key} (is zellij running?)")
         return True
 
     def _do_copy(self) -> None:

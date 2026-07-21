@@ -172,11 +172,17 @@ from typer.testing import CliRunner
 runner = CliRunner()
 
 
-def _patch_zellij(monkeypatch, *, in_session, existing):
+def _patch_zellij(monkeypatch, *, in_session, existing, action_ok=True, query_ok=True):
     calls = []
+
+    def _run(args):
+        calls.append(args)
+        return action_ok
+
     monkeypatch.setattr(layout_mod, "_in_zellij", lambda: in_session)
-    monkeypatch.setattr(layout_mod, "_query_tab_names", lambda: list(existing))
-    monkeypatch.setattr(layout_mod, "_run_zellij_action", lambda args: calls.append(args))
+    monkeypatch.setattr(layout_mod, "_query_tab_names",
+                        lambda: (list(existing) if query_ok else None))
+    monkeypatch.setattr(layout_mod, "_run_zellij_action", _run)
     return calls
 
 
@@ -279,5 +285,51 @@ def test_focus_done_item_closes_its_tab(tmp_path, monkeypatch):
         assert result.exit_code == 0, result.output
         assert calls == [["go-to-tab-name", "wi-1"], ["close-tab"]]
         assert "done" in result.output.lower() or "closed" in result.output.lower()
+    finally:
+        _reset_focus()
+
+
+# --- Greptile #396: seams report failure; never close the wrong tab ---
+def test_focus_errors_when_tab_query_fails(tmp_path, monkeypatch):
+    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
+    calls = _patch_zellij(monkeypatch, in_session=True, existing=[], query_ok=False)
+    try:
+        result = runner.invoke(app, ["layout", "focus", "wi-1"])
+        assert result.exit_code == 1
+        assert calls == []   # can't read tab state -> attempt nothing (no dup tab)
+    finally:
+        _reset_focus()
+
+
+def test_focus_new_tab_failure_reports_error(tmp_path, monkeypatch):
+    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
+    _patch_zellij(monkeypatch, in_session=True, existing=["Overview"], action_ok=False)
+    try:
+        result = runner.invoke(app, ["layout", "focus", "wi-1"])
+        assert result.exit_code == 1
+        assert "could not open" in result.output.lower()
+    finally:
+        _reset_focus()
+
+
+def test_close_does_not_close_wrong_tab_when_go_to_fails(tmp_path, monkeypatch):
+    # go-to fails -> close-tab must NOT run (else it closes the active/wrong tab).
+    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
+    calls = _patch_zellij(monkeypatch, in_session=True, existing=["wi-1"], action_ok=False)
+    try:
+        result = runner.invoke(app, ["layout", "close", "wi-1"])
+        assert result.exit_code == 1
+        assert calls == [["go-to-tab-name", "wi-1"]]   # close-tab NOT called
+    finally:
+        _reset_focus()
+
+
+def test_close_errors_when_tab_query_fails(tmp_path, monkeypatch):
+    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
+    calls = _patch_zellij(monkeypatch, in_session=True, existing=["wi-1"], query_ok=False)
+    try:
+        result = runner.invoke(app, ["layout", "close", "wi-1"])
+        assert result.exit_code == 1
+        assert calls == []
     finally:
         _reset_focus()

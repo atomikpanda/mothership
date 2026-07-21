@@ -75,3 +75,24 @@ async def test_items_view_lists_and_enter_focuses(tmp_path, monkeypatch):
         await pilot.press("enter")
         await pilot.pause()
         assert fired.get("id") == "wi-1"
+
+
+@pytest.mark.asyncio
+async def test_items_enter_announces_focus_failure(monkeypatch):
+    # Greptile #396: a failed `mship layout focus` must not report success.
+    from mship.core.view.workitem_index import Attention, WorkItemSummary
+    import mship.cli.view.items as iv
+
+    monkeypatch.setattr(iv, "_focus_workitem", lambda item_id: False)
+    s = WorkItemSummary(
+        id="wi-1", title="X", kind="feature", workspace="t", phase="in_flight",
+        attention=Attention(False, False, False, False, 0, 1),
+        created_at=_now(), updated_at=_now(), spec_id=None, task_slugs=[], thread_ids=[])
+    view = iv.ItemsView([s])
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        view._master.focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "could not focus" in view.last_action().lower()
