@@ -364,62 +364,48 @@ def register(app: typer.Typer, get_container):
 
     @layout_app.command()
     def focus(
-        item_id: str = typer.Argument(..., help="WorkItem id to focus (e.g. wi-...)."),
-        chat_command: Optional[str] = typer.Option(
-            None, "--chat-command",
-            help="Command for the Agent pane. Default: your shell in the worktree."),
+        item_id: Optional[str] = typer.Argument(
+            None, help="WorkItem id to focus (e.g. wi-...)."),
+        show: bool = typer.Option(
+            False, "--show", help="Print the current focus and exit."),
     ):
-        """Open or switch to a WorkItem's zellij tab (chat-first, phase sub-tabs).
+        """Record <id> as the workspace CURRENT FOCUS (cockpit-v2, ac1).
 
-        No-ops with a message when not inside a zellij session. Closes the tab
-        instead of opening it when the item has reached `done` (AC7)."""
-        if not _in_zellij():
-            typer.echo("Not inside a zellij session ($ZELLIJ unset); "
-                       "run `mship layout launch` first. (no-op)")
+        Writes the focus file — it does NOT open/switch a zellij tab; the cockpit's
+        right-side `--follow` views re-scope to the new focus on their next tick.
+        `--show` prints the current focus. Works in any pane; when not inside a
+        zellij session it still writes the file and just adds an advisory."""
+        from mship.core.focus import focus_path, read_focus, write_focus
+        from mship.cli.view._workitems import load_workitem_index
+
+        container = get_container()
+        state_dir = container.state_dir()
+
+        if show:
+            current = read_focus(focus_path(state_dir))
+            if current is None:
+                typer.echo("No WorkItem focused. Run `mship layout focus <id>`.")
+            else:
+                typer.echo(f"Focused: {current.work_item_id}")
             return
-        target = resolve_focus_target(get_container(), item_id)
-        if target is None:
+
+        if item_id is None:
+            typer.echo("Error: provide a WorkItem id, or --show.", err=True)
+            raise typer.Exit(code=1)
+
+        summary = next((s for s in load_workitem_index(container) if s.id == item_id), None)
+        if summary is None:
             typer.echo(f"Error: unknown work item: {item_id}", err=True)
             raise typer.Exit(code=1)
-        summary, task_slug, worktree = target
-        name = tab_name_for(item_id)
-        existing = _query_tab_names()
-        if existing is None:
-            typer.echo("Error: could not query zellij tabs.", err=True)
-            raise typer.Exit(code=1)
-        action = decide_focus_action(name, existing, is_done=summary.phase == "done")
-        if action == "noop":
-            typer.echo(f"{item_id} is done; no tab to focus.")
-            return
-        if action == "close":
-            # Only close AFTER a successful go-to, so a vanished/failed target can
-            # never make close-tab remove the currently-active (wrong) tab.
-            if _run_zellij_action(["go-to-tab-name", name]) and _run_zellij_action(["close-tab"]):
-                typer.echo(f"Closed tab for done item {item_id}.")
-                return
-            typer.echo(f"Error: could not close tab for {item_id}.", err=True)
-            raise typer.Exit(code=1)
-        if action == "go-to":
-            if _run_zellij_action(["go-to-tab-name", name]):
-                typer.echo(f"Switched to {item_id}.")
-                return
-            typer.echo(f"Error: could not switch to {item_id}.", err=True)
-            raise typer.Exit(code=1)
-        kdl = render_workitem_layout(
-            name=name, worktree=str(worktree), item_id=item_id, task_slug=task_slug,
-            chat_command=resolve_chat_command(chat_command, os.environ),
-            default_phase=default_phase_tab(summary.phase),
-        )
-        # Deliver the KDL via a cache file (`--layout <name> --layout-dir <dir>`)
-        # rather than `--layout-string`, which older zellij (the operator's) lacks.
-        layout_name, layout_dir = write_workitem_layout_file(item_id, kdl)
-        if _run_zellij_action(["new-tab", "--layout", layout_name,
-                               "--layout-dir", str(layout_dir),
-                               "--name", name, "--cwd", str(worktree)]):
-            typer.echo(f"Opened {item_id}.")
-            return
-        typer.echo(f"Error: could not open tab for {item_id}.", err=True)
-        raise typer.Exit(code=1)
+
+        write_focus(focus_path(state_dir), item_id)
+        if summary.phase == "done":
+            typer.echo(f"Focused {item_id} (note: this item is done).")
+        else:
+            typer.echo(f"Focused {item_id}.")
+        if not _in_zellij():
+            typer.echo("Not inside a zellij session; run `mship layout launch` "
+                       "to open the cockpit. (focus recorded)")
 
     @layout_app.command()
     def close(

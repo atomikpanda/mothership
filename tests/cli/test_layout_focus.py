@@ -186,45 +186,6 @@ def _patch_zellij(monkeypatch, *, in_session, existing, action_ok=True, query_ok
     return calls
 
 
-def test_focus_outside_zellij_noops_with_message(tmp_path, monkeypatch):
-    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
-    calls = _patch_zellij(monkeypatch, in_session=False, existing=[])
-    try:
-        result = runner.invoke(app, ["layout", "focus", "wi-1"])
-        assert result.exit_code == 0, result.output
-        assert "zellij" in result.output.lower()
-        assert calls == []   # no zellij action attempted
-    finally:
-        _reset_focus()
-
-
-def test_focus_creates_tab_when_absent(tmp_path, monkeypatch):
-    # HOME is isolated so the layout KDL cache write lands in tmp, not real ~/.cache.
-    monkeypatch.setenv("HOME", str(tmp_path))
-    wt = tmp_path / "wt-a"
-    _seed_focus(tmp_path, {"r": wt})
-    calls = _patch_zellij(monkeypatch, in_session=True, existing=["Overview"])
-    try:
-        result = runner.invoke(app, ["layout", "focus", "wi-1"])
-        assert result.exit_code == 0, result.output
-        assert len(calls) == 1
-        args = calls[0]
-        assert args[0] == "new-tab"
-        assert "--name" in args and "wi-1" in args
-        assert "--cwd" in args and str(wt) in args
-        # Portable delivery: KDL goes via a cache FILE (--layout <name> --layout-dir
-        # <dir>), never --layout-string (which older zellij lacks).
-        assert "--layout-string" not in args
-        assert "--layout" in args and "--layout-dir" in args
-        layout_name = args[args.index("--layout") + 1]
-        layout_dir = Path(args[args.index("--layout-dir") + 1])
-        assert layout_name == "wi-1"
-        kdl = (layout_dir / f"{layout_name}.kdl").read_text()
-        assert 'tab name="wi-1"' in kdl and 'name="Agent"' in kdl
-    finally:
-        _reset_focus()
-
-
 def test_write_workitem_layout_file_writes_stable_named_kdl(tmp_path, monkeypatch):
     # The pure helper: writes <cache>/<item_id>.kdl and returns (name, dir) that
     # `new-tab --layout <name> --layout-dir <dir>` resolves by name.
@@ -238,28 +199,6 @@ def test_write_workitem_layout_file_writes_stable_named_kdl(tmp_path, monkeypatc
     name2, cache_dir2 = write_workitem_layout_file("wi-1", "layout { changed }\n")
     assert cache_dir2 == cache_dir
     assert (cache_dir / "wi-1.kdl").read_text() == "layout { changed }\n"
-
-
-def test_focus_switches_to_existing_tab(tmp_path, monkeypatch):
-    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
-    calls = _patch_zellij(monkeypatch, in_session=True, existing=["wi-1"])
-    try:
-        result = runner.invoke(app, ["layout", "focus", "wi-1"])
-        assert result.exit_code == 0, result.output
-        assert calls == [["go-to-tab-name", "wi-1"]]
-    finally:
-        _reset_focus()
-
-
-def test_focus_unknown_id_exits_1(tmp_path, monkeypatch):
-    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
-    _patch_zellij(monkeypatch, in_session=True, existing=[])
-    try:
-        result = runner.invoke(app, ["layout", "focus", "wi-missing"])
-        assert result.exit_code == 1
-        assert "wi-missing" in result.output
-    finally:
-        _reset_focus()
 
 
 # --- Task 8: explicit close + close-on-done lifecycle ------------------------
@@ -297,46 +236,7 @@ def test_close_outside_zellij_noops(tmp_path, monkeypatch):
         _reset_focus()
 
 
-def test_focus_done_item_closes_its_tab(tmp_path, monkeypatch):
-    # A done item (terminal spec status) whose tab exists is closed, not re-opened.
-    from mship.core.spec_store import SPECS_DIRNAME, SpecStore
-    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
-    spec = SpecStore(tmp_path / SPECS_DIRNAME).find_by_id("spec-1")
-    SpecStore(tmp_path / SPECS_DIRNAME).save(spec.model_copy(update={"status": "archived"}))
-    calls = _patch_zellij(monkeypatch, in_session=True, existing=["wi-1"])
-    try:
-        result = runner.invoke(app, ["layout", "focus", "wi-1"])
-        assert result.exit_code == 0, result.output
-        assert calls == [["go-to-tab-name", "wi-1"], ["close-tab"]]
-        assert "done" in result.output.lower() or "closed" in result.output.lower()
-    finally:
-        _reset_focus()
-
-
 # --- Greptile #396: seams report failure; never close the wrong tab ---
-def test_focus_errors_when_tab_query_fails(tmp_path, monkeypatch):
-    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
-    calls = _patch_zellij(monkeypatch, in_session=True, existing=[], query_ok=False)
-    try:
-        result = runner.invoke(app, ["layout", "focus", "wi-1"])
-        assert result.exit_code == 1
-        assert calls == []   # can't read tab state -> attempt nothing (no dup tab)
-    finally:
-        _reset_focus()
-
-
-def test_focus_new_tab_failure_reports_error(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
-    _patch_zellij(monkeypatch, in_session=True, existing=["Overview"], action_ok=False)
-    try:
-        result = runner.invoke(app, ["layout", "focus", "wi-1"])
-        assert result.exit_code == 1
-        assert "could not open" in result.output.lower()
-    finally:
-        _reset_focus()
-
-
 def test_close_does_not_close_wrong_tab_when_go_to_fails(tmp_path, monkeypatch):
     # go-to fails -> close-tab must NOT run (else it closes the active/wrong tab).
     _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
@@ -356,5 +256,79 @@ def test_close_errors_when_tab_query_fails(tmp_path, monkeypatch):
         result = runner.invoke(app, ["layout", "close", "wi-1"])
         assert result.exit_code == 1
         assert calls == []
+    finally:
+        _reset_focus()
+
+
+# --- cockpit-v2 Task 2: focus sets the focus file, no tabs ---
+from mship.core.focus import focus_path, read_focus
+
+
+def test_focus_writes_focus_file_no_zellij(tmp_path, monkeypatch):
+    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
+    calls = _patch_zellij(monkeypatch, in_session=True, existing=["Overview"])
+    try:
+        result = runner.invoke(app, ["layout", "focus", "wi-1"])
+        assert result.exit_code == 0, result.output
+        assert read_focus(focus_path(tmp_path / ".mothership")).work_item_id == "wi-1"
+        assert calls == []   # NEVER touches zellij tabs anymore
+    finally:
+        _reset_focus()
+
+
+def test_focus_show_prints_current_focus(tmp_path, monkeypatch):
+    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
+    try:
+        runner.invoke(app, ["layout", "focus", "wi-1"])
+        result = runner.invoke(app, ["layout", "focus", "--show"])
+        assert result.exit_code == 0, result.output
+        assert "wi-1" in result.output
+    finally:
+        _reset_focus()
+
+
+def test_focus_show_when_none(tmp_path, monkeypatch):
+    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
+    try:
+        result = runner.invoke(app, ["layout", "focus", "--show"])
+        assert result.exit_code == 0, result.output
+        assert "no workitem" in result.output.lower()
+    finally:
+        _reset_focus()
+
+
+def test_focus_unknown_id_exits_1_no_write(tmp_path, monkeypatch):
+    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
+    try:
+        result = runner.invoke(app, ["layout", "focus", "wi-missing"])
+        assert result.exit_code == 1
+        assert "wi-missing" in result.output
+        assert read_focus(focus_path(tmp_path / ".mothership")) is None
+    finally:
+        _reset_focus()
+
+
+def test_focus_done_item_is_flagged_but_written(tmp_path, monkeypatch):
+    from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
+    store = SpecStore(tmp_path / SPECS_DIRNAME)
+    store.save(store.find_by_id("spec-1").model_copy(update={"status": "archived"}))
+    try:
+        result = runner.invoke(app, ["layout", "focus", "wi-1"])
+        assert result.exit_code == 0, result.output
+        assert "done" in result.output.lower()
+        assert read_focus(focus_path(tmp_path / ".mothership")).work_item_id == "wi-1"
+    finally:
+        _reset_focus()
+
+
+def test_focus_outside_zellij_still_writes_with_advisory(tmp_path, monkeypatch):
+    _seed_focus(tmp_path, {"r": tmp_path / "wt-a"})
+    monkeypatch.setattr("mship.cli.layout._in_zellij", lambda: False)
+    try:
+        result = runner.invoke(app, ["layout", "focus", "wi-1"])
+        assert result.exit_code == 0, result.output
+        assert read_focus(focus_path(tmp_path / ".mothership")).work_item_id == "wi-1"
+        assert "zellij" in result.output.lower()   # advisory, not an error
     finally:
         _reset_focus()
