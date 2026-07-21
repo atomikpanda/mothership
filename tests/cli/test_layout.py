@@ -34,11 +34,12 @@ def test_template_reconstructs_from_parts():
 
 def test_base_layout_has_no_phase_tabs():
     # The legacy Plan/Dev/Review/Run base tabs were removed: the base is Overview
-    # only (the phase sub-tabs now live inside each WorkItem's dedicated tab).
+    # (launchpad) + the focus-driven Cockpit tab.
     assert _BASE_TABS == ""
     for name in ("Plan", "Dev", "Review", "Run"):
         assert f'tab name="{name}"' not in _TEMPLATE
-    assert 'tab name="Overview" focus=true' in _TEMPLATE
+    assert 'tab name="Overview"' in _TEMPLATE
+    assert 'tab name="Cockpit" focus=true' in _TEMPLATE
 
 
 def test_render_workitem_layout_keeps_all_four_phase_subtabs():
@@ -92,19 +93,20 @@ def test_serve_cli_args_mapping():
 
 def test_render_serve_layout_no_args_is_overview_plus_serve():
     kdl = render_serve_layout([])
-    # Base is Overview only; serve appends a Serve tab. No legacy phase tabs.
-    assert 'tab name="Overview" focus=true' in kdl
+    # Base is Overview (launchpad) + Cockpit; serve appends a Serve tab. No phase tabs.
+    assert 'tab name="Overview"' in kdl
+    assert 'tab name="Cockpit"' in kdl
     assert 'tab name="Serve"' in kdl
     for name in ("Plan", "Dev", "Review", "Run"):
         assert f'tab name="{name}"' not in kdl
     assert 'command="mship"' in kdl
     assert 'args "serve";' in kdl
-    # Serve tab comes AFTER Overview, and Overview is the launchpad and keeps focus.
+    # Serve tab comes AFTER Overview.
     assert kdl.index('tab name="Overview"') < kdl.index('tab name="Serve"')
 
 
 def test_template_has_overview_launchpad_tab():
-    assert 'tab name="Overview" focus=true' in _TEMPLATE
+    assert 'tab name="Overview"' in _TEMPLATE
     assert '"view" "queue"' in _TEMPLATE
     assert '"view" "items"' in _TEMPLATE
 
@@ -227,3 +229,64 @@ def test_launch_serve_flag_implies_serve(tmp_path, monkeypatch):
 # Review tab, which no longer exists (base is Overview-only). The per-item Review
 # phase sub-tab's journal/diff panes are covered by test_layout_focus.py
 # (test_kdl_bakes_shipped_view_commands_with_item_and_task).
+
+
+# --- cockpit-v2 Task 9: single-cockpit builder (ONE fixed rich stack) ---
+from mship.cli.layout import (
+    ViewPaneSpec, cockpit_view_specs, render_cockpit_layout,
+)
+
+
+def test_cockpit_view_specs_is_the_fixed_rich_set_in_order():
+    # A single fixed member set, same regardless of phase: Spec, Diff, Journal,
+    # Status, Item/PR — every member is a `mship view … --follow` command.
+    specs = cockpit_view_specs()
+    assert [s.name for s in specs] == ["Spec", "Diff", "Journal", "Status", "Item"]
+    assert [s.view_args for s in specs] == [
+        ["view", "spec", "--follow"],
+        ["view", "diff", "--follow"],
+        ["view", "journal", "--follow"],
+        ["view", "status", "--follow"],
+        ["view", "item", "--follow"],
+    ]
+
+
+def test_cockpit_view_specs_takes_no_arguments():
+    # No phase parameter — membership never depends on the focused item's phase.
+    import inspect
+    assert list(inspect.signature(cockpit_view_specs).parameters) == []
+
+
+def test_cockpit_agent_pane_is_outside_the_stack():
+    kdl = render_cockpit_layout()
+    assert 'name="Agent" focus=true' in kdl
+    # Agent is declared before the stacked group and never inside it.
+    assert kdl.index('name="Agent"') < kdl.index('pane stacked=true {')
+
+
+def test_cockpit_has_stacked_group_of_all_five_follow_views():
+    kdl = render_cockpit_layout()
+    assert 'pane stacked=true {' in kdl
+    assert '"view" "spec" "--follow"' in kdl
+    assert '"view" "diff" "--follow"' in kdl
+    assert '"view" "journal" "--follow"' in kdl
+    assert '"view" "status" "--follow"' in kdl
+    assert '"view" "item" "--follow"' in kdl
+
+
+def test_cockpit_keeps_overview_launchpad():
+    kdl = render_cockpit_layout()
+    assert 'tab name="Overview"' in kdl
+    assert '"view" "queue"' in kdl and '"view" "items"' in kdl
+    assert 'tab name="Cockpit" focus=true' in kdl
+
+
+def test_cockpit_chat_command_threaded():
+    kdl = render_cockpit_layout(chat_command="claude")
+    assert 'name="Agent" focus=true command="sh"' in kdl
+    assert '"-c" "claude"' in kdl
+
+
+def test_cockpit_membership_is_identical_regardless_of_call():
+    # The stack is fixed: two builds produce the same member set (no phase input).
+    assert render_cockpit_layout() == render_cockpit_layout()

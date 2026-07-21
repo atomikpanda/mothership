@@ -1,53 +1,10 @@
 import os
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional
 
 import typer
-
-_TEMPLATE = """\
-layout {
-    default_tab_template {
-        pane size=1 borderless=true {
-            plugin location="zellij:tab-bar"
-        }
-        children
-        pane size=2 borderless=true {
-            plugin location="zellij:status-bar"
-        }
-    }
-
-    tab name="Overview" focus=true {
-        pane split_direction="vertical" {
-            pane size="50%" name="Queue" command="mship" close_on_exit=false { args "view" "queue"; }
-            pane size="50%" name="Items" command="mship" close_on_exit=false { args "view" "items"; }
-        }
-    }
-}
-"""
-
-# Composable parts, sliced from _TEMPLATE at stable markers so the normal layout
-# is reconstructed byte-for-byte (_LAYOUT_HEAD + _BASE_TABS + _LAYOUT_TAIL == _TEMPLATE)
-# while the serve layout can splice a Serve tab in before the layout close. The base
-# has NO phase tabs anymore — Overview is the only base tab (the Plan/Dev/Review/Run
-# phase sub-tabs live inside each WorkItem's dedicated tab, see render_workitem_layout).
-# The final layout-closing "}" is the only brace at column 0, so `\n}\n` locates it
-# uniquely; _BASE_TABS is therefore empty and the head is everything up to that brace.
-_close_idx = _TEMPLATE.rindex("\n}\n") + 1
-_LAYOUT_HEAD = _TEMPLATE[:_close_idx]
-_BASE_TABS = ""
-_LAYOUT_TAIL = _TEMPLATE[_close_idx:]
-
-# The tab-bar (top) + status-bar (bottom) frame the base layout applies to every
-# tab via default_tab_template. A per-item focus tab (render_workitem_layout) is
-# opened with `new-tab --layout` from its OWN layout doc, so it must carry the same
-# block or it renders with NO tab bar — you'd lose the tab bar the moment you switch
-# into a focus tab. Sliced verbatim from _TEMPLATE so the two can never drift
-# (guarded by test_workitem_layout_tab_template_matches_base).
-_DEFAULT_TAB_TEMPLATE = _TEMPLATE[
-    _TEMPLATE.index("    default_tab_template {") : _TEMPLATE.index('    tab name="Overview"')
-]
-
 
 def serve_cli_args(
     *, host: Optional[str], port: Optional[int], relay: bool, relay_host: Optional[str]
@@ -69,6 +26,116 @@ def _kdl_quote(s: str) -> str:
     """Quote a string as a KDL string literal, escaping backslash and double-quote
     so user-supplied values (e.g. --host) can't produce malformed KDL."""
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+@dataclass(frozen=True)
+class ViewPaneSpec:
+    """One right-side stack member: a display name + the `mship <args>` it runs
+    (always a `mship view … --follow` command)."""
+    name: str
+    view_args: list[str]
+
+
+# The right-side stack is ONE fixed rich set, the same regardless of the focused
+# item's phase (operator decision, option A). ac4's "dynamic per phase" is met by
+# every member running `--follow`: each re-scopes to the focused item and renders
+# phase-appropriate content (or its own empty/hint state). The Item pane carries the
+# item/PR/checks composite. No phase-conditional membership, no rebuild on switch.
+_COCKPIT_VIEW_SPECS = [
+    ViewPaneSpec("Spec", ["view", "spec", "--follow"]),
+    ViewPaneSpec("Diff", ["view", "diff", "--follow"]),
+    ViewPaneSpec("Journal", ["view", "journal", "--follow"]),
+    ViewPaneSpec("Status", ["view", "status", "--follow"]),
+    ViewPaneSpec("Item", ["view", "item", "--follow"]),
+]
+
+
+def cockpit_view_specs() -> list[ViewPaneSpec]:
+    """The fixed rich set of right-side stack members (ac4). Always the same — the
+    panes follow focus; membership never depends on phase."""
+    return list(_COCKPIT_VIEW_SPECS)
+
+
+_FRAME = """\
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        children
+        pane size=2 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+"""
+
+_OVERVIEW_TAB = """\
+    tab name="Overview" {
+        pane split_direction="vertical" {
+            pane size="50%" name="Queue" command="mship" close_on_exit=false { args "view" "queue"; }
+            pane size="50%" name="Items" command="mship" close_on_exit=false { args "view" "items"; }
+        }
+    }
+"""
+
+
+def _cockpit_agent_pane(chat_command: str | None) -> str:
+    """The fixed left Agent pane — a bare shell (operator's session) by default, or a
+    configured command. size 40%, focus=true, sibling of (NOT inside) the stack."""
+    if chat_command is None:
+        return '            pane size="40%" name="Agent" focus=true\n'
+    cmd = _kdl_quote(chat_command)
+    return ('            pane size="40%" name="Agent" focus=true command="sh" close_on_exit=false '
+            f'{{ args "-c" {cmd}; }}\n')
+
+
+def _view_pane_kdl(spec: "ViewPaneSpec") -> str:
+    args = " ".join(_kdl_quote(t) for t in spec.view_args)
+    return (f'                pane name="{spec.name}" command="mship" close_on_exit=false '
+            f'{{ args {args}; }}\n')
+
+
+def _cockpit_tab(chat_command: str | None) -> str:
+    panes = "".join(_view_pane_kdl(s) for s in cockpit_view_specs())
+    return ('    tab name="Cockpit" focus=true {\n'
+            '        pane split_direction="vertical" {\n'
+            + _cockpit_agent_pane(chat_command)
+            + '            pane stacked=true {\n'
+            + panes
+            + '            }\n'
+            + '        }\n'
+            + '    }\n')
+
+
+def render_cockpit_layout(*, chat_command: str | None = None) -> str:
+    """The v2 cockpit layout document (ac3): the frame, an Overview launchpad tab
+    (queue + items), and a single Cockpit tab = fixed Agent pane beside a stacked
+    group of the fixed rich set of `mship view … --follow` panes (Spec, Diff,
+    Journal, Status, Item). Membership never depends on phase; the panes follow
+    focus."""
+    return ("layout {\n"
+            + _FRAME + "\n"
+            + _OVERVIEW_TAB + "\n"
+            + _cockpit_tab(chat_command)
+            + "}\n")
+
+
+_TEMPLATE = render_cockpit_layout()
+
+# Serve splices a Serve tab before the final layout-closing brace. The only
+# column-0 brace is the layout close, so `\n}\n` locates it uniquely.
+_close_idx = _TEMPLATE.rindex("\n}\n") + 1
+_LAYOUT_HEAD = _TEMPLATE[:_close_idx]
+_BASE_TABS = ""
+_LAYOUT_TAIL = _TEMPLATE[_close_idx:]
+
+# The tab-bar (top) + status-bar (bottom) frame every tab via default_tab_template.
+# A per-item focus tab (render_workitem_layout) is opened with `new-tab --layout`
+# from its OWN layout doc, so it must carry the same block or it renders with NO
+# tab bar. Sliced verbatim from _TEMPLATE so the two can never drift. (Dead after
+# Task 12 removes render_workitem_layout.)
+_DEFAULT_TAB_TEMPLATE = _TEMPLATE[
+    _TEMPLATE.index("    default_tab_template {") : _TEMPLATE.index('    tab name="Overview"')
+]
 
 
 def tab_name_for(item_id: str) -> str:
