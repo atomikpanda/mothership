@@ -8,10 +8,19 @@ directly. The Textual `QueueView` and the CLI command wire thin on top; the
 formatters below are shared by both the flat text renderer (non-TTY) and the TUI
 row builder (mirrors workitem_cockpit's split).
 
+Scope is THIS workspace (mship runs one serve + one agent per workspace; the
+cross-workspace rollup is Ground Control's job, spanning per-workspace serve
+instances). The CLI has no workspace registry, so `mship view queue` is the
+current workspace's attention queue — one per zellij pane, like the other views.
+
 READ-ONLY: PR-awaiting rows come from each task's RECORDED `pr_urls` (stamped by
 `mship finish` at PR-open time), never a live `gh` call — live PR state is only
-ever resolved by `mship serve`'s PrWatcher, never in a view. Completed work
-(merged/closed PRs, implemented specs) drops off via the `phase != "done"` gate.
+ever resolved by `mship serve`'s PrWatcher, never in a view. The `phase != "done"`
+gate drops completed work items. NOTE: this gate is WorkItem-level, so on a
+multi-task WorkItem that is still active for another task, a PR whose own task has
+merged but not yet been closed can briefly linger — the normal close-on-merge flow
+removes such tasks from state, so in practice merged PRs drop off; we do not shell
+out to `gh` to detect per-PR merge state in a read-only view.
 """
 from __future__ import annotations
 
@@ -59,7 +68,7 @@ def assemble_queue(
             continue
         if s.attention.needs_approval and s.spec_id is not None:
             specs.append(QueueItem(
-                kind="spec-needs-review", key=f"spec:{s.id}",
+                kind="spec-needs-review", key=f"spec:{s.workspace}:{s.id}",
                 workspace=s.workspace, work_item_id=s.id,
                 work_item_title=s.title, phase=s.phase, spec_id=s.spec_id,
             ))
@@ -69,14 +78,14 @@ def assemble_queue(
                 continue
             if task.blocked_reason is not None:
                 blocked.append(QueueItem(
-                    kind="blocked-task", key=f"block:{slug}",
+                    kind="blocked-task", key=f"block:{s.workspace}:{slug}",
                     workspace=s.workspace, work_item_id=s.id,
                     work_item_title=s.title, phase=s.phase,
                     task_slug=slug, blocked_reason=task.blocked_reason,
                 ))
             for repo, url in task.pr_urls.items():
                 prs.append(QueueItem(
-                    kind="pr-awaiting", key=f"pr:{slug}:{repo}",
+                    kind="pr-awaiting", key=f"pr:{s.workspace}:{slug}:{repo}",
                     workspace=s.workspace, work_item_id=s.id,
                     work_item_title=s.title, phase=s.phase,
                     task_slug=slug, repo=repo, pr_url=url,

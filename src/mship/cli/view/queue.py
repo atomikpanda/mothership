@@ -1,7 +1,9 @@
-"""`mship view queue` — cross-workspace attention/triage list on the master/detail
+"""`mship view queue` — the workspace's attention/triage list on the master/detail
 base (AC4). Thin wiring: `build_rows` maps pure `QueueItem`s (assembled in
 core/view/queue) to `ListRow`s, and `QueueView` renders them on the reusable
-`MasterDetailApp`. READ-ONLY in this PR — navigate + view only.
+`MasterDetailApp`. Scoped to THIS workspace (one serve/agent per workspace; the
+cross-workspace rollup belongs to Ground Control). READ-ONLY in this PR —
+navigate + view only.
 """
 from __future__ import annotations
 
@@ -48,7 +50,7 @@ def _resolve_queue(container) -> list[QueueItem]:
 def register(app: "typer.Typer", get_container):
     @app.command()
     def queue():
-        """Cross-workspace attention/triage queue: specs awaiting review, blocked
+        """This workspace's attention/triage queue: specs awaiting review, blocked
         tasks, and PRs awaiting action — each a navigable row with a detail pane.
         Read-only (navigate + view)."""
         from mship.cli.output import Output

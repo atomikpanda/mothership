@@ -37,7 +37,7 @@ def test_needs_review_spec_becomes_a_spec_queue_item():
     items = assemble_queue([summary], {})
     assert [i.kind for i in items] == ["spec-needs-review"]
     it = items[0]
-    assert it.key == "spec:wi-1"
+    assert it.key == "spec:ws:wi-1"
     assert it.spec_id == "spec-1"
     assert it.work_item_id == "wi-1"
     assert it.work_item_title == "Overhaul"
@@ -59,7 +59,7 @@ def test_blocked_task_becomes_a_blocked_queue_item():
     items = assemble_queue([summary], _tasks_by_slug(task))
     assert [i.kind for i in items] == ["blocked-task"]
     it = items[0]
-    assert it.key == "block:a"
+    assert it.key == "block:ws:a"
     assert it.task_slug == "a"
     assert it.blocked_reason == "waiting on API key"
     assert it.work_item_id == "wi-1"
@@ -80,7 +80,7 @@ def test_recorded_pr_urls_become_pr_queue_items():
     items = assemble_queue([summary], _tasks_by_slug(task))
     assert [i.kind for i in items] == ["pr-awaiting"]
     it = items[0]
-    assert it.key == "pr:a:r"
+    assert it.key == "pr:ws:a:r"
     assert it.repo == "r"
     assert it.pr_url == "https://gh/pr/1"
     assert it.task_slug == "a"
