@@ -7,6 +7,7 @@ directly. `mship layout focus` writes it; `mship view … --follow` reads it.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,9 +32,13 @@ def write_focus(path: Path, work_item_id: str, *, now: datetime | None = None) -
     ts = now if now is not None else datetime.now(timezone.utc)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"work_item_id": work_item_id, "updated_at": ts.isoformat()}) + "\n"
-    )
+    payload = json.dumps({"work_item_id": work_item_id, "updated_at": ts.isoformat()}) + "\n"
+    # Write atomically: the five --follow panes poll this file independently, so a
+    # plain truncating write would let a reader see a half-written (→ "no focus")
+    # file mid-switch. Write a sibling temp then os.replace (atomic on POSIX).
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(payload)
+    os.replace(tmp, path)
     return FocusState(work_item_id=work_item_id, updated_at=ts)
 
 

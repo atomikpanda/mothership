@@ -133,7 +133,19 @@ class SpecView(ViewApp):
                 self._error_static.update("")
                 self.call_after_refresh(self._restore_scroll, prev_y, was_at_end)
                 return
-            source = path.read_text()
+            try:
+                source = path.read_text()
+            except OSError:
+                # The spec file can be deleted/renamed/replaced between the provider
+                # resolving it and this read (spec transitions rewrite the file). Show
+                # the hint and keep following — the next tick re-resolves; never raise
+                # out of the timer callback (that would stop the pane refreshing).
+                self._last_source = follow_hint()
+                self._last_error = ""
+                self._markdown.update(follow_hint())
+                self._error_static.update("")
+                self.call_after_refresh(self._restore_scroll, prev_y, was_at_end)
+                return
             header = self._header_provider() if self._header_provider else None
             if header:
                 source = f"**{header}**\n\n{source}"

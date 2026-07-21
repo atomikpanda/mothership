@@ -15,6 +15,16 @@ def test_write_then_read_roundtrips(tmp_path):
     assert read_focus(p) == FocusState(work_item_id="wi-1", updated_at=now)
 
 
+def test_write_is_atomic_leaves_no_temp_file(tmp_path):
+    # Atomic write (temp + os.replace): only the final focus file remains, no
+    # leftover *.tmp — a reader polling the dir never catches a half-written file.
+    p = focus_path(tmp_path)
+    write_focus(p, "wi-1")
+    write_focus(p, "wi-2")  # overwrite path also atomic
+    assert read_focus(p).work_item_id == "wi-2"
+    assert [f.name for f in tmp_path.iterdir()] == [FOCUS_FILENAME]
+
+
 def test_write_creates_parent_dirs(tmp_path):
     p = tmp_path / "nested" / FOCUS_FILENAME
     write_focus(p, "wi-2")

@@ -27,6 +27,22 @@ async def test_spec_view_missing_spec(tmp_path: Path):
         assert "Spec not found" in view.rendered_text()
 
 
+@pytest.mark.asyncio
+async def test_spec_follow_survives_spec_file_vanishing(tmp_path: Path):
+    # A --follow spec path can be deleted/renamed/replaced between the provider
+    # resolving it and the read (spec transitions rewrite the file). The pane must
+    # show the follow hint, not raise out of the timer callback (which would stop
+    # the pane from ever refreshing again).
+    from mship.cli.view._follow import follow_hint
+
+    missing = tmp_path / "gone-spec.md"  # provider hands back a path that isn't there
+    view = SpecView(workspace_root=tmp_path, name_or_path=None, watch=False,
+                    interval=1.0, path_provider=lambda: missing)
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        assert view._last_source == follow_hint()
+
+
 def test_serve_spec_web_serves_rendered_html(tmp_path: Path):
     spec = tmp_path / "s.md"
     spec.write_text("# Title\n\nBody.\n")
