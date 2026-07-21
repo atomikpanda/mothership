@@ -17,6 +17,7 @@ from mship.core.gh_app import GhAppError, mint_installation_token, resolve_insta
 from mship.core.pr import PRManager
 from mship.core.pr_watcher import PrWatcher
 from mship.core.spec import SpecDraft
+from mship.core.spec_transition import ApprovalBlocked, approve_spec, request_changes_spec
 from mship.core.view.thread_links import index_thread_work_items
 from mship.core.workitem import Phase
 from mship.util.shell import ShellRunner
@@ -590,8 +591,12 @@ def create_app(
         _auto_approve_if_ready(spec)
         return _save_and_review(spec)
 
+    # InvalidTransition/validate_transition stay imported here for the archive +
+    # apply endpoints below; the explicit approve/request-changes transitions now
+    # delegate to the shared core.spec_transition seam (imported module-top), so the
+    # phone (here) and the `mship spec` CLI execute one identical implementation and
+    # cannot diverge.
     from mship.core.spec import InvalidTransition, validate_transition
-    from mship.core.spec_approve import approval_blockers
 
     @app.post("/specs/{spec_id}/approve")
     def post_approve(spec_id: str, body: ApproveBody):
@@ -601,17 +606,13 @@ def create_app(
             # gate). A client that still posts /approve as a belt-and-suspenders step gets a plain
             # success, not a spurious approved->approved 409.
             return build_review(spec)
-        if not body.bypass_gate:
-            blockers = approval_blockers(spec)
-            if blockers:
-                raise HTTPException(status_code=409, detail="cannot approve: " + "; ".join(blockers))
         try:
-            validate_transition(spec.status, "approved")
+            approve_spec(spec, store, bypass_gate=body.bypass_gate)
+        except ApprovalBlocked as e:
+            raise HTTPException(status_code=409, detail="cannot approve: " + "; ".join(e.blockers))
         except InvalidTransition as e:
             raise HTTPException(status_code=409, detail=str(e))
-        spec.status = "approved"
-        spec.clarification_reason = None  # an approved spec carries no pending request-changes reason
-        return _save_and_review(spec)
+        return build_review(spec)
 
     @app.post("/specs/{spec_id}/request-changes")
     def post_request_changes(spec_id: str, body: ReasonBody):
@@ -620,12 +621,10 @@ def create_app(
         # status carrying a non-null clarification_reason (the dropped
         # needs_clarification status is now expressed by that field alone).
         try:
-            validate_transition(spec.status, "draft")
+            request_changes_spec(spec, store, body.reason)
         except InvalidTransition as e:
             raise HTTPException(status_code=409, detail=str(e))
-        spec.status = "draft"
-        spec.clarification_reason = body.reason
-        review = _save_and_review(spec)
+        review = build_review(spec)
         if log_manager is not None:
             try:
                 log_manager.append(spec.id, f"spec request-changes (api): {body.reason}")
