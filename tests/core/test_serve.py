@@ -928,3 +928,25 @@ def test_get_task_serializes_activity_fields(tmp_path):
     body = TestClient(_app(tmp_path)).get("/tasks/dq").json()
     assert body["last_activity_at"].startswith("2026-07-13T12:00:00")
     assert body["phase_entered_at"].startswith("2026-07-13T12:00:00")
+
+
+def test_approve_endpoint_uses_shared_transition(tmp_path, monkeypatch):
+    called = {}
+    import mship.core.serve as serve_mod
+
+    def spy(spec, store, *, bypass_gate=False):
+        called["hit"] = (spec.id, bypass_gate)
+        spec.status = "approved"
+        spec.clarification_reason = None
+        store.save(spec)
+    monkeypatch.setattr(serve_mod, "approve_spec", spy, raising=False)
+
+    now = datetime(2026, 6, 14, tzinfo=timezone.utc)
+    SpecStore(tmp_path / "specs").save(Spec(
+        id="ready", title="ready", status="needs_review", created_at=now, updated_at=now,
+        body=render_body("p", "u", "a"),
+        acceptance_criteria=[AcceptanceCriterion(id="ac1", text="x", verdict="approved")],
+        open_questions=[]))
+    r = TestClient(_app(tmp_path)).post("/specs/ready/approve", json={})
+    assert r.status_code == 200 and r.json()["status"] == "approved"
+    assert called["hit"] == ("ready", False)

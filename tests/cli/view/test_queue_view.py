@@ -31,7 +31,7 @@ async def test_queue_view_lists_every_attention_item_with_header():
         assert any(l.startswith("[PR]") for l in labels)
         assert "queue" in view.header_text().lower()
         assert "3" in view.header_text()
-        # First row (spec) detail shows the deferred-action note + spec id.
+        # First row (spec) detail shows the spec id.
         assert "spec-1" in view.detail_text()
 
 
@@ -154,3 +154,90 @@ def test_queue_cli_empty_workspace_is_ok(tmp_path):
         assert "(none)" in result.output
     finally:
         _reset()
+
+
+# --- PR4: inline actions (AC7 approve/request-changes + AC8 open/copy) ---
+
+
+@pytest.mark.asyncio
+async def test_queue_approve_writes_and_drops_row(tmp_path):
+    from mship.core.spec import AcceptanceCriterion, Spec
+    from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+    store = SpecStore(tmp_path / SPECS_DIRNAME)
+    store.save(Spec(id="spec-1", title="t", status="needs_review", created_at=_dt(),
+                    updated_at=_dt(), body="b\n",
+                    acceptance_criteria=[AcceptanceCriterion(id="ac1", text="x", verdict="approved")],
+                    open_questions=[]))
+    view = QueueView(_items(), spec_store=store)
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        view._master.focus()
+        await pilot.pause()
+        await pilot.press("a")                       # spec row is first
+        await pilot.pause()
+        assert store.find_by_id("spec-1").status == "approved"
+        assert "approved" in view.last_action().lower()
+        assert not any("spec-1" in l for l in view.list_labels())   # left the queue
+
+
+@pytest.mark.asyncio
+async def test_queue_approve_noop_on_pr_row(tmp_path):
+    view = QueueView(_items())
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        view._master.focus()
+        await pilot.press("j"); await pilot.press("j")   # -> PR row
+        await pilot.pause()
+        await pilot.press("a")
+        await pilot.pause()
+        assert "spec awaiting review" in view.last_action().lower()
+
+
+@pytest.mark.asyncio
+async def test_queue_open_and_copy_pr(tmp_path, monkeypatch):
+    import mship.cli.view.queue as qv
+    opened = {}
+    monkeypatch.setattr(qv.webbrowser, "open", lambda u: opened.setdefault("u", u))
+    view = QueueView(_items())
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        view._master.focus()
+        await pilot.press("j"); await pilot.press("j")   # -> PR row
+        await pilot.pause()
+        await pilot.press("o")
+        await pilot.pause()
+        assert opened["u"] == "https://gh/pr/9"
+        await pilot.press("y")
+        await pilot.pause()
+        assert "https://gh/pr/9" in view.last_action()
+
+
+# --- Greptile #394 F2: enter navigates on every row type, not just spec rows ---
+@pytest.mark.asyncio
+async def test_queue_enter_opens_pr_row_in_browser(tmp_path, monkeypatch):
+    import mship.cli.view.queue as qv
+    opened = {}
+    monkeypatch.setattr(qv.webbrowser, "open", lambda u: opened.setdefault("u", u))
+    view = QueueView(_items())
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        view._master.focus()
+        await pilot.press("j"); await pilot.press("j")   # -> PR row
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert opened["u"] == "https://gh/pr/9"
+
+
+@pytest.mark.asyncio
+async def test_queue_enter_opens_blocked_task_detail_in_process(tmp_path):
+    from mship.cli.view._modals import EntityScreen
+    view = QueueView(_items())
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        view._master.focus()
+        await pilot.press("j")   # -> blocked-task row
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(view.screen, EntityScreen)

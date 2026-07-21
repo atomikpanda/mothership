@@ -9,12 +9,16 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+from textual import work
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.widgets import Markdown, Static
 
 from mship.cli.view._base import ViewApp
+from mship.cli.view._modals import RequestChangesModal
 from mship.cli.view._placeholders import placeholder_for
+from mship.core.view.actions import approve_spec_by_id, request_changes_by_id
 from mship.core.task_resolver import (
     AmbiguousTaskError,
     NoActiveTaskError,
@@ -26,6 +30,15 @@ from mship.core.view.web_port import NoFreePortError, pick_port
 
 
 class SpecView(ViewApp):
+    # SpecView is a `ViewApp` stream view (not MasterDetailApp). Textual merges
+    # BINDINGS across the MRO, so these ADD to ViewApp's keys. `a`/`R` approve /
+    # request-changes the currently-rendered canonical spec through the shared
+    # core.spec_transition seam — only active when spec_store + spec_id are known.
+    BINDINGS = [
+        Binding("a", "approve", "Approve", show=False),
+        Binding("R", "request_changes", "Req-changes", show=False),
+    ]
+
     def __init__(
         self,
         workspace_root: Path,
@@ -38,12 +51,15 @@ class SpecView(ViewApp):
         cli_task: Optional[str] = None,
         cwd: Optional[Path] = None,
         header_provider=None,
+        spec_store=None,
+        spec_id: Optional[str] = None,
         **kw,
     ):
         # Strip SpecView-specific kwargs before passing to super
         for k in ("workspace_root", "name_or_path", "task",
                   "state_manager", "state", "log_manager",
-                  "cli_task", "cwd", "header_provider"):
+                  "cli_task", "cwd", "header_provider",
+                  "spec_store", "spec_id"):
             kw.pop(k, None)
         super().__init__(**kw)
         self._workspace_root = workspace_root
@@ -55,6 +71,9 @@ class SpecView(ViewApp):
         self._cli_task = cli_task
         self._cwd = cwd if cwd is not None else Path.cwd()
         self._header_provider = header_provider
+        self._spec_store = spec_store
+        self._spec_id = spec_id
+        self._last_action_message: str = ""
         self._markdown: Markdown | None = None
         self._error_static: Static | None = None
         self._body: VerticalScroll | None = None
@@ -203,6 +222,37 @@ class SpecView(ViewApp):
         """Test helper — returns last markdown source plus any error text."""
         return self._last_source + "\n" + self._last_error
 
+    # --- PR4 inline actions (AC7) ---
+    def last_action(self) -> str:
+        return self._last_action_message
+
+    def _announce(self, msg: str) -> None:
+        self._last_action_message = msg
+        self.notify(msg)
+
+    def action_approve(self) -> None:
+        if self._spec_store is None or self._spec_id is None:
+            self._announce("Approve is not available for this spec.")
+            return
+        out = approve_spec_by_id(self._spec_store, self._spec_id)
+        self._announce(out.message)
+        if out.ok:
+            self._refresh_content()
+
+    @work
+    async def action_request_changes(self) -> None:
+        if self._spec_store is None or self._spec_id is None:
+            self._announce("Request-changes is not available for this spec.")
+            return
+        reason = await self.push_screen_wait(RequestChangesModal(self._spec_id))
+        if reason is None:
+            self._announce("Request-changes cancelled.")
+            return
+        out = request_changes_by_id(self._spec_store, self._spec_id, reason)
+        self._announce(out.message)
+        if out.ok:
+            self._refresh_content()
+
 
 def _render_html(spec_path: Path) -> bytes:
     try:
@@ -293,7 +343,7 @@ def register(app: typer.Typer, get_container):
         workspace_root = _P(container.config_path()).parent
         state = container.state_manager().load()
 
-        from mship.core.spec_store import SPECS_DIRNAME
+        from mship.core.spec_store import SPECS_DIRNAME, SpecStore
         from mship.core.workitem_store import WorkItemStore
         from mship.core.view.spec_selection import (
             SpecSelectionError, SpecSelector, load_canonical_specs,
@@ -394,6 +444,10 @@ def register(app: typer.Typer, get_container):
         header_provider = None
         if canonical_spec_id is not None:
             header_provider = lambda: header_for_spec(canonical_spec_id, load_workitem_index(container))
+        # Only the canonical path carries a spec id + store, so a/R approve /
+        # request-changes are active there and read-only elsewhere (name/task paths
+        # pass None). Route writes through the same shared seam as serve + CLI.
+        action_store = SpecStore(specs_dir) if canonical_spec_id is not None else None
         view = SpecView(
             workspace_root=workspace_root,
             name_or_path=str(canonical_path) if canonical_path is not None else name_or_path,
@@ -403,6 +457,8 @@ def register(app: typer.Typer, get_container):
             cli_task=cli_task_for_view,
             cwd=_P.cwd(),
             header_provider=header_provider,
+            spec_store=action_store,
+            spec_id=canonical_spec_id,
             watch=watch,
             interval=interval,
         )

@@ -543,6 +543,25 @@ def test_spec_request_changes(configured_app_with_task: Path, tmp_path):
     assert spec.clarification_reason == "tighten scope"
 
 
+def test_cli_approve_uses_shared_transition(configured_app_with_task: Path, tmp_path, monkeypatch):
+    called = {}
+    import mship.core.spec_transition as st
+    orig = st.approve_spec
+
+    def spy(spec, store, *, bypass_gate=False):
+        called["hit"] = spec.id
+        return orig(spec, store, bypass_gate=bypass_gate)
+    monkeypatch.setattr(st, "approve_spec", spy)
+
+    _apply_dq(tmp_path)                                    # needs_review spec "dq"
+    runner.invoke(app, ["spec", "verdict", "dq", "ac1", "approved"])
+    runner.invoke(app, ["spec", "answer", "dq", "q1", "yes"])   # clears the gate
+    result = runner.invoke(app, ["spec", "approve", "dq"])
+    assert result.exit_code == 0, result.output
+    assert called["hit"] == "dq"
+    assert _store(configured_app_with_task).find_by_id("dq").status == "approved"
+
+
 def test_spec_request_changes_persists_reason_and_logs(configured_app_with_task: Path, tmp_path):
     """MOS-215: the reason must land on the spec itself (not just the task
     log), so `spec show`/`review` can surface it without digging into logs."""

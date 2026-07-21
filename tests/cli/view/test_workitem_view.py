@@ -6,8 +6,8 @@ from mship.core.view.workitem_cockpit import (
 from mship.cli.view.workitem import WorkItemCockpitView
 
 
-def _cockpit():
-    return WorkItemCockpit(
+def _cockpit(**over):
+    base = dict(
         id="wi-1", title="Overhaul", kind="feature", phase="in_flight",
         spec_id="spec-1", spec_title="Overhaul spec", spec_status="needs_review",
         criteria=[CriterionView(
@@ -20,6 +20,8 @@ def _cockpit():
         threads=[ThreadView(id="th-1", subject="Question about X",
                             needs_you=False, needs_decision=False, unseen=False)],
     )
+    base.update(over)
+    return WorkItemCockpit(**base)
 
 
 @pytest.mark.asyncio
@@ -144,3 +146,76 @@ def test_workitem_cli_unknown_id_exits_1(tmp_path):
         assert "wi-missing" in result.output
     finally:
         _reset()
+
+
+# --- PR4: inline actions (AC7 approve + AC8 open/copy) ---
+
+
+@pytest.mark.asyncio
+async def test_cockpit_approve_updates_spec_row(tmp_path):
+    from mship.core.spec import AcceptanceCriterion, Spec
+    from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+    store = SpecStore(tmp_path / SPECS_DIRNAME)
+    store.save(Spec(id="spec-1", title="t", status="needs_review", created_at=_dt(),
+                    updated_at=_dt(), body="b\n",
+                    acceptance_criteria=[AcceptanceCriterion(id="ac1", text="x", verdict="approved")],
+                    open_questions=[]))
+    cockpit = _cockpit(spec_id="spec-1", spec_status="needs_review")
+    view = WorkItemCockpitView(cockpit, spec_store=store)
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        view._master.focus()
+        await pilot.pause()
+        assert view.selected_key() == "spec"
+        await pilot.press("a")
+        await pilot.pause()
+        assert store.find_by_id("spec-1").status == "approved"
+        assert any("[approved]" in l for l in view.list_labels())
+
+
+@pytest.mark.asyncio
+async def test_cockpit_copy_pr_url(tmp_path):
+    view = WorkItemCockpitView(_cockpit())
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        view._master.focus()
+        await pilot.pause()
+        # Row order: spec(0), ac1(1), task(2), PR(3), thread(4).
+        await pilot.press("j"); await pilot.press("j"); await pilot.press("j")
+        await pilot.pause()
+        assert view.selected_key() == "pr:a:r"
+        await pilot.press("y")
+        await pilot.pause()
+        assert "https://gh/pr/1" in view.last_action()
+
+
+# --- Greptile #394 F3: cockpit enter navigates on non-spec rows too ---
+@pytest.mark.asyncio
+async def test_cockpit_enter_opens_pr_row_in_browser(monkeypatch):
+    import mship.cli.view.workitem as wv
+    opened = {}
+    monkeypatch.setattr(wv.webbrowser, "open", lambda u: opened.setdefault("u", u))
+    view = WorkItemCockpitView(_cockpit())
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        view._master.focus()
+        for _ in range(3):        # spec(0) ac1(1) task(2) PR(3)
+            await pilot.press("j")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert opened.get("u") == "https://gh/pr/1"
+
+
+@pytest.mark.asyncio
+async def test_cockpit_enter_opens_task_detail_in_process():
+    from mship.cli.view._modals import EntityScreen
+    view = WorkItemCockpitView(_cockpit())
+    async with view.run_test() as pilot:
+        await pilot.pause()
+        view._master.focus()
+        await pilot.press("j"); await pilot.press("j")   # -> task row
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(view.screen, EntityScreen)

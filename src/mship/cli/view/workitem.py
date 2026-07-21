@@ -2,17 +2,26 @@
 
 Thin wiring: `build_rows` maps a pure `WorkItemCockpit` (assembled in
 core/view/workitem_cockpit) to `ListRow`s, and `WorkItemCockpitView` renders them
-on the reusable `MasterDetailApp`. The store resolver + Typer command are added in
-the next task.
+on the reusable `MasterDetailApp`.
+
+PR4 adds the curated inline actions: `a`/`R` on the spec row (when its status is
+needs_review) approve / request-changes it through the shared core.spec_transition
+seam; `y` copies the selected entity's id/branch/PR-url; `o` opens a PR row's url;
+`enter` opens the linked spec in-process. The spec row relabels to the new status
+after a successful write.
 """
 from __future__ import annotations
 
+import webbrowser
 from pathlib import Path
 from typing import Optional
 
 import typer
+from textual import work
 
 from mship.cli.view._master_detail import ListRow, MasterDetailApp
+from mship.cli.view._modals import EntityScreen, RequestChangesModal
+from mship.core.view.actions import approve_spec_by_id, request_changes_by_id
 from mship.core.view.workitem_cockpit import (
     WorkItemCockpit, criterion_detail, pr_detail, spec_detail, task_detail,
     thread_detail,
@@ -58,15 +67,116 @@ def build_rows(cockpit: WorkItemCockpit) -> list[ListRow]:
 
 
 class WorkItemCockpitView(MasterDetailApp):
-    def __init__(self, cockpit: WorkItemCockpit, **kw) -> None:
+    def __init__(self, cockpit: WorkItemCockpit, spec_store=None, **kw) -> None:
         super().__init__(**kw)
         self._cockpit = cockpit
+        self._spec_store = spec_store
+        self._spec_status = cockpit.spec_status
 
     def list_rows(self) -> list[ListRow]:
-        return build_rows(self._cockpit)
+        rows = build_rows(self._cockpit)
+        # Reflect the live spec status (relabels after an in-view approve / request-changes).
+        if rows and self._spec_status is not None:
+            rows[0] = ListRow(
+                key="spec",
+                label=f"spec  {self._cockpit.spec_id or '(none)'}  [{self._spec_status}]",
+                detail=rows[0].detail,
+            )
+        return rows
 
     def header_line(self) -> str | None:
         return f"◆ {self._cockpit.id}  ·  {self._cockpit.title}  ·  [{self._cockpit.phase}]"
+
+    def _selected_task(self):
+        key = self.selected_key() or ""
+        if not key.startswith("task:"):
+            return None
+        slug = key[len("task:"):]
+        return next((t for t in self._cockpit.tasks if t.slug == slug), None)
+
+    def _selected_pr(self):
+        key = self.selected_key() or ""
+        return next((p for p in self._cockpit.prs
+                     if f"pr:{p.task_slug}:{p.repo}" == key), None)
+
+    # AC7 — approve / request-changes (only on the spec row when needs_review) --
+    def _do_approve(self) -> None:
+        if self.selected_key() != "spec" or self._spec_status != "needs_review" or self._spec_store is None:
+            self._announce("Approve applies to the spec row while it awaits review.")
+            return
+        out = approve_spec_by_id(self._spec_store, self._cockpit.spec_id)
+        self._announce(out.message)
+        if out.ok:
+            self._spec_status = "approved"
+            self.call_later(self.reload_rows)
+
+    @work
+    async def _do_request_changes(self) -> None:
+        if self.selected_key() != "spec" or self._spec_status != "needs_review" or self._spec_store is None:
+            self._announce("Request-changes applies to the spec row while it awaits review.")
+            return
+        reason = await self.push_screen_wait(RequestChangesModal(self._cockpit.spec_id))
+        if reason is None:
+            self._announce("Request-changes cancelled.")
+            return
+        out = request_changes_by_id(self._spec_store, self._cockpit.spec_id, reason)
+        self._announce(out.message)
+        if out.ok:
+            self._spec_status = "draft"
+            await self.reload_rows()
+
+    # AC8 — open / copy ---------------------------------------------------------
+    def _do_open_external(self) -> None:
+        pr = self._selected_pr()
+        if pr is not None and pr.url:
+            webbrowser.open(pr.url)
+            self._announce(f"Opened {pr.url}")
+        else:
+            self._announce("No PR to open on this row.")
+
+    def _do_copy(self) -> None:
+        key = self.selected_key() or ""
+        text: str | None = None
+        if key == "spec":
+            text = self._cockpit.spec_id
+        elif key.startswith("ac:"):
+            text = key[len("ac:"):]
+        elif key.startswith("task:"):
+            task = self._selected_task()
+            text = task.branch if task is not None else None
+        elif key.startswith("pr:"):
+            pr = self._selected_pr()
+            text = pr.url if pr is not None else None
+        elif key.startswith("thread:"):
+            text = key[len("thread:"):]
+        if text:
+            self.copy_to_clipboard(text)
+            self._announce(f"Copied {text}")
+        else:
+            self._announce("Nothing to copy here.")
+
+    def _do_open_entity(self) -> bool:
+        # enter opens the linked entity for EVERY cockpit row: the spec opens its
+        # full body, a PR opens in the browser, and any other row (task, thread,
+        # criterion) opens its detail in a focused in-process screen.
+        key = self.selected_key()
+        if key is None:
+            return False
+        if key == "spec" and self._spec_store is not None and self._cockpit.spec_id:
+            spec = self._spec_store.find_by_id(self._cockpit.spec_id)
+            if spec is not None:
+                self.push_screen(EntityScreen(self._cockpit.spec_id, spec.body))
+                return True
+        pr = self._selected_pr()
+        if pr is not None:
+            webbrowser.open(pr.url)
+            self._announce(f"Opened {pr.url}")
+            return True
+        row = next((r for r in self.list_rows() if r.key == key), None)
+        if row is not None:
+            self.push_screen(EntityScreen(key, row.detail))
+            return True
+        return False
 
 
 def _resolve_cockpit(container, item_id: str) -> WorkItemCockpit | None:
@@ -122,4 +232,7 @@ def register(app: "typer.Typer", get_container):
             typer.echo(render_text(cockpit))
             return
 
-        WorkItemCockpitView(cockpit).run()
+        from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+        workspace_root = Path(container.config_path()).parent
+        store = SpecStore(workspace_root / SPECS_DIRNAME)
+        WorkItemCockpitView(cockpit, spec_store=store).run()
