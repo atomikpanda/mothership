@@ -11,6 +11,35 @@ from pathlib import Path
 # id-format contract.
 _ID_RE = re.compile(r"\A[0-9a-z]{1,64}\Z")
 
+# owner/repo: exactly one slash, non-empty halves, no whitespace. This is what
+# GitHubAppProvider later splits on `owner, name = r.split("/", 1)`, so validating
+# it here (at grant/issue time) turns a malformed `--repos api` into a clear up-front
+# error instead of a later IndexError / 500 at mint time.
+_REPO_RE = re.compile(r"\A[^/\s]+/[^/\s]+\Z")
+
+
+class RepoSpecError(ValueError):
+    """A `--repos` value is empty, malformed, or spans multiple owners."""
+
+
+def parse_repos(csv: str) -> tuple[str, ...]:
+    """Parse a comma-separated `owner/repo,owner/repo` list into a validated tuple.
+
+    Raises RepoSpecError when the list is empty, any entry is not `owner/repo`, or
+    the entries span more than one owner (mship mints one installation token per
+    single account — matching `mship serve`'s single-owner /gh-token contract)."""
+    repos = tuple(r.strip() for r in csv.split(",") if r.strip())
+    if not repos:
+        raise RepoSpecError("must list at least one owner/repo")
+    bad = [r for r in repos if not _REPO_RE.match(r)]
+    if bad:
+        raise RepoSpecError(f"malformed repo(s), expected owner/repo: {bad}")
+    owners = {r.split("/", 1)[0] for r in repos}
+    if len(owners) > 1:
+        raise RepoSpecError(f"repos span multiple owners {sorted(owners)}; "
+                            "a run is single-account")
+    return repos
+
 
 @dataclass(frozen=True)
 class Scope:

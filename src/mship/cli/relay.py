@@ -205,15 +205,16 @@ def register(parent: typer.Typer, get_container):
         from pathlib import Path
 
         from mship.core.relay.enroll import RequestStore
-        from mship.core.relay.grants import Grant, GrantStore, Scope
+        from mship.core.relay.grants import Grant, GrantStore, RepoSpecError, Scope, parse_repos
 
         out = Output()
         if RequestStore(Path(store_dir)).get(rid) != "approved":
             out.error(f"enrollment {rid!r} is not an approved enrollment")
             raise typer.Exit(1)
-        repo_list = tuple(r.strip() for r in repos.split(",") if r.strip())
-        if not repo_list:
-            out.error("--repos must list at least one owner/repo")
+        try:
+            repo_list = parse_repos(repos)
+        except RepoSpecError as e:
+            out.error(f"--repos {e}")
             raise typer.Exit(1)
         GrantStore(Path(grant_store_dir)).set_grant(
             rid, Grant(provider=provider, scope=Scope(repos=repo_list))
@@ -234,17 +235,27 @@ def register(parent: typer.Typer, get_container):
         """Issue a per-run token {repos ⊆ ceiling, push_branch}; prints plaintext ONCE."""
         from pathlib import Path
 
-        from mship.core.relay.grants import GrantStore, Scope
+        from mship.core.relay.grants import GrantStore, RepoSpecError, Scope, parse_repos
         from mship.core.relay.run_token import issue_run_token
 
         out = Output()
+        if ttl <= 0:
+            out.error("--ttl must be a positive number of seconds")
+            raise typer.Exit(1)
+        if not push_branch.strip():
+            out.error("--push-branch must be a non-empty branch name")
+            raise typer.Exit(1)
         ceiling = next((g for g in GrantStore(Path(grant_store_dir)).get_grants(rid)
                         if g.provider == "github-app"), None)
         if ceiling is None:
             out.error(f"enrollment {rid!r} has no github-app grant; run `mship relay grant` first")
             raise typer.Exit(1)
-        run_scope = Scope(repos=tuple(r.strip() for r in repos.split(",") if r.strip()),
-                          push_branch=push_branch)
+        try:
+            run_repos = parse_repos(repos)
+        except RepoSpecError as e:
+            out.error(f"--repos {e}")
+            raise typer.Exit(1)
+        run_scope = Scope(repos=run_repos, push_branch=push_branch.strip())
         if not ceiling.scope.covers(run_scope):
             out.error(f"requested repos exceed the grant ceiling {list(ceiling.scope.repos)}")
             raise typer.Exit(1)

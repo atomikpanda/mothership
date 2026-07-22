@@ -38,6 +38,9 @@ class GitHubAppProvider:
         if request.repo is not None and request.repo not in repos:
             raise ProviderError(f"repo {request.repo!r} is outside the grant {repos}")
 
+        malformed = [r for r in repos if "/" not in r]
+        if malformed:
+            raise ProviderError(f"malformed repo(s), expected owner/repo: {malformed}")
         owners = {r.split("/", 1)[0] for r in repos}
         if len(owners) > 1:
             raise ProviderError(f"grant repos span multiple owners {sorted(owners)}")

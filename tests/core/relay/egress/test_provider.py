@@ -57,3 +57,15 @@ def test_resolve_refuses_empty_repo_scope(rsa_pem):
     provider = GitHubAppProvider(app_id="1", private_key=rsa_pem, client=_mock_github({}))
     with pytest.raises(ProviderError):
         provider.resolve(identity="enr1", grant=grant, request=_req())
+
+
+def test_resolve_refuses_malformed_repo_with_controlled_error(rsa_pem):
+    # A slashless repo in the grant must raise a controlled ProviderError (-> 502),
+    # NOT an uncaught IndexError from r.split("/", 1)[1] (-> 500). Defence in depth
+    # behind the grant-time validation (Greptile). The requested repo (acme/api) is
+    # in-grant so the out-of-grant check passes and the malformed guard is what fires.
+    grant = Grant("github-app", Scope(repos=("acme/api", "nope"), push_branch="feat/x"))
+    provider = GitHubAppProvider(app_id="1", private_key=rsa_pem, client=_mock_github({}))
+    with pytest.raises(ProviderError):
+        provider.resolve(identity="enr1", grant=grant,
+                         request=_req("/gh/acme/api.git/git-receive-pack"))

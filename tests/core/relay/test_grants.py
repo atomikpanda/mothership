@@ -1,4 +1,25 @@
-from mship.core.relay.grants import Scope, Grant
+import pytest
+
+from mship.core.relay.grants import Scope, Grant, RepoSpecError, parse_repos
+
+
+def test_parse_repos_accepts_owner_repo_list():
+    assert parse_repos("acme/api, acme/web") == ("acme/api", "acme/web")
+
+
+def test_parse_repos_rejects_empty():
+    with pytest.raises(RepoSpecError):
+        parse_repos("  , ,")
+
+
+def test_parse_repos_rejects_slashless():
+    with pytest.raises(RepoSpecError):
+        parse_repos("acme/api,api")
+
+
+def test_parse_repos_rejects_multi_owner():
+    with pytest.raises(RepoSpecError):
+        parse_repos("org-a/api,org-b/web")
 
 
 def test_scope_covers_is_repo_subset_ignoring_push_branch():
