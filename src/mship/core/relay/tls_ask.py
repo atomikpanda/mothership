@@ -28,6 +28,6 @@ def tls_ask_allowed(domain: str, relay_domain: str) -> bool:
     label = domain[: -len(suffix)]
     if not label or "." in label:        # no nested subdomain levels
         return False
-    if label == "enroll":
+    if label in ("enroll", "egress"):
         return True
     return len(label) <= 63 and _SERVE_LABEL.fullmatch(label) is not None

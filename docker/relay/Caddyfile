@@ -32,6 +32,16 @@ enroll.{$RELAY_DOMAIN} {
 	}
 }
 
+# Egress proxy — worker git/API traffic, credential attached at egress.
+egress.{$RELAY_DOMAIN} {
+	tls {
+		on_demand
+	}
+	reverse_proxy 127.0.0.1:47280 {
+		header_up Host {host}
+	}
+}
+
 # Per-device serve subdomains -> sish (Host preserved). The more-specific
 # enroll.<domain> site above takes precedence over this wildcard.
 *.{$RELAY_DOMAIN} {

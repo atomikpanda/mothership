@@ -61,3 +61,7 @@ def test_rejects_leading_hyphen_label():
 def test_rejects_double_leading_hyphen_label():
     # base must start alphanumeric; a lone-hyphen base must not slip through
     assert tls_ask_allowed(f"--abcdef.{RELAY}", RELAY) is False
+
+
+def test_egress_label_is_allowed():
+    assert tls_ask_allowed("egress.relay.example.com", "relay.example.com") is True
