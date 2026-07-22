@@ -2,7 +2,8 @@ import pytest
 from mship.core.relay.grants import Grant, Scope
 from mship.core.relay.egress.request import parse_egress_request
 from mship.core.relay.egress.enforce import (
-    GitSmartHttpEnforcer, HostLockedEnforcer, EnforcementError,
+    GitSmartHttpEnforcer, HostLockedEnforcer, GitHubApiEnforcer,
+    classify_api_request, EnforcementError,
 )
 
 
@@ -69,3 +70,77 @@ def test_receive_pack_advertisement_get_passes():
 
 def test_host_locked_enforcer_passes_api_traffic():
     HostLockedEnforcer().check(_req("/api/repos/acme/api/pulls", method="GET"), RUN_GRANT)
+
+
+# --- GitHubApiEnforcer classifier: default-deny permit/deny matrix ----------
+# `in_scope` = the path's owner/repo is within the run's scope.repos. For the
+# repo-less safe globals it is irrelevant (they are allowed regardless).
+_API_PERMIT = [
+    ("POST", "/repos/o/r/pulls", True),                       # OPEN a PR (the only write)
+    ("GET", "/repos/o/r", True),                              # repo read (root)
+    ("GET", "/repos/o/r/pulls", True),                        # repo read
+    ("GET", "/repos/o/r/pulls/1", True),                      # repo read
+    ("GET", "/rate_limit", False),                            # safe global (scope irrelevant)
+    ("GET", "/user", False),                                  # safe global (scope irrelevant)
+]
+
+_API_DENY = [
+    # Managing an EXISTING numbered PR/issue is refused — the enforcer can't prove
+    # the number is the run's own PR, so permitting it would let a worker touch an
+    # UNRELATED PR in an in-scope repo (Greptile "PR ownership"). Only OPEN is allowed.
+    ("PATCH", "/repos/o/r/pulls/1", True),            # update an existing PR (not the run's own, provably)
+    ("POST", "/repos/o/r/issues/1/comments", True),   # comment on an existing issue/PR
+    ("POST", "/repos/o/r/pulls/1/reviews", True),     # review an existing PR
+    ("POST", "/repos/o/r/pulls/1/requested_reviewers", True),  # alter an existing PR's reviewers
+    ("PUT", "/repos/o/r/pulls/1/merge", True),        # merge a PR — DIFFERENT path from PATCH /pulls/{n}
+    ("PATCH", "/repos/o/r/pulls/1/merge", True),      # merge via another method is still merge
+    ("POST", "/repos/o/r/merges", True),              # merges
+    ("POST", "/repos/o/r/git/refs", True),            # ref create
+    ("PATCH", "/repos/o/r/git/refs/heads/x", True),   # ref update
+    ("DELETE", "/repos/o/r/git/refs/heads/x", True),  # ref delete
+    ("PUT", "/repos/o/r/contents/f", True),           # content write
+    ("DELETE", "/repos/o/r/contents/f", True),        # content delete
+    ("DELETE", "/repos/o/r", True),                   # delete repo
+    ("POST", "/repos/o/r/deployments", True),         # unknown write endpoint
+    ("PUT", "/repos/o/r/pulls/1", True),              # method-specific: no existing-PR write is allowed
+    ("POST", "/repos/o/r/pulls", False),              # permitted shape but OUT OF SCOPE
+    ("GET", "/repos/o/r", False),                     # read but OUT OF SCOPE
+    ("GET", "/orgs/o", True),                         # repo-less non-global read
+    ("POST", "/rate_limit", False),                   # non-GET on a safe global
+]
+
+
+@pytest.mark.parametrize("method, path, in_scope", _API_PERMIT)
+def test_classify_api_request_permits_allowlist(method, path, in_scope):
+    assert classify_api_request(method, path, in_scope) is True
+
+
+@pytest.mark.parametrize("method, path, in_scope", _API_DENY)
+def test_classify_api_request_denies_everything_else(method, path, in_scope):
+    assert classify_api_request(method, path, in_scope) is False
+
+
+def test_api_enforcer_permits_in_scope_pr_create():
+    GitHubApiEnforcer().check(_req("/api/repos/acme/api/pulls", method="POST"), RUN_GRANT)
+
+
+def test_api_enforcer_permits_safe_global_read():
+    GitHubApiEnforcer().check(_req("/api/rate_limit", method="GET"), RUN_GRANT)
+
+
+def test_api_enforcer_denies_merge():
+    with pytest.raises(EnforcementError):
+        GitHubApiEnforcer().check(_req("/api/repos/acme/api/pulls/1/merge", method="PUT"), RUN_GRANT)
+
+
+def test_api_enforcer_denies_ref_mutation():
+    with pytest.raises(EnforcementError):
+        GitHubApiEnforcer().check(
+            _req("/api/repos/acme/api/git/refs/heads/main", method="PATCH"), RUN_GRANT
+        )
+
+
+def test_api_enforcer_denies_out_of_scope_repo():
+    # acme/other is NOT in RUN_GRANT.repos -> even a permitted shape is refused.
+    with pytest.raises(EnforcementError):
+        GitHubApiEnforcer().check(_req("/api/repos/acme/other/pulls", method="POST"), RUN_GRANT)

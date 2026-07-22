@@ -109,3 +109,60 @@ def test_clone_upload_pack_passes_and_attaches(tmp_path):
     )
     assert resp.status_code == 200
     assert seen["authorization"] == "token ghs_minted"
+
+
+_PR_BODY = b'{"title":"x","head":"feat/x","base":"main"}'
+
+
+def test_api_pr_create_for_in_scope_repo_attaches_token_and_forwards(tmp_path):
+    seen: dict = {}
+    provider = _StubProvider()
+    app, base = _app(tmp_path, provider, _capture_upstream(seen))
+    token = _token(base)
+    resp = TestClient(app).post(
+        "/api/repos/acme/api/pulls",
+        content=_PR_BODY,
+        headers={"Mship-Run-Token": token, "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 200
+    assert resp.content == b"ok-from-github"
+    assert seen["host"] == "api.github.com"
+    assert seen["authorization"] == "token ghs_minted"   # real cred attached at egress
+    assert seen["run_token"] is None                     # placeholder never leaves the relay
+    assert provider.calls == [("enr1", ("acme/api",), "acme/api")]
+
+
+def test_api_merge_attempt_is_rejected_before_egress(tmp_path):
+    seen: dict = {}
+    app, base = _app(tmp_path, _StubProvider(), _capture_upstream(seen))
+    token = _token(base)
+    resp = TestClient(app).put(
+        "/api/repos/acme/api/pulls/1/merge",
+        content=b"{}",
+        headers={"Mship-Run-Token": token, "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 403
+    assert seen == {}                                    # never forwarded
+
+
+def test_api_out_of_scope_repo_is_rejected_before_egress(tmp_path):
+    seen: dict = {}
+    app, base = _app(tmp_path, _StubProvider(), _capture_upstream(seen))
+    token = _token(base)  # run scope is ("acme/api",); acme/web is out of the run scope
+    resp = TestClient(app).post(
+        "/api/repos/acme/web/pulls",
+        content=_PR_BODY,
+        headers={"Mship-Run-Token": token, "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 403
+    assert seen == {}                                    # never forwarded
+
+
+def test_api_leg_fails_closed_503_without_provider(tmp_path):
+    app, base = _app(tmp_path, None, _capture_upstream({}))
+    token = _token(base)
+    resp = TestClient(app).post(
+        "/api/repos/acme/api/pulls", content=_PR_BODY,
+        headers={"Mship-Run-Token": token, "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 503

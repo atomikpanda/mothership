@@ -36,6 +36,16 @@ def _extract_repo(upstream_path: str) -> str | None:
     return f"{owner}/{name}"
 
 
+def _extract_api_repo(upstream_path: str) -> str | None:
+    # /repos/{owner}/{repo}/... -> owner/repo. Repo-less API paths
+    # (/user, /rate_limit, /graphql, /orgs/...) -> None: recognized as repo-less,
+    # not mis-parsed. Query strings never appear here (they ride the `query` field).
+    parts = [p for p in upstream_path.split("/") if p]
+    if len(parts) >= 3 and parts[0] == "repos":
+        return f"{parts[1]}/{parts[2]}"
+    return None
+
+
 def _service(method: str, upstream_path: str, query: str) -> tuple[str | None, bool]:
     if upstream_path.endswith("/info/refs"):
         svc = (parse_qs(query).get("service") or [None])[0]
@@ -57,7 +67,10 @@ def parse_egress_request(*, method, path, query, headers, body) -> EgressRequest
         raise UnmappablePathError(path)
     host = _PREFIX_HOST[prefix]
     upstream_path = path[len(prefix) - 1:]     # keep the leading slash
-    repo = _extract_repo(upstream_path) if host == "github.com" else None
+    repo = (
+        _extract_repo(upstream_path) if host == "github.com"
+        else _extract_api_repo(upstream_path)
+    )
     service, is_rp_post = _service(method, upstream_path, query)
     return EgressRequest(
         method=method, upstream_host=host, upstream_path=upstream_path, query=query,
