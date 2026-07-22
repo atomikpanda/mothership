@@ -134,8 +134,8 @@ only a *run-branch* push to the *run's repos*, with a repo-scoped short-TTL App 
 the worker never sees. Exfiltrating the placeholder + token yields no GitHub access
 and no other-branch / other-repo write.
 
-> **The api.github.com leg is live + enforced.** The worker opens (and lightly
-> manages) its own PR through the `/api/` egress leg (operator decision B). The
+> **The api.github.com leg is live + enforced.** The worker OPENS its PR through
+> the `/api/` egress leg (operator decision B). The
 > route is back on the github-app provider behind `GitHubApiEnforcer`, a
 > DEFAULT-DENY REST enforcer (below). This is the API leg the auth-spine slice
 > deferred, now done with a real enforcer instead of a pass-through — so the API
@@ -172,10 +172,8 @@ by construction: the safe failure mode is a blocked worker call, never an unexpe
 mutation.
 
 **PERMIT (and nothing else):**
-- `POST  /repos/{o}/{r}/pulls` — open a PR
-- `PATCH /repos/{o}/{r}/pulls/{n}` — update the run's PR (title/body/state); **not** merge
-- `POST  /repos/{o}/{r}/issues/{n}/comments` — comment
-- `POST  /repos/{o}/{r}/pulls/{n}/reviews`, `POST /repos/{o}/{r}/pulls/{n}/requested_reviewers` — review / request review
+- `POST  /repos/{o}/{r}/pulls` — **open** a PR (the only permitted write; the worker
+  sets title + body in this call, so it needs nothing further)
 - `GET   /repos/{o}/{r}/...` — reads scoped to the run's repos
 - `GET   /rate_limit`, `GET /user` — safe global reads
 
@@ -184,10 +182,15 @@ run's `scope.repos` (an out-of-scope repo is refused — same containment as the
 leg).
 
 **Explicitly DENIED (named + tested, though default-deny already covers them):**
+- Any write to an EXISTING numbered PR/issue — `PATCH /pulls/{n}`, `POST /issues/{n}/comments`,
+  `POST /pulls/{n}/reviews`, `POST /pulls/{n}/requested_reviewers`. The run does not
+  own every PR in its repos, and the enforcer can't prove a given number is the run's
+  own PR, so a (prompt-injectable) worker must not be able to close/rewrite/review an
+  UNRELATED PR. (Managing the run's own PR could return later behind per-run
+  PR-ownership tracking — recording the number from the open response.)
 - `PUT /repos/{o}/{r}/pulls/{n}/merge` — merging a PR. **Nothing auto-merges**; the
   fan-out is review-gated end to end (#393), so merge is denied even though the
-  token technically could. Note this is a DIFFERENT path from the permitted
-  `PATCH /pulls/{n}`.
+  token technically could.
 - `POST /repos/{o}/{r}/merges`
 - `POST|PATCH|DELETE /repos/{o}/{r}/git/refs/*` — ref mutation
 - `PUT|DELETE /repos/{o}/{r}/contents/*` — content mutation

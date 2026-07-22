@@ -71,13 +71,19 @@ def classify_api_request(method: str, path: str, in_scope: bool) -> bool:
     paths; the safe globals are allowed regardless). Permits ONLY:
       - GET /rate_limit, GET /user                      (safe global reads)
       - GET  /repos/{o}/{r}/...                          (reads on the run's repos)
-      - POST  /repos/{o}/{r}/pulls                       (open a PR)
-      - PATCH /repos/{o}/{r}/pulls/{n}                   (update the PR; NOT merge)
-      - POST  /repos/{o}/{r}/issues/{n}/comments         (comment)
-      - POST  /repos/{o}/{r}/pulls/{n}/reviews           (review)
-      - POST  /repos/{o}/{r}/pulls/{n}/requested_reviewers (request review)
-    Everything else -> deny. Merge (PUT /pulls/{n}/merge) is a DIFFERENT path
-    from the permitted PATCH /pulls/{n} and is denied by construction."""
+      - POST /repos/{o}/{r}/pulls                        (OPEN a PR)
+    Everything else -> deny.
+
+    The ONLY write permitted is OPENING a PR (POST /pulls). Managing an EXISTING
+    numbered PR/issue — PATCH /pulls/{n}, POST /issues/{n}/comments, PR reviews —
+    is deliberately NOT permitted: those take a PR/issue number the enforcer can't
+    tie to the run's own PR, so allowing them would let a (prompt-injectable) worker
+    close/rewrite/review an UNRELATED PR in an in-scope repo (the run does not own
+    every PR in its repos). The worker sets its title + body in the POST /pulls
+    body, so it needs nothing further. Managing the run's own PR could return later
+    behind per-run PR-ownership tracking (recording the PR number from the POST
+    /pulls response and gating /pulls/{n} on it). Merge (PUT /pulls/{n}/merge) is a
+    DIFFERENT path and is denied by construction."""
     method = method.upper()
     segs = [s for s in path.split("/") if s]
 
@@ -96,29 +102,24 @@ def classify_api_request(method: str, path: str, in_scope: bool) -> bool:
     if method == "GET":
         return True
 
-    # Writes: a tiny explicit allowlist (open/manage the run's PR + comment/review).
+    # The ONE permitted write: open a NEW PR. No operation on an existing numbered
+    # PR/issue (the enforcer can't prove the number is the run's own PR).
     if method == "POST" and rest == ["pulls"]:
         return True
-    if method == "PATCH" and len(rest) == 2 and rest[0] == "pulls":
-        return True  # PATCH /pulls/{n} — NOT /pulls/{n}/merge (len 3)
-    if method == "POST" and len(rest) == 3 and rest[0] == "issues" and rest[2] == "comments":
-        return True  # POST /issues/{n}/comments
-    if (method == "POST" and len(rest) == 3 and rest[0] == "pulls"
-            and rest[2] in ("reviews", "requested_reviewers")):
-        return True  # POST /pulls/{n}/reviews | /pulls/{n}/requested_reviewers
     return False
 
 
 class GitHubApiEnforcer:
     """DEFAULT-DENY enforcer for the worker's api.github.com PR-egress leg.
 
-    Permits only opening/managing the run's PR + comments/reviews + reads scoped
-    to the run's repos (plus the safe globals /rate_limit, /user). Every
-    repo-scoped permit additionally requires the path's owner/repo to be within
-    grant.scope.repos (same containment as the git leg). Everything else raises
-    EnforcementError, which the proxy maps to 403. Merge, POST /merges,
-    git/refs mutation, and contents mutation are all denied — the API leg cannot
-    sidestep the git push-to-run-branch enforcement."""
+    Permits only OPENING a PR (POST /pulls) + reads scoped to the run's repos
+    (plus the safe globals /rate_limit, /user). Every repo-scoped permit
+    additionally requires the path's owner/repo to be within grant.scope.repos
+    (same containment as the git leg). Everything else raises EnforcementError,
+    which the proxy maps to 403 — including any write to an EXISTING numbered
+    PR/issue (which could target an unrelated PR), merge, POST /merges, git/refs
+    mutation, and contents mutation. The API leg cannot sidestep the git
+    push-to-run-branch enforcement, and cannot touch a PR the run does not own."""
 
     def check(self, request: EgressRequest, grant: Grant) -> None:
         in_scope = request.repo is not None and request.repo in grant.scope.repos

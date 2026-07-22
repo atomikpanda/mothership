@@ -76,11 +76,7 @@ def test_host_locked_enforcer_passes_api_traffic():
 # `in_scope` = the path's owner/repo is within the run's scope.repos. For the
 # repo-less safe globals it is irrelevant (they are allowed regardless).
 _API_PERMIT = [
-    ("POST", "/repos/o/r/pulls", True),                       # open a PR
-    ("PATCH", "/repos/o/r/pulls/1", True),                    # update the run's PR (NOT merge)
-    ("POST", "/repos/o/r/issues/1/comments", True),           # comment
-    ("POST", "/repos/o/r/pulls/1/reviews", True),             # review
-    ("POST", "/repos/o/r/pulls/1/requested_reviewers", True), # request review
+    ("POST", "/repos/o/r/pulls", True),                       # OPEN a PR (the only write)
     ("GET", "/repos/o/r", True),                              # repo read (root)
     ("GET", "/repos/o/r/pulls", True),                        # repo read
     ("GET", "/repos/o/r/pulls/1", True),                      # repo read
@@ -89,6 +85,13 @@ _API_PERMIT = [
 ]
 
 _API_DENY = [
+    # Managing an EXISTING numbered PR/issue is refused — the enforcer can't prove
+    # the number is the run's own PR, so permitting it would let a worker touch an
+    # UNRELATED PR in an in-scope repo (Greptile "PR ownership"). Only OPEN is allowed.
+    ("PATCH", "/repos/o/r/pulls/1", True),            # update an existing PR (not the run's own, provably)
+    ("POST", "/repos/o/r/issues/1/comments", True),   # comment on an existing issue/PR
+    ("POST", "/repos/o/r/pulls/1/reviews", True),     # review an existing PR
+    ("POST", "/repos/o/r/pulls/1/requested_reviewers", True),  # alter an existing PR's reviewers
     ("PUT", "/repos/o/r/pulls/1/merge", True),        # merge a PR — DIFFERENT path from PATCH /pulls/{n}
     ("PATCH", "/repos/o/r/pulls/1/merge", True),      # merge via another method is still merge
     ("POST", "/repos/o/r/merges", True),              # merges
@@ -99,7 +102,7 @@ _API_DENY = [
     ("DELETE", "/repos/o/r/contents/f", True),        # content delete
     ("DELETE", "/repos/o/r", True),                   # delete repo
     ("POST", "/repos/o/r/deployments", True),         # unknown write endpoint
-    ("PUT", "/repos/o/r/pulls/1", True),              # method-specific: only PATCH updates a PR
+    ("PUT", "/repos/o/r/pulls/1", True),              # method-specific: no existing-PR write is allowed
     ("POST", "/repos/o/r/pulls", False),              # permitted shape but OUT OF SCOPE
     ("GET", "/repos/o/r", False),                     # read but OUT OF SCOPE
     ("GET", "/orgs/o", True),                         # repo-less non-global read
