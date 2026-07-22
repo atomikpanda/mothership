@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import tempfile
 import yaml
 from pathlib import Path
 from pydantic import ValidationError
@@ -47,41 +46,44 @@ def serialize_spec(spec: Spec) -> str:
 
 
 class SpecStore:
-    """Filesystem registry for markdown-canonical specs under `specs/`."""
+    """Filesystem registry for markdown-canonical specs under `specs/`.
 
-    def __init__(self, specs_dir: Path) -> None:
+    All on-disk representation (plaintext vs Fernet ciphertext, filename suffix,
+    gitignore) is delegated to a `SpecStorage` (spec-storage-visibility-policy).
+    When no `storage` is passed the mode is resolved from the workspace
+    `spec_storage` config (`storage_from_workspace`) — so EVERY construction site
+    (the spec CLI verbs, serve, the lifecycle persisters, `cli/worktree.py`) is
+    mode-correct by construction: a writer under an encrypted workspace can never
+    accidentally emit plaintext. A workspace with no config defaults to committed
+    — today's behaviour — so existing call sites and tests are unchanged.
+    """
+
+    def __init__(self, specs_dir: Path, storage=None) -> None:
         self._dir = Path(specs_dir)
+        if storage is None:
+            from mship.core.spec_storage import storage_from_workspace
+            storage = storage_from_workspace(self._dir)
+        self._storage = storage
 
     def path_for(self, spec: Spec) -> Path:
-        """Path for a spec's file: `<specs_dir>/<created_at date>-<id>.md`.
+        """Logical `.md` stem for a spec: `<specs_dir>/<created_at date>-<id>.md`.
 
-        Saving again with the same id + creation date overwrites the file
-        (this is the intended update mechanism).
+        The physical filename (e.g. `.md.enc` under encrypted mode) is resolved by
+        the storage layer at write time. Saving again with the same id + creation
+        date overwrites the file (this is the intended update mechanism).
         """
         if not spec.id or "/" in spec.id or "\\" in spec.id or spec.id in (".", "..") or spec.id.startswith("."):
             raise ValueError(f"unsafe spec id for filename: {spec.id!r}")
         return self._dir / f"{spec.created_at:%Y-%m-%d}-{spec.id}.md"
 
     def save(self, spec: Spec) -> Path:
-        self._dir.mkdir(parents=True, exist_ok=True)
-        path = self.path_for(spec)
-        fd, tmp = tempfile.mkstemp(dir=self._dir, suffix=".md.tmp")
-        try:
-            with open(fd, "w") as f:
-                f.write(serialize_spec(spec))
-            Path(tmp).replace(path)
-        except Exception:
-            Path(tmp).unlink(missing_ok=True)
-            raise
-        return path
+        return self._storage.write(self.path_for(spec), serialize_spec(spec))
 
     def load(self, path: Path) -> Spec:
-        return parse_spec(Path(path).read_text())
+        return parse_spec(self._storage.decode_file(Path(path)))
 
     def list(self) -> list[Spec]:
-        if not self._dir.is_dir():
-            return []
-        return [self.load(p) for p in sorted(self._dir.glob("*.md"))]
+        return [self.load(p) for p in self._storage.iter_physical()]
 
     def find_by_id(self, spec_id: str) -> Spec | None:
         for spec in self.list():
