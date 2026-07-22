@@ -39,6 +39,17 @@ def test_push_to_repo_outside_run_is_rejected():
         GitSmartHttpEnforcer().check(_req("/gh/acme/other.git/git-receive-pack", body=body), RUN_GRANT)
 
 
+def test_tag_push_branch_authorizes_no_ref():
+    # A run scoped to a non-branch ref (refs/tags/v1) must NOT authorize that tag
+    # update — the enforcer only ever allows refs/heads/ (Greptile). Both the
+    # matching tag ref and any branch are refused.
+    tag_grant = Grant("github-app", Scope(repos=("acme/api",), push_branch="refs/tags/v1"))
+    for ref in ("refs/tags/v1", "refs/heads/feat/x"):
+        body = _push_body("a" * 40, ref)
+        with pytest.raises(EnforcementError):
+            GitSmartHttpEnforcer().check(_req("/gh/acme/api.git/git-receive-pack", body=body), tag_grant)
+
+
 def test_delete_of_run_branch_is_rejected():
     body = _push_body("0" * 40, "refs/heads/feat/x")   # new-oid all-zero = delete
     with pytest.raises(EnforcementError):

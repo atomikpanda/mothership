@@ -245,6 +245,10 @@ def register(parent: typer.Typer, get_container):
         if not push_branch.strip():
             out.error("--push-branch must be a non-empty branch name")
             raise typer.Exit(1)
+        if push_branch.strip().startswith("refs/") and not push_branch.strip().startswith("refs/heads/"):
+            out.error("--push-branch must be a branch (bare name or refs/heads/...), "
+                      "not a tag or other ref")
+            raise typer.Exit(1)
         ceiling = next((g for g in GrantStore(Path(grant_store_dir)).get_grants(rid)
                         if g.provider == "github-app"), None)
         if ceiling is None:

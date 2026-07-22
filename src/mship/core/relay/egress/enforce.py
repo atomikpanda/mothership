@@ -38,8 +38,19 @@ class GitSmartHttpEnforcer:
             )
         if not scope.push_branch:
             raise EnforcementError("run scope carries no push_branch; refusing all pushes")
+        # push_branch must resolve to a BRANCH ref only. A bare name is a branch;
+        # an explicit refs/heads/... is a branch; any other fully-qualified ref
+        # (refs/tags/…, refs/notes/…) is refused — the run may push its branch, never
+        # a tag or other ref (a token minted with refs/tags/v1 would otherwise
+        # authorize a tag update).
         want = scope.push_branch
-        if not want.startswith("refs/"):
+        if want.startswith("refs/heads/"):
+            pass
+        elif want.startswith("refs/"):
+            raise EnforcementError(
+                f"run push_branch {want!r} is not a branch; only refs/heads/ is allowed"
+            )
+        else:
             want = f"refs/heads/{want}"
 
         commands = parse_receive_pack_commands(request.body)

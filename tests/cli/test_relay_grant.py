@@ -138,3 +138,12 @@ def test_issue_run_token_rejects_empty_branch(tmp_path: Path):
     _grant(tmp_path, rid, ("acme/api",))
     result = _issue_cmd(tmp_path, rid, branch="   ")
     assert result.exit_code != 0
+
+
+def test_issue_run_token_rejects_non_branch_ref(tmp_path: Path):
+    # A fully-qualified non-branch ref (refs/tags/…) would authorize a tag update —
+    # reject it at issue time; the run may push only its branch (Greptile).
+    rid = _approved_enrollment(tmp_path)
+    _grant(tmp_path, rid, ("acme/api",))
+    result = _issue_cmd(tmp_path, rid, branch="refs/tags/v1")
+    assert result.exit_code != 0
