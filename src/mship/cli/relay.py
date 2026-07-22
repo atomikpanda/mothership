@@ -252,6 +252,55 @@ def register(parent: typer.Typer, get_container):
                                 scope=run_scope, ttl_seconds=ttl)
         out.print(f"run token (store on the worker, shown once): {token}")
 
+    @relay_app.command("egress-server")
+    def egress_server(
+        grant_store_dir: str = typer.Option("./grants-store", "--grant-store-dir",
+                                             help="Directory for the typed-grant store."),
+        run_token_dir: str = typer.Option("./run-tokens-store", "--run-token-dir",
+                                           help="Directory for per-run token records."),
+        port: int = typer.Option(47280, "--port", help="Port to listen on (Caddy fronts it)."),
+        host: str = typer.Option("127.0.0.1", "--host", help="Interface to bind (loopback)."),
+    ):
+        """Run the credential-attaching egress proxy (worker git/API traffic terminates here)."""
+        import os
+        from pathlib import Path
+
+        from mship.core.relay.grants import GrantStore
+        from mship.core.relay.egress.provider import GitHubAppProvider
+        from mship.core.relay.egress.routes import build_default_routes
+        from mship.core.relay.egress.proxy import build_egress_app
+
+        out = Output()
+        app_id = os.environ.get("MSHIP_GH_APP_ID") or None
+        app_key = None
+        key_path = os.environ.get("MSHIP_GH_APP_KEY")
+        if key_path:
+            p = Path(key_path)
+            if not p.is_file():
+                out.error(
+                    f"MSHIP_GH_APP_KEY is set but not a readable file ({key_path!r}). "
+                    "Refusing to start: silently forwarding without a real credential "
+                    "would defeat attach-at-relay."
+                )
+                raise typer.Exit(1)
+            app_key = p.read_text()
+
+        # Fail closed: no App creds => no provider => the app 503s every request.
+        routes = None
+        if app_id and app_key:
+            provider = GitHubAppProvider(app_id=app_id, private_key=app_key)
+            routes = build_default_routes(provider)
+        else:
+            out.warning("no App creds (MSHIP_GH_APP_ID/MSHIP_GH_APP_KEY) — egress will "
+                        "refuse to forward (503) until configured.")
+
+        app = build_egress_app(
+            grant_store=GrantStore(Path(grant_store_dir)),
+            run_token_dir=Path(run_token_dir), routes=routes,
+        )
+        out.print(f"egress-server → http://{host}:{port}")
+        _run_uvicorn(app, host, port)
+
     # -------------------------------------------------------------------------
     # Requester-side: enroll (new device)
     # -------------------------------------------------------------------------

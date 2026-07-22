@@ -2,6 +2,13 @@
 # Caddy owns public :80/:443 (on-demand TLS, enroll route hardened).
 # sish handles SSH tunnels (:2222) and serves HTTP internally (:8080 loopback).
 # Requires: a wildcard DNS record *.RELAY_DOMAIN -> this host, ports 80/443/2222 open.
+#
+# Egress proxy (run on the host: `mship relay egress-server`) needs, in its env:
+#   MSHIP_GH_APP_ID   — the GitHub App numeric id
+#   MSHIP_GH_APP_KEY  — PATH to the App private-key .pem (refuse-on-unreadable)
+# and persistent dirs for --grant-store-dir and --run-token-dir alongside pubkeys/.
+# Caddy fronts egress.<RELAY_DOMAIN> -> 127.0.0.1:47280 (see Caddyfile); the
+# egress-server, like enroll-server, runs as a host process, not a compose service.
 services:
   sish:
     image: antoniomika/sish:latest
