@@ -3,9 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from urllib.parse import parse_qs
 
-# Path prefix -> upstream host. Adding a host = one entry here + one route
-# (routes.py) + one tls_ask/Caddy allowance. No github.com special-case in code.
-_PREFIX_HOST = {"/gh/": "github.com", "/api/": "api.github.com"}
+from mship.core.relay.contract import PREFIX_HOST
 
 
 class UnmappablePathError(Exception):
@@ -62,10 +60,10 @@ def parse_egress_request(*, method, path, query, headers, body) -> EgressRequest
 
     Fails loud at the boundary: a path outside the known prefixes raises rather
     than defaulting to a host (a mis-forward could leak a credential)."""
-    prefix = next((p for p in _PREFIX_HOST if path.startswith(p)), None)
+    prefix = next((p for p in PREFIX_HOST if path.startswith(p)), None)
     if prefix is None:
         raise UnmappablePathError(path)
-    host = _PREFIX_HOST[prefix]
+    host = PREFIX_HOST[prefix]
     upstream_path = path[len(prefix) - 1:]     # keep the leading slash
     repo = (
         _extract_repo(upstream_path) if host == "github.com"

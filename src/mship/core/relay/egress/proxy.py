@@ -3,6 +3,7 @@ from __future__ import annotations
 import httpx
 from fastapi import FastAPI, Request, Response
 
+from mship.core.relay.contract import RUN_TOKEN_HEADER
 from mship.core.relay.grants import Grant, GrantStore, Scope
 from mship.core.relay.run_token import verify_run_token
 from mship.core.relay.egress.credential import AttachmentHostError
@@ -13,7 +14,7 @@ from mship.core.relay.egress.routes import RouteTable, UnknownHostError
 
 # Headers we must never pass upstream: the worker's placeholder token, the
 # worker-facing Host, and length/encoding httpx recomputes for the new body.
-_STRIP = {"mship-run-token", "host", "content-length", "authorization",
+_STRIP = {RUN_TOKEN_HEADER.lower(), "host", "content-length", "authorization",
           "transfer-encoding", "connection"}
 
 
@@ -32,7 +33,7 @@ def build_egress_app(
             return Response("egress: no credential provider configured (App creds "
                             "absent) — refusing to forward", status_code=503)
 
-        presented = request.headers.get("Mship-Run-Token")
+        presented = request.headers.get(RUN_TOKEN_HEADER)
         if not presented:
             return Response("missing run token", status_code=401)
         rt = verify_run_token(run_token_dir, presented)
