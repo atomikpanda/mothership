@@ -29,13 +29,28 @@ def test_info_refs_service_comes_from_query():
     assert req.is_receive_pack_post is False
 
 
-def test_api_prefix_maps_to_api_host_with_no_repo():
+def test_api_prefix_extracts_repo_from_repos_path():
     req = parse_egress_request(
-        method="GET", path="/api/repos/acme/api/pulls", query="", headers={}, body=b"",
+        method="POST", path="/api/repos/acme/api/pulls", query="", headers={}, body=b"",
     )
     assert req.upstream_host == "api.github.com"
     assert req.upstream_path == "/repos/acme/api/pulls"
-    assert req.repo is None
+    assert req.repo == "acme/api"
+
+
+def test_api_repo_less_global_paths_yield_none():
+    for p in ("/api/user", "/api/rate_limit", "/api/graphql", "/api/orgs/acme"):
+        req = parse_egress_request(method="GET", path=p, query="", headers={}, body=b"")
+        assert req.upstream_host == "api.github.com"
+        assert req.repo is None
+
+
+def test_api_repo_extraction_tolerates_query_string():
+    req = parse_egress_request(
+        method="GET", path="/api/repos/acme/api/pulls", query="state=open&per_page=100",
+        headers={}, body=b"",
+    )
+    assert req.repo == "acme/api"
 
 
 def test_unmapped_prefix_raises():
