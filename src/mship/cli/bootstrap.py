@@ -15,6 +15,15 @@ def register(app: typer.Typer, get_container):
             None, "--token", help="GitHub token for cloning private members "
             "(else GH_TOKEN / GITHUB_TOKEN).",
         ),
+        relay_url: Optional[str] = typer.Option(
+            None, "--relay-url",
+            help="Relay egress base URL. With --run-token, route git through the "
+                 "relay and clone with no GitHub token on the worker.",
+        ),
+        run_token: Optional[str] = typer.Option(
+            None, "--run-token",
+            help="Per-run relay token (paired with --relay-url).",
+        ),
     ):
         """Clone missing workspace members so a fresh clone becomes a full workspace."""
         from mship.core.bootstrap import bootstrap as run_bootstrap
@@ -25,13 +34,20 @@ def register(app: typer.Typer, get_container):
         shell = container.shell()
         state_dir = container.state_dir()
 
+        from mship.core.relay.worker_config import relay_flags_error
+        pair_error = relay_flags_error(relay_url, run_token)
+        if pair_error:
+            output.error(pair_error)
+            raise typer.Exit(code=1)
+
         names = (
             [n.strip() for n in repos.split(",") if n.strip()] if repos else None
         )
 
         try:
             report = run_bootstrap(config_path, shell, state_dir=state_dir,
-                                   repos=names, token=token)
+                                   repos=names, token=token,
+                                   relay_url=relay_url, run_token=run_token)
         except ValueError as e:
             output.error(str(e))
             raise typer.Exit(code=1)

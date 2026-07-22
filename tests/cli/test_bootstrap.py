@@ -92,3 +92,42 @@ def test_bootstrap_unknown_repo_filter_errors_cleanly(tmp_path):
         assert "Unknown repo" in result.output
     finally:
         _reset()
+
+
+def test_bootstrap_relay_pairing_error_exit_nonzero(tmp_path):
+    ws = _ws(tmp_path,
+             "workspace: w\nrepos:\n  lib:\n    path: lib\n    type: library\n")
+    _configure(ws)
+    try:
+        result = runner.invoke(app, ["bootstrap", "--run-token", "rt-1"])
+        assert result.exit_code == 1
+        assert "relay-url" in result.output.lower()
+    finally:
+        _reset()
+
+
+def test_bootstrap_relay_forwards_both_flags_to_core(tmp_path, monkeypatch):
+    import mship.core.bootstrap as bmod
+    from mship.core.bootstrap import BootstrapReport
+
+    captured = {}
+
+    def fake_bootstrap(config_path, shell, *, state_dir, repos=None, token=None,
+                       relay_url=None, run_token=None):
+        captured.update(relay_url=relay_url, run_token=run_token)
+        return BootstrapReport(members=(), doctor_ok=None)
+
+    monkeypatch.setattr(bmod, "bootstrap", fake_bootstrap)
+
+    ws = _ws(tmp_path,
+             "workspace: w\nrepos:\n  lib:\n    path: lib\n    type: library\n")
+    _configure(ws)
+    try:
+        result = runner.invoke(
+            app,
+            ["bootstrap", "--relay-url", "https://relay.example", "--run-token", "rt-1"],
+        )
+        assert result.exit_code == 0, result.output
+        assert captured == {"relay_url": "https://relay.example", "run_token": "rt-1"}
+    finally:
+        _reset()

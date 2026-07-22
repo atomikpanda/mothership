@@ -88,41 +88,31 @@ def repo_owner_names_from_config(config_path: Path, repos: list[str]) -> dict[st
     return resolved
 
 
-def verify_token_covers_repos(
+def verify_repos_pushable(
     *,
-    token: str,
+    base_url: str,
+    auth_headers: dict[str, str],
     repo_owner_names: list[str],
     timeout: float = 8.0,
     client: httpx.Client | None = None,
 ) -> str | None:
-    """STRICT check that `token` can actually push to every `owner/name` in
-    `repo_owner_names`, via `GET /repos/{owner}/{name}`.
+    """STRICT check that the caller's auth can push to every `owner/name`, via
+    `GET {base_url}/repos/{owner}/{name}` carrying `auth_headers`. ONE
+    verification, two transports:
+      - override-token: base_url=api.github.com, {Authorization: Bearer <tok>}
+      - relay-attach:   base_url=<relay>/api,    {Mship-Run-Token: <run tok>}
 
-    This closes the P1 gap where the override-token branch of `run_preflight`
-    used to return "ok" unconditionally: an expired or under-scoped
-    `--token`/`GH_TOKEN`/`GITHUB_TOKEN` would pass preflight, then fail later
-    at bootstrap/finish's clone/push/PR step — defeating the whole fail-fast
-    purpose of this module.
-
-    Returns `None` when every repo responds 200 with `permissions.push`
-    true. Returns a clear, non-None error string on the first problem found:
-      - any repo 401                          -> "token is invalid or expired"
-      - a repo 403/404, or 200 w/o push perm   -> "token cannot push to {owner}/{name}"
-      - any other non-200, a malformed 200
-        body, a connection error, or a timeout -> a clear error string naming
-                                                   the repo/cause (never silently
-                                                   passes on ambiguity — same
-                                                   STRICT contract as the rest
-                                                   of this module).
-    """
+    Returns None when every repo responds 200 with `permissions.push` true.
+    Returns a clear, non-None error string on the first problem:
+      401 -> "token is invalid or expired"; 403/404 or 200-without-push ->
+      "token cannot push to {owner/name}"; any other non-200, a non-JSON body,
+      a connection error, or a timeout -> a clear error naming the repo (never
+      silently passes on ambiguity)."""
     c, owns = (client, False) if client is not None else (httpx.Client(timeout=timeout), True)
     try:
         for owner_name in repo_owner_names:
             try:
-                resp = c.get(
-                    f"{_API}/repos/{owner_name}",
-                    headers={"Authorization": f"Bearer {token}"},
-                )
+                resp = c.get(f"{base_url}/repos/{owner_name}", headers=auth_headers)
             except httpx.HTTPError as e:
                 return f"token check request failed for {owner_name}: {e}"
 
@@ -151,6 +141,27 @@ def verify_token_covers_repos(
             c.close()
 
 
+def verify_token_covers_repos(
+    *,
+    token: str,
+    repo_owner_names: list[str],
+    timeout: float = 8.0,
+    client: httpx.Client | None = None,
+) -> str | None:
+    """STRICT check that `token` can push to every `owner/name`, via
+    `GET /repos/{owner}/{name}`. The override-token transport of
+    `verify_repos_pushable` (GitHub REST + a bearer); the verification lives
+    once in that helper.
+    """
+    return verify_repos_pushable(
+        base_url=_API,
+        auth_headers={"Authorization": f"Bearer {token}"},
+        repo_owner_names=repo_owner_names,
+        timeout=timeout,
+        client=client,
+    )
+
+
 def _resolve_override_token(explicit: str | None) -> str | None:
     for candidate in (explicit, os.environ.get("GH_TOKEN"), os.environ.get("GITHUB_TOKEN")):
         if candidate and candidate.strip():
@@ -175,6 +186,8 @@ def run_preflight(
     broker_bearer: str | None,
     repos: list[str],
     repo_owner_names: dict[str, str] | None = None,
+    relay_url: str | None = None,
+    run_token: str | None = None,
     timeout: float = 8.0,
     client: httpx.Client | None = None,
 ) -> PreflightResult:
@@ -197,6 +210,33 @@ def run_preflight(
     (couldn't be resolved to a github.com owner/repo at all) fails preflight
     rather than being silently skipped.
     """
+    # Relay-attach mode (distinct third mode): probe each repo through the
+    # relay's /api leg carrying the run-token header. Returns within this
+    # branch — never falls through to the override-token / broker branches.
+    if relay_url and run_token:
+        from mship.core.relay.contract import API_PREFIX, RUN_TOKEN_HEADER
+        owner_names = repo_owner_names or {}
+        missing = [n for n in repos if n not in owner_names]
+        if missing:
+            return PreflightResult(
+                False,
+                f"cannot verify the relay covers {', '.join(missing)}: no "
+                "resolvable GitHub owner (set `url` on the repo or "
+                "`default_remote` on the workspace)",
+            )
+        slugs = [owner_names[n] for n in repos]
+        base_url = f"{relay_url.rstrip('/')}{API_PREFIX}".rstrip("/")
+        error = verify_repos_pushable(
+            base_url=base_url,
+            auth_headers={RUN_TOKEN_HEADER: run_token},
+            repo_owner_names=slugs, timeout=timeout, client=client,
+        )
+        if error:
+            return PreflightResult(
+                False, f"{error} — relay auth can't push through {relay_url}"
+            )
+        return PreflightResult(True, f"auth OK — relay covers: {', '.join(slugs)}")
+
     token = _resolve_override_token(explicit_token)
     if token:
         owner_names = repo_owner_names or {}

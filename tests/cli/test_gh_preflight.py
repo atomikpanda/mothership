@@ -231,3 +231,56 @@ def test_preflight_no_broker_no_token_exit_nonzero(tmp_path, monkeypatch):
         assert "configured" in result.output.lower()
     finally:
         _reset()
+
+
+def test_preflight_relay_ok_on_200_push_exit_zero(tmp_path, monkeypatch):
+    ws = _ws(tmp_path)
+    _configure(ws)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "/api/repos/acme/" in request.url.path
+        assert request.headers.get("mship-run-token") == "rt-9"
+        assert "authorization" not in {k.lower() for k in request.headers}
+        return httpx.Response(200, json={"permissions": {"push": True}})
+
+    _patch_httpx_client(monkeypatch, handler)
+    try:
+        result = runner.invoke(
+            app,
+            ["gh", "preflight", "--relay-url", "https://relay.example", "--run-token", "rt-9"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "auth ok" in result.output.lower()
+        assert "acme/mothership" in result.output
+    finally:
+        _reset()
+
+
+def test_preflight_relay_401_exit_nonzero(tmp_path, monkeypatch):
+    ws = _ws(tmp_path)
+    _configure(ws)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"message": "bad run token"})
+
+    _patch_httpx_client(monkeypatch, handler)
+    try:
+        result = runner.invoke(
+            app,
+            ["gh", "preflight", "--relay-url", "https://relay.example", "--run-token", "rt-9"],
+        )
+        assert result.exit_code != 0
+        assert "invalid or expired" in result.output.lower()
+    finally:
+        _reset()
+
+
+def test_preflight_relay_pairing_error_exit_nonzero(tmp_path):
+    ws = _ws(tmp_path)
+    _configure(ws)
+    try:
+        result = runner.invoke(app, ["gh", "preflight", "--relay-url", "https://relay.example"])
+        assert result.exit_code != 0
+        assert "run-token" in result.output.lower()
+    finally:
+        _reset()

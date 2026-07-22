@@ -34,6 +34,15 @@ def register(parent: typer.Typer, get_container):
             None, "--token",
             help="Explicit GitHub token override (else GH_TOKEN / GITHUB_TOKEN).",
         ),
+        relay_url: Optional[str] = typer.Option(
+            None, "--relay-url",
+            help="Relay egress base URL. With --run-token, verify auth through "
+                 "the relay (attach-at-relay) instead of a GH token / broker.",
+        ),
+        run_token: Optional[str] = typer.Option(
+            None, "--run-token",
+            help="Per-run relay token (paired with --relay-url).",
+        ),
     ):
         """Fail-fast check that GitHub auth actually covers the workspace repos,
         BEFORE an unattended run spends AI tokens on code it can't then push.
@@ -52,6 +61,12 @@ def register(parent: typer.Typer, get_container):
         container = get_container()
         config_path = container.config_path()
 
+        from mship.core.relay.worker_config import relay_flags_error
+        pair_error = relay_flags_error(relay_url, run_token)
+        if pair_error:
+            output.error(pair_error)
+            raise typer.Exit(code=1)
+
         explicit_repos = (
             [n.strip() for n in repos.split(",") if n.strip()] if repos else None
         )
@@ -68,6 +83,8 @@ def register(parent: typer.Typer, get_container):
             broker_bearer=broker_bearer,
             repos=resolved_repos,
             repo_owner_names=repo_owner_names,
+            relay_url=relay_url,
+            run_token=run_token,
         )
 
         if result.ok:
