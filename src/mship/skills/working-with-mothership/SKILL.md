@@ -122,6 +122,35 @@ Review a spec without the CLI via `mship view spec [--web]`, or over HTTP via `m
 
 **The approval gate.** With `require_approved_spec: true` in `mothership.yaml`, `mship phase dev` is **hard-blocked** until a bound, approved spec exists — escape with `mship phase dev --bypass-spec-gate`. **This is opt-in: the default is OFF**, so by default `phase dev` only warns when no spec is found. Spec-first is the recommended methodology regardless of the gate.
 
+## Spec storage & visibility (`spec_storage`)
+
+A workspace's `spec_storage:` policy in `mothership.yaml` controls where specs live
+and who can read them. The `mship spec` UX is identical across all modes — only the
+on-disk representation changes.
+
+- `committed` (default): plaintext `specs/<date>-<id>.md`, committed + pushed. A public
+  design record. Existing workspaces are unchanged.
+- `local`: the same plaintext file, but git-ignored (`specs/*.md`). Present + fully
+  usable on your machine, never committed or pushed.
+- `encrypted`: Fernet ciphertext `specs/<date>-<id>.md.enc`, committed to the repo.
+  It round-trips through clone/pull like any file, but a repo-reader without the key
+  sees only ciphertext. This also delivers specs to cloud workers: a worker holding
+  the key clones the repo and decrypts.
+
+The key is a single per-workspace Fernet key at `.mothership/spec-key` (git-ignored),
+generated on the first encrypted write. `mship serve`/Ground Control decrypt for
+display with the local key and show a LOCKED state when the key is absent.
+
+**⚠ Back up `.mothership/spec-key`.** It is the ONLY key to your encrypted specs.
+Losing it makes every encrypted spec permanently unrecoverable — there is no escrow
+or recovery. Rotation is manual: generate a new key and re-encrypt (re-run
+`mship spec migrate-storage`).
+
+**Switching modes:** edit `spec_storage:` in `mothership.yaml`, then run
+`mship spec migrate-storage`. It re-materialises every spec into the new mode and
+git-removes the old representation, so no spec is left readable in a mode that should
+hide it.
+
 ## Work items: the cross-artifact spine (`mship item`)
 
 A **work item** is the durable unit of intent that outlives any single spec, task, or thread. Where a `spec` is the design and a `task` is one worktree of execution, a work item groups everything about one piece of work — its spec, its task(s), the phone thread(s) discussing it, and external links (GitHub/Linear/Notion/Jira/url) — so it can drive a phase-aware cockpit (the Ground Control home). Use it when a piece of work spans more than one of those artifacts, or when you want a stable id to hang external tracker links off.
