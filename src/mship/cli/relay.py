@@ -189,6 +189,69 @@ def register(parent: typer.Typer, get_container):
             out.error(f"no pending request {rid!r} (unknown, already resolved, or expired)")
             raise typer.Exit(1)
 
+    # ---- typed grants + per-run tokens (cloud-worker-auth-spine) ----
+
+    @relay_app.command("grant")
+    def grant_cmd(
+        rid: str = typer.Argument(..., help="Approved enrollment id to grant repos to."),
+        provider: str = typer.Option("github-app", "--provider", help="Credential provider."),
+        repos: str = typer.Option(..., "--repos", help="Ceiling repos owner/a,owner/b."),
+        store_dir: str = typer.Option("./pending-store", "--store-dir",
+                                      help="Enroll request store (to confirm approval)."),
+        grant_store_dir: str = typer.Option("./grants-store", "--grant-store-dir",
+                                            help="Directory for the typed-grant store."),
+    ):
+        """Set/update an enrollment's typed grant (the repo CEILING it may ever touch)."""
+        from pathlib import Path
+
+        from mship.core.relay.enroll import RequestStore
+        from mship.core.relay.grants import Grant, GrantStore, Scope
+
+        out = Output()
+        if RequestStore(Path(store_dir)).get(rid) != "approved":
+            out.error(f"enrollment {rid!r} is not an approved enrollment")
+            raise typer.Exit(1)
+        repo_list = tuple(r.strip() for r in repos.split(",") if r.strip())
+        if not repo_list:
+            out.error("--repos must list at least one owner/repo")
+            raise typer.Exit(1)
+        GrantStore(Path(grant_store_dir)).set_grant(
+            rid, Grant(provider=provider, scope=Scope(repos=repo_list))
+        )
+        out.success(f"granted {provider} {list(repo_list)} to enrollment {rid}")
+
+    @relay_app.command("issue-run-token")
+    def issue_run_token_cmd(
+        rid: str = typer.Argument(..., help="Approved+granted enrollment id."),
+        repos: str = typer.Option(..., "--repos", help="Run repos (⊆ the grant ceiling)."),
+        push_branch: str = typer.Option(..., "--push-branch", help="The run's branch, e.g. feat/<slug>."),
+        ttl: int = typer.Option(86400, "--ttl", help="Token TTL in seconds (default 24h)."),
+        grant_store_dir: str = typer.Option("./grants-store", "--grant-store-dir",
+                                            help="Directory for the typed-grant store."),
+        run_token_dir: str = typer.Option("./run-tokens-store", "--run-token-dir",
+                                           help="Directory for per-run token records."),
+    ):
+        """Issue a per-run token {repos ⊆ ceiling, push_branch}; prints plaintext ONCE."""
+        from pathlib import Path
+
+        from mship.core.relay.grants import GrantStore, Scope
+        from mship.core.relay.run_token import issue_run_token
+
+        out = Output()
+        ceiling = next((g for g in GrantStore(Path(grant_store_dir)).get_grants(rid)
+                        if g.provider == "github-app"), None)
+        if ceiling is None:
+            out.error(f"enrollment {rid!r} has no github-app grant; run `mship relay grant` first")
+            raise typer.Exit(1)
+        run_scope = Scope(repos=tuple(r.strip() for r in repos.split(",") if r.strip()),
+                          push_branch=push_branch)
+        if not ceiling.scope.covers(run_scope):
+            out.error(f"requested repos exceed the grant ceiling {list(ceiling.scope.repos)}")
+            raise typer.Exit(1)
+        token = issue_run_token(Path(run_token_dir), enrollment_id=rid,
+                                scope=run_scope, ttl_seconds=ttl)
+        out.print(f"run token (store on the worker, shown once): {token}")
+
     # -------------------------------------------------------------------------
     # Requester-side: enroll (new device)
     # -------------------------------------------------------------------------
