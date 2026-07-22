@@ -67,3 +67,23 @@ def test_spec_validate_under_encrypted(encrypted_workspace: Path):
     # validate found + decoded the ENCRYPTED spec rather than reporting "no spec
     # file" (which is what a raw *.md glob would do against a *.md.enc store).
     assert "No spec file for id" not in res.output
+
+
+def test_spec_validate_reports_malformed_not_nameerror(tmp_path: Path):
+    # Greptile "Import The Parse Error": `mship spec validate` on a malformed spec
+    # must report the invalid-spec message (via read_strict raising SpecParseError),
+    # NOT crash with a NameError because SpecParseError wasn't imported in cli/spec.py.
+    (tmp_path / "mothership.yaml").write_text("workspace: demo\n")  # committed mode
+    state_dir = tmp_path / ".mothership"; state_dir.mkdir()
+    (tmp_path / "specs").mkdir()
+    (tmp_path / "specs" / "2026-07-22-broken.md").write_text("this is not a valid spec")
+    container.config.reset(); container.state_manager.reset(); container.log_manager.reset()
+    container.config_path.override(tmp_path / "mothership.yaml"); container.state_dir.override(state_dir)
+    try:
+        res = runner.invoke(app, ["spec", "validate", "broken"])
+        assert res.exit_code != 0
+        assert "NameError" not in res.output and (res.exception is None or not isinstance(res.exception, NameError))
+        assert "invalid spec" in res.output.lower()
+    finally:
+        container.config_path.reset_override(); container.state_dir.reset_override()
+        container.config.reset(); container.state_manager.reset(); container.log_manager.reset()

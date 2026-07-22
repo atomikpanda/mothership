@@ -334,6 +334,7 @@ def register(parent: typer.Typer, get_container):
         # Strict read: report a locked or malformed spec clearly instead of the
         # resilient list silently skipping it.
         from mship.core.spec_storage import SpecLocked
+        from mship.core.spec_store import SpecParseError
         store = _spec_store()
         try:
             spec = store.read_strict(spec_id)
