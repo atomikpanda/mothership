@@ -190,10 +190,12 @@ def test_list_skips_locked_file_and_returns_readable_siblings(tmp_path: Path):
     assert plain.find_by_id("readable-one") is not None
 
 
-def test_read_strict_raises_locked_and_parse_but_resilient_list_skips(tmp_path: Path):
-    # Greptile "Malformed Specs Bypass Validation Output": read_strict must RAISE on
-    # a locked or malformed spec (so `mship spec validate` can report it), even though
-    # the resilient list() silently skips both.
+def test_read_strict_raises_and_list_skips_locked_but_propagates_malformed(tmp_path: Path):
+    # read_strict must RAISE on a locked OR malformed spec (so `mship spec validate`
+    # can report it). list() only tolerates the LOCKED case (encrypted, no key — an
+    # expected, graceful state); a MALFORMED spec PROPAGATES out of list() so a
+    # corrupt store can't silently vanish a spec from the gate (Greptile #341 —
+    # resolve_bound_spec must fail safe, not return None).
     enc = _store(tmp_path, "encrypted")
     enc.save(_spec())
     (tmp_path / ".mothership" / "spec-key").unlink()     # secret-thing.enc now LOCKED
@@ -207,5 +209,6 @@ def test_read_strict_raises_locked_and_parse_but_resilient_list_skips(tmp_path: 
     with pytest.raises(SpecParseError):
         store.read_strict("broken")
     assert store.read_strict("nope") is None            # genuinely-missing id
-    # list() stays resilient: neither the locked nor the malformed file aborts it
-    assert store.list() == []
+    # list() skips the locked file but must NOT swallow the malformed one:
+    with pytest.raises(SpecParseError):
+        store.list()
