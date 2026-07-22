@@ -16,14 +16,11 @@ def test_emits_exactly_three_global_config_commands():
 
 def test_insteadof_rewrites_gh_and_api_prefixes_to_relay():
     cmds = relay_git_config_commands("https://relay.example", "rt-123")
-    assert any(
-        "url.https://relay.example/gh/.insteadOf" in c and "https://github.com/" in c
-        for c in cmds
-    )
-    assert any(
-        "url.https://relay.example/api/.insteadOf" in c and "https://api.github.com/" in c
-        for c in cmds
-    )
+    # Exact-match membership (not substring-in): precise, and the left operand is a
+    # full command (not a bare host), so CodeQL's incomplete-url-substring-sanitization
+    # doesn't false-positive on the github.com literal.
+    assert "git config --global url.https://relay.example/gh/.insteadOf https://github.com/" in cmds
+    assert "git config --global url.https://relay.example/api/.insteadOf https://api.github.com/" in cmds
 
 
 def test_extraheader_carries_the_run_token_under_the_contract_header():

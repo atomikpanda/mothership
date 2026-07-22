@@ -278,8 +278,11 @@ def test_bootstrap_relay_configures_git_then_clones_without_token(tmp_path, monk
     assert len(cfg_idxs) == 3
     assert max(cfg_idxs) < clone_idx
     cfg = [commands[i] for i in cfg_idxs]
-    assert any("url.https://relay.example/gh/.insteadOf" in c and "https://github.com/" in c for c in cfg)
-    assert any("url.https://relay.example/api/.insteadOf" in c and "https://api.github.com/" in c for c in cfg)
+    # Exact-match membership (not substring-in): the left operand is a full command,
+    # not a bare host, so CodeQL's incomplete-url-substring-sanitization doesn't
+    # false-positive on the github.com literals.
+    assert "git config --global url.https://relay.example/gh/.insteadOf https://github.com/" in cfg
+    assert "git config --global url.https://relay.example/api/.insteadOf https://api.github.com/" in cfg
     assert any("http.https://relay.example/.extraHeader" in c and "Mship-Run-Token: rt-123" in c for c in cfg)
     # Clone took the NO-token path.
     clone_cmd, clone_env = calls[clone_idx]
