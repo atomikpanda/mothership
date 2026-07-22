@@ -111,6 +111,32 @@ class GitRunner:
         )
         return result.returncode == 0
 
+    def add(self, repo_path: Path, path: Path) -> None:
+        """Stage a path (spec-storage-visibility-policy migrate-storage: track the
+        newly-materialised spec representation so it lands in the next commit)."""
+        subprocess.run(
+            ["git", "add", "--", str(path)],
+            cwd=repo_path, check=True, capture_output=True, text=True,
+        )
+
+    def rm(self, repo_path: Path, path: Path, *, cached: bool = False) -> None:
+        """Remove `path` from the index (and the working tree unless `cached`).
+        Used by migrate-storage to drop a spec's old on-disk representation."""
+        args = ["git", "rm", "-q"]
+        if cached:
+            args.append("--cached")
+        args += ["--", str(path)]
+        subprocess.run(args, cwd=repo_path, check=True, capture_output=True, text=True)
+
+    def remove_from_gitignore(self, repo_path: Path, pattern: str) -> None:
+        """Drop `pattern` from `.gitignore` (inverse of add_to_gitignore). Used when
+        migrating back to `committed` so specs become public + trackable again."""
+        gitignore = repo_path / ".gitignore"
+        if not gitignore.exists():
+            return
+        kept = [ln for ln in gitignore.read_text().splitlines() if ln.strip() != pattern]
+        gitignore.write_text("\n".join(kept) + ("\n" if kept else ""))
+
     def add_to_gitignore(self, repo_path: Path, pattern: str) -> None:
         gitignore = repo_path / ".gitignore"
         if gitignore.exists():

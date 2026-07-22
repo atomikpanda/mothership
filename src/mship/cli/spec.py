@@ -690,4 +690,66 @@ def register(parent: typer.Typer, get_container):
         """Advance an implemented spec to archived."""
         _simple_transition("archived", spec_id)
 
+    @spec_app.command("migrate-storage")
+    def migrate_storage():
+        """Re-materialise every spec into the workspace's current `spec_storage`
+        mode, removing the old representation (git rm the plaintext when moving to
+        local/encrypted, git rm the ciphertext when moving back). Run after editing
+        `spec_storage` in mothership.yaml — it reads the target mode from config."""
+        from pathlib import Path
+        from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+        from mship.core.spec_storage import SpecStorage
+        from mship.util.git import GitRunner
+
+        output = Output()
+        container = get_container()
+        workspace_root = Path(container.config_path()).parent
+        specs_dir = workspace_root / SPECS_DIRNAME
+        target = container.config().spec_storage
+        git = GitRunner()
+
+        # Read every current file suffix-agnostically (needs the key for any .md.enc);
+        # write each into the target representation.
+        reader = SpecStorage(specs_dir, workspace_root=workspace_root)
+        target_storage = SpecStorage(specs_dir, mode=target, workspace_root=workspace_root)
+        target_store = SpecStore(specs_dir, storage=target_storage)
+
+        migrated = 0
+        for spec, locked_id, old_path in reader.read_all():
+            if spec is None:
+                output.error(
+                    f"Cannot migrate {locked_id!r}: it is encrypted and no key is present. "
+                    f"Restore `.mothership/spec-key` first."
+                )
+                raise typer.Exit(1)
+            new_path = target_store.save(spec)  # writes the target representation
+            if new_path.resolve() != old_path.resolve():
+                # Suffix changed (.md <-> .md.enc): drop the old file from disk + index
+                # so no spec is left readable in a mode that should hide it.
+                try:
+                    git.rm(workspace_root, old_path)
+                except Exception:
+                    old_path.unlink(missing_ok=True)
+            if target in ("committed", "encrypted"):
+                if target == "committed":
+                    # local/encrypted -> committed: specs are public again.
+                    git.remove_from_gitignore(workspace_root, f"{SPECS_DIRNAME}/*.md")
+                try:
+                    git.add(workspace_root, new_path)  # track the new representation
+                except Exception:
+                    pass
+            elif target == "local":
+                # committed -> local: same .md path, but stop tracking it (save()
+                # already gitignored specs/*.md).
+                try:
+                    git.rm(workspace_root, new_path, cached=True)
+                except Exception:
+                    pass
+            migrated += 1
+
+        if output.human_mode:
+            output.success(f"Migrated {migrated} spec(s) to spec_storage={target!r}.")
+        else:
+            output.json({"migrated": migrated, "spec_storage": target})
+
     parent.add_typer(spec_app, rich_help_panel="Work items & specs")
