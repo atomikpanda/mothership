@@ -134,10 +134,12 @@ only a *run-branch* push to the *run's repos*, with a repo-scoped short-TTL App 
 the worker never sees. Exfiltrating the placeholder + token yields no GitHub access
 and no other-branch / other-repo write.
 
-> **API route deferred on the worker.** The `api.github.com` route (`/api/`) is
-> built + tested at the proxy boundary in v1, but wiring the worker's API client
-> (`mship`/`gh`) to `…/api/` is a later worker-image slice. v1 fully exercises
-> ac1's clone/fetch/push through the **git** leg.
+> **The api.github.com leg is live + enforced.** The worker opens (and lightly
+> manages) its own PR through the `/api/` egress leg (operator decision B). The
+> route is back on the github-app provider behind `GitHubApiEnforcer`, a
+> DEFAULT-DENY REST enforcer (below). This is the API leg the auth-spine slice
+> deferred, now done with a real enforcer instead of a pass-through — so the API
+> path cannot sidestep the git push-to-run-branch enforcement.
 
 ## 7. Egress-proxy module boundary
 
@@ -145,7 +147,8 @@ The egress-proxy role is the subpackage `src/mship/core/relay/egress/`:
 
 - `pktline.py` — `read_pkt_lines`, `parse_receive_pack_commands`, `RefUpdate` (pure git-wire).
 - `request.py` — `parse_egress_request` (path-prefix host map + repo/service extraction).
-- `enforce.py` — `GitSmartHttpEnforcer` (run-branch-only push), `HostLockedEnforcer`.
+- `enforce.py` — `GitSmartHttpEnforcer` (run-branch-only push), `GitHubApiEnforcer`
+  (default-deny PR-only REST leg) + `classify_api_request` (its pure classifier).
 - `credential.py` — `Attachment` (host-locked), `Credential`, `github_token_attachment`.
 - `provider.py` — `CredentialProvider`, `GitHubAppProvider`.
 - `routes.py` — `Route`, `RouteTable`, `build_default_routes`.
@@ -156,3 +159,47 @@ The worker's session **logically terminates at `build_egress_app`**, authenticat
 by the per-run token that module verifies itself (not delegated to the relay). This
 self-contained, end-to-end-verifiable boundary is exactly what makes the Shape-3
 relocation a deployment change rather than a rewrite.
+
+## 8. The api.github.com leg — `GitHubApiEnforcer` (default-deny, PR-only)
+
+The worker opens its own PR, which is a REST call (`POST /repos/{o}/{r}/pulls`).
+So the `api.github.com` route is routed on the **same** github-app provider as the
+git leg, behind `GitHubApiEnforcer`. Containment is two independent layers: (a) the
+repo-scoped App installation token already bounds every call to the run's repos;
+(b) the enforcer is DEFAULT-DENY over the REST surface — it permits an enumerated
+allowlist and refuses everything else (403). New/unknown GitHub endpoints are denied
+by construction: the safe failure mode is a blocked worker call, never an unexpected
+mutation.
+
+**PERMIT (and nothing else):**
+- `POST  /repos/{o}/{r}/pulls` — open a PR
+- `PATCH /repos/{o}/{r}/pulls/{n}` — update the run's PR (title/body/state); **not** merge
+- `POST  /repos/{o}/{r}/issues/{n}/comments` — comment
+- `POST  /repos/{o}/{r}/pulls/{n}/reviews`, `POST /repos/{o}/{r}/pulls/{n}/requested_reviewers` — review / request review
+- `GET   /repos/{o}/{r}/...` — reads scoped to the run's repos
+- `GET   /rate_limit`, `GET /user` — safe global reads
+
+Every repo-scoped permit ALSO requires the path's `owner/repo` to be within the
+run's `scope.repos` (an out-of-scope repo is refused — same containment as the git
+leg).
+
+**Explicitly DENIED (named + tested, though default-deny already covers them):**
+- `PUT /repos/{o}/{r}/pulls/{n}/merge` — merging a PR. **Nothing auto-merges**; the
+  fan-out is review-gated end to end (#393), so merge is denied even though the
+  token technically could. Note this is a DIFFERENT path from the permitted
+  `PATCH /pulls/{n}`.
+- `POST /repos/{o}/{r}/merges`
+- `POST|PATCH|DELETE /repos/{o}/{r}/git/refs/*` — ref mutation
+- `PUT|DELETE /repos/{o}/{r}/contents/*` — content mutation
+
+These are exactly the REST paths that could sidestep the git push-to-run-branch
+enforcement, so they are called out even though default-deny refuses them anyway.
+GraphQL (`/graphql`) is not routed (REST-only in v1; it would need its own enforcer).
+
+**No new deploy surface.** The api leg rides the existing egress subdomain: the
+`/api/` path prefix is already mapped in `request.py`, the worker config already sets
+`url."…/api/".insteadOf "https://api.github.com/"` (Section 6), the Attachment already
+host-locks the token to `[github.com, api.github.com]`, and one Caddy block + one
+`tls_ask` entry already front the whole `egress.<RELAY_DOMAIN>` host. Adding the leg
+was a route-table entry + enforcer, not a new route/TLS allowance. The proxy still
+fails CLOSED on the api leg (App creds absent -> 503, never forward).
