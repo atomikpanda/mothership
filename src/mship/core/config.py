@@ -332,6 +332,14 @@ class WorkspaceConfig(BaseModel):
     # - "none": require explicit --repos; no-flag spawn errors with the repo list.
     # - list[str]: use those repos as the default. See #74.
     default_scope: str | list[str] = "all"
+    # Where this workspace's specs live on disk + who can read them
+    # (spec-storage-visibility-policy). `committed` (default) = today's behaviour:
+    # plaintext `specs/<date>-<id>.md`, committed + pushed. `local` = same plaintext
+    # file but git-ignored (kept on this machine, never pushed). `encrypted` =
+    # Fernet ciphertext `specs/<date>-<id>.md.enc`, committed to the repo but
+    # unreadable without `.mothership/spec-key`. Applied transparently by
+    # core/spec_storage.py; an invalid value fails loud at config load.
+    spec_storage: Literal["committed", "local", "encrypted"] = "committed"
     # If set and the effective spawn scope exceeds N repos AND no --repos was
     # passed, require confirmation (TTY) or --yes (non-TTY). See #74.
     spawn_confirm_threshold: int | None = None

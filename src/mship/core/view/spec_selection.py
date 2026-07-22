@@ -24,22 +24,23 @@ def _sort_key(spec: Spec) -> tuple:
 
 def scan_canonical_specs(specs_dir: Path) -> list[tuple[Spec, Path]]:
     """Parse every spec in the canonical `<workspace_root>/specs` store and return
-    (spec, real_path) pairs sorted by (created_at, id). Skips files that are
-    unreadable (OSError), invalid UTF-8 (UnicodeError), or unparseable
-    (SpecParseError) so one bad file never aborts selection. Reads ONLY the
-    workspace-root store, never a per-task worktree, so the result is
-    branch/worktree independent (AC1). Returning the real path (not a
-    reconstruction) keeps rendering correct even if a file's name diverges from
-    `<date>-<id>.md`."""
-    from mship.core.spec_store import SpecParseError, parse_spec
+    (spec, real_path) pairs sorted by (created_at, id). Suffix-aware via the storage
+    layer: reads plaintext `.md` and decrypts `.md.enc` with the workspace key; a
+    locked encrypted spec (no key) is skipped, as are files that are unreadable
+    (OSError), invalid UTF-8 (UnicodeError), or unparseable (SpecParseError) so one
+    bad file never aborts selection. Reads ONLY the workspace-root store, never a
+    per-task worktree, so the result is branch/worktree independent (AC1).
+    Returning the real path (not a reconstruction) keeps rendering correct even if
+    a file's name diverges from `<date>-<id>.md`."""
+    from mship.core.spec_storage import SpecStorage
     if not specs_dir.is_dir():
         return []
+    storage = SpecStorage(specs_dir)  # workspace_root defaults to specs_dir.parent
     out: list[tuple[Spec, Path]] = []
-    for p in sorted(specs_dir.glob("*.md")):
-        try:
-            out.append((parse_spec(p.read_text()), p))
-        except (OSError, UnicodeError, SpecParseError):
-            continue
+    for spec, _locked_id, path in storage.read_all():
+        if spec is None:
+            continue  # locked: no key, skip
+        out.append((spec, path))
     return sorted(out, key=lambda sp: _sort_key(sp[0]))
 
 

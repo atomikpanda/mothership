@@ -45,7 +45,7 @@ def test_list_specs(tmp_path):
     _seed_spec(tmp_path)
     r = TestClient(_app(tmp_path)).get("/specs")
     assert r.status_code == 200
-    assert r.json() == [{"id": "dq", "title": "Decision queue", "status": "needs_review", "task_slug": "dq", "affected_repos": []}]
+    assert r.json() == [{"id": "dq", "title": "Decision queue", "status": "needs_review", "task_slug": "dq", "affected_repos": [], "locked": False}]
 
 
 def test_get_spec_and_404(tmp_path):
