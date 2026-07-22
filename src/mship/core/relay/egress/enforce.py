@@ -63,6 +63,52 @@ class GitSmartHttpEnforcer:
                 raise EnforcementError(f"deletion of {cmd.ref!r} is not allowed")
 
 
+def classify_api_request(method: str, path: str, in_scope: bool) -> bool:
+    """Pure DEFAULT-DENY classifier for the GitHub REST surface.
+
+    Returns True to PERMIT, False to DENY. `in_scope` says whether the path's
+    owner/repo is within the run's scope.repos (only meaningful for repo-scoped
+    paths; the safe globals are allowed regardless). Permits ONLY:
+      - GET /rate_limit, GET /user                      (safe global reads)
+      - GET  /repos/{o}/{r}/...                          (reads on the run's repos)
+      - POST  /repos/{o}/{r}/pulls                       (open a PR)
+      - PATCH /repos/{o}/{r}/pulls/{n}                   (update the PR; NOT merge)
+      - POST  /repos/{o}/{r}/issues/{n}/comments         (comment)
+      - POST  /repos/{o}/{r}/pulls/{n}/reviews           (review)
+      - POST  /repos/{o}/{r}/pulls/{n}/requested_reviewers (request review)
+    Everything else -> deny. Merge (PUT /pulls/{n}/merge) is a DIFFERENT path
+    from the permitted PATCH /pulls/{n} and is denied by construction."""
+    method = method.upper()
+    segs = [s for s in path.split("/") if s]
+
+    # Safe global reads (repo-less), permitted regardless of scope.
+    if method == "GET" and segs in (["rate_limit"], ["user"]):
+        return True
+
+    # Every other permit is repo-scoped: /repos/{owner}/{repo}/...
+    if len(segs) < 3 or segs[0] != "repos":
+        return False
+    if not in_scope:
+        return False
+    rest = segs[3:]  # path tail after /repos/{owner}/{repo}
+
+    # Reads on the run's repos (bounded by the repo-scoped token).
+    if method == "GET":
+        return True
+
+    # Writes: a tiny explicit allowlist (open/manage the run's PR + comment/review).
+    if method == "POST" and rest == ["pulls"]:
+        return True
+    if method == "PATCH" and len(rest) == 2 and rest[0] == "pulls":
+        return True  # PATCH /pulls/{n} — NOT /pulls/{n}/merge (len 3)
+    if method == "POST" and len(rest) == 3 and rest[0] == "issues" and rest[2] == "comments":
+        return True  # POST /issues/{n}/comments
+    if (method == "POST" and len(rest) == 3 and rest[0] == "pulls"
+            and rest[2] in ("reviews", "requested_reviewers")):
+        return True  # POST /pulls/{n}/reviews | /pulls/{n}/requested_reviewers
+    return False
+
+
 class HostLockedEnforcer:
     """No ref-level policy: the API surface is bounded by the repo-scoped App
     token + the Attachment host-lock. Passes; documents the boundary."""
