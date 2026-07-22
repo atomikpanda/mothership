@@ -99,27 +99,45 @@ def bootstrap(
     state_dir: Path,
     repos: list[str] | None = None,
     token: str | None = None,
+    relay_url: str | None = None,
+    run_token: str | None = None,
 ) -> BootstrapReport:
     config_path = Path(config_path)
     workspace_root = config_path.parent
     config = ConfigLoader.load(config_path, require_paths=False)
 
-    # Repo set for the broker-pull fallback: every repo in the workspace config
-    # that is its own GitHub repo (git_root repos are subdirectories of their
-    # parent's checkout, not independently-installed repos — excluded so a
-    # broker mint request never names a repo the App can't see).
-    all_repo_names = [n for n, r in config.repos.items() if r.git_root is None]
-    # Send the broker `owner/repo` slugs (not short config names) so the folded
-    # serve can resolve the GitHub App installation per repo. Drop any repo that
-    # doesn't resolve to a github.com owner/repo; fall back to the short names if
-    # none resolve (Broker A ignores `repos`, so that stays backward-safe).
-    _owner_map = repo_owner_names_from_config(config_path, all_repo_names)
-    broker_repos = [_owner_map[n] for n in all_repo_names if n in _owner_map]
-    broker_url, broker_bearer = broker_config_from_env()
-    resolved_token = resolve_token(
-        token, broker_url=broker_url, broker_bearer=broker_bearer,
-        repos=broker_repos or all_repo_names,
-    )
+    if relay_url and run_token:
+        # Relay-attach mode: route git through the relay BEFORE cloning, then
+        # clone with NO GitHub token on the worker (the relay attaches real
+        # creds at egress). Skip token/broker resolution entirely — a stray
+        # token could shadow the relay path.
+        from mship.core.relay.worker_config import relay_git_config_commands
+        for cmd in relay_git_config_commands(relay_url, run_token):
+            res = shell.run(cmd, cwd=workspace_root)
+            if res.returncode != 0:
+                raise ValueError(
+                    f"failed to configure git for the relay ({cmd}): "
+                    f"{res.stderr.strip()[:200] or 'unknown error'}"
+                )
+        resolved_token = None
+    else:
+        # Repo set for the broker-pull fallback: every repo in the workspace
+        # config that is its own GitHub repo (git_root repos are subdirectories
+        # of their parent's checkout, not independently-installed repos —
+        # excluded so a broker mint request never names a repo the App can't see).
+        all_repo_names = [n for n, r in config.repos.items() if r.git_root is None]
+        # Send the broker `owner/repo` slugs (not short config names) so the
+        # folded serve can resolve the GitHub App installation per repo. Drop any
+        # repo that doesn't resolve to a github.com owner/repo; fall back to the
+        # short names if none resolve (Broker A ignores `repos`, so that stays
+        # backward-safe).
+        _owner_map = repo_owner_names_from_config(config_path, all_repo_names)
+        broker_repos = [_owner_map[n] for n in all_repo_names if n in _owner_map]
+        broker_url, broker_bearer = broker_config_from_env()
+        resolved_token = resolve_token(
+            token, broker_url=broker_url, broker_bearer=broker_bearer,
+            repos=broker_repos or all_repo_names,
+        )
 
     names = repos or list(config.repos.keys())
     # A workspace with no `repos:` now loads (#259); bootstrapping it is a no-op, so say so

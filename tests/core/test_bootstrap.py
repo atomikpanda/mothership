@@ -242,6 +242,51 @@ def test_bootstrap_clone_no_cred_args_without_token(tmp_path):
     assert clone_env is None  # no token => no injected env at all
 
 
+def test_bootstrap_relay_configures_git_then_clones_without_token(tmp_path, monkeypatch):
+    """Relay mode: git config runs (globally) BEFORE the clone, resolve_token is
+    never called, and the clone carries no credential args and no token env."""
+    from mship.core import bootstrap as bmod
+    from mship.util.shell import ShellResult
+
+    def boom_resolve_token(*a, **k):
+        raise AssertionError("resolve_token must not run in relay mode")
+
+    monkeypatch.setattr(bmod, "resolve_token", boom_resolve_token)
+
+    calls = []
+
+    class FakeShell:
+        def run(self, command, cwd, env=None):
+            calls.append((command, env))
+            return ShellResult(returncode=0, stdout="", stderr="")
+        def run_task(self, *a, **k):
+            return ShellResult(returncode=0, stdout="", stderr="")
+
+    ws = tmp_path / "ws"; ws.mkdir(); (ws / ".mothership").mkdir()
+    (ws / "mothership.yaml").write_text(
+        "workspace: w\nrepos:\n  lib:\n    path: lib\n    type: library\n"
+        "    url: https://github.com/o/lib\n"
+    )
+    bmod.bootstrap(ws / "mothership.yaml", FakeShell(),
+                   state_dir=ws / ".mothership",
+                   relay_url="https://relay.example", run_token="rt-123")
+
+    commands = [c for c, _ in calls]
+    cfg_idxs = [i for i, c in enumerate(commands) if "git config --global" in c]
+    clone_idx = next(i for i, c in enumerate(commands) if "clone" in c)
+    # All three config commands ran before the clone.
+    assert len(cfg_idxs) == 3
+    assert max(cfg_idxs) < clone_idx
+    cfg = [commands[i] for i in cfg_idxs]
+    assert any("url.https://relay.example/gh/.insteadOf" in c and "https://github.com/" in c for c in cfg)
+    assert any("url.https://relay.example/api/.insteadOf" in c and "https://api.github.com/" in c for c in cfg)
+    assert any("http.https://relay.example/.extraHeader" in c and "Mship-Run-Token: rt-123" in c for c in cfg)
+    # Clone took the NO-token path.
+    clone_cmd, clone_env = calls[clone_idx]
+    assert "credential.https://github.com.helper" not in clone_cmd
+    assert clone_env is None
+
+
 def test_bootstrap_empty_repos_errors(tmp_path):
     # A workspace with no `repos:` loads since #259; bootstrapping it must error clearly, not
     # silently "succeed" with nothing cloned.
