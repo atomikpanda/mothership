@@ -1,6 +1,15 @@
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
+
+# Enroll ids are secrets.token_hex(16) (hex); [0-9a-z] also admits the
+# lowercase-alpha stand-ins used in tests while still rejecting every
+# path-traversal metacharacter (., /, \) — this is the traversal guard, not an
+# id-format contract.
+_ID_RE = re.compile(r"\A[0-9a-z]{1,64}\Z")
 
 
 @dataclass(frozen=True)
@@ -25,3 +34,62 @@ class Grant:
     """A typed authorization: one provider + its scope. v1: provider='github-app'."""
     provider: str
     scope: Scope
+
+
+class GrantStore:
+    """Filesystem-backed typed grants, one file per enrollment: grants/<id>.json.
+    Atomic writes (tmp + replace), like RequestStore."""
+
+    def __init__(self, base_dir):
+        self._dir = Path(base_dir) / "grants"
+        self._dir.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, enrollment_id: str) -> Path:
+        if not _ID_RE.match(enrollment_id):
+            raise ValueError(f"invalid enrollment id {enrollment_id!r}")
+        return self._dir / f"{enrollment_id}.json"
+
+    def _write_atomic(self, path: Path, rec: dict) -> None:
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(rec))
+        tmp.replace(path)
+
+    def set_grant(self, enrollment_id: str, grant: Grant) -> None:
+        """Set/replace the grant for `grant.provider` on this enrollment."""
+        path = self._path(enrollment_id)
+        grants = {g.provider: g for g in self.get_grants(enrollment_id)}
+        grants[grant.provider] = grant
+        self._write_atomic(
+            path,
+            {
+                "enrollment_id": enrollment_id,
+                "grants": [
+                    {
+                        "provider": g.provider,
+                        "scope": {"repos": list(g.scope.repos),
+                                  "push_branch": g.scope.push_branch},
+                    }
+                    for g in grants.values()
+                ],
+            },
+        )
+
+    def get_grants(self, enrollment_id: str) -> list[Grant]:
+        path = self._path(enrollment_id)
+        if not path.exists():
+            return []
+        try:
+            rec = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return []
+        out: list[Grant] = []
+        for g in rec.get("grants", []):
+            sc = g.get("scope", {})
+            out.append(
+                Grant(
+                    provider=g["provider"],
+                    scope=Scope(repos=tuple(sc.get("repos", [])),
+                                push_branch=sc.get("push_branch")),
+                )
+            )
+        return out
