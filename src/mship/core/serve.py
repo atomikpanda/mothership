@@ -285,10 +285,17 @@ def create_app(
     from fastapi import Depends, FastAPI, HTTPException
 
     from mship.core.spec_store import SpecStore
+    from mship.core.spec_storage import SpecStorage
     from mship.core.message_store import MessageStore
     from mship.core.workitem_store import WorkItemStore
 
-    store = SpecStore(specs_dir)
+    # Mode-aware spec store (spec-storage-visibility-policy): under encrypted mode
+    # `store` decrypts `.md.enc` with the local key for display; `_spec_storage`
+    # exposes read_all() so the list/detail endpoints can render a LOCKED marker
+    # (never ciphertext, never a 500) when the key is absent on this host.
+    _spec_mode = getattr(config, "spec_storage", "committed") if config is not None else "committed"
+    _spec_storage = SpecStorage(specs_dir, mode=_spec_mode, workspace_root=workspace_root)
+    store = SpecStore(specs_dir, storage=_spec_storage)
     pr_manager = PRManager(ShellRunner())
     # Separate ShellRunner instance for GET /gh-token (Broker A) rather than
     # reaching into pr_manager's private `_shell` — same class, own lifetime,
@@ -358,17 +365,42 @@ def create_app(
 
     @app.get("/specs")
     def list_specs():
-        return [
-            {"id": s.id, "title": s.title, "status": s.status, "task_slug": s.task_slug, "affected_repos": s.affected_repos}
-            for s in store.list()
-        ]
+        out = []
+        for spec, locked_id, _path in _spec_storage.read_all():
+            if spec is None:
+                # Encrypted spec, no key on this host: surface a LOCKED marker so
+                # Ground Control can show it without ever leaking ciphertext.
+                out.append({
+                    "id": locked_id, "locked": True, "status": "locked",
+                    "title": None, "task_slug": None, "affected_repos": [],
+                })
+            else:
+                out.append({
+                    "id": spec.id, "title": spec.title, "status": spec.status,
+                    "task_slug": spec.task_slug, "affected_repos": spec.affected_repos,
+                    "locked": False,
+                })
+        return out
 
     @app.get("/specs/{spec_id}")
     def get_spec(spec_id: str):
-        spec = store.find_by_id(spec_id)
+        # Resolve via the LOCKED-aware seam (not store.find_by_id, which loads
+        # EVERY file and would raise on a sibling locked spec — making a coexisting
+        # plaintext spec unreachable). A locked match returns a marker (200), not
+        # ciphertext and not a 500.
+        spec = None
+        for candidate, locked_id, _path in _spec_storage.read_all():
+            if candidate is None:
+                if locked_id == spec_id:
+                    return {"id": spec_id, "locked": True, "status": "locked"}
+                continue
+            if candidate.id == spec_id:
+                spec = candidate
+                break
         if spec is None:
             raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
         data = spec.model_dump(mode="json")
+        data["locked"] = False
         # Resolve the linked WorkItem's kind (feature/bug/chore) so the Queue review cards can show
         # it alongside the spec title + affected_repos. Best-effort: the kind is decorative, so a
         # missing OR corrupt/unreadable WorkItem must never 500 the spec detail — any lookup failure
