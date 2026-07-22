@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from mship.core.relay.egress.enforce import Enforcer, GitSmartHttpEnforcer
+from mship.core.relay.egress.enforce import Enforcer, GitSmartHttpEnforcer, GitHubApiEnforcer
 from mship.core.relay.egress.provider import CredentialProvider
 
 
@@ -31,16 +31,22 @@ class RouteTable:
 
 
 def build_default_routes(provider: CredentialProvider) -> RouteTable:
-    """v1 ships ONLY the git path (github.com), which is fully branch-enforced.
+    """v1 ships two GitHub legs, both on the github-app provider:
 
-    api.github.com is intentionally NOT routed yet: a repo-scoped App token can
-    mutate refs/contents via the REST API, which would bypass the git push-to-run-
-    branch enforcement (the HostLockedEnforcer applies no ref policy). No worker uses
-    the API leg in v1 (its client wiring is a later slice), so an under-enforced API
-    route must not be reachable. The api.github.com route returns when that slice adds
-    a real API enforcer (method/permission-scoped). Adding a host stays a data entry."""
+    - github.com    -> GitSmartHttpEnforcer: clone/fetch + push only the run
+      branch to a run-scoped repo (fully branch-enforced).
+    - api.github.com -> GitHubApiEnforcer: DEFAULT-DENY REST leg permitting only
+      opening/managing the run's PR + comments/reviews + repo-scoped reads. It
+      refuses merge, POST /merges, git/refs mutation, and contents mutation, so
+      the API leg cannot sidestep the git push-to-run-branch enforcement.
+
+    Both hosts already ride the same egress subdomain (path-prefix /gh/ vs /api/,
+    one Caddy block, one tls_ask entry) and the Attachment host-locks the token to
+    [github.com, api.github.com] — adding the api leg needs no new deploy surface.
+    Adding a host stays a data entry (+ one /prefix/ in request.py)."""
     return RouteTable(
         {
             "github.com": Route(provider=provider, enforcer=GitSmartHttpEnforcer()),
+            "api.github.com": Route(provider=provider, enforcer=GitHubApiEnforcer()),
         }
     )

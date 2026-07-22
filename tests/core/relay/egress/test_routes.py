@@ -1,6 +1,6 @@
 import pytest
 from mship.core.relay.egress.routes import RouteTable, UnknownHostError, build_default_routes
-from mship.core.relay.egress.enforce import GitSmartHttpEnforcer
+from mship.core.relay.egress.enforce import GitSmartHttpEnforcer, GitHubApiEnforcer
 
 
 class _FakeProvider:
@@ -8,15 +8,14 @@ class _FakeProvider:
         raise NotImplementedError
 
 
-def test_default_routes_ship_git_only_with_branch_enforcer():
-    # v1 ships ONLY the fully-branch-enforced git path. api.github.com is
-    # intentionally not routed yet (a repo-scoped App token could mutate refs via
-    # the REST API and bypass the push-to-run-branch enforcement); it returns with a
-    # real API enforcer when the worker's API-client slice lands.
+def test_default_routes_include_git_and_api_enforcers():
+    # The git leg is fully branch-enforced; the api leg is default-deny (PR-only)
+    # via GitHubApiEnforcer. Both share the github-app provider.
     table = build_default_routes(_FakeProvider())
     assert isinstance(table.resolve("github.com").enforcer, GitSmartHttpEnforcer)
-    with pytest.raises(UnknownHostError):
-        table.resolve("api.github.com")
+    api_route = table.resolve("api.github.com")
+    assert isinstance(api_route.enforcer, GitHubApiEnforcer)
+    assert api_route.provider is table.resolve("github.com").provider
 
 
 def test_unknown_host_is_rejected_not_defaulted():
