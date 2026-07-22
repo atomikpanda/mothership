@@ -2,7 +2,8 @@ import pytest
 from mship.core.relay.grants import Grant, Scope
 from mship.core.relay.egress.request import parse_egress_request
 from mship.core.relay.egress.enforce import (
-    GitSmartHttpEnforcer, HostLockedEnforcer, classify_api_request, EnforcementError,
+    GitSmartHttpEnforcer, HostLockedEnforcer, GitHubApiEnforcer,
+    classify_api_request, EnforcementError,
 )
 
 
@@ -114,3 +115,29 @@ def test_classify_api_request_permits_allowlist(method, path, in_scope):
 @pytest.mark.parametrize("method, path, in_scope", _API_DENY)
 def test_classify_api_request_denies_everything_else(method, path, in_scope):
     assert classify_api_request(method, path, in_scope) is False
+
+
+def test_api_enforcer_permits_in_scope_pr_create():
+    GitHubApiEnforcer().check(_req("/api/repos/acme/api/pulls", method="POST"), RUN_GRANT)
+
+
+def test_api_enforcer_permits_safe_global_read():
+    GitHubApiEnforcer().check(_req("/api/rate_limit", method="GET"), RUN_GRANT)
+
+
+def test_api_enforcer_denies_merge():
+    with pytest.raises(EnforcementError):
+        GitHubApiEnforcer().check(_req("/api/repos/acme/api/pulls/1/merge", method="PUT"), RUN_GRANT)
+
+
+def test_api_enforcer_denies_ref_mutation():
+    with pytest.raises(EnforcementError):
+        GitHubApiEnforcer().check(
+            _req("/api/repos/acme/api/git/refs/heads/main", method="PATCH"), RUN_GRANT
+        )
+
+
+def test_api_enforcer_denies_out_of_scope_repo():
+    # acme/other is NOT in RUN_GRANT.repos -> even a permitted shape is refused.
+    with pytest.raises(EnforcementError):
+        GitHubApiEnforcer().check(_req("/api/repos/acme/other/pulls", method="POST"), RUN_GRANT)

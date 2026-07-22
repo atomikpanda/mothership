@@ -109,6 +109,29 @@ def classify_api_request(method: str, path: str, in_scope: bool) -> bool:
     return False
 
 
+class GitHubApiEnforcer:
+    """DEFAULT-DENY enforcer for the worker's api.github.com PR-egress leg.
+
+    Permits only opening/managing the run's PR + comments/reviews + reads scoped
+    to the run's repos (plus the safe globals /rate_limit, /user). Every
+    repo-scoped permit additionally requires the path's owner/repo to be within
+    grant.scope.repos (same containment as the git leg). Everything else raises
+    EnforcementError, which the proxy maps to 403. Merge, POST /merges,
+    git/refs mutation, and contents mutation are all denied — the API leg cannot
+    sidestep the git push-to-run-branch enforcement."""
+
+    def check(self, request: EgressRequest, grant: Grant) -> None:
+        in_scope = request.repo is not None and request.repo in grant.scope.repos
+        if not classify_api_request(request.method, request.upstream_path, in_scope):
+            raise EnforcementError(
+                f"github api request refused: {request.method} {request.upstream_path} "
+                f"(repo={request.repo!r}, in_scope={in_scope})"
+            )
+
+
+# SUPERSEDED/UNUSED placeholder: predates GitHubApiEnforcer and wired to NO route.
+# Kept as flagged pre-existing dead code (do not wire to a route — a no-ref-policy
+# pass-through on api.github.com would re-open the REST bypass GitHubApiEnforcer closes).
 class HostLockedEnforcer:
     """No ref-level policy: the API surface is bounded by the repo-scoped App
     token + the Attachment host-lock. Passes; documents the boundary."""
