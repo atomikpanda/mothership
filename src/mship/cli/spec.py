@@ -331,8 +331,19 @@ def register(parent: typer.Typer, get_container):
         workspace_root = Path(container.config_path()).parent
         # Route through the storage layer so an encrypted `.md.enc` spec is decoded
         # and validated, not missed by a raw `*.md` glob (spec-storage-visibility-policy).
+        # Strict read: report a locked or malformed spec clearly instead of the
+        # resilient list silently skipping it.
+        from mship.core.spec_storage import SpecLocked
         store = _spec_store()
-        spec = store.find_by_id(spec_id)
+        try:
+            spec = store.read_strict(spec_id)
+        except SpecLocked:
+            output.error(f"{spec_id}: encrypted and no key present — cannot validate. "
+                         f"Restore `.mothership/spec-key` first.")
+            raise typer.Exit(1)
+        except SpecParseError as e:
+            output.error(f"{spec_id}: invalid spec — {e}")
+            raise typer.Exit(1)
         if spec is None:
             output.error(f"No spec file for id {spec_id!r} in {workspace_root / SPECS_DIRNAME}.")
             raise typer.Exit(1)
@@ -723,28 +734,38 @@ def register(parent: typer.Typer, get_container):
                 )
                 raise typer.Exit(1)
             new_path = target_store.save(spec)  # writes the target representation
-            if new_path.resolve() != old_path.resolve():
-                # Suffix changed (.md <-> .md.enc): drop the old file from disk + index
-                # so no spec is left readable in a mode that should hide it.
-                try:
-                    git.rm(workspace_root, old_path)
-                except Exception:
-                    old_path.unlink(missing_ok=True)
-            if target in ("committed", "encrypted"):
+            # Every git step below FAILS LOUD: a swallowed failure could report a
+            # successful migration while leaving plaintext indexed/tracked (a leak) or
+            # the new representation untracked (a clean/clone loses the migrated spec).
+            # `is_tracked` guards keep it idempotent (re-migrating to the same mode is
+            # a no-op, not a spurious error).
+            try:
+                if new_path.resolve() != old_path.resolve():
+                    # Suffix changed (.md <-> .md.enc): the old file must leave BOTH the
+                    # working tree AND the index, or a mode meant to hide it keeps a
+                    # readable/restorable copy.
+                    if git.is_tracked(workspace_root, old_path):
+                        git.rm(workspace_root, old_path, force=True)   # index + working tree
+                    elif old_path.exists():
+                        old_path.unlink()                          # untracked: just the file
                 if target == "committed":
-                    # local/encrypted -> committed: specs are public again.
                     git.remove_from_gitignore(workspace_root, f"{SPECS_DIRNAME}/*.md")
-                try:
-                    git.add(workspace_root, new_path)  # track the new representation
-                except Exception:
-                    pass
-            elif target == "local":
-                # committed -> local: same .md path, but stop tracking it (save()
-                # already gitignored specs/*.md).
-                try:
-                    git.rm(workspace_root, new_path, cached=True)
-                except Exception:
-                    pass
+                    git.add(workspace_root, new_path)              # public + tracked again
+                elif target == "encrypted":
+                    git.add(workspace_root, new_path)              # track the ciphertext
+                elif target == "local":
+                    # committed -> local: same .md path; stop TRACKING it (save() already
+                    # gitignored specs/*.md). Untrack only if currently tracked.
+                    if git.is_tracked(workspace_root, new_path):
+                        git.rm(workspace_root, new_path, cached=True, force=True)
+            except Exception as e:
+                output.error(
+                    f"Migration of {spec.id!r} to {target!r} FAILED at a git step: {e}. "
+                    f"The store may be half-migrated — resolve the git state "
+                    f"(check `git status` for staged/uncommitted spec changes) and re-run. "
+                    f"No migration was reported as complete."
+                )
+                raise typer.Exit(1)
             migrated += 1
 
         if output.human_mode:

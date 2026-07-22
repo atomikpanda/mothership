@@ -170,3 +170,42 @@ def test_no_module_serializes_specs_outside_storage_layer():
     assert offenders == [], (
         f"modules serialize specs outside the storage layer: {offenders}"
     )
+
+
+def test_list_skips_locked_file_and_returns_readable_siblings(tmp_path: Path):
+    # Greptile "One Locked File Blocks All Specs": a locked .md.enc must not abort
+    # list()/find_by_id — the readable plaintext siblings still come back.
+    from datetime import datetime, timezone
+    from mship.core.spec import Spec
+    enc = _store(tmp_path, "encrypted")
+    enc.save(_spec())                                   # writes a .md.enc + a key
+    (tmp_path / ".mothership" / "spec-key").unlink()    # now that .enc is LOCKED
+    plain = _store(tmp_path, "committed")
+    now = datetime(2026, 7, 22, 10, 0, 0, tzinfo=timezone.utc)
+    plain.save(Spec(id="readable-one", title="Readable", status="draft",
+                    created_at=now, updated_at=now, body="## Problem\n\nok\n"))
+    ids = {s.id for s in plain.list()}
+    assert "readable-one" in ids                        # readable sibling survives
+    assert "secret-thing" not in ids                    # the locked one is skipped, not crashing
+    assert plain.find_by_id("readable-one") is not None
+
+
+def test_read_strict_raises_locked_and_parse_but_resilient_list_skips(tmp_path: Path):
+    # Greptile "Malformed Specs Bypass Validation Output": read_strict must RAISE on
+    # a locked or malformed spec (so `mship spec validate` can report it), even though
+    # the resilient list() silently skips both.
+    enc = _store(tmp_path, "encrypted")
+    enc.save(_spec())
+    (tmp_path / ".mothership" / "spec-key").unlink()     # secret-thing.enc now LOCKED
+    # a malformed plaintext spec (no parseable frontmatter)
+    (tmp_path / SPECS_DIRNAME).mkdir(parents=True, exist_ok=True)
+    (tmp_path / SPECS_DIRNAME / "2026-07-22-broken.md").write_text("not a valid spec at all")
+    store = _store(tmp_path, "committed")
+    from mship.core.spec_store import SpecParseError
+    with pytest.raises(SpecLocked):
+        store.read_strict("secret-thing")
+    with pytest.raises(SpecParseError):
+        store.read_strict("broken")
+    assert store.read_strict("nope") is None            # genuinely-missing id
+    # list() stays resilient: neither the locked nor the malformed file aborts it
+    assert store.list() == []

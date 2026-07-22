@@ -45,3 +45,37 @@ def test_encrypt_output_excludes_plaintext_and_round_trips(tmp_path: Path):
     blob = spec_key.encrypt(key, plaintext)
     assert b"secret design intent" not in blob
     assert spec_key.decrypt(key, blob) == plaintext
+
+
+def test_generated_key_is_0600(tmp_path: Path):
+    # Greptile: the key must be 0600 from creation (no world-readable window).
+    import os, stat
+    spec_key.load_or_generate_key(tmp_path)
+    mode = stat.S_IMODE(os.stat(spec_key.keyfile_path(tmp_path)).st_mode)
+    assert mode == 0o600
+
+
+def test_generate_when_key_exists_reuses_it(tmp_path: Path):
+    # Greptile: a second first-write must reuse the existing key, never split.
+    k1 = spec_key.load_or_generate_key(tmp_path)
+    k2 = spec_key.load_or_generate_key(tmp_path)
+    assert k1 == k2
+
+
+def test_generate_lost_race_reuses_winners_key(tmp_path: Path, monkeypatch):
+    # Greptile "Concurrent Writers Split The Key": if the keyfile appears between the
+    # load-None check and the atomic link (a concurrent winner), the loser reuses the
+    # winner's key rather than clobbering it with a second key.
+    import os as _os
+    winner = spec_key.Fernet.generate_key()
+    real_link = _os.link
+
+    def racing_link(src, dst):
+        p = spec_key.keyfile_path(tmp_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if not p.exists():
+            p.write_bytes(winner)
+        return real_link(src, dst)  # raises FileExistsError
+
+    monkeypatch.setattr(_os, "link", racing_link)
+    assert spec_key.load_or_generate_key(tmp_path) == winner

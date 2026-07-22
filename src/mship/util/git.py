@@ -119,14 +119,33 @@ class GitRunner:
             cwd=repo_path, check=True, capture_output=True, text=True,
         )
 
-    def rm(self, repo_path: Path, path: Path, *, cached: bool = False) -> None:
+    def rm(self, repo_path: Path, path: Path, *, cached: bool = False, force: bool = False) -> None:
         """Remove `path` from the index (and the working tree unless `cached`).
-        Used by migrate-storage to drop a spec's old on-disk representation."""
+        Used by migrate-storage to drop a spec's old on-disk representation.
+
+        `force` (git rm -f) overrides git's staged/working-tree-changes safety —
+        correct for migration, where the old representation's content is already
+        preserved in the freshly-written new representation, so removing it can
+        never lose data. Still raises CalledProcessError on a GENUINE failure (the
+        caller must NOT swallow it, or a spec could be left readable in a mode
+        meant to hide it)."""
         args = ["git", "rm", "-q"]
         if cached:
             args.append("--cached")
+        if force:
+            args.append("-f")
         args += ["--", str(path)]
         subprocess.run(args, cwd=repo_path, check=True, capture_output=True, text=True)
+
+    def is_tracked(self, repo_path: Path, path: Path) -> bool:
+        """True when `path` is tracked in the index (git ls-files --error-unmatch).
+        Lets migrate-storage act only when needed (idempotent) while still failing
+        loud on a genuine git error, rather than blanket-swallowing failures."""
+        result = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", str(path)],
+            cwd=repo_path, capture_output=True, text=True, check=False,
+        )
+        return result.returncode == 0
 
     def remove_from_gitignore(self, repo_path: Path, pattern: str) -> None:
         """Drop `pattern` from `.gitignore` (inverse of add_to_gitignore). Used when

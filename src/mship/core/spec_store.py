@@ -83,10 +83,26 @@ class SpecStore:
         return parse_spec(self._storage.decode_file(Path(path)))
 
     def list(self) -> list[Spec]:
-        return [self.load(p) for p in self._storage.iter_physical()]
+        # Resilient: skip a spec whose file is locked (encrypted, no key) or
+        # unreadable/unparseable, so one bad file never blocks the readable siblings
+        # (or every routed CLI op via find_by_id). read_all yields the parsed spec
+        # for decodable files and (None, id, path) for locked ones — take the specs.
+        return [spec for spec, _locked_id, _path in self._storage.read_all() if spec is not None]
 
     def find_by_id(self, spec_id: str) -> Spec | None:
         for spec in self.list():
             if spec.id == spec_id:
                 return spec
+        return None
+
+    def read_strict(self, spec_id: str) -> Spec | None:
+        """Strictly read ONE spec by id: returns the parsed Spec, None if no file
+        exists for the id, and RAISES SpecLocked (encrypted, no key) or
+        SpecParseError (malformed) rather than swallowing them — for callers like
+        `mship spec validate` that must report locked/invalid, not silently skip
+        (the resilient `list`/`find_by_id` skip both)."""
+        from mship.core.spec_storage import spec_id_from_filename
+        for path in self._storage.iter_physical():
+            if spec_id_from_filename(path) == spec_id:
+                return parse_spec(self._storage.decode_file(path))
         return None

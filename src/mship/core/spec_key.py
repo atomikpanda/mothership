@@ -7,7 +7,9 @@ the run token is injected. Losing it loses every encrypted spec — there is no 
 """
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -63,9 +65,25 @@ def load_or_generate_key(workspace_root: Path, *, git: GitRunner | None = None) 
     path = keyfile_path(workspace_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     key = Fernet.generate_key()
-    # Write then tighten perms so the key is never briefly world-readable.
-    path.write_bytes(key)
-    path.chmod(0o600)
+    # Generate atomically + race-safe: write to a 0600 temp (mkstemp is 0600), then
+    # os.link it into place. link is atomic and REFUSES to clobber (FileExistsError),
+    # so under concurrent first-writes exactly one key wins and every other writer
+    # reuses the winner's key — never two split keys, and the destination only ever
+    # appears fully-written + 0600 (no world-readable window, no partial read).
+    fd, tmp = tempfile.mkstemp(dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(key)
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            # Lost the race (or it appeared meanwhile): use the persisted winner's key.
+            won = load_key(workspace_root)
+            if won is not None:
+                return won
+            raise  # keyfile vanished between link and read — surface, never plaintext
+    finally:
+        Path(tmp).unlink(missing_ok=True)
 
     _ensure_gitignored(Path(workspace_root), git or GitRunner())
     print(_GENERATED_NOTICE.format(path=path), file=sys.stderr)
