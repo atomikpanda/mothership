@@ -31,6 +31,15 @@ def test_extraheader_carries_the_run_token_under_the_contract_header():
     )
 
 
+def test_header_is_configured_before_the_insteadof_rewrites():
+    # Safety ordering (Greptile #404): the auth header is written FIRST, so a later
+    # failed insteadOf rewrite can never leave relay routing active without it.
+    # bootstrap applies these in order and fails loud on the first error.
+    cmds = relay_git_config_commands("https://relay.example", "rt-123")
+    assert "extraHeader" in cmds[0]
+    assert all(".insteadOf" in c for c in cmds[1:])
+
+
 def test_trailing_slash_on_relay_url_is_normalized():
     cmds = relay_git_config_commands("https://relay.example/", "rt-1")
     # No doubled slash before the /gh/ prefix.

@@ -115,9 +115,14 @@ def bootstrap(
         for cmd in relay_git_config_commands(relay_url, run_token):
             res = shell.run(cmd, cwd=workspace_root)
             if res.returncode != 0:
+                # Redact the run token before it reaches worker logs: the extraHeader
+                # command carries `<HEADER>: <run_token>`, and stderr may echo it
+                # (Greptile #404 P1 security).
+                safe_cmd = cmd.replace(run_token, "<run-token>")
+                detail = (res.stderr.strip()[:200] or "unknown error").replace(
+                    run_token, "<run-token>")
                 raise ValueError(
-                    f"failed to configure git for the relay ({cmd}): "
-                    f"{res.stderr.strip()[:200] or 'unknown error'}"
+                    f"failed to configure git for the relay ({safe_cmd}): {detail}"
                 )
         resolved_token = None
     else:

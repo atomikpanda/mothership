@@ -290,6 +290,38 @@ def test_bootstrap_relay_configures_git_then_clones_without_token(tmp_path, monk
     assert clone_env is None
 
 
+def test_bootstrap_relay_config_failure_does_not_leak_run_token(tmp_path):
+    """A failed relay git-config must raise WITHOUT the run token in the message —
+    this error is printed into worker logs (Greptile #404 P1 security)."""
+    import pytest
+    from mship.core import bootstrap as bmod
+    from mship.util.shell import ShellResult
+
+    TOKEN = "sekret-run-tok-abc123"
+
+    class FailHeaderShell:
+        def run(self, command, cwd, env=None):
+            if "extraHeader" in command:          # the one command carrying the token
+                return ShellResult(returncode=1, stdout="",
+                                   stderr=f"fatal: bad config: Mship-Run-Token: {TOKEN}")
+            return ShellResult(returncode=0, stdout="", stderr="")
+        def run_task(self, *a, **k):
+            return ShellResult(returncode=0, stdout="", stderr="")
+
+    ws = tmp_path / "ws"; ws.mkdir(); (ws / ".mothership").mkdir()
+    (ws / "mothership.yaml").write_text(
+        "workspace: w\nrepos:\n  lib:\n    path: lib\n    type: library\n"
+        "    url: https://github.com/o/lib\n"
+    )
+    with pytest.raises(ValueError) as exc:
+        bmod.bootstrap(ws / "mothership.yaml", FailHeaderShell(),
+                       state_dir=ws / ".mothership",
+                       relay_url="https://relay.example", run_token=TOKEN)
+    msg = str(exc.value)
+    assert TOKEN not in msg          # neither the command nor the echoed stderr leaks it
+    assert "<run-token>" in msg      # redaction marker present
+
+
 def test_bootstrap_empty_repos_errors(tmp_path):
     # A workspace with no `repos:` loads since #259; bootstrapping it must error clearly, not
     # silently "succeed" with nothing cloned.
