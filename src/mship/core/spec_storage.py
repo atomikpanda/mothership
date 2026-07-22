@@ -113,8 +113,10 @@ class SpecStorage:
 
     def read_all(self) -> Iterator[tuple[object | None, str | None, Path]]:
         """Yield (spec_or_None, locked_id_or_None, path) for every spec file.
-        Locked (undecryptable) files yield (None, <id>, path); unparseable files
-        are skipped. Used by LOCKED-aware readers (serve)."""
+        Locked (undecryptable — no key) files yield (None, <id>, path); files that
+        are unreadable (OSError), invalid UTF-8 (UnicodeError), or unparseable
+        (SpecParseError) are skipped so one bad file never aborts a scan. Used by
+        the LOCKED-aware serve reader and the resilient view readers."""
         from mship.core.spec_store import SpecParseError, parse_spec
 
         for path in self.iter_physical():
@@ -122,6 +124,8 @@ class SpecStorage:
                 text = self.decode_file(path)
             except SpecLocked as locked:
                 yield (None, locked.spec_id, path)
+                continue
+            except (OSError, UnicodeError):
                 continue
             try:
                 yield (parse_spec(text), None, path)
@@ -162,21 +166,10 @@ def resolve_mode(workspace_root: Path) -> SpecMode:
 def storage_from_workspace(specs_dir: Path, *, git: GitRunner | None = None) -> "SpecStorage":
     """Build a `SpecStorage` whose mode is resolved from the workspace config at
     `specs_dir.parent`. The DEFAULT construction path for `SpecStore` (no explicit
-    storage), so every construction site is mode-correct by construction."""
+    storage), so every construction site is mode-correct by construction — a writer
+    under an encrypted workspace can never accidentally emit plaintext."""
     specs_dir = Path(specs_dir)
     workspace_root = specs_dir.parent
     return SpecStorage(
         specs_dir, mode=resolve_mode(workspace_root), workspace_root=workspace_root, git=git
     )
-
-
-def spec_store_from_config(workspace_root: Path, config) -> "SpecStore":
-    """Build a mode-aware SpecStore from an already-loaded WorkspaceConfig. Single
-    source of the mode->store mapping for callers that already hold the config
-    (spec CLI verbs, serve); avoids re-reading mothership.yaml."""
-    from mship.core.spec_store import SPECS_DIRNAME, SpecStore
-
-    specs_dir = Path(workspace_root) / SPECS_DIRNAME
-    mode = getattr(config, "spec_storage", "committed")
-    storage = SpecStorage(specs_dir, mode=mode, workspace_root=Path(workspace_root))
-    return SpecStore(specs_dir, storage=storage)

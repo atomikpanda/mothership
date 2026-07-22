@@ -154,8 +154,8 @@ def test_no_module_serializes_specs_outside_storage_layer():
       - core/spec_store.py: the codec itself + SpecStore.save (goes through storage)
       - core/export.py:     writes a redacted `spec.md` into an EXPORT BUNDLE, never
                             the `specs/` store.
-    A new caller trips this test — route it through spec_store_from_config /
-    SpecStore instead of serializing + writing by hand.
+    A new caller trips this test — route it through SpecStore (which delegates to
+    the mode-aware SpecStorage) instead of serializing + writing by hand.
     """
     import mship
 

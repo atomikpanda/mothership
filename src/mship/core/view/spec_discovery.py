@@ -24,21 +24,22 @@ SPECS_DIR = Path(SPECS_DIRNAME)
 
 def _find_in_specs_dir(workspace_root: Path, *, spec_id=None, task_slug=None):
     """Return the path of a spec file in `<workspace_root>/specs` matching
-    `spec_id` (frontmatter id) or `task_slug` (bound task), else None."""
+    `spec_id` (frontmatter id) or `task_slug` (bound task), else None. Suffix-aware
+    (plaintext `.md` + encrypted `.md.enc`) via the storage layer; a locked
+    encrypted spec (no key) is skipped, since its frontmatter can't be matched."""
     # imported lazily to keep this discovery module loosely coupled to the store
-    from mship.core.spec_store import SpecParseError, parse_spec
+    from mship.core.spec_storage import SpecStorage
     specs_dir = workspace_root / SPECS_DIR
     if not specs_dir.is_dir():
         return None
-    for p in sorted(specs_dir.glob("*.md")):
-        try:
-            spec = parse_spec(p.read_text())
-        except SpecParseError:
-            continue
+    storage = SpecStorage(specs_dir, workspace_root=workspace_root)
+    for spec, _locked_id, path in storage.read_all():
+        if spec is None:
+            continue  # locked: cannot match on frontmatter
         if spec_id is not None and spec.id == spec_id:
-            return p
+            return path
         if task_slug is not None and spec.task_slug == task_slug:
-            return p
+            return path
     return None
 
 

@@ -19,6 +19,16 @@ def register(parent: typer.Typer, get_container):
         no_args_is_help=True,
     )
 
+    def _spec_store():
+        """The workspace's spec store in its configured `spec_storage` mode
+        (spec-storage-visibility-policy). SpecStore resolves the mode from the
+        workspace config by default, so every verb reads + writes through the same
+        mode-aware SpecStorage — committed/local/encrypted alike."""
+        from pathlib import Path
+        from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+        container = get_container()
+        return SpecStore(Path(container.config_path()).parent / SPECS_DIRNAME)
+
     @spec_app.command("new")
     def new(
         title: Optional[str] = typer.Option(None, "--title", help="Spec title (required unless --task is given)."),
@@ -28,14 +38,11 @@ def register(parent: typer.Typer, get_container):
     ):
         """Create a structured spec at `<workspace>/specs/YYYY-MM-DD-<id>.md`."""
         from datetime import datetime, timezone
-        from pathlib import Path
         from mship.core.spec_draft import new_spec
-        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
 
         container = get_container()
         output = Output()
-        workspace_root = Path(container.config_path()).parent
-        store = SpecStore(workspace_root / SPECS_DIRNAME)
+        store = _spec_store()
 
         affected_repos: list[str] = []
         task_slug: Optional[str] = None
@@ -93,7 +100,6 @@ def register(parent: typer.Typer, get_container):
         Supply one of those options to embed your intent directly in the prompt.
         """
         from pathlib import Path
-        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
         from mship.core.spec_draft import build_draft_prompt
 
         output = Output()
@@ -101,9 +107,7 @@ def register(parent: typer.Typer, get_container):
             output.error("Provide only one of --from-text or --from-file, not both.")
             raise typer.Exit(1)
 
-        container = get_container()
-        workspace_root = Path(container.config_path()).parent
-        store = SpecStore(workspace_root / SPECS_DIRNAME)
+        store = _spec_store()
         if store.find_by_id(spec_id) is None:
             output.error(f"No spec with id {spec_id!r}. Create it first with `mship spec new`.")
             raise typer.Exit(1)
@@ -146,7 +150,6 @@ def register(parent: typer.Typer, get_container):
         from pydantic import ValidationError
         from mship.core.spec import SpecDraft, InvalidTransition, validate_transition
         from mship.core.spec_draft import apply_draft, parse_spec_markdown
-        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
 
         output = Output()
 
@@ -182,8 +185,7 @@ def register(parent: typer.Typer, get_container):
             raise typer.Exit(1)
 
         container = get_container()
-        workspace_root = Path(container.config_path()).parent
-        store = SpecStore(workspace_root / SPECS_DIRNAME)
+        store = _spec_store()
         spec = store.find_by_id(spec_id)
         if spec is None:
             output.error(f"No spec with id {spec_id!r}.")
@@ -220,14 +222,10 @@ def register(parent: typer.Typer, get_container):
         spec_id: str = typer.Argument(..., help="Spec id to review."),
     ):
         """Emit a spec's review units (criteria + questions + read-only context)."""
-        from pathlib import Path
-        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
         from mship.core.spec_review import build_review
 
         output = Output()
-        container = get_container()
-        workspace_root = Path(container.config_path()).parent
-        store = SpecStore(workspace_root / SPECS_DIRNAME)
+        store = _spec_store()
         spec = store.find_by_id(spec_id)
         if spec is None:
             output.error(f"No spec with id {spec_id!r}.")
@@ -260,14 +258,10 @@ def register(parent: typer.Typer, get_container):
     ):
         """Record a verdict on one acceptance criterion (no status change)."""
         from datetime import datetime, timezone
-        from pathlib import Path
-        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
         from mship.core.spec_review import set_criterion_verdict
 
         output = Output()
-        container = get_container()
-        workspace_root = Path(container.config_path()).parent
-        store = SpecStore(workspace_root / SPECS_DIRNAME)
+        store = _spec_store()
         spec = store.find_by_id(spec_id)
         if spec is None:
             output.error(f"No spec with id {spec_id!r}.")
@@ -300,14 +294,10 @@ def register(parent: typer.Typer, get_container):
     ):
         """Attach an evidence entry to one acceptance criterion (no status change)."""
         from datetime import datetime, timezone
-        from pathlib import Path
-        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
         from mship.core.spec_review import infer_evidence_kind, set_criterion_evidence
 
         output = Output()
-        container = get_container()
-        workspace_root = Path(container.config_path()).parent
-        store = SpecStore(workspace_root / SPECS_DIRNAME)
+        store = _spec_store()
         spec = store.find_by_id(spec_id)
         if spec is None:
             output.error(f"No spec with id {spec_id!r}.")
@@ -333,27 +323,18 @@ def register(parent: typer.Typer, get_container):
     ):
         """Check a spec conforms: frontmatter validates + canonical body sections present."""
         from pathlib import Path
-        from mship.core.spec_store import SpecStore, SPECS_DIRNAME, SpecParseError, parse_spec
+        from mship.core.spec_store import SPECS_DIRNAME
         from mship.core.spec_body import validate_body_structure
 
         output = Output()
         container = get_container()
         workspace_root = Path(container.config_path()).parent
-        specs_dir = workspace_root / SPECS_DIRNAME
-
-        matches = sorted(specs_dir.glob(f"*-{spec_id}.md"))
-        if not matches:
-            output.error(f"No spec file for id {spec_id!r} in {specs_dir}.")
-            raise typer.Exit(1)
-
-        try:
-            spec = parse_spec(matches[0].read_text())
-        except SpecParseError as e:
-            output.error(f"{spec_id}: invalid frontmatter — {e}")
-            raise typer.Exit(1)
-
-        if spec.id != spec_id:
-            output.error(f"{spec_id}: file {matches[0].name} has mismatched id {spec.id!r}.")
+        # Route through the storage layer so an encrypted `.md.enc` spec is decoded
+        # and validated, not missed by a raw `*.md` glob (spec-storage-visibility-policy).
+        store = _spec_store()
+        spec = store.find_by_id(spec_id)
+        if spec is None:
+            output.error(f"No spec file for id {spec_id!r} in {workspace_root / SPECS_DIRNAME}.")
             raise typer.Exit(1)
 
         missing = validate_body_structure(spec.body)
@@ -369,11 +350,9 @@ def register(parent: typer.Typer, get_container):
     @spec_app.command("questions")
     def questions(spec_id: str = typer.Argument(..., help="Spec id.")):
         """List a spec's open questions."""
-        from pathlib import Path
-        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
         from mship.core.spec_questions import list_questions
-        output = Output(); container = get_container()
-        store = SpecStore(Path(container.config_path()).parent / SPECS_DIRNAME)
+        output = Output()
+        store = _spec_store()
         spec = store.find_by_id(spec_id)
         if spec is None:
             output.error(f"No spec with id {spec_id!r}."); raise typer.Exit(1)
@@ -388,11 +367,9 @@ def register(parent: typer.Typer, get_container):
     def ask(spec_id: str = typer.Argument(...), text: str = typer.Argument(..., help="Question text.")):
         """Add an open question to a spec."""
         from datetime import datetime, timezone
-        from pathlib import Path
-        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
         from mship.core.spec_questions import add_question
-        output = Output(); container = get_container()
-        store = SpecStore(Path(container.config_path()).parent / SPECS_DIRNAME)
+        output = Output()
+        store = _spec_store()
         spec = store.find_by_id(spec_id)
         if spec is None:
             output.error(f"No spec with id {spec_id!r}."); raise typer.Exit(1)
@@ -407,11 +384,9 @@ def register(parent: typer.Typer, get_container):
     def answer(spec_id: str = typer.Argument(...), q_id: str = typer.Argument(...), answer_text: str = typer.Argument(..., metavar="ANSWER")):
         """Answer an open question (does not change status)."""
         from datetime import datetime, timezone
-        from pathlib import Path
-        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
         from mship.core.spec_questions import answer_question
-        output = Output(); container = get_container()
-        store = SpecStore(Path(container.config_path()).parent / SPECS_DIRNAME)
+        output = Output()
+        store = _spec_store()
         spec = store.find_by_id(spec_id)
         if spec is None:
             output.error(f"No spec with id {spec_id!r}."); raise typer.Exit(1)
@@ -431,13 +406,10 @@ def register(parent: typer.Typer, get_container):
         bypass_gate: bool = typer.Option(False, "--bypass-gate", help="Approve despite unmet review gate."),
     ):
         """Approve a spec (gate: all criteria approved + all questions answered)."""
-        from pathlib import Path
         from mship.core.spec import InvalidTransition
-        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
         from mship.core.spec_transition import ApprovalBlocked, approve_spec
         output = Output()
-        container = get_container()
-        store = SpecStore(Path(container.config_path()).parent / SPECS_DIRNAME)
+        store = _spec_store()
         spec = store.find_by_id(spec_id)
         if spec is None:
             output.error(f"No spec with id {spec_id!r}.")
@@ -466,11 +438,9 @@ def register(parent: typer.Typer, get_container):
         from pathlib import Path
         from mship.core.message_store import MessageStore
         from mship.core.spec_draft import build_draft_prompt, new_spec
-        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
 
         container = get_container()
         output = Output()
-        workspace_root = Path(container.config_path()).parent
         messages = MessageStore(Path(container.state_dir()) / "messages")
         thread = messages.get(thread_id)
         if thread is None:
@@ -478,7 +448,7 @@ def register(parent: typer.Typer, get_container):
             raise typer.Exit(1)
 
         now = datetime.now(timezone.utc)
-        spec_store = SpecStore(workspace_root / SPECS_DIRNAME)
+        spec_store = _spec_store()
 
         # A thread spawns at most one spec. If from-thread runs again (agent
         # retry, accidental re-invocation), reuse the already-linked spec rather
@@ -518,14 +488,13 @@ def register(parent: typer.Typer, get_container):
         """
         from datetime import datetime, timezone
         from pathlib import Path
-        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
         from mship.core.spec_dispatch import DispatchError, dispatch_spec
         from mship.core.workitem_store import WorkItemStore
 
         output = Output()
         container = get_container()
         workspace_root = Path(container.config_path()).parent
-        store = SpecStore(workspace_root / SPECS_DIRNAME)
+        store = _spec_store()
         workitems = WorkItemStore(workspace_root / ".mothership" / "workitems")
         spec = store.find_by_id(spec_id)
         if spec is None:
@@ -574,13 +543,11 @@ def register(parent: typer.Typer, get_container):
         MOS-240: `needs_clarification` is gone; "needs clarification" is now the
         non-null `clarification_reason` carried by the editable `draft` status.
         """
-        from pathlib import Path
         from mship.core.spec import InvalidTransition
-        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
         from mship.core.spec_transition import request_changes_spec
         output = Output()
         container = get_container()
-        store = SpecStore(Path(container.config_path()).parent / SPECS_DIRNAME)
+        store = _spec_store()
         spec = store.find_by_id(spec_id)
         if spec is None:
             output.error(f"No spec with id {spec_id!r}.")
@@ -604,13 +571,8 @@ def register(parent: typer.Typer, get_container):
     @spec_app.command("list")
     def list_specs():
         """List all specs (TTY: table; non-TTY: JSON envelope)."""
-        from pathlib import Path
-        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
-
         output = Output()
-        container = get_container()
-        workspace_root = Path(container.config_path()).parent
-        store = SpecStore(workspace_root / SPECS_DIRNAME)
+        store = _spec_store()
         specs = store.list()
         items = [
             {
@@ -645,13 +607,8 @@ def register(parent: typer.Typer, get_container):
         spec_id: str = typer.Argument(..., help="Spec id to show."),
     ):
         """Show structured detail for a spec (non-TTY: pure JSON)."""
-        from pathlib import Path
-        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
-
         output = Output()
-        container = get_container()
-        workspace_root = Path(container.config_path()).parent
-        store = SpecStore(workspace_root / SPECS_DIRNAME)
+        store = _spec_store()
         spec = store.find_by_id(spec_id)
         if spec is None:
             output.error(f"No spec with id {spec_id!r}.")
@@ -698,13 +655,10 @@ def register(parent: typer.Typer, get_container):
     def _simple_transition(target_status: str, spec_id: str) -> None:
         """Shared logic for implemented/archive: validate transition and save."""
         from datetime import datetime, timezone
-        from pathlib import Path
         from mship.core.spec import InvalidTransition, validate_transition
-        from mship.core.spec_store import SpecStore, SPECS_DIRNAME
 
         output = Output()
-        container = get_container()
-        store = SpecStore(Path(container.config_path()).parent / SPECS_DIRNAME)
+        store = _spec_store()
         spec = store.find_by_id(spec_id)
         if spec is None:
             output.error(f"No spec with id {spec_id!r}.")
