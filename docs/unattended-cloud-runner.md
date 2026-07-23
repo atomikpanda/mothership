@@ -155,14 +155,36 @@ mship gh preflight --relay-url "<relay-url>" --run-token "<run-token>"
 
 # d. Implement the assigned spec (normal mship phase workflow).
 
-# e. Open the PR(s) — routed through the relay by the git config bootstrap wrote:
-mship finish          # opens PR(s); NEVER merges, NEVER pushes the base branch
+# e. Land the branch THROUGH THE RELAY, then open the PR in an attended step.
+#    A run-token-only worker can push (git is relay-routed) but cannot open the
+#    PR itself — see "Opening the PR" below. So the worker pushes only:
+mship finish --push-only     # push the run branch via the relay; skip PR creation
+#    NEVER merges, NEVER pushes the base branch.
 ```
 
 ### 5. Morning: review + merge
 
 You review and merge in Ground Control (the Queue / Review cockpit). This is the
 only merge step — the runner always stops at an open PR.
+
+### Opening the PR (why it is a separate step today)
+
+`mship finish`'s **PR-open** is not relay-aware. It creates PRs via the `gh` CLI
+(or a direct `api.github.com` REST call) using a real GitHub credential, and has
+no `--relay-url`/`--run-token` path — and git's `insteadOf`/`extraHeader` rewrite
+only *git* transport, not that PR-open REST call. So a run-token-only worker can
+push its branch through the relay but **cannot open the PR itself**. Complete the
+run one of two ways:
+
+- **Attended PR-open (works today).** The worker runs `mship finish --push-only`
+  to land the run branch through the relay; the PR is then opened by a step that
+  holds real GitHub auth — the operator, or the orchestrator that scheduled the
+  run — e.g. `mship finish` (or `gh pr create`) against the pushed branch. A
+  human is in the loop at PR time anyway, so this fits the review-gated model.
+- **Relay-wired PR-open (not yet shipped).** Route finish's PR-open through the
+  relay's `/api/` leg (the default-deny, PR-only enforcer is already built and
+  host-locked — see `cloud-worker-auth-spine.md` §8), so the worker opens its own
+  PR carrying only the run token. Tracked as follow-up.
 
 ---
 
@@ -177,10 +199,13 @@ only merge step — the runner always stops at an open PR.
   send it anywhere else.
 - **The git leg enforces run-branch-only push** (clone/fetch pass; other
   branches, other repos, and branch *deletes* are refused).
-- **The REST leg is default-deny, PR-open only.** The worker may `POST .../pulls`
-  (open its PR) and do scoped reads; every write to an existing PR/issue, every
-  ref/content mutation, and **every merge** is refused. Nothing auto-merges — the
-  fan-out is review-gated end to end (#393).
+- **The relay's `/api/` (REST) leg is default-deny, PR-open only.** It permits
+  `POST .../pulls` + scoped reads and refuses every write to an existing
+  PR/issue, every ref/content mutation, and **every merge**. This enforcer is
+  built and host-locked, ready for when PR-open is routed through the relay (see
+  [Opening the PR](#opening-the-pr-why-it-is-a-separate-step-today)); today it is
+  the worker's *git* push that rides the relay, and PR creation is a separate
+  attended step. Nothing auto-merges — the fan-out is review-gated end to end (#393).
 
 ---
 
@@ -194,6 +219,10 @@ only merge step — the runner always stops at an open PR.
   on the egress host (A); deploy the Caddy egress block and run `egress-server`
   (B); enroll + grant a worker identity (C). Then, per run: mint a token and
   schedule the routine.
+- **Not yet wired:** `mship finish`'s **PR-open** through the relay `/api/` leg —
+  the enforcer is built but finish has no `--relay-url`/`--run-token` path, so a
+  run-token-only worker pushes with `--push-only` and the PR is opened in an
+  attended step (see [Opening the PR](#opening-the-pr-why-it-is-a-separate-step-today)).
 
 ---
 
