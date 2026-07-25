@@ -21,6 +21,14 @@ PAYLOAD = {
 }
 
 
+#: Console-local DISPLAY settings, allowed in the context but deliberately NOT in
+#: any endpoint payload. The contract's purpose is that an external frontend can
+#: reproduce a page from one endpoint response — and a refresh interval is a
+#: preference such a frontend would choose for itself, not server state it needs
+#: to be told. Anything added here must carry no server state, or the contract
+#: stops meaning anything.
+_CONSOLE_LOCAL = {"refresh_seconds"}
+
 def test_context_contains_nothing_beyond_the_payload(monkeypatch):
     seen = {}
 
@@ -39,8 +47,9 @@ def test_context_contains_nothing_beyond_the_payload(monkeypatch):
     with TestClient(app) as client:
         assert client.get("/ui").status_code == 200
 
-    # Jinja2Templates injects `request` itself; everything else must be payload.
-    extra = set(seen["context"]) - set(PAYLOAD) - {"request"}
+    # Jinja2Templates injects `request` itself, and `_CONSOLE_LOCAL` names are
+    # display preferences that deliberately are not endpoint data (see below).
+    extra = set(seen["context"]) - set(PAYLOAD) - {"request"} - _CONSOLE_LOCAL
     assert extra == set(), f"context keys not in the payload: {extra}"
 
 
@@ -68,19 +77,72 @@ def test_per_edge_derivation_stays_inside_edges(monkeypatch):
     assert "action" not in seen["context"]
 
 
-def test_templates_render_no_value_absent_from_the_payload():
-    """Every top-level value the templates interpolate exists in the contract."""
+#: Each page renders from exactly ONE endpoint payload. That is the rule that
+#: keeps the console separable — a page whose values come from two sources cannot
+#: be reproduced by an external client holding one response. The shapes below are
+#: the contract each page is allowed to draw on.
+_PAGE_PAYLOADS = {
+    "topology.html": set(PAYLOAD),
+    "doctor.html": {"workspace", "checks", "failures", "warnings",
+                    "mship_version", "probed_at"},
+    "pair.html": {"workspace", "qr_data_uri", "unavailable_reason",
+                  "mship_version", "probed_at"},
+}
+
+#: Shared shell: every payload must carry these, plus `request`, which
+#: Jinja2Templates injects itself.
+_SHELL_KEYS = {"mship_version", "probed_at"}
+
+
+def _interpolated_names(text: str) -> set[str]:
     import re
-    from pathlib import Path
+
+    names = set()
+    for match in re.finditer(r"\{\{\s*([a-z_]+)", text):
+        names.add(match.group(1))
+    for match in re.finditer(r"\{%\s*(?:if|for [a-z_]+ in)\s+([a-z_]+)", text):
+        names.add(match.group(1))
+    return names
+
+
+def test_every_page_renders_only_values_its_own_payload_carries():
+    """The per-page version of the context contract.
+
+    If this fails, the fix is to add the value to that page's ENDPOINT payload —
+    not to pass it into the template context, which would make the page
+    unreproducible from the endpoint alone.
+    """
+    from pathlib import Path as _P
 
     from mship.webui import TEMPLATES_DIR
 
-    rendered = set()
-    for tpl in Path(TEMPLATES_DIR).glob("*.html"):
-        for match in re.finditer(r"\{\{\s*([a-z_]+)\s*\}\}", tpl.read_text()):
-            rendered.add(match.group(1))
-    # `edge`/`edge.*` are loop locals, not top-level context keys.
-    rendered -= {"edge"}
-    missing = rendered - set(PAYLOAD)
-    assert missing == set(), f"templates render values absent from the payload: {missing}"
-    assert "mship_version" in rendered, "ac14: the version must be shown"
+    shell = _interpolated_names((_P(TEMPLATES_DIR) / "base.html").read_text())
+    loop_locals = {"edge", "check", "request"}
+
+    for page, payload_keys in _PAGE_PAYLOADS.items():
+        text = (_P(TEMPLATES_DIR) / page).read_text()
+        names = (_interpolated_names(text) | shell) - loop_locals - _CONSOLE_LOCAL
+        missing = names - payload_keys
+        assert missing == set(), (
+            f"{page} renders values absent from its payload: {sorted(missing)}"
+        )
+
+
+def test_every_page_payload_carries_the_shared_shell_values():
+    """base.html is shared, so every page's payload must satisfy it — including
+    the version and probed-at the footer shows."""
+    for page, payload_keys in _PAGE_PAYLOADS.items():
+        assert _SHELL_KEYS <= payload_keys, (
+            f"{page}'s payload is missing shell values: {sorted(_SHELL_KEYS - payload_keys)}"
+        )
+
+
+def test_console_local_settings_carry_no_server_state():
+    """The allowlist above is a loophole, so keep it honest: each entry must be a
+    display preference, not data. A name that looks like state (a url, a token, a
+    path, a count) does not belong there."""
+    for name in _CONSOLE_LOCAL:
+        assert not any(
+            marker in name
+            for marker in ("url", "token", "path", "host", "count", "status", "edge")
+        ), f"{name!r} looks like server state, not a display preference"

@@ -53,6 +53,11 @@ STATIC_DIR = _PACKAGE_DIR / "static"
 
 MOUNT_PATH = "/ui"
 
+#: How often a left-open console page reloads itself. Modest on purpose: each
+#: reload re-probes the network, so a page parked in a background tab should not
+#: become a traffic source.
+REFRESH_SECONDS = 30
+
 
 #: Cookie the console sets after a `?token=` visit. Scoped to the console path so
 #: it is never sent to the JSON API, and HttpOnly so page scripts cannot read it.
@@ -125,12 +130,24 @@ def _is_loopback(request: "Request") -> bool:
     return bool(client) and client.host in {"127.0.0.1", "::1", "localhost"}
 
 
-def mount_webui(app, *, payload_source: Callable[[], dict], auth_token: str | None = None) -> None:
+def mount_webui(
+    app,
+    *,
+    payload_source: Callable[[], dict],
+    doctor_source: Callable[[], dict] | None = None,
+    pair_source: Callable[[], dict] | None = None,
+    auth_token: str | None = None,
+) -> None:
     """Attach the console to `app` at /ui.
 
     `payload_source` returns the `GET /net/topology` payload — a plain dict. It
     is the ONLY data this package receives, which is what makes the frontend
     separately shippable (see the module docstring).
+
+    `doctor_source` / `pair_source` are the same shape: a callable returning the
+    payload for the health and pairing pages. Each page renders from exactly ONE
+    payload, which is what keeps the context-equals-payload contract intact as the
+    console grows. Absent sources yield a page that says so rather than 404ing.
 
     `auth_token` is the serve bearer, or None when the serve runs without auth
     (a tokenless loopback serve). When None the console adds no auth of its own —
@@ -145,6 +162,18 @@ def mount_webui(app, *, payload_source: Callable[[], dict], auth_token: str | No
     from fastapi.staticfiles import StaticFiles
 
     from mship.webui.views import render_topology
+
+    # A caller that supplies no health/pairing source gets a page that explains
+    # itself rather than a 404 — the console should degrade to "not available
+    # here", never to a broken link in its own nav.
+    _doctor = doctor_source or (lambda: {
+        "workspace": "", "checks": [], "failures": 0, "warnings": 0,
+        "mship_version": "", "probed_at": "",
+    })
+    _pair = pair_source or (lambda: {
+        "workspace": "", "qr_data_uri": None, "mship_version": "", "probed_at": "",
+        "unavailable_reason": "Pairing is not available from this serve.",
+    })
 
     def _credentialed(request: Request) -> bool:
         if auth_token is None:
@@ -161,6 +190,18 @@ def mount_webui(app, *, payload_source: Callable[[], dict], auth_token: str | No
     # the console authenticate a browser and what puts its static files behind a
     # check instead of leaving them open over the relay.
     console = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+    @console.get("/doctor", include_in_schema=False)
+    def doctor_page(request: Request):
+        from mship.webui.views import render_doctor
+
+        return render_doctor(request, _doctor())
+
+    @console.get("/pair", include_in_schema=False)
+    def pair_page(request: Request):
+        from mship.webui.views import render_pair
+
+        return render_pair(request, _pair())
 
     @console.get("/", include_in_schema=False)
     def ui(request: Request, token: str | None = Query(default=None)):

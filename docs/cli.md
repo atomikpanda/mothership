@@ -118,6 +118,11 @@ mship net status [--no-network]                     # connectivity topology: ser
 mship ui [--no-browser] [--host h] [--port p]       # open the serve-host console (opens a browser, else prints a copyable link)
 ```
 
+The console has three pages: `/ui` (connectivity topology, worst-first,
+self-refreshing), `/ui/doctor` (the full `mship doctor` report), and `/ui/pair`
+(a pairing QR — on its own page because a pair link embeds the serve token, so
+that page displays a credential).
+
 The console lives at `/ui` on the serve host. When the serve runs with auth (any
 relay setup does), a browser cannot send the bearer header from its address bar —
 so visit it once via `mship ui`, which builds `/ui?token=<serve token>`; the
