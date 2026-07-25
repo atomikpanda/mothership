@@ -4,6 +4,8 @@ A structured interface between AI coding agents and a running multi-repo system.
 
 > Pre-1.0. API may change. Pin a commit if you need stability.
 
+📖 **Docs:** <https://atomikpanda.github.io/mothership/>
+
 ## Problem
 
 Consider a single feature that touches five repos: the shared schemas, two microservices that depend on those schemas, the api that sits in front of the microservices, and the api-client consumed by a web app. An agent (or team of them) working on this feature has to hold all five in its head simultaneously — make the schema change, propagate it to both microservices, update the api to match, regenerate the client, and verify the whole thing works end-to-end. Then open five PRs that need to land in the right order.
