@@ -331,7 +331,7 @@ def register(app: typer.Typer, get_container):
                 output.error("--closes requires --work-item (issues are linked to the WorkItem)")
                 raise typer.Exit(code=1)
             from mship.core.issue_link import default_issue_slug
-            from mship.core.issue_ref import IssueRefError, normalize_issue_ref
+            from mship.core.issue_refs import IssueRefError, normalize_issue_ref
             _slug_default = default_issue_slug(container.config().repos.values())
             try:
                 closes_canonical = [normalize_issue_ref(c, default_slug=_slug_default)
@@ -1118,6 +1118,16 @@ def register(app: typer.Typer, get_container):
                 output.error(f"Cannot finish: {gate_result.reason}")
                 raise typer.Exit(code=1)
 
+        # Tracker issues linked to this task's WorkItem (#386); injected into
+        # each PR body as Closes trailers during PR creation below.
+        linked_issue_canonicals: list[str] = []
+        if getattr(task, "work_item_id", None):
+            from mship.core.issue_link import linked_issue_refs
+            from mship.core.workitem_store import WorkItemStore
+            _wi = WorkItemStore(workspace_root / ".mothership" / "workitems").get(task.work_item_id)
+            if _wi is not None:
+                linked_issue_canonicals = linked_issue_refs(_wi)
+
         graph = container.graph()
         config = container.config()
         ordered = graph.topo_sort(task.affected_repos)
@@ -1662,6 +1672,13 @@ def register(app: typer.Typer, get_container):
                 else:
                     pr_body_base = task.description
                 pr_body = append_closes_footer(pr_body_base, extract_issue_refs(texts))
+                # WorkItem-linked tracker issues (#386): same-repo as `Closes #N`
+                # (GitHub auto-closes on merge), cross-repo as owner/repo#N.
+                if linked_issue_canonicals:
+                    from mship.core.issue_link import slug_for_path
+                    from mship.core.issue_refs import append_linked_closes
+                    pr_body = append_linked_closes(
+                        pr_body, linked_issue_canonicals, slug_for_path(group.rep_path))
                 if acceptance_block:
                     pr_body = pr_body + acceptance_block
 

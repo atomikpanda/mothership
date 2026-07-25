@@ -255,7 +255,7 @@ def register(parent: typer.Typer, get_container) -> None:
     def link_issue(item_id: str, ref: str):
         """Link a GitHub tracker issue; it is closed automatically when the task's PRs merge."""
         from mship.core.issue_link import default_issue_slug, link_issue_to_item
-        from mship.core.issue_ref import IssueRefError
+        from mship.core.issue_refs import IssueRefError
 
         items, _, _, _, _ = _ctx()
         _guard(items, item_id)

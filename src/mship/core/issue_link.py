@@ -8,24 +8,26 @@ from __future__ import annotations
 import subprocess
 from datetime import datetime, timezone
 
-from mship.core.issue_ref import issue_url, normalize_issue_ref
+from mship.core.issue_refs import issue_url, normalize_issue_ref
 from mship.core.workitem import ExternalLink
+
+
+def slug_for_path(path) -> str | None:
+    """The 'owner/repo' a checkout's origin points at, or None."""
+    from mship.core.pr import _parse_github_slug
+
+    r = subprocess.run(["git", "-C", str(path), "remote", "get-url", "origin"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    parsed = _parse_github_slug(r.stdout.strip())
+    return f"{parsed[0]}/{parsed[1]}" if parsed else None
 
 
 def default_issue_slug(repos) -> str | None:
     """The single 'owner/repo' every configured repo's origin points at, or
     None when zero or several distinct slugs resolve (caller must be explicit)."""
-    from mship.core.pr import _parse_github_slug
-
-    slugs: set[str] = set()
-    for repo in repos:
-        r = subprocess.run(["git", "-C", str(repo.path), "remote", "get-url", "origin"],
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            continue
-        parsed = _parse_github_slug(r.stdout.strip())
-        if parsed:
-            slugs.add(f"{parsed[0]}/{parsed[1]}")
+    slugs = {s for s in (slug_for_path(repo.path) for repo in repos) if s}
     return slugs.pop() if len(slugs) == 1 else None
 
 

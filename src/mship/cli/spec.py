@@ -522,7 +522,7 @@ def register(parent: typer.Typer, get_container):
         closes_canonical: list[str] = []
         if closes:
             from mship.core.issue_link import default_issue_slug
-            from mship.core.issue_ref import IssueRefError, normalize_issue_ref
+            from mship.core.issue_refs import IssueRefError, normalize_issue_ref
             _slug_default = default_issue_slug(container.config().repos.values())
             try:
                 closes_canonical = [normalize_issue_ref(c, default_slug=_slug_default)
