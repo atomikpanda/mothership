@@ -16,6 +16,8 @@ yields no card.
 """
 from __future__ import annotations
 
+import shlex
+
 #: Tokens that stand in for a value the console CANNOT know — a pair link is a
 #: secret minted by `mship pair` on another machine, a bearer belongs to a serve
 #: this host may never have talked to. A card containing any of these is marked
@@ -125,18 +127,26 @@ def command_for(edge: dict) -> dict | None:
         if declared:
             facts["role"] = declared[0]
 
-    def _fill(text: str) -> str:
+    # Facts are CONFIG-DERIVED (role names come from mothership.yaml), and the
+    # command is meant to be copied into a shell — so every substituted value is
+    # shell-quoted. Jinja's HTML escaping protects the PAGE; it does nothing once
+    # the text is pasted into a terminal, where a role like `x; touch /tmp/pwned`
+    # would otherwise run (Greptile, PR #412). Labels are prose, not shell, so
+    # they get the raw value.
+    quoted = {k: shlex.quote(v) if isinstance(v, str) else v for k, v in facts.items()}
+
+    def _fill(text: str, values: dict) -> str:
         """Substitute facts, leaving the placeholder visible when a fact is
         missing — a half-filled card still guides, and raising here would blank
         the whole page for one absent field."""
         try:
-            return text.format(**facts)
+            return text.format(**values)
         except (KeyError, IndexError):
             return text
 
-    command = _fill(command_template)
+    command = _fill(command_template, quoted)
     return {
-        "label": _fill(label_template),
+        "label": _fill(label_template, facts),
         "command": command,
         # True when the operator must substitute something before running.
         "needs_input": any(token in command for token in _PLACEHOLDERS),

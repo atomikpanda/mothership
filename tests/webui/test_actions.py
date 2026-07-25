@@ -121,3 +121,50 @@ def test_turnkey_cards_are_not_flagged():
     for code in ("relay_not_running", "relay_auth_failed", "probe_skipped"):
         card = command_for({"status": "fail", "code": code, "facts": {}})
         assert card["needs_input"] is False, f"{code} needs no input but is flagged"
+
+
+def test_config_derived_values_are_shell_quoted_in_commands():
+    """Greptile, PR #412 round 4: role names come from mothership.yaml and land
+    in a command the operator is invited to paste into a shell. HTML escaping
+    protects the PAGE and does nothing after paste — without shell quoting, a
+    role like `x; touch /tmp/pwned` executes.
+
+    The assertion is behavioural: parse the rendered command the way a shell
+    would and require the role to survive as exactly ONE literal argument.
+    """
+    import shlex
+
+    hostile = [
+        "mac-studio",                 # ordinary: must be unchanged in meaning
+        "my role",                    # whitespace: would split into two args
+        "x; touch /tmp/pwned",        # command separator: would EXECUTE
+        "$(id)",                      # substitution: would execute
+        "a'b",                        # quote character: would break parsing
+    ]
+    for role in hostile:
+        card = command_for({
+            "status": "fail", "code": "run_host_unmapped", "facts": {"role": role},
+        })
+        tokens = shlex.split(card["command"])
+        assert role in tokens, (
+            f"role {role!r} did not survive as one literal argument in "
+            f"{card['command']!r} -> {tokens}"
+        )
+
+
+def test_shell_quoting_does_not_uglify_ordinary_values():
+    """shlex.quote is a no-op for safe values, so normal cards stay readable."""
+    card = command_for({
+        "status": "fail", "code": "run_host_unmapped", "facts": {"role": "mac-studio"},
+    })
+    assert "'mac-studio'" not in card["command"]
+    assert "add mac-studio " in card["command"]
+
+
+def test_labels_keep_the_raw_value():
+    """Labels are prose, not shell — quoting there would just look wrong."""
+    card = command_for({
+        "status": "warn", "code": "run_hosts_store_unreadable",
+        "facts": {"declared": ["mac"], "store_path": "/ws/a b/run-hosts.yaml"},
+    })
+    assert "/ws/a b/run-hosts.yaml" in card["label"]
