@@ -1,11 +1,23 @@
 import json
 
+import pytest
 from typer.testing import CliRunner
 
 from mship.cli import app
+from mship.cli.output import reset_output_settings
 from mship.core.topology import Edge, Topology
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _reset_settings():
+    """`configure_output` writes process-global state, so a `--json` invocation
+    here would otherwise force JSON mode for every later test in the run (the
+    same pattern as tests/cli/test_output_flags.py)."""
+    reset_output_settings()
+    yield
+    reset_output_settings()
 
 
 def _fake_topology():
