@@ -113,7 +113,8 @@ mship view status|journal|diff|spec [--watch]
 mship view spec --web                               # serve rendered spec on localhost
 mship graph
 mship worktrees
-mship doctor
+mship doctor [--no-network]                         # workspace health; --no-network skips connectivity probes
+mship net status [--no-network]                     # connectivity topology: serve, relay, run hosts, gh auth, egress
 ```
 
 ## Maintenance

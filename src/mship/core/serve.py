@@ -361,6 +361,30 @@ def create_app(
     def health():
         return {"status": "ok", "workspace": workspace_name}
 
+    @app.get("/net/topology")
+    def net_topology():
+        """This host's connectivity topology — the SAME payload `mship net
+        status --json` prints, from the same `probe_topology`.
+
+        This is the UI contract for the serve-host management console: it carries
+        a schema `version` and must stay renderable on its own, so no view logic
+        accumulates here.
+        """
+        from mship.core import topology as topo
+
+        if config is None:
+            raise HTTPException(
+                status_code=503,
+                detail=("this serve host has no workspace config wired in; "
+                        "bootstrap it as an mship workspace and restart serve"),
+            )
+        result = topo.probe_topology(
+            config=config,
+            state_dir=workspace_root / ".mothership",
+            workspace_root=workspace_root,
+        )
+        return topo.topology_payload(result)
+
     from mship.core.spec_review import build_review
 
     @app.get("/specs")

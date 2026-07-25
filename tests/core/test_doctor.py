@@ -710,3 +710,88 @@ def test_doctor_accepts_taskfile_yaml_only(tmp_path: Path):
     tf = next(c for c in report.checks if c.name == "svc/taskfile")
     assert tf.status == "pass"
     assert "Taskfile.yaml" in tf.message
+
+
+# --- connectivity group (sourced from core.topology.probe_topology) ---
+
+def _shell_ok():
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.return_value = ShellResult(
+        returncode=0, stdout="test\nrun\nlint\nsetup\n", stderr="",
+    )
+    return mock_shell
+
+
+def test_doctor_reports_connectivity_from_probe_topology(workspace: Path, monkeypatch):
+    """AC3: doctor's connectivity checks come from probe_topology, not from a
+    second copy of the probe logic."""
+    from mship.core import topology as topo
+
+    called = {}
+
+    def fake_probe(**kw):
+        called.update(kw)
+        return topo.Topology(version=1, workspace="ws", probed_at="t", edges=[
+            topo.Edge(kind="relay", name="relay", status="fail",
+                      code="relay_unreachable", detail="down",
+                      fix="restart `mship serve --relay`", facts={}),
+            topo.Edge(kind="egress", name="egress", status="absent",
+                      code="egress_absent", detail="not routed", fix=None, facts={}),
+        ])
+
+    monkeypatch.setattr(topo, "probe_topology", fake_probe)
+
+    config = ConfigLoader.load(workspace / "mothership.yaml")
+    report = DoctorChecker(
+        config, _shell_ok(), state_dir=workspace / ".mothership",
+        workspace_root=workspace,
+    ).run()
+
+    conn = [c for c in report.checks if c.name.startswith("connectivity/")]
+    assert [c.name for c in conn] == ["connectivity/relay", "connectivity/egress"]
+    assert conn[0].status == "fail"
+    assert "restart `mship serve --relay`" in conn[0].message
+    # `absent` is not a problem to fix -> reported as a pass
+    assert conn[1].status == "pass"
+    assert called["skip_network"] is False
+
+
+def test_doctor_can_skip_network_probes(workspace: Path, monkeypatch):
+    from mship.core import topology as topo
+
+    seen = {}
+
+    def fake_probe(**kw):
+        seen.update(kw)
+        return topo.Topology(version=1, workspace="ws", probed_at="t", edges=[])
+
+    monkeypatch.setattr(topo, "probe_topology", fake_probe)
+
+    config = ConfigLoader.load(workspace / "mothership.yaml")
+    DoctorChecker(
+        config, _shell_ok(), state_dir=workspace / ".mothership",
+        workspace_root=workspace, probe_network=False,
+    ).run()
+    assert seen["skip_network"] is True
+
+
+def test_doctor_survives_a_topology_failure(workspace: Path, monkeypatch):
+    """probe_topology promises never to raise; doctor must not depend on that
+    promise being kept — a connectivity bug can't take down the other checks."""
+    from mship.core import topology as topo
+
+    def boom(**kw):
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(topo, "probe_topology", boom)
+
+    config = ConfigLoader.load(workspace / "mothership.yaml")
+    report = DoctorChecker(
+        config, _shell_ok(), state_dir=workspace / ".mothership",
+        workspace_root=workspace,
+    ).run()
+    conn = [c for c in report.checks if c.name == "connectivity"]
+    assert conn and conn[0].status == "warn"
+    assert "probe exploded" in conn[0].message
+    # the other checks still ran
+    assert any(c.name.endswith("/path") for c in report.checks)

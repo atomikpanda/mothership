@@ -5,7 +5,12 @@ from mship.cli.output import Output
 
 def register(app: typer.Typer, get_container):
     @app.command(rich_help_panel="Inspection")
-    def doctor():
+    def doctor(
+        no_network: bool = typer.Option(
+            False, "--no-network",
+            help="Skip connectivity network probes (faster; config-level checks only).",
+        ),
+    ):
         """Check workspace health and configuration."""
         container = get_container()
         output = Output()
@@ -38,6 +43,7 @@ def register(app: typer.Typer, get_container):
             workspace_root=container.config_path().parent,
             config_path=config_path,
             config_source=config_source,
+            probe_network=not no_network,
         )
         report = checker.run()
 

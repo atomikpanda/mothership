@@ -102,15 +102,31 @@ These are deliberately out of scope for the first cut. Know them before you lean
 
 ## Troubleshooting
 
-| Symptom | Meaning | Fix |
-|---|---|---|
-| `unknown run-host role '<role>'; not declared in this workspace's \`run_hosts:\` list` | You passed `--remote=<role>` (or a repo declared `run_host: <role>`) but that name isn't in `mothership.yaml`'s `run_hosts:` list — likely a typo. | Add the role to `run_hosts:` in `mothership.yaml`, or fix the typo. |
-| `ambiguous run-host: multiple roles are configured (...) and none was specified` | Bare `--remote` with 2+ roles in `run_hosts:` and no repo-declared default. | Pass `--remote=<role>` explicitly, or declare `run_host: <role>` on the repo. |
-| `run-host role '<role>' is declared but has no connection mapped on this machine; run \`mship run-host add <role>\`` | The role exists in `mothership.yaml`, but *this* machine never mapped it to a `{url, token}`. | `mship run-host add <role> --pair-link '...'` (get the link by running `mship pair` on the remote). |
-| `remote host at <url> is unreachable via relay (...)` | Couldn't even connect — the remote isn't running `mship serve --relay`, the relay is down, or the pairing is stale. | Confirm the remote is up and `mship serve --relay` is running there; re-pair if the relay subdomain changed. |
-| `remote workspace not bootstrapped at <url> (503)` | The remote's `mship serve --relay` is reachable, but that machine has no workspace config wired in (no `mothership.yaml`, or serve was started without one). | Bootstrap that machine as an mship workspace and restart `mship serve --relay` there. |
-| `remote host at <url> rejected the bearer token (401)` | The mapped token is wrong or was rotated on the remote. | Re-run `mship run-host add <role>` with a fresh pair link/token. |
-| `error: unknown repo(s) ...; known repos: ...` (streamed, then a non-zero exit) | The remote's own `mothership.yaml` doesn't have a repo of that name — usually a workspace mismatch between your box and the remote. | Confirm both workspaces declare the same repo names, or pass `--repos` naming a repo the remote actually has. |
-| A repo's task lines print, then `error: branch-materialize failed for repo '<repo>': ...` (then a non-zero exit) | The remote's `git fetch`/`git worktree add` for that repo's task branch failed — commonly the branch not pushed yet, or a dirty/locked worktree on the remote. | Push the task's branch, or clear the stuck worktree on the remote (`git worktree remove`/`prune`), then retry. |
-| Remote task's own output ends with a non-zero `__MSHIP_EXIT__ <code>` | The task itself failed on the remote — same as a local failure. The streamed output above the exit line is the task's real stdout/stderr. | Read the streamed output like any other failing `run`/`build`/`capture`. |
-| `--remote requires a resolvable task: ...` / `--remote requires an active task: ...` | You ran `--remote` with no active/resolvable task. Remote execution always needs a branch to check out. | Pass `--task <slug>`, or run from inside an active task's worktree. |
+Start with `mship net status`. It reports every connectivity edge on this machine
+— serve, relay, each run-host role, the GitHub auth model in effect, and whether
+git is routed through a relay egress — with a status code and the fix for each
+unhealthy one. `mship doctor` reports the same checks inline as a
+`connectivity/*` group, and `GET /net/topology` on serve returns the same JSON.
+
+```bash
+mship net status               # human topology view
+mship net status --json        # the same structure, for scripts
+mship net status --no-network  # configured state only, no probes
+```
+
+The table below is the reference for what each code means. The first six rows are
+states `mship net status` detects for you; the rest surface only while a remote
+task is running.
+
+| Symptom | Code | Meaning | Fix |
+|---|---|---|---|
+| `unknown run-host role '<role>'; not declared in this workspace's \`run_hosts:\` list` | `run_host_unknown_role` | You passed `--remote=<role>` (or a repo declared `run_host: <role>`) but that name isn't in `mothership.yaml`'s `run_hosts:` list — likely a typo. | Add the role to `run_hosts:` in `mothership.yaml`, or fix the typo. |
+| `ambiguous run-host: multiple roles are configured (...) and none was specified` | `run_hosts_ambiguous_default` | Bare `--remote` with 2+ roles in `run_hosts:` and no repo-declared default. | Pass `--remote=<role>` explicitly, or declare `run_host: <role>` on the repo. |
+| `run-host role '<role>' is declared but has no connection mapped on this machine; run \`mship run-host add <role>\`` | `run_host_unmapped` | The role exists in `mothership.yaml`, but *this* machine never mapped it to a `{url, token}`. | `mship run-host add <role> --pair-link '...'` (get the link by running `mship pair` on the remote). |
+| `remote host at <url> is unreachable via relay (...)` | `run_host_unreachable` | Couldn't even connect — the remote isn't running `mship serve --relay`, the relay is down, or the pairing is stale. | Confirm the remote is up and `mship serve --relay` is running there; re-pair if the relay subdomain changed. |
+| `remote workspace not bootstrapped at <url> (503)` | `run_host_not_bootstrapped` | The remote's `mship serve --relay` is reachable, but that machine has no workspace config wired in (no `mothership.yaml`, or serve was started without one). | Bootstrap that machine as an mship workspace and restart `mship serve --relay` there. |
+| `remote host at <url> rejected the bearer token (401)` | `run_host_stale_token` | The mapped token is wrong or was rotated on the remote. | Re-run `mship run-host add <role>` with a fresh pair link/token. |
+| `error: unknown repo(s) ...; known repos: ...` (streamed, then a non-zero exit) | — | The remote's own `mothership.yaml` doesn't have a repo of that name — usually a workspace mismatch between your box and the remote. | Confirm both workspaces declare the same repo names, or pass `--repos` naming a repo the remote actually has. |
+| A repo's task lines print, then `error: branch-materialize failed for repo '<repo>': ...` (then a non-zero exit) | — | The remote's `git fetch`/`git worktree add` for that repo's task branch failed — commonly the branch not pushed yet, or a dirty/locked worktree on the remote. | Push the task's branch, or clear the stuck worktree on the remote (`git worktree remove`/`prune`), then retry. |
+| Remote task's own output ends with a non-zero `__MSHIP_EXIT__ <code>` | — | The task itself failed on the remote — same as a local failure. The streamed output above the exit line is the task's real stdout/stderr. | Read the streamed output like any other failing `run`/`build`/`capture`. |
+| `--remote requires a resolvable task: ...` / `--remote requires an active task: ...` | — | You ran `--remote` with no active/resolvable task. Remote execution always needs a branch to check out. | Pass `--task <slug>`, or run from inside an active task's worktree. |

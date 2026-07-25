@@ -1,5 +1,37 @@
 from __future__ import annotations
+from dataclasses import dataclass
 from typing import Callable
+
+
+@dataclass(frozen=True)
+class HealthProbe:
+    """Outcome of one `/health` request. Exactly one of `status_code` (a
+    response arrived) or `error` (transport/DNS/TLS failure) is set."""
+    ok: bool
+    status_code: int | None = None
+    error: str | None = None
+
+
+def probe_health(public_url: str, token: str, *, get: Callable | None = None,
+                 timeout: float = 8.0) -> HealthProbe:
+    """Probe `<public_url>/health` with the bearer token. Never raises.
+
+    The single reachability prober for the codebase: `verify_relay_reachable`
+    renders its prose from this, and `mship.core.topology` maps the status code
+    to a per-edge status + fix hint (a run-host 401 and a phone-pairing 401 need
+    different advice, so that mapping belongs with the caller, not here).
+    """
+    if get is None:
+        import httpx
+        get = lambda url, **kw: httpx.get(url, **kw)
+    url = public_url.rstrip("/") + "/health"
+    try:
+        r = get(url, headers={"Authorization": f"Bearer {token}"},
+                timeout=timeout, follow_redirects=True)
+    except Exception as e:  # transport/DNS/TLS error
+        return HealthProbe(ok=False, error=str(e))
+    code = r.status_code
+    return HealthProbe(ok=200 <= code < 300, status_code=code)
 
 
 def verify_relay_reachable(public_url: str, token: str, *, get: Callable | None = None,
@@ -10,21 +42,15 @@ def verify_relay_reachable(public_url: str, token: str, *, get: Callable | None 
     Any transport error → ok=False with the exception text (the real reason).
     `get` is injectable (defaults to httpx.get) for testing.
     """
-    if get is None:
-        import httpx
-        get = lambda url, **kw: httpx.get(url, **kw)
-    url = public_url.rstrip("/") + "/health"
-    try:
-        r = get(url, headers={"Authorization": f"Bearer {token}"},
-                timeout=timeout, follow_redirects=True)
-    except Exception as e:  # transport/DNS/TLS error
-        return False, f"could not reach relay URL: {e}"
-    if 200 <= r.status_code < 300:
+    p = probe_health(public_url, token, get=get, timeout=timeout)
+    if p.error is not None:
+        return False, f"could not reach relay URL: {p.error}"
+    if p.ok:
         return True, "ok"
-    if r.status_code in (401, 403):
-        return False, (f"relay reachable but auth failed (HTTP {r.status_code}) — "
+    if p.status_code in (401, 403):
+        return False, (f"relay reachable but auth failed (HTTP {p.status_code}) — "
                        "the paired phone's token is stale; re-scan the QR")
-    return False, f"relay returned HTTP {r.status_code}"
+    return False, f"relay returned HTTP {p.status_code}"
 
 
 # Phrase emitted by verify_relay_reachable on a 401/403. A stale token never

@@ -121,6 +121,7 @@ class DoctorChecker:
         workspace_root: Path | None = None,
         config_path: Path | None = None,
         config_source: str | None = None,
+        probe_network: bool = True,
     ) -> None:
         self._config = config
         self._shell = shell
@@ -128,6 +129,7 @@ class DoctorChecker:
         self._workspace_root = workspace_root
         self._config_path = config_path
         self._config_source = config_source
+        self._probe_network = probe_network
 
     def run(self) -> DoctorReport:
         report = DoctorReport()
@@ -378,7 +380,49 @@ class DoctorChecker:
         if ws is not None and ws.is_dir():
             report.checks.extend(self._check_bundler_exclusions(ws))
 
+        # Connectivity group — sourced from the SINGLE topology implementation
+        # (`mship.core.topology.probe_topology`), the same one `mship net status`
+        # and `GET /net/topology` use. No probe logic lives here.
+        report.checks.extend(self._connectivity_checks())
+
         return report
+
+    #: topology edge status -> doctor check status. `absent` means "not
+    #: configured on this machine", which is not a problem to report.
+    _CONNECTIVITY_STATUS = {
+        "ok": "pass", "warn": "warn", "fail": "fail", "absent": "pass",
+    }
+
+    def _connectivity_checks(self) -> list[CheckResult]:
+        if self._state_dir is None or self._workspace_root is None:
+            return []
+        from mship.core import topology as topo
+
+        try:
+            result = topo.probe_topology(
+                config=self._config,
+                state_dir=self._state_dir,
+                workspace_root=self._workspace_root,
+                shell=self._shell,
+                skip_network=not self._probe_network,
+            )
+        except Exception as exc:
+            # probe_topology promises never to raise; don't let a bug there take
+            # down the checks that already ran.
+            return [CheckResult(
+                name="connectivity", status="warn",
+                message=f"connectivity probe failed: {exc}",
+            )]
+
+        checks: list[CheckResult] = []
+        for edge in result.edges:
+            message = edge.detail if edge.fix is None else f"{edge.detail} — {edge.fix}"
+            checks.append(CheckResult(
+                name=f"connectivity/{edge.name}",
+                status=self._CONNECTIVITY_STATUS.get(edge.status, "warn"),
+                message=message,
+            ))
+        return checks
 
     def _check_bundler_exclusions(self, ws: Path) -> list[CheckResult]:
         """WARN when a known asset-bundling config at the workspace root does not

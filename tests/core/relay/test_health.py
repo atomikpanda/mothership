@@ -1,4 +1,8 @@
-from mship.core.relay.health import verify_relay_reachable, wait_until_reachable
+from mship.core.relay.health import (
+    probe_health,
+    verify_relay_reachable,
+    wait_until_reachable,
+)
 
 class _Resp:
     def __init__(self, status): self.status_code = status
@@ -80,3 +84,22 @@ def test_wait_does_not_retry_on_auth_failure():
     assert ok is False and "token" in detail.lower()
     assert len(calls) == 1          # no retry
     assert clk.t == 0               # never slept
+
+
+# --- probe_health: the one prober, with the status code exposed ---
+
+def test_probe_health_reports_status_code():
+    p = probe_health("https://w-ab12.relay", "tok", get=lambda *a, **k: _Resp(503))
+    assert p.ok is False
+    assert p.status_code == 503
+    assert p.error is None
+
+def test_probe_health_ok_on_2xx():
+    p = probe_health("https://w-ab12.relay", "tok", get=lambda *a, **k: _Resp(204))
+    assert p.ok is True and p.status_code == 204
+
+def test_probe_health_carries_transport_error_and_never_raises():
+    def boom(*a, **k): raise RuntimeError("name resolution failed")
+    p = probe_health("https://w-ab12.relay", "tok", get=boom)
+    assert p.ok is False and p.status_code is None
+    assert "name resolution failed" in p.error
