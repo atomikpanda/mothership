@@ -251,6 +251,45 @@ def register(parent: typer.Typer, get_container) -> None:
         items.add_task(item_id, task_slug, now=datetime.now(timezone.utc), state=state_manager)
         typer.echo(f"linked task {task_slug} -> {item_id}")
 
+    def _default_issue_slug() -> str | None:
+        """The single 'owner/repo' every configured repo's origin points at, or
+        None when zero or several distinct slugs resolve (caller must be explicit)."""
+        import subprocess
+
+        from mship.core.pr import _parse_github_slug
+
+        container = get_container()
+        slugs: set[str] = set()
+        for repo in container.config().repos.values():
+            r = subprocess.run(["git", "-C", str(repo.path), "remote", "get-url", "origin"],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                continue
+            parsed = _parse_github_slug(r.stdout.strip())
+            if parsed:
+                slugs.add(f"{parsed[0]}/{parsed[1]}")
+        return slugs.pop() if len(slugs) == 1 else None
+
+    @item_app.command("link-issue")
+    def link_issue(item_id: str, ref: str):
+        """Link a GitHub tracker issue; it is closed automatically when the task's PRs merge."""
+        from mship.core.issue_ref import IssueRefError, issue_url, normalize_issue_ref
+
+        items, _, _, _, _ = _ctx()
+        _guard(items, item_id)
+        try:
+            canonical = normalize_issue_ref(ref, default_slug=_default_issue_slug())
+        except IssueRefError as e:
+            typer.echo(str(e), err=True)
+            raise typer.Exit(1)
+        url = issue_url(canonical)
+        if any(link.url == url for link in items.get(item_id).external_links):
+            typer.echo(f"already linked: {canonical}")
+            return
+        items.add_external_link(item_id, ExternalLink(provider="github", url=url, title=canonical),
+                                now=datetime.now(timezone.utc))
+        typer.echo(f"linked issue {canonical} -> {item_id}")
+
     @item_app.command("link-url")
     def link_url(item_id: str, url: str,
                  provider: str = typer.Option("url", "--provider"),

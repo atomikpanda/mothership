@@ -649,3 +649,70 @@ def test_item_unarchive_unknown_id_errors_cleanly(tmp_path):
         container.config_path.reset_override()
         container.state_dir.reset_override()
         container.config.reset()
+
+
+# --- link-issue (#386) ---
+
+def test_link_issue_normalizes_and_stores_github_link(tmp_path):
+    _isolate(tmp_path)
+    try:
+        res = runner.invoke(app, ["item", "new", "Title", "--kind", "feature"])
+        assert res.exit_code == 0, res.output
+        item_id = res.output.strip()
+
+        res = runner.invoke(app, ["item", "link-issue", item_id, "acme/widgets#12"])
+        assert res.exit_code == 0, res.output
+        assert "acme/widgets#12" in res.output
+
+        from mship.core.workitem_store import WorkItemStore
+        item = WorkItemStore(tmp_path / ".mothership" / "workitems").get(item_id)
+        assert len(item.external_links) == 1
+        link = item.external_links[0]
+        assert link.provider == "github"
+        assert link.url == "https://github.com/acme/widgets/issues/12"
+        assert link.title == "acme/widgets#12"
+    finally:
+        _reset()
+
+
+def test_link_issue_twice_is_a_noop(tmp_path):
+    _isolate(tmp_path)
+    try:
+        res = runner.invoke(app, ["item", "new", "Title", "--kind", "feature"])
+        item_id = res.output.strip()
+        assert runner.invoke(app, ["item", "link-issue", item_id, "acme/widgets#12"]).exit_code == 0
+        res = runner.invoke(
+            app, ["item", "link-issue", item_id, "https://github.com/acme/widgets/issues/12"])
+        assert res.exit_code == 0, res.output
+        assert "already linked" in res.output
+
+        from mship.core.workitem_store import WorkItemStore
+        item = WorkItemStore(tmp_path / ".mothership" / "workitems").get(item_id)
+        assert len(item.external_links) == 1
+    finally:
+        _reset()
+
+
+def test_link_issue_bare_number_without_default_slug_fails_loud(tmp_path):
+    _isolate(tmp_path)  # repos: {} -> no default slug resolvable
+    try:
+        res = runner.invoke(app, ["item", "new", "Title", "--kind", "feature"])
+        item_id = res.output.strip()
+        res = runner.invoke(app, ["item", "link-issue", item_id, "12"])
+        assert res.exit_code == 1
+        assert "owner/repo#N" in res.output
+    finally:
+        _reset()
+
+
+def test_item_show_displays_linked_issue(tmp_path):
+    _isolate(tmp_path)
+    try:
+        res = runner.invoke(app, ["item", "new", "Title", "--kind", "feature"])
+        item_id = res.output.strip()
+        assert runner.invoke(app, ["item", "link-issue", item_id, "acme/widgets#12"]).exit_code == 0
+        res = runner.invoke(app, ["item", "show", item_id])
+        assert res.exit_code == 0, res.output
+        assert "acme/widgets#12" in res.output
+    finally:
+        _reset()
