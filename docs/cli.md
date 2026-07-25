@@ -115,7 +115,14 @@ mship graph
 mship worktrees
 mship doctor [--no-network]                         # workspace health; --no-network skips connectivity probes
 mship net status [--no-network]                     # connectivity topology: serve, relay, run hosts, gh auth, egress
+mship ui [--no-browser] [--host h] [--port p]       # open the serve-host console (opens a browser, else prints a copyable link)
 ```
+
+The console lives at `/ui` on the serve host. When the serve runs with auth (any
+relay setup does), a browser cannot send the bearer header from its address bar —
+so visit it once via `mship ui`, which builds `/ui?token=<serve token>`; the
+console exchanges that for a short-lived cookie and cleans the URL. `GET
+/net/topology` continues to accept only the `Authorization` header.
 
 ## Maintenance
 

@@ -400,7 +400,7 @@ def create_app(
         except ImportError:
             logger.info("mship.webui is unavailable; serving without the console")
         else:
-            mount_webui(app, payload_source=_topology_payload)
+            mount_webui(app, payload_source=_topology_payload, auth_token=auth_token)
 
     from mship.core.spec_review import build_review
 
