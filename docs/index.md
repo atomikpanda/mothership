@@ -22,10 +22,10 @@ inbox for operator ↔ agent messaging.
 
 ## Cloud workers
 
-- **[Unattended cloud runner](unattended-cloud-runner.md)** — the end-to-end runbook: setup, per-run lifecycle, security guarantees.
-- **[Cloud worker auth spine](cloud-worker-auth-spine.md)** — attach-at-relay credential model.
-- **[Cloud agent auth](cloud-agent-auth.md)** — worker identity, enrollment, run tokens.
-- **[Claude routine runner](adapters/claude-routine-runner.md)** — the scheduled-routine adapter.
+- **[Unattended cloud runner](unattended-cloud-runner.md)** — the end-to-end runbook: setup, per-run lifecycle, security guarantees. Start here.
+- **[Attach-at-relay egress proxy](cloud-worker-auth-spine.md)** — the no-credential-on-worker auth model.
+- **[The /gh-token broker](cloud-agent-auth.md)** — the simpler trusted-session auth model + GitHub App setup.
+- **[Pull-API runner](adapters/claude-routine-runner.md)** — backlog-draining via a scheduled Claude routine.
 
 ## Install
 
