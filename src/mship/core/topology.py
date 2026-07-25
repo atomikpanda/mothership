@@ -47,10 +47,17 @@ RELAY_AUTH_FAILED = "relay_auth_failed"
 RELAY_SUBDOMAIN_DRIFT = "relay_subdomain_drift"
 RELAY_NOT_CONFIGURED = "relay_not_configured"
 RELAY_NOT_RUNNING = "relay_not_running"
+RELAY_NO_PUBLIC_URL = "relay_no_public_url"
+
+#: Probes were skipped (`--no-network`), so reachability is UNKNOWN. Distinct
+#: from `*_unreachable`, which asserts a probe ran and failed — a console that
+#: conflated them would report a healthy relay as down.
+PROBE_SKIPPED = "probe_skipped"
 
 RUN_HOSTS_NONE_DECLARED = "run_hosts_none_declared"
 RUN_HOSTS_AMBIGUOUS_DEFAULT = "run_hosts_ambiguous_default"
 RUN_HOSTS_OK = "run_hosts_ok"
+RUN_HOSTS_STORE_UNREADABLE = "run_hosts_store_unreadable"
 RUN_HOST_OK = "run_host_ok"
 RUN_HOST_UNKNOWN_ROLE = "run_host_unknown_role"
 RUN_HOST_UNMAPPED = "run_host_unmapped"
@@ -241,12 +248,21 @@ def _serve_and_relay_edges(
         )
         return [serve, relay]
 
-    if skip_network or not record.url:
+    if skip_network:
         relay = Edge(
-            kind="relay", name="relay", status="warn", code=RELAY_UNREACHABLE,
-            detail=("network probes skipped" if skip_network else
-                    "record carries no public url"),
+            kind="relay", name="relay", status="warn", code=PROBE_SKIPPED,
+            detail="network probes skipped; relay reachability unknown",
             fix="re-run without --no-network to probe the relay URL",
+            facts=facts,
+        )
+        return [serve, relay]
+
+    if not record.url:
+        relay = Edge(
+            kind="relay", name="relay", status="warn", code=RELAY_NO_PUBLIC_URL,
+            detail="the relay-serve record carries no public url to probe",
+            fix=("restart `mship serve --relay` so it re-publishes its public "
+                 "URL into the runtime record"),
             facts=facts,
         )
         return [serve, relay]
@@ -296,11 +312,33 @@ def _run_host_edges(
     declared = list(getattr(config, "run_hosts", ()) or ())
     repos = getattr(config, "repos", {}) or {}
     store = RunHostStore(state_dir)
+    edges: list[Edge] = []
     # Private read: `redacted_list()` drops the token entirely, but this edge
     # must report `token_configured` (a boolean) AND whether the effective value
     # came from the file or an env override — neither is derivable from it.
-    mapped = dict(store._read_all())
-    edges: list[Edge] = []
+    #
+    # A hand-edited run-hosts.yaml is a realistic broken input, and `_read_all`
+    # does not guard it: malformed YAML raises, and a non-mapping document
+    # returns a str whose `.get` would blow up. Neither may break a report whose
+    # whole job is to run when things are broken.
+    store_error: str | None = None
+    try:
+        raw = store._read_all()
+        mapped = dict(raw) if isinstance(raw, dict) else {}
+        if not isinstance(raw, dict):
+            store_error = "run-hosts.yaml is not a mapping of role -> {url, token}"
+    except Exception as exc:
+        mapped, store_error = {}, str(exc).splitlines()[0][:200]
+
+    if store_error is not None:
+        return [Edge(
+            kind="run_host", name="run_hosts", status="warn",
+            code=RUN_HOSTS_STORE_UNREADABLE,
+            detail=f"could not read the run-host store ({store_error})",
+            fix=(f"fix or remove `run-hosts.yaml` in {state_dir}, then re-map "
+                 f"roles with `mship run-host add <role>`"),
+            facts={"declared": declared, "store_path": str(state_dir / "run-hosts.yaml")},
+        )]
 
     repo_defaults = {
         name: getattr(r, "run_host", None)
@@ -379,7 +417,8 @@ def _run_host_edges(
         if skip_network:
             edges.append(Edge(
                 kind="run_host", name=f"run_host:{role}", status="warn",
-                code=RUN_HOST_UNREACHABLE, detail="network probes skipped",
+                code=PROBE_SKIPPED,
+                detail="network probes skipped; reachability unknown",
                 fix="re-run without --no-network to probe this run host",
                 facts=facts,
             ))

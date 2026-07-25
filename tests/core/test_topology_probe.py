@@ -415,3 +415,61 @@ def test_no_unhealthy_edge_is_ever_left_without_a_fix(tmp_path: Path):
     assert unhealthy, "expected this fixture to produce unhealthy edges"
     missing = [e.name for e in unhealthy if not e.fix]
     assert missing == [], f"edges with no fix hint: {missing}"
+
+
+# --- not-probed is its own state, and a corrupt store cannot crash the probe ---
+
+def test_skipped_probe_is_not_reported_as_unreachable(tmp_path: Path):
+    """A UI branching on `relay_unreachable` must not light up merely because
+    probes were skipped — "not probed" is a different state from "down"."""
+    from mship.core.topology import PROBE_SKIPPED
+
+    _map_role(tmp_path, "mac", "https://mac.relay")
+    write_runtime_record(tmp_path, RelayRuntimeRecord(
+        host="h", pid=1, subdomain="s", url="https://s.relay", workspace="ws",
+    ))
+    t = _run(tmp_path, FakeConfig(run_hosts=("mac",), relay=object()),
+             skip_network=True)
+
+    assert _named(t, "relay").code == PROBE_SKIPPED
+    assert _named(t, "run_host:mac").code == PROBE_SKIPPED
+    assert RELAY_UNREACHABLE not in {e.code for e in t.edges}
+    assert RUN_HOST_UNREACHABLE not in {e.code for e in t.edges}
+
+
+def test_relay_record_without_a_url_is_its_own_state(tmp_path: Path):
+    from mship.core.topology import RELAY_NO_PUBLIC_URL
+
+    write_runtime_record(tmp_path, RelayRuntimeRecord(
+        host="h", pid=1, subdomain="s", url=None, workspace="ws",
+    ))
+    t = _run(tmp_path, FakeConfig(relay=object()))
+    assert _named(t, "relay").code == RELAY_NO_PUBLIC_URL
+
+
+def test_corrupt_run_host_store_does_not_raise(tmp_path: Path):
+    """AC4: a broken environment is the expected input. A hand-edited
+    run-hosts.yaml must degrade to a reported edge, not a traceback."""
+    from mship.core.topology import RUN_HOSTS_STORE_UNREADABLE
+
+    state = tmp_path / ".mothership"
+    state.mkdir(parents=True)
+    (state / "run-hosts.yaml").write_text("mac: {url: [unclosed\n")
+
+    t = _run(tmp_path, FakeConfig(run_hosts=("mac",)))
+    edge = _named(t, "run_hosts")
+    assert edge.status == "warn" and edge.code == RUN_HOSTS_STORE_UNREADABLE
+    assert "run-hosts.yaml" in edge.fix
+    # the other edge kinds still reported
+    assert {e.kind for e in t.edges} >= {"serve", "relay", "gh_auth", "egress"}
+
+
+def test_non_mapping_run_host_store_does_not_raise(tmp_path: Path):
+    from mship.core.topology import RUN_HOSTS_STORE_UNREADABLE
+
+    state = tmp_path / ".mothership"
+    state.mkdir(parents=True)
+    (state / "run-hosts.yaml").write_text("just a string\n")
+
+    t = _run(tmp_path, FakeConfig(run_hosts=("mac",)))
+    assert _named(t, "run_hosts").code == RUN_HOSTS_STORE_UNREADABLE
