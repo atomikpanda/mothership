@@ -1,4 +1,11 @@
-# Reference Adapter: a Claude Routine as the Unattended-Run Host
+# Pull-API runner: a Claude routine as the unattended-run host
+
+> **Where this fits:** this is the **pull** variant of the
+> [unattended cloud runner](../unattended-cloud-runner.md) — instead of
+> scheduling one routine per named spec, `mship item run-next` selects and
+> claims the next eligible item from a backlog. How the worker *authenticates*
+> is an independent choice (see Prerequisites below): any of the three auth
+> models works with this selection model.
 
 This documents **one concrete host** for the unattended runner (spec
 `unattended-runner`, AC8): a Claude routine on a cron schedule (or the
@@ -36,13 +43,23 @@ one-at-a-time; no parallel runs).
 - Two environment variables, set on the routine (not mship flags — these are
   adapter-level inputs the routine's shell body needs before it can call
   `mship` at all):
-  - **`GH_TOKEN`** (or `GITHUB_TOKEN`, checked in that order) — a GitHub
-    token with repo scope. `mship bootstrap` uses it to clone private member
-    repos and `mship finish` uses it to push branches + open PRs, in either
-    case only when no other git credential helper is already configured.
-    Both commands also accept an explicit `--token`, which wins over either
-    env var (`resolve_token`'s precedence: `--token` > `GH_TOKEN` >
-    `GITHUB_TOKEN`, `src/mship/core/gh_auth.py`).
+  - **GitHub auth for `bootstrap`/`finish`** — pick ONE of the three auth
+    models (full comparison: the runbook's
+    [Choosing your setup](../unattended-cloud-runner.md#choosing-your-setup)):
+    - **Raw env token** — set `GH_TOKEN` (or `GITHUB_TOKEN`; `--token` wins
+      over both, `src/mship/core/gh_auth.py`). Simplest; only for a trusted
+      execution environment, since the worker holds a real GitHub credential.
+    - **The `/gh-token` broker** — set `MSHIP_GH_BROKER_URL` +
+      `MSHIP_SERVE_TOKEN` and the worker pulls short-lived repo-scoped tokens
+      from `mship serve` at the moment of use
+      ([cloud-agent-auth.md](../cloud-agent-auth.md) §1).
+    - **Attach-at-relay** — the worker holds no GitHub credential at all;
+      `mship bootstrap --relay-url … --run-token …` routes git through the
+      credential-attaching egress proxy
+      ([cloud-worker-auth-spine.md](../cloud-worker-auth-spine.md)). Note the
+      PR-open caveat: with only a run token, `finish` must run `--push-only`
+      and the PR is opened in an attended step (runbook:
+      [Opening the PR](../unattended-cloud-runner.md#opening-the-pr-why-it-is-a-separate-step-today)).
   - **`WORKSPACE_GIT_URL`** — the git URL of the *workspace meta-repo* (the
     one containing `mothership.yaml`). This is an adapter convention, not an
     mship flag: `mship bootstrap` has no positional "clone this workspace"
@@ -70,7 +87,8 @@ If nothing matches, the tick is a clean no-op.
 set -euo pipefail
 
 # --- environment the routine must provide ---
-#   GH_TOKEN            GitHub token (repo scope); or GITHUB_TOKEN.
+#   <auth>              ONE of: GH_TOKEN / MSHIP_GH_BROKER_URL+MSHIP_SERVE_TOKEN
+#                       / relay --relay-url+--run-token (see Prerequisites).
 #   WORKSPACE_GIT_URL   git URL of the repo containing mothership.yaml.
 
 WORKDIR="${WORKDIR:-/work/workspace}"
