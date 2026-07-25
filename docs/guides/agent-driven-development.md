@@ -53,12 +53,18 @@ Two rules of thumb:
   regression tests covering concurrent phase transitions and a same-slug spawn
   race.
 
-  Everything else those commands write is already per-task, so it has nothing to
-  contend over: `mship journal` appends to `logs/<task>.md`, and a test run's
+  Everything else those commands write is keyed by task, so **different tasks**
+  never contend: `mship journal` appends to `logs/<task>.md`, and a test run's
   output, iteration JSON, and `latest.json` pointer live under
-  `.mothership/test-runs/<task>/`. Only the pass/fail status recorded in
-  `state.yaml` goes through the lock — the run artifacts are written outside it,
-  which is safe because no two tasks share those paths.
+  `.mothership/test-runs/<task>/`. Only the pass/fail status in `state.yaml` goes
+  through the lock; the run artifacts are written outside it.
+
+  That leaves one narrow case to avoid: **two concurrent runs of the *same* task**.
+  The test iteration number is chosen by scanning the run directory for its highest
+  number, with no lock, so two simultaneous `mship test --task X` calls can pick
+  the same iteration and overwrite each other's artifacts and `latest.json`. This
+  is not what parallel subagents normally do — they work on different tasks — but
+  do not fan two runs at one task and expect both results to survive.
 
   What actually limits how many agents you can run is elsewhere: **one inbox
   listener per workspace** (the mailbox lease refuses a second, so only one
