@@ -35,5 +35,19 @@ jobs:
           # `task test` is the entry point; the action needs a token to resolve
           # the release from GitHub's API without hitting anonymous rate limits.
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Give git an identity
+        # A bare runner has no global git identity, and much of the suite drives
+        # real git through mship (spawn creates worktrees and commits). Without
+        # this, `spawn` fails, the task is never registered, and ~170 tests fail
+        # downstream with a confusing "Unknown task: … Known: (none)".
+        #
+        # Configuring the runner rather than the tests is the deliberate smaller
+        # change: the suite currently inherits the developer's git identity, which
+        # is why this only shows up on a clean machine. Making every fixture
+        # hermetic is a larger, separate piece of work.
+        run: |
+          git config --global user.name "mship ci"
+          git config --global user.email "ci@example.invalid"
+          git config --global init.defaultBranch main
       - name: Run the suite
         run: task test
