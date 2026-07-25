@@ -20,6 +20,18 @@ def _reset_settings():
     reset_output_settings()
 
 
+@pytest.fixture(autouse=True)
+def _in_a_workspace(workspace, monkeypatch):
+    """`mship net status` resolves its workspace config from the CURRENT
+    DIRECTORY, so without this the tests only pass when pytest happens to run
+    from inside an mship workspace — they failed in a bare clone of this repo,
+    where no `mothership.yaml` is discoverable, with a bare `SystemExit(1)`.
+
+    Same `workspace` + `chdir` pattern as tests/cli/test_doctor.py.
+    """
+    monkeypatch.chdir(workspace)
+
+
 def _fake_topology():
     return Topology(
         version=1, workspace="ws", probed_at="2026-07-25T16:00:00+00:00",
