@@ -41,3 +41,6 @@ dev = [
     "pytest-asyncio>=0.23",
     "coverage>=7.13.5",
 ]
+docs = [
+    "mkdocs-material>=9.5",
+]
