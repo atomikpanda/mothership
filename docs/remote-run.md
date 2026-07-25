@@ -78,7 +78,7 @@ Bare `--remote` (no `=role`) auto-resolves in this order: the target repo's decl
 Two different credentials are in play, and they never mix:
 
 1. **Relay pairing token** (the run-host's own serve bearer token, handed to you via `mship pair`/`--pair-link` or `--url`/`--token`) — this is what YOUR box uses to authenticate to the REMOTE's `mship serve --relay`. It lives only in the gitignored `.mothership/run-hosts.yaml` on your machine, keyed by role.
-2. **The remote's own git credentials** — the remote box fetches the task branch using its own git auth (a normal git credential helper, SSH key, or the Phase-1 GitHub token broker for a credential-less/cloud remote). No GitHub token ever crosses the wire between your box and the remote.
+2. **The remote's own git credentials** — the remote box fetches the task branch using its own git auth (a normal git credential helper, SSH key, or the [`/gh-token` broker](cloud-agent-auth.md) for a credential-less/cloud remote). No GitHub token ever crosses the wire between your box and the remote.
 
 Nothing secret is ever committed to `mothership.yaml` — that file only ever holds role *names*.
 

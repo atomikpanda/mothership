@@ -45,6 +45,6 @@ nav:
       - Remote run: remote-run.md
   - Cloud workers:
       - Unattended cloud runner: unattended-cloud-runner.md
-      - Cloud worker auth spine: cloud-worker-auth-spine.md
-      - Cloud agent auth: cloud-agent-auth.md
-      - Claude routine runner (adapter): adapters/claude-routine-runner.md
+      - Attach-at-relay egress proxy: cloud-worker-auth-spine.md
+      - The /gh-token broker: cloud-agent-auth.md
+      - Pull-API runner (Claude routine): adapters/claude-routine-runner.md
