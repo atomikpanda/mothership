@@ -1134,14 +1134,18 @@ def register(app: typer.Typer, get_container):
                 raise typer.Exit(code=1)
 
         # Tracker issues linked to this task's WorkItem (#386); injected into
-        # each PR body as Closes trailers during PR creation below.
+        # each PR body as Closes trailers during PR creation below. Fail-open:
+        # a corrupt store must not block finish (same contract as the gate above).
         linked_issue_canonicals: list[str] = []
         if getattr(task, "work_item_id", None):
-            from mship.core.issue_link import linked_issue_refs
-            from mship.core.workitem_store import WorkItemStore
-            _wi = WorkItemStore(workspace_root / ".mothership" / "workitems").get(task.work_item_id)
-            if _wi is not None:
-                linked_issue_canonicals = linked_issue_refs(_wi)
+            try:
+                from mship.core.issue_link import linked_issue_refs
+                from mship.core.workitem_store import WorkItemStore
+                _wi = WorkItemStore(workspace_root / ".mothership" / "workitems").get(task.work_item_id)
+                if _wi is not None:
+                    linked_issue_canonicals = linked_issue_refs(_wi)
+            except Exception as e:
+                output.warning(f"couldn't read linked issues (corrupt store?): {e}")
 
         graph = container.graph()
         config = container.config()
