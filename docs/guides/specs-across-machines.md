@@ -96,9 +96,21 @@ The consequence worth internalising: **tasks are machine-local**. A task you
 spawned on the devbox does not exist on the desktop — `mship status` there will
 not list it, and `mship test --task <slug>` will report an unknown task. What
 crosses machines is the *branch* (pushed to the remote) and the *spec and plan*
-(committed to the workspace repo). To continue a task elsewhere, spawn a task
-there against the same branch, or use `--remote` to run on the other machine from
-the one holding the task.
+(committed to the workspace repo).
+
+Note what you cannot do: **`mship spawn` always derives its own branch** from the
+task slug (`branch_pattern`, e.g. `feat/<slug>`), and there is no flag to adopt an
+existing one. `--base` chooses what to cut *from*, not what to reuse. So spawning
+a second task for the same work on another machine gives you a second branch, and
+the two diverge. Pick one of these instead:
+
+- **Run the step remotely** from the machine that owns the task (below) — the usual
+  answer, and the one that keeps a single branch and a single task.
+- **Hand the work over**: finish on the first machine, then spawn fresh on the
+  second for the follow-up work, treating it as a new task with its own branch.
+- **Check the branch out by hand** on the second machine for a quick look. It will
+  not be a registered mship task there, so the gates and `mship test --task` will
+  not apply to it.
 
 ## Running one machine's work on another
 
@@ -106,11 +118,22 @@ For the iOS-simulator case you usually do not want a second copy of the task at
 all — you want the desktop to execute one step:
 
 ```bash
-mship run --remote=desktop        # runs on the desktop, streams back here
+mship commit "wip: about to run on the simulator"   # or plain git commit + push
+mship run --remote=desktop                          # runs there, streams back here
 ```
 
-That materialises the task's branch in a worktree on the run host, so the code
-arrives via git rather than via the workspace repo. See
+**Commit and push first.** The run host materialises the task's branch by fetching
+it, so the code arrives via git rather than via the workspace repo — with two
+consequences that bite if you skip the push:
+
+- An **unpushed branch cannot be fetched**, so the run fails outright.
+- A worktree that already exists on the run host is **hard-reset to the branch
+  tip**. So uncommitted or unpushed local edits are not merely missing — the
+  remote silently runs the last pushed revision, and the output looks like a real
+  result for code you are not currently editing.
+
+The failure mode worth remembering is the second one: it does not error, it just
+tests something other than what is in front of you. See
 [Remote run hosts](../remote-run.md) for setting the role up.
 
 ## If a spec should not be committed
