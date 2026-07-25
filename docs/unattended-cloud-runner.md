@@ -12,12 +12,12 @@ one-time go-live setup. It stitches together three deep-dive docs and one skill;
 each is linked at the point it becomes relevant, and their internals are not
 restated here.
 
-- **`cloud-worker-auth-spine.md`** — the attach-at-relay credential egress proxy
+- **`cloud-worker-auth-spine.md`** — attach-at-relay: the credential egress proxy
   (trust model, enforcers, module boundary).
-- **`cloud-agent-auth.md`** — the simpler `/gh-token` broker (the daytime/trusted
-  variant) and the GitHub App setup that both models share.
-- **`adapters/claude-routine-runner.md`** — the alternative pull-API host model
-  (`mship item run-next` selects + claims from a backlog).
+- **`cloud-agent-auth.md`** — the `/gh-token` broker: GitHub auth for trusted
+  cloud sessions, plus the GitHub App setup both auth models share.
+- **`adapters/claude-routine-runner.md`** — the pull-API runner: a Claude routine
+  as the unattended-run host (`mship item run-next` selects + claims from a backlog).
 - **skill `overnight-cloud-worker-routines`** — the agent-facing pattern for
   minting the token and standing up the routine.
 
@@ -32,9 +32,36 @@ restated here.
 | **Credential** | the relay egress proxy | Attaches the repo-scoped GitHub App token **at egress** and enforces the run's scope (which repos, which push branch). The worker never sees it. |
 
 The recommended path below is **attach-at-relay** (worker holds no credential),
-the model built for untrusted, prompt-injectable overnight workers. Two simpler
-variants — the `/gh-token` broker and the pull-API runner — are covered under
-[Variants](#variants-when-to-use-them).
+the model built for untrusted, prompt-injectable overnight workers. It is one
+point in a small decision space — see the next section before committing to a
+setup.
+
+---
+
+## Choosing your setup
+
+Two **independent** choices define a deployment. Pick one from each axis — any
+combination works.
+
+**Axis 1 — how the worker authenticates to GitHub:**
+
+| Model | Worker holds | Use when | Doc |
+|---|---|---|---|
+| Raw env token (`GH_TOKEN`) | a real GitHub token | trusted CI/container you fully control | [pull-API runner prerequisites](adapters/claude-routine-runner.md) |
+| The `/gh-token` broker | a serve bearer; pulls short-lived repo-scoped tokens on use | daytime/trusted runs; a machine with `mship serve` is awake | [cloud-agent-auth.md](cloud-agent-auth.md) |
+| Attach-at-relay (this runbook's default) | **no GitHub credential** — only a per-run relay token | untrusted, prompt-injectable overnight workers | [cloud-worker-auth-spine.md](cloud-worker-auth-spine.md) |
+
+**Axis 2 — how work is selected:**
+
+| Model | You schedule | Use when | Doc |
+|---|---|---|---|
+| Per-spec push (this runbook's default) | one routine per named approved spec | you decide each night what runs | this doc, [Per-run lifecycle](#per-run-lifecycle-once-per-approved-spec) |
+| Pull-API backlog | one recurring tick; `mship item run-next` picks + claims | you keep an `unattended`-flagged backlog and want it drained | [adapters/claude-routine-runner.md](adapters/claude-routine-runner.md) |
+
+One caveat couples the axes: with attach-at-relay the worker cannot open its own
+PR yet — `finish` runs `--push-only` and the PR is opened in an attended step
+([Opening the PR](#opening-the-pr-why-it-is-a-separate-step-today)). The other
+two auth models let `finish` open the PR directly.
 
 ---
 
@@ -228,7 +255,7 @@ run one of two ways:
 
 ## Variants: when to use them
 
-- **Daytime / trusted, zero App — the `/gh-token` broker.** If a workspace only
+- **The `/gh-token` broker (daytime / trusted, zero App).** If a workspace only
   runs while your own machine is awake, skip the App entirely: `mship serve`'s
   `/gh-token` proxies the host's `gh auth token`, and the worker pulls a
   short-lived token itself. Simpler, but single-identity and needs a machine
@@ -245,8 +272,8 @@ run one of two ways:
 
 ## See also
 
-- `cloud-worker-auth-spine.md` — attach-at-relay egress proxy (trust model, seams, enforcers).
-- `cloud-agent-auth.md` — GitHub App setup + the `/gh-token` broker variant.
-- `adapters/claude-routine-runner.md` — the pull-API host model + smoke test.
+- `cloud-worker-auth-spine.md` — attach-at-relay: the credential egress proxy (trust model, seams, enforcers).
+- `cloud-agent-auth.md` — the `/gh-token` broker + the GitHub App setup both auth models share.
+- `adapters/claude-routine-runner.md` — the pull-API runner (Claude routine host) + smoke test.
 - skill `overnight-cloud-worker-routines` — the agent-facing routine pattern.
 - specs: `cloud-worker-auth-spine`, `worker-pr-egress`, `relay-aware-worker-boot`, `cloud-agent-github-auth`, `unattended-runner`.
