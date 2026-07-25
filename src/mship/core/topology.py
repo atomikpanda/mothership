@@ -418,7 +418,10 @@ def _run_host_edges(
                     f"in this workspace's run_hosts list"),
             fix=(f"add {role!r} to `run_hosts:` in mothership.yaml, or fix the "
                  f"typo on repo {repo_name!r}"),
-            facts={"declared_by_repo": repo_name, "known_roles": declared},
+            # `role` is included so a consumer can name it (the console fills
+            # it into the remediation snippet); without it the card would render
+            # a literal `{role}` placeholder.
+            facts={"role": role, "declared_by_repo": repo_name, "known_roles": declared},
         ))
 
     # --- per declared role -------------------------------------------------

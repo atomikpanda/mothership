@@ -168,3 +168,30 @@ def test_labels_keep_the_raw_value():
         "facts": {"declared": ["mac"], "store_path": "/ws/a b/run-hosts.yaml"},
     })
     assert "/ws/a b/run-hosts.yaml" in card["label"]
+
+
+def test_an_unfillable_slot_is_always_flagged_as_needing_input():
+    """Greptile, PR #412 round 5: `str.format` raises on ANY missing key, so the
+    template returns whole — and a card whose only gap was `{role}` looked
+    turnkey while literally containing `{role}`. Live for `run_host_unknown_role`
+    (whose facts carried no `role`) and `run_host_orphan_mapping`.
+    """
+    for code in sorted(_COMMANDS):
+        card = command_for({"status": "fail", "code": code, "facts": {}})
+        if "{" in card["command"]:
+            assert card["needs_input"], (
+                f"{code} renders an unfilled slot but is not flagged: "
+                f"{card['command']!r}"
+            )
+
+
+def test_unknown_role_card_names_the_role():
+    """The topology edge reports the offending role, so the snippet should say it
+    rather than emit a placeholder."""
+    card = command_for({
+        "status": "fail", "code": "run_host_unknown_role",
+        "facts": {"role": "typo-role", "declared_by_repo": "api",
+                  "known_roles": ["mac-studio"]},
+    })
+    assert "typo-role" in card["command"]
+    assert "{role}" not in card["command"]

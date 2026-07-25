@@ -16,6 +16,7 @@ yields no card.
 """
 from __future__ import annotations
 
+import re
 import shlex
 
 #: Tokens that stand in for a value the console CANNOT know — a pair link is a
@@ -27,6 +28,9 @@ import shlex
 #: The invariant this buys, enforced in tests: every card either runs unchanged
 #: OR is flagged `needs_input`. "Every card runs unchanged" is not achievable —
 #: some remediations genuinely require operator-supplied secrets.
+#: A `{slot}` left in a rendered command means a fact was missing.
+_UNFILLED_SLOT = re.compile(r"\{[a-z_]+\}")
+
 _PLACEHOLDERS = (
     "PAIR_LINK", "ROLE_NAME", "ROLE", "SERVE_URL", "BEARER_TOKEN",
     "/absolute/path/to/",
@@ -148,6 +152,14 @@ def command_for(edge: dict) -> dict | None:
     return {
         "label": _fill(label_template, facts),
         "command": command,
-        # True when the operator must substitute something before running.
-        "needs_input": any(token in command for token in _PLACEHOLDERS),
+        # True when the operator must substitute something before running: either
+        # a known placeholder token, or a `{slot}` that could not be filled
+        # because the fact was absent. The second half matters — `str.format`
+        # raises on ANY missing key, so the template comes back whole, and a card
+        # whose only gap was that slot would otherwise look turnkey while
+        # containing a literal `{role}` (Greptile, PR #412).
+        "needs_input": (
+            any(token in command for token in _PLACEHOLDERS)
+            or _UNFILLED_SLOT.search(command) is not None
+        ),
     }
