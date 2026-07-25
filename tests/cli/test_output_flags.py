@@ -249,6 +249,17 @@ _ALLOWED_ISATTY = {
         # input-mode decision, not an output-shape one.
         "sys.stdin.isatty()",
     ),
+    "ui.py": (
+        # Both are reached only AFTER Output().json_mode has already chosen the
+        # human branch, and neither picks a shape:
+        #   stdout — can an OSC 52 clipboard escape reach a terminal at all?
+        #            (a capability question about writing an escape sequence)
+        #   stdin  — can we read a single keypress for the "press c to copy"
+        #            prompt, or must it be skipped? (interactivity, same as
+        #            worktree.py above)
+        "sys.stdout.isatty()",
+        "sys.stdin.isatty()",
+    ),
 }
 
 

@@ -140,6 +140,7 @@ from mship.cli import skill as _skill_mod
 from mship.cli import spec as _spec_mod
 from mship.cli import status as _status_mod
 from mship.cli import switch as _switch_mod
+from mship.cli import ui as _ui_mod
 from mship.cli import serve as _serve_mod
 from mship.cli import sync as _sync_mod
 from mship.cli import view as _view_mod
@@ -198,6 +199,7 @@ _pr_mod.register(app, get_container)
 _prune_mod.register(app, get_container)
 _reconcile_mod.register(app, get_container)
 _net_mod.register(app, get_container)
+_ui_mod.register(app, get_container)
 _relay_mod.register(app, get_container)
 _run_host_mod.register(app, get_container)
 _skill_mod.register(app, get_container)
