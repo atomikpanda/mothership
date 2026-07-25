@@ -1,8 +1,15 @@
-# Cloud-worker auth spine — attach-at-relay credential egress proxy (Shape 2)
+# Attach-at-relay: the credential egress proxy
 
-The overnight cloud-worker fan-out runs disposable, prompt-injectable workers that
+> **Where this fits:** this is the deep-dive on the **credential plane** of the
+> [unattended cloud runner](unattended-cloud-runner.md) — start there for the
+> workflow and setup. Siblings: [the `/gh-token` broker](cloud-agent-auth.md)
+> (the simpler, trusted-worker alternative to this proxy) and the
+> [pull-API runner](adapters/claude-routine-runner.md) (an alternative way to
+> *select* work; independent of how auth is done).
+
+The unattended cloud runner runs disposable, prompt-injectable workers that
 must clone/fetch/push across several repos — yet a worker must never hold a GitHub
-credential. This spine turns the relay into a scoped, credential-attaching **egress
+credential. Attach-at-relay turns the relay into a scoped, credential-attaching **egress
 proxy**: the worker points its git remote at the relay carrying only a low-value
 placeholder + per-run token; the relay attaches the real, repo-scoped GitHub App
 token at egress and enforces what the worker may do. The credential never lands on
@@ -23,8 +30,8 @@ Three trust tiers, least-trusted first:
   directly to `github.com`, is rejected (it is not a GitHub bearer); presented to
   the relay it unlocks only a push of the *run branch* to the *run's repos*.
 - **Relay / front door — trusted transport (in v1).** Terminates the worker's TLS
-  and forwards to the small trusted core. In Shape 2 the front door and the core
-  are co-located, so the relay is trusted.
+  and forwards to the small trusted core. In the co-located deployment the front
+  door and the core run on the same host, so the relay is trusted.
 - **Secrets-egress host — the small trusted core.** Does the exchange: verify the
   per-run token → resolve the enrollment ceiling → enforce the request → mint the
   repo-scoped App token → attach it host-locked → forward to GitHub.
@@ -38,7 +45,7 @@ Containment rests on four independent limits, so no single slip is catastrophic:
 4. the **Attachment is host-locked** — a route misconfig cannot send the credential
    to any host outside `github.com` / `api.github.com`.
 
-## 2. Attach-at-relay, Shape 2 (co-located)
+## 2. The co-located deployment (v1)
 
 All three roles run on the single relay the operator already runs. This is the
 deliberate v1 simplification: **some host must see the bearer credential in
@@ -47,7 +54,7 @@ bearer-token scheme. The design does not pretend otherwise; it *minimizes and
 isolates* that plaintext exposure to the small egress-proxy core and keeps it off
 the worker entirely.
 
-## 3. North star: the untrusted-relay 3-role split
+## 3. Deployment trust: trusted relay today, untrusted relay later
 
 The end-state splits the tiers onto separate hosts: **worker / blind relay /
 separate secrets-egress host**. Because the egress-proxy is a **distinct module**
@@ -57,11 +64,12 @@ that module onto its own host behind a now-blind relay is a **deployment / wirin
 change, not a channel rewrite**. The worker config, the token, the seams, and the
 enforcer are all unchanged by the move.
 
-**Shape 2 vs Shape 3 is a FORK, not a ladder.** They defend *different* adversaries:
+**The co-located shape (this doc) vs the untrusted-relay shape is a FORK, not a
+ladder** (internally: Shape 2 / Shape 3). They defend *different* adversaries:
 
-- **Shape 2 (this):** worker is least-trusted; the relay operator is trusted.
-- **Shape 3:** the *relay operator* is least-trusted (a blind courier), which needs
-  a second, separately-operated secrets-egress component.
+- **Co-located (this):** worker is least-trusted; the relay operator is trusted.
+- **Untrusted-relay:** the *relay operator* is least-trusted (a blind courier), which
+  needs a second, separately-operated secrets-egress component.
 
 You pick the fork by *which* party you distrust — you do not "graduate" from one to
 the other. Attach-at-relay **retires seal-to-worker / HPKE**: there is no longer any
@@ -134,12 +142,17 @@ only a *run-branch* push to the *run's repos*, with a repo-scoped short-TTL App 
 the worker never sees. Exfiltrating the placeholder + token yields no GitHub access
 and no other-branch / other-repo write.
 
-> **The api.github.com leg is live + enforced.** The worker OPENS its PR through
-> the `/api/` egress leg (operator decision B). The
-> route is back on the github-app provider behind `GitHubApiEnforcer`, a
-> DEFAULT-DENY REST enforcer (below). This is the API leg the auth-spine slice
-> deferred, now done with a real enforcer instead of a pass-through — so the API
-> path cannot sidestep the git push-to-run-branch enforcement.
+> **The api.github.com leg is live + enforced — but `mship finish` does not
+> route its PR-open through it yet.** The `/api/` route is deployed behind
+> `GitHubApiEnforcer`, a DEFAULT-DENY REST enforcer (below) whose only permitted
+> write is opening a PR. However `mship finish` has no `--relay-url`/`--run-token`
+> path today, so a run-token-only worker pushes with `mship finish --push-only`
+> and the PR is opened in an attended step. The canonical statement of what works
+> today is the runbook's
+> [Opening the PR](unattended-cloud-runner.md#opening-the-pr-why-it-is-a-separate-step-today)
+> — this section documents the enforcer that makes the future relay-routed
+> PR-open safe, so the API path can never sidestep the git push-to-run-branch
+> enforcement.
 
 ## 7. Egress-proxy module boundary
 
@@ -162,9 +175,12 @@ relocation a deployment change rather than a rewrite.
 
 ## 8. The api.github.com leg — `GitHubApiEnforcer` (default-deny, PR-only)
 
-The worker opens its own PR, which is a REST call (`POST /repos/{o}/{r}/pulls`).
-So the `api.github.com` route is routed on the **same** github-app provider as the
-git leg, behind `GitHubApiEnforcer`. Containment is two independent layers: (a) the
+Opening a PR is a REST call (`POST /repos/{o}/{r}/pulls`), and the plan of record
+is for the worker to open its own PR through this leg once `mship finish` can
+route its PR-open via the relay (today it cannot — see the runbook's
+[Opening the PR](unattended-cloud-runner.md#opening-the-pr-why-it-is-a-separate-step-today)).
+The `api.github.com` route is therefore already routed on the **same** github-app
+provider as the git leg, behind `GitHubApiEnforcer`. Containment is two independent layers: (a) the
 repo-scoped App installation token already bounds every call to the run's repos;
 (b) the enforcer is DEFAULT-DENY over the REST surface — it permits an enumerated
 allowlist and refuses everything else (403). New/unknown GitHub endpoints are denied
