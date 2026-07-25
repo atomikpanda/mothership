@@ -1,4 +1,11 @@
-# GitHub Auth for Cloud Agent Sessions
+# The /gh-token broker: GitHub auth for trusted cloud sessions
+
+> **Where this fits:** this is the **simpler** of the two worker-auth models for
+> the [unattended cloud runner](unattended-cloud-runner.md) — the worker pulls a
+> short-lived GitHub token from `mship serve` at the moment of use, so it briefly
+> holds a real credential. For untrusted overnight workers that must never hold
+> one, use [attach-at-relay](cloud-worker-auth-spine.md) instead. §2 below (the
+> GitHub App setup) is shared by **both** models.
 
 Cloud/CI agent containers need to push commits and open PRs without a locally
 logged-in `gh` CLI or a hand-copied personal access token (PAT) baked into the
@@ -6,8 +13,10 @@ routine, prompt, or logs. mship solves this with one token endpoint: the cloud
 container asks `mship serve` for a short-lived, repo-scoped token at the moment
 it needs one, instead of holding a long-lived credential itself.
 
-There is a single broker — `mship serve`'s `GET /gh-token` — with two backends,
-chosen automatically by whether a GitHub App is configured on the serve host:
+There is a single **token broker** — `mship serve`'s `GET /gh-token` (referred to
+as "the `/gh-token` broker" across these docs; distinct from the attach-at-relay
+egress proxy, which never hands the worker a token) — with two backends, chosen
+automatically by whether a GitHub App is configured on the serve host:
 
 - **App-backed (unattended + multi-account).** If `MSHIP_GH_APP_ID` +
   `MSHIP_GH_APP_KEY` are set on the serve host, serve mints short-lived GitHub
