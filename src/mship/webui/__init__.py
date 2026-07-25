@@ -63,14 +63,66 @@ COOKIE_NAME = "mship_ui"
 COOKIE_MAX_AGE_SECONDS = 12 * 60 * 60
 
 
-def _cookie_value(auth_token: str) -> str:
-    """An opaque, deterministic derivation of the serve token — never the token
-    itself, so a stolen cookie cannot be replayed against the JSON API (which
-    wants the raw bearer). Deterministic so a restart does not invalidate an open
-    tab, and compared with `compare_digest`."""
-    import hashlib
+def _mint_cookie(auth_token: str, *, now: int, lifetime: int = COOKIE_MAX_AGE_SECONDS) -> str:
+    """`<expires-at>.<hmac>` — a credential that the SERVER can expire.
 
-    return hashlib.sha256(f"mship-ui-cookie:{auth_token}".encode()).hexdigest()
+    Never the serve token itself, so a stolen cookie cannot be replayed against
+    the JSON API (which wants the raw bearer). The expiry is inside the signed
+    material rather than only in the Set-Cookie `max_age`: `max_age` is a request
+    to the browser, and a client that ignores it (or a copied cookie value) would
+    otherwise stay valid forever.
+    """
+    import hashlib
+    import hmac
+
+    expires_at = now + lifetime
+    mac = hmac.new(
+        auth_token.encode(), f"mship-ui:{expires_at}".encode(), hashlib.sha256
+    ).hexdigest()
+    return f"{expires_at}.{mac}"
+
+
+def _cookie_is_valid(cookie: str, auth_token: str, *, now: int) -> bool:
+    """Verify a minted cookie: well-formed, signature matches, not expired."""
+    import hashlib
+    import hmac
+
+    expires_str, _, mac = cookie.partition(".")
+    if not mac:
+        return False
+    try:
+        expires_at = int(expires_str)
+    except ValueError:
+        return False
+    if expires_at <= now:
+        return False
+    expected = hmac.new(
+        auth_token.encode(), f"mship-ui:{expires_at}".encode(), hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(mac, expected)
+
+
+def _connection_is_secure(request: "Request") -> bool:
+    """Whether this request reached us over TLS.
+
+    Behind the relay, Caddy terminates TLS and the request arrives at the app as
+    plain HTTP, so the ASGI scheme alone under-reports it — hence the forwarded
+    header. Trusting that header is safe in this direction: the only thing it can
+    do is make a cookie MORE restrictive (a forged `https` yields a Secure cookie
+    the browser then declines to send over http — a self-inflicted annoyance, not
+    a privilege gain).
+    """
+    if request.url.scheme == "https":
+        return True
+    forwarded = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    return forwarded.lower() == "https"
+
+
+def _is_loopback(request: "Request") -> bool:
+    """Whether the request came from this machine, judged by the client address
+    rather than the Host header (which a client controls)."""
+    client = request.client
+    return bool(client) and client.host in {"127.0.0.1", "::1", "localhost"}
 
 
 def mount_webui(app, *, payload_source: Callable[[], dict], auth_token: str | None = None) -> None:
@@ -86,14 +138,13 @@ def mount_webui(app, *, payload_source: Callable[[], dict], auth_token: str | No
     operator out of a server that is already open locally.
     """
     import hmac
+    import time
 
-    from fastapi import Depends, FastAPI, HTTPException, Query
+    from fastapi import FastAPI, HTTPException, Query
     from fastapi.responses import RedirectResponse
     from fastapi.staticfiles import StaticFiles
 
     from mship.webui.views import render_topology
-
-    expected_cookie = _cookie_value(auth_token) if auth_token else None
 
     def _credentialed(request: Request) -> bool:
         if auth_token is None:
@@ -102,8 +153,8 @@ def mount_webui(app, *, payload_source: Callable[[], dict], auth_token: str | No
         if hmac.compare_digest(header.encode(), f"Bearer {auth_token}".encode()):
             return True
         cookie = request.cookies.get(COOKIE_NAME) or ""
-        return bool(expected_cookie) and hmac.compare_digest(
-            cookie.encode(), expected_cookie.encode()
+        return bool(cookie) and _cookie_is_valid(
+            cookie, auth_token, now=int(time.time())
         )
 
     # A sub-app, NOT include_router: see the module docstring. This is what lets
@@ -119,15 +170,31 @@ def mount_webui(app, *, payload_source: Callable[[], dict], auth_token: str | No
         if token is not None and auth_token is not None:
             if not hmac.compare_digest(token.encode(), auth_token.encode()):
                 raise HTTPException(status_code=401, detail="invalid token")
+
+            secure = _connection_is_secure(request)
+            if not secure and not _is_loopback(request):
+                # Refuse to hand a browser credential to a plaintext connection
+                # from off-box. The header bearer still works, so this is a
+                # narrowing rather than a dead end.
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "refusing to set a console cookie over plaintext from a "
+                        "non-loopback client; reach the console over https (the "
+                        "relay terminates TLS), tunnel it to localhost, or send "
+                        "Authorization: Bearer instead"
+                    ),
+                )
+
             response = RedirectResponse(url=str(request.url.path), status_code=303)
             response.set_cookie(
                 COOKIE_NAME,
-                expected_cookie,
+                _mint_cookie(auth_token, now=int(time.time())),
                 max_age=COOKIE_MAX_AGE_SECONDS,
                 httponly=True,
                 samesite="strict",
                 path=MOUNT_PATH,
-                secure=request.url.scheme == "https",
+                secure=secure,
             )
             return response
 
