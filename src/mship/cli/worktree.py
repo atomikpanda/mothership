@@ -904,6 +904,7 @@ def register(app: typer.Typer, get_container):
                 pr_manager=container.pr_manager(),
                 merged_count=merged_count,
                 closed_count=closed_count,
+                open_count=open_count,
                 warn=output.warning,
             )
         except Exception:

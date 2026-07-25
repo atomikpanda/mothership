@@ -115,3 +115,14 @@ def test_noop_without_work_item_or_links(tmp_path):
                                  pr_manager=pm, merged_count=1, closed_count=0,
                                  warn=lambda m: None)
     assert result == {"closed": [], "skipped": [], "failed": []}
+
+
+def test_noop_when_any_pr_still_open(tmp_path):
+    """close --force with merged+open PRs must not close tracker issues (#410 review)."""
+    store, wi_id = _item_with_issue(tmp_path, ["acme/widgets#12"])
+    pm = FakePRManager({"acme/widgets#12": "open"})
+    result = close_linked_issues(task=_task(wi_id), workitems_dir=tmp_path / "workitems",
+                                 pr_manager=pm, merged_count=1, closed_count=0,
+                                 open_count=1, warn=lambda m: None)
+    assert result == {"closed": [], "skipped": [], "failed": []}
+    assert pm.closed_calls == []

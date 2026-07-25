@@ -21,18 +21,20 @@ def _shipped_comment(pr_url: str) -> str:
 
 
 def close_linked_issues(*, task, workitems_dir, pr_manager,
-                        merged_count: int, closed_count: int, warn) -> dict:
+                        merged_count: int, closed_count: int, warn,
+                        open_count: int = 0) -> dict:
     """Close every still-open GitHub issue linked to the task's WorkItem.
 
     Never raises: individual failures are reported through `warn` and the
     close-out proceeds. Returns {"closed": [...], "skipped": [...], "failed": [...]}
-    of canonical 'owner/repo#N' refs. No-op unless the task is fully merged
-    (mirrors advance_spec_on_close's guards).
+    of canonical 'owner/repo#N' refs. No-op unless the task is fully merged —
+    including when ANY PR is still open (a forced close with a mixed
+    merged+open task must not close tracker issues, #410 review).
     """
     result: dict = {"closed": [], "skipped": [], "failed": []}
     if not getattr(task, "work_item_id", None):
         return result
-    if merged_count == 0 or closed_count > 0:
+    if merged_count == 0 or closed_count > 0 or open_count > 0:
         return result
     try:
         from mship.core.issue_link import linked_issue_refs

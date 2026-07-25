@@ -266,6 +266,7 @@ class PrWatcher:
                     pr_manager=PRManager(self.shell),
                     merged_count=merged_count,
                     closed_count=closed_count,
+                    open_count=open_count,
                     warn=lambda m: log.warning("pr_watcher: %s (task=%s)", m, slug),
                 )
         except Exception:
