@@ -29,7 +29,16 @@ def test_config_derived_values_are_escaped():
     })
     # What matters is that no LIVE tag is formed — an inert `onerror=alert(1)`
     # sitting inside escaped angle brackets is just text on the page.
-    assert "<script" not in html.replace('<script src="/ui/static/copy.js">', "")
+    # The page's own local <script src=...> tags are expected; assert on those
+    # explicitly rather than string-stripping one filename, so adding a script
+    # cannot quietly weaken this check.
+    import re
+
+    scripts = re.findall(r"<script\b[^>]*>", html)
+    for tag in scripts:
+        assert re.match(r'<script src="/ui/static/[a-z0-9_.-]+\.js">$', tag), (
+            f"unexpected script tag (inline script, or an off-host src): {tag}"
+        )
     assert "<img" not in html
     assert "<svg" not in html
     assert "<b>not bold</b>" not in html
@@ -60,8 +69,13 @@ def test_no_safe_filter_on_any_template_value():
 
     from mship.webui import TEMPLATES_DIR
 
+    import re
+
     for tpl in Path(TEMPLATES_DIR).glob("*.html"):
-        text = tpl.read_text()
+        # Strip Jinja comments first: a comment that merely MENTIONS the filter
+        # (e.g. explaining why it is not used) is not a bypass, and grepping raw
+        # text made this guard fire on its own documentation.
+        text = re.sub(r"\{#.*?#\}", "", tpl.read_text(), flags=re.S)
         assert "|safe" not in text and "| safe" not in text, f"{tpl.name} uses |safe"
         assert "autoescape false" not in text
 

@@ -261,6 +261,7 @@ def create_app(
     config=None,
     gh_app_id: str | None = None,
     gh_app_key: str | None = None,
+    pair_link: str | None = None,
 ):
     """Build the mship serve FastAPI app (read + review/approve write endpoints).
     Sync handlers call the core directly; FastAPI serializes the returns.
@@ -273,6 +274,12 @@ def create_app(
     `mship run/capture/build --remote`. Without it, `/exec/*` is unavailable
     (503) rather than absent, so a caller gets an actionable message instead
     of a bare 404.
+
+    `pair_link` is the `groundcontrol://add?...` link this serve advertises, or
+    None when it is not pairable. The CALLER supplies it because the correct link
+    differs per transport — `serve_pair_link` for a LAN/tailnet bind,
+    `build_relay_pair_link` for a relay (which binds loopback, so deriving it from
+    the bind address here would wrongly report a relay serve as unpairable).
 
     `gh_app_id` / `gh_app_key` (optional) are the GitHub App broker (Broker B)
     credentials — the App's numeric id and its private-key TEXT (already read
@@ -373,6 +380,44 @@ def create_app(
             workspace_root=workspace_root,
         ))
 
+    def _doctor_payload() -> dict:
+        """Workspace health, from the SAME `DoctorChecker` the CLI uses — no
+        second copy of the checks. Read-only; `probe_network=False` because the
+        console's topology page already probes those edges and a page load should
+        not re-probe the network twice."""
+        from mship.core import topology as topo
+        from mship.core.doctor import DoctorChecker
+
+        report = DoctorChecker(
+            config,
+            ShellRunner(),
+            state_dir=workspace_root / ".mothership",
+            workspace_root=workspace_root,
+            probe_network=False,
+        ).run()
+        return {
+            "workspace": workspace_name,
+            "mship_version": topo._mship_version(),
+            "probed_at": topo._utc_now_iso(),
+            "checks": [
+                {"name": c.name, "status": c.status, "message": c.message}
+                for c in report.checks
+            ],
+            "failures": report.errors,
+            "warnings": report.warnings,
+        }
+
+    @app.get("/doctor")
+    def doctor_report():
+        """The same checks `mship doctor` prints, as JSON."""
+        if config is None:
+            raise HTTPException(
+                status_code=503,
+                detail=("this serve host has no workspace config wired in; "
+                        "bootstrap it as an mship workspace and restart serve"),
+            )
+        return _doctor_payload()
+
     @app.get("/net/topology")
     def net_topology():
         """This host's connectivity topology — the SAME payload `mship net
@@ -390,6 +435,42 @@ def create_app(
             )
         return _topology_payload()
 
+    def _pair_payload() -> dict:
+        """The pairing QR, as a locally-generated data URI.
+
+        The pair link embeds the serve bearer, so this payload carries a
+        CREDENTIAL — which is why the console renders it on its own page with a
+        warning rather than on the topology view, whose no-secrets test would
+        (correctly) reject it.
+        """
+        import base64
+        import io
+
+        from mship.core import topology as topo
+
+        shell = {
+            "workspace": workspace_name,
+            "mship_version": topo._mship_version(),
+            "probed_at": topo._utc_now_iso(),
+        }
+        if pair_link is None:
+            return {
+                **shell, "qr_data_uri": None,
+                "unavailable_reason": (
+                    "Not pairable from this serve: pairing needs a bearer token and "
+                    "an address a phone can reach (a loopback-only serve has neither). "
+                    "Run `mship serve --relay`, or bind a tailnet/LAN address with "
+                    "MSHIP_SERVE_TOKEN set."
+                ),
+            }
+        import segno
+
+        buf = io.BytesIO()
+        segno.make(pair_link, error="m").save(buf, kind="png", scale=6, border=2)
+        encoded = base64.b64encode(buf.getvalue()).decode()
+        return {**shell, "qr_data_uri": f"data:image/png;base64,{encoded}",
+                "unavailable_reason": ""}
+
     # The management console is an optional, self-contained frontend package
     # (`mship.webui`). It receives ONLY the payload above — no config, no stores —
     # which is what lets a separately-shipped frontend replace it later. If the
@@ -400,7 +481,13 @@ def create_app(
         except ImportError:
             logger.info("mship.webui is unavailable; serving without the console")
         else:
-            mount_webui(app, payload_source=_topology_payload, auth_token=auth_token)
+            mount_webui(
+                app,
+                payload_source=_topology_payload,
+                doctor_source=_doctor_payload,
+                pair_source=_pair_payload,
+                auth_token=auth_token,
+            )
 
     from mship.core.spec_review import build_review
 

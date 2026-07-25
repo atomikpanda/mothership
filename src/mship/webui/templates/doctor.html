@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}{{ workspace }} — health{% endblock %}
+{% block content %}
+  <h1 class="text-2xl font-semibold">{{ workspace }}</h1>
+  <p class="mt-1 text-sm text-slate-500">
+    Workspace health &mdash; {{ failures }} failing, {{ warnings }} warning,
+    {{ checks | length }} checks total
+  </p>
+
+  <ul class="mt-6 space-y-2">
+    {% for check in checks %}
+      <li class="flex items-start gap-3 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+        <span class="rounded px-2 py-0.5 text-xs font-medium
+          {% if check.status == 'pass' %}bg-emerald-100 text-emerald-900 dark:bg-emerald-900 dark:text-emerald-100
+          {% elif check.status == 'warn' %}bg-amber-100 text-amber-900 dark:bg-amber-900 dark:text-amber-100
+          {% else %}bg-red-100 text-red-900 dark:bg-red-900 dark:text-red-100{% endif %}">
+          {{ check.status }}
+        </span>
+        <div class="min-w-0">
+          <div class="text-sm font-medium">{{ check.name }}</div>
+          <div class="text-sm text-slate-600 dark:text-slate-400">{{ check.message }}</div>
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
+{% endblock %}

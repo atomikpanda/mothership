@@ -116,6 +116,9 @@ def register(app: typer.Typer, get_container):
 
         gh_app_id, gh_app_key = _read_gh_app_creds(output)
 
+        from mship.core.serve_pair import serve_pair_link
+        pair = serve_pair_link(host, port, token, config.workspace)
+
         api = create_app(
             specs_dir=workspace_root / SPECS_DIRNAME,
             state_manager=container.state_manager(),
@@ -127,13 +130,12 @@ def register(app: typer.Typer, get_container):
             config=config,
             gh_app_id=gh_app_id,
             gh_app_key=gh_app_key,
+            pair_link=pair,
         )
         auth_note = "auth: bearer token" if token else "auth: none (loopback only)"
         docs_note = "docs: disabled (auth)" if token else "docs: /docs"
         output.print(f"mship serve → http://{host}:{port}  ({auth_note}; {docs_note})")
 
-        from mship.core.serve_pair import serve_pair_link
-        pair = serve_pair_link(host, port, token, config.workspace)
         if pair is not None:
             import segno
             from mship.core.relay.pairing import parse_pair_link
@@ -212,6 +214,18 @@ def _serve_with_relay(
 
     # serve stays bound to loopback; the tunnel is what exposes it.
     host = "127.0.0.1"
+
+    # Built before create_app so the console's pairing page renders the SAME link
+    # this function prints as a QR — one source for "how do I pair with this
+    # serve", rather than the page re-deriving it and getting the relay case wrong.
+    key_path = ensure_relay_key(home=Path.home())
+    pair_link = build_relay_pair_link(
+        workspace=workspace,
+        host=rc.host,
+        workspace_root=workspace_root,
+        home=Path.home(),
+    )
+
     api = create_app(
         specs_dir=workspace_root / SPECS_DIRNAME,
         state_manager=container.state_manager(),
@@ -226,15 +240,9 @@ def _serve_with_relay(
         config=config,
         gh_app_id=gh_app_id,
         gh_app_key=gh_app_key,
+        pair_link=pair_link.link,
     )
 
-    key_path = ensure_relay_key(home=Path.home())
-    pair_link = build_relay_pair_link(
-        workspace=workspace,
-        host=rc.host,
-        workspace_root=workspace_root,
-        home=Path.home(),
-    )
     subdomain = pair_link.subdomain
     argv = build_tunnel_argv(rc, subdomain=subdomain, local_port=port, key_path=key_path)
 

@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}{{ workspace }} — pair a phone{% endblock %}
+{% block content %}
+  <h1 class="text-2xl font-semibold">Pair a phone</h1>
+
+  {% if qr_data_uri %}
+    <div class="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm dark:border-amber-700 dark:bg-amber-950">
+      <strong>This QR code is a credential.</strong>
+      It embeds this serve's bearer token, so anything that can read it can reach
+      this workspace. Do not screenshot or share it, and it is why this lives on
+      its own page rather than on the topology view.
+    </div>
+    <div class="mt-4 inline-block rounded-lg bg-white p-4">
+      {# A data: URI, not inline SVG markup — an <img src> is autoescaped like any
+         other attribute, so the QR needs no |safe and the template keeps the
+         no-|safe guarantee the console's escaping test asserts. Generated
+         locally, so still no external request. #}
+      <img src="{{ qr_data_uri }}" alt="Pairing QR code" width="240" height="240">
+    </div>
+    <p class="mt-3 text-sm text-slate-600 dark:text-slate-400">
+      Scan it with Ground Control to add this workspace.
+    </p>
+  {% else %}
+    <p class="mt-4 text-sm">{{ unavailable_reason }}</p>
+  {% endif %}
+{% endblock %}
