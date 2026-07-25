@@ -34,7 +34,7 @@ def test_config_derived_values_are_escaped():
     # cannot quietly weaken this check.
     import re
 
-    scripts = re.findall(r"<script\b[^>]*>", html)
+    scripts = re.findall(r"<script\b[^>]*>", html, flags=re.IGNORECASE)
     for tag in scripts:
         assert re.match(r'<script src="/ui/static/[a-z0-9_.-]+\.js">$', tag), (
             f"unexpected script tag (inline script, or an off-host src): {tag}"
