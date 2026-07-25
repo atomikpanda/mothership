@@ -566,6 +566,13 @@ def register(parent: typer.Typer, get_container):
                                        default_slug=None)
             except Exception as e:
                 output.warning(f"could not link --closes issue(s): {e}")
+        elif closes_canonical:
+            # Never drop user intent silently (#410 review): dispatch normally
+            # ensures a WorkItem, so this branch flags the unexpected case.
+            output.warning(
+                f"--closes refs ignored: spec {spec_id!r} has no work_item_id — "
+                f"link manually with `mship item link-issue`"
+            )
 
         if output.human_mode and result.spawned:
             output.success(
