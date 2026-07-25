@@ -118,9 +118,16 @@ For the iOS-simulator case you usually do not want a second copy of the task at
 all — you want the desktop to execute one step:
 
 ```bash
-mship commit "wip: about to run on the simulator"   # or plain git commit + push
-mship run --remote=desktop                          # runs there, streams back here
+git add -A && git commit -m "wip: about to run on the simulator"
+git push                                  # REQUIRED — see below
+mship run --remote=desktop                # runs there, streams back here
 ```
+
+Note the explicit `git push`. `mship commit` pushes **only** for a task that is
+already finished with an open PR (`finished_at` plus a recorded PR url); for a task
+you are still working on it commits locally and stops. So `mship commit` alone
+before a remote run leaves the run host fetching the previous revision — the exact
+trap described next.
 
 **Commit and push first.** The run host materialises the task's branch by fetching
 it, so the code arrives via git rather than via the workspace repo — with two
