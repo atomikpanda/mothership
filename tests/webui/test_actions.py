@@ -40,3 +40,44 @@ def test_a_missing_fact_leaves_the_placeholder_rather_than_raising():
 def test_healthy_and_unknown_codes_yield_no_card():
     assert command_for({"status": "ok", "code": "relay_ok", "facts": {}}) is None
     assert command_for({"status": "fail", "code": "nope", "facts": {}}) is None
+
+
+def test_every_command_is_shell_safe_when_pasted():
+    """Greptile, PR #412: an unquoted `<role>` placeholder is INPUT REDIRECTION,
+    so pasting the card yields `role: No such file or directory` — and
+    `--remote=<role>` / `export VAR=<serve url>` are outright syntax errors.
+
+    Checked by actually running each rendered command through `bash -n` (parse,
+    don't execute), which catches the whole class rather than the one instance
+    that was reported.
+    """
+    import shutil
+    import subprocess
+
+    bash = shutil.which("bash")
+    if bash is None:                      # pragma: no cover - CI always has bash
+        import pytest
+        pytest.skip("bash unavailable")
+
+    facts = {"role": "mac-studio", "store_path": "/ws/.mothership/run-hosts.yaml"}
+    broken = []
+    for code in sorted(_COMMANDS):
+        card = command_for({"status": "fail", "code": code, "facts": facts})
+        result = subprocess.run(
+            [bash, "-n", "-c", card["command"]],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            broken.append((code, card["command"], result.stderr.strip().splitlines()[:1]))
+    assert broken == [], f"commands that a shell cannot parse: {broken}"
+
+
+def test_placeholders_use_no_angle_brackets():
+    """The convention that keeps the above true: bare UPPERCASE placeholders.
+    Angle brackets are shell metacharacters, so they must not appear at all —
+    even quoted, where they are safe but inconsistent."""
+    offenders = [
+        code for code, (label, tpl) in _COMMANDS.items()
+        if "<" in tpl or ">" in tpl or "<" in label or ">" in label
+    ]
+    assert offenders == [], f"cards using angle-bracket placeholders: {offenders}"

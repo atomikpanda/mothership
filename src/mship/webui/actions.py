@@ -18,14 +18,21 @@ from __future__ import annotations
 
 #: code -> (label template, command template). `{field}` slots in EITHER are
 #: filled from `edge["facts"]`.
+#:
+#: Placeholders for values we CANNOT fill are bare UPPERCASE tokens, never
+#: `<angle brackets>`: these strings are meant to be copied straight into a
+#: shell, where `<role>` is input redirection (pastes and dies with "role: No
+#: such file or directory") and `--remote=<role>` is a syntax error outright.
+#: `tests/webui/test_actions.py` enforces this by running every rendered command
+#: through `bash -n` and rejecting angle brackets.
 _COMMANDS: dict[str, tuple[str, str]] = {
     "run_host_unmapped": (
         "Map this role on this machine",
-        "mship run-host add {role} --pair-link '<paste from `mship pair` on that machine>'",
+        "mship run-host add {role} --pair-link 'PAIR_LINK'   # from `mship pair` on that machine",
     ),
     "run_host_stale_token": (
         "Re-map with a fresh token",
-        "mship run-host add {role} --pair-link '<paste a fresh link>'",
+        "mship run-host add {role} --pair-link 'PAIR_LINK'   # a fresh link from `mship pair`",
     ),
     "run_host_orphan_mapping": (
         "Drop the unused mapping",
@@ -45,11 +52,11 @@ _COMMANDS: dict[str, tuple[str, str]] = {
     ),
     "run_hosts_none_declared": (
         "Declare a role in mothership.yaml",
-        "run_hosts: [<role-name>]   # add to mothership.yaml",
+        "run_hosts: [ROLE_NAME]   # add to mothership.yaml",
     ),
     "run_hosts_ambiguous_default": (
         "Name the role explicitly",
-        "mship run --remote=<role>   # or declare `run_host: <role>` on the repo",
+        "mship run --remote=ROLE   # or declare `run_host: ROLE` on the repo",
     ),
     "run_hosts_store_unreadable": (
         # The store file is the thing to fix first, so name it. The command then
@@ -58,7 +65,7 @@ _COMMANDS: dict[str, tuple[str, str]] = {
         # together, or --pair-link"), and a card that fails on paste is worse
         # than no card.
         "Fix or remove {store_path}, then re-map each role",
-        "mship run-host add <role> --pair-link '<paste from `mship pair` on that machine>'",
+        "mship run-host add ROLE --pair-link 'PAIR_LINK'   # once per declared role",
     ),
     "relay_not_configured": ("Start a relay serve", "mship serve --relay"),
     "relay_not_running": ("Restart the relay serve", "mship serve --relay"),
@@ -70,7 +77,7 @@ _COMMANDS: dict[str, tuple[str, str]] = {
     "serve_relay_absent": ("Start a relay serve", "mship serve --relay"),
     "gh_auth_none": (
         "Point this machine at a token broker",
-        "export MSHIP_GH_BROKER_URL=<serve url> MSHIP_SERVE_TOKEN=<bearer>",
+        "export MSHIP_GH_BROKER_URL=SERVE_URL MSHIP_SERVE_TOKEN=BEARER_TOKEN",
     ),
     "gh_auth_app_key_unreadable": (
         "Fix the App key path",
