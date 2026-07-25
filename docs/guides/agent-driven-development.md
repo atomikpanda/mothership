@@ -45,9 +45,36 @@ compliance first, code quality second) before dispatching the next.
 
 Two rules of thumb:
 
-- **Keep mship-state writes serial.** Parallel subagents editing code in
-  different worktrees is fine; parallel writes to task state (journal, test,
-  finish) race.
+- **Parallel subagents are safe to run.** Both halves are isolated: each task
+  gets its own worktree and branch, so code edits never collide, and every write
+  to `state.yaml` goes through a single read-modify-write under an exclusive
+  `flock` with an atomic replace — so concurrent `journal` / `test` / `finish`
+  calls cannot lose each other's updates to it. There are multiprocessing
+  regression tests covering concurrent phase transitions and a same-slug spawn
+  race.
+
+  Everything else those commands write is keyed by task, so **different tasks**
+  never contend: `mship journal` appends to `logs/<task>.md`, and a test run's
+  output, iteration JSON, and `latest.json` pointer live under
+  `.mothership/test-runs/<task>/`. Only the pass/fail status in `state.yaml` goes
+  through the lock; the run artifacts are written outside it.
+
+  That leaves one narrow case to avoid: **two concurrent runs of the *same* task**.
+  The test iteration number is chosen by scanning the run directory for its highest
+  number, with no lock, so two simultaneous `mship test --task X` calls can pick
+  the same iteration and overwrite each other's artifacts and `latest.json`. This
+  is not what parallel subagents normally do — they work on different tasks — but
+  do not fan two runs at one task and expect both results to survive.
+
+  What actually limits how many agents you can run is elsewhere: **one inbox
+  listener per workspace** (the mailbox lease refuses a second, so only one
+  agent per workspace can hear the phone), **one `mship serve` per workspace**,
+  the **review loop** — every feature needs an approved spec, and you are the one
+  approving — and **CPU for the test suite** when several agents run it at once.
+  (Ground Control's queue holds and merges items from every workspace; it shows
+  one card at a time as a presentation choice, so needing more review throughput
+  is not a reason to add workspaces.) Scale by adding workspaces, or by keeping one
+  orchestrator per workspace that fans work out to subagents.
 - **Commit early, journal always.** `mship journal "<what happened>"` after
   each meaningful step is what lets any future session — human or agent —
   reconstruct the work without replaying it.
