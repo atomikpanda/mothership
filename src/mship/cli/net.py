@@ -66,4 +66,5 @@ def register(parent: typer.Typer, get_container):
             for e in fixes:
                 out.print(f"  [yellow]{e.name}[/yellow]: {e.fix}")
 
-    parent.add_typer(net_app)
+    # "Inspection" alongside `doctor`/`status`: this reports, it never mutates.
+    parent.add_typer(net_app, rich_help_panel="Inspection")
