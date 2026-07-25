@@ -889,6 +889,21 @@ def register(app: typer.Typer, get_container):
         except Exception:
             pass
 
+        # Close linked GitHub tracker issues (#386). Fail-open like the
+        # advances above: failures warn, the close never blocks on them.
+        try:
+            from mship.core.issue_close import close_linked_issues
+            close_linked_issues(
+                task=task,
+                workitems_dir=Path(container.config_path()).parent / ".mothership" / "workitems",
+                pr_manager=container.pr_manager(),
+                merged_count=merged_count,
+                closed_count=closed_count,
+                warn=output.warning,
+            )
+        except Exception:
+            pass
+
         # Lifecycle hooks (MOS-220): `task.closed` fires here, after the
         # spec-advance above (which may have already committed a spec-status
         # mutation) and before the worktree teardown/state-removal below.
