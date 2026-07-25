@@ -138,3 +138,11 @@ def test_url_form_tolerates_fragment_and_query():
     assert normalize_issue_ref(
         "https://github.com/acme/widgets/issues/12?foo=bar", default_slug=None
     ) == "acme/widgets#12"
+
+
+def test_linked_closes_not_fooled_by_substring_issue_numbers():
+    """'Closes #123' in the body must NOT suppress a 'Closes #12' trailer (#410 review)."""
+    from mship.core.issue_refs import append_linked_closes
+    body = "Body.\n\nCloses #123"
+    out = append_linked_closes(body, ["acme/widgets#12"], "acme/widgets")
+    assert out.endswith("Closes #123\nCloses #12")

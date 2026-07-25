@@ -55,11 +55,14 @@ def append_linked_closes(body: str, canonical_refs: list[str], repo_slug: str | 
     'Closes #N', cross-repo as 'Closes owner/repo#N'. Skips refs whose closing
     line is already present in `body` (e.g. from the commit-derived footer).
     No-op when there is nothing new to add."""
+    # Exact-line comparison: substring matching would let 'Closes #123'
+    # suppress a distinct 'Closes #12' trailer (#410 review).
+    body_lines = set(body.splitlines())
     lines = []
     for canonical in canonical_refs:
         slug, num = issue_slug_and_number(canonical)
         line = f"Closes #{num}" if slug == repo_slug else f"Closes {canonical}"
-        if line not in body and line not in lines:
+        if line not in body_lines and line not in lines:
             lines.append(line)
     if not lines:
         return body
