@@ -48,6 +48,7 @@ nav:
       - Run & observe: guides/run-and-observe.md
       - Phone control: guides/phone-control.md
       - Agent-driven development: guides/agent-driven-development.md
+      - Specs & plans across machines: guides/specs-across-machines.md
   - Concepts: concepts.md
   - Reference:
       - CLI reference: cli.md
