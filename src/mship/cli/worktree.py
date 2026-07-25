@@ -272,6 +272,11 @@ def register(app: typer.Typer, get_container):
             help="Bypass the WorkItem requirement for this spawn. Recorded to "
                  "the bypass log.",
         ),
+        closes: Optional[list[str]] = typer.Option(
+            None, "--closes",
+            help="GitHub issue ref(s) this task closes on merge (#N, owner/repo#N, "
+                 "or issue URL; repeatable). Requires --work-item. See #386.",
+        ),
     ):
         """Create coordinated worktrees across repos for a new task."""
         import re as _re
@@ -316,6 +321,23 @@ def register(app: typer.Typer, get_container):
             items = WorkItemStore(workspace_root / ".mothership" / "workitems")
             if items.get(work_item) is None:
                 output.error(f"WorkItem {work_item!r} not found")
+                raise typer.Exit(code=1)
+
+        # Validate --closes refs BEFORE any side effects (#386): a bad ref must
+        # fail the spawn while nothing has been created yet.
+        closes_canonical: list[str] = []
+        if closes:
+            if work_item is None:
+                output.error("--closes requires --work-item (issues are linked to the WorkItem)")
+                raise typer.Exit(code=1)
+            from mship.core.issue_link import default_issue_slug
+            from mship.core.issue_ref import IssueRefError, normalize_issue_ref
+            _slug_default = default_issue_slug(container.config().repos.values())
+            try:
+                closes_canonical = [normalize_issue_ref(c, default_slug=_slug_default)
+                                    for c in closes]
+            except IssueRefError as e:
+                output.error(str(e))
                 raise typer.Exit(code=1)
 
         wt_mgr = container.worktree_manager()
@@ -496,6 +518,12 @@ def register(app: typer.Typer, get_container):
             output.error(str(e))
             raise typer.Exit(code=1)
         task = result.task
+
+        if closes_canonical:
+            from mship.core.issue_link import link_issue_to_item
+            _issue_items = WorkItemStore(workspace_root / ".mothership" / "workitems")
+            for _canonical in closes_canonical:
+                link_issue_to_item(_issue_items, work_item, _canonical, default_slug=None)
 
         if pending_bypass:
             log_mgr = container.log_manager()

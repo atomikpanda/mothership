@@ -984,3 +984,22 @@ def test_regression_from_json_bad_payload_still_errors(configured_app_with_task:
     jf2 = tmp_path / "partial.json"; jf2.write_text('{"problem": "only problem"}')
     result2 = runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf2)])
     assert result2.exit_code != 0
+
+
+def test_spec_dispatch_closes_links_issue_to_work_item(configured_app_with_task: Path, tmp_path: Path):
+    """--closes on dispatch links the issue ref to the task's WorkItem (#386)."""
+    _approve_add_labels(configured_app_with_task, tmp_path)
+    result = runner.invoke(app, ["spec", "dispatch", "add-labels", "--closes", "acme/widgets#9"])
+    assert result.exit_code == 0, result.output
+    mgr = StateManager(configured_app_with_task / ".mothership")
+    wi_id = mgr.load().tasks["add-labels"].work_item_id
+    assert wi_id
+    from mship.core.workitem_store import WorkItemStore
+    item = WorkItemStore(configured_app_with_task / ".mothership" / "workitems").get(wi_id)
+    assert [l.title for l in item.external_links] == ["acme/widgets#9"]
+
+
+def test_spec_dispatch_closes_invalid_ref_fails_loud(configured_app_with_task: Path, tmp_path: Path):
+    _approve_add_labels(configured_app_with_task, tmp_path)
+    result = runner.invoke(app, ["spec", "dispatch", "add-labels", "--closes", "nope"])
+    assert result.exit_code == 1

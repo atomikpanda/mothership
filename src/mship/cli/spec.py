@@ -487,6 +487,11 @@ def register(parent: typer.Typer, get_container):
             None, "--task",
             help="Bind to this existing task slug instead of auto-spawning a slug==id task.",
         ),
+        closes: Optional[list[str]] = typer.Option(
+            None, "--closes",
+            help="GitHub issue ref(s) this work closes on merge (#N, owner/repo#N, "
+                 "or issue URL; repeatable). Linked to the task's WorkItem. See #386.",
+        ),
     ):
         """Dispatch an approved spec to a task.
 
@@ -513,6 +518,19 @@ def register(parent: typer.Typer, get_container):
             output.error(f"No spec with id {spec_id!r}.")
             raise typer.Exit(1)
 
+        # Validate --closes refs BEFORE dispatch side effects (#386).
+        closes_canonical: list[str] = []
+        if closes:
+            from mship.core.issue_link import default_issue_slug
+            from mship.core.issue_ref import IssueRefError, normalize_issue_ref
+            _slug_default = default_issue_slug(container.config().repos.values())
+            try:
+                closes_canonical = [normalize_issue_ref(c, default_slug=_slug_default)
+                                    for c in closes]
+            except IssueRefError as e:
+                output.error(str(e))
+                raise typer.Exit(1)
+
         def _spawn(s):
             return container.worktree_manager().spawn(
                 description=s.title,
@@ -537,6 +555,12 @@ def register(parent: typer.Typer, get_container):
         except DispatchError as e:
             output.error(str(e))
             raise typer.Exit(1)
+
+        if closes_canonical and spec.work_item_id:
+            from mship.core.issue_link import link_issue_to_item
+            for _canonical in closes_canonical:
+                link_issue_to_item(workitems, spec.work_item_id, _canonical,
+                                   default_slug=None)
 
         if output.human_mode and result.spawned:
             output.success(

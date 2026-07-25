@@ -2249,3 +2249,31 @@ def test_close_surfaces_worktree_dirty_error_and_keeps_task(configured_git_app):
     finally:
         container.shell.reset_override()
         container.worktree_manager.reset_override()
+
+
+# --- spawn --closes (#386) ---
+
+def test_spawn_closes_links_issue_to_work_item(configured_git_app: Path):
+    res = runner.invoke(app, ["item", "new", "labels", "--kind", "chore"])
+    assert res.exit_code == 0, res.output
+    item_id = res.output.strip()
+    result = runner.invoke(app, ["spawn", "add labels", "--repos", "shared",
+                                 "--work-item", item_id,
+                                 "--closes", "acme/widgets#12",
+                                 "--closes", "acme/widgets#13"])
+    assert result.exit_code == 0, result.output
+    from mship.core.workitem_store import WorkItemStore
+    item = WorkItemStore(configured_git_app / ".mothership" / "workitems").get(item_id)
+    titles = [l.title for l in item.external_links]
+    assert titles == ["acme/widgets#12", "acme/widgets#13"]
+
+
+def test_spawn_closes_invalid_ref_fails_before_spawn(configured_git_app: Path):
+    res = runner.invoke(app, ["item", "new", "labels", "--kind", "chore"])
+    item_id = res.output.strip()
+    result = runner.invoke(app, ["spawn", "add labels", "--repos", "shared",
+                                 "--work-item", item_id, "--closes", "not-a-ref"])
+    assert result.exit_code == 1
+    from mship.core.state import StateManager
+    state = StateManager(configured_git_app / ".mothership").load()
+    assert "add-labels" not in state.tasks
