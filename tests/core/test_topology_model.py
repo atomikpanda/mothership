@@ -58,3 +58,13 @@ def test_status_values_are_constrained():
     # The four statuses a caller may branch on; `absent` means "not configured
     # on this machine", which is not a problem to fix.
     assert STATUSES == ("ok", "warn", "fail", "absent")
+
+
+def test_payload_carries_the_mship_version():
+    """The console footer shows which mship answered the request, and an external
+    frontend must be able to render that footer from the endpoint alone — so the
+    version belongs IN the payload, not beside it in a template context."""
+    payload = topology_payload(
+        Topology(version=SCHEMA_VERSION, workspace="w", probed_at="t", edges=[])
+    )
+    assert isinstance(payload["mship_version"], str) and payload["mship_version"]
