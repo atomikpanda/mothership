@@ -1,0 +1,53 @@
+name: test
+
+# Until now nothing in CI ran the suite (only docs.yml and version-bump.yml
+# existed), so a green PR said nothing about the tests. PR #411 merged with five
+# failing tests because of it.
+#
+# The job deliberately invokes `task test` rather than calling pytest directly:
+# that target is the single definition of "run the tests" (it runs the
+# runtime-deps guard first, which catches a runtime module importing a dev-only
+# dependency — something pytest structurally cannot detect because pytest always
+# runs in the dev environment). CI and a contributor's laptop therefore run the
+# same thing by construction.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A new push supersedes an in-flight run for the same ref.
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: arduino/setup-task@v2
+        with:
+          # `task test` is the entry point; the action needs a token to resolve
+          # the release from GitHub's API without hitting anonymous rate limits.
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Give git an identity
+        # A bare runner has no global git identity, and much of the suite drives
+        # real git through mship (spawn creates worktrees and commits). Without
+        # this, `spawn` fails, the task is never registered, and ~170 tests fail
+        # downstream with a confusing "Unknown task: … Known: (none)".
+        #
+        # Configuring the runner rather than the tests is the deliberate smaller
+        # change: the suite currently inherits the developer's git identity, which
+        # is why this only shows up on a clean machine. Making every fixture
+        # hermetic is a larger, separate piece of work.
+        run: |
+          git config --global user.name "mship ci"
+          git config --global user.email "ci@example.invalid"
+          git config --global init.defaultBranch main
+      - name: Run the suite
+        run: task test
