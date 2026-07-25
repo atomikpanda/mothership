@@ -16,8 +16,8 @@ yields no card.
 """
 from __future__ import annotations
 
-#: code -> (label, command template). `{field}` slots are filled from
-#: `edge["facts"]`.
+#: code -> (label template, command template). `{field}` slots in EITHER are
+#: filled from `edge["facts"]`.
 _COMMANDS: dict[str, tuple[str, str]] = {
     "run_host_unmapped": (
         "Map this role on this machine",
@@ -52,8 +52,13 @@ _COMMANDS: dict[str, tuple[str, str]] = {
         "mship run --remote=<role>   # or declare `run_host: <role>` on the repo",
     ),
     "run_hosts_store_unreadable": (
-        "Re-map roles after fixing the store",
-        "mship run-host add <role>",
+        # The store file is the thing to fix first, so name it. The command then
+        # has to carry a connection source: bare `run-host add <role>` is
+        # REJECTED by the CLI ("provide a connection: either --url and --token
+        # together, or --pair-link"), and a card that fails on paste is worse
+        # than no card.
+        "Fix or remove {store_path}, then re-map each role",
+        "mship run-host add <role> --pair-link '<paste from `mship pair` on that machine>'",
     ),
     "relay_not_configured": ("Start a relay serve", "mship serve --relay"),
     "relay_not_running": ("Restart the relay serve", "mship serve --relay"),
@@ -87,10 +92,16 @@ def command_for(edge: dict) -> dict | None:
     entry = _COMMANDS.get(edge.get("code", ""))
     if entry is None:
         return None
-    label, template = entry
+    label_template, command_template = entry
     facts = edge.get("facts") or {}
-    try:
-        command = template.format(**facts)
-    except (KeyError, IndexError):
-        command = template
-    return {"label": label, "command": command}
+
+    def _fill(text: str) -> str:
+        """Substitute facts, leaving the placeholder visible when a fact is
+        missing — a half-filled card still guides, and raising here would blank
+        the whole page for one absent field."""
+        try:
+            return text.format(**facts)
+        except (KeyError, IndexError):
+            return text
+
+    return {"label": _fill(label_template), "command": _fill(command_template)}
