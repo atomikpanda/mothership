@@ -45,9 +45,22 @@ compliance first, code quality second) before dispatching the next.
 
 Two rules of thumb:
 
-- **Keep mship-state writes serial.** Parallel subagents editing code in
-  different worktrees is fine; parallel writes to task state (journal, test,
-  finish) race.
+- **Parallel subagents are safe to run.** Both halves are isolated: each task
+  gets its own worktree and branch, so code edits never collide, and every write
+  to `state.yaml` goes through a single read-modify-write under an exclusive
+  `flock` with an atomic replace — so concurrent `journal` / `test` / `finish`
+  calls cannot lose each other's updates. `mship journal` writes one file per
+  task in append mode, and test results are recorded inside the same locked
+  mutation. There are multiprocessing regression tests covering concurrent
+  phase transitions and a same-slug spawn race.
+
+  What actually limits how many agents you can run is elsewhere: **one inbox
+  listener per workspace** (the mailbox lease refuses a second, so only one
+  agent per workspace can hear the phone), **one `mship serve` per workspace**,
+  the **review loop** — every feature needs an approved spec, and Ground
+  Control's queue is one card at a time — and **CPU for the test suite** when
+  several agents run it at once. Scale by adding workspaces, or by keeping one
+  orchestrator per workspace that fans work out to subagents.
 - **Commit early, journal always.** `mship journal "<what happened>"` after
   each meaningful step is what lets any future session — human or agent —
   reconstruct the work without replaying it.
