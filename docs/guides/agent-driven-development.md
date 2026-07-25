@@ -49,17 +49,25 @@ Two rules of thumb:
   gets its own worktree and branch, so code edits never collide, and every write
   to `state.yaml` goes through a single read-modify-write under an exclusive
   `flock` with an atomic replace — so concurrent `journal` / `test` / `finish`
-  calls cannot lose each other's updates. `mship journal` writes one file per
-  task in append mode, and test results are recorded inside the same locked
-  mutation. There are multiprocessing regression tests covering concurrent
-  phase transitions and a same-slug spawn race.
+  calls cannot lose each other's updates to it. There are multiprocessing
+  regression tests covering concurrent phase transitions and a same-slug spawn
+  race.
+
+  Everything else those commands write is already per-task, so it has nothing to
+  contend over: `mship journal` appends to `logs/<task>.md`, and a test run's
+  output, iteration JSON, and `latest.json` pointer live under
+  `.mothership/test-runs/<task>/`. Only the pass/fail status recorded in
+  `state.yaml` goes through the lock — the run artifacts are written outside it,
+  which is safe because no two tasks share those paths.
 
   What actually limits how many agents you can run is elsewhere: **one inbox
   listener per workspace** (the mailbox lease refuses a second, so only one
   agent per workspace can hear the phone), **one `mship serve` per workspace**,
-  the **review loop** — every feature needs an approved spec, and Ground
-  Control's queue is one card at a time — and **CPU for the test suite** when
-  several agents run it at once. Scale by adding workspaces, or by keeping one
+  the **review loop** — every feature needs an approved spec, and you are the one
+  approving — and **CPU for the test suite** when several agents run it at once.
+  (Ground Control's queue holds and merges items from every workspace; it shows
+  one card at a time as a presentation choice, so needing more review throughput
+  is not a reason to add workspaces.) Scale by adding workspaces, or by keeping one
   orchestrator per workspace that fans work out to subagents.
 - **Commit early, journal always.** `mship journal "<what happened>"` after
   each meaningful step is what lets any future session — human or agent —
