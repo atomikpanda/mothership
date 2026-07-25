@@ -367,3 +367,51 @@ def test_every_probe_call_is_timeout_bounded(tmp_path: Path):
     _run(tmp_path, FakeConfig(run_hosts=("mac",), relay=object()),
          probe=recording, shell=FakeShell())
     assert seen and all(isinstance(x, float) and x > 0 for x in seen)
+
+
+# --- code vocabulary guards ------------------------------------------------
+
+def test_documented_failure_modes_have_distinct_codes():
+    """AC8: docs/remote-run.md's troubleshooting rows map 1:1 onto codes."""
+    documented = {
+        "unknown role": RUN_HOST_UNKNOWN_ROLE,
+        "ambiguous run-host": RUN_HOSTS_AMBIGUOUS_DEFAULT,
+        "role unmapped on this machine": RUN_HOST_UNMAPPED,
+        "relay unreachable": RUN_HOST_UNREACHABLE,
+        "remote not bootstrapped (503)": RUN_HOST_NOT_BOOTSTRAPPED,
+        "stale token (401)": RUN_HOST_STALE_TOKEN,
+    }
+    assert len(set(documented.values())) == len(documented)
+
+
+def test_every_status_code_constant_is_unique():
+    """A copy-pasted constant would silently merge two states in the UI."""
+    from mship.core import topology as topo
+
+    codes = [
+        v for k, v in vars(topo).items()
+        if k.isupper() and isinstance(v, str) and not k.startswith("_")
+        and k != "SCHEMA_VERSION"
+    ]
+    assert len(codes) == len(set(codes)), "duplicate status-code value"
+
+
+def test_no_unhealthy_edge_is_ever_left_without_a_fix(tmp_path: Path):
+    """Across every unhealthy shape this module can produce, `fix` is set —
+    a status code with no next step is a dead end for the operator."""
+    cfg = FakeConfig(run_hosts=("mac", "linux"), relay=object(),
+                     repos={"api": FakeRepo(run_host="typo")})
+    _map_role(tmp_path, "linux", "https://linux.relay")
+    _map_role(tmp_path, "orphan", "https://orphan.relay")
+    write_runtime_record(tmp_path, RelayRuntimeRecord(
+        host="h", pid=1, subdomain="s", url="https://s.relay", workspace="ws",
+    ))
+    t = _run(
+        tmp_path, cfg,
+        probe=_probe(**{"https://linux.relay": HealthProbe(ok=False, status_code=503)}),
+        shell=FakeShell(raises=OSError("no git")),
+    )
+    unhealthy = [e for e in t.edges if e.status in ("warn", "fail")]
+    assert unhealthy, "expected this fixture to produce unhealthy edges"
+    missing = [e.name for e in unhealthy if not e.fix]
+    assert missing == [], f"edges with no fix hint: {missing}"
