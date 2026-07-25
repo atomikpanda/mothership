@@ -1,0 +1,6 @@
+/* Tailwind INPUT. Compiled to static/app.css by `task webui:css`.
+   v4 is CSS-first, so no JS config file lands in this Python repo. */
+@import "tailwindcss";
+
+/* Scan the templates for utility classes. */
+@source "./templates/*.html";

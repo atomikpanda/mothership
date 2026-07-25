@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}{{ workspace }} — connectivity{% endblock %}
+{% block content %}
+  <h1 class="text-2xl font-semibold">{{ workspace }}</h1>
+  <p class="mt-1 text-sm text-slate-500">Connectivity topology</p>
+
+  <ul class="mt-6 space-y-3">
+    {% for edge in edges %}
+      <li class="rounded-lg border border-slate-200 p-4 dark:border-slate-800">
+        <div class="flex flex-wrap items-baseline gap-3">
+          <span class="rounded px-2 py-0.5 text-xs font-medium
+            {% if edge.status == 'ok' %}bg-emerald-100 text-emerald-900 dark:bg-emerald-900 dark:text-emerald-100
+            {% elif edge.status == 'warn' %}bg-amber-100 text-amber-900 dark:bg-amber-900 dark:text-amber-100
+            {% elif edge.status == 'fail' %}bg-red-100 text-red-900 dark:bg-red-900 dark:text-red-100
+            {% else %}bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300{% endif %}">
+            {{ edge.status }}
+          </span>
+          <span class="font-medium">{{ edge.name }}</span>
+          <code class="text-xs text-slate-500">{{ edge.code }}</code>
+        </div>
+        <p class="mt-2 text-sm">{{ edge.detail }}</p>
+        {% if edge.fix %}
+          <p class="mt-2 text-sm text-slate-600 dark:text-slate-400">
+            <strong>Fix:</strong> {{ edge.fix }}
+          </p>
+        {% endif %}
+        {% if edge.action %}
+          <div class="mt-3 rounded-md bg-slate-50 p-3 dark:bg-slate-900">
+            <div class="flex items-center justify-between gap-3">
+              <span class="text-xs font-medium text-slate-600 dark:text-slate-400">
+                {{ edge.action.label }}
+              </span>
+              <button type="button" data-copy="{{ edge.action.command }}"
+                class="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-white dark:border-slate-700 dark:hover:bg-slate-800">
+                Copy
+              </button>
+            </div>
+            <pre class="mt-2 overflow-x-auto text-xs"><code>{{ edge.action.command }}</code></pre>
+          </div>
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+{% endblock %}

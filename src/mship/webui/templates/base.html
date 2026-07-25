@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}mship{% endblock %}</title>
+    <!-- Local stylesheet only: the console must work with no internet. -->
+    <link rel="stylesheet" href="/ui/static/app.css">
+  </head>
+  <body class="bg-white text-slate-900 dark:bg-slate-950 dark:text-slate-100">
+    <main class="mx-auto max-w-4xl p-6">
+      {% block content %}{% endblock %}
+    </main>
+    <footer class="mx-auto max-w-4xl px-6 pb-10 text-xs text-slate-500">
+      <!-- A server-rendered page is a snapshot; say when, and by which build. -->
+      mship {{ mship_version }} &middot; probed {{ probed_at }} &middot;
+      <a class="underline" href="/ui">refresh</a>
+    </footer>
+    <script src="/ui/static/copy.js"></script>
+  </body>
+</html>

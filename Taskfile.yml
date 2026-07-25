@@ -49,3 +49,62 @@ tasks:
     desc: Not applicable for this repo
     cmds:
       - echo "mship is a CLI tool; use `uv run mship ...` directly"
+
+  webui:tailwind-binary:
+    desc: Fetch the pinned standalone Tailwind CLI into .tools/ (gitignored, never committed)
+    # The standalone binary removes any need for node/npm in this Python repo.
+    # It is tens of megabytes, so it is fetched on demand into a gitignored dir
+    # rather than committed — only contributors who edit templates need it. The
+    # GENERATED stylesheet is what ships (see webui:css), so installing, running,
+    # and testing mship require neither this binary nor any build step.
+    vars:
+      TAILWIND_VERSION: v4.3.3
+    status:
+      - test -x .tools/tailwindcss
+    cmds:
+      - |
+        set -eu
+        mkdir -p .tools
+        os="$(uname -s)"; arch="$(uname -m)"
+        case "$os/$arch" in
+          Linux/x86_64)  asset=tailwindcss-linux-x64 ;;
+          Linux/aarch64) asset=tailwindcss-linux-arm64 ;;
+          Darwin/arm64)  asset=tailwindcss-macos-arm64 ;;
+          Darwin/x86_64) asset=tailwindcss-macos-x64 ;;
+          *) echo "no pinned Tailwind binary for $os/$arch — put a tailwindcss binary on PATH and re-run" >&2; exit 1 ;;
+        esac
+        # musl (Alpine): the glibc build will not run there.
+        if [ "$os" = Linux ] && ! ldd /bin/sh 2>/dev/null | grep -qi gnu; then
+          case "$arch" in
+            x86_64)  asset=tailwindcss-linux-x64-musl ;;
+            aarch64) asset=tailwindcss-linux-arm64-musl ;;
+          esac
+        fi
+        url="https://github.com/tailwindlabs/tailwindcss/releases/download/{{.TAILWIND_VERSION}}/$asset"
+        echo "fetching $asset ({{.TAILWIND_VERSION}})"
+        curl -fsSL "$url" -o .tools/tailwindcss
+        chmod +x .tools/tailwindcss
+
+  webui:css:
+    desc: Compile the console stylesheet (src/mship/webui/tailwind.css -> static/app.css)
+    deps: [webui:tailwind-binary]
+    cmds:
+      - .tools/tailwindcss -i src/mship/webui/tailwind.css -o src/mship/webui/static/app.css --minify
+
+  webui:css-check:
+    desc: Fail if the committed console stylesheet is stale
+    # Committing a build artifact is normally a smell; it is deliberate here so
+    # users never need a Tailwind binary to install or test mship. This check
+    # removes the usual downside — silent staleness, where a template gains a
+    # utility class that was never compiled and renders unstyled with nothing
+    # complaining — by making a mismatch loud.
+    deps: [webui:tailwind-binary]
+    cmds:
+      - |
+        set -eu
+        tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+        .tools/tailwindcss -i src/mship/webui/tailwind.css -o "$tmp/app.css" --minify
+        if ! diff -q "$tmp/app.css" src/mship/webui/static/app.css >/dev/null; then
+          echo "src/mship/webui/static/app.css is stale — run \`task webui:css\` and commit the result" >&2
+          exit 1
+        fi
