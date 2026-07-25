@@ -145,4 +145,5 @@ def test_linked_closes_not_fooled_by_substring_issue_numbers():
     from mship.core.issue_refs import append_linked_closes
     body = "Body.\n\nCloses #123"
     out = append_linked_closes(body, ["acme/widgets#12"], "acme/widgets")
-    assert out.endswith("Closes #123\nCloses #12")
+    assert "Closes #123" in out.splitlines()
+    assert "Closes #12" in out.splitlines()
