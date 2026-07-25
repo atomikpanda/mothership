@@ -272,6 +272,11 @@ def register(app: typer.Typer, get_container):
             help="Bypass the WorkItem requirement for this spawn. Recorded to "
                  "the bypass log.",
         ),
+        closes: Optional[list[str]] = typer.Option(
+            None, "--closes",
+            help="GitHub issue ref(s) this task closes on merge (#N, owner/repo#N, "
+                 "or issue URL; repeatable). Requires --work-item. See #386.",
+        ),
     ):
         """Create coordinated worktrees across repos for a new task."""
         import re as _re
@@ -316,6 +321,23 @@ def register(app: typer.Typer, get_container):
             items = WorkItemStore(workspace_root / ".mothership" / "workitems")
             if items.get(work_item) is None:
                 output.error(f"WorkItem {work_item!r} not found")
+                raise typer.Exit(code=1)
+
+        # Validate --closes refs BEFORE any side effects (#386): a bad ref must
+        # fail the spawn while nothing has been created yet.
+        closes_canonical: list[str] = []
+        if closes:
+            if work_item is None:
+                output.error("--closes requires --work-item (issues are linked to the WorkItem)")
+                raise typer.Exit(code=1)
+            from mship.core.issue_link import default_issue_slug
+            from mship.core.issue_refs import IssueRefError, normalize_issue_ref
+            _slug_default = default_issue_slug(container.config().repos.values())
+            try:
+                closes_canonical = [normalize_issue_ref(c, default_slug=_slug_default)
+                                    for c in closes]
+            except IssueRefError as e:
+                output.error(str(e))
                 raise typer.Exit(code=1)
 
         wt_mgr = container.worktree_manager()
@@ -496,6 +518,17 @@ def register(app: typer.Typer, get_container):
             output.error(str(e))
             raise typer.Exit(code=1)
         task = result.task
+
+        if closes_canonical:
+            # Fail-open: the task already exists, so a linking failure must not
+            # crash the spawn after its side effects (#410 review).
+            try:
+                from mship.core.issue_link import link_issue_to_item
+                _issue_items = WorkItemStore(workspace_root / ".mothership" / "workitems")
+                for _canonical in closes_canonical:
+                    link_issue_to_item(_issue_items, work_item, _canonical, default_slug=None)
+            except Exception as e:
+                output.warning(f"could not link --closes issue(s): {e}")
 
         if pending_bypass:
             log_mgr = container.log_manager()
@@ -861,6 +894,22 @@ def register(app: typer.Typer, get_container):
         except Exception:
             pass
 
+        # Close linked GitHub tracker issues (#386). Fail-open like the
+        # advances above: failures warn, the close never blocks on them.
+        try:
+            from mship.core.issue_close import close_linked_issues
+            close_linked_issues(
+                task=task,
+                workitems_dir=Path(container.config_path()).parent / ".mothership" / "workitems",
+                pr_manager=container.pr_manager(),
+                merged_count=merged_count,
+                closed_count=closed_count,
+                open_count=open_count,
+                warn=output.warning,
+            )
+        except Exception:
+            pass
+
         # Lifecycle hooks (MOS-220): `task.closed` fires here, after the
         # spec-advance above (which may have already committed a spec-status
         # mutation) and before the worktree teardown/state-removal below.
@@ -1089,6 +1138,20 @@ def register(app: typer.Typer, get_container):
             else:
                 output.error(f"Cannot finish: {gate_result.reason}")
                 raise typer.Exit(code=1)
+
+        # Tracker issues linked to this task's WorkItem (#386); injected into
+        # each PR body as Closes trailers during PR creation below. Fail-open:
+        # a corrupt store must not block finish (same contract as the gate above).
+        linked_issue_canonicals: list[str] = []
+        if getattr(task, "work_item_id", None):
+            try:
+                from mship.core.issue_link import linked_issue_refs
+                from mship.core.workitem_store import WorkItemStore
+                _wi = WorkItemStore(workspace_root / ".mothership" / "workitems").get(task.work_item_id)
+                if _wi is not None:
+                    linked_issue_canonicals = linked_issue_refs(_wi)
+            except Exception as e:
+                output.warning(f"couldn't read linked issues (corrupt store?): {e}")
 
         graph = container.graph()
         config = container.config()
@@ -1634,6 +1697,13 @@ def register(app: typer.Typer, get_container):
                 else:
                     pr_body_base = task.description
                 pr_body = append_closes_footer(pr_body_base, extract_issue_refs(texts))
+                # WorkItem-linked tracker issues (#386): same-repo as `Closes #N`
+                # (GitHub auto-closes on merge), cross-repo as owner/repo#N.
+                if linked_issue_canonicals:
+                    from mship.core.issue_link import slug_for_path
+                    from mship.core.issue_refs import append_linked_closes
+                    pr_body = append_linked_closes(
+                        pr_body, linked_issue_canonicals, slug_for_path(group.rep_path))
                 if acceptance_block:
                     pr_body = pr_body + acceptance_block
 

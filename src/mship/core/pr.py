@@ -367,6 +367,29 @@ class PRManager:
         )
         return PrStateResult(state="unknown", reason=reason)
 
+    def issue_state(self, slug: str, number: int) -> str:
+        """'open' | 'closed' | 'unknown' for GitHub issue `slug#number` (#386)."""
+        result = self._shell.run(
+            f"gh issue view {number} -R {shlex.quote(slug)} --json state -q .state",
+            cwd=Path("."),
+        )
+        raw = result.stdout.strip().upper()
+        if result.returncode == 0 and raw in ("OPEN", "CLOSED"):
+            return raw.lower()
+        return "unknown"
+
+    def close_issue(self, slug: str, number: int, comment: str) -> None:
+        """Close GitHub issue `slug#number` with `comment`. Raises RuntimeError
+        on failure (callers treat that as warn-and-continue, #386)."""
+        result = self._shell.run(
+            f"gh issue close {number} -R {shlex.quote(slug)} --comment {shlex.quote(comment)}",
+            cwd=Path("."),
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                result.stderr.strip() or f"gh issue close failed for {slug}#{number}"
+            )
+
     def get_pr_body(self, pr_url: str) -> str:
         result = self._shell.run(
             f"gh pr view {shlex.quote(pr_url)} --json body -q .body",

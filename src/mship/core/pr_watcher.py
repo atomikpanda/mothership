@@ -253,6 +253,22 @@ class PrWatcher:
                 task=task, workitems_dir=workitems_dir, specs_dir=specs_dir,
                 state=snapshot, merged_count=merged_count, closed_count=closed_count,
             )
+
+            # Close linked GitHub tracker issues (#386). Gated on the injected
+            # shell (present inside `mship serve`, like worktree_manager);
+            # close_linked_issues itself never raises.
+            if self.shell is not None:
+                from mship.core.issue_close import close_linked_issues
+                from mship.core.pr import PRManager
+                close_linked_issues(
+                    task=task,
+                    workitems_dir=workitems_dir,
+                    pr_manager=PRManager(self.shell),
+                    merged_count=merged_count,
+                    closed_count=closed_count,
+                    open_count=open_count,
+                    warn=lambda m: log.warning("pr_watcher: %s (task=%s)", m, slug),
+                )
         except Exception:
             log.exception("pr_watcher: merge auto-advance failed (task=%s)", slug)
             return

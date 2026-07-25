@@ -2249,3 +2249,102 @@ def test_close_surfaces_worktree_dirty_error_and_keeps_task(configured_git_app):
     finally:
         container.shell.reset_override()
         container.worktree_manager.reset_override()
+
+
+# --- spawn --closes (#386) ---
+
+def test_spawn_closes_links_issue_to_work_item(configured_git_app: Path):
+    res = runner.invoke(app, ["item", "new", "labels", "--kind", "chore"])
+    assert res.exit_code == 0, res.output
+    item_id = res.output.strip()
+    result = runner.invoke(app, ["spawn", "add labels", "--repos", "shared",
+                                 "--work-item", item_id,
+                                 "--closes", "acme/widgets#12",
+                                 "--closes", "acme/widgets#13"])
+    assert result.exit_code == 0, result.output
+    from mship.core.workitem_store import WorkItemStore
+    item = WorkItemStore(configured_git_app / ".mothership" / "workitems").get(item_id)
+    titles = [l.title for l in item.external_links]
+    assert titles == ["acme/widgets#12", "acme/widgets#13"]
+
+
+def test_spawn_closes_invalid_ref_fails_before_spawn(configured_git_app: Path):
+    res = runner.invoke(app, ["item", "new", "labels", "--kind", "chore"])
+    item_id = res.output.strip()
+    result = runner.invoke(app, ["spawn", "add labels", "--repos", "shared",
+                                 "--work-item", item_id, "--closes", "not-a-ref"])
+    assert result.exit_code == 1
+    from mship.core.state import StateManager
+    state = StateManager(configured_git_app / ".mothership").load()
+    assert "add-labels" not in state.tasks
+
+
+def test_finish_injects_linked_issue_closes_trailer(configured_git_app: Path):
+    """WorkItem-linked issues land as Closes trailers in the PR body (#386)."""
+    from mship.cli import container as cli_container
+
+    res = runner.invoke(app, ["item", "new", "trailer test", "--kind", "chore"])
+    item_id = res.output.strip()
+    runner.invoke(app, ["spawn", "trailer test", "--repos", "shared",
+                        "--work-item", item_id, "--closes", "acme/widgets#12"])
+
+    captured: dict[str, str] = {}
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            captured["create_cmd"] = cmd
+            return ShellResult(returncode=0, stdout="https://x/pr/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    cli_container.shell.override(mock_shell)
+    try:
+        result = runner.invoke(app, ["finish", "--task", "trailer-test"])
+        assert result.exit_code == 0, result.output
+        assert "create_cmd" in captured
+        # Test repo's origin is not github -> cross-repo (full) form expected.
+        assert "Closes acme/widgets#12" in captured["create_cmd"]
+    finally:
+        cli_container.shell.reset_override()
+
+
+def test_finish_body_unchanged_when_no_linked_issues(configured_git_app: Path):
+    from mship.cli import container as cli_container
+
+    runner.invoke(app, ["spawn", "--hotfix", "no trailer", "--repos", "shared"])
+    captured: dict[str, str] = {}
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd and "origin/" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            captured["create_cmd"] = cmd
+            return ShellResult(returncode=0, stdout="https://x/pr/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
+    cli_container.shell.override(mock_shell)
+    try:
+        result = runner.invoke(app, ["finish", "--hotfix", "--task", "no-trailer"])
+        assert result.exit_code == 0, result.output
+        assert "Closes acme" not in captured.get("create_cmd", "")
+    finally:
+        cli_container.shell.reset_override()

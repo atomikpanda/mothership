@@ -251,6 +251,24 @@ def register(parent: typer.Typer, get_container) -> None:
         items.add_task(item_id, task_slug, now=datetime.now(timezone.utc), state=state_manager)
         typer.echo(f"linked task {task_slug} -> {item_id}")
 
+    @item_app.command("link-issue")
+    def link_issue(item_id: str, ref: str):
+        """Link a GitHub tracker issue; it is closed automatically when the task's PRs merge."""
+        from mship.core.issue_link import default_issue_slug, link_issue_to_item
+        from mship.core.issue_refs import IssueRefError
+
+        items, _, _, _, _ = _ctx()
+        _guard(items, item_id)
+        try:
+            canonical, newly = link_issue_to_item(
+                items, item_id, ref,
+                default_slug=default_issue_slug(get_container().config().repos.values()))
+        except IssueRefError as e:
+            typer.echo(str(e), err=True)
+            raise typer.Exit(1)
+        typer.echo(f"linked issue {canonical} -> {item_id}" if newly
+                   else f"already linked: {canonical}")
+
     @item_app.command("link-url")
     def link_url(item_id: str, url: str,
                  provider: str = typer.Option("url", "--provider"),
