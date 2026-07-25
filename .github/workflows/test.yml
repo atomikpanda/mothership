@@ -1,0 +1,39 @@
+name: test
+
+# Until now nothing in CI ran the suite (only docs.yml and version-bump.yml
+# existed), so a green PR said nothing about the tests. PR #411 merged with five
+# failing tests because of it.
+#
+# The job deliberately invokes `task test` rather than calling pytest directly:
+# that target is the single definition of "run the tests" (it runs the
+# runtime-deps guard first, which catches a runtime module importing a dev-only
+# dependency — something pytest structurally cannot detect because pytest always
+# runs in the dev environment). CI and a contributor's laptop therefore run the
+# same thing by construction.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A new push supersedes an in-flight run for the same ref.
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: arduino/setup-task@v2
+        with:
+          # `task test` is the entry point; the action needs a token to resolve
+          # the release from GitHub's API without hitting anonymous rate limits.
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run the suite
+        run: task test
