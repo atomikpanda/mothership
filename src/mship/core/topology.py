@@ -111,6 +111,9 @@ def topology_payload(topology: Topology) -> dict[str, Any]:
     disagree about the contract."""
     return {
         "version": topology.version,
+        # Additive, so SCHEMA_VERSION does not change: existing consumers keep
+        # working and new ones can rely on it being present.
+        "mship_version": _mship_version(),
         "workspace": topology.workspace,
         "probed_at": topology.probed_at,
         "edges": [
@@ -126,6 +129,22 @@ def topology_payload(topology: Topology) -> dict[str, Any]:
             for e in topology.edges
         ],
     }
+
+
+def _mship_version() -> str:
+    """The running mship version, for the console footer.
+
+    An additive payload field: a server-rendered page is a snapshot, so it must
+    say which build produced it — and a separately-shipped frontend has to be
+    able to render that footer from the endpoint response alone, which it could
+    not do if the version were passed beside the payload into a template
+    context. Never raises; an unresolvable version is reported as "unknown".
+    """
+    try:
+        from importlib.metadata import version
+        return version("mothership")
+    except Exception:
+        return "unknown"
 
 
 def _utc_now_iso() -> str:
@@ -399,7 +418,10 @@ def _run_host_edges(
                     f"in this workspace's run_hosts list"),
             fix=(f"add {role!r} to `run_hosts:` in mothership.yaml, or fix the "
                  f"typo on repo {repo_name!r}"),
-            facts={"declared_by_repo": repo_name, "known_roles": declared},
+            # `role` is included so a consumer can name it (the console fills
+            # it into the remediation snippet); without it the card would render
+            # a literal `{role}` placeholder.
+            facts={"role": role, "declared_by_repo": repo_name, "known_roles": declared},
         ))
 
     # --- per declared role -------------------------------------------------

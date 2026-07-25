@@ -20,3 +20,6 @@ docker/relay/pending-store/
 docker/relay/caddy-config/
 docker/relay/caddy-data/
 site/
+
+# Fetched dev tooling (Tailwind standalone binary) — never committed.
+.tools

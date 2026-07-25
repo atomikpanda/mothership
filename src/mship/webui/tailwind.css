@@ -1,0 +1,13 @@
+/* Tailwind INPUT. Compiled to static/app.css by `task webui:css`.
+   v4 is CSS-first, so no JS config file lands in this Python repo.
+
+   `source(none)` disables Tailwind's automatic project-wide source detection and
+   makes the @source list below the ONLY input. That is required for the drift
+   check to be deterministic: with auto-detection on, the compiler also scans
+   incidental files — including its own previous output in static/ — so the
+   generated stylesheet varied with whatever happened to be in the tree
+   (picking up .italic/.uppercase/.py-0, none of which these templates use) and
+   `task webui:css-check` failed at random. */
+@import "tailwindcss" source(none);
+
+@source "./templates/*.html";

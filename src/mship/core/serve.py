@@ -361,6 +361,18 @@ def create_app(
     def health():
         return {"status": "ok", "workspace": workspace_name}
 
+    def _topology_payload() -> dict:
+        """The topology payload. ONE builder, two surfaces: `GET /net/topology`
+        returns it as JSON and the management console renders from it, so the
+        console can never drift from the documented contract."""
+        from mship.core import topology as topo
+
+        return topo.topology_payload(topo.probe_topology(
+            config=config,
+            state_dir=workspace_root / ".mothership",
+            workspace_root=workspace_root,
+        ))
+
     @app.get("/net/topology")
     def net_topology():
         """This host's connectivity topology — the SAME payload `mship net
@@ -370,20 +382,25 @@ def create_app(
         a schema `version` and must stay renderable on its own, so no view logic
         accumulates here.
         """
-        from mship.core import topology as topo
-
         if config is None:
             raise HTTPException(
                 status_code=503,
                 detail=("this serve host has no workspace config wired in; "
                         "bootstrap it as an mship workspace and restart serve"),
             )
-        result = topo.probe_topology(
-            config=config,
-            state_dir=workspace_root / ".mothership",
-            workspace_root=workspace_root,
-        )
-        return topo.topology_payload(result)
+        return _topology_payload()
+
+    # The management console is an optional, self-contained frontend package
+    # (`mship.webui`). It receives ONLY the payload above — no config, no stores —
+    # which is what lets a separately-shipped frontend replace it later. If the
+    # package has been removed, serve runs without it rather than failing.
+    if config is not None:
+        try:
+            from mship.webui import mount_webui
+        except ImportError:
+            logger.info("mship.webui is unavailable; serving without the console")
+        else:
+            mount_webui(app, payload_source=_topology_payload)
 
     from mship.core.spec_review import build_review
 

@@ -1,5 +1,10 @@
 version: '3'
 
+vars:
+  # Pinned Tailwind release for the serve console stylesheet. Bumping this
+  # requires updating the pinned SHA-256 digests in `webui:tailwind-binary`.
+  TAILWIND_VERSION: v4.3.3
+
 tasks:
   setup:
     desc: Install Python dependencies
@@ -49,3 +54,107 @@ tasks:
     desc: Not applicable for this repo
     cmds:
       - echo "mship is a CLI tool; use `uv run mship ...` directly"
+
+  webui:tailwind-binary:
+    desc: Fetch the pinned+checksummed standalone Tailwind CLI into .tools/ (gitignored, never committed)
+    # The standalone binary removes any need for node/npm in this Python repo.
+    # It is tens of megabytes, so it is fetched on demand into a gitignored dir
+    # rather than committed — only contributors who edit templates need it. The
+    # GENERATED stylesheet is what ships (see webui:css), so installing, running,
+    # and testing mship require neither this binary nor any build step.
+    #
+    # The download is verified against a SHA-256 pinned HERE, in a reviewed file,
+    # rather than against the release's own sha256sums.txt: a checksum fetched
+    # from the same release an attacker replaced would validate the replacement.
+    # Bumping TAILWIND_VERSION therefore requires updating these digests too,
+    # which is the point — it makes the new bytes a reviewed change.
+    #
+    # The cache marker includes the version (the binary is stored under a
+    # versioned name), so bumping the pin re-downloads instead of silently
+    # compiling with the previous release.
+    status:
+      - test -x .tools/tailwindcss-{{.TAILWIND_VERSION}}
+    cmds:
+      - |
+        set -eu
+        mkdir -p .tools
+        os="$(uname -s)"; arch="$(uname -m)"
+        case "$os/$arch" in
+          Linux/x86_64)  asset=tailwindcss-linux-x64 ;;
+          Linux/aarch64) asset=tailwindcss-linux-arm64 ;;
+          Darwin/arm64)  asset=tailwindcss-macos-arm64 ;;
+          Darwin/x86_64) asset=tailwindcss-macos-x64 ;;
+          *) echo "no pinned Tailwind binary for $os/$arch — put a tailwindcss binary on PATH and re-run" >&2; exit 1 ;;
+        esac
+        # musl (Alpine): the glibc build will not run there.
+        if [ "$os" = Linux ] && ! ldd /bin/sh 2>/dev/null | grep -qi gnu; then
+          case "$arch" in
+            x86_64)  asset=tailwindcss-linux-x64-musl ;;
+            aarch64) asset=tailwindcss-linux-arm64-musl ;;
+          esac
+        fi
+
+        # Pinned SHA-256 per asset for {{.TAILWIND_VERSION}}.
+        case "$asset" in
+          tailwindcss-linux-x64)        want=dc61b3ac6b8c9ca874c0cc4c57b2409791a64c5540404ca5f5367360babc313a ;;
+          tailwindcss-linux-x64-musl)   want=a04d34ceacc8f52cbe8920ad846cdeb61d3d0021dba32db0d1f77c9d9fad7a6c ;;
+          tailwindcss-linux-arm64)      want=55fd0b241214eff3de1e8ee4f22796662f2d2e7a49bcfca7477cfd0bac398195 ;;
+          tailwindcss-linux-arm64-musl) want=71ea4be79c9de9827545682df3e040053fb535d37c71ed2cfdedf9385a0868e0 ;;
+          tailwindcss-macos-arm64)      want=cdf646702987a743464dff4d9c60fd4480d1c1e73dd819a9a67f1078815dce9d ;;
+          tailwindcss-macos-x64)        want=7922e0953f2110c05976e3bf58f14e643d90427575e766b7d433f5f80cbee7e1 ;;
+          *) echo "no pinned digest for $asset at {{.TAILWIND_VERSION}}" >&2; exit 1 ;;
+        esac
+
+        url="https://github.com/tailwindlabs/tailwindcss/releases/download/{{.TAILWIND_VERSION}}/$asset"
+        tmp="$(mktemp)"
+        trap 'rm -f "$tmp"' EXIT
+        echo "fetching $asset ({{.TAILWIND_VERSION}})"
+        curl -fsSL "$url" -o "$tmp"
+
+        if command -v sha256sum >/dev/null 2>&1; then
+          got="$(sha256sum "$tmp" | cut -d" " -f1)"
+        elif command -v shasum >/dev/null 2>&1; then
+          got="$(shasum -a 256 "$tmp" | cut -d" " -f1)"
+        else
+          echo "neither sha256sum nor shasum available — refusing to run an unverified binary" >&2
+          exit 1
+        fi
+
+        if [ "$got" != "$want" ]; then
+          echo "checksum MISMATCH for $asset" >&2
+          echo "  expected $want" >&2
+          echo "  got      $got" >&2
+          echo "refusing to install. If you bumped TAILWIND_VERSION, update the pinned digests too." >&2
+          exit 1
+        fi
+
+        # Only now is it made executable, and under a versioned name so a pin
+        # bump cannot be served from cache.
+        chmod +x "$tmp"
+        mv "$tmp" ".tools/tailwindcss-{{.TAILWIND_VERSION}}"
+        trap - EXIT
+        echo "verified + installed .tools/tailwindcss-{{.TAILWIND_VERSION}}"
+
+  webui:css:
+    desc: Compile the console stylesheet (src/mship/webui/tailwind.css -> static/app.css)
+    deps: [webui:tailwind-binary]
+    cmds:
+      - .tools/tailwindcss-{{.TAILWIND_VERSION}} -i src/mship/webui/tailwind.css -o src/mship/webui/static/app.css --minify
+
+  webui:css-check:
+    desc: Fail if the committed console stylesheet is stale
+    # Committing a build artifact is normally a smell; it is deliberate here so
+    # users never need a Tailwind binary to install or test mship. This check
+    # removes the usual downside — silent staleness, where a template gains a
+    # utility class that was never compiled and renders unstyled with nothing
+    # complaining — by making a mismatch loud.
+    deps: [webui:tailwind-binary]
+    cmds:
+      - |
+        set -eu
+        tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+        .tools/tailwindcss-{{.TAILWIND_VERSION}} -i src/mship/webui/tailwind.css -o "$tmp/app.css" --minify
+        if ! diff -q "$tmp/app.css" src/mship/webui/static/app.css >/dev/null; then
+          echo "src/mship/webui/static/app.css is stale — run \`task webui:css\` and commit the result" >&2
+          exit 1
+        fi
