@@ -35,6 +35,15 @@
                 Copy
               </button>
             </div>
+            {% if edge.action.needs_input %}
+              {# Not turnkey: this command contains something only the operator
+                 knows (a pair link from another machine, a bearer, a path). Say
+                 so, rather than letting it look runnable and die in an argument
+                 parser on paste. #}
+              <p class="mt-2 text-xs text-amber-700 dark:text-amber-300">
+                Replace the UPPERCASE value before running.
+              </p>
+            {% endif %}
             <pre class="mt-2 overflow-x-auto text-xs"><code>{{ edge.action.command }}</code></pre>
           </div>
         {% endif %}

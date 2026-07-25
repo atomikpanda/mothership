@@ -81,3 +81,43 @@ def test_placeholders_use_no_angle_brackets():
         if "<" in tpl or ">" in tpl or "<" in label or ">" in label
     ]
     assert offenders == [], f"cards using angle-bracket placeholders: {offenders}"
+
+
+def test_every_card_either_runs_unchanged_or_is_flagged_needs_input():
+    """The honest invariant (Greptile, PR #412 round 3).
+
+    "Every card runs unchanged" is NOT achievable: a pair link is a secret minted
+    by `mship pair` on another machine and a bearer belongs to a serve this host
+    may never have contacted, so no console can pre-fill them. What IS achievable
+    is that a card never *pretends* to be turnkey — so each one either contains no
+    placeholder, or sets needs_input for the UI to label.
+    """
+    from mship.webui.actions import _PLACEHOLDERS
+
+    facts = {"role": "mac-studio", "store_path": "/ws/.mothership/run-hosts.yaml"}
+    for code in sorted(_COMMANDS):
+        card = command_for({"status": "fail", "code": code, "facts": facts})
+        has_placeholder = any(tok in card["command"] for tok in _PLACEHOLDERS)
+        assert card["needs_input"] == has_placeholder, (
+            f"{code}: needs_input={card['needs_input']} but "
+            f"placeholder-present={has_placeholder} in {card['command']!r}"
+        )
+
+
+def test_unreadable_store_fills_a_real_role_from_the_declared_list():
+    """Reading the store is what failed, so there is no `role` fact — but the
+    DECLARED roles are known, so the card names one instead of a literal ROLE."""
+    card = command_for({
+        "status": "warn", "code": "run_hosts_store_unreadable",
+        "facts": {"declared": ["mac-studio", "linux-box"],
+                  "store_path": "/ws/.mothership/run-hosts.yaml"},
+    })
+    assert "mac-studio" in card["command"]
+    assert "ROLE" not in card["command"]
+    assert card["needs_input"] is True          # PAIR_LINK still operator-supplied
+
+
+def test_turnkey_cards_are_not_flagged():
+    for code in ("relay_not_running", "relay_auth_failed", "probe_skipped"):
+        card = command_for({"status": "fail", "code": code, "facts": {}})
+        assert card["needs_input"] is False, f"{code} needs no input but is flagged"

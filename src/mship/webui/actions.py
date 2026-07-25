@@ -16,6 +16,20 @@ yields no card.
 """
 from __future__ import annotations
 
+#: Tokens that stand in for a value the console CANNOT know — a pair link is a
+#: secret minted by `mship pair` on another machine, a bearer belongs to a serve
+#: this host may never have talked to. A card containing any of these is marked
+#: `needs_input` so the UI presents it as "edit, then run" rather than as a
+#: turnkey command that would die in an argument parser (Greptile, PR #412).
+#:
+#: The invariant this buys, enforced in tests: every card either runs unchanged
+#: OR is flagged `needs_input`. "Every card runs unchanged" is not achievable —
+#: some remediations genuinely require operator-supplied secrets.
+_PLACEHOLDERS = (
+    "PAIR_LINK", "ROLE_NAME", "ROLE", "SERVE_URL", "BEARER_TOKEN",
+    "/absolute/path/to/",
+)
+
 #: code -> (label template, command template). `{field}` slots in EITHER are
 #: filled from `edge["facts"]`.
 #:
@@ -65,7 +79,7 @@ _COMMANDS: dict[str, tuple[str, str]] = {
         # together, or --pair-link"), and a card that fails on paste is worse
         # than no card.
         "Fix or remove {store_path}, then re-map each role",
-        "mship run-host add ROLE --pair-link 'PAIR_LINK'   # once per declared role",
+        "mship run-host add {role} --pair-link 'PAIR_LINK'   # repeat per declared role",
     ),
     "relay_not_configured": ("Start a relay serve", "mship serve --relay"),
     "relay_not_running": ("Restart the relay serve", "mship serve --relay"),
@@ -100,7 +114,16 @@ def command_for(edge: dict) -> dict | None:
     if entry is None:
         return None
     label_template, command_template = entry
-    facts = edge.get("facts") or {}
+    facts = dict(edge.get("facts") or {})
+
+    # The unreadable-store edge cannot report a `role` (reading the store is what
+    # failed), but it DOES carry the roles declared in mothership.yaml — so fill a
+    # real one instead of leaving a literal ROLE the operator has to guess at. The
+    # comment in the template already says to repeat it per declared role.
+    if "role" not in facts:
+        declared = facts.get("declared") or []
+        if declared:
+            facts["role"] = declared[0]
 
     def _fill(text: str) -> str:
         """Substitute facts, leaving the placeholder visible when a fact is
@@ -111,4 +134,10 @@ def command_for(edge: dict) -> dict | None:
         except (KeyError, IndexError):
             return text
 
-    return {"label": _fill(label_template), "command": _fill(command_template)}
+    command = _fill(command_template)
+    return {
+        "label": _fill(label_template),
+        "command": command,
+        # True when the operator must substitute something before running.
+        "needs_input": any(token in command for token in _PLACEHOLDERS),
+    }
