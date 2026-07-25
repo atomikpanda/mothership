@@ -8,7 +8,7 @@ from mship.core.topology import (
     EGRESS_ABSENT,
     EGRESS_ROUTED,
     EGRESS_UNKNOWN,
-    GH_AUTH_APP,
+    GH_AUTH_ENV_TOKEN,
     GH_AUTH_BROKER,
     GH_AUTH_NONE,
     GH_AUTH_RELAY_ATTACH,
@@ -291,7 +291,7 @@ def test_gh_auth_none_when_nothing_configured(tmp_path: Path):
     assert "MSHIP_GH_BROKER_URL" in edge.fix
 
 
-def test_gh_auth_reports_app_without_leaking_the_key(tmp_path: Path):
+def test_gh_auth_reports_the_app_capability_without_leaking_the_key(tmp_path: Path):
     key = tmp_path / "app.pem"
     key.write_text("-----BEGIN PRIVATE KEY-----\nsupersecret\n")
     t = _run(
@@ -299,7 +299,7 @@ def test_gh_auth_reports_app_without_leaking_the_key(tmp_path: Path):
         env={"MSHIP_GH_APP_ID": "12345", "MSHIP_GH_APP_KEY": str(key)},
     )
     edge = _edges(t, "gh_auth")[0]
-    assert edge.code == GH_AUTH_APP and edge.status == "ok"
+    assert edge.facts["serves_app_backed_tokens"] is True
     assert edge.facts["app_key_readable"] is True
     assert "supersecret" not in json.dumps(edge.facts)
     assert "12345" not in json.dumps(edge.facts)   # an App id is credential-adjacent
@@ -473,3 +473,113 @@ def test_non_mapping_run_host_store_does_not_raise(tmp_path: Path):
 
     t = _run(tmp_path, FakeConfig(run_hosts=("mac",)))
     assert _named(t, "run_hosts").code == RUN_HOSTS_STORE_UNREADABLE
+
+
+# --- Greptile P1 findings ---------------------------------------------------
+
+def test_relay_probe_uses_the_env_serve_token_when_set(tmp_path: Path):
+    """Greptile P1: `ensure_serve_token` is env-override > file, and the env
+    value is never written to the file. Probing with the file value would 401 on
+    a healthy relay and report relay_auth_failed."""
+    state = tmp_path / ".mothership"
+    state.mkdir(parents=True)
+    (state / "serve-token").write_text("stale-file-token\n")
+    write_runtime_record(tmp_path, RelayRuntimeRecord(
+        host="h", pid=1, subdomain="s", url="https://s.relay", workspace="ws",
+    ))
+    seen = {}
+
+    def recording(url, token, *, timeout=None):
+        seen["token"] = token
+        return HealthProbe(ok=True, status_code=200)
+
+    t = _run(tmp_path, FakeConfig(relay=object()), probe=recording,
+             env={"MSHIP_SERVE_TOKEN": "live-env-token"})
+    assert seen["token"] == "live-env-token"
+    assert _named(t, "relay").code == RELAY_OK
+
+
+def test_relay_probe_falls_back_to_the_file_token(tmp_path: Path):
+    state = tmp_path / ".mothership"
+    state.mkdir(parents=True)
+    (state / "serve-token").write_text("file-token\n")
+    write_runtime_record(tmp_path, RelayRuntimeRecord(
+        host="h", pid=1, subdomain="s", url="https://s.relay", workspace="ws",
+    ))
+    seen = {}
+
+    def recording(url, token, *, timeout=None):
+        seen["token"] = token
+        return HealthProbe(ok=True, status_code=200)
+
+    _run(tmp_path, FakeConfig(relay=object()), probe=recording, env={})
+    assert seen["token"] == "file-token"
+
+
+def test_non_utf8_serve_token_does_not_raise(tmp_path: Path):
+    """Greptile P1: read_text raises UnicodeDecodeError (a ValueError, NOT an
+    OSError) on a corrupt token, which an OSError-only handler misses."""
+    state = tmp_path / ".mothership"
+    state.mkdir(parents=True)
+    (state / "serve-token").write_bytes(b"\xff\xfe not utf-8 \x00")
+    write_runtime_record(tmp_path, RelayRuntimeRecord(
+        host="h", pid=1, subdomain="s", url="https://s.relay", workspace="ws",
+    ))
+    t = _run(tmp_path, FakeConfig(relay=object()))
+    assert {e.kind for e in t.edges} >= {"serve", "relay"}
+
+
+def test_non_utf8_relay_pubkey_does_not_raise(tmp_path: Path):
+    """Same hole in the drift check's read of the public key."""
+    state = tmp_path / ".mothership"
+    state.mkdir(parents=True)
+    (state / "relay-subdomain-secret").write_bytes(b"x" * 32)
+    (state / "relay_ed25519.pub").write_bytes(b"\xff\xfe binary")
+    write_runtime_record(tmp_path, RelayRuntimeRecord(
+        host="h", pid=1, subdomain="s", url="https://s.relay", workspace="ws",
+    ))
+    t = _run(tmp_path, FakeConfig(relay=object()))
+    assert _named(t, "relay").code in {RELAY_OK, RELAY_UNREACHABLE}
+
+
+def test_env_token_wins_over_app_creds_in_the_reported_model(tmp_path: Path):
+    """Greptile P1: App creds serve `GET /gh-token` for CALLERS (Broker B) —
+    they are not how this machine authenticates its own git ops. With GH_TOKEN
+    set, `resolve_token` uses GH_TOKEN, so that is the model in effect."""
+    from mship.core.topology import GH_AUTH_ENV_TOKEN
+
+    key = tmp_path / "app.pem"
+    key.write_text("-----BEGIN PRIVATE KEY-----\nx\n")
+    t = _run(tmp_path, FakeConfig(), env={
+        "MSHIP_GH_APP_ID": "1", "MSHIP_GH_APP_KEY": str(key),
+        "GH_TOKEN": "ghp_x",
+    })
+    edge = _edges(t, "gh_auth")[0]
+    assert edge.code == GH_AUTH_ENV_TOKEN
+    # the App capability is still reported, as what it actually is
+    assert edge.facts["serves_app_backed_tokens"] is True
+
+
+def test_app_creds_alone_report_the_broker_capability_not_a_client_model(tmp_path: Path):
+    from mship.core.topology import GH_AUTH_NONE
+
+    key = tmp_path / "app.pem"
+    key.write_text("-----BEGIN PRIVATE KEY-----\nx\n")
+    t = _run(tmp_path, FakeConfig(), env={
+        "MSHIP_GH_APP_ID": "1", "MSHIP_GH_APP_KEY": str(key),
+    })
+    edge = _edges(t, "gh_auth")[0]
+    # This host mints App tokens for others but has no client auth of its own.
+    assert edge.code == GH_AUTH_NONE
+    assert edge.facts["serves_app_backed_tokens"] is True
+    assert "App-backed" in edge.detail
+
+
+def test_unreadable_app_key_is_a_distinct_failure(tmp_path: Path):
+    from mship.core.topology import GH_AUTH_APP_KEY_UNREADABLE
+
+    t = _run(tmp_path, FakeConfig(), env={
+        "MSHIP_GH_APP_ID": "1", "MSHIP_GH_APP_KEY": str(tmp_path / "missing.pem"),
+    })
+    edge = _edges(t, "gh_auth")[0]
+    assert edge.status == "fail" and edge.code == GH_AUTH_APP_KEY_UNREADABLE

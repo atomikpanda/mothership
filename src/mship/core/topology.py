@@ -66,11 +66,14 @@ RUN_HOST_NOT_BOOTSTRAPPED = "run_host_not_bootstrapped"
 RUN_HOST_STALE_TOKEN = "run_host_stale_token"
 RUN_HOST_ORPHAN_MAPPING = "run_host_orphan_mapping"
 
-GH_AUTH_APP = "gh_auth_app"
 GH_AUTH_BROKER = "gh_auth_broker"
 GH_AUTH_ENV_TOKEN = "gh_auth_env_token"
 GH_AUTH_RELAY_ATTACH = "gh_auth_relay_attach"
 GH_AUTH_NONE = "gh_auth_none"
+
+#: A misconfiguration, not a model: MSHIP_GH_APP_ID is set but its key file is
+#: unreadable, so `GET /gh-token` cannot mint App tokens for callers.
+GH_AUTH_APP_KEY_UNREADABLE = "gh_auth_app_key_unreadable"
 
 EGRESS_ROUTED = "egress_routed"
 EGRESS_ABSENT = "egress_absent"
@@ -135,13 +138,25 @@ def _default_probe(url: str, token: str, *, timeout: float = PROBE_TIMEOUT_SECON
     return probe_health(url, token, timeout=timeout)
 
 
-def _serve_token(workspace_root) -> str | None:
-    """This host's serve bearer, read WITHOUT creating one (`ensure_serve_token`
-    would mint a token as a side effect of reporting)."""
+def _serve_token(workspace_root, *, env) -> str | None:
+    """This host's serve bearer, read WITHOUT creating one.
+
+    Mirrors `relay.token.ensure_serve_token`'s precedence — env override BEFORE
+    the persisted file — minus the generate-on-absence step. The env value is
+    never written to the file, so reading only the file would probe a running
+    relay with a stale bearer and report a healthy tunnel as `relay_auth_failed`.
+
+    A corrupt (non-UTF-8) token file yields None rather than raising:
+    `UnicodeDecodeError` is a ValueError, not an OSError, so both are caught.
+    """
     from pathlib import Path
+
+    from_env = env.get("MSHIP_SERVE_TOKEN")
+    if from_env:
+        return from_env
     try:
         return Path(workspace_root).joinpath(".mothership", "serve-token").read_text().strip()
-    except OSError:
+    except (OSError, ValueError):
         return None
 
 
@@ -163,7 +178,8 @@ def _subdomain_drift(record, *, home) -> str | None:
     try:
         secret = subdomain_secret_path(home).read_bytes()
         pub = Path(str(relay_key_path(home)) + ".pub").read_text()
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError covers UnicodeDecodeError on a binary/corrupt .pub file.
         return None
     try:
         expected = device_subdomain(record.workspace, device_id(pub), secret)
@@ -173,7 +189,7 @@ def _subdomain_drift(record, *, home) -> str | None:
 
 
 def _serve_and_relay_edges(
-    *, config, workspace_root, home, probe, pid_alive, skip_network, timeout,
+    *, config, workspace_root, home, env, probe, pid_alive, skip_network, timeout,
 ) -> list[Edge]:
     """The `serve --relay` process on this machine and the relay edge it owns.
 
@@ -267,7 +283,7 @@ def _serve_and_relay_edges(
         )
         return [serve, relay]
 
-    token = _serve_token(workspace_root)
+    token = _serve_token(workspace_root, env=env)
     result = probe(record.url, token or "", timeout=timeout)
     if result.ok:
         relay = Edge(
@@ -478,7 +494,6 @@ def _run_host_edges(
 
 _GH_AUTH_CODES = {
     "relay_attach": GH_AUTH_RELAY_ATTACH,
-    "app": GH_AUTH_APP,
     "env_token": GH_AUTH_ENV_TOKEN,
     "broker": GH_AUTH_BROKER,
     "none": GH_AUTH_NONE,
@@ -486,11 +501,18 @@ _GH_AUTH_CODES = {
 
 
 def _gh_auth_edge(*, env) -> Edge:
-    """Which GitHub auth model is in effect on this machine.
+    """How THIS machine authenticates to GitHub, plus whether it also serves
+    App-backed tokens to others.
 
-    Reports the MODEL and whether each credential is present/readable — never
-    the credential, and never the App id (an identifier tied to a specific
-    private key is not something a console needs to display).
+    Those are two different questions, and conflating them misreports the first.
+    A GitHub App configured here is consumed ONLY by `GET /gh-token` to mint
+    tokens for CALLERS (Broker B) — this host's own git operations still go
+    through `gh_auth.resolve_token`. So with GH_TOKEN set alongside App creds,
+    the model in effect is the env token, and the App is reported as the serve
+    capability it actually is (`serves_app_backed_tokens`).
+
+    Reports presence/readability, never a credential — and never the App id,
+    which identifies a specific private key.
     """
     from pathlib import Path
 
@@ -499,18 +521,19 @@ def _gh_auth_edge(*, env) -> Edge:
     app_id = env.get("MSHIP_GH_APP_ID") or None
     app_key_path = env.get("MSHIP_GH_APP_KEY") or None
     app_key_readable = bool(app_key_path) and Path(app_key_path).is_file()
+    serves_app_tokens = bool(app_id and app_key_readable)
     broker_url = env.get("MSHIP_GH_BROKER_URL") or None
     relay_url = env.get("MSHIP_RELAY_URL") or None
     run_token = env.get("MSHIP_RUN_TOKEN") or None
     explicit = env.get("GH_TOKEN") or env.get("GITHUB_TOKEN") or None
 
     model = classify_gh_auth(
-        app_configured=bool(app_id and app_key_readable),
         relay_url=relay_url, run_token=run_token,
         explicit_token=explicit, broker_url=broker_url,
     )
     facts = {
         "model": model,
+        "serves_app_backed_tokens": serves_app_tokens,
         "app_id_configured": bool(app_id),
         "app_key_readable": app_key_readable,
         "broker_url": broker_url,          # a URL, not a credential
@@ -518,26 +541,35 @@ def _gh_auth_edge(*, env) -> Edge:
         "run_token_configured": bool(run_token),
         "env_token_configured": bool(explicit),
     }
+    app_note = (
+        " This host also serves App-backed tokens via GET /gh-token."
+        if serves_app_tokens else ""
+    )
 
-    if model == "none":
-        return Edge(
-            kind="gh_auth", name="gh_auth", status="warn", code=GH_AUTH_NONE,
-            detail="no GitHub auth configured on this machine",
-            fix=("set MSHIP_GH_BROKER_URL + MSHIP_SERVE_TOKEN to use a broker, "
-                 "or GH_TOKEN/GITHUB_TOKEN for a direct token"),
-            facts=facts,
-        )
+    # A half-configured App is a real misconfiguration: serve refuses to start
+    # rather than silently pushing as a different identity, so say so plainly.
     if app_id and not app_key_readable:
         return Edge(
-            kind="gh_auth", name="gh_auth", status="fail", code=_GH_AUTH_CODES[model],
+            kind="gh_auth", name="gh_auth", status="fail",
+            code=GH_AUTH_APP_KEY_UNREADABLE,
             detail="MSHIP_GH_APP_ID is set but MSHIP_GH_APP_KEY is not a readable file",
             fix=("fix the MSHIP_GH_APP_KEY path, or unset it to fall back to "
                  "`gh auth token` deliberately"),
             facts=facts,
         )
+
+    if model == "none":
+        return Edge(
+            kind="gh_auth", name="gh_auth", status="warn", code=GH_AUTH_NONE,
+            detail="no GitHub auth configured for this machine's own git operations." + app_note,
+            fix=("set MSHIP_GH_BROKER_URL + MSHIP_SERVE_TOKEN to use a broker, "
+                 "or GH_TOKEN/GITHUB_TOKEN for a direct token"),
+            facts=facts,
+        )
     return Edge(
         kind="gh_auth", name="gh_auth", status="ok", code=_GH_AUTH_CODES[model],
-        detail=f"GitHub auth model in effect: {model}", fix=None, facts=facts,
+        detail=f"GitHub auth model in effect: {model}." + app_note,
+        fix=None, facts=facts,
     )
 
 
@@ -632,7 +664,7 @@ def probe_topology(
 
     edges: list[Edge] = []
     edges.extend(_serve_and_relay_edges(
-        config=config, workspace_root=Path(workspace_root), home=home,
+        config=config, workspace_root=Path(workspace_root), home=home, env=env,
         probe=probe, pid_alive=pid_alive, skip_network=skip_network,
         timeout=timeout,
     ))

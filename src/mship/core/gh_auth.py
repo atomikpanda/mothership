@@ -196,22 +196,28 @@ def get_default_branch_via_httpx(
     return branch
 
 
-#: Auth models in precedence order, most specific first. Mirrors the token
-#: precedence documented on `resolve_token` (explicit > GH_TOKEN > GITHUB_TOKEN
-#: > broker), with relay-attach ahead of them all (a worker routed through the
-#: relay egress never holds a token of its own) and an App-backed serve ahead of
-#: the broker leg it implements.
+#: Auth models in precedence order, most specific first. Mirrors EXACTLY the
+#: token precedence documented on `resolve_token` (explicit > GH_TOKEN >
+#: GITHUB_TOKEN > broker), with relay-attach ahead of them all (a worker routed
+#: through the relay egress never holds a token of its own).
+#:
+#: A configured GitHub App is deliberately NOT a model here. App credentials are
+#: consumed only by serve's `GET /gh-token` to mint tokens for CALLERS (Broker
+#: B); the host's own git operations still resolve through `resolve_token`. So an
+#: App-backed serve that also has GH_TOKEN set uses GH_TOKEN, and reporting
+#: "app" would name a different model than the one bootstrap/finish actually
+#: use. Callers that care about the serve capability should report it separately
+#: (see `topology._gh_auth_edge`'s `serves_app_backed_tokens`).
 #:
 #: NOTE: `core.gh_preflight.run_preflight` branches on the same precedence for
 #: its STRICT, network-verifying check. That duplication is pre-existing and
 #: deliberately left alone here — this function is the *reporting* owner and must
 #: never raise or touch the network.
-GH_AUTH_MODELS = ("relay_attach", "app", "env_token", "broker", "none")
+GH_AUTH_MODELS = ("relay_attach", "env_token", "broker", "none")
 
 
 def classify_gh_auth(
     *,
-    app_configured: bool,
     relay_url: str | None,
     run_token: str | None,
     explicit_token: str | None,
@@ -228,8 +234,6 @@ def classify_gh_auth(
 
     if present(relay_url) and present(run_token):
         return "relay_attach"
-    if app_configured:
-        return "app"
     if present(explicit_token):
         return "env_token"
     if present(broker_url):
