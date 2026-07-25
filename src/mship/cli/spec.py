@@ -557,10 +557,15 @@ def register(parent: typer.Typer, get_container):
             raise typer.Exit(1)
 
         if closes_canonical and spec.work_item_id:
-            from mship.core.issue_link import link_issue_to_item
-            for _canonical in closes_canonical:
-                link_issue_to_item(workitems, spec.work_item_id, _canonical,
-                                   default_slug=None)
+            # Fail-open: dispatch already completed, so a linking failure must
+            # not crash it after its side effects (#410 review).
+            try:
+                from mship.core.issue_link import link_issue_to_item
+                for _canonical in closes_canonical:
+                    link_issue_to_item(workitems, spec.work_item_id, _canonical,
+                                       default_slug=None)
+            except Exception as e:
+                output.warning(f"could not link --closes issue(s): {e}")
 
         if output.human_mode and result.spawned:
             output.success(

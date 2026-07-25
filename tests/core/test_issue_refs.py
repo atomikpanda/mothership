@@ -128,3 +128,13 @@ def test_linked_closes_skips_refs_already_in_body():
     from mship.core.issue_refs import append_linked_closes
     body = "Body.\n\nCloses #12"
     assert append_linked_closes(body, ["acme/widgets#12"], "acme/widgets") == body
+
+
+def test_url_form_tolerates_fragment_and_query():
+    assert normalize_issue_ref(
+        "https://github.com/acme/widgets/issues/12#issuecomment-987654321",
+        default_slug=None,
+    ) == "acme/widgets#12"
+    assert normalize_issue_ref(
+        "https://github.com/acme/widgets/issues/12?foo=bar", default_slug=None
+    ) == "acme/widgets#12"

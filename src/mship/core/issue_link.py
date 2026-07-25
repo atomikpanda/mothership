@@ -41,7 +41,10 @@ def link_issue_to_item(items, item_id: str, ref: str, *, default_slug: str | Non
     """
     canonical = normalize_issue_ref(ref, default_slug=default_slug)
     url = issue_url(canonical)
-    if any(link.url == url for link in items.get(item_id).external_links):
+    item = items.get(item_id)
+    if item is None:
+        raise KeyError(f"WorkItem {item_id!r} not found; cannot link issue {canonical}")
+    if any(link.url == url for link in item.external_links):
         return canonical, False
     items.add_external_link(item_id, ExternalLink(provider="github", url=url, title=canonical),
                             now=now or datetime.now(timezone.utc))

@@ -14,7 +14,9 @@ class IssueRefError(ValueError):
 
 
 _SLUG_FORM = re.compile(r"^([\w.-]+)/([\w.-]+)#(\d+)$")
-_URL_FORM = re.compile(r"^https?://github\.com/([\w.-]+)/([\w.-]+)/issues/(\d+)/?$")
+_URL_FORM = re.compile(
+    r"^https?://github\.com/([\w.-]+)/([\w.-]+)/issues/(\d+)(?:[/?#].*)?$"
+)
 _NUM_FORM = re.compile(r"^#?(\d+)$")
 
 

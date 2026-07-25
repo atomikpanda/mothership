@@ -520,10 +520,15 @@ def register(app: typer.Typer, get_container):
         task = result.task
 
         if closes_canonical:
-            from mship.core.issue_link import link_issue_to_item
-            _issue_items = WorkItemStore(workspace_root / ".mothership" / "workitems")
-            for _canonical in closes_canonical:
-                link_issue_to_item(_issue_items, work_item, _canonical, default_slug=None)
+            # Fail-open: the task already exists, so a linking failure must not
+            # crash the spawn after its side effects (#410 review).
+            try:
+                from mship.core.issue_link import link_issue_to_item
+                _issue_items = WorkItemStore(workspace_root / ".mothership" / "workitems")
+                for _canonical in closes_canonical:
+                    link_issue_to_item(_issue_items, work_item, _canonical, default_slug=None)
+            except Exception as e:
+                output.warning(f"could not link --closes issue(s): {e}")
 
         if pending_bypass:
             log_mgr = container.log_manager()

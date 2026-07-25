@@ -716,3 +716,17 @@ def test_item_show_displays_linked_issue(tmp_path):
         assert "acme/widgets#12" in res.output
     finally:
         _reset()
+
+
+def test_link_issue_missing_item_fails_loud_via_helper(tmp_path):
+    """link_issue_to_item raises a clear KeyError for an absent WorkItem (#410 review)."""
+    _isolate(tmp_path)
+    try:
+        import pytest as _pytest
+        from mship.core.issue_link import link_issue_to_item
+        from mship.core.workitem_store import WorkItemStore
+        store = WorkItemStore(tmp_path / ".mothership" / "workitems")
+        with _pytest.raises(KeyError, match="wi-nope"):
+            link_issue_to_item(store, "wi-nope", "acme/widgets#1", default_slug=None)
+    finally:
+        _reset()
