@@ -34,7 +34,7 @@ restated here.
 The recommended path below is **attach-at-relay** (worker holds no credential),
 the model built for untrusted, prompt-injectable overnight workers. Two simpler
 variants — the `/gh-token` broker and the pull-API runner — are covered under
-[Variants](#variants--when-to-use-them).
+[Variants](#variants-when-to-use-them).
 
 ---
 
@@ -226,7 +226,7 @@ run one of two ways:
 
 ---
 
-## Variants & when to use them
+## Variants: when to use them
 
 - **Daytime / trusted, zero App — the `/gh-token` broker.** If a workspace only
   runs while your own machine is awake, skip the App entirely: `mship serve`'s

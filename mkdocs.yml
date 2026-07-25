@@ -1,0 +1,50 @@
+site_name: mship
+site_description: Phase-based workflow engine for multi-repo AI development
+site_url: https://atomikpanda.github.io/mothership/
+repo_url: https://github.com/atomikpanda/mothership
+repo_name: atomikpanda/mothership
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+
+exclude_docs: |
+  plans/
+  specs/
+  superpowers/
+
+nav:
+  - Getting started: index.md
+  - Concepts: concepts.md
+  - Configuration: configuration.md
+  - CLI reference: cli.md
+  - Remote access:
+      - Serve over Tailscale: mship-serve-tailscale.md
+      - Relay hosting: relay-hosting.md
+      - Remote run: remote-run.md
+  - Cloud workers:
+      - Unattended cloud runner: unattended-cloud-runner.md
+      - Cloud worker auth spine: cloud-worker-auth-spine.md
+      - Cloud agent auth: cloud-agent-auth.md
+      - Claude routine runner (adapter): adapters/claude-routine-runner.md

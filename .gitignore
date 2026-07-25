@@ -19,3 +19,4 @@ docker/relay/pubkeys/
 docker/relay/pending-store/
 docker/relay/caddy-config/
 docker/relay/caddy-data/
+site/
