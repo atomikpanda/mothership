@@ -22,6 +22,19 @@ def _read_secret_if_valid(path: Path) -> bytes | None:
     return data if len(data) >= _SUBDOMAIN_SECRET_LEN else None
 
 
+def subdomain_secret_path(home: Path) -> Path:
+    """Where the per-machine relay-subdomain HMAC secret lives. Read-only —
+    creates nothing, so a reporter (see `mship.core.topology`) can check for it
+    without generating one."""
+    return home / ".mothership" / "relay-subdomain-secret"
+
+
+def relay_key_path(home: Path) -> Path:
+    """Where this machine's relay ssh key lives (public key at `<path>.pub`).
+    Read-only — creates nothing."""
+    return home / ".mothership" / "relay_ed25519"
+
+
 def ensure_subdomain_secret(home: Path) -> bytes:
     """Return the per-machine relay-subdomain HMAC secret, generating it if absent.
 
@@ -35,7 +48,7 @@ def ensure_subdomain_secret(home: Path) -> bytes:
     winner's secret (so both derive the same subdomain) rather than crashing.
     A truncated/corrupt persisted file self-heals by regenerating.
     """
-    path = home / ".mothership" / "relay-subdomain-secret"
+    path = subdomain_secret_path(home)
     existing = _read_secret_if_valid(path)
     if existing is not None:
         return existing
@@ -67,7 +80,7 @@ def ensure_subdomain_secret(home: Path) -> bytes:
 
 def ensure_relay_key(home: Path, runner=_default_runner) -> Path:
     """Return home/.mothership/relay_ed25519, generating it via ssh-keygen if absent."""
-    path = home / ".mothership" / "relay_ed25519"
+    path = relay_key_path(home)
     if path.exists():
         return path
     path.parent.mkdir(parents=True, exist_ok=True)

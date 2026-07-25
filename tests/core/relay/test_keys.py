@@ -1,5 +1,11 @@
 from pathlib import Path
-from mship.core.relay.keys import ensure_relay_key, ensure_subdomain_secret, relay_public_key
+from mship.core.relay.keys import (
+    ensure_relay_key,
+    ensure_subdomain_secret,
+    relay_key_path,
+    relay_public_key,
+    subdomain_secret_path,
+)
 
 
 def test_ensure_subdomain_secret_creates_stable_0600_secret(tmp_path):
@@ -50,3 +56,17 @@ def test_idempotent_when_present(tmp_path):
     path = ensure_relay_key(home=tmp_path, runner=fake_run)
     assert len(calls) == 0, "runner must NOT be called when key already exists"
     assert path == key_path
+
+
+# --- read-only path accessors (a reporter must not generate keys) ---
+
+def test_paths_are_readable_without_creating_anything(tmp_path):
+    assert subdomain_secret_path(tmp_path) == tmp_path / ".mothership" / "relay-subdomain-secret"
+    assert relay_key_path(tmp_path) == tmp_path / ".mothership" / "relay_ed25519"
+    # Read-only: asking for the paths must not create the dir or the files.
+    assert not (tmp_path / ".mothership").exists()
+
+
+def test_ensure_secret_writes_at_the_declared_path(tmp_path):
+    secret = ensure_subdomain_secret(home=tmp_path)
+    assert subdomain_secret_path(tmp_path).read_bytes() == secret
