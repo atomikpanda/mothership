@@ -382,10 +382,18 @@ def publish_evidence(
 
 
 def _warning(notes: list[str], spec_id: str, repo: Path) -> str:
-    """One operator-facing message: what went wrong, what it costs, what to do."""
+    """One operator-facing message: what went wrong, what it costs, what to do.
+
+    The remedy deliberately does NOT say "re-run finish": the acceptance block is
+    rendered only while a PR is being CREATED, so a second finish over an
+    existing PR finds it and leaves its body exactly as it stands (cli/worktree
+    .py). Fix the push before the PR opens, or edit the body afterwards.
+    """
     return (
         f"Image evidence for {spec_id} is not embeddable ({'; '.join(notes)}), so "
         f"the PR body will name the artifacts instead of emitting images that "
-        f"404. Opening the PR is unaffected. Once the `{ORPHAN_BRANCH}` branch in "
-        f"{repo} can be pushed to origin, re-run finish to embed them."
+        f"404. Opening the PR is unaffected. Re-running finish will not re-render "
+        f"an existing PR's body: make the `{ORPHAN_BRANCH}` branch in {repo} "
+        f"pushable to origin BEFORE the PR is opened, or add the images to the "
+        f"body by hand afterwards."
     )
