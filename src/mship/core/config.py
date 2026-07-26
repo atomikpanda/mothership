@@ -5,6 +5,7 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, field_validator, model_validator
 
+from mship.core.evidence_store import EvidenceModeError, resolve_evidence_mode
 from mship.core.relay.config import RelayConfig
 
 
@@ -440,6 +441,19 @@ class WorkspaceConfig(BaseModel):
                     f"default_scope references unknown repos: {unknown}. "
                     f"Valid repos: {sorted(self.repos.keys())}"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def validate_evidence_exposure(self) -> "WorkspaceConfig":
+        """evidence_storage may never be more exposed than spec_storage — a
+        screenshot discloses exactly what encrypted/local spec prose was
+        protecting. Reuse resolve_evidence_mode (core/evidence_store.py) as the
+        single source of truth for the exposure ordering rather than
+        reimplementing the comparison here."""
+        try:
+            resolve_evidence_mode(self)
+        except EvidenceModeError as e:
+            raise ValueError(str(e)) from e
         return self
 
     @model_validator(mode="after")
