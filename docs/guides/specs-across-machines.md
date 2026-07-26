@@ -118,16 +118,29 @@ For the iOS-simulator case you usually do not want a second copy of the task at
 all — you want the desktop to execute one step:
 
 ```bash
-git add -A && git commit -m "wip: about to run on the simulator"
-git push                                  # REQUIRED — see below
-mship run --remote=desktop                # runs there, streams back here
+# 1. commit across EVERY repo the task touches (mship commit is multi-repo aware)
+mship commit "wip: about to run on the simulator"
+
+# 2. push every one of those branches — the run host fetches each repo separately
+mship worktrees | jq -r '.tasks["<task-slug>"].worktrees[]' \
+  | while read -r d; do git -C "$d" push -u origin HEAD; done
+
+# 3. now the remote sees exactly what you committed
+mship run --remote=desktop
 ```
 
-Note the explicit `git push`. `mship commit` pushes **only** for a task that is
-already finished with an open PR (`finished_at` plus a recorded PR url); for a task
-you are still working on it commits locally and stops. So `mship commit` alone
-before a remote run leaves the run host fetching the previous revision — the exact
-trap described next.
+Two things that sequence is working around, both worth knowing:
+
+- **`mship commit` does not push while you are still working.** It pushes only for a
+  task that is already finished with an open PR (`finished_at` plus a recorded PR
+  url). Before that it commits locally and stops, so `mship commit` alone leaves the
+  run host fetching the previous revision.
+- **A multi-repo task has a branch per repo.** The run host materialises each
+  affected repo separately, so pushing only the repo you happen to be standing in
+  leaves the others stale — the same trap, one repo over. Hence the loop rather than
+  a single `git push`.
+
+For a single-repo task, `git push` from that worktree is of course enough.
 
 **Commit and push first.** The run host materialises the task's branch by fetching
 it, so the code arrives via git rather than via the workspace repo — with two
