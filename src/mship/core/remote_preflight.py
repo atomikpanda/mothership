@@ -262,6 +262,17 @@ def _inspect_repo(shell, repo: str, path: Path, branch: str) -> RepoState:
     # HEAD is not on the task's branch, which is already a refusal. That
     # subsumes the old `symbolic-ref` check entirely: the two values could
     # never come out equal without HEAD being ON refs/heads/<branch>.
+    #
+    # One process is not one instant, though: git still resolves HEAD and
+    # then refs/heads/<branch> as two sequential reads within this single
+    # command, so a ref mutating in THAT window (a concurrent commit, or a
+    # force-checkout that also moves the branch) is a torn read too, not just
+    # the two-command case above. It needs no separate handling because the
+    # same equality check already covers it: either the mutation lands
+    # outside the window and both reads see one consistent value, or it lands
+    # inside and the two reads disagree — which is the WRONG_BRANCH refusal
+    # already taken above. There is no interleaving where the two agree on a
+    # sha that was never actually the branch's tip at some consistent instant.
     ref = f"refs/heads/{branch}"
     pair = shell.run(f"git rev-parse HEAD {shlex.quote(ref)}", cwd=path)
     out = (pair.stdout or "").splitlines()

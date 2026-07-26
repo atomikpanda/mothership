@@ -45,7 +45,11 @@ class FakeShell:
     `head` or reports `other_branch_sha` instead. `stale_bare_head` answers a
     bare, argument-less `rev-parse HEAD` — a call current code never makes,
     kept only so a reverted (pre-fix) `_inspect_repo` can be exercised in the
-    race test's red-before-green check.
+    race test's red-before-green check. `pair_output` (with optional
+    `pair_rc`) overrides the pair-read's stdout VERBATIM instead of deriving
+    it from `head`/`head_ref` — the only way to hand back a genuinely TORN
+    pair (two lines that disagree because a ref mutated between git reading
+    them, not because the worktree is really on some other branch).
     """
 
     def __init__(self, answers, push_rc=0, push_err=""):
@@ -82,14 +86,17 @@ class FakeShell:
             # that consistency is the entire point of collapsing the two old
             # calls into one.
             self.pair_calls[key] = self.pair_calls.get(key, 0) + 1
-            target_ref = cmd.rsplit("refs/heads/", 1)[-1].strip("'\"")
-            head_sha = spec.get("head", "headsha")
-            checked_out = spec.get("head_ref", f"refs/heads/{target_ref}")
-            branch_sha = (
-                head_sha if checked_out == f"refs/heads/{target_ref}"
-                else spec.get("other_branch_sha", "otherbranchsha")
-            )
-            out, rc = f"{head_sha}\n{branch_sha}", 0
+            if "pair_output" in spec:
+                out, rc = spec["pair_output"], spec.get("pair_rc", 0)
+            else:
+                target_ref = cmd.rsplit("refs/heads/", 1)[-1].strip("'\"")
+                head_sha = spec.get("head", "headsha")
+                checked_out = spec.get("head_ref", f"refs/heads/{target_ref}")
+                branch_sha = (
+                    head_sha if checked_out == f"refs/heads/{target_ref}"
+                    else spec.get("other_branch_sha", "otherbranchsha")
+                )
+                out, rc = f"{head_sha}\n{branch_sha}", 0
         elif "rev-parse HEAD" in cmd:
             # Bare `rev-parse HEAD`, no branch argument: only a *reverted*,
             # pre-fix `_inspect_repo` ever issues this (see `stale_bare_head`
@@ -305,6 +312,86 @@ def test_a_checkout_between_branch_check_and_sha_capture_cannot_tear_the_pair(tm
     assert pre.ok
     assert pre.states[0].head_sha == "correct"   # the atomically-verified sha
     assert shell.pair_calls == {"api": 1}        # never re-read -- nothing to race
+
+
+def test_a_torn_pair_within_the_single_rev_parse_is_refused_not_pinned(tmp_path):
+    """The decisive case for the self-verifying claim: `git rev-parse HEAD
+    refs/heads/<branch>` still resolves its two arguments SEQUENTIALLY inside
+    one process, so a window survives WITHIN that single command even though
+    the two old separate commands are gone. This is not the same bypass as
+    `test_a_checkout_between_branch_check_and_sha_capture_cannot_tear_the_pair`
+    above (that one shows there is no longer a SECOND call to race against);
+    this one shows that a mutation landing DURING the one remaining call
+    cannot slip a wrong sha through either.
+
+    Reasoning through it: whatever lands between the two reads either leaves
+    them agreeing — in which case the pinned sha genuinely is a value both
+    reads observed, i.e. really was the branch's tip at some consistent
+    instant — or makes them disagree, which `_inspect_repo` already refuses
+    as WRONG_BRANCH. There is no third outcome where they agree on a sha that
+    is not actually the branch's tip. A force-checkout that ALSO resets the
+    branch (`git checkout -B <branch> <other-sha>` — a subagent restarting the
+    branch from a different base is the realistic trigger) is exactly the
+    shape that would produce this: HEAD's read observes the tip from before
+    the reset, the direct `refs/heads/<branch>` read observes it after.
+
+    Modeled with `pair_output` so the two lines are asserted directly, rather
+    than through `head`/`head_ref` (which can only express "really on another
+    branch", already covered above) — this is a same-branch race, not a
+    different-branch worktree.
+    """
+    api = _repo(tmp_path, "api")
+    shell = FakeShell({"api": _clean(
+        pair_output="before-reset-sha\nafter-reset-sha\n",
+        origin=None,
+    )})
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert not pre.ok
+    assert [s.blocked_reason for s in pre.blocked] == [WRONG_BRANCH]
+    assert pre.states[0].head_sha is None       # never pinned, torn or not
+    assert shell.pushes == []
+
+
+def test_a_commit_landing_between_the_two_reads_is_refused_not_pinned(tmp_path):
+    """Same guard, different realistic trigger: no checkout at all, just
+    another process (a second worktree of the same repo, sharing refs)
+    committing to the task's branch while this `rev-parse` is mid-flight.
+    HEAD's read observes the pre-commit tip; the direct branch-ref read,
+    running microseconds later in the same process, observes the new one."""
+    api = _repo(tmp_path, "api")
+    shell = FakeShell({"api": _clean(
+        pair_output="pre-commit-sha\npost-commit-sha\n",
+        origin=None,
+    )})
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert not pre.ok
+    assert [s.blocked_reason for s in pre.blocked] == [WRONG_BRANCH]
+    assert pre.states[0].head_sha is None
+
+
+def test_one_ref_failing_to_resolve_mid_command_is_refused_not_pinned(tmp_path):
+    """The branch ref vanishing (deleted, or renamed out from under git) between
+    the two reads is a torn pair too, just an asymmetric one: git emits a
+    resolved line for the argument it could still answer and none for the one
+    that broke mid-command, so the second line is simply missing rather than
+    present-but-different. `_inspect_repo` must not read the missing second
+    line as "no branch given, HEAD alone is enough" — an empty `branch_tip`
+    already fails `head_sha != branch_tip` because a real sha is never
+    empty, but this pins that down explicitly rather than leaving it as a
+    side effect of the disagreeing-pair cases above."""
+    api = _repo(tmp_path, "api")
+    shell = FakeShell({"api": _clean(
+        pair_output="only-head-resolved\n",   # branch ref line never arrives
+        pair_rc=128,                          # git exits non-zero: one arg failed
+        origin=None,
+    )})
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert not pre.ok
+    assert [s.blocked_reason for s in pre.blocked] == [WRONG_BRANCH]
+    assert pre.states[0].head_sha is None
 
 
 def test_a_detached_worktree_is_refused_and_says_so(tmp_path):
