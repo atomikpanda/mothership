@@ -148,6 +148,28 @@ repos:
 
 Each repo needs a `Taskfile.yml` with standard task names. Mothership calls `task <name>` in each repo. Override names per repo in the `tasks` mapping. Default tasks: `test`, `run`, `lint`, `logs`, `setup`. Missing tasks are skipped gracefully.
 
+## Evidence storage (`evidence_storage`)
+
+Storage mode for acceptance-criterion artifact evidence: `committed`, `local`,
+or `encrypted`. When unset it **inherits `spec_storage`**, which is what you
+want unless the cost profiles genuinely differ — prose is bytes, screenshots
+are megabytes, so `spec_storage: committed` with `evidence_storage: local` is
+a reasonable pairing.
+
+Evidence may never be **more exposed** than its spec. Ordering the modes
+`committed` > `encrypted` > `local`, a configuration where evidence outranks
+the spec is refused at config load: a plaintext screenshot beside an encrypted
+spec discloses exactly what the encryption was protecting.
+
+```yaml
+evidence_storage: local   # inherits spec_storage when omitted
+```
+
+Embedding evidence in a pull-request body requires `committed` — the other two
+modes aren't fetchable by GitHub, so the PR names the artifact instead of
+showing it. Embedding therefore means the screenshots are readable by anyone
+who can read the workspace repo.
+
 ## Workspace-level fields
 
 Top-level keys on `mothership.yaml` (alongside `workspace`, `env_runner`, `branch_pattern`, `audit`, and `repos`, all covered above):
