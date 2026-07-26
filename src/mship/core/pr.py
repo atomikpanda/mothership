@@ -4,6 +4,7 @@ import shlex
 from pathlib import Path
 from typing import NamedTuple
 
+from mship.core.evidence_store import IMAGE_EXTS, _REF_RE
 from mship.core.gh_auth import git_cred_args, create_pr_via_httpx, get_default_branch_via_httpx
 from mship.util.shell import ShellRunner
 
@@ -448,12 +449,35 @@ class PRManager:
         return "\n".join(lines)
 
 
-def build_acceptance_block(spec) -> str:
+def _is_embeddable_image(evidence, evidence_base_url: str | None) -> bool:
+    """True when GitHub's renderer can fetch these bytes AND they are an image.
+
+    Only refs the evidence store produced can resolve under the base URL, so a
+    hand-written ref (`docs/shot.png`, from before `capture --evidence`) is
+    named rather than embedded as a URL that would 404. An encrypted ref falls
+    out here for free: its extension is `.enc`, not an image one — and its bytes
+    are ciphertext, so an embed would render broken.
+    """
+    if not evidence_base_url or evidence.kind != "artifact":
+        return False
+    if not _REF_RE.fullmatch(evidence.ref):
+        return False
+    return Path(evidence.ref).suffix.lower() in IMAGE_EXTS
+
+
+def build_acceptance_block(spec, evidence_base_url: str | None = None) -> str:
     """Render an 'Acceptance criteria' PR-body section listing each AC as verified
     (with its evidence refs) or unverified. Pure analogue of
     PRManager.build_coordination_block: returns '' when there is nothing to render
     (no criteria), else a leading-separator markdown block ready to append to a
-    PR body."""
+    PR body.
+
+    `evidence_base_url`, when given, is the raw base under which this workspace's
+    committed evidence is fetchable; image artifacts are then embedded rather than
+    named. It is None whenever the bytes are not fetchable by GitHub (local or
+    encrypted storage, or an evidence commit that has not been pushed), in which
+    case the artifact is named — never emitted as a broken image.
+    """
     acs = getattr(spec, "acceptance_criteria", None) or []
     if not acs:
         return ""
@@ -465,9 +489,21 @@ def build_acceptance_block(spec) -> str:
         "",
     ]
     for c in acs:
-        if c.evidence:
-            refs = ", ".join(f"{e.kind}:{e.ref}" for e in c.evidence)
-            lines.append(f"- [x] `{c.id}` {c.text} — {refs}")
-        else:
+        if not c.evidence:
             lines.append(f"- [ ] `{c.id}` {c.text} — _no evidence_")
+            continue
+        embeds, named = [], []
+        for e in c.evidence:
+            target = embeds if _is_embeddable_image(e, evidence_base_url) else named
+            target.append(e)
+        head = f"- [x] `{c.id}` {c.text}"
+        if named:
+            head += " — " + ", ".join(f"{e.kind}:{e.ref}" for e in named)
+        lines.append(head)
+        # Embedded on its own indented line beneath the criterion, so the
+        # checklist stays scannable. The image replaces the ref text: showing
+        # both a hash filename and the picture of it is noise.
+        for e in embeds:
+            lines.append("")
+            lines.append(f"  ![{c.id}]({evidence_base_url}/{spec.id}/{e.ref})")
     return "\n".join(lines)
