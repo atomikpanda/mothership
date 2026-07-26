@@ -69,9 +69,11 @@ mship capture --evidence my-spec:ac3
 
 The artifact is copied into `specs/evidence/<spec-id>/` under a content-hashed
 name, attached to the criterion as `kind=artifact`, and recorded with the
-revision it was taken from — marked when that revision is an uncommitted tree, so
-a reviewer can tell work-in-progress evidence from a screenshot taken at a real
-commit.
+revision it was taken from — marked when that revision is an uncommitted working
+tree, and separately marked when the revision itself is not a commit on any
+branch (a detached HEAD, or a throwaway ref materialized for a remote capture),
+so a reviewer can tell work-in-progress or throwaway evidence from a screenshot
+taken at a real, committed revision. Both markers can appear together.
 
 Artifacts are capped at 8 MiB each — a phone fetches these over the relay, and a
 screenshot or layout dump larger than that is a capture bug, not evidence. An

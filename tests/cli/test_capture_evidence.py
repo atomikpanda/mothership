@@ -58,6 +58,8 @@ class _FakeShell:
             return _FakeResult(stdout="abc1234\n")
         if command.startswith("git status"):
             return _FakeResult(stdout=" M src/app.kt\n" if self._dirty else "")
+        if command.startswith("git branch"):
+            return _FakeResult(stdout="* main\n")  # on a real branch, by default
         return _FakeResult()
 
 

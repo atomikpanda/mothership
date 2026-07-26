@@ -26,10 +26,32 @@ def parse_evidence_target(raw: str) -> EvidenceTarget:
     return EvidenceTarget(spec_id=parts[0], criterion_id=parts[1])
 
 
+def _on_a_branch(sha: str, worktree: Path, shell) -> bool:
+    """True iff some branch — local or remote-tracking — contains `sha`.
+
+    `git branch --all --contains <sha>` lists every branch reachable from
+    `sha`, but on a detached HEAD it ALSO always emits a synthetic
+    `* (HEAD detached at/from ...)` line even when no real branch contains the
+    commit — so "empty output" isn't the right test. Filter that pseudo-entry
+    out (it starts with `(`) and check whether any real branch name remains.
+    `--all` (not just local) matters because a worktree can be a detached
+    checkout of a commit that's the tip of a REMOTE branch with no local
+    branch pointing at it — that commit is still "on a branch", just not one
+    with a local ref.
+    """
+    result = shell.run(f"git branch --all --contains {sha}", cwd=worktree)
+    for line in (result.stdout or "").splitlines():
+        name = line[2:].strip()  # strip the leading "* " / "  " marker column
+        if name and not name.startswith("("):
+            return True
+    return False
+
+
 def provenance_note(worktree: Path, shell) -> str:
-    """Where the capture was taken from. A capture of uncommitted work or of a
-    throwaway run ref is still useful evidence, but a reviewer must be able to
-    see that is what it is.
+    """Where the capture was taken from. A capture of uncommitted work, or of
+    a commit that isn't on any branch (a detached HEAD, or a throwaway run
+    ref materialized for a remote capture), is still useful evidence — but a
+    reviewer must be able to see that is what it is.
 
     `shell` is util/shell.py::Shell — its `run` takes a command STRING (it uses
     shell=True), not an argv list.
@@ -38,4 +60,13 @@ def provenance_note(worktree: Path, shell) -> str:
     sha = (rev.stdout or "").strip() or "unknown"
     status = shell.run("git status --porcelain", cwd=worktree)
     dirty = bool((status.stdout or "").strip())
-    return f"at {sha} (uncommitted working tree)" if dirty else f"at {sha}"
+
+    markers = []
+    if dirty:
+        markers.append("uncommitted working tree")
+    if sha != "unknown" and not _on_a_branch(sha, worktree, shell):
+        markers.append("not on any branch")
+
+    if markers:
+        return f"at {sha} ({', '.join(markers)})"
+    return f"at {sha}"
