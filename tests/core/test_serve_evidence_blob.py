@@ -23,7 +23,7 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 PNG_BYTES = b"\x89PNG fake bytes"
 
 
-def _app(tmp_path: Path, auth_token: str | None = None):
+def _app(tmp_path: Path, auth_token: str | None = None, config=None):
     return create_app(
         specs_dir=tmp_path / "specs",
         state_manager=StateManager(tmp_path / ".mothership"),
@@ -31,21 +31,37 @@ def _app(tmp_path: Path, auth_token: str | None = None):
         workspace_root=tmp_path,
         workspace_name="test-ws",
         auth_token=auth_token,
+        config=config,
     )
 
 
-def _client(tmp_path: Path) -> TestClient:
-    return TestClient(_app(tmp_path, auth_token=TOKEN))
+def _client(tmp_path: Path, config=None) -> TestClient:
+    return TestClient(_app(tmp_path, auth_token=TOKEN, config=config))
 
 
-def _seed_spec(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 26, tzinfo=timezone.utc)
-    SpecStore(tmp_path / "specs").save(Spec(
+def _spec(now) -> Spec:
+    return Spec(
         id="dq", title="Decision queue", status="needs_review",
         created_at=now, updated_at=now, task_slug="dq",
         body=render_body("the problem", "as a user", "the approach"),
         acceptance_criteria=[AcceptanceCriterion(id="ac1", text="view questions")],
-    ))
+    )
+
+
+def _seed_spec(tmp_path: Path) -> None:
+    SpecStore(tmp_path / "specs").save(_spec(datetime(2026, 7, 26, tzinfo=timezone.utc)))
+
+
+def _seed_encrypted_spec(tmp_path: Path) -> None:
+    """A genuinely encrypted workspace: the SPEC FILE itself is ciphertext, not
+    just the artifact. This is what `spec_storage: encrypted` produces, and the
+    only shape in which a missing key locks the spec as well as its evidence."""
+    from mship.core.spec_storage import SpecStorage
+
+    storage = SpecStorage(tmp_path / "specs", mode="encrypted", workspace_root=tmp_path)
+    SpecStore(tmp_path / "specs", storage=storage).save(
+        _spec(datetime(2026, 7, 26, tzinfo=timezone.utc))
+    )
 
 
 def _seed_evidence(tmp_path: Path, mode: str = "committed") -> str:
@@ -112,7 +128,36 @@ def test_traversing_spec_id_is_404(tmp_path: Path):
     assert b"secret screenshot" not in r.content
 
 
+def test_locked_spec_reports_locked_rather_than_missing(tmp_path: Path):
+    """The primary shape of "no key on this host": `spec_storage: encrypted`,
+    so the spec file is ciphertext too and evidence inherits the mode.
+
+    The blob route must report the SAME key-unavailable condition the spec read
+    path reports. It used to 404 "no spec" instead, because its pre-check went
+    through the spec store's list, which silently skips locked specs.
+    """
+    from mship.core.config import WorkspaceConfig
+
+    _seed_encrypted_spec(tmp_path)
+    ref = _seed_evidence(tmp_path, mode="encrypted")
+    spec_key.keyfile_path(tmp_path).unlink()
+
+    client = _client(tmp_path, config=WorkspaceConfig(
+        workspace="test-ws", spec_storage="encrypted",
+    ))
+    # What the spec read path says about this spec, for comparison.
+    detail = client.get("/specs/dq", headers=AUTH)
+    assert detail.status_code == 200 and detail.json()["locked"] is True
+
+    r = client.get(f"/specs/dq/evidence/{ref}/blob", headers=AUTH)
+    assert r.status_code == 409, r.text
+    assert "locked" in r.text
+    assert PNG_BYTES not in r.content and b"gAAAA" not in r.content
+
+
 def test_encrypted_blob_without_key_is_locked_not_plaintext(tmp_path: Path):
+    # The legal-but-narrower config: plaintext spec, encrypted evidence
+    # (`spec_storage: committed` + `evidence_storage: encrypted`).
     _seed_spec(tmp_path)
     ref = _seed_evidence(tmp_path, mode="encrypted")
     spec_key.keyfile_path(tmp_path).unlink()

@@ -576,10 +576,12 @@ def create_app(
             resolve_ref,
         )
 
-        # Cheap "no such spec" first (a pure id comparison over parsed specs — it
-        # never joins the id onto a path, so a traversing id simply matches
-        # nothing and 404s). Same status as an unresolvable ref either way.
-        _load_or_404(spec_id)
+        # `resolve_ref` is the ONLY spec resolution on this path, deliberately.
+        # It validates `spec_id` as a direct child of the evidence store, so an
+        # unknown spec has no directory and 404s here anyway — while the spec
+        # store's own lookup SKIPS locked specs, which would have turned the
+        # ordinary encrypted-workspace case into "no such spec" instead of the
+        # locked answer below.
         try:
             path = resolve_ref(workspace_root, spec_id, name)
         except BadEvidenceRef:
