@@ -19,6 +19,7 @@ from mship.core.remote_preflight import (
     MISSING_WORKTREE,
     ORIGIN_UNREACHABLE,
     UNREADABLE,
+    WRONG_BRANCH,
     blocked_message,
     inspect,
     push,
@@ -36,7 +37,9 @@ class FakeShell:
 
     `origin` is the sha `ls-remote` reports for the branch (None = origin does
     not have it); `head` is this worktree's HEAD; `contains` lists the shas that
-    are ancestors of HEAD, which is how `merge-base --is-ancestor` is answered.
+    are ancestors of HEAD, which is how `merge-base --is-ancestor` is answered;
+    `head_ref` is what `symbolic-ref HEAD` reports (default: the task's branch —
+    `""` with a non-zero rc is a detached HEAD).
     """
 
     def __init__(self, answers, push_rc=0, push_err=""):
@@ -54,6 +57,9 @@ class FakeShell:
         if "status --porcelain" in cmd:
             out, rc = spec["status"], spec.get("status_rc", 0)
             err = spec.get("status_err", "")
+        elif "symbolic-ref" in cmd:
+            out = spec.get("head_ref", "refs/heads/feat/x")
+            rc = 0 if out else 1
         elif "ls-remote" in cmd:
             if spec.get("ls_remote_rc"):
                 out, rc, err = "", spec["ls_remote_rc"], spec.get("ls_remote_err", "")
@@ -172,6 +178,29 @@ def test_a_missing_worktree_blocks_rather_than_being_skipped(tmp_path):
     assert "mship worktrees" in msg
 
 
+def test_a_selected_repo_outside_the_tasks_worktrees_is_refused_not_skipped(tmp_path):
+    """`--repos web` naming a repo that is not one of this task's repos at all
+    (no entry in `task.worktrees`, unlike `test_a_missing_worktree_blocks_...`
+    above where the entry exists but the path is gone) must not vanish from the
+    check silently. `inspect` only ever iterates `task.worktrees`, so a `web`
+    with no entry there would produce no RepoState and no refusal — while the
+    run host materializes `feat/x` for `web` regardless."""
+    api = _repo(tmp_path, "api")
+    task = FakeTask({"api": api})
+    shell = FakeShell({"api": _clean()})
+
+    pre = inspect(task, shell, repos=["api", "web"])
+    assert not pre.ok
+    assert [s.repo for s in pre.blocked] == ["web"]
+    assert [s.blocked_reason for s in pre.blocked] == [MISSING_WORKTREE]
+    assert shell.touched == {"api"}                  # web was never even looked at
+    assert shell.pushes == []
+
+    msg = blocked_message(pre)
+    assert "missing worktree in web" in msg
+    assert "mship worktrees" in msg
+
+
 def test_origin_ahead_of_head_is_refused_not_pushed(tmp_path):
     """A push cannot fast-forward from behind, so attempting one would replace
     the real remedy with a confusing git error."""
@@ -190,6 +219,59 @@ def test_origin_ahead_of_head_is_refused_not_pushed(tmp_path):
     assert "0123456789ab" in msg                     # which commit, exactly
     assert "pull --ff-only origin feat/x" in msg     # the remedy is pull, not push
     assert "fast-forward from behind is impossible" in msg
+
+
+def test_a_worktree_on_another_branch_is_refused(tmp_path):
+    """Every verdict here is reached by reading HEAD, and `push` publishes what
+    those verdicts cleared. If HEAD is not the task's branch, the run host
+    materializes one commit while a different one was inspected."""
+    api = _repo(tmp_path, "api")
+    shell = FakeShell({"api": _clean(head_ref="refs/heads/main")})
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert not pre.ok
+    assert [s.blocked_reason for s in pre.blocked] == [WRONG_BRANCH]
+    assert pre.to_push == []
+    assert shell.pushes == []
+
+    msg = blocked_message(pre)
+    assert "worktree is not on the task's branch in api" in msg
+    assert "HEAD is main, not feat/x" in msg           # which branch, exactly
+    assert "checkout feat/x" in msg                    # the remedy
+    assert "mship commit" not in msg                   # not a dirty-tree problem
+
+
+def test_a_detached_worktree_is_refused_and_says_so(tmp_path):
+    """Detached is the same finding with no branch name to report: `symbolic-ref
+    --quiet` exits non-zero with empty output, which must not read as a match."""
+    api = _repo(tmp_path, "api")
+    shell = FakeShell({"api": _clean(head_ref="")})
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert [s.blocked_reason for s in pre.blocked] == [WRONG_BRANCH]
+    assert "HEAD is detached, not feat/x" in blocked_message(pre)
+
+
+def test_the_branch_is_checked_before_the_tree_is_judged_dirty(tmp_path):
+    """A wrong-branch worktree that is also dirty must report the branch: telling
+    the operator to `mship commit` would commit their work onto the wrong
+    branch, which is worse than the state they are already in."""
+    api = _repo(tmp_path, "api")
+    shell = FakeShell({"api": _clean(status=" M a.py\n", head_ref="refs/heads/main")})
+    assert [s.blocked_reason for s in inspect(FakeTask({"api": api}), shell).blocked] \
+        == [WRONG_BRANCH]
+
+
+def test_a_path_that_is_not_a_git_repo_is_unreadable_not_wrong_branch(tmp_path):
+    """Ordering guard: `git status` failing means nothing about HEAD can be
+    asked, so the remedy is "fix the repo", not "check out the branch"."""
+    api = _repo(tmp_path, "api")
+    shell = FakeShell({"api": _clean(
+        status="", status_rc=128, status_err="fatal: not a git repository\n",
+        head_ref="",
+    )})
+    assert [s.blocked_reason for s in inspect(FakeTask({"api": api}), shell).blocked] \
+        == [UNREADABLE]
 
 
 def test_an_unreachable_origin_blocks(tmp_path):
@@ -231,7 +313,10 @@ def test_a_clean_branch_missing_from_origin_is_pushed(tmp_path):
 
     pushed, err = push(pre, shell)
     assert err is None and pushed == ["api"]
-    assert shell.pushes and "push -u origin feat/x" in shell.pushes[0][0]
+    # The ref that was INSPECTED — see `test_a_detached_worktree_never_publishes_
+    # a_commit_that_was_not_inspected` for why the branch name alone is not it.
+    assert shell.pushes
+    assert "push -u origin HEAD:refs/heads/feat/x" in shell.pushes[0][0]
 
 
 def test_a_clean_branch_ahead_of_origin_is_pushed(tmp_path):
@@ -471,6 +556,59 @@ def test_real_repo_branch_absent_from_origin_is_pushed(tmp_path):
     _git(work, "checkout", "-b", "feat/never-pushed")
     pre = inspect(FakeTask({"api": work}, branch="feat/never-pushed"), RealShell())
     assert [s.push_reason for s in pre.to_push] == ["not on origin"]
+
+
+def test_a_detached_worktree_never_publishes_a_commit_that_was_not_inspected(tmp_path):
+    """THE second finding, stated as the invariant it protects: *the commit that
+    reaches origin is the commit preflight inspected*.
+
+    A detached worktree splits the two. Every check reads HEAD, but pushing the
+    BRANCH NAME (`git push -u origin feat/x`) resolves the stale local branch ref
+    instead — git reports `Everything up-to-date`, exit 0, and origin keeps the
+    old commit. The run host then resets to that old commit, and the preflight
+    that cleared the run had looked at something else entirely.
+
+    Real git, real bare origin: a mocked shell has no notion of `feat/x` and
+    `HEAD` being two different commits, which is the whole point.
+    """
+    origin, work = _real_repo(tmp_path)
+    _git(work, "checkout", "--detach", "HEAD")
+    (work / "d.txt").write_text("detached\n")
+    _git(work, "add", "d.txt")
+    _git(work, "commit", "-m", "detached work")
+    inspected = _git(work, "rev-parse", "HEAD")
+    assert _git(work, "rev-parse", "feat/x") != inspected   # the split is real
+
+    shell = RealShell()
+    pre = inspect(FakeTask({"api": work}), shell)
+
+    if pre.ok:
+        push(pre, shell)
+        assert _git(origin, "rev-parse", "refs/heads/feat/x") == inspected
+    else:
+        assert [s.blocked_reason for s in pre.blocked] == [WRONG_BRANCH]
+        assert pre.to_push == []
+
+
+def test_a_real_worktree_on_another_branch_is_refused_and_origin_is_untouched(tmp_path):
+    """The everyday shape of the same thing: someone checked another branch out
+    inside the task worktree. Silently pushing its HEAD would republish the
+    TASK's branch on origin as that other branch's commit — a shared ref moved to
+    something the operator never named."""
+    origin, work = _real_repo(tmp_path)
+    before = _git(origin, "rev-parse", "refs/heads/feat/x")
+    _git(work, "checkout", "-b", "side")
+    (work / "s.txt").write_text("side\n")
+    _git(work, "add", "s.txt")
+    _git(work, "commit", "-m", "side")
+
+    shell = RealShell()
+    pre = inspect(FakeTask({"api": work}), shell)      # task branch is feat/x
+    assert [s.blocked_reason for s in pre.blocked] == [WRONG_BRANCH]
+
+    push(pre, shell)                                    # nothing to push
+    assert _git(origin, "rev-parse", "refs/heads/feat/x") == before
+    assert "HEAD is side, not feat/x" in blocked_message(pre)
 
 
 def test_real_repo_that_is_not_a_git_worktree_blocks(tmp_path):

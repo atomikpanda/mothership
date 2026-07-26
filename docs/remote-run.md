@@ -120,10 +120,24 @@ compares against your HEAD:
   running the previous revision while you are mid-edit is worse than stopping.
 - **Untracked files only** → it warns. They cannot change what the push carries,
   but they will not exist on the run host either.
+- **The worktree isn't on the task's branch** — detached, or some other branch
+  checked out → it refuses, and prints the `git checkout <branch>` that fixes it.
+  Every check above reads the worktree's HEAD while the run host materializes the
+  *task's* branch, so the commit that was verified and the commit that would run
+  are two different things. (Nothing is quietly resolved for you: publishing that
+  HEAD would move the task's branch on origin to a commit you never named.)
 - **The repo can't be inspected at all** — `git status` fails, the worktree is
   gone, origin won't answer → it refuses, naming which. Nothing about what the run
   host would execute was established, and that is the one case that must never pass
   silently.
+- **`--repos`/`--tag` names a repo that isn't one of the task's repos at all** — no
+  worktree, no branch, nothing to compare against origin → it refuses with the
+  same "missing worktree" message as a worktree that existed and vanished. The run
+  host would still materialize that repo's branch from origin regardless, so a
+  selection outside the task's own repos is never silently dropped from the check.
+
+When it does push for you, it pushes `HEAD:refs/heads/<branch>` — the ref it just
+inspected — so the commit that reaches origin is the commit that was verified.
 
 Every repo **the run will actually touch** is checked, not just the one you are
 standing in: a task has a branch per repo and the run host materializes each

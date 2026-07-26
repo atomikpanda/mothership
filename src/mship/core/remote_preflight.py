@@ -33,6 +33,17 @@ Against origin's real tip:
   * untracked files only → **warn**. They cannot change what the push contains, but
     they also will not exist on the run host, which is worth saying out loud.
 
+Every one of those verdicts is reached by reading the worktree's **HEAD**, and
+`push` publishes what they cleared — so HEAD has to *be* the task's branch for the
+answer to mean anything. A worktree that is detached, or has some other branch
+checked out, would have one commit inspected and a different one published, after
+which the run host resets to the published one and executes code nothing here
+looked at. So the identity of what is being inspected is established before its
+state is (**refuse** if HEAD is not the task branch), and the push then names the
+ref that was inspected — `HEAD:refs/heads/<branch>` — rather than resolving the
+branch a second time. The guarantee is meant to hold by construction: the commit
+that reaches origin is the commit preflight inspected.
+
 Anything that cannot be determined is refused, not assumed clean: a repo `git
 status` fails in, a worktree that is gone, an origin that will not answer. The
 whole purpose here is "do not dispatch something unverified", so an unverifiable
@@ -67,11 +78,16 @@ UNREADABLE = "unreadable git state"
 BEHIND_ORIGIN = "unpulled commits on origin"
 MISSING_WORKTREE = "missing worktree"
 ORIGIN_UNREACHABLE = "unverified origin"
+WRONG_BRANCH = "worktree is not on the task's branch"
 
 _WHY = {
     DIRTY:
         "the run host materializes the task's branch from origin, so it would "
         "run the last PUSHED revision, not what you are editing.",
+    WRONG_BRANCH:
+        "every check here reads the worktree's HEAD, but the run host "
+        "materializes the TASK's branch — so what was verified and what would "
+        "run are two different commits.",
     UNREADABLE:
         "git could not report the repo's state, so nothing about what the run "
         "host would execute could be verified.",
@@ -96,6 +112,10 @@ _FIX = {
         "Commit and push first:",
         '  mship commit "<what changed>"        # commits across every task repo',
         '  git -C "{path}" push -u origin HEAD',
+    ],
+    WRONG_BRANCH: [
+        "Check the task's branch back out, then re-run:",
+        '  git -C "{path}" checkout {branch}',
     ],
     UNREADABLE: [
         "Run `git status` in the repo to see what git is unhappy about, then "
@@ -198,6 +218,21 @@ def _inspect_repo(shell, repo: str, path: Path, branch: str) -> RepoState:
         # tree, so the return code is the only thing separating "nothing to
         # report" from "could not look".
         return state(blocked=UNREADABLE, detail=_tail(status))
+
+    # WHAT is being inspected, before WHAT STATE it is in: every verdict below
+    # reads HEAD and `push` publishes what they cleared, so a worktree that is
+    # detached or on another branch would have one commit inspected and another
+    # published. Asked after `git status` because a path that is not a git
+    # worktree at all is UNREADABLE, not "on the wrong branch". `--quiet` makes a
+    # detached HEAD exit non-zero with empty output instead of printing an error.
+    head_ref = shell.run("git symbolic-ref --quiet HEAD", cwd=path)
+    checked_out = (head_ref.stdout or "").strip().removeprefix("refs/heads/")
+    if checked_out != branch:
+        return state(
+            blocked=WRONG_BRANCH,
+            detail=f"HEAD is {checked_out or 'detached'}, not {branch}",
+        )
+
     lines = [ln for ln in (status.stdout or "").splitlines() if ln.strip()]
     if any(not ln.startswith("??") for ln in lines):
         return state(blocked=DIRTY)
@@ -240,7 +275,10 @@ def inspect(task, shell, *, repos: list[str] | None = None) -> Preflight:
     `repos` is the caller's `--repos`/`--tag`-filtered set — the repos the run
     will actually touch. Inspecting more than that both refuses runs over
     unrelated work in progress and pushes repos the operator never named. `None`
-    means every repo the task touches.
+    means every repo the task touches. A selected repo with no worktree entry on
+    the task at all (outside `task.worktrees`) still gets a MISSING_WORKTREE
+    refusal, exactly like one whose worktree existed and vanished — the run host
+    would materialize it from origin either way.
 
     Costs one `ls-remote` per selected repo (see the module docstring): a single
     ref, immediately before a network dispatch that makes the run host fetch that
@@ -248,11 +286,31 @@ def inspect(task, shell, *, repos: list[str] | None = None) -> Preflight:
     on.
     """
     selected = None if repos is None else set(repos)
+    worktrees = task.worktrees or {}
     states = [
         _inspect_repo(shell, repo, Path(raw_path), task.branch)
-        for repo, raw_path in sorted((task.worktrees or {}).items())
+        for repo, raw_path in sorted(worktrees.items())
         if selected is None or repo in selected
     ]
+
+    # A selected repo the task has no worktree for at all — e.g. `--repos web`
+    # naming a repo `_resolve_repos` never intersected with the task's own repo
+    # list — is filtered OUT of `worktrees.items()` above by construction, not
+    # blocked: it would otherwise vanish from `states` with no refusal, while the
+    # run host materializes it from origin regardless. Same finding as a worktree
+    # that existed and then disappeared, so it gets the same MISSING_WORKTREE
+    # refusal, not a new mechanism.
+    if selected is not None:
+        states += [
+            RepoState(
+                repo=repo, path=Path(f"<no worktree for {repo!r} on this task>"),
+                branch=task.branch, blocked_reason=MISSING_WORKTREE,
+                detail=f"{repo!r} is not one of this task's repos (no worktree entry)",
+                untracked_only=False, needs_push=False, push_reason=None,
+            )
+            for repo in sorted(selected - worktrees.keys())
+        ]
+
     return Preflight(
         states=states,
         blocked=[s for s in states if s.blocked_reason is not None],
@@ -266,8 +324,8 @@ def blocked_message(pre: Preflight) -> str:
     per reason, because a task with a dirty repo AND a stale one needs both
     remedies, not whichever happened to be found first."""
     sections = []
-    for reason in (DIRTY, BEHIND_ORIGIN, MISSING_WORKTREE, UNREADABLE,
-                   ORIGIN_UNREACHABLE):
+    for reason in (DIRTY, WRONG_BRANCH, BEHIND_ORIGIN, MISSING_WORKTREE,
+                   UNREADABLE, ORIGIN_UNREACHABLE):
         group = [s for s in pre.blocked if s.blocked_reason == reason]
         if not group:
             continue
@@ -292,10 +350,19 @@ def push(pre: Preflight, shell) -> tuple[list[str], str | None]:
     Returns `(pushed_repos, error)`. A push failure stops the run: proceeding
     after a failed push is exactly the silent-stale-code case this module exists
     to prevent.
+
+    The refspec names the ref that was INSPECTED — `HEAD:refs/heads/<branch>` —
+    rather than letting git resolve `<branch>` a second time. `inspect` already
+    refuses a worktree whose HEAD is not the task branch, so the two agree; this
+    spelling is what makes them agree by construction rather than by that check
+    being present. (`git push -u origin <branch>` from a detached HEAD pushes the
+    stale local branch ref and reports "Everything up-to-date" — a success for a
+    commit nothing verified.)
     """
     pushed: list[str] = []
     for s in pre.to_push:
-        result = shell.run(f"git push -u origin {s.branch}", cwd=s.path)
+        refspec = shlex.quote(f"HEAD:refs/heads/{s.branch}")
+        result = shell.run(f"git push -u origin {refspec}", cwd=s.path)
         if result.returncode != 0:
             return pushed, f"could not push {s.repo} ({s.push_reason}): {_tail(result)}"
         pushed.append(s.repo)
