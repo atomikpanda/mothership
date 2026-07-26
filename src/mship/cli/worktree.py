@@ -1542,9 +1542,12 @@ def register(app: typer.Typer, get_container):
 
         # Render the acceptance-criteria PR-body section once (reuses bound_spec
         # from the gate above). Empty string when there's no bound spec or no ACs.
-        # Embeds image evidence when the workspace's evidence commit is fetchable
-        # from GitHub; otherwise names it and warns here, BEFORE any PR is opened,
-        # so the operator can abort and push rather than fix it up after the fact.
+        # Under `committed` evidence storage this also COMMITS AND PUSHES the
+        # referenced artifacts in the workspace repo (pathspec-scoped to
+        # specs/evidence/<spec>/ — see evidence_url.publish_evidence), because
+        # nothing else does and an unpublished artifact embeds as a 404. Every
+        # failure in there degrades to naming the artifact plus this warning,
+        # raised BEFORE any PR is opened; opening the PR never depends on it.
         from mship.core.pr import acceptance_block_for_finish
         acceptance_block = ""
         if bound_spec is not None:

@@ -79,9 +79,25 @@ over-cap artifact is refused when it is stored (the capture itself still
 succeeds) and refused again if one ever reaches the store another way.
 
 **What travels:** the phone fetches evidence from `mship serve` over the relay.
-The PR body embeds it when the bytes are fetchable on GitHub — which means
-`evidence_storage: committed` **and** the evidence commit pushed. Otherwise the
-PR names the artifact instead of showing it, and `mship finish` says so.
+The PR body embeds it when the bytes are fetchable on GitHub, which means
+`evidence_storage: committed` **and** the artifact present in a pushed workspace
+commit. You do not have to arrange that second half: under `committed` storage
+`mship finish` commits the referenced artifacts and pushes the workspace repo
+itself, because otherwise the URL in the PR body would point at a file nobody
+ever committed.
+
+That is the one place mship writes to your workspace repo, and it stays narrow:
+only files under `specs/evidence/<spec-id>/` that a criterion references, staged
+and committed by explicit pathspec, so work you have in flight — untracked,
+edited, or already staged — is never swept into it. Nothing is forced: a
+gitignored evidence directory, a detached HEAD, a diverged branch, an
+unreachable origin, or a branch origin does not already have all stop the
+publish rather than push past it.
+
+Every failure there degrades and none of them block the PR: `finish` warns,
+names the artifact instead of embedding it, and carries on opening the PR. It
+also warns under `local` or `encrypted` storage, where the bytes are not on
+GitHub in readable form at all and nothing is committed or pushed.
 
 **What does not travel:** secrets, platform state, and anything else git cannot
 carry.

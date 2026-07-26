@@ -1,9 +1,17 @@
-"""finish's acceptance-block wrapper: embeds image evidence when the workspace's
-evidence commit is fetchable, and warns the operator (once, actionably) when it
-exists but is not — because `workspace_raw_base` answers only the git question
-and does not know the storage mode, the wrapper must gate on `committed` mode
-before ever calling it (see evidence_url.py's module docstring): under `local`
-the evidence dir is gitignored, so a URL would 404 for bytes never on the remote.
+"""finish's acceptance-block wrapper: embeds image evidence when the artifact is
+provably in a pushed workspace commit, and warns the operator (once, actionably)
+when it is not.
+
+Because `publish_evidence` answers only the git question and does not know the
+storage mode, the wrapper must gate on `committed` mode before ever calling it
+(see evidence_url.py's module docstring): under `local` the evidence dir is
+gitignored, so a URL would 404 for bytes never on the remote — and staging it
+would be actively wrong. The gate is asserted here as "the shell was never
+invoked at all".
+
+These are the wrapper's decisions with a scripted shell. The commit/push seam
+itself is covered end-to-end against a real git repo in
+test_finish_evidence_publish.py.
 """
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -58,6 +66,7 @@ def _pushed_shell() -> _FakeShell:
         "--abbrev-ref": (0, "main\n"),
         "rev-parse HEAD": (0, "abc123def456\n"),
         "ls-remote": (0, "abc123def456\trefs/heads/main\n"),
+        "cat-file": (0, ""),  # the artifact IS in the pinned commit's tree
     })
 
 
@@ -92,6 +101,20 @@ def test_committed_and_pushed_embeds_with_no_warning(tmp_path):
     assert warning is None
 
 
+def test_pushed_but_not_tracked_at_the_pinned_sha_is_named_not_embedded(tmp_path):
+    """The seatbelt: HEAD is on origin, but the artifact is not in that tree, so
+    the URL would 404. The module emitting the URL checks its own precondition
+    instead of trusting whoever was supposed to have committed the file."""
+    shell = _pushed_shell()
+    shell._replies["cat-file"] = (128, "")
+    spec = _spec_with(AcceptanceEvidence(kind="artifact", ref=IMAGE_REF))
+    block, warning = acceptance_block_for_finish(spec, tmp_path, shell, _config())
+    assert "![" not in block
+    assert IMAGE_REF in block
+    assert warning is not None
+    assert "not tracked at workspace commit" in warning
+
+
 def test_local_mode_never_calls_the_shell_and_warns(tmp_path):
     spec = _spec_with(AcceptanceEvidence(kind="artifact", ref=IMAGE_REF))
     shell = _pushed_shell()  # would happily answer "pushed" if ever asked
@@ -121,10 +144,11 @@ def test_no_image_evidence_produces_no_warning(tmp_path):
         AcceptanceEvidence(kind="test", ref="test-runs/7"),
         AcceptanceEvidence(kind="commit", ref="deadbee"),
     )
-    block, warning = acceptance_block_for_finish(
-        spec, tmp_path, _unpushed_shell(), _config(),
-    )
+    shell = _unpushed_shell()
+    block, warning = acceptance_block_for_finish(spec, tmp_path, shell, _config())
     assert warning is None
+    # Nothing embeddable => no reason to touch the operator's workspace repo.
+    assert shell.commands == []
 
 
 def test_no_evidence_at_all_produces_no_warning(tmp_path):

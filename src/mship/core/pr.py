@@ -449,7 +449,9 @@ class PRManager:
         return "\n".join(lines)
 
 
-def _is_embeddable_image(evidence, evidence_base_url: str | None) -> bool:
+def _is_embeddable_image(
+    evidence, evidence_base_url: str | None, verified_refs=None
+) -> bool:
     """True when GitHub's renderer can fetch these bytes AND they are an image.
 
     Only refs the evidence store produced can resolve under the base URL, so a
@@ -457,15 +459,24 @@ def _is_embeddable_image(evidence, evidence_base_url: str | None) -> bool:
     named rather than embedded as a URL that would 404. An encrypted ref falls
     out here for free: its extension is `.enc`, not an image one — and its bytes
     are ciphertext, so an embed would render broken.
+
+    `verified_refs`, when given, additionally restricts embedding to refs proven
+    to exist in the commit the base URL pins. None means "not checked" — the
+    pure renderer's default, and the shape callers use to ask the weaker
+    question "is this the KIND of thing we would embed?".
     """
     if not evidence_base_url or evidence.kind != "artifact":
         return False
     if not is_stored_ref(evidence.ref):
         return False
-    return Path(evidence.ref).suffix.lower() in IMAGE_EXTS
+    if Path(evidence.ref).suffix.lower() not in IMAGE_EXTS:
+        return False
+    return verified_refs is None or evidence.ref in verified_refs
 
 
-def build_acceptance_block(spec, evidence_base_url: str | None = None) -> str:
+def build_acceptance_block(
+    spec, evidence_base_url: str | None = None, verified_refs=None
+) -> str:
     """Render an 'Acceptance criteria' PR-body section listing each AC as verified
     (with its evidence refs) or unverified. Pure analogue of
     PRManager.build_coordination_block: returns '' when there is nothing to render
@@ -477,6 +488,11 @@ def build_acceptance_block(spec, evidence_base_url: str | None = None) -> str:
     named. It is None whenever the bytes are not fetchable by GitHub (local or
     encrypted storage, or an evidence commit that has not been pushed), in which
     case the artifact is named — never emitted as a broken image.
+
+    `verified_refs` narrows that further to refs proven present in the pinned
+    commit, so one unpublished artifact degrades to a name without dragging its
+    published siblings down with it. None (the default) embeds every image ref
+    the base URL covers.
     """
     acs = getattr(spec, "acceptance_criteria", None) or []
     if not acs:
@@ -494,8 +510,8 @@ def build_acceptance_block(spec, evidence_base_url: str | None = None) -> str:
             continue
         embeds, named = [], []
         for e in c.evidence:
-            target = embeds if _is_embeddable_image(e, evidence_base_url) else named
-            target.append(e)
+            embeddable = _is_embeddable_image(e, evidence_base_url, verified_refs)
+            (embeds if embeddable else named).append(e)
         head = f"- [x] `{c.id}` {c.text}"
         if named:
             head += " — " + ", ".join(f"{e.kind}:{e.ref}" for e in named)
@@ -513,16 +529,23 @@ def acceptance_block_for_finish(spec, workspace_root, shell, config) -> tuple[st
     """The acceptance block plus an optional operator warning.
 
     Split from build_acceptance_block so the pure renderer stays testable without
-    a git repo or a config. Embedding requires `committed` storage AND the evidence
-    commit actually pushed: under `local` the evidence directory is gitignored, so
-    a raw URL would 404, and under `encrypted` the bytes are ciphertext.
+    a git repo or a config. Embedding requires `committed` storage AND the artifact
+    actually present in a pushed workspace commit: under `local` the evidence
+    directory is gitignored, so a raw URL would 404, and under `encrypted` the
+    bytes are ciphertext.
+
+    Under `committed`, finish OWNS getting it there — `publish_evidence` commits
+    the referenced artifacts and pushes the workspace repo, because otherwise the
+    ordinary sequence (`capture --evidence`, then finish) emits a URL to a file
+    nobody ever committed. It reports back only the refs it could prove are in the
+    pinned commit; the rest are named.
 
     The mode gate is checked FIRST and short-circuits before any shell call:
-    `workspace_raw_base` only answers the git question ("is this sha on origin?")
-    and would happily return a URL for gitignored bytes under `local` if asked, so
-    it must never be asked under `local`/`encrypted` (see evidence_url.py). The
-    "has image evidence" scan is what decides whether to warn — an operator with
-    no screenshots needs no message, so it is checked before doing any git work too.
+    `publish_evidence` only answers the git question and would happily stage
+    gitignored bytes under `local` if asked, so it must never be asked under
+    `local`/`encrypted` (see evidence_url.py). The "has image evidence" scan
+    likewise runs first — an operator with no screenshots gets no message, no
+    commit, and no push.
 
     `resolve_evidence_mode` can raise `EvidenceModeError` (evidence_storage more
     exposed than spec_storage). By the time `finish` runs, config load has already
@@ -533,34 +556,32 @@ def acceptance_block_for_finish(spec, workspace_root, shell, config) -> tuple[st
     """
     mode = resolve_evidence_mode(config)
     acs = getattr(spec, "acceptance_criteria", None) or []
-    has_image_evidence = any(
-        _is_embeddable_image(e, "placeholder")
+    # Ordered-unique: one artifact attached to several criteria is one file.
+    image_refs = list(dict.fromkeys(
+        e.ref
         for c in acs
         for e in (c.evidence or [])
+        if _is_embeddable_image(e, "placeholder")
+    ))
+
+    base_url, verified, publish_warning = None, None, None
+    if mode == "committed" and image_refs:
+        from mship.core.evidence_url import publish_evidence
+
+        base_url, verified, publish_warning = publish_evidence(
+            workspace_root, spec.id, image_refs, shell,
+        )
+
+    block = build_acceptance_block(
+        spec, evidence_base_url=base_url, verified_refs=verified,
     )
 
-    base_url = None
-    if mode == "committed" and has_image_evidence:
-        from mship.core.evidence_url import workspace_raw_base
-
-        base_url = workspace_raw_base(workspace_root, shell)
-
-    block = build_acceptance_block(spec, evidence_base_url=base_url)
-
-    if not has_image_evidence or base_url is not None:
+    if not image_refs:
         return block, None
-
     if mode == "committed":
-        warning = (
-            "Image evidence exists but the workspace evidence commit has not "
-            "been pushed, so it will be named rather than embedded in the PR "
-            "body. Commit and push `specs/` (including `specs/evidence/`), "
-            "then re-run finish to embed it."
-        )
-    else:
-        warning = (
-            f"Image evidence exists but evidence_storage={mode!r} keeps it off "
-            "the public workspace repo, so it will be named rather than "
-            "embedded in the PR body."
-        )
-    return block, warning
+        return block, publish_warning
+    return block, (
+        f"Image evidence exists but evidence_storage={mode!r} keeps it off "
+        "the public workspace repo, so it will be named rather than "
+        "embedded in the PR body."
+    )
