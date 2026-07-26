@@ -184,8 +184,16 @@ def _run_remote(
     if push_error is not None:
         output.error(push_error)
         raise typer.Exit(code=1)
+    # Name the commit, not just the repo: "pushed" alone doesn't say WHICH sha
+    # landed on origin, and that identity is the guarantee this whole preflight
+    # exists to make (see remote_preflight.py).
+    pushed_sha = {s.repo: s.head_sha for s in pre.to_push}
     for repo_name in pushed:
-        output.breadcrumb(f"pushed {repo_name} so the run host sees your commits")
+        sha = pushed_sha.get(repo_name)
+        suffix = f" ({sha[:12]})" if sha else ""
+        output.breadcrumb(
+            f"pushed {repo_name}{suffix} so the run host sees your commits"
+        )
 
     try:
         return exec_remote(

@@ -136,8 +136,25 @@ compares against your HEAD:
   host would still materialize that repo's branch from origin regardless, so a
   selection outside the task's own repos is never silently dropped from the check.
 
-When it does push for you, it pushes `HEAD:refs/heads/<branch>` — the ref it just
-inspected — so the commit that reaches origin is the commit that was verified.
+When it does push for you, it pushes the exact sha it resolved HEAD to during
+inspection — `<sha>:refs/heads/<branch>` — rather than letting git resolve `HEAD`
+(or the branch) a second time when the push itself runs moments later. That
+closes the gap between inspecting and pushing: if something else commits in the
+worktree in between — a subagent, a background job, anything — the push still
+names the commit every check above actually cleared, not whatever HEAD has
+become by the time the push runs.
+
+That guarantee ends at origin, and this is a real limit, not a hypothetical one:
+**the commit *pushed* is the commit *inspected*; that is not the same claim as
+"the commit *executed* is the commit inspected."** Once the push lands, the
+branch on origin is a mutable ref, and mutable refs are exactly what this module
+cannot make safe — anyone with push access can advance the branch before the run
+host's own `git fetch` picks it up, and nothing here can see that happen or stop
+it: the write lands after mship has finished checking, on a different machine's
+clock, outside this process entirely. Closing that second gap would need the run
+host to materialize a specific, immutable revision — a commit, not a branch —
+instead of resolving the branch itself at fetch time; it does not do that today,
+and no amount of extra checking on the dispatching side substitutes for it.
 
 Every repo **the run will actually touch** is checked, not just the one you are
 standing in: a task has a branch per repo and the run host materializes each

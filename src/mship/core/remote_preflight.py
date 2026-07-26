@@ -39,10 +39,25 @@ answer to mean anything. A worktree that is detached, or has some other branch
 checked out, would have one commit inspected and a different one published, after
 which the run host resets to the published one and executes code nothing here
 looked at. So the identity of what is being inspected is established before its
-state is (**refuse** if HEAD is not the task branch), and the push then names the
-ref that was inspected — `HEAD:refs/heads/<branch>` — rather than resolving the
-branch a second time. The guarantee is meant to hold by construction: the commit
-that reaches origin is the commit preflight inspected.
+state is (**refuse** if HEAD is not the task branch), and `inspect` resolves HEAD
+to a concrete sha ONCE and carries it on `RepoState` (`head_sha`) rather than
+re-reading HEAD later. `push` then names that exact sha in its refspec —
+`<sha>:refs/heads/<branch>` — instead of resolving `HEAD` (or the branch) a
+second time at push time. That second resolution is not hypothetical: this
+workspace runs subagents that commit inside a task's worktree while other
+commands are in flight, so a `HEAD:refs/heads/<branch>` refspec computed at push
+time can legitimately name a different commit than the one every check above
+just cleared. The guarantee is meant to hold by construction: the commit that
+reaches origin is the commit preflight inspected — including against a write
+that lands in the gap between the two.
+
+That guarantee stops at origin. Once the push lands, the branch on origin is
+still a mutable ref: another writer with push access can advance it before the
+run host fetches it, and nothing on this machine can see or prevent that — the
+mutation happens after preflight has finished, on a different machine's clock.
+See "Known limitations" in `docs/remote-run.md` for what would actually close
+that gap (the run host materializing an immutable revision, not a branch); it
+is not something this module can do from here.
 
 Anything that cannot be determined is refused, not assumed clean: a repo `git
 status` fails in, a worktree that is gone, an origin that will not answer. The
@@ -149,6 +164,7 @@ class RepoState:
     untracked_only: bool
     needs_push: bool
     push_reason: str | None      # "not on origin" | "ahead of origin" | None
+    head_sha: str | None = None  # HEAD as resolved during inspect; see `push`
 
 
 @dataclass(frozen=True)
@@ -198,11 +214,11 @@ def _inspect_repo(shell, repo: str, path: Path, branch: str) -> RepoState:
     """One repo's verdict. Every path out of here is either a decision or a
     refusal — there is no "could not tell, carry on"."""
     def state(*, blocked=None, detail=None, untracked_only=False,
-              needs_push=False, push_reason=None) -> RepoState:
+              needs_push=False, push_reason=None, head_sha=None) -> RepoState:
         return RepoState(
             repo=repo, path=path, branch=branch, blocked_reason=blocked,
             detail=detail, untracked_only=untracked_only,
-            needs_push=needs_push, push_reason=push_reason,
+            needs_push=needs_push, push_reason=push_reason, head_sha=head_sha,
         )
 
     if not path.exists():
@@ -238,33 +254,43 @@ def _inspect_repo(shell, repo: str, path: Path, branch: str) -> RepoState:
         return state(blocked=DIRTY)
     untracked_only = bool(lines)
 
-    tip, error = _origin_tip(shell, path, branch)
-    if error is not None:
-        return state(blocked=ORIGIN_UNREACHABLE, detail=error,
-                     untracked_only=untracked_only)
-    if tip is None:
-        return state(untracked_only=untracked_only,
-                     needs_push=True, push_reason="not on origin")
-
+    # Resolved ONCE, here, and carried on every state this repo can still reach
+    # (`head_sha` below) rather than re-read at push time. `push` names this exact
+    # sha in its refspec instead of the bare branch, which is what git resolves
+    # HEAD against a SECOND time — so anything that commits in this worktree
+    # between `inspect` and `push` (a subagent, a background job) would otherwise
+    # publish a commit nothing here inspected. Fetched before asking origin so a
+    # local git failure is reported as UNREADABLE without spending the network
+    # round trip first.
     head = shell.run("git rev-parse HEAD", cwd=path)
     if head.returncode != 0:
         return state(blocked=UNREADABLE, detail=_tail(head),
                      untracked_only=untracked_only)
-    if (head.stdout or "").strip() == tip:
-        return state(untracked_only=untracked_only)
+    head_sha = (head.stdout or "").strip()
+
+    tip, error = _origin_tip(shell, path, branch)
+    if error is not None:
+        return state(blocked=ORIGIN_UNREACHABLE, detail=error,
+                     untracked_only=untracked_only, head_sha=head_sha)
+    if tip is None:
+        return state(untracked_only=untracked_only, head_sha=head_sha,
+                     needs_push=True, push_reason="not on origin")
+    if head_sha == tip:
+        return state(untracked_only=untracked_only, head_sha=head_sha)
 
     # A tip that is an ancestor of HEAD is one a push fast-forwards past. A tip
     # that is not — because origin moved on, or because the branches diverged, or
     # because this clone has never even fetched that commit — is one the run host
     # would execute in place of the operator's HEAD. That is the whole finding.
     ancestor = shell.run(
-        f"git merge-base --is-ancestor {shlex.quote(tip)} HEAD", cwd=path
+        f"git merge-base --is-ancestor {shlex.quote(tip)} {shlex.quote(head_sha)}",
+        cwd=path,
     )
     if ancestor.returncode == 0:
-        return state(untracked_only=untracked_only,
+        return state(untracked_only=untracked_only, head_sha=head_sha,
                      needs_push=True, push_reason="ahead of origin")
     return state(
-        blocked=BEHIND_ORIGIN, untracked_only=untracked_only,
+        blocked=BEHIND_ORIGIN, untracked_only=untracked_only, head_sha=head_sha,
         detail=f"origin/{branch} is at {tip[:12]}, which is not in your history",
     )
 
@@ -351,17 +377,28 @@ def push(pre: Preflight, shell) -> tuple[list[str], str | None]:
     after a failed push is exactly the silent-stale-code case this module exists
     to prevent.
 
-    The refspec names the ref that was INSPECTED — `HEAD:refs/heads/<branch>` —
-    rather than letting git resolve `<branch>` a second time. `inspect` already
-    refuses a worktree whose HEAD is not the task branch, so the two agree; this
-    spelling is what makes them agree by construction rather than by that check
-    being present. (`git push -u origin <branch>` from a detached HEAD pushes the
-    stale local branch ref and reports "Everything up-to-date" — a success for a
-    commit nothing verified.)
+    The refspec names the exact sha `inspect` resolved HEAD to —
+    `<sha>:refs/heads/<branch>` — rather than letting git resolve `HEAD` (or
+    `<branch>`) a second time here. `inspect` already refuses a worktree whose
+    HEAD is not the task branch, so the two agree on WHICH ref; spelling the sha
+    is what makes them agree on WHICH COMMIT even if something commits in this
+    worktree between the two calls — a subagent, a background job — rather than
+    relying on nothing else touching the worktree meanwhile. (`git push -u origin
+    <branch>` from a detached HEAD pushes the stale local branch ref and reports
+    "Everything up-to-date" — a success for a commit nothing verified.)
+
+    That is the last thing this module controls. Once this returns, origin has
+    the inspected commit under a mutable branch name, and a concurrent writer can
+    move that name again before the run host fetches it. Do not try to close that
+    here with a lock, a re-check, or a retry — the mutation happens on a different
+    machine, after this function has already returned, so nothing on this side
+    can observe or prevent it. See "Before it dispatches" in
+    `docs/remote-run.md` for what actually would (the run host resolving an
+    immutable revision instead of a branch).
     """
     pushed: list[str] = []
     for s in pre.to_push:
-        refspec = shlex.quote(f"HEAD:refs/heads/{s.branch}")
+        refspec = shlex.quote(f"{s.head_sha}:refs/heads/{s.branch}")
         result = shell.run(f"git push -u origin {refspec}", cwd=s.path)
         if result.returncode != 0:
             return pushed, f"could not push {s.repo} ({s.push_reason}): {_tail(result)}"

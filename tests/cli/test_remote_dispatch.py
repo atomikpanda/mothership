@@ -1022,7 +1022,10 @@ def test_remote_run_pushes_a_clean_unpushed_branch_then_dispatches(tmp_path, mon
         with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame(["ok\n"], exit_code=0))):
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert result.exit_code == 0, result.output
-        assert any("push -u origin HEAD:refs/heads/feat/t1" in c for c in shell.pushes)
+        # The sha `inspect` resolved HEAD to, not a re-resolved `HEAD` — see
+        # test_remote_preflight.py's push-refspec tests for why that distinction
+        # matters.
+        assert any("push -u origin headsha:refs/heads/feat/t1" in c for c in shell.pushes)
         assert recorder["url"] == "http://remote.example/exec/run"   # dispatched after
     finally:
         container.shell.reset_override()

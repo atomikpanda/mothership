@@ -313,10 +313,12 @@ def test_a_clean_branch_missing_from_origin_is_pushed(tmp_path):
 
     pushed, err = push(pre, shell)
     assert err is None and pushed == ["api"]
-    # The ref that was INSPECTED — see `test_a_detached_worktree_never_publishes_
-    # a_commit_that_was_not_inspected` for why the branch name alone is not it.
+    # The exact sha that was INSPECTED — see `test_a_detached_worktree_never_
+    # publishes_a_commit_that_was_not_inspected` for why the branch name alone is
+    # not it, and `test_a_commit_landing_between_inspect_and_push_is_not_what_
+    # gets_pushed` for why `HEAD` re-resolved at push time is not either.
     assert shell.pushes
-    assert "push -u origin HEAD:refs/heads/feat/x" in shell.pushes[0][0]
+    assert "push -u origin headsha:refs/heads/feat/x" in shell.pushes[0][0]
 
 
 def test_a_clean_branch_ahead_of_origin_is_pushed(tmp_path):
@@ -526,6 +528,47 @@ def test_real_repo_ahead_of_origin_is_pushed_and_lands(tmp_path):
     pushed, err = push(pre, shell)
     assert err is None and pushed == ["api"]
     assert _git(origin, "rev-parse", "refs/heads/feat/x") == head
+
+
+def test_a_commit_landing_between_inspect_and_push_is_not_what_gets_pushed(tmp_path):
+    """The local half of the eighth bypass: `push` used to re-resolve `HEAD` at
+    push time via `HEAD:refs/heads/<branch>`. If anything commits in the SAME
+    worktree between `inspect` and `push` — a subagent, a background job, this
+    very workspace's own pattern of running commands while others are in flight —
+    that re-resolution would publish the NEWER commit, one `inspect` never
+    looked at, which is the exact silent-stale-code failure this module exists to
+    prevent, just moved one step later.
+
+    Capturing the sha during `inspect` (`RepoState.head_sha`) and pushing that
+    exact sha instead of re-resolving `HEAD` closes it: whatever HEAD becomes
+    afterward, the push still names the commit that was actually inspected. This
+    does NOT cover a writer advancing the branch on ORIGIN after the push lands —
+    that gap is a mutable ref on another machine and is documented, not fixed,
+    in `docs/remote-run.md`.
+    """
+    origin, work = _real_repo(tmp_path)
+    (work / "f.txt").write_text("inspected\n")
+    _git(work, "add", "f.txt")
+    _git(work, "commit", "-m", "inspected")
+    inspected = _git(work, "rev-parse", "HEAD")
+
+    shell = RealShell()
+    pre = inspect(FakeTask({"api": work}), shell)
+    assert pre.ok and [s.push_reason for s in pre.to_push] == ["ahead of origin"]
+    assert [s.head_sha for s in pre.to_push] == [inspected]
+
+    # The race: something else commits in the SAME worktree after inspection,
+    # before `push` runs.
+    (work / "f.txt").write_text("raced\n")
+    _git(work, "add", "f.txt")
+    _git(work, "commit", "-m", "raced after inspection")
+    raced = _git(work, "rev-parse", "HEAD")
+    assert raced != inspected
+
+    pushed, err = push(pre, shell)
+    assert err is None and pushed == ["api"]
+    assert _git(origin, "rev-parse", "refs/heads/feat/x") == inspected
+    assert _git(origin, "rev-parse", "refs/heads/feat/x") != raced
 
 
 def test_real_repo_diverged_from_origin_is_refused(tmp_path):
