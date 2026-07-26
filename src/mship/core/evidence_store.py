@@ -18,6 +18,8 @@ import shutil
 from pathlib import Path
 from typing import Literal
 
+from mship.util.git import GitRunner
+
 EvidenceMode = Literal["committed", "local", "encrypted"]
 
 # Ordered least-exposed to most-exposed. `local` never leaves the machine;
@@ -91,8 +93,9 @@ def store_artifact(
     """Copy `src` into the spec's evidence directory under a content-hashed
     name. Returns the BARE FILENAME to persist as the evidence ref.
 
-    `mode` is accepted here and honoured in full by a later change (gitignore for
-    `local`, ciphertext for `encrypted`); this path is the plaintext copy.
+    `mode` is honoured in full: `local` plaintext-copies and gitignores the
+    evidence store, `encrypted` writes ciphertext under an `.enc`-suffixed ref
+    (never plaintext), `committed` plaintext-copies with no gitignore entry.
     """
     src = Path(src)
     ext = src.suffix.lower()
@@ -104,14 +107,27 @@ def store_artifact(
     ref = f"{_digest(src)}{ext}"
     dest_dir = evidence_dir(workspace_root, spec_id)
     dest_dir.mkdir(parents=True, exist_ok=True)
+
+    if mode == "encrypted":
+        from mship.core import spec_key
+
+        ref = ref + ENC_SUFFIX
+        key = spec_key.load_or_generate_key(Path(workspace_root), git=GitRunner())
+        (dest_dir / ref).write_bytes(spec_key.encrypt_bytes(key, src.read_bytes()))
+        return ref
+
     shutil.copyfile(src, dest_dir / ref)
+    if mode == "local":
+        GitRunner().add_to_gitignore(
+            Path(workspace_root), f"{SPECS_DIRNAME}/{EVIDENCE_DIRNAME}/"
+        )
     return ref
 
 
 # A ref is exactly a content hash plus a known extension. `fullmatch` and not a
 # `$`-anchored `match`, because `$` would also accept a trailing newline.
 # Nothing that fails this ever reaches the filesystem.
-_REF_RE = re.compile(r"[0-9a-f]{%d}\.[a-z0-9]{2,5}" % _HASH_CHARS)
+_REF_RE = re.compile(r"[0-9a-f]{%d}\.[a-z0-9]{2,5}(\.enc)?" % _HASH_CHARS)
 
 
 class BadEvidenceRef(Exception):
@@ -128,10 +144,11 @@ def resolve_ref(workspace_root: Path, spec_id: str, ref: str) -> Path:
     """
     if not isinstance(ref, str) or not _REF_RE.fullmatch(ref):
         raise BadEvidenceRef(f"malformed evidence ref {ref!r}")
-    # The regex admits one dot only, so the suffix is unambiguous. A full-length
-    # hash with an extension we do not serve (`deadbeefcafe.exe`) is refused
-    # here, not by the regex.
-    if Path(ref).suffix not in CONTENT_TYPES:
+    # A full-length hash with an extension we do not serve (`deadbeefcafe.exe`)
+    # is refused here, not by the regex. An encrypted ref carries a trailing
+    # `.enc`, so the extension we care about is the one beneath that.
+    logical = ref[: -len(ENC_SUFFIX)] if ref.endswith(ENC_SUFFIX) else ref
+    if Path(logical).suffix.lower() not in CONTENT_TYPES:
         raise BadEvidenceRef(f"unsupported evidence extension in {ref!r}")
 
     store_root = Path(os.path.realpath(
