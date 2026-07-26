@@ -158,11 +158,17 @@ def _run_remote(
     # check a remote run either fails with a confusing remote-side materialize
     # error, or — worse — silently executes the last pushed revision and reports it
     # as a result for code the operator is currently editing.
+    #
+    # Scoped to `target_repos` — the same `--repos`/`--tag`-filtered set that is
+    # dispatched below. Preflighting the task's other repos would refuse a run over
+    # work in progress it never touches, and push repos the operator did not name.
     from mship.core import remote_preflight
 
     task_obj = container.state_manager().load().tasks.get(task_slug)
     if task_obj is not None:
-        pre = remote_preflight.inspect(task_obj, container.shell())
+        pre = remote_preflight.inspect(
+            task_obj, container.shell(), repos=target_repos
+        )
         if not pre.ok:
             output.error(remote_preflight.blocked_message(pre))
             raise typer.Exit(code=1)

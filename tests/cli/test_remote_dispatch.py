@@ -390,21 +390,25 @@ def test_exec_remote_malformed_control_count_raises_clean_error():
 # =============================================================================
 
 
-def _write_run_workspace(ws: Path, *, run_hosts: list[str], repo_run_host: str | None = None) -> None:
-    repo_dir = ws / "api"
-    repo_dir.mkdir(exist_ok=True)
-    (repo_dir / "Taskfile.yml").write_text(
-        "version: '3'\ntasks:\n  run:\n    cmds:\n      - echo run\n  build:\n    cmds:\n      - echo build\n"
-    )
+def _write_run_workspace(
+    ws: Path, *, run_hosts: list[str], repo_run_host: str | None = None,
+    repos: list[str] = ["api"],
+) -> None:
     run_host_line = f"    run_host: {repo_run_host}\n" if repo_run_host else ""
+    blocks = ""
+    for name in repos:
+        repo_dir = ws / name
+        repo_dir.mkdir(exist_ok=True)
+        (repo_dir / "Taskfile.yml").write_text(
+            "version: '3'\ntasks:\n  run:\n    cmds:\n      - echo run\n"
+            "  build:\n    cmds:\n      - echo build\n"
+        )
+        blocks += f"  {name}:\n    path: ./{name}\n    type: service\n{run_host_line}"
     (ws / "mothership.yaml").write_text(
         "workspace: t\n"
         f"run_hosts: [{', '.join(run_hosts)}]\n"
         "repos:\n"
-        "  api:\n"
-        "    path: ./api\n"
-        "    type: service\n"
-        f"{run_host_line}"
+        f"{blocks}"
     )
 
 
@@ -899,28 +903,53 @@ def test_cli_capture_without_remote_never_touches_remote_client_or_httpx(tmp_pat
 
 # --- preflight: never dispatch a run that would execute stale code -----------
 
-def _seed_task_with_worktree(ws: Path, slug: str, repo: str) -> Path:
-    wt = ws / ".worktrees" / slug / repo
-    wt.mkdir(parents=True, exist_ok=True)
-    _seed_task(ws, slug=slug, repos=[repo], worktrees={repo: str(wt)})
-    return wt
+def _seed_task_with_worktree(ws: Path, slug: str, *repos: str) -> dict[str, Path]:
+    wts = {}
+    for repo in repos:
+        wt = ws / ".worktrees" / slug / repo
+        wt.mkdir(parents=True, exist_ok=True)
+        wts[repo] = wt
+    _seed_task(ws, slug=slug, repos=list(repos),
+               worktrees={r: str(p) for r, p in wts.items()})
+    return wts
 
 
-def _git_shell(porcelain: str, *, upstream: bool, ahead: int = 0, push_rc: int = 0):
-    """A shell whose git answers are scripted, with everything else passing."""
+def _repo_git(porcelain: str = "", *, origin: str | None = "headsha",
+              head: str = "headsha", contains: list[str] = [],
+              status_rc: int = 0, status_err: str = "") -> dict:
+    """One repo's scripted git answers. Defaults to clean and in sync with
+    origin (`origin` None = the branch is not on origin at all)."""
+    return {
+        "status": porcelain, "status_rc": status_rc, "status_err": status_err,
+        "origin": origin, "head": head, "contains": contains,
+    }
+
+
+def _git_shell(spec: dict | dict[str, dict], *, push_rc: int = 0):
+    """A shell whose git answers are scripted per repo (keyed by the worktree
+    directory name), with everything else passing. A bare spec applies to `api`."""
+    if "status" in spec:
+        spec = {"api": spec}
     shell = MagicMock(spec=ShellRunner)
     pushes: list[str] = []
+    touched: set[str] = set()
 
     def _run(cmd, cwd=None, **kw):
+        touched.add(Path(cwd).name)
+        s = spec[Path(cwd).name]
         if "status --porcelain" in cmd:
-            return ShellResult(returncode=0, stdout=porcelain, stderr="")
-        if "symbolic-full-name" in cmd:
             return ShellResult(
-                returncode=0 if upstream else 128,
-                stdout="origin/feat/t1" if upstream else "", stderr="",
+                returncode=s["status_rc"], stdout=s["status"], stderr=s["status_err"],
             )
-        if "rev-list --count" in cmd:
-            return ShellResult(returncode=0, stdout=f"{ahead}\n", stderr="")
+        if "ls-remote" in cmd:
+            out = "" if s["origin"] is None else f"{s['origin']}\trefs/heads/feat/t1\n"
+            return ShellResult(returncode=0, stdout=out, stderr="")
+        if "rev-parse HEAD" in cmd:
+            return ShellResult(returncode=0, stdout=s["head"], stderr="")
+        if "merge-base --is-ancestor" in cmd:
+            tip = cmd.split()[-2].strip("'")
+            return ShellResult(returncode=0 if tip in s["contains"] else 1,
+                               stdout="", stderr="")
         if cmd.startswith("git push"):
             pushes.append(cmd)
             return ShellResult(returncode=push_rc, stdout="", stderr="denied\n")
@@ -929,6 +958,7 @@ def _git_shell(porcelain: str, *, upstream: bool, ahead: int = 0, push_rc: int =
     shell.run.side_effect = _run
     shell.run_task.return_value = ShellResult(returncode=0, stdout="ok\n", stderr="")
     shell.pushes = pushes
+    shell.touched = touched
     return shell
 
 
@@ -938,7 +968,7 @@ def test_remote_run_is_refused_when_the_worktree_is_dirty(tmp_path, monkeypatch)
     _write_run_workspace(tmp_path, run_hosts=["role-x"])
     _seed_task_with_worktree(tmp_path, "t1", "api")
     _configure(tmp_path)
-    container.shell.override(_git_shell(" M src/app.py\n", upstream=True))
+    container.shell.override(_git_shell(_repo_git(" M src/app.py\n")))
     RunHostStore(tmp_path / ".mothership").set(
         "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
     )
@@ -961,7 +991,7 @@ def test_remote_run_pushes_a_clean_unpushed_branch_then_dispatches(tmp_path, mon
     _write_run_workspace(tmp_path, run_hosts=["role-x"])
     _seed_task_with_worktree(tmp_path, "t1", "api")
     _configure(tmp_path)
-    shell = _git_shell("", upstream=False)
+    shell = _git_shell(_repo_git(origin=None))
     container.shell.override(shell)
     RunHostStore(tmp_path / ".mothership").set(
         "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
@@ -983,7 +1013,7 @@ def test_a_failed_push_aborts_before_dispatch(tmp_path, monkeypatch):
     _write_run_workspace(tmp_path, run_hosts=["role-x"])
     _seed_task_with_worktree(tmp_path, "t1", "api")
     _configure(tmp_path)
-    container.shell.override(_git_shell("", upstream=False, push_rc=1))
+    container.shell.override(_git_shell(_repo_git(origin=None), push_rc=1))
     RunHostStore(tmp_path / ".mothership").set(
         "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
     )
@@ -1003,7 +1033,7 @@ def test_an_up_to_date_repo_dispatches_without_pushing(tmp_path, monkeypatch):
     _write_run_workspace(tmp_path, run_hosts=["role-x"])
     _seed_task_with_worktree(tmp_path, "t1", "api")
     _configure(tmp_path)
-    shell = _git_shell("", upstream=True, ahead=0)
+    shell = _git_shell(_repo_git())
     container.shell.override(shell)
     RunHostStore(tmp_path / ".mothership").set(
         "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
@@ -1015,6 +1045,132 @@ def test_an_up_to_date_repo_dispatches_without_pushing(tmp_path, monkeypatch):
         assert result.exit_code == 0, result.output
         assert shell.pushes == []
         assert recorder["url"].endswith("/exec/run")
+    finally:
+        container.shell.reset_override()
+        _reset()
+
+
+def test_a_repo_whose_git_state_is_unreadable_is_not_dispatched(tmp_path, monkeypatch):
+    """A failed `git status` has EMPTY stdout, exactly like a clean tree. Reading
+    it as clean dispatches a run over a repo nothing was verified about."""
+    _write_run_workspace(tmp_path, run_hosts=["role-x"])
+    _seed_task_with_worktree(tmp_path, "t1", "api")
+    _configure(tmp_path)
+    shell = _git_shell(_repo_git(
+        status_rc=128, status_err="fatal: not a git repository\n",
+    ))
+    container.shell.override(shell)
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+    recorder: dict = {}
+    try:
+        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+            result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
+        assert result.exit_code == 1, result.output
+        assert "unreadable git state in api" in result.output
+        assert "not a git repository" in result.output
+        assert "mship commit" not in result.output   # a broken repo is not a dirty one
+        assert shell.pushes == []
+        assert recorder == {}                        # the remote was never contacted
+    finally:
+        container.shell.reset_override()
+        _reset()
+
+
+def test_a_newer_commit_on_origin_is_refused_not_pushed(tmp_path, monkeypatch):
+    """The run host resets to origin's tip, so it would execute a commit the
+    operator has never seen. No push can fix that."""
+    _write_run_workspace(tmp_path, run_hosts=["role-x"])
+    _seed_task_with_worktree(tmp_path, "t1", "api")
+    _configure(tmp_path)
+    shell = _git_shell(_repo_git(origin="abcdef0123456789", head="oldsha"))
+    container.shell.override(shell)
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+    recorder: dict = {}
+    try:
+        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+            result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
+        assert result.exit_code == 1, result.output
+        assert "unpulled commits on origin in api" in result.output
+        assert "pull --ff-only" in result.output
+        assert shell.pushes == []                    # a push would only confuse
+        assert recorder == {}
+    finally:
+        container.shell.reset_override()
+        _reset()
+
+
+def test_a_task_repo_whose_worktree_vanished_is_not_dispatched(tmp_path, monkeypatch):
+    """Skipping it leaves the run host materializing that repo's branch anyway —
+    from an older pushed revision, or failing outright."""
+    _write_run_workspace(tmp_path, run_hosts=["role-x"])
+    wts = _seed_task_with_worktree(tmp_path, "t1", "api")
+    wts["api"].rmdir()
+    _configure(tmp_path)
+    shell = _git_shell(_repo_git())
+    container.shell.override(shell)
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+    recorder: dict = {}
+    try:
+        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+            result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
+        assert result.exit_code == 1, result.output
+        assert "missing worktree in api" in result.output
+        assert recorder == {}
+    finally:
+        container.shell.reset_override()
+        _reset()
+
+
+def test_repos_scope_keeps_an_unrelated_dirty_repo_from_blocking(tmp_path, monkeypatch):
+    """`--repos api` never touches web, so work in progress there cannot make
+    api's run execute stale code — aborting over it is pure obstruction."""
+    _write_run_workspace(tmp_path, run_hosts=["role-x"], repos=["api", "web"])
+    _seed_task_with_worktree(tmp_path, "t1", "api", "web")
+    _configure(tmp_path)
+    shell = _git_shell({"api": _repo_git(), "web": _repo_git(" M b.ts\n")})
+    container.shell.override(shell)
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+    recorder: dict = {}
+    try:
+        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame(["ok\n"], exit_code=0))):
+            result = runner.invoke(
+                app, ["run", "--task", "t1", "--repos", "api", "--remote=role-x"]
+            )
+        assert result.exit_code == 0, result.output
+        assert recorder["json"]["repos"] == ["api"]
+    finally:
+        container.shell.reset_override()
+        _reset()
+
+
+def test_repos_scope_does_not_push_a_repo_the_operator_did_not_name(tmp_path, monkeypatch):
+    """A narrowly scoped command must not push a repo outside its scope — web's
+    branch is not on origin, so an unscoped preflight would push it. The check
+    is that web was never so much as LOOKED at: no inspection, hence no push."""
+    _write_run_workspace(tmp_path, run_hosts=["role-x"], repos=["api", "web"])
+    _seed_task_with_worktree(tmp_path, "t1", "api", "web")
+    _configure(tmp_path)
+    shell = _git_shell({"api": _repo_git(), "web": _repo_git(origin=None)})
+    container.shell.override(shell)
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+    try:
+        with _ClientPatch(monkeypatch, _recording_handler({}, _frame(["ok\n"], exit_code=0))):
+            result = runner.invoke(
+                app, ["run", "--task", "t1", "--repos", "api", "--remote=role-x"]
+            )
+        assert result.exit_code == 0, result.output
+        assert shell.pushes == []
+        assert shell.touched == {"api"}
     finally:
         container.shell.reset_override()
         _reset()
