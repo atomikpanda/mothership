@@ -574,6 +574,7 @@ def create_app(
             ENC_SUFFIX,
             BadEvidenceRef,
             resolve_ref,
+            stored_size_cap,
         )
 
         # `resolve_ref` is the ONLY spec resolution on this path, deliberately.
@@ -586,6 +587,15 @@ def create_app(
             path = resolve_ref(workspace_root, spec_id, name)
         except BadEvidenceRef:
             raise HTTPException(status_code=404, detail="no such evidence")
+
+        # The size cap that actually bounds a response: `store_artifact` refuses
+        # oversized artifacts up front, but bytes can reach the store without it
+        # (a hand-placed file, a restore), and this is the one place a phone on a
+        # relay is on the other end of them.
+        if path.stat().st_size > stored_size_cap(name):
+            raise HTTPException(
+                status_code=413, detail="evidence artifact is too large to serve"
+            )
 
         if name.endswith(ENC_SUFFIX):
             from cryptography.fernet import InvalidToken

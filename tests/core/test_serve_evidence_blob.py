@@ -180,6 +180,20 @@ def test_encrypted_blob_with_key_returns_decrypted_bytes(tmp_path: Path):
     assert r.headers["content-type"].startswith("image/png")
 
 
+def test_oversized_blob_is_refused(tmp_path: Path, monkeypatch):
+    """Serve-time is where the cap actually protects the caller: bytes can reach
+    the store without passing store_artifact. The cap VALUE is a judgement call,
+    so the test moves it rather than materialising megabytes."""
+    from mship.core import evidence_store
+
+    _seed_spec(tmp_path)
+    ref = _seed_evidence(tmp_path)
+    monkeypatch.setattr(evidence_store, "MAX_EVIDENCE_BYTES", 1)
+    r = _client(tmp_path).get(f"/specs/dq/evidence/{ref}/blob", headers=AUTH)
+    assert r.status_code == 413, r.text
+    assert PNG_BYTES not in r.content
+
+
 def test_undecryptable_encrypted_blob_is_not_a_500(tmp_path: Path):
     """A `.enc` artifact the current key cannot open (key regenerated after a
     loss, or a restore from another host) is a locked-shaped 409, not a

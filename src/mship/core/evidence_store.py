@@ -67,11 +67,33 @@ CONTENT_TYPES: dict[str, str] = {
 }
 IMAGE_EXTS: frozenset[str] = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 
+# What a screenshot or layout dump plausibly weighs: a phone PNG at 3x is a few
+# MB and an XML dump far less, so 8 MiB accepts every real artifact with room to
+# spare while keeping a single blob small enough for a phone to fetch over the
+# relay. This is a ceiling on the ARTIFACT, checked both when storing (so the
+# operator hears about it at capture time) and when serving (the check that
+# actually bounds a response, since a file can reach the store by other means).
+MAX_EVIDENCE_BYTES = 8 * 1024 * 1024
+# On-disk ceiling for an encrypted artifact, whose file is Fernet ciphertext:
+# base64 over a 57-byte envelope plus AES padding, so under 1.4x the plaintext.
+# 2x is the round number that keeps a just-under-cap artifact servable while
+# still bounding what the blob route decrypts into memory.
+_CIPHERTEXT_SLACK = 2
+
 _HASH_CHARS = 12
 
 
+def stored_size_cap(ref: str) -> int:
+    """The largest on-disk size this ref may have. Encrypted refs get the
+    ciphertext allowance; everything else is the artifact cap itself."""
+    if ref.endswith(ENC_SUFFIX):
+        return MAX_EVIDENCE_BYTES * _CIPHERTEXT_SLACK
+    return MAX_EVIDENCE_BYTES
+
+
 class EvidenceStoreError(Exception):
-    """An artifact could not be stored (unsupported extension, unreadable)."""
+    """An artifact could not be stored (unsupported extension, too large,
+    unreadable)."""
 
 
 def evidence_dir(workspace_root: Path, spec_id: str) -> Path:
@@ -103,6 +125,13 @@ def store_artifact(
         raise EvidenceStoreError(
             f"unsupported evidence extension {ext!r}; expected one of "
             f"{', '.join(sorted(CONTENT_TYPES))}"
+        )
+    size = src.stat().st_size
+    if size > MAX_EVIDENCE_BYTES:
+        raise EvidenceStoreError(
+            f"evidence artifact is {size} bytes, over the "
+            f"{MAX_EVIDENCE_BYTES}-byte limit; a screenshot or layout dump this "
+            f"large is a capture bug, and the blob route would refuse to serve it"
         )
     ref = f"{_digest(src)}{ext}"
     dest_dir = evidence_dir(workspace_root, spec_id)

@@ -40,3 +40,18 @@ def test_unsupported_extension_is_refused(tmp_path):
     src = tmp_path / "payload.exe"; src.write_bytes(b"MZ")
     with pytest.raises(EvidenceStoreError):
         store_artifact(tmp_path, "s", src, mode="committed")
+
+
+def test_oversized_artifact_is_refused_at_store_time(tmp_path, monkeypatch):
+    """The operator hears about an over-cap artifact when it is captured, not
+    later when a phone fails to fetch it. The cap VALUE is a judgement call, so
+    the test moves it rather than materialising megabytes."""
+    import pytest
+    from mship.core import evidence_store
+    from mship.core.evidence_store import EvidenceStoreError
+
+    monkeypatch.setattr(evidence_store, "MAX_EVIDENCE_BYTES", 8)
+    src = tmp_path / "screen.png"; src.write_bytes(b"\x89PNG far too many bytes")
+    with pytest.raises(EvidenceStoreError, match="limit"):
+        store_artifact(tmp_path, "s", src, mode="committed")
+    assert not (evidence_dir(tmp_path, "s")).exists()

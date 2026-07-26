@@ -73,6 +73,11 @@ revision it was taken from — marked when that revision is an uncommitted tree,
 a reviewer can tell work-in-progress evidence from a screenshot taken at a real
 commit.
 
+Artifacts are capped at 8 MiB each — a phone fetches these over the relay, and a
+screenshot or layout dump larger than that is a capture bug, not evidence. An
+over-cap artifact is refused when it is stored (the capture itself still
+succeeds) and refused again if one ever reaches the store another way.
+
 **What travels:** the phone fetches evidence from `mship serve` over the relay.
 The PR body embeds it when the bytes are fetchable on GitHub — which means
 `evidence_storage: committed` **and** the evidence commit pushed. Otherwise the
