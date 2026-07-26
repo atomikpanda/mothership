@@ -36,10 +36,16 @@ class FakeShell:
     """Answers git queries from a per-repo script keyed by path name.
 
     `origin` is the sha `ls-remote` reports for the branch (None = origin does
-    not have it); `head` is this worktree's HEAD; `contains` lists the shas that
-    are ancestors of HEAD, which is how `merge-base --is-ancestor` is answered;
-    `head_ref` is what `symbolic-ref HEAD` reports (default: the task's branch —
-    `""` with a non-zero rc is a detached HEAD).
+    not have it); `head` is this worktree's HEAD, reported by the atomic
+    `rev-parse HEAD refs/heads/<branch>` pair-read; `contains` lists the shas
+    that are ancestors of HEAD, which is how `merge-base --is-ancestor` is
+    answered; `head_ref` is what `symbolic-ref HEAD` reports (default: the
+    task's branch — `""` with a non-zero rc is a detached HEAD) AND, via the
+    pair-read, what decides whether the branch-ref half of that read matches
+    `head` or reports `other_branch_sha` instead. `stale_bare_head` answers a
+    bare, argument-less `rev-parse HEAD` — a call current code never makes,
+    kept only so a reverted (pre-fix) `_inspect_repo` can be exercised in the
+    race test's red-before-green check.
     """
 
     def __init__(self, answers, push_rc=0, push_err=""):
@@ -48,6 +54,7 @@ class FakeShell:
         self._push_err = push_err
         self.pushes: list[tuple[str, Path]] = []
         self.touched: set[str] = set()
+        self.pair_calls: dict[str, int] = {}
 
     def run(self, cmd, cwd=None, **kw):
         key = Path(cwd).name
@@ -67,8 +74,27 @@ class FakeShell:
                 out, rc = "", 0
             else:
                 out, rc = f"{spec['origin']}\trefs/heads/feat/x\n", 0
+        elif "rev-parse HEAD" in cmd and "refs/heads/" in cmd:
+            # The atomic branch-identity + sha read `_inspect_repo` makes:
+            # one call answering both "which branch is HEAD on" and "what sha
+            # is it at" from the same process. Modeled here as a single
+            # consistent pair rather than two independent answers, because
+            # that consistency is the entire point of collapsing the two old
+            # calls into one.
+            self.pair_calls[key] = self.pair_calls.get(key, 0) + 1
+            target_ref = cmd.rsplit("refs/heads/", 1)[-1].strip("'\"")
+            head_sha = spec.get("head", "headsha")
+            checked_out = spec.get("head_ref", f"refs/heads/{target_ref}")
+            branch_sha = (
+                head_sha if checked_out == f"refs/heads/{target_ref}"
+                else spec.get("other_branch_sha", "otherbranchsha")
+            )
+            out, rc = f"{head_sha}\n{branch_sha}", 0
         elif "rev-parse HEAD" in cmd:
-            out, rc = spec.get("head", "headsha"), 0
+            # Bare `rev-parse HEAD`, no branch argument: only a *reverted*,
+            # pre-fix `_inspect_repo` ever issues this (see `stale_bare_head`
+            # above) — current code always names the branch in the same call.
+            out, rc = spec.get("stale_bare_head", spec.get("head", "headsha")), 0
         elif "merge-base --is-ancestor" in cmd:
             tip = cmd.split()[-2].strip("'")
             out, rc = "", 0 if tip in spec.get("contains", []) else 1
@@ -239,6 +265,46 @@ def test_a_worktree_on_another_branch_is_refused(tmp_path):
     assert "HEAD is main, not feat/x" in msg           # which branch, exactly
     assert "checkout feat/x" in msg                    # the remedy
     assert "mship commit" not in msg                   # not a dirty-tree problem
+
+
+def test_a_checkout_between_branch_check_and_sha_capture_cannot_tear_the_pair(tmp_path):
+    """The ninth bypass, one level deeper than the eighth: branch identity and
+    the sha it certifies must come from ONE read of the repo's refs, not two.
+    The OLD shape was `symbolic-ref` (verify the branch) THEN `rev-parse HEAD`
+    (capture the sha) — a `git checkout` landing in the window between those
+    two calls would verify branch A and capture a sha that actually belongs to
+    branch B, and nothing downstream could tell: it just carries on with a
+    `head_sha` that was never on the branch preflight thinks it inspected.
+
+    Made deterministic by giving the fake shell two DIFFERENT answers for the
+    two different call shapes this race is about: `head_ref`/`head` describe
+    what the SINGLE atomic `rev-parse HEAD refs/heads/<branch>` call sees (a
+    consistent pair — HEAD really is on the task's branch, at `head_sha`), and
+    `stale_bare_head` describes what a SEPARATE, later, argument-less
+    `rev-parse HEAD` would see if a checkout to another branch landed in
+    between — the exact torn read that is only reachable by an implementation
+    that still makes two calls.
+
+    Current code never issues that second, bare call at all (see `FakeShell`
+    docstring), so this passes by construction: `pair_calls` is exactly 1 and
+    the sha carried forward is the one the atomic read certified, not the
+    racy one. Stashing the production fix and rerunning this test reintroduces
+    the old two-call shape, which DOES reach `stale_bare_head` and fails this
+    exact assertion — see the task's red-before-green note.
+    """
+    api = _repo(tmp_path, "api")
+    shell = FakeShell({"api": _clean(
+        head_ref="refs/heads/feat/x",   # the atomic read: HEAD is on feat/x
+        head="correct",                  # ...at this sha
+        stale_bare_head="raced",         # a checkout-then-bare-read would see this
+        origin=None,                      # keep the origin comparison out of the way
+    )})
+
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert pre.ok
+    assert pre.states[0].head_sha == "correct"   # the atomically-verified sha
+    assert shell.pair_calls == {"api": 1}        # never re-read -- nothing to race
 
 
 def test_a_detached_worktree_is_refused_and_says_so(tmp_path):

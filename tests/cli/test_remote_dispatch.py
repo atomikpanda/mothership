@@ -965,8 +965,19 @@ def _git_shell(spec: dict | dict[str, dict], *, push_rc: int = 0):
         if "ls-remote" in cmd:
             out = "" if s["origin"] is None else f"{s['origin']}\trefs/heads/feat/t1\n"
             return ShellResult(returncode=0, stdout=out, stderr="")
-        if "rev-parse HEAD" in cmd:
-            return ShellResult(returncode=0, stdout=s["head"], stderr="")
+        if "rev-parse HEAD" in cmd and "refs/heads/" in cmd:
+            # The atomic branch-identity + sha read `_inspect_repo` makes: one
+            # call answering both "which branch is HEAD on" and "what sha is
+            # it at" from the same process. `head_ref` decides whether the
+            # branch-ref half of the pair agrees with `head` (HEAD really is
+            # on the named branch) or reports a distinct sha (it is not).
+            target_ref = cmd.rsplit("refs/heads/", 1)[-1].strip("'\"")
+            branch_sha = (
+                s["head"] if s["head_ref"] == f"refs/heads/{target_ref}"
+                else "otherbranchsha"
+            )
+            return ShellResult(returncode=0, stdout=f"{s['head']}\n{branch_sha}",
+                               stderr="")
         if "merge-base --is-ancestor" in cmd:
             tip = cmd.split()[-2].strip("'")
             return ShellResult(returncode=0 if tip in s["contains"] else 1,

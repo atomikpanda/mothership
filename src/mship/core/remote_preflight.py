@@ -39,9 +39,15 @@ answer to mean anything. A worktree that is detached, or has some other branch
 checked out, would have one commit inspected and a different one published, after
 which the run host resets to the published one and executes code nothing here
 looked at. So the identity of what is being inspected is established before its
-state is (**refuse** if HEAD is not the task branch), and `inspect` resolves HEAD
-to a concrete sha ONCE and carries it on `RepoState` (`head_sha`) rather than
-re-reading HEAD later. `push` then names that exact sha in its refspec —
+state is (**refuse** if HEAD is not the task branch) — and, because two
+separate git calls cannot be made atomic against an outside writer, that
+identity check and the sha it certifies are read from the SAME `git rev-parse`
+invocation rather than as two calls with a window between them (see
+`_inspect_repo` for why: a `git checkout` landing in that window would
+otherwise verify one branch and capture a different branch's sha). `inspect`
+resolves HEAD to a concrete sha ONCE this way and carries it on `RepoState`
+(`head_sha`) rather than re-reading HEAD later. `push` then names that exact
+sha in its refspec —
 `<sha>:refs/heads/<branch>` — instead of resolving `HEAD` (or the branch) a
 second time at push time. That second resolution is not hypothetical: this
 workspace runs subagents that commit inside a task's worktree while other
@@ -239,11 +245,36 @@ def _inspect_repo(shell, repo: str, path: Path, branch: str) -> RepoState:
     # reads HEAD and `push` publishes what they cleared, so a worktree that is
     # detached or on another branch would have one commit inspected and another
     # published. Asked after `git status` because a path that is not a git
-    # worktree at all is UNREADABLE, not "on the wrong branch". `--quiet` makes a
-    # detached HEAD exit non-zero with empty output instead of printing an error.
-    head_ref = shell.run("git symbolic-ref --quiet HEAD", cwd=path)
-    checked_out = (head_ref.stdout or "").strip().removeprefix("refs/heads/")
-    if checked_out != branch:
+    # worktree at all is UNREADABLE, not "on the wrong branch".
+    #
+    # Branch identity and the sha to carry forward used to be two separate git
+    # invocations — a `symbolic-ref` to name the checked-out branch, then a
+    # `rev-parse HEAD` to capture the sha — with a window between them: a `git
+    # checkout` landing in that window verifies branch A and then captures a
+    # sha that belongs to branch B, so every check past this point reasons
+    # about a commit that was never on the branch it validated. Two subprocess
+    # calls cannot be made atomic against an outside writer, so instead they
+    # are made self-verifying: a SINGLE `git rev-parse HEAD refs/heads/<branch>`
+    # reads both shas out of the same process. If they agree, HEAD was at that
+    # branch's tip at this instant — exactly the invariant every check below
+    # assumes. If they disagree (including one of them failing to resolve at
+    # all — a detached HEAD, no local ref by this name, an unborn branch),
+    # HEAD is not on the task's branch, which is already a refusal. That
+    # subsumes the old `symbolic-ref` check entirely: the two values could
+    # never come out equal without HEAD being ON refs/heads/<branch>.
+    ref = f"refs/heads/{branch}"
+    pair = shell.run(f"git rev-parse HEAD {shlex.quote(ref)}", cwd=path)
+    out = (pair.stdout or "").splitlines()
+    head_sha = out[0].strip() if out else ""
+    branch_tip = out[1].strip() if len(out) > 1 else ""
+    if pair.returncode != 0 or not head_sha or head_sha != branch_tip:
+        # `symbolic-ref` is asked here ONLY to name what IS checked out, for
+        # the refusal message — it plays no part in the decision above, so its
+        # being a second, unsynchronized read does not reopen the race: the
+        # run is already refused, and no `head_sha` is ever produced for this
+        # repo.
+        head_ref = shell.run("git symbolic-ref --quiet HEAD", cwd=path)
+        checked_out = (head_ref.stdout or "").strip().removeprefix("refs/heads/")
         return state(
             blocked=WRONG_BRANCH,
             detail=f"HEAD is {checked_out or 'detached'}, not {branch}",
@@ -254,19 +285,12 @@ def _inspect_repo(shell, repo: str, path: Path, branch: str) -> RepoState:
         return state(blocked=DIRTY)
     untracked_only = bool(lines)
 
-    # Resolved ONCE, here, and carried on every state this repo can still reach
-    # (`head_sha` below) rather than re-read at push time. `push` names this exact
+    # `head_sha`, resolved above, is carried on every state this repo can
+    # still reach rather than re-read at push time. `push` names this exact
     # sha in its refspec instead of the bare branch, which is what git resolves
     # HEAD against a SECOND time — so anything that commits in this worktree
     # between `inspect` and `push` (a subagent, a background job) would otherwise
-    # publish a commit nothing here inspected. Fetched before asking origin so a
-    # local git failure is reported as UNREADABLE without spending the network
-    # round trip first.
-    head = shell.run("git rev-parse HEAD", cwd=path)
-    if head.returncode != 0:
-        return state(blocked=UNREADABLE, detail=_tail(head),
-                     untracked_only=untracked_only)
-    head_sha = (head.stdout or "").strip()
+    # publish a commit nothing here inspected.
 
     tip, error = _origin_tip(shell, path, branch)
     if error is not None:
