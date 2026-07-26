@@ -27,7 +27,7 @@ def test_different_content_yields_different_ref(tmp_path):
            store_artifact(tmp_path, "s", b, mode="published")
 
 
-def test_store_lands_under_specs_evidence_spec_id(tmp_path):
+def test_store_lands_under_mothership_evidence_spec_id(tmp_path):
     src = tmp_path / "layout.xml"; src.write_text("<hierarchy/>")
     store_artifact(tmp_path, "my-spec", src, mode="published")
     assert (tmp_path / ".mothership" / "evidence" / "my-spec").is_dir()

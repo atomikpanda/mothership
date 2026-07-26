@@ -643,7 +643,7 @@ def test_cli_capture_remote_extracts_artifacts_into_exact_local_captures_path(tm
 def test_cli_capture_remote_with_evidence_attaches_artifact_indistinguishably_from_local(
     tmp_path, monkeypatch,
 ):
-    """ac13 (specs/2026-07-12-ac-evidence-loop.md): `mship capture --remote
+    """ac15 (specs/2026-07-26-artifact-evidence-on-phone.md): `mship capture --remote
     --evidence` must attach evidence from artifacts produced on the mapped run
     host indistinguishably from a local capture. `_attach_evidence`
     (cli/capture.py) is wired into the `--remote` branch AFTER `exec_remote`
