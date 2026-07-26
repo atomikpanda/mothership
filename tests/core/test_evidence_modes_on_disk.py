@@ -26,6 +26,13 @@ def test_encrypted_mode_writes_ciphertext_with_enc_suffix(tmp_path):
     assert ref.endswith(ENC_SUFFIX)
     raw = (evidence_dir(tmp_path, "s") / ref).read_bytes()
     assert b"marker" not in raw
+    # A regression where `store_artifact` copies the plaintext IN ADDITION TO
+    # encrypting it would leave a plaintext sibling in the same directory —
+    # checking only the `.enc` file's own bytes wouldn't catch that. Walk
+    # every file under the evidence dir, not just the one named `ref`.
+    for f in evidence_dir(tmp_path, "s").rglob("*"):
+        if f.is_file():
+            assert b"marker" not in f.read_bytes(), f"plaintext leaked into {f}"
 
 
 def test_encrypted_ref_round_trips_through_resolve_ref(tmp_path):
