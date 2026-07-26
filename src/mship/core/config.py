@@ -340,6 +340,13 @@ class WorkspaceConfig(BaseModel):
     # unreadable without `.mothership/spec-key`. Applied transparently by
     # core/spec_storage.py; an invalid value fails loud at config load.
     spec_storage: Literal["committed", "local", "encrypted"] = "committed"
+    # Storage mode for acceptance-criterion artifact evidence. `None` inherits
+    # `spec_storage` — the safe default, so evidence is governed exactly like the
+    # spec it backs unless an operator deliberately diverges (prose is bytes,
+    # screenshots are megabytes). Resolved by
+    # core/evidence_store.py::resolve_evidence_mode, which also enforces that
+    # evidence is never MORE exposed than its spec.
+    evidence_storage: Literal["committed", "local", "encrypted"] | None = None
     # If set and the effective spawn scope exceeds N repos AND no --repos was
     # passed, require confirmation (TTY) or --yes (non-TTY). See #74.
     spawn_confirm_threshold: int | None = None
