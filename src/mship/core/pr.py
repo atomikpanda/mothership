@@ -4,7 +4,7 @@ import shlex
 from pathlib import Path
 from typing import NamedTuple
 
-from mship.core.evidence_store import IMAGE_EXTS, _REF_RE, resolve_evidence_mode
+from mship.core.evidence_store import IMAGE_EXTS, is_stored_ref, resolve_evidence_mode
 from mship.core.gh_auth import git_cred_args, create_pr_via_httpx, get_default_branch_via_httpx
 from mship.util.shell import ShellRunner
 
@@ -460,7 +460,7 @@ def _is_embeddable_image(evidence, evidence_base_url: str | None) -> bool:
     """
     if not evidence_base_url or evidence.kind != "artifact":
         return False
-    if not _REF_RE.fullmatch(evidence.ref):
+    if not is_stored_ref(evidence.ref):
         return False
     return Path(evidence.ref).suffix.lower() in IMAGE_EXTS
 

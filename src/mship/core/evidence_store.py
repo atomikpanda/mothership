@@ -167,6 +167,17 @@ def store_artifact(
 _REF_RE = re.compile(r"[0-9a-f]{%d}\.[a-z0-9]{2,5}(\.enc)?" % _HASH_CHARS)
 
 
+def is_stored_ref(ref: str) -> bool:
+    """True when `ref` has the shape this store produces (a content hash plus a
+    known extension), as opposed to a hand-written path from before
+    `capture --evidence` existed.
+
+    The public answer to "did we store this?", so callers never need the regex
+    itself: ref shape stays one module's business.
+    """
+    return isinstance(ref, str) and _REF_RE.fullmatch(ref) is not None
+
+
 class BadEvidenceRef(Exception):
     """A ref was malformed, escaped its spec's evidence directory, or is absent."""
 
@@ -179,7 +190,7 @@ def resolve_ref(workspace_root: Path, spec_id: str, ref: str) -> Path:
     blob route, so both are validated here: `ref` must be a bare hash filename,
     and `spec_id` must name a direct child of the workspace's evidence store.
     """
-    if not isinstance(ref, str) or not _REF_RE.fullmatch(ref):
+    if not is_stored_ref(ref):
         raise BadEvidenceRef(f"malformed evidence ref {ref!r}")
     # A full-length hash with an extension we do not serve (`deadbeefcafe.exe`)
     # is refused here, not by the regex. An encrypted ref carries a trailing
