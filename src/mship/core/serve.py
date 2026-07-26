@@ -597,6 +597,11 @@ def create_app(
                 status_code=413, detail="evidence artifact is too large to serve"
             )
 
+        # Layout dumps carry app-under-test content, so nothing here is served as
+        # a type a browser executes (see evidence_store.CONTENT_TYPES); nosniff
+        # stops it being re-guessed into one.
+        headers = {"X-Content-Type-Options": "nosniff"}
+
         if name.endswith(ENC_SUFFIX):
             from cryptography.fernet import InvalidToken
 
@@ -625,10 +630,10 @@ def create_app(
                     status_code=409,
                     detail="evidence is locked: this host's key cannot decrypt it",
                 )
-            return Response(content=plain, media_type=media)
+            return Response(content=plain, media_type=media, headers=headers)
 
         media = CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
-        return FileResponse(path, media_type=media)
+        return FileResponse(path, media_type=media, headers=headers)
 
     from fastapi.encoders import jsonable_encoder
     from mship.core.view.task_index import build_task_index

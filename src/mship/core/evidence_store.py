@@ -54,16 +54,24 @@ SPECS_DIRNAME = "specs"
 EVIDENCE_DIRNAME = "evidence"
 ENC_SUFFIX = ".enc"
 
-# Extensions we are willing to store and serve. Anything else is refused rather
-# than guessed at — a served blob's content-type is derived from this.
+# Extensions we are willing to store, mapped to the content-type we SERVE them
+# as. Anything else is refused rather than guessed at.
+#
+# The non-image entries are the layout dumps `mship capture` produces
+# (core/capture.py::KIND_FILENAMES: layout.xml/.json/.html), and they are
+# deliberately served as text/plain rather than their true type: their content
+# comes from the app under test, so serving it as text/html would let a rendered
+# UI string execute script on the API's own origin — a stored-XSS shape. Only
+# the image types, which no browser executes, keep a rendering content-type.
+_TEXT = "text/plain; charset=utf-8"
 CONTENT_TYPES: dict[str, str] = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
-    ".xml": "application/xml",
-    ".json": "application/json",
-    ".html": "text/html",
+    ".xml": _TEXT,
+    ".json": _TEXT,
+    ".html": _TEXT,
 }
 IMAGE_EXTS: frozenset[str] = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 

@@ -180,6 +180,21 @@ def test_encrypted_blob_with_key_returns_decrypted_bytes(tmp_path: Path):
     assert r.headers["content-type"].startswith("image/png")
 
 
+def test_layout_html_is_never_served_as_html(tmp_path: Path):
+    """A layout dump is app-under-test content, so serving it as text/html would
+    make the API's own origin a stored-XSS sink. Type and nosniff, together."""
+    _seed_spec(tmp_path)
+    from mship.core.evidence_store import store_artifact
+    src = tmp_path / "layout.html"
+    src.write_text("<script>alert(1)</script>")
+    ref = store_artifact(tmp_path, "dq", src, mode="committed")
+
+    r = _client(tmp_path).get(f"/specs/dq/evidence/{ref}/blob", headers=AUTH)
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("text/plain")
+    assert r.headers["x-content-type-options"] == "nosniff"
+
+
 def test_oversized_blob_is_refused(tmp_path: Path, monkeypatch):
     """Serve-time is where the cap actually protects the caller: bytes can reach
     the store without passing store_artifact. The cap VALUE is a judgement call,
