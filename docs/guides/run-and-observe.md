@@ -67,13 +67,17 @@ evidence for that acceptance criterion:
 mship capture --evidence my-spec:ac3
 ```
 
-The artifact is copied into `specs/evidence/<spec-id>/` under a content-hashed
-name, attached to the criterion as `kind=artifact`, and recorded with the
-revision it was taken from — marked when that revision is an uncommitted working
+The artifact is copied into `.mothership/evidence/<spec-id>/` under a
+content-hashed name, attached to the criterion as `kind=artifact`, and recorded
+with the revision it was taken from — marked when that revision is an uncommitted working
 tree, and separately marked when the revision itself is not a commit on any
 branch (a detached HEAD, or a throwaway ref materialized for a remote capture),
 so a reviewer can tell work-in-progress or throwaway evidence from a screenshot
 taken at a real, committed revision. Both markers can appear together.
+
+The store is machine-local and gitignored, so it behaves identically whether
+your workspace is a metarepo, a monorepo, or a single repo — nothing is ever
+committed into your product's history by capturing evidence.
 
 Artifacts are capped at 8 MiB each — a phone fetches these over the relay, and a
 screenshot or layout dump larger than that is a capture bug, not evidence. An
@@ -103,7 +107,7 @@ all stop the publish rather than push past it.
 Every failure there degrades and none of them block the PR: `finish` warns,
 names the artifact instead of embedding it, and carries on opening the PR. It
 also warns under `local` or `encrypted` storage, where the bytes are not on
-GitHub in readable form at all and nothing is committed or pushed.
+GitHub in readable form at all and nothing is published.
 
 **What does not travel:** secrets, platform state, and anything else git cannot
 carry.

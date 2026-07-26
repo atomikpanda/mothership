@@ -702,7 +702,7 @@ def test_cli_capture_remote_with_evidence_attaches_artifact_indistinguishably_fr
         assert ev.ref.endswith(".png")
         assert "at " in (ev.note or "")
 
-        stored = tmp_path / "specs" / "evidence" / "dq" / ev.ref
+        stored = tmp_path / ".mothership" / "evidence" / "dq" / ev.ref
         assert stored.read_bytes() == b"PNGDATA"
 
         mock_shell.run_task.assert_not_called()  # the local capture target never ran

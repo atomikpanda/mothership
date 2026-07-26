@@ -321,6 +321,28 @@ def test_unrelated_uncommitted_work_is_never_swept_in(workspace, member, origin)
     assert "A  staged-by-operator.md" in status, "the operator's staged work moved"
 
 
+def test_the_store_stays_invisible_to_git_in_a_single_repo_workspace(tmp_path, origin):
+    """The shape the old design got wrong: the workspace root IS the product
+    repo, so the store sits inside it. It must never reach git — not as an
+    untracked file, not as a commit — and publishing must not change that."""
+    repo = _init_member(tmp_path, origin, "single")
+    # As `mship spawn` writes it (core/worktree.py); asserted there too.
+    (repo / ".gitignore").write_text(".worktrees\n.mothership\n")
+    _git(repo, "add", "--", ".gitignore")
+    _git(repo, "commit", "-qm", "ignore mship runtime dirs")
+    _git(repo, "push", "-q", "origin", "main")
+    _store(repo)
+    before = _main_shas(repo, origin)
+
+    block, warning = _finish(repo, repo)
+
+    assert warning is None, warning
+    _assert_url_resolves(origin, _embedded_url(block))
+    assert _status(repo) == "", "the evidence store showed up in git status"
+    assert _main_shas(repo, origin) == before
+    assert _git(origin, "ls-tree", "-r", "--name-only", "main") == ".gitignore\nproduct.py"
+
+
 def test_local_mode_touches_neither_the_shell_nor_the_repo(workspace, member, origin):
     """Under `local` nothing may leave the machine, so the mode gate must
     short-circuit before any git call at all."""

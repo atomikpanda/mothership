@@ -117,7 +117,8 @@ def test_traversing_spec_id_is_404(tmp_path: Path):
     """
     _seed_spec(tmp_path)
     ref = _seed_evidence(tmp_path)
-    other = tmp_path / "specs" / "evidence" / "other"
+    from mship.core.evidence_store import evidence_dir
+    other = evidence_dir(tmp_path, "other")
     other.mkdir(parents=True)
     (other / ref).write_bytes(b"another spec's secret screenshot")
 

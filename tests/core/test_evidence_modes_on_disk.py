@@ -16,9 +16,13 @@ def test_committed_mode_writes_plaintext(tmp_path):
     assert (evidence_dir(tmp_path, "s") / ref).read_bytes().endswith(b"marker")
 
 
-def test_local_mode_gitignores_the_evidence_dir(tmp_path):
-    store_artifact(tmp_path, "s", _png(tmp_path), mode="local")
-    assert "specs/evidence/" in (tmp_path / ".gitignore").read_text()
+def test_local_mode_writes_plaintext_and_no_gitignore_of_its_own(tmp_path):
+    """The whole store lives under the gitignored `.mothership/`, so `local`
+    needs no ignore entry of its own — writing one would only add a stray line
+    to the operator's .gitignore for no gain."""
+    ref = store_artifact(tmp_path, "s", _png(tmp_path), mode="local")
+    assert (evidence_dir(tmp_path, "s") / ref).read_bytes().endswith(b"marker")
+    assert not (tmp_path / ".gitignore").exists()
 
 
 def test_encrypted_mode_writes_ciphertext_with_enc_suffix(tmp_path):

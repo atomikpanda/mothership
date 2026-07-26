@@ -145,7 +145,7 @@ def test_evidence_attaches_to_the_named_criterion(workspace_with_spec: Path):
     # The provenance marker: a reviewer can see WHICH tree the shot came from.
     assert "at " in (ev.note or "")
     # The bytes actually landed in the durable, spec-scoped store.
-    stored = workspace_with_spec / "specs" / "evidence" / "dq" / ev.ref
+    stored = workspace_with_spec / ".mothership" / "evidence" / "dq" / ev.ref
     assert stored.read_bytes() == b"PNGDATA"
 
 
@@ -155,7 +155,7 @@ def test_bare_capture_attaches_nothing(workspace_with_spec: Path):
 
     assert _criterion(workspace_with_spec).evidence == []
     # Not merely empty — bare capture must not create the store at all.
-    assert not (workspace_with_spec / "specs" / "evidence").exists()
+    assert not (workspace_with_spec / ".mothership" / "evidence").exists()
 
 
 def test_store_failure_warns_but_capture_succeeds(workspace_with_spec: Path, monkeypatch):

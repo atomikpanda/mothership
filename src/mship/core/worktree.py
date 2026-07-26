@@ -543,10 +543,19 @@ class WorktreeManager:
         hub = workspace_root / ".worktrees" / slug
         hub.mkdir(parents=True, exist_ok=True)
 
-        # Workspace-root .gitignore gets .worktrees if root is a git repo.
+        # Workspace-root .gitignore gets mship's runtime directories if the root
+        # is a git repo. `.mothership` holds machine-local state — task state,
+        # captures, the spec key, the evidence store — none of which may ever be
+        # committed, and in a monorepo or single-repo workspace the root IS the
+        # product repo, so leaving it merely untracked would put screenshots and
+        # state files in every `git status`. Written without a trailing slash,
+        # like `.worktrees`: the `foo/` form does not match a SYMLINK named
+        # `foo`, which is how these directories get shared into a worktree (see
+        # _symlink_gitignore_footgun).
         if (workspace_root / ".git").exists():
-            if not self._git.is_ignored(workspace_root, ".worktrees"):
-                self._git.add_to_gitignore(workspace_root, ".worktrees")
+            for runtime_dir in (".worktrees", ".mothership"):
+                if not self._git.is_ignored(workspace_root, runtime_dir):
+                    self._git.add_to_gitignore(workspace_root, runtime_dir)
 
         for repo_name in all_repos:
             repo_config = self._config.repos[repo_name]

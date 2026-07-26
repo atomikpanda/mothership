@@ -85,7 +85,7 @@ def test_refuses_a_spec_id_that_escapes_the_evidence_store(tmp_path, bad_spec):
     """`spec_id` also arrives from the request path, so one spec's ref must not
     be readable under another spec's id."""
     ref = _stored(tmp_path)
-    other = tmp_path / "specs" / "evidence" / "other-spec"
+    other = evidence_dir(tmp_path, "other-spec")
     other.mkdir(parents=True)
     (other / ref).write_bytes(b"someone else's evidence")
     with pytest.raises(BadEvidenceRef):

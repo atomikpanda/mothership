@@ -50,7 +50,14 @@ def resolve_evidence_mode(config) -> EvidenceMode:
     return declared
 
 
-SPECS_DIRNAME = "specs"
+# The store is machine-local and lives under the workspace's gitignored state
+# directory, NOT in any git repo's tracked tree. That is what makes it behave
+# identically in a multi-repo workspace, a monorepo and a single repo: where the
+# workspace root happens to BE a product repo, evidence bytes still never enter
+# that repo's history. Getting bytes to GitHub for a PR embed is a separate,
+# explicit step at finish (core/evidence_url.py), not a property of where the
+# file sits.
+STATE_DIRNAME = ".mothership"
 EVIDENCE_DIRNAME = "evidence"
 ENC_SUFFIX = ".enc"
 
@@ -104,9 +111,14 @@ class EvidenceStoreError(Exception):
     unreadable)."""
 
 
+def evidence_root(workspace_root: Path) -> Path:
+    """The store. Every spec's evidence directory is a direct child of this."""
+    return Path(workspace_root) / STATE_DIRNAME / EVIDENCE_DIRNAME
+
+
 def evidence_dir(workspace_root: Path, spec_id: str) -> Path:
     """The one directory a spec's artifact evidence may live in."""
-    return Path(workspace_root) / SPECS_DIRNAME / EVIDENCE_DIRNAME / spec_id
+    return evidence_root(workspace_root) / spec_id
 
 
 def _digest(src: Path) -> str:
@@ -123,9 +135,10 @@ def store_artifact(
     """Copy `src` into the spec's evidence directory under a content-hashed
     name. Returns the BARE FILENAME to persist as the evidence ref.
 
-    `mode` is honoured in full: `local` plaintext-copies and gitignores the
-    evidence store, `encrypted` writes ciphertext under an `.enc`-suffixed ref
-    (never plaintext), `committed` plaintext-copies with no gitignore entry.
+    `mode` is honoured in full: `encrypted` writes ciphertext under an
+    `.enc`-suffixed ref and never plaintext; the other modes plaintext-copy. The
+    store is gitignored in every mode — the modes differ only in what LEAVES the
+    machine, which is decided at publication (core/evidence_url.py), not here.
     """
     src = Path(src)
     ext = src.suffix.lower()
@@ -154,10 +167,6 @@ def store_artifact(
         return ref
 
     shutil.copyfile(src, dest_dir / ref)
-    if mode == "local":
-        GitRunner().add_to_gitignore(
-            Path(workspace_root), f"{SPECS_DIRNAME}/{EVIDENCE_DIRNAME}/"
-        )
     return ref
 
 
@@ -199,9 +208,7 @@ def resolve_ref(workspace_root: Path, spec_id: str, ref: str) -> Path:
     if Path(logical).suffix.lower() not in CONTENT_TYPES:
         raise BadEvidenceRef(f"unsupported evidence extension in {ref!r}")
 
-    store_root = Path(os.path.realpath(
-        Path(workspace_root) / SPECS_DIRNAME / EVIDENCE_DIRNAME
-    ))
+    store_root = Path(os.path.realpath(evidence_root(workspace_root)))
     root = Path(os.path.realpath(evidence_dir(workspace_root, spec_id)))
     # realpath normalises `..` away, so a spec id like `../other-spec` lands
     # somewhere whose parent is not the store — one spec can never read another's.
