@@ -848,3 +848,76 @@ def test_transition_to_review_no_ac_warning_without_bound_spec(state_with_task, 
     result = pm.transition("add-labels", "review")
     assert not any("evidence" in w.lower() and "acceptance" in w.lower()
                    for w in result.warnings)
+
+
+def _bind_spec_for_capture_hint(state_with_task, tmp_path):
+    """Shared setup for the two capture-hint-scoping tests below: bind an
+    approved spec with one unevidenced criterion to `add-labels`
+    (affected_repos=["shared", "auth-service"])."""
+    from mship.core.spec import AcceptanceCriterion, Spec
+    from mship.core.spec_store import SpecStore
+    from mship.core.workitem_store import WorkItemStore
+    now = datetime(2026, 4, 10, tzinfo=timezone.utc)
+    SpecStore(tmp_path / "specs").save(Spec(
+        id="add-labels-spec", title="S", status="approved",
+        created_at=now, updated_at=now,
+        acceptance_criteria=[AcceptanceCriterion(id="ac1", text="x", verdict="approved")],
+    ))
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi_id = state_with_task.load().tasks["add-labels"].work_item_id
+    items.link_spec(wi_id, "add-labels-spec", now=now)
+
+
+def test_transition_to_review_ac_capture_hint_only_names_affected_repos(state_with_task, tmp_path):
+    """C2: the `mship capture --evidence` hint must name only repos the TASK
+    affects (here "shared"/"auth-service"), even when the workspace also has
+    an unrelated repo ("notes") with its own capture target."""
+    from mship.core.config import CaptureConfig, RepoConfig, WorkspaceConfig
+    _bind_spec_for_capture_hint(state_with_task, tmp_path)
+
+    config = WorkspaceConfig(
+        workspace="test",
+        repos={
+            "shared": RepoConfig(path=Path("./shared"), type="library"),
+            "auth-service": RepoConfig(
+                path=Path("./auth-service"), type="service",
+                capture=CaptureConfig(platforms=["android"]),
+            ),
+            "notes": RepoConfig(
+                path=Path("./notes"), type="service",
+                capture=CaptureConfig(platforms=["ios"]),
+            ),
+        },
+    )
+    pm = PhaseManager(state_with_task, MagicMock(spec=LogManager), config=config, workspace_root=tmp_path)
+    pm.transition("add-labels", "dev")
+    result = pm.transition("add-labels", "review")
+    hint = next(w for w in result.warnings if "evidence" in w.lower() and "ac1" in w)
+    assert "auth-service" in hint
+    assert "notes" not in hint
+
+
+def test_transition_to_review_ac_capture_hint_omitted_when_intersection_empty(state_with_task, tmp_path):
+    """C2: when NONE of the task's affected repos define a capture target
+    (only an unrelated repo does), the `mship capture --evidence` suggestion
+    is omitted entirely — only the `mship spec evidence` remedy fires."""
+    from mship.core.config import CaptureConfig, RepoConfig, WorkspaceConfig
+    _bind_spec_for_capture_hint(state_with_task, tmp_path)
+
+    config = WorkspaceConfig(
+        workspace="test",
+        repos={
+            "shared": RepoConfig(path=Path("./shared"), type="library"),
+            "auth-service": RepoConfig(path=Path("./auth-service"), type="service"),
+            "notes": RepoConfig(
+                path=Path("./notes"), type="service",
+                capture=CaptureConfig(platforms=["ios"]),
+            ),
+        },
+    )
+    pm = PhaseManager(state_with_task, MagicMock(spec=LogManager), config=config, workspace_root=tmp_path)
+    pm.transition("add-labels", "dev")
+    result = pm.transition("add-labels", "review")
+    hint = next(w for w in result.warnings if "evidence" in w.lower() and "ac1" in w)
+    assert "mship capture --evidence" not in hint
+    assert "mship spec evidence" in hint

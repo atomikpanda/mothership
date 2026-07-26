@@ -311,13 +311,49 @@ class PhaseManager:
             return []
         if spec is None:
             return []
-        missing = [c.id for c in spec.acceptance_criteria if not c.evidence]
-        if not missing:
+        msg = unevidenced_warning(spec, self._capture_repos(task.affected_repos))
+        return [msg] if msg else []
+
+    def _capture_repos(self, affected: list[str]) -> list[str]:
+        """Names of `affected` repos that actually define a capture target
+        (`RepoConfig.capture` is set). `cli/capture.py` resolves the underlying
+        task name via `tasks.get("capture", "capture")`, which silently falls
+        back to a "capture" task even for repos that never declared one — so
+        that dict can't tell us whether the command would work. The `capture:`
+        block is the one place a repo opts in, so its presence is the actual
+        signal. Scoped to `affected` (the task's `affected_repos`) — naming an
+        unrelated repo's capture target would look actionable but be wrong."""
+        if self._config is None:
             return []
+        affected_set = set(affected)
         return [
-            f"Acceptance criteria without evidence: {', '.join(missing)} "
-            f"— attach with `mship spec evidence {spec.id} <ac> <ref>`"
+            name for name, repo in self._config.repos.items()
+            if repo.capture is not None and name in affected_set
         ]
 
     def _gate_run(self, task) -> list[str]:
         return []
+
+
+def unevidenced_warning(spec, capture_repos: list[str]) -> str:
+    """Warning text for a spec's acceptance criteria that carry no evidence.
+    Keeps the original `mship spec evidence` remedy verbatim and, only when at
+    least one repo in the workspace actually defines a capture target, appends
+    `mship capture --evidence` as a second, pull-based remedy — reusing a
+    mechanism that already exists rather than inventing one. Suggesting a
+    command that cannot run would be worse than saying nothing, so the hint is
+    omitted entirely when no repo defines one. Returns "" when every criterion
+    already has evidence — nothing to say."""
+    missing = [c.id for c in (spec.acceptance_criteria or []) if not c.evidence]
+    if not missing:
+        return ""
+    msg = (
+        f"Acceptance criteria without evidence: {', '.join(missing)} "
+        f"— attach with `mship spec evidence {spec.id} <ac> <ref>`"
+    )
+    if capture_repos:
+        msg += (
+            f", or `mship capture --evidence {spec.id}:<ac>` "
+            f"(capture targets: {', '.join(capture_repos)})"
+        )
+    return msg

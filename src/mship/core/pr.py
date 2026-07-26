@@ -4,6 +4,13 @@ import shlex
 from pathlib import Path
 from typing import NamedTuple
 
+from mship.core.evidence_store import (
+    IMAGE_EXTS,
+    is_encrypted_ref,
+    is_image_ref,
+    is_stored_ref,
+    resolve_evidence_mode,
+)
 from mship.core.gh_auth import git_cred_args, create_pr_via_httpx, get_default_branch_via_httpx
 from mship.util.shell import ShellRunner
 
@@ -448,15 +455,62 @@ class PRManager:
         return "\n".join(lines)
 
 
-def build_acceptance_block(spec) -> str:
+def _is_embeddable_image(
+    evidence, evidence_base_url: str | None, verified_refs=None
+) -> bool:
+    """True when GitHub's renderer can fetch these bytes AND they are an image.
+
+    Strictly the here-and-now question; "is this the KIND of artifact we would
+    embed?" is `evidence_store.is_image_ref`, which sees an encrypted image as
+    an image. This one must not: an `.enc` ref holds ciphertext, so it is not
+    embeddable even when a base URL exists.
+
+    Only refs the evidence store produced can resolve under the base URL, so a
+    hand-written ref (`docs/shot.png`, from before `capture --evidence`) is
+    named rather than embedded as a URL that would 404.
+
+    `verified_refs`, when given, additionally restricts embedding to refs proven
+    to exist in the commit the base URL pins. None means "not checked" — the
+    pure renderer's default.
+    """
+    if not evidence_base_url or evidence.kind != "artifact":
+        return False
+    if not is_stored_ref(evidence.ref):
+        return False
+    if Path(evidence.ref).suffix.lower() not in IMAGE_EXTS:
+        return False
+    return verified_refs is None or evidence.ref in verified_refs
+
+
+def build_acceptance_block(
+    spec, evidence_base_url: str | None = None, verified_refs=None
+) -> str:
     """Render an 'Acceptance criteria' PR-body section listing each AC as verified
     (with its evidence refs) or unverified. Pure analogue of
     PRManager.build_coordination_block: returns '' when there is nothing to render
     (no criteria), else a leading-separator markdown block ready to append to a
-    PR body."""
+    PR body.
+
+    `evidence_base_url`, when given, is the raw base under which this spec's
+    published evidence is fetchable — a commit on the target repo's evidence
+    branch; image artifacts are then embedded rather than named. It is None
+    whenever the bytes are not fetchable by GitHub (local or encrypted storage, or
+    a publication that did not land), in which case the artifact is named — never
+    emitted as a broken image.
+
+    `verified_refs` narrows that further to refs proven present in the pinned
+    commit, so one unpublished artifact degrades to a name without dragging its
+    published siblings down with it. None (the default) embeds every image ref
+    the base URL covers.
+    """
     acs = getattr(spec, "acceptance_criteria", None) or []
     if not acs:
         return ""
+    # Deferred: evidence_url imports this module for `_parse_github_slug`. The
+    # embedded URL must use the same `<spec-id>/<ref>` layout the publisher
+    # writes into the orphan tree, so it comes from the module that owns it.
+    from mship.core.evidence_url import evidence_tree_path
+
     lines = [
         "",
         "---",
@@ -465,9 +519,108 @@ def build_acceptance_block(spec) -> str:
         "",
     ]
     for c in acs:
-        if c.evidence:
-            refs = ", ".join(f"{e.kind}:{e.ref}" for e in c.evidence)
-            lines.append(f"- [x] `{c.id}` {c.text} — {refs}")
-        else:
+        if not c.evidence:
             lines.append(f"- [ ] `{c.id}` {c.text} — _no evidence_")
+            continue
+        embeds, named = [], []
+        for e in c.evidence:
+            embeddable = _is_embeddable_image(e, evidence_base_url, verified_refs)
+            (embeds if embeddable else named).append(e)
+        head = f"- [x] `{c.id}` {c.text}"
+        if named:
+            head += " — " + ", ".join(f"{e.kind}:{e.ref}" for e in named)
+        lines.append(head)
+        # Embedded on its own indented line beneath the criterion, so the
+        # checklist stays scannable. The image replaces the ref text: showing
+        # both a hash filename and the picture of it is noise.
+        for e in embeds:
+            lines.append("")
+            lines.append(
+                f"  ![{c.id}]({evidence_base_url}/{evidence_tree_path(spec.id, e.ref)})"
+            )
     return "\n".join(lines)
+
+
+def acceptance_block_for_finish(
+    spec, workspace_root, repo_path, shell, config, token: str | None = None,
+) -> tuple[str, str | None]:
+    """The acceptance block plus an optional operator warning, for the PR about to
+    be opened in `repo_path`.
+
+    Split from build_acceptance_block so the pure renderer stays testable without
+    a git repo or a config. Embedding requires `published` storage AND the artifact
+    actually present in a pushed commit: under `local` the bytes never leave the
+    machine, and under `encrypted` they are ciphertext.
+
+    Under `published`, finish OWNS getting them there — `publish_evidence` puts the
+    referenced artifacts on `repo_path`'s `mship-evidence` orphan branch, because
+    the store is machine-local and nothing else would. Called PER REPO, since each
+    PR embeds from its own repo's branch (ac7). It reports back only the refs it
+    could prove are in the pinned commit; the rest are named.
+
+    The mode gate is checked FIRST and short-circuits before any shell call:
+    `publish_evidence` only answers the git question and would happily publish
+    bytes that must never leave the machine if asked, so it must never be asked
+    under `local`/`encrypted` (see evidence_url.py). The "has image evidence" scan
+    likewise runs first — an operator with no screenshots gets no message and no
+    git work.
+
+    `resolve_evidence_mode` can raise `EvidenceModeError` (evidence_storage more
+    exposed than spec_storage). By the time `finish` runs, config load has already
+    enforced that invariant, so a raise here means the config changed underneath
+    mid-session — a real inconsistency, not a normal path. Left to propagate
+    uncaught rather than downgraded to a warning: swallowing it would let finish
+    continue past a broken config silently, the opposite of surfacing the problem.
+
+    `token`, when the caller has one (the same `gh_token` resolved for
+    `push_branch`), is passed straight through to `publish_evidence` so the
+    evidence push authenticates the same way the branch push already does —
+    otherwise a token-only environment with no cached git credentials pushes the
+    branch fine and silently fails to publish evidence.
+    """
+    mode = resolve_evidence_mode(config)
+    acs = getattr(spec, "acceptance_criteria", None) or []
+    # Ordered-unique: one artifact attached to several criteria is one file.
+    image_refs = list(dict.fromkeys(
+        e.ref
+        for c in acs
+        for e in (c.evidence or [])
+        if e.kind == "artifact" and is_image_ref(e.ref)
+    ))
+
+    # A ref records how its bytes were written, which a later change of
+    # `evidence_storage` does not rewrite. So ciphertext can turn up while the
+    # mode reads `published`: it is still an image artifact (it must be warned
+    # about), but it is not publishable — pushing it would put blobs on the
+    # evidence branch that no renderer could ever use.
+    publishable = [r for r in image_refs if not is_encrypted_ref(r)]
+
+    base_url, verified, publish_warning = None, None, None
+    if mode == "published" and publishable:
+        from mship.core.evidence_url import publish_evidence
+
+        base_url, verified, publish_warning = publish_evidence(
+            workspace_root, repo_path, spec.id, publishable, shell, token,
+        )
+
+    block = build_acceptance_block(
+        spec, evidence_base_url=base_url, verified_refs=verified,
+    )
+
+    if not image_refs:
+        return block, None
+    if mode != "published":
+        return block, (
+            f"Image evidence exists but evidence_storage={mode!r} keeps it off "
+            "GitHub in readable form, so it will be named rather than embedded in "
+            "the PR body."
+        )
+    encrypted = len(image_refs) - len(publishable)
+    if encrypted:
+        note = (
+            f"{encrypted} of {len(image_refs)} image artifacts were stored "
+            f"encrypted, under an earlier evidence_storage setting, so their "
+            f"bytes are ciphertext and they will be named rather than embedded."
+        )
+        return block, f"{publish_warning} {note}" if publish_warning else note
+    return block, publish_warning

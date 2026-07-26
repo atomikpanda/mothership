@@ -85,6 +85,24 @@ def test_spawn_all_repos(worktree_deps):
 
 
 
+def test_spawn_gitignores_mships_runtime_directories(worktree_deps):
+    """In a monorepo or single-repo workspace the root IS a product repo, so
+    mship's machine-local state — task state, captures, the spec key, the
+    evidence store — has to be invisible to git rather than merely untracked."""
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    # The interesting shape: the workspace ROOT is itself a git repo.
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True, capture_output=True)
+    mgr = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    mgr.spawn("ignore runtime dirs", repos=["shared"], workspace_root=workspace)
+
+    ignored = (workspace / ".gitignore").read_text().splitlines()
+    assert ".worktrees" in ignored
+    assert ".mothership" in ignored
+    # The entry actually covers what lives under it — a stored evidence artifact
+    # in the workspace repo's own tree must never show up in `git status`.
+    assert git.is_ignored(workspace, ".mothership/evidence/s/a1b2c3d4e5f6.png")
+
+
 def test_spawn_custom_branch_pattern(workspace_with_git: Path):
     workspace = workspace_with_git
     cfg = workspace / "mothership.yaml"

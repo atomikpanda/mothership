@@ -261,7 +261,7 @@ mship phase plan|dev|review|run [-f]  # `-f` overrides blocked or finished-task 
 mship block "reason" | mship unblock
 mship test [--all] [--repos|--tag] [--no-diff]
 mship build [--all] [--repos|--tag]   # runs `task build` across repos in dep order
-mship capture [--repo R] [--platform P] [--kind image|layout|all] [--out DIR]
+mship capture [--repo R] [--platform P] [--kind image|layout|all] [--out DIR] [--evidence SPEC:AC]
 mship journal "msg" [--action X] [--open Y] [--repo R] [--test-state pass|fail|mixed]
 mship journal --show-open                 # what am I blocked on across this task?
 mship finish [--base B] [--base-map ...] [--push-only] [--handoff] [--force-audit] [--body-file F | --body TEXT] [--force] [--require-tests] [--title T] [--body-map ...]
@@ -296,6 +296,20 @@ It's task-aware but **not** task-required: with an active task it runs in that
 task's worktree and files captures under the task; with no task it runs an
 ad-hoc capture against the repo's main checkout (pass `--repo` if the workspace
 has more than one). Capture observes a *running app*, not worktree source.
+
+**`--evidence SPEC:AC` promotes a capture into proof.** Bare `capture` is
+ephemeral — files you look at and overwrite on the next iteration. Adding
+`--evidence my-spec:ac3` also copies the artifact into the durable evidence
+store (`.mothership/evidence/<spec-id>/`, gitignored, content-hashed) and
+attaches it to that acceptance criterion as `kind=artifact` evidence, with a
+provenance note. From there it travels on its own: the operator sees the image
+on the spec's detail screen in Ground Control, and `mship finish` embeds it in
+the PR body — publishing the bytes to an `mship-evidence` orphan branch in the
+repo the PR targets so GitHub can render them. Under `local`/`encrypted`
+evidence storage, or if that publish fails, the PR **names** the artifact
+instead and finish warns; the PR still opens. So for UI work, capture with
+`--evidence` once the screen is right: it is the visual equivalent of a passing
+test, and the reviewer sees it without asking you for a screenshot.
 
 **`spawn` order:** slugify → worktree per repo → symlink `symlink_dirs` → `task setup` (unless `--skip-setup`) → save state → enter `plan`. If a repo's setup fails, the task still spawns; fix and re-run setup manually.
 

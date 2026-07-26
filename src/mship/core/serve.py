@@ -549,6 +549,92 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
         return build_review(spec)
 
+    @app.get("/specs/{spec_id}/evidence/{name}/blob")
+    def get_evidence_blob(spec_id: str, name: str):
+        """Read-only artifact bytes for a criterion's evidence.
+
+        Inherits the app-wide bearer like every other route. Everything
+        unresolvable is a 404 rather than a 403 so the route never confirms what
+        exists. Both path parameters are attacker-controlled, and ALL of their
+        validation — including `spec_id` containment — is owned by
+        `core/evidence_store.py::resolve_ref`; a second copy here could drift out
+        of step with the real one, so there isn't one.
+
+        Note that Starlette percent-decodes the path before routing, so a
+        multi-segment `spec_id` (`..%2Fother`) fails to match `{spec_id}` and
+        404s in the router, while a bare `%2E%2E` does reach here — which is why
+        the resolver validates the spec id and not just the ref.
+        """
+        from pathlib import Path as _Path
+
+        from fastapi.responses import FileResponse, Response
+
+        from mship.core.evidence_store import (
+            CONTENT_TYPES,
+            ENC_SUFFIX,
+            BadEvidenceRef,
+            resolve_ref,
+            stored_size_cap,
+        )
+
+        # `resolve_ref` is the ONLY spec resolution on this path, deliberately.
+        # It validates `spec_id` as a direct child of the evidence store, so an
+        # unknown spec has no directory and 404s here anyway — while the spec
+        # store's own lookup SKIPS locked specs, which would have turned the
+        # ordinary encrypted-workspace case into "no such spec" instead of the
+        # locked answer below.
+        try:
+            path = resolve_ref(workspace_root, spec_id, name)
+        except BadEvidenceRef:
+            raise HTTPException(status_code=404, detail="no such evidence")
+
+        # The size cap that actually bounds a response: `store_artifact` refuses
+        # oversized artifacts up front, but bytes can reach the store without it
+        # (a hand-placed file, a restore), and this is the one place a phone on a
+        # relay is on the other end of them.
+        if path.stat().st_size > stored_size_cap(name):
+            raise HTTPException(
+                status_code=413, detail="evidence artifact is too large to serve"
+            )
+
+        # Layout dumps carry app-under-test content, so nothing here is served as
+        # a type a browser executes (see evidence_store.CONTENT_TYPES); nosniff
+        # stops it being re-guessed into one.
+        headers = {"X-Content-Type-Options": "nosniff"}
+
+        if name.endswith(ENC_SUFFIX):
+            from cryptography.fernet import InvalidToken
+
+            from mship.core import spec_key
+
+            key = spec_key.load_key(workspace_root)
+            # The spec routes express "encrypted, no key on this host" as a
+            # `locked` marker; a byte stream has nowhere to put a marker, so the
+            # same condition is a 409 (serve's status for "the store can't
+            # satisfy this right now") whose detail names it locked. Never
+            # plaintext, never ciphertext, never a 500.
+            if key is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="evidence is locked: encrypted, and no key is available on this host",
+                )
+            logical = name[: -len(ENC_SUFFIX)]
+            media = CONTENT_TYPES.get(_Path(logical).suffix.lower(), "application/octet-stream")
+            try:
+                plain = spec_key.decrypt_bytes(key, path.read_bytes())
+            except InvalidToken:
+                # This host has A key, but not the one this artifact was sealed
+                # with (regenerated after a loss, or restored from elsewhere).
+                # Indistinguishable from locked to the caller, and equally not a 500.
+                raise HTTPException(
+                    status_code=409,
+                    detail="evidence is locked: this host's key cannot decrypt it",
+                )
+            return Response(content=plain, media_type=media, headers=headers)
+
+        media = CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
+        return FileResponse(path, media_type=media, headers=headers)
+
     from fastapi.encoders import jsonable_encoder
     from mship.core.view.task_index import build_task_index
 

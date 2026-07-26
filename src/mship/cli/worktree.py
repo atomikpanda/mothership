@@ -1540,10 +1540,33 @@ def register(app: typer.Typer, get_container):
                 bound_spec.updated_at = _dt_al.now(_tz_al.utc)
                 SpecStore(workspace_root / SPECS_DIRNAME).save(bound_spec)
 
-        # Render the acceptance-criteria PR-body section once (reuses bound_spec
-        # from the gate above). Empty string when there's no bound spec or no ACs.
-        from mship.core.pr import build_acceptance_block
-        acceptance_block = build_acceptance_block(bound_spec) if bound_spec is not None else ""
+        # The acceptance-criteria PR-body section is rendered PER REPO, because
+        # under `published` evidence storage rendering it also publishes the
+        # referenced artifacts to THAT repo's `mship-evidence` orphan branch (see
+        # core/evidence_url.py): every PR then embeds from the repo its reviewer
+        # already has open, and no reviewer needs read access to a sibling repo.
+        # Memoised per repo path, so a repo is published to once however many
+        # groups map onto it, and each distinct warning is shown once. Every
+        # failure in there degrades to naming the artifact plus that warning,
+        # emitted before that repo's PR is created; opening the PR never depends
+        # on it. Empty string when there's no bound spec or no ACs.
+        from mship.core.pr import acceptance_block_for_finish
+        _acceptance_blocks: dict[Path, str] = {}
+        _acceptance_warnings: set[str] = set()
+
+        def acceptance_block_for(repo_path: Path) -> str:
+            if bound_spec is None:
+                return ""
+            if repo_path not in _acceptance_blocks:
+                block, evidence_warning = acceptance_block_for_finish(
+                    bound_spec, workspace_root, repo_path, shell, config,
+                    token=gh_token,
+                )
+                _acceptance_blocks[repo_path] = block
+                if evidence_warning is not None and evidence_warning not in _acceptance_warnings:
+                    _acceptance_warnings.add(evidence_warning)
+                    output.warning(evidence_warning)
+            return _acceptance_blocks[repo_path]
 
         pr_list: list[dict] = []
         repushed_repos: list[str] = []  # repos where --force re-pushed commits
@@ -1704,6 +1727,7 @@ def register(app: typer.Typer, get_container):
                     from mship.core.issue_refs import append_linked_closes
                     pr_body = append_linked_closes(
                         pr_body, linked_issue_canonicals, slug_for_path(group.rep_path))
+                acceptance_block = acceptance_block_for(group.rep_path)
                 if acceptance_block:
                     pr_body = pr_body + acceptance_block
 

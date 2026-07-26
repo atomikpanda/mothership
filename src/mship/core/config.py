@@ -5,6 +5,7 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, field_validator, model_validator
 
+from mship.core.evidence_store import EvidenceModeError, resolve_evidence_mode
 from mship.core.relay.config import RelayConfig
 
 
@@ -340,6 +341,16 @@ class WorkspaceConfig(BaseModel):
     # unreadable without `.mothership/spec-key`. Applied transparently by
     # core/spec_storage.py; an invalid value fails loud at config load.
     spec_storage: Literal["committed", "local", "encrypted"] = "committed"
+    # Storage mode for acceptance-criterion artifact evidence. `None` inherits
+    # `spec_storage` — the safe default, so evidence is governed exactly like the
+    # spec it backs unless an operator deliberately diverges (prose is bytes,
+    # screenshots are megabytes). The vocabulary differs by one word: a spec is
+    # `committed` into the workspace repo's tree, whereas evidence is `published`
+    # onto an orphan branch in the repo whose PR embeds it, so inheritance maps
+    # `committed` to `published`. Resolved by
+    # core/evidence_store.py::resolve_evidence_mode, which also enforces that
+    # evidence is never MORE exposed than its spec.
+    evidence_storage: Literal["published", "local", "encrypted"] | None = None
     # If set and the effective spawn scope exceeds N repos AND no --repos was
     # passed, require confirmation (TTY) or --yes (non-TTY). See #74.
     spawn_confirm_threshold: int | None = None
@@ -433,6 +444,19 @@ class WorkspaceConfig(BaseModel):
                     f"default_scope references unknown repos: {unknown}. "
                     f"Valid repos: {sorted(self.repos.keys())}"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def validate_evidence_exposure(self) -> "WorkspaceConfig":
+        """evidence_storage may never be more exposed than spec_storage — a
+        screenshot discloses exactly what encrypted/local spec prose was
+        protecting. Reuse resolve_evidence_mode (core/evidence_store.py) as the
+        single source of truth for the exposure ordering rather than
+        reimplementing the comparison here."""
+        try:
+            resolve_evidence_mode(self)
+        except EvidenceModeError as e:
+            raise ValueError(str(e)) from e
         return self
 
     @model_validator(mode="after")

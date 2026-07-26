@@ -35,6 +35,8 @@ from mship.cli import app, container
 from mship.core import remote_client
 from mship.core.remote_exec import ARTIFACT_MARKER, EXIT_MARKER
 from mship.core.run_host import RunHostConnection, RunHostError, RunHostStore
+from mship.core.spec import AcceptanceCriterion, Spec
+from mship.core.spec_store import SpecStore
 from mship.core.state import StateManager, Task, WorkspaceState
 from mship.util.shell import ShellResult, ShellRunner
 
@@ -634,6 +636,76 @@ def test_cli_capture_remote_extracts_artifacts_into_exact_local_captures_path(tm
 
         # The local capture target never ran.
         mock_shell.run_task.assert_not_called()
+    finally:
+        _reset()
+
+
+def test_cli_capture_remote_with_evidence_attaches_artifact_indistinguishably_from_local(
+    tmp_path, monkeypatch,
+):
+    """ac15 (specs/2026-07-26-artifact-evidence-on-phone.md): `mship capture --remote
+    --evidence` must attach evidence from artifacts produced on the mapped run
+    host indistinguishably from a local capture. `_attach_evidence`
+    (cli/capture.py) is wired into the `--remote` branch AFTER `exec_remote`
+    returns, once the extracted artifacts are re-discovered locally as
+    `landed` — this proves that wiring actually runs and produces the same
+    criterion.evidence shape (kind=artifact, content-hashed `.png` ref, a
+    provenance note) that
+    test_capture_evidence.py::test_evidence_attaches_to_the_named_criterion
+    asserts for the LOCAL path."""
+    wt = _write_capture_workspace(tmp_path, run_hosts=["role-x"], platforms=["android"])
+    _seed_task(tmp_path, slug="t1", repos=["app"], worktrees={"app": str(wt)})
+    mock_shell = _configure(tmp_path)
+
+    # provenance_note() shells out through the same container.shell() the
+    # remote path already uses — always against the LOCAL, task-bound
+    # worktree `wt` (the remote only supplies the artifact bytes).
+    def _fake_run(command, cwd=None, **kwargs):
+        assert isinstance(command, str), "ShellRunner.run takes a command string"
+        if command.startswith("git rev-parse"):
+            return ShellResult(returncode=0, stdout="abc1234\n", stderr="")
+        if command.startswith("git branch"):
+            return ShellResult(returncode=0, stdout="* main\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")  # git status: clean
+
+    mock_shell.run.side_effect = _fake_run
+
+    now = datetime(2026, 7, 25, tzinfo=timezone.utc)
+    SpecStore(tmp_path / "specs").save(Spec(
+        id="dq", title="Dequeue", status="approved",
+        created_at=now, updated_at=now, affected_repos=["app"],
+        acceptance_criteria=[AcceptanceCriterion(id="ac1", text="The card clears.")],
+    ))
+
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+    tar_bytes = _make_tar({"screen.png": b"PNGDATA"})
+    body = _frame(["captured\n"], exit_code=0, artifact_tar=tar_bytes)
+
+    try:
+        with _ClientPatch(monkeypatch, _recording_handler({}, body)):
+            result = runner.invoke(
+                app, [
+                    "capture", "--task", "t1", "--repo", "app", "--remote=role-x",
+                    "--evidence", "dq:ac1",
+                ]
+            )
+        assert result.exit_code == 0, result.output
+
+        spec = SpecStore(tmp_path / "specs").find_by_id("dq")
+        crit = spec.acceptance_criteria[0]
+        assert len(crit.evidence) == 1
+        ev = crit.evidence[0]
+        # Same shape a LOCAL --evidence capture produces.
+        assert ev.kind == "artifact"
+        assert ev.ref.endswith(".png")
+        assert "at " in (ev.note or "")
+
+        stored = tmp_path / ".mothership" / "evidence" / "dq" / ev.ref
+        assert stored.read_bytes() == b"PNGDATA"
+
+        mock_shell.run_task.assert_not_called()  # the local capture target never ran
     finally:
         _reset()
 

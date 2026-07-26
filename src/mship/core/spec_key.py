@@ -98,9 +98,17 @@ def _ensure_gitignored(workspace_root: Path, git: GitRunner) -> None:
         git.add_to_gitignore(workspace_root, pattern)
 
 
+def encrypt_bytes(key: bytes, data: bytes) -> bytes:
+    return Fernet(key).encrypt(data)
+
+
+def decrypt_bytes(key: bytes, data: bytes) -> bytes:
+    return Fernet(key).decrypt(data)
+
+
 def encrypt(key: bytes, text: str) -> bytes:
-    return Fernet(key).encrypt(text.encode("utf-8"))
+    return encrypt_bytes(key, text.encode("utf-8"))
 
 
 def decrypt(key: bytes, blob: bytes) -> str:
-    return Fernet(key).decrypt(blob).decode("utf-8")
+    return decrypt_bytes(key, blob).decode("utf-8")
