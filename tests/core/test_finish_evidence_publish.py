@@ -112,6 +112,30 @@ def _init_member(tmp_path: Path, origin: Path, name: str = "member") -> Path:
     return repo
 
 
+def _single_branch_clone(tmp_path: Path, origin: Path, name: str = "clone") -> Path:
+    """A clone that has `main` and NOTHING else — deliberately without the
+    evidence branch's objects, unlike an ordinary `_init_member` repo that
+    published from (which already has them in its own object store). This is
+    what makes `_fetch_tip` actually reach the network instead of finding the
+    objects already present locally, mirroring "a tip pushed from another
+    machine" (evidence_url.py's own docstring for that function).
+    """
+    repo = tmp_path / name
+    subprocess.run(
+        # `--no-local`: a local-path origin otherwise takes git's local-clone
+        # shortcut (hardlink/copy the WHOLE object database), which would
+        # smuggle in the evidence branch's objects regardless of
+        # `--single-branch` and defeat the point of this helper.
+        ["git", "clone", "-q", "--no-local", "--no-tags", "--single-branch",
+         "--branch", "main", str(origin), str(repo)],
+        check=True,
+    )
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "config", "commit.gpgsign", "false")
+    return repo
+
+
 def _store(workspace: Path, ref: str = IMAGE_REF, body: bytes = PNG_BYTES) -> Path:
     """Seed the machine-local evidence store exactly as `capture --evidence`
     leaves it. Located via evidence_store so this says WHAT, not where."""
@@ -141,9 +165,10 @@ def workspace(tmp_path: Path) -> Path:
     return root
 
 
-def _finish(workspace: Path, repo: Path, spec=None, config=None, shell=None):
+def _finish(workspace: Path, repo: Path, spec=None, config=None, shell=None, token=None):
     return acceptance_block_for_finish(
         spec or _spec(), workspace, repo, shell or ShellRunner(), config or _config(),
+        token=token,
     )
 
 
@@ -464,6 +489,110 @@ def test_the_push_cannot_prompt_for_credentials(monkeypatch, workspace, member):
     assert seen["env"]["GIT_TERMINAL_PROMPT"] == "0"
     assert "BatchMode=yes" in seen["env"]["GIT_SSH_COMMAND"]
     assert seen["timeout"] is not None
+
+
+# --- token-backed credential helper (Greptile P1 on #421) -------------------
+#
+# `finish` in a token-only environment (cloud agent, CI, an unattended
+# overnight routine) has no cached git credentials. Before this, the evidence
+# push used none of the credential machinery the branch push already uses
+# (`push_branch`, core/pr.py) — it degraded to a named artifact instead of an
+# embed every time, silently. These pin the fix: the same github.com-scoped
+# helper reaches every git call that talks to the remote, the token itself
+# never appears in a command string (only in the env, like `git_cred_args`
+# promises — tests/core/test_gh_auth.py:188), and the no-token path is
+# byte-for-byte what it always was.
+
+
+def test_network_calls_use_the_credential_helper_when_a_token_is_given(
+    monkeypatch, workspace, member, origin,
+):
+    """ls-remote, fetch, and push are the only calls that reach the network —
+    hash-object/read-tree/write-tree/commit-tree/cat-file are local plumbing on
+    objects already on disk. Each network call must carry the same credential
+    helper `push_branch` splices onto the branch push, with the token landing
+    only in the env it carries, never in the command string itself.
+
+    Seeded with a first publish from `member` (no token) so the branch exists
+    on origin; the SECOND publish below runs from a fresh single-branch clone
+    (`_single_branch_clone`) that has never fetched it, so `_fetch_tip` has to
+    reach the network instead of finding the objects already in its own object
+    store — otherwise this test would never exercise the fetch call at all.
+    """
+    token = "ghp_secrettoken123"
+    _finish(workspace, member)
+    clone = _single_branch_clone(member.parent, origin)
+    second_ref = "b1b2c3d4e5f6.png"
+    _store(workspace, second_ref)
+
+    seen: list[tuple[str, dict]] = []
+    real = ShellRunner.run
+
+    def spy(self, command, cwd, env=None, timeout=None):
+        seen.append((command, env or {}))
+        return real(self, command, cwd, env=env, timeout=timeout)
+
+    monkeypatch.setattr(ShellRunner, "run", spy)
+
+    block, warning = _finish(
+        workspace, clone, spec=_spec(IMAGE_REF, second_ref), token=token,
+    )
+
+    assert warning is None
+    assert _embedded_url(block) is not None
+
+    def _kind(cmd: str) -> str | None:
+        for sub in ("ls-remote", "fetch", "push"):
+            if f" {sub} " in cmd:
+                return sub
+        return None
+
+    network = [(c, e, _kind(c)) for c, e in seen if _kind(c) is not None]
+    kinds = {k for _, _, k in network}
+    assert kinds == {"ls-remote", "fetch", "push"}, (
+        f"expected ls-remote, fetch, and push all exercised, got: {kinds}"
+    )
+    for cmd, env, _ in network:
+        assert "credential.https://github.com.helper" in cmd
+        assert token not in cmd
+        assert env.get("MSHIP_GH_TOKEN") == token
+
+    local = [
+        c for c, _ in seen
+        if any(
+            f" {sub} " in c or c.rstrip().endswith(sub)
+            for sub in ("hash-object", "read-tree", "write-tree", "commit-tree", "cat-file")
+        )
+    ]
+    assert local, "expected at least one local plumbing call"
+    for cmd in local:
+        assert "credential.https://github.com.helper" not in cmd, (
+            f"local plumbing call should never carry remote credentials: {cmd}"
+        )
+
+
+def test_no_token_path_is_unchanged(workspace, member, origin):
+    """A local operator with cached credentials passes no token at all, and
+    must keep working exactly as before: no credential helper spliced onto
+    any command, and the same commands this module has always run — including
+    the fetch path, exercised the same way as the token test above (a fresh
+    single-branch clone that has to fetch the existing tip's objects)."""
+    _finish(workspace, member)
+    clone = _single_branch_clone(member.parent, origin)
+    second_ref = "c1b2c3d4e5f6.png"
+    _store(workspace, second_ref)
+    shell = _SpyShell()
+
+    block, warning = _finish(
+        workspace, clone, spec=_spec(IMAGE_REF, second_ref), shell=shell,
+    )
+
+    assert warning is None
+    assert _embedded_url(block) is not None
+    assert all("credential.https://github.com.helper" not in c for c in shell.commands)
+    assert any(c.startswith("git ls-remote origin ") for c in shell.commands)
+    assert any(c.startswith("git fetch --no-tags --quiet origin ") for c in shell.commands)
+    assert any(c.startswith("git push origin ") for c in shell.commands)
 
 
 # --- multi-repo (ac7) --------------------------------------------------------

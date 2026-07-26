@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from mship.core.evidence_store import evidence_dir
+from mship.core.gh_auth import git_cred_args
 from mship.core.pr import _parse_github_slug
 
 RAW_HOST = "https://raw.githubusercontent.com"
@@ -69,11 +70,30 @@ _TREE_MODE = "100644"
 PUSH_TIMEOUT_SECONDS = 120
 
 
-def _remote_env() -> dict[str, str]:
+def _remote_env(token: str | None = None) -> dict[str, str]:
     env = {"GIT_TERMINAL_PROMPT": "0"}
     if not os.environ.get("GIT_SSH_COMMAND"):
         env["GIT_SSH_COMMAND"] = "ssh -oBatchMode=yes"
+    if token:
+        _, cred_env = git_cred_args(token)
+        env.update(cred_env)
     return env
+
+
+def _cred_prefix(token: str | None) -> str:
+    """The `-c credential....helper=...` global git option, pre-quoted and ready
+    to splice in front of a subcommand — empty when there is no token, so the
+    no-token path emits the exact command it always has.
+
+    `-c` is a global option, so it MUST precede the subcommand (`git -c ... push
+    ...`, never `git push -c ...`); every remote-facing call below builds its
+    command string with this prefix immediately after `git `. Mirrors
+    `PRManager.push_branch` (core/pr.py), the precedent for this pattern.
+    """
+    if not token:
+        return ""
+    args, _ = git_cred_args(token)
+    return " ".join(shlex.quote(a) for a in args) + " "
 
 
 class EvidencePublication(NamedTuple):
@@ -108,14 +128,14 @@ def _reason(result) -> str:
     return lines[-1] if lines else "no error output"
 
 
-def _remote_tip(shell, repo: Path) -> tuple[str | None, str | None]:
+def _remote_tip(shell, repo: Path, token: str | None = None) -> tuple[str | None, str | None]:
     """`(sha, reason)` for the orphan branch on origin. `(None, None)` means the
     branch does not exist yet — the first-publication case, which is normal and
     not a failure; `(None, reason)` means origin could not be asked."""
     ls = shell.run(
-        f"git ls-remote origin {shlex.quote(ORPHAN_REF)}",
+        f"git {_cred_prefix(token)}ls-remote origin {shlex.quote(ORPHAN_REF)}",
         cwd=repo,
-        env=_remote_env(),
+        env=_remote_env(token),
     )
     if ls.returncode != 0:
         return None, f"origin is unreachable ({_reason(ls)})"
@@ -126,7 +146,7 @@ def _remote_tip(shell, repo: Path) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _fetch_tip(shell, repo: Path, sha: str) -> str | None:
+def _fetch_tip(shell, repo: Path, sha: str, token: str | None = None) -> str | None:
     """Make `sha`'s objects available locally so a new commit can PARENT on it.
 
     Published artifacts accumulate: the new commit extends the existing orphan
@@ -141,9 +161,9 @@ def _fetch_tip(shell, repo: Path, sha: str) -> str | None:
         return None
     try:
         fetched = shell.run(
-            f"git fetch --no-tags --quiet origin {shlex.quote(ORPHAN_REF)}",
+            f"git {_cred_prefix(token)}fetch --no-tags --quiet origin {shlex.quote(ORPHAN_REF)}",
             cwd=repo,
-            env=_remote_env(),
+            env=_remote_env(token),
             timeout=PUSH_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
@@ -238,7 +258,7 @@ def _publish_commit(
     return sha, None
 
 
-def _push_commit(shell, repo: Path, sha: str) -> str | None:
+def _push_commit(shell, repo: Path, sha: str, token: str | None = None) -> str | None:
     """Push `sha` to the orphan branch. None on success, else a reason.
 
     Pushes the COMMIT OBJECT (`<sha>:refs/heads/<branch>`) rather than a local
@@ -253,9 +273,9 @@ def _push_commit(shell, repo: Path, sha: str) -> str | None:
     """
     try:
         result = shell.run(
-            f"git push origin {shlex.quote(sha)}:{shlex.quote(ORPHAN_REF)}",
+            f"git {_cred_prefix(token)}push origin {shlex.quote(sha)}:{shlex.quote(ORPHAN_REF)}",
             cwd=repo,
-            env=_remote_env(),
+            env=_remote_env(token),
             timeout=PUSH_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
@@ -265,7 +285,7 @@ def _push_commit(shell, repo: Path, sha: str) -> str | None:
     return None
 
 
-def _is_on_origin(shell, repo: Path, sha: str) -> bool:
+def _is_on_origin(shell, repo: Path, sha: str, token: str | None = None) -> bool:
     """True when `sha` is reachable from origin's copy of the orphan branch.
 
     Asks the REMOTE rather than trusting a local ref, because claiming "pushed"
@@ -275,7 +295,7 @@ def _is_on_origin(shell, repo: Path, sha: str) -> bool:
     cannot judge ancestry and we report not-pushed, so the artifact is named even
     though it may well be on the remote.
     """
-    tip, _ = _remote_tip(shell, repo)
+    tip, _ = _remote_tip(shell, repo, token)
     if tip is None:
         return False
     if tip == sha:
@@ -299,7 +319,8 @@ def is_present_at(shell, repo: Path, sha: str, tree_path: str) -> bool:
 
 
 def publish_evidence(
-    workspace_root: Path, repo_path: Path, spec_id: str, refs: list[str], shell
+    workspace_root: Path, repo_path: Path, spec_id: str, refs: list[str], shell,
+    token: str | None = None,
 ) -> EvidencePublication:
     """Publish `spec_id`'s referenced artifacts to `repo_path`'s orphan evidence
     branch, then report which of them are provably fetchable.
@@ -309,6 +330,14 @@ def publish_evidence(
     and only under `published` evidence storage (see the module docstring).
     `refs` are bare stored refs; anything not proven present in the pinned commit
     is left out of `verified` so the caller names it instead.
+
+    `token`, when given, is spliced onto every git call that reaches the network
+    (`ls-remote`, `fetch`, `push`) as the same github.com-scoped credential
+    helper `push_branch` uses for the branch push (core/pr.py), so a token-only
+    environment (cloud agent, CI, an unattended overnight routine) with no
+    cached git credentials can publish evidence exactly as a local operator
+    with cached credentials already does. `None` reproduces today's behaviour
+    unchanged — the operator's cached credentials, if any, apply as before.
     """
     repo = Path(repo_path)
     store = evidence_dir(workspace_root, spec_id)
@@ -325,14 +354,14 @@ def publish_evidence(
         )
     owner, name = slug
 
-    tip, tip_note = _remote_tip(shell, repo)
+    tip, tip_note = _remote_tip(shell, repo, token)
     if tip_note is not None:
         return EvidencePublication(
             None, frozenset(), _warning([tip_note], spec_id, repo)
         )
     parent = tip
     if parent is not None:
-        note = _fetch_tip(shell, repo, parent)
+        note = _fetch_tip(shell, repo, parent, token)
         if note is not None:
             # Without the parent's objects we could only build a commit that
             # REPLACES the branch, discarding earlier publications, and the push
@@ -357,10 +386,10 @@ def publish_evidence(
         return EvidencePublication(None, frozenset(), _warning(notes, spec_id, repo))
 
     if pinned != tip:
-        note = _push_commit(shell, repo, pinned)
+        note = _push_commit(shell, repo, pinned, token)
         if note is not None:
             notes.append(note)
-    if not _is_on_origin(shell, repo, pinned):
+    if not _is_on_origin(shell, repo, pinned, token):
         notes.append(
             f"the evidence commit is not on origin's {ORPHAN_BRANCH} branch"
         )

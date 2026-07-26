@@ -542,7 +542,7 @@ def build_acceptance_block(
 
 
 def acceptance_block_for_finish(
-    spec, workspace_root, repo_path, shell, config
+    spec, workspace_root, repo_path, shell, config, token: str | None = None,
 ) -> tuple[str, str | None]:
     """The acceptance block plus an optional operator warning, for the PR about to
     be opened in `repo_path`.
@@ -571,6 +571,12 @@ def acceptance_block_for_finish(
     mid-session — a real inconsistency, not a normal path. Left to propagate
     uncaught rather than downgraded to a warning: swallowing it would let finish
     continue past a broken config silently, the opposite of surfacing the problem.
+
+    `token`, when the caller has one (the same `gh_token` resolved for
+    `push_branch`), is passed straight through to `publish_evidence` so the
+    evidence push authenticates the same way the branch push already does —
+    otherwise a token-only environment with no cached git credentials pushes the
+    branch fine and silently fails to publish evidence.
     """
     mode = resolve_evidence_mode(config)
     acs = getattr(spec, "acceptance_criteria", None) or []
@@ -594,7 +600,7 @@ def acceptance_block_for_finish(
         from mship.core.evidence_url import publish_evidence
 
         base_url, verified, publish_warning = publish_evidence(
-            workspace_root, repo_path, spec.id, publishable, shell,
+            workspace_root, repo_path, spec.id, publishable, shell, token,
         )
 
     block = build_acceptance_block(

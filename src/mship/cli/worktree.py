@@ -1560,6 +1560,7 @@ def register(app: typer.Typer, get_container):
             if repo_path not in _acceptance_blocks:
                 block, evidence_warning = acceptance_block_for_finish(
                     bound_spec, workspace_root, repo_path, shell, config,
+                    token=gh_token,
                 )
                 _acceptance_blocks[repo_path] = block
                 if evidence_warning is not None and evidence_warning not in _acceptance_warnings:
