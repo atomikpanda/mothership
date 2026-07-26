@@ -483,11 +483,12 @@ def build_acceptance_block(
     (no criteria), else a leading-separator markdown block ready to append to a
     PR body.
 
-    `evidence_base_url`, when given, is the raw base under which this workspace's
-    committed evidence is fetchable; image artifacts are then embedded rather than
-    named. It is None whenever the bytes are not fetchable by GitHub (local or
-    encrypted storage, or an evidence commit that has not been pushed), in which
-    case the artifact is named — never emitted as a broken image.
+    `evidence_base_url`, when given, is the raw base under which this spec's
+    published evidence is fetchable — a commit on the target repo's evidence
+    branch; image artifacts are then embedded rather than named. It is None
+    whenever the bytes are not fetchable by GitHub (local or encrypted storage, or
+    a publication that did not land), in which case the artifact is named — never
+    emitted as a broken image.
 
     `verified_refs` narrows that further to refs proven present in the pinned
     commit, so one unpublished artifact degrades to a name without dragging its
@@ -525,27 +526,29 @@ def build_acceptance_block(
     return "\n".join(lines)
 
 
-def acceptance_block_for_finish(spec, workspace_root, shell, config) -> tuple[str, str | None]:
-    """The acceptance block plus an optional operator warning.
+def acceptance_block_for_finish(
+    spec, workspace_root, repo_path, shell, config
+) -> tuple[str, str | None]:
+    """The acceptance block plus an optional operator warning, for the PR about to
+    be opened in `repo_path`.
 
     Split from build_acceptance_block so the pure renderer stays testable without
-    a git repo or a config. Embedding requires `committed` storage AND the artifact
-    actually present in a pushed workspace commit: under `local` the evidence
-    directory is gitignored, so a raw URL would 404, and under `encrypted` the
-    bytes are ciphertext.
+    a git repo or a config. Embedding requires `published` storage AND the artifact
+    actually present in a pushed commit: under `local` the bytes never leave the
+    machine, and under `encrypted` they are ciphertext.
 
-    Under `committed`, finish OWNS getting it there — `publish_evidence` commits
-    the referenced artifacts and pushes the workspace repo, because otherwise the
-    ordinary sequence (`capture --evidence`, then finish) emits a URL to a file
-    nobody ever committed. It reports back only the refs it could prove are in the
-    pinned commit; the rest are named.
+    Under `published`, finish OWNS getting them there — `publish_evidence` puts the
+    referenced artifacts on `repo_path`'s `mship-evidence` orphan branch, because
+    the store is machine-local and nothing else would. Called PER REPO, since each
+    PR embeds from its own repo's branch (ac7). It reports back only the refs it
+    could prove are in the pinned commit; the rest are named.
 
     The mode gate is checked FIRST and short-circuits before any shell call:
-    `publish_evidence` only answers the git question and would happily stage
-    gitignored bytes under `local` if asked, so it must never be asked under
-    `local`/`encrypted` (see evidence_url.py). The "has image evidence" scan
-    likewise runs first — an operator with no screenshots gets no message, no
-    commit, and no push.
+    `publish_evidence` only answers the git question and would happily publish
+    bytes that must never leave the machine if asked, so it must never be asked
+    under `local`/`encrypted` (see evidence_url.py). The "has image evidence" scan
+    likewise runs first — an operator with no screenshots gets no message and no
+    git work.
 
     `resolve_evidence_mode` can raise `EvidenceModeError` (evidence_storage more
     exposed than spec_storage). By the time `finish` runs, config load has already
@@ -569,7 +572,7 @@ def acceptance_block_for_finish(spec, workspace_root, shell, config) -> tuple[st
         from mship.core.evidence_url import publish_evidence
 
         base_url, verified, publish_warning = publish_evidence(
-            workspace_root, spec.id, image_refs, shell,
+            workspace_root, repo_path, spec.id, image_refs, shell,
         )
 
     block = build_acceptance_block(
@@ -582,6 +585,6 @@ def acceptance_block_for_finish(spec, workspace_root, shell, config) -> tuple[st
         return block, publish_warning
     return block, (
         f"Image evidence exists but evidence_storage={mode!r} keeps it off "
-        "the public workspace repo, so it will be named rather than "
-        "embedded in the PR body."
+        "GitHub in readable form, so it will be named rather than embedded in "
+        "the PR body."
     )

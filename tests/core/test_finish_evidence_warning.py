@@ -1,16 +1,16 @@
 """finish's acceptance-block wrapper: embeds image evidence when the artifact is
-provably in a pushed workspace commit, and warns the operator (once, actionably)
+provably present at a published commit, and warns the operator (once, actionably)
 when it is not.
 
 Because `publish_evidence` answers only the git question and does not know the
 storage mode, the wrapper must gate on `committed` mode before ever calling it
-(see evidence_url.py's module docstring): under `local` the evidence dir is
-gitignored, so a URL would 404 for bytes never on the remote — and staging it
+(see evidence_url.py's module docstring): under `local` nothing may leave the
+machine and under `encrypted` the bytes are ciphertext, so publishing either
 would be actively wrong. The gate is asserted here as "the shell was never
 invoked at all".
 
-These are the wrapper's decisions with a scripted shell. The commit/push seam
-itself is covered end-to-end against a real git repo in
+These are the wrapper's decisions with a scripted shell. The publication seam
+itself is covered end-to-end against real git repos in
 test_finish_evidence_publish.py.
 """
 from datetime import datetime, timezone
@@ -60,41 +60,46 @@ class _FakeShell:
         return type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})()
 
 
-def _pushed_shell() -> _FakeShell:
+TIP = "abc123def456"
+
+
+def _published_shell() -> _FakeShell:
+    """An evidence branch already carrying this artifact: the store holds no file
+    (tmp_path is empty), so nothing new is built and the existing tip is pinned.
+
+    Fragment order matters — the commit-readable probe is matched before the
+    generic `cat-file` reply so a test can flip one without the other.
+    """
     return _FakeShell({
         "remote get-url": (0, "git@github.com:o/r.git\n"),
-        "--abbrev-ref": (0, "main\n"),
-        "rev-parse HEAD": (0, "abc123def456\n"),
-        "ls-remote": (0, "abc123def456\trefs/heads/main\n"),
-        "cat-file": (0, ""),  # the artifact IS in the pinned commit's tree
+        "ls-remote": (0, f"{TIP}\trefs/heads/mship-evidence\n"),
+        "^{commit}": (0, ""),  # the tip's objects are readable here
+        "cat-file": (0, ""),   # the artifact IS in the pinned commit's tree
     })
 
 
-def _unpushed_shell() -> _FakeShell:
+def _unpublished_shell() -> _FakeShell:
     return _FakeShell({
         "remote get-url": (0, "git@github.com:o/r.git\n"),
-        "--abbrev-ref": (0, "main\n"),
-        "rev-parse HEAD": (0, "abc123def456\n"),
-        "ls-remote": (0, ""),  # no matching line for the branch => not on origin
+        "ls-remote": (0, ""),  # the evidence branch does not exist yet
     })
 
 
-def test_committed_and_not_pushed_names_the_artifact_and_warns(tmp_path):
+def test_nothing_published_names_the_artifact_and_warns(tmp_path):
     spec = _spec_with(AcceptanceEvidence(kind="artifact", ref=IMAGE_REF))
     block, warning = acceptance_block_for_finish(
-        spec, tmp_path, _unpushed_shell(), _config(),
+        spec, tmp_path, tmp_path, _unpublished_shell(), _config(),
     )
     assert "![" not in block
     assert IMAGE_REF in block
     assert warning is not None
-    assert "pushed" in warning.lower()
-    assert "specs/" in warning
+    assert "mship-evidence" in warning
 
 
-def test_committed_and_pushed_embeds_with_no_warning(tmp_path):
+def test_published_and_present_embeds_with_no_warning(tmp_path):
     spec = _spec_with(AcceptanceEvidence(kind="artifact", ref=IMAGE_REF))
     block, warning = acceptance_block_for_finish(
-        spec, tmp_path, _pushed_shell(), _config(),
+        spec, tmp_path, tmp_path, _published_shell(), _config(),
     )
     assert f"![ac1](" in block
     assert IMAGE_REF in block
@@ -102,24 +107,26 @@ def test_committed_and_pushed_embeds_with_no_warning(tmp_path):
 
 
 def test_pushed_but_not_tracked_at_the_pinned_sha_is_named_not_embedded(tmp_path):
-    """The seatbelt: HEAD is on origin, but the artifact is not in that tree, so
-    the URL would 404. The module emitting the URL checks its own precondition
-    instead of trusting whoever was supposed to have committed the file."""
-    shell = _pushed_shell()
+    """The seatbelt: the pinned commit is on origin, but the artifact is not in
+    its tree, so the URL would 404. The module emitting the URL checks its own
+    precondition instead of trusting whoever was supposed to publish the file."""
+    shell = _published_shell()
     shell._replies["cat-file"] = (128, "")
     spec = _spec_with(AcceptanceEvidence(kind="artifact", ref=IMAGE_REF))
-    block, warning = acceptance_block_for_finish(spec, tmp_path, shell, _config())
+    block, warning = acceptance_block_for_finish(
+        spec, tmp_path, tmp_path, shell, _config(),
+    )
     assert "![" not in block
     assert IMAGE_REF in block
     assert warning is not None
-    assert "not tracked at workspace commit" in warning
+    assert "not present at evidence commit" in warning
 
 
 def test_local_mode_never_calls_the_shell_and_warns(tmp_path):
     spec = _spec_with(AcceptanceEvidence(kind="artifact", ref=IMAGE_REF))
-    shell = _pushed_shell()  # would happily answer "pushed" if ever asked
+    shell = _published_shell()  # would happily answer "published" if ever asked
     block, warning = acceptance_block_for_finish(
-        spec, tmp_path, shell, _config(evidence_storage="local"),
+        spec, tmp_path, tmp_path, shell, _config(evidence_storage="local"),
     )
     assert shell.commands == []
     assert "![" not in block
@@ -129,9 +136,9 @@ def test_local_mode_never_calls_the_shell_and_warns(tmp_path):
 
 def test_encrypted_mode_names_the_artifact_and_warns(tmp_path):
     spec = _spec_with(AcceptanceEvidence(kind="artifact", ref=IMAGE_REF))
-    shell = _pushed_shell()
+    shell = _published_shell()
     block, warning = acceptance_block_for_finish(
-        spec, tmp_path, shell, _config(evidence_storage="encrypted"),
+        spec, tmp_path, tmp_path, shell, _config(evidence_storage="encrypted"),
     )
     assert shell.commands == []
     assert "![" not in block
@@ -144,10 +151,12 @@ def test_no_image_evidence_produces_no_warning(tmp_path):
         AcceptanceEvidence(kind="test", ref="test-runs/7"),
         AcceptanceEvidence(kind="commit", ref="deadbee"),
     )
-    shell = _unpushed_shell()
-    block, warning = acceptance_block_for_finish(spec, tmp_path, shell, _config())
+    shell = _unpublished_shell()
+    block, warning = acceptance_block_for_finish(
+        spec, tmp_path, tmp_path, shell, _config(),
+    )
     assert warning is None
-    # Nothing embeddable => no reason to touch the operator's workspace repo.
+    # Nothing embeddable => no reason to touch any repo.
     assert shell.commands == []
 
 
@@ -159,6 +168,6 @@ def test_no_evidence_at_all_produces_no_warning(tmp_path):
         acceptance_criteria=[AcceptanceCriterion(id="ac1", text="does X")],
     )
     block, warning = acceptance_block_for_finish(
-        spec, tmp_path, _FakeShell(), _config(),
+        spec, tmp_path, tmp_path, _FakeShell(), _config(),
     )
     assert warning is None

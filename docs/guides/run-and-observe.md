@@ -82,19 +82,23 @@ succeeds) and refused again if one ever reaches the store another way.
 
 **What travels:** the phone fetches evidence from `mship serve` over the relay.
 The PR body embeds it when the bytes are fetchable on GitHub, which means
-`evidence_storage: committed` **and** the artifact present in a pushed workspace
-commit. You do not have to arrange that second half: under `committed` storage
-`mship finish` commits the referenced artifacts and pushes the workspace repo
-itself, because otherwise the URL in the PR body would point at a file nobody
-ever committed.
+`evidence_storage: committed` **and** the artifact published. You do not have to
+arrange that second half: under `committed` storage `mship finish` publishes the
+referenced artifacts to an **`mship-evidence` orphan branch in the repo the pull
+request targets**, and embeds a raw URL pinned to that branch's commit.
 
-That is the one place mship writes to your workspace repo, and it stays narrow:
-only files under `specs/evidence/<spec-id>/` that a criterion references, staged
-and committed by explicit pathspec, so work you have in flight — untracked,
-edited, or already staged — is never swept into it. Nothing is forced: a
-gitignored evidence directory, a detached HEAD, a diverged branch, an
-unreachable origin, or a branch origin does not already have all stop the
-publish rather than push past it.
+An orphan branch shares no history with your default branch, so the binaries
+never enter `main`'s tree and a clone of the product is unaffected. `finish`
+pushes that branch and nothing else — never `main`, never your workspace repo —
+and when a task spans several repos, each repo that gets a PR publishes to its
+own branch, so every PR is self-contained. Published artifacts accumulate on the
+branch; nothing prunes them for you.
+
+The publication is built with git plumbing, not a checkout, so your working
+tree, index, HEAD and branches are untouched: work you have in flight —
+untracked, edited, or already staged — cannot be swept into it. Nothing is
+forced: a rejected push, an unreachable origin, or a repo with no GitHub origin
+all stop the publish rather than push past it.
 
 Every failure there degrades and none of them block the PR: `finish` warns,
 names the artifact instead of embedding it, and carries on opening the PR. It

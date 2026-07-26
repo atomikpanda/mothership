@@ -1,19 +1,27 @@
-"""Getting a spec's committed evidence onto raw.githubusercontent.com — and
-proving it arrived before anyone links to it.
+"""Getting a spec's evidence artifacts onto raw.githubusercontent.com — and
+proving they arrived before anyone links to them.
 
-`mship capture --evidence` writes an artifact into the workspace repo's working
-tree; the PR body wants to embed it as a sha-pinned raw URL. Between those two
-sits a git commit and a push that, until this module owned them, nobody made:
-the ordinary sequence (capture, then finish without touching `specs/`) emitted a
-URL to an untracked path, which 404s silently. `publish_evidence` is that owner.
+`mship capture --evidence` writes an artifact into the machine-local store
+(`.mothership/evidence/<spec-id>/`, see evidence_store.py); the PR body wants to
+embed it as a sha-pinned raw URL. Between those two sits a publication step that
+nobody else makes, and that this module owns.
 
-It writes to the workspace repo, which nothing else in mship does — `mship sync`
-deliberately leaves that repo alone because it holds the operator's config and
-prose. The licence here is narrow and stays narrow: only files under
-`specs/evidence/<spec-id>/` that a criterion actually references, staged by
-explicit pathspec and committed by explicit pathspec, so a partial commit is
-made even if the operator has unrelated work staged. Never `commit -a`, never
-`add -A`, never `push --force`, never `add -f` past a .gitignore.
+WHERE it publishes is the whole design. GitHub has no public API for uploading an
+image attachment, so an embed must already live at a ref GitHub serves. The bytes
+therefore go to an **orphan branch (`mship-evidence`) in the member repo the pull
+request targets** — the repo the reviewer already has open:
+
+  * an orphan branch shares no history with the default branch, so binaries never
+    enter `main`'s tree and a clone of the product is unaffected;
+  * `raw.githubusercontent.com` serves any ref, so no special hosting is needed;
+  * every workspace shape (multi-repo, monorepo, single repo) has a member repo
+    with a remote, so this assumes no metarepo — the earlier design published to
+    the workspace repo, which in a monorepo or single repo IS the product repo,
+    and pushed its `main` as a side effect of opening a PR.
+
+That branch, and only that branch, is pushed. Nothing here ever touches `main`,
+any other branch, the index, HEAD, or the working tree — see `_publish_commit`
+for how the commit is built with plumbing instead of a checkout.
 
 Every failure degrades and none of them block: a PR that names its artifact is
 worth far more than no PR at all. So each step returns a reason rather than
@@ -22,36 +30,46 @@ raising, and the caller turns the reasons into one operator warning.
 The storage-mode half of the condition is the CALLER's: this module answers only
 the git question ("are these bytes reachable at raw.githubusercontent.com?"), and
 `evidence_store.resolve_evidence_mode` already owns the config question. Callers
-must not call into here under `local` (gitignored, so never on the remote — and
-staging it would be actively wrong) or `encrypted` (on the remote, but as
-ciphertext).
+must not call into here under `local` (nothing may leave the machine) or
+`encrypted` (the bytes are ciphertext, so an embed would render broken).
 
 The URL pins a commit sha, never a branch: a content-hashed filename at a fixed
-sha stays valid forever, whereas a branch link breaks the moment files move.
+sha stays valid forever, whereas a branch link breaks the moment the branch moves.
 """
 from __future__ import annotations
 
 import os
 import shlex
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import NamedTuple
 
-from mship.core.evidence_store import EVIDENCE_DIRNAME, SPECS_DIRNAME
+from mship.core.evidence_store import evidence_dir
 from mship.core.pr import _parse_github_slug
 
 RAW_HOST = "https://raw.githubusercontent.com"
 
-# `mship finish` must never become interactive. A workspace repo whose
-# credentials are not cached would otherwise stop mid-finish on a password
-# prompt with a PR half-opened, which is worse than a named artifact. Both
-# settings make git fail fast instead of asking, and the timeout bounds a push
-# that hangs on an unresponsive host. GIT_SSH_COMMAND is left alone when the
-# operator already set one — theirs may select a key we know nothing about.
+# One branch name for every repo and every spec. Shared, append-only, and named
+# so an operator seeing it in the branch list knows what made it.
+ORPHAN_BRANCH = "mship-evidence"
+ORPHAN_REF = f"refs/heads/{ORPHAN_BRANCH}"
+
+# Files are stored in the tree as `<spec-id>/<ref>`: `ref` is already a content
+# hash, so the spec id is the only grouping needed, and it keeps one spec's
+# publications legible in a branch shared by all of them.
+_TREE_MODE = "100644"
+
+# `mship finish` must never become interactive. A repo whose credentials are not
+# cached would otherwise stop mid-finish on a password prompt with a PR
+# half-opened, which is worse than a named artifact. Both settings make git fail
+# fast instead of asking, and the timeout bounds a transfer that hangs on an
+# unresponsive host. GIT_SSH_COMMAND is left alone when the operator already set
+# one — theirs may select a key we know nothing about.
 PUSH_TIMEOUT_SECONDS = 120
 
 
-def _push_env() -> dict[str, str]:
+def _remote_env() -> dict[str, str]:
     env = {"GIT_TERMINAL_PROMPT": "0"}
     if not os.environ.get("GIT_SSH_COMMAND"):
         env["GIT_SSH_COMMAND"] = "ssh -oBatchMode=yes"
@@ -70,9 +88,15 @@ class EvidencePublication(NamedTuple):
     warning: str | None
 
 
-def _stdout(shell, command: str, cwd: Path) -> str | None:
+def evidence_tree_path(spec_id: str, ref: str) -> str:
+    """The artifact's path inside the orphan branch's tree, in git's own
+    forward-slash form (a git path, never an OS path)."""
+    return f"{spec_id}/{ref}"
+
+
+def _stdout(shell, command: str, cwd: Path, env=None) -> str | None:
     """Trimmed stdout, or None on any non-zero exit."""
-    result = shell.run(command, cwd=cwd)
+    result = shell.run(command, cwd=cwd, env=env)
     if result.returncode != 0:
         return None
     return result.stdout.strip()
@@ -84,169 +108,154 @@ def _reason(result) -> str:
     return lines[-1] if lines else "no error output"
 
 
-def _head_is_on_origin(shell, repo: Path, sha: str) -> bool:
-    """True when `sha` is reachable from origin's copy of the current branch.
-
-    Asks the REMOTE (`git ls-remote`) for the tip rather than trusting
-    `origin/<branch>`, because a remote-tracking ref can be arbitrarily stale and
-    a stale one would let us claim "pushed" for a commit that only exists locally
-    — the one wrong answer here, since it puts a 404 image in a PR body.
-
-    The residual failure mode is the opposite, safe one: if the remote tip is a
-    commit this clone has never fetched, `merge-base` cannot judge ancestry and
-    we report not-pushed, so the artifact is named even though it may well be on
-    the remote. Same for an unreachable remote and for a detached HEAD (no branch
-    to ask about).
-    """
-    branch = _stdout(shell, "git rev-parse --abbrev-ref HEAD", repo)
-    if not branch or branch == "HEAD":
-        return False
+def _remote_tip(shell, repo: Path) -> tuple[str | None, str | None]:
+    """`(sha, reason)` for the orphan branch on origin. `(None, None)` means the
+    branch does not exist yet — the first-publication case, which is normal and
+    not a failure; `(None, reason)` means origin could not be asked."""
     ls = shell.run(
-        f"git ls-remote origin {shlex.quote('refs/heads/' + branch)}", cwd=repo
+        f"git ls-remote origin {shlex.quote(ORPHAN_REF)}",
+        cwd=repo,
+        env=_remote_env(),
     )
     if ls.returncode != 0:
-        return False
-    remote_sha = ""
+        return None, f"origin is unreachable ({_reason(ls)})"
     for line in ls.stdout.splitlines():
         parts = line.split("\t", 1)
-        if len(parts) == 2:
-            remote_sha = parts[0].strip()
-            break
-    if not remote_sha:
-        return False
-    if remote_sha == sha:
-        return True
-    ancestry = shell.run(
-        f"git merge-base --is-ancestor {shlex.quote(sha)} {shlex.quote(remote_sha)}",
-        cwd=repo,
-    )
-    return ancestry.returncode == 0
+        if len(parts) == 2 and parts[0].strip():
+            return parts[0].strip(), None
+    return None, None
 
 
-def _raw_base_and_sha(workspace_root: Path, shell) -> tuple[str, str] | None:
-    """The raw base URL and the sha it pins, or None when not fetchable.
+def _fetch_tip(shell, repo: Path, sha: str) -> str | None:
+    """Make `sha`'s objects available locally so a new commit can PARENT on it.
 
-    Resolved together in one call so the sha the URL advertises is the exact sha
-    the tracked-at check interrogates — re-deriving it would leave a window in
-    which the two could disagree.
+    Published artifacts accumulate: the new commit extends the existing orphan
+    branch rather than replacing it, which needs the old tree readable here. A
+    clone that has never fetched the branch (or a tip pushed from another
+    machine) has to fetch first. None on success, else a reason.
+
+    `--no-tags` and no refspec destination: the objects land in the object store
+    and nothing local is renamed, moved, or created.
     """
-    root = Path(workspace_root)
-    remote_url = _stdout(shell, "git remote get-url origin", root)
-    slug = _parse_github_slug(remote_url) if remote_url else None
-    if slug is None:
+    if _stdout(shell, f"git cat-file -e {shlex.quote(sha + '^{commit}')}", repo) is not None:
         return None
-    sha = _stdout(shell, "git rev-parse HEAD", root)
-    if not sha:
-        return None
-    if not _head_is_on_origin(shell, root, sha):
-        return None
-    owner, repo = slug
-    base = f"{RAW_HOST}/{owner}/{repo}/{sha}/{SPECS_DIRNAME}/{EVIDENCE_DIRNAME}"
-    return base, sha
-
-
-def workspace_raw_base(workspace_root: Path, shell) -> str | None:
-    """`https://raw.githubusercontent.com/<owner>/<repo>/<sha>/specs/evidence`,
-    or None when the workspace's evidence is not fetchable from there.
-
-    Says nothing about whether any particular artifact is IN that commit — see
-    `is_tracked_at`, and prefer `publish_evidence` which does both.
-    """
-    resolved = _raw_base_and_sha(workspace_root, shell)
-    return resolved[0] if resolved else None
-
-
-def is_tracked_at(shell, workspace_root: Path, sha: str, relpath: str) -> bool:
-    """True when `relpath` exists in `sha`'s tree.
-
-    The precondition of every embed, checked by the module that emits the URL
-    rather than assumed from the module that wrote the file. Working-tree
-    presence is deliberately not consulted: an artifact committed and later
-    deleted locally is still fetchable at the pinned sha, and one sitting
-    untracked on disk is not.
-    """
-    result = shell.run(
-        f"git cat-file -e {shlex.quote(f'{sha}:{relpath}')}", cwd=Path(workspace_root)
-    )
-    return result.returncode == 0
-
-
-def evidence_relpath(spec_id: str, ref: str) -> str:
-    """The artifact's path relative to the workspace repo root, in git's own
-    forward-slash form (a git pathspec, never an OS path)."""
-    return f"{SPECS_DIRNAME}/{EVIDENCE_DIRNAME}/{spec_id}/{ref}"
+    try:
+        fetched = shell.run(
+            f"git fetch --no-tags --quiet origin {shlex.quote(ORPHAN_REF)}",
+            cwd=repo,
+            env=_remote_env(),
+            timeout=PUSH_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return f"fetching {ORPHAN_BRANCH} timed out after {PUSH_TIMEOUT_SECONDS}s"
+    if fetched.returncode != 0:
+        return f"could not fetch the existing {ORPHAN_BRANCH} branch ({_reason(fetched)})"
+    if _stdout(shell, f"git cat-file -e {shlex.quote(sha + '^{commit}')}", repo) is None:
+        return f"the fetched {ORPHAN_BRANCH} tip {sha[:12]} is still not readable here"
+    return None
 
 
 def _commit_message(spec_id: str, count: int) -> str:
     plural = "artifact" if count == 1 else "artifacts"
     return (
         f"chore(evidence): publish {count} {plural} for {spec_id}\n\n"
-        f"Written by `mship capture --evidence` and committed by `mship finish` "
+        f"Captured by `mship capture --evidence` and published by `mship finish` "
         f"so the PR body can embed them from raw.githubusercontent.com.\n\n"
-        f"Scoped to {SPECS_DIRNAME}/{EVIDENCE_DIRNAME}/{spec_id}/ — no other "
-        f"path in this repo is staged or committed."
+        f"This is the `{ORPHAN_BRANCH}` orphan branch: it shares no history with "
+        f"the default branch and holds nothing but evidence artifacts under "
+        f"<spec-id>/."
     )
 
 
-def _commit_artifacts(shell, root: Path, spec_id: str, relpaths: list[str]) -> str | None:
-    """Stage and commit exactly `relpaths`. None on success (including nothing
-    to do), else a reason.
+def _publish_commit(
+    shell, repo: Path, spec_id: str, sources: dict[str, Path], parent: str | None
+) -> tuple[str | None, str | None]:
+    """Build a commit carrying `sources` on top of `parent`. `(sha, reason)`.
 
-    Both halves are pathspec-scoped, and the commit is deliberately a PARTIAL
-    commit (`git commit -- <paths>`): it takes those paths' working-tree content
-    and ignores the rest of the index, so unrelated work the operator had already
-    staged is neither committed nor unstaged by us. No `-f`, so an evidence
-    directory the operator has gitignored refuses to stage rather than being
-    forced past their wishes.
+    Built entirely with plumbing, because the bytes being published do NOT live
+    in this repo's working tree — they sit in the workspace's local evidence
+    store, outside the repo entirely. The obvious alternative (check the orphan
+    branch out, copy files in, commit) is unavailable: `mship finish` runs while
+    an agent is working in this very worktree, and checking out another branch
+    would rewrite the files under it.
+
+    So: `hash-object -w` writes each artifact into the object store from an
+    arbitrary path on disk; a THROWAWAY index (`GIT_INDEX_FILE`) is seeded from
+    the parent commit's tree and added to, so earlier publications survive and
+    the repo's real index is never opened; `write-tree` + `commit-tree` produce
+    the commit. Nothing here writes a ref, moves HEAD, or touches a file in the
+    working tree — the only lasting effect is a few unreferenced objects if the
+    push later fails, which git gc collects.
+
+    `--no-filters` on hash-object: these are binaries, and a repo whose
+    `.gitattributes` declares CRLF or a clean filter must not be allowed to
+    rewrite them into a blob that no longer matches the ref's content hash.
     """
-    pathspec = " ".join(shlex.quote(p) for p in relpaths)
-    add = shell.run(f"git add -- {pathspec}", cwd=root)
-    if add.returncode != 0:
-        return f"could not stage the artifacts ({_reason(add)})"
-    # Names rather than `--quiet`, so the commit message can say how many
-    # artifacts it really carries. Only the COUNT is taken from git's output —
-    # the commit still uses the pathspec we built ourselves, so no path ever
-    # makes a round trip through git's quoting rules.
-    staged = shell.run(f"git diff --cached --name-only -- {pathspec}", cwd=root)
-    if staged.returncode != 0:
-        return f"could not inspect the staged artifacts ({_reason(staged)})"
-    changed = len([line for line in staged.stdout.splitlines() if line.strip()])
-    if not changed:
-        return None
-    message = _commit_message(spec_id, changed)
+    with tempfile.TemporaryDirectory(prefix="mship-evidence-") as tmp:
+        env = {"GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        if parent is not None:
+            seeded = shell.run(f"git read-tree {shlex.quote(parent)}", cwd=repo, env=env)
+            if seeded.returncode != 0:
+                return None, f"could not read the existing {ORPHAN_BRANCH} tree ({_reason(seeded)})"
+        for ref, src in sorted(sources.items()):
+            blob = _stdout(
+                shell,
+                f"git hash-object -w --no-filters {shlex.quote(str(src))}",
+                repo,
+            )
+            if not blob:
+                return None, f"could not store {ref} as a git object"
+            added = shell.run(
+                f"git update-index --add --cacheinfo "
+                f"{_TREE_MODE},{blob},{shlex.quote(evidence_tree_path(spec_id, ref))}",
+                cwd=repo,
+                env=env,
+            )
+            if added.returncode != 0:
+                return None, f"could not add {ref} to the evidence tree ({_reason(added)})"
+        tree = _stdout(shell, "git write-tree", repo, env=env)
+    if not tree:
+        return None, "could not write the evidence tree"
+
+    # Identical content re-published (content-addressed refs make that the norm
+    # on a re-run of finish) produces the parent's own tree. Reuse the parent
+    # commit rather than stacking an empty one on the operator's branch.
+    if parent is not None and _stdout(
+        shell, f"git rev-parse {shlex.quote(parent + '^{tree}')}", repo
+    ) == tree:
+        return parent, None
+
+    message = _commit_message(spec_id, len(sources))
+    parent_arg = f"-p {shlex.quote(parent)} " if parent else ""
     commit = shell.run(
-        f"git commit -m {shlex.quote(message)} -- {pathspec}", cwd=root
+        f"git commit-tree {tree} {parent_arg}-m {shlex.quote(message)}", cwd=repo
     )
     if commit.returncode != 0:
-        return f"could not commit the artifacts ({_reason(commit)})"
-    return None
+        return None, f"could not create the evidence commit ({_reason(commit)})"
+    sha = commit.stdout.strip()
+    if not sha:
+        return None, "could not create the evidence commit"
+    return sha, None
 
 
-def _push_current_branch(shell, root: Path) -> str | None:
-    """Push the workspace repo's current branch to origin. None on success, else
-    a reason.
+def _push_commit(shell, repo: Path, sha: str) -> str | None:
+    """Push `sha` to the orphan branch. None on success, else a reason.
 
-    Only ever updates a branch origin already has: creating one would publish a
-    workspace the operator has chosen not to push, which is far beyond the
-    licence to commit an artifact. Never `--force`, so a diverged branch is
-    reported rather than overwritten, and never `-u`, so the operator's tracking
-    config is left as they set it.
+    Pushes the COMMIT OBJECT (`<sha>:refs/heads/<branch>`) rather than a local
+    branch, so publication creates no local ref at all: nothing appears in the
+    operator's `git branch`, and a stale local copy can never diverge from the
+    remote and start rejecting pushes.
+
+    Never `--force`: the new commit descends from the tip we read, so an ordinary
+    fast-forward is all it needs, and a concurrent publication from elsewhere is
+    reported rather than overwritten. `refs/heads/<branch>` is spelled in full so
+    the refspec can only ever name this one branch.
     """
-    branch = _stdout(shell, "git rev-parse --abbrev-ref HEAD", root)
-    if not branch:
-        return "the workspace repo has no resolvable HEAD"
-    if branch == "HEAD":
-        return "the workspace repo is on a detached HEAD"
-    ls = shell.run(f"git ls-remote --heads origin {shlex.quote(branch)}", cwd=root)
-    if ls.returncode != 0:
-        return f"origin is unreachable ({_reason(ls)})"
-    if not ls.stdout.strip():
-        return f"origin has no {branch!r} branch to update"
     try:
         result = shell.run(
-            f"git push origin {shlex.quote(branch)}",
-            cwd=root,
-            env=_push_env(),
+            f"git push origin {shlex.quote(sha)}:{shlex.quote(ORPHAN_REF)}",
+            cwd=repo,
+            env=_remote_env(),
             timeout=PUSH_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
@@ -256,95 +265,127 @@ def _push_current_branch(shell, root: Path) -> str | None:
     return None
 
 
-def publish_evidence(
-    workspace_root: Path, spec_id: str, refs: list[str], shell
-) -> EvidencePublication:
-    """Commit and push `spec_id`'s referenced artifacts, then report which of
-    them are provably fetchable.
+def _is_on_origin(shell, repo: Path, sha: str) -> bool:
+    """True when `sha` is reachable from origin's copy of the orphan branch.
 
-    Call only under `committed` evidence storage (see the module docstring).
-    `refs` are bare stored refs; anything not proven present in the pinned
-    commit is left out of `verified` so the caller names it instead.
+    Asks the REMOTE rather than trusting a local ref, because claiming "pushed"
+    for a commit that only exists locally is the one wrong answer here: it puts a
+    404 image in a PR body. The residual failure mode is the opposite, safe one —
+    if the remote tip is a commit this clone has never fetched, `merge-base`
+    cannot judge ancestry and we report not-pushed, so the artifact is named even
+    though it may well be on the remote.
     """
-    root = Path(workspace_root)
-    relpaths = {ref: evidence_relpath(spec_id, ref) for ref in refs}
-
-    # The licence to write to the operator's workspace repo is "so the PR body
-    # can embed this" — so when no embed is possible at all, write nothing. A
-    # non-GitHub origin has no raw host to serve from, and committing anyway
-    # would be a change to their repo that buys them nothing.
-    remote_url = _stdout(shell, "git remote get-url origin", root)
-    if (_parse_github_slug(remote_url) if remote_url else None) is None:
-        return EvidencePublication(
-            None,
-            frozenset(),
-            _warning(["the workspace repo has no GitHub origin"], spec_id, root),
-        )
-
-    # A commit on a detached HEAD would be worse than useless: it is unreachable
-    # from any branch, and the next `git checkout` would DELETE the artifact from
-    # the working tree (tracked in the commit being left, absent from the one
-    # being entered). Nothing is fetchable from a detached HEAD anyway, so refuse
-    # before writing rather than after.
-    branch = _stdout(shell, "git rev-parse --abbrev-ref HEAD", root)
-    if not branch or branch == "HEAD":
-        return EvidencePublication(
-            None,
-            frozenset(),
-            _warning(
-                ["the workspace repo is on a detached HEAD, so nothing was "
-                 "committed or pushed"],
-                spec_id,
-                root,
-            ),
-        )
-
-    # Nothing to publish for a ref whose bytes are gone from the working tree;
-    # it may still be tracked at HEAD from an earlier finish, which the
-    # verification pass below settles.
-    to_commit = sorted(p for p in relpaths.values() if (root / p).exists())
-    notes: list[str] = []
-    if to_commit:
-        note = _commit_artifacts(shell, root, spec_id, to_commit)
-        if note is not None:
-            notes.append(note)
-
-    resolved = _raw_base_and_sha(root, shell)
-    if resolved is None:
-        # Not on the remote yet (or at all). Try to put it there, then ASK the
-        # remote again rather than assuming a zero exit means what we hoped.
-        note = _push_current_branch(shell, root)
-        if note is not None:
-            notes.append(note)
-        resolved = _raw_base_and_sha(root, shell)
-
-    if resolved is None:
-        notes.append(
-            "the workspace evidence is not reachable at raw.githubusercontent.com"
-        )
-        return EvidencePublication(None, frozenset(), _warning(notes, spec_id, root))
-
-    base_url, sha = resolved
-    verified = frozenset(
-        ref for ref, p in relpaths.items() if is_tracked_at(shell, root, sha, p)
+    tip, _ = _remote_tip(shell, repo)
+    if tip is None:
+        return False
+    if tip == sha:
+        return True
+    ancestry = shell.run(
+        f"git merge-base --is-ancestor {shlex.quote(sha)} {shlex.quote(tip)}", cwd=repo
     )
-    missing = len(relpaths) - len(verified)
+    return ancestry.returncode == 0
+
+
+def is_present_at(shell, repo: Path, sha: str, tree_path: str) -> bool:
+    """True when `tree_path` exists in `sha`'s tree.
+
+    The precondition of every embed, checked by the module that emits the URL
+    rather than assumed from the module that wrote the file.
+    """
+    result = shell.run(
+        f"git cat-file -e {shlex.quote(f'{sha}:{tree_path}')}", cwd=Path(repo)
+    )
+    return result.returncode == 0
+
+
+def publish_evidence(
+    workspace_root: Path, repo_path: Path, spec_id: str, refs: list[str], shell
+) -> EvidencePublication:
+    """Publish `spec_id`'s referenced artifacts to `repo_path`'s orphan evidence
+    branch, then report which of them are provably fetchable.
+
+    Call once per repo receiving a pull request (see ac7: every PR is
+    self-contained, so a reviewer of one repo's PR needs no access to a sibling),
+    and only under `published` evidence storage (see the module docstring).
+    `refs` are bare stored refs; anything not proven present in the pinned commit
+    is left out of `verified` so the caller names it instead.
+    """
+    repo = Path(repo_path)
+    store = evidence_dir(workspace_root, spec_id)
+    tree_paths = {ref: evidence_tree_path(spec_id, ref) for ref in refs}
+    notes: list[str] = []
+
+    # No raw host to serve from means no embed is possible at all, so do no git
+    # work: the licence to write anything here is "so the PR body can embed it".
+    remote_url = _stdout(shell, "git remote get-url origin", repo)
+    slug = _parse_github_slug(remote_url) if remote_url else None
+    if slug is None:
+        return EvidencePublication(
+            None, frozenset(), _warning(["the repo has no GitHub origin"], spec_id, repo)
+        )
+    owner, name = slug
+
+    tip, tip_note = _remote_tip(shell, repo)
+    if tip_note is not None:
+        return EvidencePublication(
+            None, frozenset(), _warning([tip_note], spec_id, repo)
+        )
+    parent = tip
+    if parent is not None:
+        note = _fetch_tip(shell, repo, parent)
+        if note is not None:
+            # Without the parent's objects we could only build a commit that
+            # REPLACES the branch, discarding earlier publications, and the push
+            # would be rejected as a non-fast-forward anyway.
+            return EvidencePublication(
+                None, frozenset(), _warning([note], spec_id, repo)
+            )
+
+    # Bytes gone from the local store are not republishable, but may already be
+    # on the branch from an earlier finish — the verification pass settles that.
+    sources = {ref: store / ref for ref in refs if (store / ref).is_file()}
+
+    pinned = parent
+    if sources:
+        pinned, note = _publish_commit(shell, repo, spec_id, sources, parent)
+        if note is not None:
+            notes.append(note)
+            pinned = parent
+
+    if pinned is None:
+        notes.append(f"nothing could be published to {ORPHAN_BRANCH}")
+        return EvidencePublication(None, frozenset(), _warning(notes, spec_id, repo))
+
+    if pinned != tip:
+        note = _push_commit(shell, repo, pinned)
+        if note is not None:
+            notes.append(note)
+    if not _is_on_origin(shell, repo, pinned):
+        notes.append(
+            f"the evidence commit is not on origin's {ORPHAN_BRANCH} branch"
+        )
+        return EvidencePublication(None, frozenset(), _warning(notes, spec_id, repo))
+
+    base_url = f"{RAW_HOST}/{owner}/{name}/{pinned}"
+    verified = frozenset(
+        ref for ref, p in tree_paths.items() if is_present_at(shell, repo, pinned, p)
+    )
+    missing = len(tree_paths) - len(verified)
     if missing:
         notes.append(
-            f"{missing} of {len(relpaths)} image artifacts are not tracked at "
-            f"workspace commit {sha[:12]}"
+            f"{missing} of {len(tree_paths)} image artifacts are not present at "
+            f"evidence commit {pinned[:12]}"
         )
     return EvidencePublication(
-        base_url, verified, _warning(notes, spec_id, root) if notes else None
+        base_url, verified, _warning(notes, spec_id, repo) if notes else None
     )
 
 
-def _warning(notes: list[str], spec_id: str, root: Path) -> str:
+def _warning(notes: list[str], spec_id: str, repo: Path) -> str:
     """One operator-facing message: what went wrong, what it costs, what to do."""
     return (
         f"Image evidence for {spec_id} is not embeddable ({'; '.join(notes)}), so "
         f"the PR body will name the artifacts instead of emitting images that "
-        f"404. Opening the PR is unaffected. Once "
-        f"`{SPECS_DIRNAME}/{EVIDENCE_DIRNAME}/{spec_id}/` is committed and pushed "
-        f"in {root}, re-run finish to embed them."
+        f"404. Opening the PR is unaffected. Once the `{ORPHAN_BRANCH}` branch in "
+        f"{repo} can be pushed to origin, re-run finish to embed them."
     )
