@@ -11,6 +11,8 @@ primary defence is that the data model cannot say "elsewhere".
 """
 from __future__ import annotations
 
+import hashlib
+import shutil
 from pathlib import Path
 from typing import Literal
 
@@ -42,3 +44,63 @@ def resolve_evidence_mode(config) -> EvidenceMode:
             f"{', '.join(m for m in _EXPOSURE if _EXPOSURE[m] <= _EXPOSURE[spec_mode])}."
         )
     return declared
+
+
+SPECS_DIRNAME = "specs"
+EVIDENCE_DIRNAME = "evidence"
+ENC_SUFFIX = ".enc"
+
+# Extensions we are willing to store and serve. Anything else is refused rather
+# than guessed at — a served blob's content-type is derived from this.
+CONTENT_TYPES: dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".xml": "application/xml",
+    ".json": "application/json",
+    ".html": "text/html",
+}
+IMAGE_EXTS: frozenset[str] = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+
+_HASH_CHARS = 12
+
+
+class EvidenceStoreError(Exception):
+    """An artifact could not be stored (unsupported extension, unreadable)."""
+
+
+def evidence_dir(workspace_root: Path, spec_id: str) -> Path:
+    """The one directory a spec's artifact evidence may live in."""
+    return Path(workspace_root) / SPECS_DIRNAME / EVIDENCE_DIRNAME / spec_id
+
+
+def _digest(src: Path) -> str:
+    h = hashlib.sha256()
+    with open(src, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()[:_HASH_CHARS]
+
+
+def store_artifact(
+    workspace_root: Path, spec_id: str, src: Path, *, mode: EvidenceMode
+) -> str:
+    """Copy `src` into the spec's evidence directory under a content-hashed
+    name. Returns the BARE FILENAME to persist as the evidence ref.
+
+    `mode` is accepted here and honoured in full by a later change (gitignore for
+    `local`, ciphertext for `encrypted`); this path is the plaintext copy.
+    """
+    src = Path(src)
+    ext = src.suffix.lower()
+    if ext not in CONTENT_TYPES:
+        raise EvidenceStoreError(
+            f"unsupported evidence extension {ext!r}; expected one of "
+            f"{', '.join(sorted(CONTENT_TYPES))}"
+        )
+    ref = f"{_digest(src)}{ext}"
+    dest_dir = evidence_dir(workspace_root, spec_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src, dest_dir / ref)
+    return ref
