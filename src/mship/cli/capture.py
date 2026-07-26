@@ -41,6 +41,59 @@ class _RemoteFlagCommand(TyperCommand):
         return super().parse_args(ctx, args)
 
 
+def _attach_evidence(
+    *, artifacts, evidence: str, container, output, worktree: Path, platform: str | None
+) -> None:
+    """Promote captured artifacts into acceptance-criterion evidence.
+
+    Fail-open: the capture already succeeded, so a storage or spec failure warns
+    and returns. It must never turn a good capture into a bad exit code — the
+    same posture as `spawn`'s --closes issue linking.
+    """
+    from mship.core.evidence_attach import parse_evidence_target, provenance_note
+    from mship.core.evidence_store import resolve_evidence_mode, store_artifact
+    from mship.core.spec import AcceptanceEvidence
+    from mship.core.spec_store import SpecStore
+
+    try:
+        target = parse_evidence_target(evidence)
+        workspace_root = Path(container.config_path()).parent
+        mode = resolve_evidence_mode(container.config())
+        store = SpecStore(workspace_root / "specs")
+        spec = store.find_by_id(target.spec_id)
+        if spec is None:
+            output.warning(f"could not attach evidence: no spec {target.spec_id!r}")
+            return
+        crit = next((c for c in spec.acceptance_criteria if c.id == target.criterion_id), None)
+        if crit is None:
+            output.warning(
+                f"could not attach evidence: {target.spec_id!r} has no criterion "
+                f"{target.criterion_id!r}"
+            )
+            return
+        note_where = provenance_note(worktree, container.shell())
+        for a in artifacts:
+            ref = store_artifact(workspace_root, target.spec_id, a.path, mode=mode)
+            crit.evidence.append(
+                AcceptanceEvidence(
+                    kind="artifact",
+                    ref=ref,
+                    note=f"{a.kind} · {platform or 'default'} · {note_where}",
+                )
+            )
+        store.save(spec)
+        # human_mode only: `success` writes to STDOUT, which in JSON mode already
+        # carries the capture payload — a confirmation line there would corrupt
+        # it for `| jq`. Warnings above are safe (they go to stderr in JSON mode).
+        if output.human_mode:
+            output.success(
+                f"attached {len(artifacts)} artifact(s) to "
+                f"{target.spec_id}:{target.criterion_id}"
+            )
+    except Exception as e:
+        output.warning(f"could not attach evidence: {e}")
+
+
 def register(app: typer.Typer, get_container):
     @app.command(cls=_RemoteFlagCommand, rich_help_panel="Runtime")
     def capture(
@@ -49,6 +102,13 @@ def register(app: typer.Typer, get_container):
         platform: Optional[str] = typer.Option(None, "--platform", help="Platform to capture (required when the repo exposes more than one)."),
         kind: str = typer.Option("all", "--kind", help="Artifact kind: image | layout | all."),
         out: Optional[Path] = typer.Option(None, "--out", help="Output directory (default: .mothership/captures/<task-or-_adhoc>/<ts>-<platform>/)."),
+        evidence: Optional[str] = typer.Option(
+            None, "--evidence", metavar="SPEC:AC",
+            help="Attach the captured artifact(s) to an acceptance criterion as "
+                 "kind=artifact evidence, e.g. --evidence my-spec:ac3. Without "
+                 "this flag the capture stays an ephemeral develop-verify-iterate "
+                 "artifact and nothing is stored or attached.",
+        ),
         remote: Optional[str] = typer.Option(
             None, "--remote",
             help="Execute the capture on a mapped run-host role instead of "
@@ -203,6 +263,11 @@ def register(app: typer.Typer, get_container):
                         "resolved_task": t.slug if t is not None else None,
                         "resolution_source": source.value if source is not None else None,
                     })
+                if evidence:
+                    _attach_evidence(
+                        artifacts=landed, evidence=evidence, container=container,
+                        output=output, worktree=worktree, platform=resolved_platform,
+                    )
             raise typer.Exit(code=code)
 
         try:
@@ -230,3 +295,9 @@ def register(app: typer.Typer, get_container):
                 "resolved_task": t.slug if t is not None else None,
                 "resolution_source": source.value if source is not None else None,
             })
+
+        if evidence:
+            _attach_evidence(
+                artifacts=artifacts, evidence=evidence, container=container,
+                output=output, worktree=worktree, platform=resolved_platform,
+            )
