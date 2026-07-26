@@ -16,10 +16,30 @@ test_finish_evidence_publish.py.
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+from mship.core.evidence_store import store_artifact
 from mship.core.pr import acceptance_block_for_finish
 from mship.core.spec import AcceptanceCriterion, AcceptanceEvidence, Spec
 
+# The published-mode cases want an EMPTY store (see `_published_shell`), so they
+# use a literal of the shape `published` storage produces. Shape drift there
+# cannot go unnoticed: the embed assertions fail the moment a literal stops
+# looking like a stored ref. The local/encrypted cases go through the store
+# itself — see `_real_ref`.
 IMAGE_REF = "a1b2c3d4e5f6.png"
+
+
+def _real_ref(tmp_path, mode) -> str:
+    """A ref produced by the store itself, in `mode`.
+
+    The refs differ in SHAPE by mode (`encrypted` appends `.enc`), and a
+    hand-written literal cannot track that: this test file once asserted the
+    encrypted warning using a plaintext `.png` ref, which no encrypted store ever
+    produces, and passed while the warning did not fire at all. Going through
+    `store_artifact` makes that drift impossible.
+    """
+    src = tmp_path / "shot.png"
+    src.write_bytes(b"\x89PNG\r\n\x1a\n" + mode.encode())
+    return store_artifact(tmp_path, "my-spec", src, mode=mode)
 
 
 def _spec_with(*evidence: AcceptanceEvidence) -> Spec:
@@ -125,26 +145,54 @@ def test_pushed_but_not_tracked_at_the_pinned_sha_is_named_not_embedded(tmp_path
 
 
 def test_local_mode_never_calls_the_shell_and_warns(tmp_path):
-    spec = _spec_with(AcceptanceEvidence(kind="artifact", ref=IMAGE_REF))
+    ref = _real_ref(tmp_path, "local")
+    spec = _spec_with(AcceptanceEvidence(kind="artifact", ref=ref))
     shell = _published_shell()  # would happily answer "published" if ever asked
     block, warning = acceptance_block_for_finish(
         spec, tmp_path, tmp_path, shell, _config(evidence_storage="local"),
     )
     assert shell.commands == []
     assert "![" not in block
-    assert IMAGE_REF in block
+    assert ref in block
     assert warning is not None
+    assert "'local'" in warning
 
 
 def test_encrypted_mode_names_the_artifact_and_warns(tmp_path):
-    spec = _spec_with(AcceptanceEvidence(kind="artifact", ref=IMAGE_REF))
+    """ac19: the ref an encrypted store really produces is `<hash>.png.enc`, so
+    the scan deciding whether this spec HAS image evidence has to see through the
+    suffix — otherwise the whole warning path is skipped for exactly the mode
+    that most needs it."""
+    ref = _real_ref(tmp_path, "encrypted")
+    assert ref.endswith(".png.enc")  # the shape under test, not an assumption
+    spec = _spec_with(AcceptanceEvidence(kind="artifact", ref=ref))
     shell = _published_shell()
     block, warning = acceptance_block_for_finish(
         spec, tmp_path, tmp_path, shell, _config(evidence_storage="encrypted"),
     )
     assert shell.commands == []
     assert "![" not in block
+    assert ref in block
     assert warning is not None
+    assert "'encrypted'" in warning
+
+
+def test_ciphertext_left_over_from_an_earlier_mode_is_named_not_published(tmp_path):
+    """A ref records how its bytes were written; switching `evidence_storage` to
+    `published` later does not decrypt them. Such an artifact must still be named
+    and warned about, and must NOT be pushed to the evidence branch — ciphertext
+    on a public branch is bytes no renderer can ever use."""
+    ref = _real_ref(tmp_path, "encrypted")
+    spec = _spec_with(AcceptanceEvidence(kind="artifact", ref=ref))
+    shell = _published_shell()
+    block, warning = acceptance_block_for_finish(
+        spec, tmp_path, tmp_path, shell, _config(),  # mode: published
+    )
+    assert shell.commands == []
+    assert "![" not in block
+    assert ref in block
+    assert warning is not None
+    assert "encrypted" in warning
 
 
 def test_no_image_evidence_produces_no_warning(tmp_path):

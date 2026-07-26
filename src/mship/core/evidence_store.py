@@ -118,7 +118,7 @@ _HASH_CHARS = 12
 def stored_size_cap(ref: str) -> int:
     """The largest on-disk size this ref may have. Encrypted refs get the
     ciphertext allowance; everything else is the artifact cap itself."""
-    if ref.endswith(ENC_SUFFIX):
+    if is_encrypted_ref(ref):
         return MAX_EVIDENCE_BYTES * _CIPHERTEXT_SLACK
     return MAX_EVIDENCE_BYTES
 
@@ -193,6 +193,13 @@ def store_artifact(
 _REF_RE = re.compile(r"[0-9a-f]{%d}\.[a-z0-9]{2,5}(\.enc)?" % _HASH_CHARS)
 
 
+def _logical_ref(ref: str) -> str:
+    """The ref with any encryption suffix stripped. `<hash>.png.enc` names a PNG
+    whose stored bytes happen to be ciphertext, so anything asking about the
+    ARTIFACT asks it of this, never of the on-disk filename."""
+    return ref[: -len(ENC_SUFFIX)] if is_encrypted_ref(ref) else ref
+
+
 def is_stored_ref(ref: str) -> bool:
     """True when `ref` has the shape this store produces (a content hash plus a
     known extension), as opposed to a hand-written path from before
@@ -202,6 +209,27 @@ def is_stored_ref(ref: str) -> bool:
     itself: ref shape stays one module's business.
     """
     return isinstance(ref, str) and _REF_RE.fullmatch(ref) is not None
+
+
+def is_image_ref(ref: str) -> bool:
+    """True when `ref` names an image this store produced, encrypted or not.
+
+    Answers "is this the KIND of artifact a PR body would ever embed?" — a
+    different question from "can these bytes be embedded here and now"
+    (core/pr.py::_is_embeddable_image), which additionally needs a base URL and
+    verification. An encrypted image is still an image; it just cannot be
+    published in readable form, which is precisely what finish must warn about.
+    Only this module can tell, because only it knows the `.enc` suffix hides the
+    logical extension.
+    """
+    return is_stored_ref(ref) and Path(_logical_ref(ref)).suffix.lower() in IMAGE_EXTS
+
+
+def is_encrypted_ref(ref: str) -> bool:
+    """True when the stored bytes behind `ref` are ciphertext. Independent of the
+    CURRENT evidence mode: a ref records how those bytes were written, which a
+    later change of `evidence_storage` does not rewrite."""
+    return ref.endswith(ENC_SUFFIX)
 
 
 class BadEvidenceRef(Exception):
@@ -221,8 +249,7 @@ def resolve_ref(workspace_root: Path, spec_id: str, ref: str) -> Path:
     # A full-length hash with an extension we do not serve (`deadbeefcafe.exe`)
     # is refused here, not by the regex. An encrypted ref carries a trailing
     # `.enc`, so the extension we care about is the one beneath that.
-    logical = ref[: -len(ENC_SUFFIX)] if ref.endswith(ENC_SUFFIX) else ref
-    if Path(logical).suffix.lower() not in CONTENT_TYPES:
+    if Path(_logical_ref(ref)).suffix.lower() not in CONTENT_TYPES:
         raise BadEvidenceRef(f"unsupported evidence extension in {ref!r}")
 
     store_root = Path(os.path.realpath(evidence_root(workspace_root)))
