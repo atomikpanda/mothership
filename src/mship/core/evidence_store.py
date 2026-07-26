@@ -12,6 +12,8 @@ primary defence is that the data model cannot say "elsewhere".
 from __future__ import annotations
 
 import hashlib
+import os
+import re
 import shutil
 from pathlib import Path
 from typing import Literal
@@ -104,3 +106,53 @@ def store_artifact(
     dest_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(src, dest_dir / ref)
     return ref
+
+
+# A ref is exactly a content hash plus a known extension. `fullmatch` and not a
+# `$`-anchored `match`, because `$` would also accept a trailing newline.
+# Nothing that fails this ever reaches the filesystem.
+_REF_RE = re.compile(r"[0-9a-f]{%d}\.[a-z0-9]{2,5}" % _HASH_CHARS)
+
+
+class BadEvidenceRef(Exception):
+    """A ref was malformed, escaped its spec's evidence directory, or is absent."""
+
+
+def resolve_ref(workspace_root: Path, spec_id: str, ref: str) -> Path:
+    """The on-disk path for a stored ref. Raises BadEvidenceRef for anything
+    malformed, absent, or resolving outside the spec's evidence directory.
+
+    Both arguments after `workspace_root` arrive from an HTTP path in serve's
+    blob route, so both are validated here: `ref` must be a bare hash filename,
+    and `spec_id` must name a direct child of the workspace's evidence store.
+    """
+    if not isinstance(ref, str) or not _REF_RE.fullmatch(ref):
+        raise BadEvidenceRef(f"malformed evidence ref {ref!r}")
+    # The regex admits one dot only, so the suffix is unambiguous. A full-length
+    # hash with an extension we do not serve (`deadbeefcafe.exe`) is refused
+    # here, not by the regex.
+    if Path(ref).suffix not in CONTENT_TYPES:
+        raise BadEvidenceRef(f"unsupported evidence extension in {ref!r}")
+
+    store_root = Path(os.path.realpath(
+        Path(workspace_root) / SPECS_DIRNAME / EVIDENCE_DIRNAME
+    ))
+    root = Path(os.path.realpath(evidence_dir(workspace_root, spec_id)))
+    # realpath normalises `..` away, so a spec id like `../other-spec` lands
+    # somewhere whose parent is not the store — one spec can never read another's.
+    if root.parent != store_root:
+        raise BadEvidenceRef(f"malformed spec id {spec_id!r}")
+
+    candidate = root / ref
+    # `root` is fully resolved and `ref` is a bare filename, so `candidate` is a
+    # direct child of this spec's store; the only way it could still name
+    # something else is a symlink at the final component, which is exactly what
+    # realpath differing from the path we built detects. A link pointing back
+    # INSIDE the store is refused too: a ref attests the content hash of a
+    # regular file, so a link there is an integrity violation, and honouring one
+    # would make containment depend on where it points at read time.
+    if Path(os.path.realpath(candidate)) != candidate:
+        raise BadEvidenceRef(f"evidence ref {ref!r} is a link, not stored content")
+    if not candidate.is_file():
+        raise BadEvidenceRef(f"no evidence at {ref!r}")
+    return candidate
