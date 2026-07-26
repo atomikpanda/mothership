@@ -153,6 +153,31 @@ def _run_remote(
         output.error(str(e))
         raise typer.Exit(code=1)
 
+    # The run host materializes the task's branch FROM ORIGIN, and nothing pushes
+    # during development (`git push -u` happens at `mship finish`). Without this
+    # check a remote run either fails with a confusing remote-side materialize
+    # error, or — worse — silently executes the last pushed revision and reports it
+    # as a result for code the operator is currently editing.
+    from mship.core import remote_preflight
+
+    task_obj = container.state_manager().load().tasks.get(task_slug)
+    if task_obj is not None:
+        pre = remote_preflight.inspect(task_obj, container.shell())
+        if not pre.ok:
+            output.error(remote_preflight.blocked_message(pre))
+            raise typer.Exit(code=1)
+        for state in pre.untracked:
+            output.warning(
+                f"{state.repo}: untracked files will not exist on the run host "
+                f"(they are not part of the push)"
+            )
+        pushed, push_error = remote_preflight.push(pre, container.shell())
+        if push_error is not None:
+            output.error(push_error)
+            raise typer.Exit(code=1)
+        for repo_name in pushed:
+            output.breadcrumb(f"pushed {repo_name} so the run host sees your commits")
+
     try:
         return exec_remote(verb=verb, conn=conn, task=task_slug, repos=target_repos)
     except RemoteExecError as e:

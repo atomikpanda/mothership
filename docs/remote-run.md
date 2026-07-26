@@ -100,6 +100,23 @@ These are deliberately out of scope for the first cut. Know them before you lean
 - **Remote task stdout is streamed to your terminal verbatim.** There is no ANSI / control-sequence sanitization — the remote host is trusted. Don't point `--remote` at a host you don't control.
 - **A `run_host:` set under a `capture:` block in `mothership.yaml` is silently ignored.** `CaptureConfig` has no `run_host` field; only the **repo-level** `run_host` (documented above under "Declaring roles") is honored. Put `run_host:` directly on the repo, not inside its `capture:` block.
 
+## Before it dispatches
+
+`--remote` runs the code that is on **origin**, because the run host materializes
+the task's branch by fetching it. So before dispatching, mship checks every repo
+the task touches:
+
+- **Clean, but origin is missing the branch or behind it** → it pushes for you.
+  Nothing is lost, and it is unambiguously what you meant.
+- **Tracked changes present** → it refuses, and names the commands that unblock
+  you. Committing your work in progress is not a decision mship makes for you, and
+  running the previous revision while you are mid-edit is worse than stopping.
+- **Untracked files only** → it warns. They cannot change what the push carries,
+  but they will not exist on the run host either.
+
+Every affected repo is checked, not just the one you are standing in: a task has a
+branch per repo and the run host materializes each separately.
+
 ## Troubleshooting
 
 Start with `mship net status`. It reports every connectivity edge on this machine
