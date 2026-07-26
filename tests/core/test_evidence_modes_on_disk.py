@@ -11,8 +11,8 @@ def _png(tmp_path):
     return p
 
 
-def test_committed_mode_writes_plaintext(tmp_path):
-    ref = store_artifact(tmp_path, "s", _png(tmp_path), mode="committed")
+def test_published_mode_writes_plaintext(tmp_path):
+    ref = store_artifact(tmp_path, "s", _png(tmp_path), mode="published")
     assert (evidence_dir(tmp_path, "s") / ref).read_bytes().endswith(b"marker")
 
 

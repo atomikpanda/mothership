@@ -568,7 +568,7 @@ def acceptance_block_for_finish(
     ))
 
     base_url, verified, publish_warning = None, None, None
-    if mode == "committed" and image_refs:
+    if mode == "published" and image_refs:
         from mship.core.evidence_url import publish_evidence
 
         base_url, verified, publish_warning = publish_evidence(
@@ -581,7 +581,7 @@ def acceptance_block_for_finish(
 
     if not image_refs:
         return block, None
-    if mode == "committed":
+    if mode == "published":
         return block, publish_warning
     return block, (
         f"Image evidence exists but evidence_storage={mode!r} keeps it off "

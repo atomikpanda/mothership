@@ -64,7 +64,7 @@ def _seed_encrypted_spec(tmp_path: Path) -> None:
     )
 
 
-def _seed_evidence(tmp_path: Path, mode: str = "committed") -> str:
+def _seed_evidence(tmp_path: Path, mode: str = "published") -> str:
     """Store an artifact the way the CLI does, so the ref under test is the real
     content-hashed name rather than one this test invented."""
     from mship.core.evidence_store import store_artifact
@@ -188,7 +188,7 @@ def test_layout_html_is_never_served_as_html(tmp_path: Path):
     from mship.core.evidence_store import store_artifact
     src = tmp_path / "layout.html"
     src.write_text("<script>alert(1)</script>")
-    ref = store_artifact(tmp_path, "dq", src, mode="committed")
+    ref = store_artifact(tmp_path, "dq", src, mode="published")
 
     r = _client(tmp_path).get(f"/specs/dq/evidence/{ref}/blob", headers=AUTH)
     assert r.status_code == 200, r.text

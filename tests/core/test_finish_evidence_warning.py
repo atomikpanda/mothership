@@ -3,7 +3,7 @@ provably present at a published commit, and warns the operator (once, actionably
 when it is not.
 
 Because `publish_evidence` answers only the git question and does not know the
-storage mode, the wrapper must gate on `committed` mode before ever calling it
+storage mode, the wrapper must gate on `published` mode before ever calling it
 (see evidence_url.py's module docstring): under `local` nothing may leave the
 machine and under `encrypted` the bytes are ciphertext, so publishing either
 would be actively wrong. The gate is asserted here as "the shell was never
@@ -37,6 +37,8 @@ def _spec_with(*evidence: AcceptanceEvidence) -> Spec:
 
 
 def _config(evidence_storage=None, spec_storage="committed"):
+    """`spec_storage: committed` with evidence unset — the default workspace,
+    which inherits as evidence mode `published`."""
     return SimpleNamespace(spec_storage=spec_storage, evidence_storage=evidence_storage)
 
 

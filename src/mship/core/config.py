@@ -344,10 +344,13 @@ class WorkspaceConfig(BaseModel):
     # Storage mode for acceptance-criterion artifact evidence. `None` inherits
     # `spec_storage` — the safe default, so evidence is governed exactly like the
     # spec it backs unless an operator deliberately diverges (prose is bytes,
-    # screenshots are megabytes). Resolved by
+    # screenshots are megabytes). The vocabulary differs by one word: a spec is
+    # `committed` into the workspace repo's tree, whereas evidence is `published`
+    # onto an orphan branch in the repo whose PR embeds it, so inheritance maps
+    # `committed` to `published`. Resolved by
     # core/evidence_store.py::resolve_evidence_mode, which also enforces that
     # evidence is never MORE exposed than its spec.
-    evidence_storage: Literal["committed", "local", "encrypted"] | None = None
+    evidence_storage: Literal["published", "local", "encrypted"] | None = None
     # If set and the effective spawn scope exceeds N repos AND no --repos was
     # passed, require confirmation (TTY) or --yes (non-TTY). See #74.
     spawn_confirm_threshold: int | None = None

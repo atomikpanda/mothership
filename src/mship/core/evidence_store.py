@@ -20,12 +20,27 @@ from typing import Literal
 
 from mship.util.git import GitRunner
 
-EvidenceMode = Literal["committed", "local", "encrypted"]
+# `published` and not `committed`: evidence is never committed where the spec is.
+# The spec's own bytes are committed to the workspace repo's tracked tree, while
+# an artifact is only ever PUBLISHED — copied onto an orphan branch in the repo
+# whose PR embeds it (core/evidence_url.py). Same exposure, different mechanism,
+# so it gets its own word.
+EvidenceMode = Literal["published", "local", "encrypted"]
 
 # Ordered least-exposed to most-exposed. `local` never leaves the machine;
-# `encrypted` leaves but is unreadable without the key; `committed` leaves in the
+# `encrypted` leaves but is unreadable without the key; `published` leaves in the
 # clear. Evidence may never rank above the spec it backs.
-_EXPOSURE: dict[str, int] = {"local": 0, "encrypted": 1, "committed": 2}
+_EXPOSURE: dict[str, int] = {"local": 0, "encrypted": 1, "published": 2}
+
+# `spec_storage` keeps its own vocabulary — it is not this feature's field to
+# rename — so inheritance maps its values onto the evidence ones. Only the
+# most-exposed name differs; the mapping is explicit so the two vocabularies can
+# never drift into a silent KeyError or a wrong exposure comparison.
+_INHERITED: dict[str, EvidenceMode] = {
+    "committed": "published",
+    "local": "local",
+    "encrypted": "encrypted",
+}
 
 
 class EvidenceModeError(Exception):
@@ -34,18 +49,20 @@ class EvidenceModeError(Exception):
 
 def resolve_evidence_mode(config) -> EvidenceMode:
     """The effective evidence mode. `evidence_storage` unset inherits
-    `spec_storage`; set, it must not be more exposed than the spec's mode."""
-    spec_mode: EvidenceMode = getattr(config, "spec_storage", "committed")
+    `spec_storage` (mapping `committed` to `published`); set, it must not be more
+    exposed than the spec's mode."""
+    spec_mode: str = getattr(config, "spec_storage", "committed")
+    inherited = _INHERITED[spec_mode]
     declared = getattr(config, "evidence_storage", None)
     if declared is None:
-        return spec_mode
-    if _EXPOSURE[declared] > _EXPOSURE[spec_mode]:
+        return inherited
+    if _EXPOSURE[declared] > _EXPOSURE[inherited]:
         raise EvidenceModeError(
             f"evidence_storage={declared!r} is more exposed than "
             f"spec_storage={spec_mode!r}. A screenshot discloses what the spec "
             f"prose was protecting, so evidence may never be less protected "
             f"than its spec. Use one of: "
-            f"{', '.join(m for m in _EXPOSURE if _EXPOSURE[m] <= _EXPOSURE[spec_mode])}."
+            f"{', '.join(m for m in _EXPOSURE if _EXPOSURE[m] <= _EXPOSURE[inherited])}."
         )
     return declared
 

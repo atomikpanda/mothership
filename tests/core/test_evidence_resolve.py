@@ -12,7 +12,7 @@ from mship.core.evidence_store import (
 
 def _stored(tmp_path):
     src = tmp_path / "screen.png"; src.write_bytes(b"bytes")
-    return store_artifact(tmp_path, "s", src, mode="committed")
+    return store_artifact(tmp_path, "s", src, mode="published")
 
 
 def test_resolves_a_stored_ref(tmp_path):

@@ -72,6 +72,8 @@ def _spec(*refs: str) -> Spec:
 
 
 def _config(evidence_storage=None, spec_storage="committed"):
+    """`spec_storage: committed` with evidence unset — the default workspace,
+    which inherits as evidence mode `published`."""
     return SimpleNamespace(spec_storage=spec_storage, evidence_storage=evidence_storage)
 
 

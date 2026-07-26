@@ -86,8 +86,8 @@ succeeds) and refused again if one ever reaches the store another way.
 
 **What travels:** the phone fetches evidence from `mship serve` over the relay.
 The PR body embeds it when the bytes are fetchable on GitHub, which means
-`evidence_storage: committed` **and** the artifact published. You do not have to
-arrange that second half: under `committed` storage `mship finish` publishes the
+`evidence_storage: published` **and** the bytes actually on a ref GitHub serves.
+You do not have to arrange that second half: under `published` storage `mship finish` publishes the
 referenced artifacts to an **`mship-evidence` orphan branch in the repo the pull
 request targets**, and embeds a raw URL pinned to that branch's commit.
 
