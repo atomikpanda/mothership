@@ -1542,8 +1542,17 @@ def register(app: typer.Typer, get_container):
 
         # Render the acceptance-criteria PR-body section once (reuses bound_spec
         # from the gate above). Empty string when there's no bound spec or no ACs.
-        from mship.core.pr import build_acceptance_block
-        acceptance_block = build_acceptance_block(bound_spec) if bound_spec is not None else ""
+        # Embeds image evidence when the workspace's evidence commit is fetchable
+        # from GitHub; otherwise names it and warns here, BEFORE any PR is opened,
+        # so the operator can abort and push rather than fix it up after the fact.
+        from mship.core.pr import acceptance_block_for_finish
+        acceptance_block = ""
+        if bound_spec is not None:
+            acceptance_block, evidence_warning = acceptance_block_for_finish(
+                bound_spec, workspace_root, shell, config,
+            )
+            if evidence_warning is not None:
+                output.warning(evidence_warning)
 
         pr_list: list[dict] = []
         repushed_repos: list[str] = []  # repos where --force re-pushed commits

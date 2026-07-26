@@ -4,7 +4,7 @@ import shlex
 from pathlib import Path
 from typing import NamedTuple
 
-from mship.core.evidence_store import IMAGE_EXTS, _REF_RE
+from mship.core.evidence_store import IMAGE_EXTS, _REF_RE, resolve_evidence_mode
 from mship.core.gh_auth import git_cred_args, create_pr_via_httpx, get_default_branch_via_httpx
 from mship.util.shell import ShellRunner
 
@@ -507,3 +507,60 @@ def build_acceptance_block(spec, evidence_base_url: str | None = None) -> str:
             lines.append("")
             lines.append(f"  ![{c.id}]({evidence_base_url}/{spec.id}/{e.ref})")
     return "\n".join(lines)
+
+
+def acceptance_block_for_finish(spec, workspace_root, shell, config) -> tuple[str, str | None]:
+    """The acceptance block plus an optional operator warning.
+
+    Split from build_acceptance_block so the pure renderer stays testable without
+    a git repo or a config. Embedding requires `committed` storage AND the evidence
+    commit actually pushed: under `local` the evidence directory is gitignored, so
+    a raw URL would 404, and under `encrypted` the bytes are ciphertext.
+
+    The mode gate is checked FIRST and short-circuits before any shell call:
+    `workspace_raw_base` only answers the git question ("is this sha on origin?")
+    and would happily return a URL for gitignored bytes under `local` if asked, so
+    it must never be asked under `local`/`encrypted` (see evidence_url.py). The
+    "has image evidence" scan is what decides whether to warn — an operator with
+    no screenshots needs no message, so it is checked before doing any git work too.
+
+    `resolve_evidence_mode` can raise `EvidenceModeError` (evidence_storage more
+    exposed than spec_storage). By the time `finish` runs, config load has already
+    enforced that invariant, so a raise here means the config changed underneath
+    mid-session — a real inconsistency, not a normal path. Left to propagate
+    uncaught rather than downgraded to a warning: swallowing it would let finish
+    continue past a broken config silently, the opposite of surfacing the problem.
+    """
+    mode = resolve_evidence_mode(config)
+    acs = getattr(spec, "acceptance_criteria", None) or []
+    has_image_evidence = any(
+        _is_embeddable_image(e, "placeholder")
+        for c in acs
+        for e in (c.evidence or [])
+    )
+
+    base_url = None
+    if mode == "committed" and has_image_evidence:
+        from mship.core.evidence_url import workspace_raw_base
+
+        base_url = workspace_raw_base(workspace_root, shell)
+
+    block = build_acceptance_block(spec, evidence_base_url=base_url)
+
+    if not has_image_evidence or base_url is not None:
+        return block, None
+
+    if mode == "committed":
+        warning = (
+            "Image evidence exists but the workspace evidence commit has not "
+            "been pushed, so it will be named rather than embedded in the PR "
+            "body. Commit and push `specs/` (including `specs/evidence/`), "
+            "then re-run finish to embed it."
+        )
+    else:
+        warning = (
+            f"Image evidence exists but evidence_storage={mode!r} keeps it off "
+            "the public workspace repo, so it will be named rather than "
+            "embedded in the PR body."
+        )
+    return block, warning
