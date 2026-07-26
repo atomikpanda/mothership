@@ -311,20 +311,25 @@ class PhaseManager:
             return []
         if spec is None:
             return []
-        msg = unevidenced_warning(spec, self._capture_repos())
+        msg = unevidenced_warning(spec, self._capture_repos(task.affected_repos))
         return [msg] if msg else []
 
-    def _capture_repos(self) -> list[str]:
-        """Names of configured repos that actually define a capture target
+    def _capture_repos(self, affected: list[str]) -> list[str]:
+        """Names of `affected` repos that actually define a capture target
         (`RepoConfig.capture` is set). `cli/capture.py` resolves the underlying
         task name via `tasks.get("capture", "capture")`, which silently falls
         back to a "capture" task even for repos that never declared one — so
         that dict can't tell us whether the command would work. The `capture:`
         block is the one place a repo opts in, so its presence is the actual
-        signal."""
+        signal. Scoped to `affected` (the task's `affected_repos`) — naming an
+        unrelated repo's capture target would look actionable but be wrong."""
         if self._config is None:
             return []
-        return [name for name, repo in self._config.repos.items() if repo.capture is not None]
+        affected_set = set(affected)
+        return [
+            name for name, repo in self._config.repos.items()
+            if repo.capture is not None and name in affected_set
+        ]
 
     def _gate_run(self, task) -> list[str]:
         return []
