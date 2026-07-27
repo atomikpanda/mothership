@@ -48,10 +48,24 @@ def _safe(name: str) -> str:
 
 
 def key_file(workspace_root: Path, task: str, repo: str) -> Path:
-    """Where this host records the key it last set `task`/`repo` up at."""
+    """Where this host records the key it last set `task`/`repo` up at.
+
+    The readable part is sanitized and therefore LOSSY — `_safe` maps every
+    unsafe character to `-`, so `api.v2` and `api-v2` both read `api-v2`, and
+    `_` survives intact, so a bare `__` join lets the boundary move (`a__b`/`c`
+    vs `a`/`b__c`). Either collision would be a correctness bug, not just a
+    spurious re-run: two repos sharing a file whose digests happen to agree —
+    which they do whenever both declare the same patterns and neither has the
+    files yet — let the second read the first's record, match, and skip the
+    setup that installs ITS dependencies.
+
+    So identity comes from a digest of the exact pair, and the sanitized names
+    are kept only so an operator can tell at a glance whose state a file holds.
+    """
+    ident = hashlib.sha256(f"{task}\0{repo}".encode("utf-8")).hexdigest()[:16]
     return (
         Path(workspace_root) / ".mothership" / SETUP_STATE_DIRNAME
-        / f"{_safe(task)}__{_safe(repo)}.key"
+        / f"{_safe(task)}__{_safe(repo)}__{ident}.key"
     )
 
 

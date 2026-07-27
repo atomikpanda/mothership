@@ -145,6 +145,30 @@ def test_the_key_file_path_is_per_task_and_per_repo(tmp_path):
     assert key_file(tmp_path, "t1", "api") != key_file(tmp_path, "t1", "web")
 
 
+def test_names_that_sanitize_alike_still_get_their_own_file(tmp_path):
+    """`_safe` maps every unsafe character to `-`, so `api.v2` and `api-v2` both
+    read `api-v2`. Sharing a file is not merely a spurious re-run: two repos that
+    declare the same patterns hash the SAME key while those patterns match no
+    files yet, so the second would read the first's record, match, and skip the
+    setup that installs its dependencies."""
+    assert key_file(tmp_path, "t1", "api.v2") != key_file(tmp_path, "t1", "api-v2")
+    assert key_file(tmp_path, "a.b", "api") != key_file(tmp_path, "a-b", "api")
+
+
+def test_the_separator_cannot_be_forged_from_a_name(tmp_path):
+    """`_` survives sanitizing, so a bare `__` join lets the boundary move: task
+    `a__b` + repo `c` and task `a` + repo `b__c` would name one file."""
+    assert key_file(tmp_path, "a__b", "c") != key_file(tmp_path, "a", "b__c")
+
+
+def test_the_pair_cannot_be_confused_across_its_boundary(tmp_path):
+    """Both halves of the name have to agree to collide, so the case that bites
+    is one where the readable prefix AND the digest move together: `a` + `__b`
+    and `a__` + `b` sanitize to one prefix and concatenate to one string. Only
+    separating the pair inside the digest keeps them apart."""
+    assert key_file(tmp_path, "a", "__b") != key_file(tmp_path, "a__", "b")
+
+
 def test_a_task_name_cannot_escape_the_state_directory(tmp_path):
     """The task name arrives over the wire, where `core/serve.py` permits `/`
     and `.`, so `../..` would otherwise be a legal path component here."""
