@@ -1173,6 +1173,14 @@ def test_setup_runs_the_first_time_a_worktree_is_materialized(tmp_path):
     _stream_run(deps)
 
     assert [c["command"] for c in fake.streaming_calls] == ["task setup", "task start"]
+    # WHERE setup ran, not just that it ran: "from the delivered source" is the
+    # whole of ac15. Run in the repo's own checkout instead of the materialized
+    # worktree, setup would derive dependencies for the run host's stale tree
+    # while the operator's exact source executes against them — the
+    # exact-source-with-stale-deps trap this feature exists to close. Every
+    # other setup test here asserts only the command, which cannot see that.
+    worktree = tmp_path / ".worktrees" / "t1" / "api"
+    assert [c["cwd"] for c in fake.streaming_calls] == [worktree, worktree]
 
 
 def test_setup_is_skipped_on_the_next_run(tmp_path):
