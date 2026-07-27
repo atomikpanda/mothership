@@ -764,3 +764,106 @@ def test_a_real_push_onto_a_branch_is_rejected(tmp_path):
     assert result.returncode != 0
     assert "403" in result.stderr        # the endpoint's refusal, not a git error
     assert "refs/heads/attacker" not in _refnames(host_repo)
+
+
+# --- the whole path ----------------------------------------------------------
+
+from mship.core import remote_exec
+from mship.core.run_host import RunHostConnection
+from mship.core.run_transfer import push_run_ref, synthesize_commit
+from mship.util.shell import ShellRunner
+
+
+def test_the_run_host_materializes_the_operators_uncommitted_bytes(tmp_path, monkeypatch):
+    """ac1 end to end: synthesize -> real HTTP push -> materialize -> read the
+    file. The operator edits files and never commits them; the run host's
+    worktree ends up holding exactly those bytes.
+
+    Every layer below this one is tested against a fixture of the layer beneath
+    it. This one has no fixtures: real git on both sides, a real socket in the
+    middle, and the ASSERTION IS THE FILE'S CONTENT ON THE RUN HOST — not that
+    the commands were issued. That is the only shape that catches a seam, and
+    seams are what this feature has produced: a push that exited 0 against the
+    wrong repository looked identical to every layer test until the ref was
+    read back server-side.
+
+    Unlike the `_git` helper, the code under test runs through `ShellRunner`,
+    which layers its env over `os.environ` — so it inherits whoever's
+    `~/.gitconfig` the suite runs under. A global `core.excludesFile` alone
+    would change which of the files below travel. Point git's global and system
+    config at /dev/null for the duration, exactly as `_GIT_ENV` already does for
+    the helper, so both halves of the test see the same git.
+    """
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+
+    host_repo = _repo(tmp_path / "api")
+    # `tracked.env` is TRACKED AND GITIGNORED — the one shape that distinguishes
+    # `synthesize_commit`'s `read-tree` seed from a bare `git add -A`. Without
+    # the seed the scratch index starts empty, the file reads as untracked and
+    # ignored, and `add -A` drops it: every other assertion here still passes.
+    # `-f` because the ignore rule lands in the same commit that first tracks it.
+    (host_repo / "tracked.env").write_text("committed\n")
+    (host_repo / ".gitignore").write_text("tracked.env\n")
+    _git("add", "-A", "-f", cwd=host_repo)
+    _git("commit", "-qm", "a tracked file the ignore rules also match", cwd=host_repo)
+
+    operator = _clone(host_repo, tmp_path / "operator")
+    _git("checkout", "-q", "-b", "feat/t1", cwd=operator)
+
+    # Uncommitted work of every shape that matters.
+    (operator / "a.txt").write_text("what I am editing right now\n")
+    (operator / "scratch.py").write_text("print('debug')\n")
+    (operator / "tracked.env").write_text("edited, never committed\n")
+    (operator / ".gitignore").write_text("tracked.env\nsecret.env\nbuilt.log\n")
+    (operator / "secret.env").write_text("TOKEN=hunter2\n")
+    (operator / "built.log").write_text("derived\n")
+
+    shell = ShellRunner()
+    base = _git("rev-parse", "HEAD", cwd=operator)
+    sha = synthesize_commit(shell, operator, base_sha=base)
+
+    with live_serve(_app(tmp_path, auth_token="tok-abc")) as base_url:
+        push_run_ref(
+            shell, operator,
+            conn=RunHostConnection(url=base_url, token="tok-abc"),
+            repo="api", task="t1", sha=sha,
+        )
+
+    worktree = tmp_path / "host-wt" / "api"
+    remote_exec.materialize_worktree(
+        shell, host_repo, worktree, "feat/t1",
+        repo_name="api", run_ref="refs/mship/run/t1/api",
+    )
+
+    # ac1: the tracked edit arrived, uncommitted.
+    assert (worktree / "a.txt").read_text() == "what I am editing right now\n"
+    # ac11: untracked travels, gitignored does not.
+    assert (worktree / "scratch.py").read_text() == "print('debug')\n"
+    assert not (worktree / "secret.env").exists()
+    assert not (worktree / "built.log").exists()
+    # ac1 again, at the shape that needs the `read-tree` seed: already tracked,
+    # and matched by an ignore rule.
+    assert (worktree / "tracked.env").read_text() == "edited, never committed\n"
+    # It is the synthesized commit that is checked out, and HEAD is detached:
+    # throwaway state is not dressed up as a branch on the run host.
+    assert _git("rev-parse", "HEAD", cwd=worktree) == sha
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=worktree) == "HEAD"
+
+    # ac2: the operator's own repo is untouched — still dirty, still on the
+    # branch, HEAD unmoved, nothing staged, no new branch.
+    assert _git("status", "--porcelain", cwd=operator) != ""
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=operator) == "feat/t1"
+    assert _git("rev-parse", "HEAD", cwd=operator) == base
+    assert _git("diff", "--cached", "--name-only", cwd=operator) == ""
+
+    # ac3: the branch never reached the host as a branch — only the scratch ref
+    # did. (`host_repo` is the operator's origin here, which makes this the
+    # strongest available form of "origin saw nothing but the scratch ref".)
+    refs = _refnames(host_repo)
+    assert "refs/heads/feat/t1" not in refs
+    assert "refs/mship/run/t1/api" in refs
+    # And the host's own checkout is where it was: materialization happens in a
+    # separate worktree, never on the branch the host has out.
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=host_repo) == "main"
+    assert _git("status", "--porcelain", cwd=host_repo) == ""
