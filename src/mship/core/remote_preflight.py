@@ -1,10 +1,9 @@
 """Make sure a remote run executes the code you are actually looking at.
 
-`--remote` works by having the run host materialize the task's branch **from
-origin** (see `remote_exec.materialize_worktree`, which ends in `git reset --hard
-origin/<branch>`). Nothing on the caller side ever checked that origin matched the
-local worktree, and nothing pushes during development — `git push -u` happens at
-`mship finish`. So two things could happen silently:
+`--remote` used to run whatever was on origin, because the run host materialized
+the task's branch by fetching it. Nothing on the caller side checked that origin
+matched the local worktree, and nothing pushes during development — `git push -u`
+happens at `mship finish`. So two things could happen silently:
 
   * the branch was never pushed at all, and the remote failed with a materialize
     error that pointed at the remote rather than at the real cause; or
@@ -12,14 +11,34 @@ local worktree, and nothing pushes during development — `git push -u` happens 
     The output looked like a real result for code the operator was not editing.
 
 The second is the dangerous one, and it is what this module exists to prevent. It
-is deliberately conservative, and every verdict is reached by ASKING ORIGIN rather
-than by reading a local remote-tracking ref: `@{u}` is a cached copy that another
-machine's push makes stale, and it goes stale in the unsafe direction — it reports
-"up to date" for a branch origin has since moved ahead on. One
-`git ls-remote origin refs/heads/<branch>` per dispatched repo settles it (the same
-pattern, for the same reason, as `evidence_url._remote_tip`).
+sorts the task's repos into three outcomes:
 
-Against origin's real tip:
+  * **REFUSE** — the repo cannot be sent, or sending it would be a lie about what
+    the operator meant. See the reason constants below.
+  * **TRANSFER** (`Preflight.dirty`) — the working tree differs from HEAD, in any
+    way at all. `cli/exec.py` synthesizes a commit from that tree
+    (`core/run_transfer.py`) and pushes it STRAIGHT TO THE RUN HOST, onto a ref
+    under the throwaway namespace `core/run_ref.py` owns. Origin is never in this
+    path: routing uncommitted work through it would publish untracked scratch
+    files to a third party, and deleting the ref afterwards would not retract the
+    objects. Nothing local is mutated — see `synthesize_commit`.
+  * **PUSH** (`Preflight.to_push`) — the tree is clean but origin is missing the
+    branch or is behind it. Push the branch to origin exactly as before. There is
+    nothing extra to send, so nothing extra happens.
+
+Real history goes to origin; throwaway state goes host to host.
+
+ANY `git status --porcelain` output makes a repo dirty, untracked entries
+included. That is not laxity: untracked files are part of what the operator sees,
+they now travel only between the operator's own two machines, and a rule that
+excluded them would mean they never travel at all.
+
+For a CLEAN repo, and only for a clean repo, the verdict is reached by ASKING
+ORIGIN rather than by reading a local remote-tracking ref: `@{u}` is a cached copy
+that another machine's push makes stale, and it goes stale in the unsafe direction
+— it reports "up to date" for a branch origin has since moved ahead on. One
+`git ls-remote origin refs/heads/<branch>` settles it (the same pattern, for the
+same reason, as `evidence_url._remote_tip`). Against origin's real tip:
 
   * the branch is **missing from origin, or origin's tip is an ancestor of HEAD** →
     **push**. That is unambiguously what the operator meant, and nothing is lost.
@@ -27,11 +46,21 @@ Against origin's real tip:
     execute a commit the operator does not have, and no push can fix it: a
     fast-forward from behind is impossible, so attempting one would only produce a
     confusing git error in place of the real remedy (sync, or reset deliberately).
-  * a repo with **tracked** modifications → **refuse**, because inventing a commit
-    out of someone's work in progress is not a decision this tool should make
-    silently;
-  * untracked files only → **warn**. They cannot change what the push contains, but
-    they also will not exist on the run host, which is worth saying out loud.
+
+A DIRTY repo never asks origin at all. The run host materializes the scratch ref
+this machine pushed, with no fetch (`remote_exec.materialize_worktree(run_ref=…)`),
+so origin's tip cannot change what executes — and a network round trip that cannot
+change the outcome is one not worth taking. BEHIND_ORIGIN and ORIGIN_UNREACHABLE
+therefore keep their full force on the path where they describe a real hazard, and
+are simply unreachable on the path where they would not.
+
+A repo mid-merge, mid-rebase, mid-cherry-pick or with unmerged paths is refused
+outright (IN_PROGRESS). The working tree is what gets sent, and in that state it
+holds conflict markers and half-applied changes; shipping them produces a remote
+failure with no visible relationship to the edit the operator was making. That
+check runs BEFORE the branch check on purpose: `git rebase` detaches HEAD, so
+checking the branch first would refuse a rebase as WRONG_BRANCH and print a
+`git checkout` that abandons it.
 
 Every one of those verdicts is reached by reading the worktree's **HEAD**, and
 `push` publishes what they cleared — so HEAD has to *be* the task's branch for the
@@ -94,7 +123,7 @@ _NO_PROMPT = {"GIT_TERMINAL_PROMPT": "0"}
 
 # Why a repo must not be dispatched. Distinct rather than one "dirty" bucket
 # because each has a different remedy, and the message has to name the right one.
-DIRTY = "uncommitted changes"
+IN_PROGRESS = "merge or rebase in progress"
 UNREADABLE = "unreadable git state"
 BEHIND_ORIGIN = "unpulled commits on origin"
 MISSING_WORKTREE = "missing worktree"
@@ -102,9 +131,9 @@ ORIGIN_UNREACHABLE = "unverified origin"
 WRONG_BRANCH = "worktree is not on the task's branch"
 
 _WHY = {
-    DIRTY:
-        "the run host materializes the task's branch from origin, so it would "
-        "run the last PUSHED revision, not what you are editing.",
+    IN_PROGRESS:
+        "the working tree is what gets sent, and mid-operation it holds conflict "
+        "markers and half-applied changes rather than code you meant to run.",
     WRONG_BRANCH:
         "every check here reads the worktree's HEAD, but the run host "
         "materializes the TASK's branch — so what was verified and what would "
@@ -129,10 +158,10 @@ _WHY = {
 # other line is printed as written. That keeps the remedy for a five-repo task from
 # collapsing into a command the operator has to rewrite five times by hand.
 _FIX = {
-    DIRTY: [
-        "Commit and push first:",
-        '  mship commit "<what changed>"        # commits across every task repo',
-        '  git -C "{path}" push -u origin HEAD',
+    IN_PROGRESS: [
+        "Finish it or abandon it, then re-run:",
+        '  git -C "{path}" status                 # what git is in the middle of',
+        '  git -C "{path}" rebase --abort         # ...or merge/cherry-pick/revert --abort',
     ],
     WRONG_BRANCH: [
         "Check the task's branch back out, then re-run:",
@@ -167,10 +196,15 @@ class RepoState:
     branch: str
     blocked_reason: str | None   # one of the reason constants, else None
     detail: str | None           # git's own words, for this repo
-    untracked_only: bool
+    dirty: bool                  # working tree differs from HEAD -> TRANSFER
     needs_push: bool
     push_reason: str | None      # "not on origin" | "ahead of origin" | None
     head_sha: str | None = None  # HEAD as resolved during inspect; see `push`
+    # The TOP-LEVEL git repo this worktree belongs to. Equal to `repo` except
+    # for a `git_root` child, whose tree IS its parent's — so both name the
+    # parent and dedupe to one transfer (spec ac7). Resolved in `inspect` from
+    # the workspace config; `repo` itself when no config was supplied.
+    git_repo: str | None = None
 
 
 @dataclass(frozen=True)
@@ -179,7 +213,7 @@ class Preflight:
     states: list[RepoState]
     blocked: list[RepoState]
     to_push: list[RepoState]
-    untracked: list[RepoState]
+    dirty: list[RepoState]       # one entry per GIT repo, not per repo name
 
     @property
     def ok(self) -> bool:
@@ -191,6 +225,32 @@ def _tail(result) -> str:
     text = (result.stderr or "").strip() or (result.stdout or "")
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     return lines[-1] if lines else f"exit {result.returncode}"
+
+
+# `git status --porcelain` spells an unmerged path with these two-letter codes
+# (verified: a real conflict reports `UU`). They are the only porcelain codes
+# that mean "git has not finished", which is why they are singled out rather
+# than lumped in with the dirty check below.
+_UNMERGED_CODES = ("DD", "AU", "UD", "UA", "DU", "AA", "UU")
+
+# Marker files git leaves in the per-worktree git dir while an operation is
+# suspended. A `--no-commit` merge leaves MERGE_HEAD with NOTHING unmerged, so
+# the porcelain alone cannot see it — hence the extra look.
+_OPERATIONS = (
+    ("rebase-merge", "a rebase is in progress"),
+    ("rebase-apply", "a rebase or `git am` is in progress"),
+    ("MERGE_HEAD", "a merge is in progress"),
+    ("CHERRY_PICK_HEAD", "a cherry-pick is in progress"),
+    ("REVERT_HEAD", "a revert is in progress"),
+)
+
+
+def _operation_in_progress(git_dir: Path) -> str | None:
+    """Which suspended git operation this worktree is in, if any."""
+    for marker, description in _OPERATIONS:
+        if (git_dir / marker).exists():
+            return description
+    return None
 
 
 def _origin_tip(shell, path: Path, branch: str) -> tuple[str | None, str | None]:
@@ -216,15 +276,18 @@ def _origin_tip(shell, path: Path, branch: str) -> tuple[str | None, str | None]
     return None, None
 
 
-def _inspect_repo(shell, repo: str, path: Path, branch: str) -> RepoState:
+def _inspect_repo(
+    shell, repo: str, path: Path, branch: str, *, git_repo: str | None = None,
+) -> RepoState:
     """One repo's verdict. Every path out of here is either a decision or a
     refusal — there is no "could not tell, carry on"."""
-    def state(*, blocked=None, detail=None, untracked_only=False,
+    def state(*, blocked=None, detail=None, dirty=False,
               needs_push=False, push_reason=None, head_sha=None) -> RepoState:
         return RepoState(
             repo=repo, path=path, branch=branch, blocked_reason=blocked,
-            detail=detail, untracked_only=untracked_only,
+            detail=detail, dirty=dirty,
             needs_push=needs_push, push_reason=push_reason, head_sha=head_sha,
+            git_repo=git_repo or repo,
         )
 
     if not path.exists():
@@ -232,14 +295,40 @@ def _inspect_repo(shell, repo: str, path: Path, branch: str) -> RepoState:
 
     # `git status --porcelain` lists untracked entries as `??` and never lists
     # gitignored files, so an ignored `.venv` does not make a repo look dirty.
-    # Untracked files are reported separately because they cannot alter what a
-    # push carries — refusing on them would block a run over a stray scratch file.
+    # (It DOES list a tracked-and-gitignored file that changed, as ` M` —
+    # verified — which is right: that file is part of what gets sent.)
     status = shell.run("git status --porcelain", cwd=path)
     if status.returncode != 0:
         # Empty stdout from a FAILED status is indistinguishable from a clean
         # tree, so the return code is the only thing separating "nothing to
         # report" from "could not look".
         return state(blocked=UNREADABLE, detail=_tail(status))
+
+    lines = [ln for ln in (status.stdout or "").splitlines() if ln.strip()]
+
+    # An interrupted operation is refused BEFORE the branch is checked, because
+    # `git rebase` detaches HEAD: checking the branch first would refuse a
+    # rebase as WRONG_BRANCH and hand the operator a `git checkout` that
+    # abandons it. Still AFTER `git status`, so a path that is not a git
+    # worktree at all stays UNREADABLE rather than becoming "finish your merge".
+    unmerged = [ln[3:].strip() for ln in lines if ln[:2] in _UNMERGED_CODES]
+    git_dir_result = shell.run("git rev-parse --git-dir", cwd=path)
+    git_dir_raw = (git_dir_result.stdout or "").strip()
+    if git_dir_result.returncode != 0 or not git_dir_raw:
+        # Same rule as the status guard above: a repo whose state could not be
+        # established is refused, never assumed clean — and never shipped.
+        return state(blocked=UNREADABLE, detail=_tail(git_dir_result))
+    git_dir = Path(git_dir_raw)
+    if not git_dir.is_absolute():
+        # `git rev-parse --git-dir` answers a bare `.git` at a repo root and an
+        # absolute path in a linked worktree (verified) — resolve either.
+        git_dir = path / git_dir
+    operation = _operation_in_progress(git_dir)
+    if operation is not None or unmerged:
+        detail = operation or "unmerged paths"
+        if unmerged:
+            detail = f"{detail}; unresolved: {', '.join(sorted(unmerged)[:5])}"
+        return state(blocked=IN_PROGRESS, detail=detail)
 
     # WHAT is being inspected, before WHAT STATE it is in: every verdict below
     # reads HEAD and `push` publishes what they cleared, so a worktree that is
@@ -291,10 +380,13 @@ def _inspect_repo(shell, repo: str, path: Path, branch: str) -> RepoState:
             detail=f"HEAD is {checked_out or 'detached'}, not {branch}",
         )
 
-    lines = [ln for ln in (status.stdout or "").splitlines() if ln.strip()]
-    if any(not ln.startswith("??") for ln in lines):
-        return state(blocked=DIRTY)
-    untracked_only = bool(lines)
+    # ANY porcelain output at all — tracked edits, untracked files, or both —
+    # means the working tree is not HEAD, and the working tree is what gets
+    # sent. Returning HERE is also what keeps origin out of the dirty path: the
+    # `ls-remote` below is never reached, because origin's tip cannot change
+    # what the run host executes once it is materializing a scratch ref.
+    if lines:
+        return state(dirty=True, head_sha=head_sha)
 
     # `head_sha`, resolved above, is carried on every state this repo can
     # still reach rather than re-read at push time. `push` names this exact
@@ -305,13 +397,12 @@ def _inspect_repo(shell, repo: str, path: Path, branch: str) -> RepoState:
 
     tip, error = _origin_tip(shell, path, branch)
     if error is not None:
-        return state(blocked=ORIGIN_UNREACHABLE, detail=error,
-                     untracked_only=untracked_only, head_sha=head_sha)
+        return state(blocked=ORIGIN_UNREACHABLE, detail=error, head_sha=head_sha)
     if tip is None:
-        return state(untracked_only=untracked_only, head_sha=head_sha,
-                     needs_push=True, push_reason="not on origin")
+        return state(head_sha=head_sha, needs_push=True,
+                     push_reason="not on origin")
     if head_sha == tip:
-        return state(untracked_only=untracked_only, head_sha=head_sha)
+        return state(head_sha=head_sha)
 
     # A tip that is an ancestor of HEAD is one a push fast-forwards past. A tip
     # that is not — because origin moved on, or because the branches diverged, or
@@ -322,15 +413,15 @@ def _inspect_repo(shell, repo: str, path: Path, branch: str) -> RepoState:
         cwd=path,
     )
     if ancestor.returncode == 0:
-        return state(untracked_only=untracked_only, head_sha=head_sha,
-                     needs_push=True, push_reason="ahead of origin")
+        return state(head_sha=head_sha, needs_push=True,
+                     push_reason="ahead of origin")
     return state(
-        blocked=BEHIND_ORIGIN, untracked_only=untracked_only, head_sha=head_sha,
+        blocked=BEHIND_ORIGIN, head_sha=head_sha,
         detail=f"origin/{branch} is at {tip[:12]}, which is not in your history",
     )
 
 
-def inspect(task, shell, *, repos: list[str] | None = None) -> Preflight:
+def inspect(task, shell, *, repos: list[str] | None = None, config=None) -> Preflight:
     """Read the task's worktrees for the repos being dispatched. No mutation.
 
     `repos` is the caller's `--repos`/`--tag`-filtered set — the repos the run
@@ -345,11 +436,24 @@ def inspect(task, shell, *, repos: list[str] | None = None) -> Preflight:
     ref, immediately before a network dispatch that makes the run host fetch that
     same branch, so the round trip buys the one guarantee the whole feature rests
     on.
+
+    `config` (the workspace's `WorkspaceConfig`, optional) is used for one thing:
+    resolving each repo to its TOP-LEVEL git repo, so a `git_root` child and its
+    parent — one git repository, one tree — dedupe to a single entry in `dirty`
+    (spec ac7). Without it every repo is its own git repo, which is correct for
+    every workspace that has no `git_root` children.
     """
     selected = None if repos is None else set(repos)
     worktrees = task.worktrees or {}
+    repo_configs = getattr(config, "repos", {}) if config is not None else {}
+
+    def _git_repo_of(repo: str) -> str:
+        rc = repo_configs.get(repo)
+        return rc.git_root if rc is not None and rc.git_root else repo
+
     states = [
-        _inspect_repo(shell, repo, Path(raw_path), task.branch)
+        _inspect_repo(shell, repo, Path(raw_path), task.branch,
+                      git_repo=_git_repo_of(repo))
         for repo, raw_path in sorted(worktrees.items())
         if selected is None or repo in selected
     ]
@@ -367,25 +471,40 @@ def inspect(task, shell, *, repos: list[str] | None = None) -> Preflight:
                 repo=repo, path=Path(f"<no worktree for {repo!r} on this task>"),
                 branch=task.branch, blocked_reason=MISSING_WORKTREE,
                 detail=f"{repo!r} is not one of this task's repos (no worktree entry)",
-                untracked_only=False, needs_push=False, push_reason=None,
+                dirty=False, needs_push=False, push_reason=None,
+                git_repo=_git_repo_of(repo),
             )
             for repo in sorted(selected - worktrees.keys())
         ]
+
+    # One transfer per GIT repository: a `git_root` child and its parent share
+    # one tree, so pushing both would send the same objects twice under two
+    # names, and the run host materializes the parent either way (spec ac7).
+    # The parent's own state is preferred as the survivor when it is in scope,
+    # because the parent is the name the run host resolves the child under.
+    dirty_states = [s for s in states if s.dirty]
+    dirty: list[RepoState] = []
+    seen_git_repos: set[str] = set()
+    for s in [d for d in dirty_states if d.repo == d.git_repo] + dirty_states:
+        if s.git_repo in seen_git_repos:
+            continue
+        seen_git_repos.add(s.git_repo)
+        dirty.append(s)
 
     return Preflight(
         states=states,
         blocked=[s for s in states if s.blocked_reason is not None],
         to_push=[s for s in states if s.needs_push],
-        untracked=[s for s in states if s.untracked_only],
+        dirty=dirty,
     )
 
 
 def blocked_message(pre: Preflight) -> str:
     """Why the run was refused, and the commands that unblock it — one section
-    per reason, because a task with a dirty repo AND a stale one needs both
+    per reason, because a task with a conflicted repo AND a stale one needs both
     remedies, not whichever happened to be found first."""
     sections = []
-    for reason in (DIRTY, WRONG_BRANCH, BEHIND_ORIGIN, MISSING_WORKTREE,
+    for reason in (IN_PROGRESS, WRONG_BRANCH, BEHIND_ORIGIN, MISSING_WORKTREE,
                    UNREADABLE, ORIGIN_UNREACHABLE):
         group = [s for s in pre.blocked if s.blocked_reason == reason]
         if not group:
