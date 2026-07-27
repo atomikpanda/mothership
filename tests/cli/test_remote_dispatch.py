@@ -1387,3 +1387,34 @@ def test_repos_scope_does_not_push_a_repo_the_operator_did_not_name(tmp_path, mo
     finally:
         container.shell.reset_override()
         _reset()
+
+
+# --- exact copy: which repos come from a scratch ref -------------------------
+
+def test_exec_remote_sends_run_ref_repos_when_there_are_any():
+    recorder: dict = {}
+    conn = RunHostConnection(url="http://remote.example", token="tok")
+
+    remote_client.exec_remote(
+        verb="run", conn=conn, task="t1", repos=["api", "web"],
+        run_ref_repos=["api"], print_fn=lambda _l: None,
+        transport=_mock_transport(_recording_handler(recorder, _frame(["ok\n"], exit_code=0))),
+    )
+
+    assert recorder["json"] == {
+        "task": "t1", "repos": ["api", "web"], "kind": "all", "run_ref_repos": ["api"],
+    }
+
+
+def test_exec_remote_omits_the_key_entirely_when_nothing_was_transferred():
+    """ac9: a clean run must be byte-identical on the wire to today's, so a run
+    host on an older mship keeps working."""
+    recorder: dict = {}
+    conn = RunHostConnection(url="http://remote.example", token="tok")
+
+    remote_client.exec_remote(
+        verb="run", conn=conn, task="t1", repos=["api"], print_fn=lambda _l: None,
+        transport=_mock_transport(_recording_handler(recorder, _frame(["ok\n"], exit_code=0))),
+    )
+
+    assert recorder["json"] == {"task": "t1", "repos": ["api"], "kind": "all"}

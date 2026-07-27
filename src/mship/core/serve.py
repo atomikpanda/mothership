@@ -130,6 +130,11 @@ class ExecBody(BaseModel):
     # Only meaningful for verb == "capture"; mirrors `cli/capture.py`'s
     # `--kind` default. Optional so run/build callers can omit it.
     kind: str = "all"
+    # Repos whose working tree the caller pushed to this host's own scratch ref
+    # for this task (spec remote-exact-copy). Materialized from that LOCAL ref
+    # instead of from origin — no fetch. Absent or empty means today's behaviour
+    # for every repo in the request, so an older client is unaffected.
+    run_ref_repos: list[str] = []
 
 
 def _make_auth_dependency(token: str):

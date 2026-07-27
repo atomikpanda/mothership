@@ -236,6 +236,7 @@ def exec_remote(
     platform: str | None = None,
     kind: str = "all",
     captures_dir_for: Path | None = None,
+    run_ref_repos: list[str] | None = None,
     print_fn: Callable[[str], None] = print,
     transport: httpx.BaseTransport | None = None,
 ) -> int:
@@ -250,6 +251,13 @@ def exec_remote(
     indistinguishable on disk from a local one. `captures_dir_for` is ignored
     (nothing to extract) for `run`/`build`, which never emit an artifact
     block.
+
+    `run_ref_repos` (optional) names the repos this host should materialize
+    from its own local scratch ref for this task rather than from origin —
+    the operator's working tree was pushed straight to it (see
+    `mship.core.run_transfer`). Repo NAMES, not refs: the host builds the ref
+    itself from values it has already validated. Omitted from the request
+    body entirely when empty, so a clean run's wire format is unchanged.
 
     Returns the remote task's exit code, parsed from the trailing
     `__MSHIP_EXIT__ <code>` line — conveyed as DATA, not an HTTP error, so a
@@ -267,6 +275,8 @@ def exec_remote(
     body: dict = {"task": task, "repos": repos, "kind": kind}
     if platform is not None:
         body["platform"] = platform
+    if run_ref_repos:
+        body["run_ref_repos"] = list(run_ref_repos)
 
     headers = {"Authorization": f"Bearer {conn.token}"}
     url = f"{conn.url}/exec/{verb}"

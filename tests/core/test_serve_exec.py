@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 
 from mship.core import remote_exec
 from mship.core.config import RepoConfig, WorkspaceConfig
-from mship.core.serve import create_app
+from mship.core.serve import ExecBody, create_app
 from mship.core.state import StateManager
 from mship.util.shell import ShellResult
 
@@ -743,3 +743,26 @@ def test_exec_run_and_build_never_emit_artifact_block(tmp_path, monkeypatch):
         r = client.post(f"/exec/{verb}", json={"task": "t1", "repos": ["api"]})
         assert r.status_code == 200
         assert b"__MSHIP_ARTIFACTS__" not in r.content
+
+
+def test_exec_body_accepts_run_ref_repos(tmp_path, monkeypatch):
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    _patch_shell(monkeypatch, fake)
+    client = TestClient(_app(tmp_path))
+    r = client.post(
+        "/exec/run", json={"task": "t1", "repos": ["api"], "run_ref_repos": ["api"]},
+    )
+    assert r.status_code == 200
+    # A 200 alone doesn't prove the field was captured — pydantic silently
+    # drops unrecognized keys by default, so a body without the field would
+    # also 200. Assert directly on the model to catch that.
+    assert ExecBody(task="t1", repos=["api"], run_ref_repos=["api"]).run_ref_repos == ["api"]
+
+
+def test_exec_body_defaults_run_ref_repos_to_empty(tmp_path, monkeypatch):
+    """An older client omits the key; the host must behave exactly as before."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    _patch_shell(monkeypatch, fake)
+    r = TestClient(_app(tmp_path)).post("/exec/run", json={"task": "t1", "repos": ["api"]})
+    assert r.status_code == 200
+    assert any("fetch origin feat/t1" in cmd for cmd, _cwd in fake.run_calls)
