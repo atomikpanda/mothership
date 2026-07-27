@@ -48,6 +48,15 @@ RESULT_CONTENT_TYPE = "application/x-git-receive-pack-result"
 # and is refused rather than read past.
 _OID_RE = re.compile(rb"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
 
+# A `shallow <oid>` line, which a push from a shallow clone sends BEFORE its
+# commands. Reachable rather than theoretical: `git worktree add` from a
+# `--depth 1` clone succeeds and the worktree is shallow too, so an operator who
+# shallow-cloned a workspace repo gets shallow task worktrees. Exactly as strict
+# as git's own reader (`read_head_info`, receive-pack.c): the literal prefix then
+# a whole, valid oid and nothing else — git dies on anything laxer, and a laxer
+# skip here would be a way to hide a command from the scope check.
+_SHALLOW_RE = re.compile(rb"shallow (?:[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?)\Z")
+
 
 class PktLineError(ValueError):
     """The request body is not parseable pkt-line framing. Refused rather than
@@ -77,7 +86,7 @@ def service_advertisement(refs_output: bytes) -> bytes:
     return pkt_line(f"# service={RECEIVE_SERVICE}\n".encode("utf-8")) + b"0000" + refs_output
 
 
-def _command_ref(payload: bytes) -> str:
+def _command_ref(payload: bytes) -> str | None:
     """The ref name in one receive-pack command packet, read exactly as git
     reads it (`read_head_info` in receive-pack.c):
 
@@ -85,6 +94,9 @@ def _command_ref(payload: bytes) -> str:
       - the payload is a C string, so it ends at the first NUL — which is why
         capabilities are stripped on EVERY line, not only the first one that
         carries them;
+      - a `shallow <oid>` line is not a command at all; git records it and moves
+        on, and so do we (None). Failing the whole push on one would refuse a
+        legitimate push from a shallow worktree;
       - two object ids and a space each must lead, and the ref name is then the
         WHOLE remainder, spaces included. Stopping at the next space would
         report a shorter, in-scope name for a command git reads as a different
@@ -93,6 +105,8 @@ def _command_ref(payload: bytes) -> str:
     if payload.endswith(b"\n"):
         payload = payload[:-1]
     line = payload.split(b"\x00", 1)[0]
+    if _SHALLOW_RE.match(line):
+        return None
     fields = line.split(b" ", 2)
     if len(fields) < 3 or not fields[2]:
         raise PktLineError(f"malformed ref command: {payload!r}")
@@ -106,7 +120,9 @@ def ref_commands(body: bytes) -> list[str]:
 
     The request is `pkt_line("<old-oid> <new-oid> <ref>[\\0<capabilities>]")`
     repeated, then a `0000` flush, then push options and (for anything but a
-    delete) the packfile. Parsing stops at the flush, so neither is touched.
+    delete) the packfile. Parsing stops at the flush, so neither is touched. A
+    shallow client leads with `shallow <oid>` lines, which are not commands and
+    contribute no names.
 
     Only the flush ends the list. A body truncated instead is parsed to its end
     anyway (real receive-pack dies on one, but the check must never see fewer
@@ -128,7 +144,9 @@ def ref_commands(body: bytes) -> list[str]:
             )
         payload = body[i + 4:i + length]
         i += length
-        names.append(_command_ref(payload))
+        name = _command_ref(payload)
+        if name is not None:
+            names.append(name)
     return names
 
 
