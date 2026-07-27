@@ -429,3 +429,193 @@ def test_receive_is_unavailable_without_a_workspace_config(tmp_path):
     assert client.post(
         "/git/api/git-receive-pack", content=b"0000"
     ).status_code == 503
+
+
+# --- real git over a real socket ---------------------------------------------
+
+import contextlib
+import socket
+import threading
+import time
+
+import uvicorn
+
+
+@contextlib.contextmanager
+def live_serve(app):
+    """Run `app` under uvicorn on a loopback port for the duration of the block.
+
+    Real git speaks real HTTP; TestClient does not. Anything asserting the smart-
+    HTTP framing, the auth header git actually sends, or a push's effect on refs
+    has to go through a socket.
+
+    The listening socket is bound HERE and handed to uvicorn, rather than probing
+    for a free port and letting uvicorn bind it: the port is never unbound
+    between the two, so nothing else on the machine can take it in between. The
+    block is only entered once `server.started` is set, which uvicorn does after
+    `create_server` — so the port is accepting before the first `git push`, and
+    the test cannot race the startup. `thread.is_alive()` is part of the wait
+    condition so a server that dies during startup fails immediately with its
+    reason rather than after the full timeout.
+    """
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    server = uvicorn.Server(
+        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
+    )
+    thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
+    thread.start()
+    deadline = time.time() + 10
+    while not server.started and thread.is_alive() and time.time() < deadline:
+        time.sleep(0.02)
+    if not server.started:
+        server.should_exit = True
+        thread.join(timeout=10)
+        sock.close()       # uvicorn only closes it as part of its own shutdown
+        raise RuntimeError(
+            f"uvicorn did not start within 10s (thread alive: {thread.is_alive()})"
+        )
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+def _push_env(token: str | None) -> dict[str, str]:
+    """The env `core/run_transfer.extra_header_env` will build in Task 8: the
+    bearer as an HTTP header through git's ENV config, and no interactive
+    credential prompt (a rejected push must fail the command, not hang).
+
+    The index is taken from `_GIT_ENV` — the dict actually being handed to git —
+    and NOT from `os.environ`. They differ: tests/conftest.py:41 sets
+    GIT_CONFIG_COUNT=2 in `os.environ` from a session fixture, which runs AFTER
+    this module is imported, so the `_GIT_ENV` snapshot above does not carry the
+    count or its keys. Reading the count from `os.environ` (=2) while passing an
+    env with no GIT_CONFIG_KEY_0 makes every push die with `error: missing
+    config key GIT_CONFIG_KEY_0` / `fatal: unable to parse command-line config`
+    — verified. Nothing is lost by starting at 0 here: those two keys only
+    disable commit signing, and `_GIT_ENV` already points GIT_CONFIG_GLOBAL and
+    GIT_CONFIG_SYSTEM at /dev/null, so no signing config reaches these repos at
+    all.
+    """
+    env = {**_GIT_ENV, "GIT_TERMINAL_PROMPT": "0"}
+    if token is not None:
+        n = int(env.get("GIT_CONFIG_COUNT", "0"))
+        env["GIT_CONFIG_COUNT"] = str(n + 1)
+        env[f"GIT_CONFIG_KEY_{n}"] = "http.extraHeader"
+        env[f"GIT_CONFIG_VALUE_{n}"] = f"Authorization: Bearer {token}"
+    return env
+
+
+def _push(cwd: Path, url: str, refspec: str, token: str | None):
+    return subprocess.run(
+        ["git", "push", "--force", url, refspec],
+        cwd=cwd, capture_output=True, text=True, env=_push_env(token),
+    )
+
+
+def _clone(host_repo: Path, dest: Path) -> Path:
+    subprocess.run(
+        ["git", "clone", "-q", str(host_repo), str(dest)],
+        check=True, capture_output=True, env=_GIT_ENV,
+    )
+    return dest
+
+
+def _refnames(repo: Path) -> str:
+    return _git("for-each-ref", "--format=%(refname)", cwd=repo)
+
+
+def test_a_real_git_push_lands_on_the_scratch_ref(tmp_path):
+    """ac5/ac6/ac8/ac20 end to end: real git, real socket, real refs.
+
+    `returncode == 0` is not the assertion that matters — a push can exit 0
+    against the wrong repository. The ref on the HOST, at the sha the operator
+    pushed, is: pointed at a second repo, `receive_repo_path` still answers and
+    git still exits 0, and only the rev-parse below notices (verified).
+    """
+    host_repo = _repo(tmp_path / "api")
+    operator = _clone(host_repo, tmp_path / "operator")
+    (operator / "b.txt").write_text("two\n")
+    _git("add", "-A", cwd=operator)
+    _git("commit", "-qm", "second", cwd=operator)
+    sha = _git("rev-parse", "HEAD", cwd=operator)
+
+    with live_serve(_app(tmp_path, auth_token="tok-abc")) as base:
+        result = _push(
+            operator, f"{base}/git/api", f"{sha}:refs/mship/run/t1/api", "tok-abc"
+        )
+        assert result.returncode == 0, result.stderr
+        assert _git("rev-parse", "refs/mship/run/t1/api", cwd=host_repo) == sha
+
+        # ac8: the same ref force-updates on the next run.
+        (operator / "b.txt").write_text("three\n")
+        _git("commit", "-qam", "third", cwd=operator)
+        sha2 = _git("rev-parse", "HEAD", cwd=operator)
+        assert sha2 != sha
+        assert _push(
+            operator, f"{base}/git/api", f"{sha2}:refs/mship/run/t1/api", "tok-abc"
+        ).returncode == 0
+
+        # Deleting an absent ref is a no-op success (verified against real git:
+        # `remote: warning: deleting a non-existent ref`, exit 0), so
+        # `mship close` needs no "does it exist" probe.
+        delete_absent = _push(
+            operator, f"{base}/git/api", ":refs/mship/run/never/api", "tok-abc"
+        )
+        assert delete_absent.returncode == 0, delete_absent.stderr
+
+    assert _git("rev-parse", "refs/mship/run/t1/api", cwd=host_repo) == sha2
+    # The push never touched the host's checkout: `receive.denyCurrentBranch`
+    # cannot apply outside refs/heads/.
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=host_repo) == "main"
+    assert _git("status", "--porcelain", cwd=host_repo) == ""
+
+
+def test_a_real_push_without_the_bearer_is_rejected(tmp_path):
+    """ac6: an unauthenticated push fails — and fails rather than prompting.
+
+    git turns the 401 into a credential request, which `GIT_TERMINAL_PROMPT=0`
+    then refuses; the observed stderr is `fatal: could not read Username for
+    'http://127.0.0.1:<port>': terminal prompts disabled` (exit 128), NOT the
+    string "401". Assert the outcome — non-zero exit, no ref created, and an
+    intelligible one-line reason rather than a hang or a traceback — not git's
+    exact wording.
+    """
+    host_repo = _repo(tmp_path / "api")
+    operator = _clone(host_repo, tmp_path / "operator")
+    sha = _git("rev-parse", "HEAD", cwd=operator)
+    before = _refnames(host_repo)
+
+    with live_serve(_app(tmp_path, auth_token="tok-abc")) as base:
+        result = _push(operator, f"{base}/git/api", f"{sha}:refs/mship/run/t1/api", None)
+
+    assert result.returncode != 0
+    assert "refs/mship/run/t1/api" not in _refnames(host_repo)
+    assert _refnames(host_repo) == before
+    # The failure is legible to whoever ran the push: one fatal line, no prompt
+    # left hanging and no server traceback echoed back.
+    assert "terminal prompts disabled" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_a_real_push_onto_a_branch_is_rejected(tmp_path):
+    """ac5, with real git driving: the endpoint is not an arbitrary-ref writer.
+
+    The ref assertion is the one that bites. Move `check_ref_scope` AFTER the
+    `git receive-pack` call in `receive_pack` and this push still fails with
+    HTTP 403 — the branch is simply created first (verified). Only the absent
+    ref distinguishes "refused" from "done, then complained".
+    """
+    host_repo = _repo(tmp_path / "api")
+    operator = _clone(host_repo, tmp_path / "operator")
+    sha = _git("rev-parse", "HEAD", cwd=operator)
+
+    with live_serve(_app(tmp_path, auth_token="tok-abc")) as base:
+        result = _push(operator, f"{base}/git/api", f"{sha}:refs/heads/attacker", "tok-abc")
+
+    assert result.returncode != 0
+    assert "403" in result.stderr        # the endpoint's refusal, not a git error
+    assert "refs/heads/attacker" not in _refnames(host_repo)
