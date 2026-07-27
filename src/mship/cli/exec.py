@@ -129,11 +129,12 @@ def _run_remote(
     `--remote=<role>`.
 
     Remote execution always operates on a task's branch — the remote
-    materializes `.worktrees/<task>/<repo>` from origin — so there's no
-    "ad-hoc" remote run. Local `run`/`build` gracefully fall back to "the
-    whole workspace" when no task is active, but that fallback has no branch
-    for the remote to check out, so `--remote` without a resolvable task is a
-    clean, actionable CLI error rather than a confusing remote-side failure.
+    materializes `.worktrees/<task>/<repo>`, either from origin or from a
+    scratch ref this command pushes it — so there's no "ad-hoc" remote run.
+    Local `run`/`build` gracefully fall back to "the whole workspace" when no
+    task is active, but that fallback has no branch for the remote to check out,
+    so `--remote` without a resolvable task is a clean, actionable CLI error
+    rather than a confusing remote-side failure.
 
     A `RunHostError` (unknown/ambiguous/unmapped role) or `RemoteExecError`
     (remote unreachable) surfaces as `output.error(...)` + `typer.Exit(1)` —
@@ -160,27 +161,59 @@ def _run_remote(
         output.error(str(e))
         raise typer.Exit(code=1)
 
-    # The run host materializes the task's branch FROM ORIGIN, and nothing pushes
-    # during development (`git push -u` happens at `mship finish`). Without this
-    # check a remote run either fails with a confusing remote-side materialize
+    # A CLEAN repo is still materialized on the run host FROM ORIGIN, and nothing
+    # pushes during development (`git push -u` happens at `mship finish`). Without
+    # this check a remote run either fails with a confusing remote-side materialize
     # error, or — worse — silently executes the last pushed revision and reports it
     # as a result for code the operator is currently editing.
-    #
-    # Scoped to `target_repos` — the same `--repos`/`--tag`-filtered set that is
-    # dispatched below. Preflighting the task's other repos would refuse a run over
-    # work in progress it never touches, and push repos the operator did not name.
-    from mship.core import remote_preflight
+    from mship.core import remote_preflight, run_transfer
+    from mship.core.run_ref import RunRefNameError
 
-    pre = remote_preflight.inspect(task_obj, container.shell(), repos=target_repos)
+    shell = container.shell()
+    # `repos=target_repos` is load-bearing and stays: preflighting the task's
+    # other repos would both refuse a run over work in progress it never touches
+    # and transfer repos the operator never named. `config` is what lets a
+    # `git_root` child and its parent collapse to one transfer.
+    pre = remote_preflight.inspect(
+        task_obj, shell, repos=target_repos, config=config,
+    )
     if not pre.ok:
         output.error(remote_preflight.blocked_message(pre))
         raise typer.Exit(code=1)
-    for state in pre.untracked:
-        output.warning(
-            f"{state.repo}: untracked files will not exist on the run host "
-            f"(they are not part of the push)"
+
+    # A working tree that differs from HEAD is no longer a refusal, it is a
+    # TRANSFER: synthesize a commit from that tree and push it STRAIGHT to the
+    # run host, onto the throwaway namespace `core/run_ref.py` owns. Origin is
+    # never in this path — routing uncommitted work through it would publish
+    # untracked scratch files to a third party, and deleting the ref afterwards
+    # would not retract the objects.
+    #
+    # `state.head_sha` is the sha the preflight certified HEAD to be at, not a
+    # re-read of HEAD: it is the same guarantee `remote_preflight.push` makes
+    # for the origin path, applied to the snapshot's parent.
+    run_ref_repos: list[str] = []
+    for state in pre.dirty:
+        try:
+            sha = run_transfer.synthesize_commit(
+                shell, state.path, base_sha=state.head_sha,
+            )
+            ref = run_transfer.push_run_ref(
+                shell, state.path, conn=conn, repo=state.git_repo,
+                task=task_obj.slug, sha=sha,
+            )
+        except (run_transfer.RunTransferError, RunRefNameError) as e:
+            output.error(str(e))
+            raise typer.Exit(code=1)
+        run_ref_repos.append(state.git_repo)
+        # Name it as throwaway (spec ac13): an operator who sees a bare sha will
+        # reasonably try to `git show` it and find it attached to nothing.
+        output.breadcrumb(
+            f"{state.git_repo}: sent your working tree to the run host as "
+            f"{ref} ({sha[:12]}) — a throwaway run ref, not a commit on "
+            f"{state.branch}"
         )
-    pushed, push_error = remote_preflight.push(pre, container.shell())
+
+    pushed, push_error = remote_preflight.push(pre, shell)
     if push_error is not None:
         output.error(push_error)
         raise typer.Exit(code=1)
@@ -198,6 +231,7 @@ def _run_remote(
     try:
         return exec_remote(
             verb=verb, conn=conn, task=task_obj.slug, repos=target_repos,
+            run_ref_repos=run_ref_repos,
         )
     except RemoteExecError as e:
         output.error(str(e))
