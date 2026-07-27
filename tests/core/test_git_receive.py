@@ -307,3 +307,125 @@ def test_a_line_git_would_not_read_as_shallow_is_still_refused(line):
     a laxer skip here would be a way to hide a command from the scope check."""
     with pytest.raises(PktLineError):
         ref_commands(_body(line))
+
+
+# --- the HTTP routes ---------------------------------------------------------
+
+from fastapi.testclient import TestClient
+
+from mship.core.serve import create_app
+from mship.core.state import StateManager
+
+
+def _app(tmp_path: Path, *, auth_token: str | None = None, with_config: bool = True):
+    """Mirrors `tests/core/test_serve_exec.py::_app` (line 141) so the receive
+    routes are exercised through exactly the app the exec routes are."""
+    return create_app(
+        specs_dir=tmp_path / "specs",
+        state_manager=StateManager(tmp_path / ".mothership"),
+        log_manager=None,
+        workspace_root=tmp_path,
+        workspace_name="test-ws",
+        auth_token=auth_token,
+        config=_config(tmp_path) if with_config else None,
+    )
+
+
+def test_receive_endpoints_require_the_bearer(tmp_path):
+    """ac6: the run-host bearer gates the push, on both legs of it."""
+    client = TestClient(_app(tmp_path, auth_token="secret"))
+    assert client.get(
+        "/git/api/info/refs", params={"service": "git-receive-pack"}
+    ).status_code == 401
+    assert client.post("/git/api/git-receive-pack", content=b"0000").status_code == 401
+
+
+def test_advertisement_is_served_with_the_bearer(tmp_path):
+    _repo(tmp_path / "api")
+    client = TestClient(_app(tmp_path, auth_token="secret"))
+    r = client.get(
+        "/git/api/info/refs",
+        params={"service": "git-receive-pack"},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/x-git-receive-pack-advertisement"
+    assert r.content.startswith(b"001f# service=git-receive-pack\n0000")
+
+
+def test_upload_pack_service_is_not_served_here(tmp_path):
+    """Narrow on purpose: this is a receive path, not a git host."""
+    _repo(tmp_path / "api")
+    client = TestClient(_app(tmp_path))
+    r = client.get("/git/api/info/refs", params={"service": "git-upload-pack"})
+    assert r.status_code == 403
+
+
+def test_a_repo_the_workspace_does_not_declare_is_404(tmp_path):
+    """The detail is asserted, not just the status: an unrouted path 404s too,
+    so status alone would pass against an app with no receive routes at all."""
+    client = TestClient(_app(tmp_path))
+    for r in (
+        client.get("/git/nope/info/refs", params={"service": "git-receive-pack"}),
+        client.post("/git/nope/git-receive-pack", content=b"0000"),
+    ):
+        assert r.status_code == 404
+        assert "unknown repo 'nope'" in r.json()["detail"]
+
+
+def test_a_git_root_child_is_404_and_names_its_parent(tmp_path):
+    """ac7 at the HTTP boundary."""
+    r = TestClient(_app(tmp_path)).post("/git/server/git-receive-pack", content=b"0000")
+    assert r.status_code == 404
+    assert "api" in r.json()["detail"]
+
+
+def test_a_push_outside_the_run_namespace_is_403_and_creates_nothing(tmp_path):
+    """ac5 at the HTTP boundary.
+
+    Carries a real (empty) packfile for the same reason the unit twin above
+    does: without one, receive-pack refuses the push itself and the "no ref
+    exists" assertion would hold even with the scope check moved AFTER git.
+    With it, git would happily answer `ok refs/heads/attacker` — so the absent
+    ref, and the 403 rather than a 500, are evidence the check ran first.
+    """
+    repo = _repo(tmp_path / "api")
+    sha = _git("rev-parse", "HEAD", cwd=repo)
+    body = (
+        pkt_line(f"{'0' * 40} {sha} refs/heads/attacker\x00report-status".encode())
+        + b"0000" + _empty_pack(repo)
+    )
+    r = TestClient(_app(tmp_path)).post("/git/api/git-receive-pack", content=body)
+    assert r.status_code == 403
+    assert "refs/mship/run" in r.json()["detail"]
+    assert "attacker" not in _git("for-each-ref", "--format=%(refname)", cwd=repo)
+
+
+def test_an_unparseable_body_is_400(tmp_path):
+    _repo(tmp_path / "api")
+    r = TestClient(_app(tmp_path)).post("/git/api/git-receive-pack", content=b"zzzz0000")
+    assert r.status_code == 400
+
+
+def test_a_compressed_body_is_refused_rather_than_mis_parsed(tmp_path):
+    """git does not compress a receive-pack request body (verified against a
+    real push), so a non-identity encoding means bytes whose refs cannot be
+    checked. Refuse rather than hand them to receive-pack unexamined."""
+    _repo(tmp_path / "api")
+    r = TestClient(_app(tmp_path)).post(
+        "/git/api/git-receive-pack", content=b"0000",
+        headers={"Content-Encoding": "gzip"},
+    )
+    assert r.status_code == 400
+    # The detail, not just the status: an unreadable body 400s from the pkt-line
+    # parser anyway, so status alone would pass with no encoding check at all.
+    assert "Content-Encoding" in r.json()["detail"]
+
+
+def test_receive_is_unavailable_without_a_workspace_config(tmp_path):
+    """Mirrors `POST /exec/{verb}` (serve.py:1411): 503 with an actionable
+    message, never a bare 404."""
+    client = TestClient(_app(tmp_path, with_config=False))
+    assert client.post(
+        "/git/api/git-receive-pack", content=b"0000"
+    ).status_code == 503
