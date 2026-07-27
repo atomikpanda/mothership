@@ -61,9 +61,11 @@ from pathlib import Path
 from typing import Iterator, Protocol
 
 from mship.core import capture as _cap
+from mship.core import remote_setup
 from mship.core.config import WorkspaceConfig
 from mship.core.run_ref import RunRefNameError
 from mship.core.run_ref import run_ref as build_run_ref
+from mship.util.taskfile import taskfile_has_target
 
 VERBS: tuple[str, ...] = ("run", "capture", "build")
 
@@ -504,6 +506,64 @@ def run_verb_stream(
         materialized[top_repo] = worktree_path
         return True
 
+    def _ensure_setup(repo_name: str, repo_config, worktree_path: Path) -> Iterator[bytes]:
+        """Run `task setup` in a freshly-materialized worktree when it is
+        needed, streaming its output live exactly like the verb itself.
+
+        Git carries source, not dependencies. Without this, an exact-source run
+        against stale dependencies fails with a module-not-found that has no
+        visible relationship to the edit — the same confusing-staleness class
+        the rest of this feature exists to eliminate. So the host DERIVES them.
+
+        Keyed (see `core/remote_setup.py`): the first materialization on this
+        host, then only when the repo's declared `setup_inputs` change. Skipped
+        entirely for a repo that declares `setup` not applicable or whose
+        Taskfile has no such target — `task setup` in a repo that never defined
+        one exits non-zero, and that must not fail every remote run.
+
+        PEP 380 value: True to continue, False when setup FAILED — in which case
+        the error line and the exit sentinel have ALREADY been emitted and the
+        caller MUST return, exactly like `_ensure_materialized`.
+        """
+        if "setup" in repo_config.not_applicable:
+            return True
+        actual_setup = repo_config.tasks.get("setup", "setup")
+        if not taskfile_has_target(worktree_path, actual_setup):
+            return True
+
+        key = remote_setup.setup_key(worktree_path, repo_config.setup_inputs)
+        key_path = remote_setup.key_file(deps.workspace_root, task, repo_name)
+        if not remote_setup.needs_setup(key_path, key):
+            return True
+
+        yield f"setup: {repo_name} (task {actual_setup})\n".encode("utf-8")
+        env_runner = repo_config.env_runner or config.env_runner
+        command = shell.build_command(f"task {actual_setup}", env_runner)
+        proc = None
+        try:
+            proc = shell.run_streaming(command, cwd=worktree_path, env=None)
+            yield from _stream_proc_lines(proc)
+            setup_code = proc.wait()
+        finally:
+            _terminate_proc(proc)
+
+        if setup_code != 0:
+            # Surface setup's OWN failure rather than letting the verb run
+            # against half-built dependencies and report something that does not
+            # name the real cause (spec ac18).
+            yield (
+                f"error: `task {actual_setup}` failed on the run host for repo "
+                f"{repo_name!r} (exit {setup_code}); the output above is setup's "
+                f"own. The {verb} was not started.\n"
+            ).encode("utf-8")
+            yield f"{EXIT_MARKER}:{nonce} {setup_code}\n".encode("utf-8")
+            return False
+
+        # Recorded only after a SUCCESSFUL setup: caching a failure would skip
+        # the retry that fixes it.
+        remote_setup.record_setup(key_path, key)
+        return True
+
     for repo_name in repos:
         repo_config = config.repos[repo_name]
 
@@ -524,6 +584,9 @@ def run_verb_stream(
             if not (yield from _ensure_materialized(repo_name)):
                 return
             worktree_path = materialized[repo_name]
+
+        if not (yield from _ensure_setup(repo_name, repo_config, worktree_path)):
+            return
 
         actual_task_name = repo_config.tasks.get(verb, verb)
         env_runner = repo_config.env_runner or config.env_runner

@@ -1125,3 +1125,223 @@ def test_exec_endpoint_forwards_run_ref_repos_to_the_run(tmp_path, monkeypatch):
     assert any("refs/mship/run/t1/api" in c for c in commands)
     assert not any("fetch" in c for c in commands)
     assert not any("origin" in c for c in commands)
+
+
+# --- setup on the run host, keyed --------------------------------------------
+
+def _config_with_setup(tmp_path: Path, *, setup_inputs=None) -> WorkspaceConfig:
+    """A repo whose MATERIALIZED WORKTREE really has a Taskfile declaring
+    `setup`. The Taskfile has to exist on disk because `taskfile_has_target`
+    reads it — the fake shell cannot answer for it."""
+    repo_dir = tmp_path / "api"
+    repo_dir.mkdir(exist_ok=True)
+    worktree = tmp_path / ".worktrees" / "t1" / "api"
+    worktree.mkdir(parents=True, exist_ok=True)
+    (worktree / "Taskfile.yml").write_text(
+        "version: '3'\ntasks:\n  setup:\n    cmds: [echo setup]\n"
+        "  start:\n    cmds: [echo run]\n"
+    )
+    (worktree / "package.json").write_text('{"deps": 1}\n')
+    return WorkspaceConfig(
+        workspace="t",
+        repos={
+            "api": RepoConfig(
+                path=repo_dir, type="service",
+                tasks={"run": "start"},
+                setup_inputs=setup_inputs or [],
+            ),
+        },
+    )
+
+
+def _stream_run(deps, **kw) -> list[str]:
+    return [
+        l.decode() for l in remote_exec.run_verb_stream(
+            "run", "t1", ["api"], None, deps=deps, nonce=_TEST_NONCE, **kw
+        )
+    ]
+
+
+def test_setup_runs_the_first_time_a_worktree_is_materialized(tmp_path):
+    """ac15: a fresh host builds its dependencies from the delivered source
+    instead of failing on missing ones."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    deps = remote_exec.RemoteExecDeps(
+        config=_config_with_setup(tmp_path), shell=fake, workspace_root=tmp_path,
+    )
+
+    _stream_run(deps)
+
+    assert [c["command"] for c in fake.streaming_calls] == ["task setup", "task start"]
+
+
+def test_setup_is_skipped_on_the_next_run(tmp_path):
+    """ac16: a source-only iteration pays no setup cost."""
+    config = _config_with_setup(tmp_path)
+    first = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=first, workspace_root=tmp_path))
+
+    second = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=second, workspace_root=tmp_path))
+
+    assert [c["command"] for c in second.streaming_calls] == ["task start"]
+
+
+def test_setup_re_runs_when_a_declared_input_changes(tmp_path):
+    """ac16: a dependency change pays once."""
+    config = _config_with_setup(tmp_path, setup_inputs=["package.json"])
+    first = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=first, workspace_root=tmp_path))
+
+    (tmp_path / ".worktrees" / "t1" / "api" / "package.json").write_text('{"deps": 2}\n')
+    second = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=second, workspace_root=tmp_path))
+
+    assert [c["command"] for c in second.streaming_calls] == ["task setup", "task start"]
+
+
+def test_declaring_no_inputs_means_setup_runs_once_only(tmp_path):
+    """ac17: nothing to invalidate against, even when a manifest changes."""
+    config = _config_with_setup(tmp_path)
+    first = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=first, workspace_root=tmp_path))
+
+    (tmp_path / ".worktrees" / "t1" / "api" / "package.json").write_text('{"deps": 9}\n')
+    second = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=second, workspace_root=tmp_path))
+
+    assert [c["command"] for c in second.streaming_calls] == ["task start"]
+
+
+def test_a_failing_setup_fails_the_run_with_its_own_output(tmp_path):
+    """ac18: not a downstream error that does not name the real cause."""
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["npm ERR! ENOENT\n"], returncode=3),
+    )
+    deps = remote_exec.RemoteExecDeps(
+        config=_config_with_setup(tmp_path), shell=fake, workspace_root=tmp_path,
+    )
+
+    lines = _stream_run(deps)
+
+    assert "npm ERR! ENOENT\n" in lines                       # setup's own output
+    assert any(l.startswith("error:") and "setup" in l and "api" in l for l in lines)
+    assert lines[-1] == f"{remote_exec.EXIT_MARKER}:{_TEST_NONCE} 3\n"
+    assert [c["command"] for c in fake.streaming_calls] == ["task setup"]  # run never started
+
+
+def test_a_failed_setup_is_not_recorded_as_done(tmp_path):
+    """Caching a failure would skip the retry."""
+    config = _config_with_setup(tmp_path)
+    failing = _FakeShellRunner(streaming_proc=_FakeProc(returncode=1))
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=failing, workspace_root=tmp_path))
+
+    second = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=second, workspace_root=tmp_path))
+
+    assert [c["command"] for c in second.streaming_calls][0] == "task setup"
+
+
+def test_a_repo_with_no_setup_target_is_not_failed_over_it(tmp_path):
+    """ac15's second half: `task setup` in a repo that never declared one exits
+    non-zero, and that must not turn every remote run into a failure."""
+    config = _config_with_setup(tmp_path)
+    (tmp_path / ".worktrees" / "t1" / "api" / "Taskfile.yml").write_text(
+        "version: '3'\ntasks:\n  start:\n    cmds: [echo run]\n"
+    )
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=fake, workspace_root=tmp_path))
+
+    assert [c["command"] for c in fake.streaming_calls] == ["task start"]
+
+
+def test_a_repo_declaring_setup_not_applicable_skips_it(tmp_path):
+    config = _config_with_setup(tmp_path)
+    config.repos["api"].not_applicable = ["setup"]
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=fake, workspace_root=tmp_path))
+
+    assert [c["command"] for c in fake.streaming_calls] == ["task start"]
+
+
+def test_setup_honours_an_aliased_target_name(tmp_path):
+    """A repo may spell its setup target something else via `tasks:`."""
+    config = _config_with_setup(tmp_path)
+    config.repos["api"].tasks = {"run": "start", "setup": "bootstrap"}
+    (tmp_path / ".worktrees" / "t1" / "api" / "Taskfile.yml").write_text(
+        "version: '3'\ntasks:\n  bootstrap:\n    cmds: [echo boot]\n"
+        "  start:\n    cmds: [echo run]\n"
+    )
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=fake, workspace_root=tmp_path))
+
+    assert [c["command"] for c in fake.streaming_calls] == ["task bootstrap", "task start"]
+
+
+class _MaterializingShellRunner(_FakeShellRunner):
+    """Like `_FakeShellRunner`, but `.run()` actually creates the worktree
+    directory + a `setup`-declaring Taskfile as a side effect of the real
+    `git worktree add` command — standing in for what a real git checkout
+    does to disk.
+
+    `_config_with_setup`'s fixture pre-creates the Taskfile at the
+    destination path regardless of call order, so a test built on it can't
+    tell "setup ran before materialization" from "setup ran after" — the
+    file is there either way. This fake makes the file's existence
+    CONDITIONAL on materialization having actually run, which is the only
+    way to pin that ordering.
+    """
+
+    def run(self, command, cwd, env=None):
+        result = super().run(command, cwd, env=env)
+        if command.startswith("git worktree add"):
+            # `git worktree add -B <branch> <worktree_path> origin/<branch>`
+            worktree_path = Path(command.split()[5])
+            worktree_path.mkdir(parents=True, exist_ok=True)
+            (worktree_path / "Taskfile.yml").write_text(
+                "version: '3'\ntasks:\n  setup:\n    cmds: [echo setup]\n"
+                "  start:\n    cmds: [echo run]\n"
+            )
+        return result
+
+
+def test_setup_runs_only_after_materialization_creates_the_worktree(tmp_path):
+    """Pins the ordering the plan calls out explicitly: setup must run AFTER
+    the worktree is materialized (the files don't exist before that), never
+    before. A shell fake that only produces the Taskfile as a side effect of
+    the real `git worktree add` command proves it — unlike
+    `_config_with_setup`'s pre-created fixture, this one distinguishes "ran
+    before materialize" (no Taskfile yet, so setup is skipped as
+    not-applicable and only `task start` streams) from "ran after" (Taskfile
+    exists, `task setup` streams first)."""
+    repo_dir = tmp_path / "api"
+    repo_dir.mkdir(exist_ok=True)
+    config = WorkspaceConfig(
+        workspace="t",
+        repos={
+            "api": RepoConfig(
+                path=repo_dir, type="service",
+                tasks={"run": "start"},
+            ),
+        },
+    )
+    fake = _MaterializingShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    deps = remote_exec.RemoteExecDeps(config=config, shell=fake, workspace_root=tmp_path)
+
+    _stream_run(deps)
+
+    assert [c["command"] for c in fake.streaming_calls] == ["task setup", "task start"]
