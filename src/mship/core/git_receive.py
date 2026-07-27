@@ -126,10 +126,16 @@ def ref_commands(body: bytes) -> list[str]:
 
     Only the flush ends the list. A body truncated instead is parsed to its end
     anyway (real receive-pack dies on one, but the check must never see fewer
-    refs than git might act on).
+    refs than git might act on) — EXCEPT when it also yielded no commands, which
+    is not a receive-pack request at all rather than one that asks for nothing.
+    That is the line between "no commands" and "unreadable": `0000` is a
+    well-formed request for nothing and is returned as `[]`, while a body that
+    runs out before either a flush or a command is refused, as it must be — git
+    answers one with `fatal: the remote end hung up unexpectedly` (verified).
     """
     names: list[str] = []
     i = 0
+    flushed = False
     while i + 4 <= len(body):
         header = body[i:i + 4]
         try:
@@ -137,6 +143,7 @@ def ref_commands(body: bytes) -> list[str]:
         except ValueError:
             raise PktLineError(f"not a pkt-line length: {header!r}")
         if length == 0:
+            flushed = True
             break
         if length < 4 or i + length > len(body):
             raise PktLineError(
@@ -147,14 +154,25 @@ def ref_commands(body: bytes) -> list[str]:
         name = _command_ref(payload)
         if name is not None:
             names.append(name)
+    if not flushed and not names:
+        raise PktLineError(
+            f"not a receive-pack request: no pkt-line command and no flush in "
+            f"{body[:16]!r}"
+        )
     return names
 
 
 def check_ref_scope(body: bytes) -> None:
-    """Raise unless every ref the push writes is in the run scratch namespace."""
+    """Raise unless every ref the push writes is in the run scratch namespace.
+
+    A body with NO commands passes. It is not an oversight and not a hole: git's
+    remote-curl sends exactly that — a `0000` probe, `Content-Length: 4` — ahead
+    of any request bigger than `http.postBuffer` (1 MiB by default), and aborts
+    the push on anything but a clean answer, so refusing it broke every push
+    over that size. Nothing is waved through: a body with no commands names no
+    refs, and one that cannot be read still raises out of `ref_commands` above.
+    """
     names = ref_commands(body)
-    if not names:
-        raise PktLineError("push request contains no ref command")
     outside = [n for n in names if not is_run_ref(n)]
     if outside:
         raise RefScopeError(

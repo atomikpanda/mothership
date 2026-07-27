@@ -127,9 +127,36 @@ def test_one_out_of_scope_ref_refuses_the_whole_push():
         ))
 
 
-def test_a_body_with_no_commands_is_refused():
+def test_a_zero_command_body_is_forwarded_rather_than_refused():
+    """git's own probe, and therefore the feature's ordinary path.
+
+    Before streaming a body larger than `http.postBuffer` (1 MiB by default),
+    remote-curl POSTs a zero-command probe first: the body is exactly `0000`,
+    `Content-Length: 4`. Refusing it as "contains no ref command" aborted every
+    push over 1 MiB with `error: RPC failed; HTTP 400` and then a misleading
+    `Everything up-to-date` (reproduced three ways) — and Task 8 pushes a
+    synthesized working tree, routinely over 1 MiB.
+
+    Safe to forward, and safe for the scope check to pass: a body with no
+    commands names no refs, so there is nothing to check; real `git receive-pack
+    --stateless-rpc <repo>` fed `0000` exits 0 with empty stdout (verified,
+    git 2.43).
+    """
+    assert ref_commands(b"0000") == []
+    check_ref_scope(b"0000")
+
+
+@pytest.mark.parametrize("body", [b"", b"00", b"000"])
+def test_a_body_that_is_not_a_pkt_line_stream_at_all_is_still_refused(body):
+    """"No commands" and "unreadable" have to stay distinct.
+
+    `0000` is a well-formed request that asks for nothing. A body that ends
+    without either a flush or a command is not a receive-pack request at all:
+    forwarded, it gets `fatal: the remote end hung up unexpectedly` out of git
+    (verified) — a 500 for what is really a bad request.
+    """
     with pytest.raises(PktLineError):
-        check_ref_scope(b"0000")
+        ref_commands(body)
 
 
 # --- real repositories -------------------------------------------------------
@@ -241,6 +268,17 @@ def test_receive_pack_refuses_an_out_of_scope_push_without_touching_the_repo(tmp
 
     refs = _git("for-each-ref", "--format=%(refname)", cwd=repo)
     assert "refs/heads/attacker" not in refs
+
+
+def test_a_zero_command_probe_is_answered_by_real_receive_pack(tmp_path):
+    """The unit twin above says the probe is not refused; this says git is happy
+    to be handed it — exit 0, empty stdout, no ref touched. Both halves matter:
+    forwarding a body git chokes on would only move the failure from a 400 to a
+    500."""
+    repo = _repo(tmp_path / "api")
+    before = _git("for-each-ref", "--format=%(refname)", cwd=repo)
+    assert receive_pack(repo, b"0000") == b""
+    assert _git("for-each-ref", "--format=%(refname)", cwd=repo) == before
 
 
 # --- pushes from a shallow clone ---------------------------------------------
@@ -483,10 +521,11 @@ def live_serve(app):
         thread.join(timeout=10)
 
 
-def _push_env(token: str | None) -> dict[str, str]:
+def _push_env(token: str | None, config: dict[str, str] | None = None) -> dict[str, str]:
     """The env `core/run_transfer.extra_header_env` will build in Task 8: the
     bearer as an HTTP header through git's ENV config, and no interactive
     credential prompt (a rejected push must fail the command, not hang).
+    `config` adds further git settings through the same mechanism.
 
     The index is taken from `_GIT_ENV` — the dict actually being handed to git —
     and NOT from `os.environ`. They differ: tests/conftest.py:41 sets
@@ -501,18 +540,23 @@ def _push_env(token: str | None) -> dict[str, str]:
     all.
     """
     env = {**_GIT_ENV, "GIT_TERMINAL_PROMPT": "0"}
+    settings = dict(config or {})
     if token is not None:
-        n = int(env.get("GIT_CONFIG_COUNT", "0"))
-        env["GIT_CONFIG_COUNT"] = str(n + 1)
-        env[f"GIT_CONFIG_KEY_{n}"] = "http.extraHeader"
-        env[f"GIT_CONFIG_VALUE_{n}"] = f"Authorization: Bearer {token}"
+        settings["http.extraHeader"] = f"Authorization: Bearer {token}"
+    n = int(env.get("GIT_CONFIG_COUNT", "0"))
+    for key, value in settings.items():
+        env[f"GIT_CONFIG_KEY_{n}"] = key
+        env[f"GIT_CONFIG_VALUE_{n}"] = value
+        n += 1
+    env["GIT_CONFIG_COUNT"] = str(n)
     return env
 
 
-def _push(cwd: Path, url: str, refspec: str, token: str | None):
+def _push(cwd: Path, url: str, refspec: str, token: str | None,
+          config: dict[str, str] | None = None):
     return subprocess.run(
         ["git", "push", "--force", url, refspec],
-        cwd=cwd, capture_output=True, text=True, env=_push_env(token),
+        cwd=cwd, capture_output=True, text=True, env=_push_env(token, config),
     )
 
 
@@ -572,6 +616,69 @@ def test_a_real_git_push_lands_on_the_scratch_ref(tmp_path):
     # cannot apply outside refs/heads/.
     assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=host_repo) == "main"
     assert _git("status", "--porcelain", cwd=host_repo) == ""
+
+
+def _commit_incompressible(operator: Path, size: int) -> str:
+    """Commit `size` bytes of random data and return the sha.
+
+    Random on purpose: git zlib-deflates a blob before it goes on the wire, so a
+    file of zeros would be a few hundred bytes by the time `http.postBuffer` is
+    consulted and would not exercise this path at all. The existing end-to-end
+    push above misses the whole probe path for exactly that reason — its payload
+    is a few hundred bytes.
+    """
+    (operator / "big.bin").write_bytes(os.urandom(size))
+    _git("add", "-A", cwd=operator)
+    _git("commit", "-qm", "big", cwd=operator)
+    return _git("rev-parse", "HEAD", cwd=operator)
+
+
+def test_a_push_over_the_post_buffer_takes_the_probe_path_and_lands(tmp_path):
+    """The path EVERY push bigger than `http.postBuffer` takes.
+
+    remote-curl will not buffer a request that large, so it cannot retry one; it
+    POSTs a zero-command probe (`0000`, `Content-Length: 4`) first and only
+    streams the real body once that is answered. Refusing the probe aborted the
+    push with `error: RPC failed; HTTP 400` and then a misleading `Everything
+    up-to-date`.
+
+    `http.postBuffer=1024` forces the probe for a few hundred KB rather than
+    several MB, so this stays cheap; the sibling below runs at the real default
+    so the shipped configuration is exercised too.
+    """
+    host_repo = _repo(tmp_path / "api")
+    operator = _clone(host_repo, tmp_path / "operator")
+    sha = _commit_incompressible(operator, 200 * 1024)
+
+    with live_serve(_app(tmp_path, auth_token="tok-abc")) as base:
+        result = _push(
+            operator, f"{base}/git/api", f"{sha}:refs/mship/run/t1/api", "tok-abc",
+            config={"http.postBuffer": "1024"},
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert _git("rev-parse", "refs/mship/run/t1/api", cwd=host_repo) == sha
+
+
+def test_a_multi_megabyte_push_lands_at_the_default_post_buffer(tmp_path):
+    """The same path with nothing configured — 4 MiB against the 1 MiB default.
+
+    Task 8 pushes a synthesized working tree, which is routinely this size, so
+    the default is the configuration that actually ships. Kept alongside the
+    cheap one above so a change to git's buffering default cannot quietly stop
+    the probe from being covered.
+    """
+    host_repo = _repo(tmp_path / "api")
+    operator = _clone(host_repo, tmp_path / "operator")
+    sha = _commit_incompressible(operator, 4 * 1024 * 1024)
+
+    with live_serve(_app(tmp_path, auth_token="tok-abc")) as base:
+        result = _push(
+            operator, f"{base}/git/api", f"{sha}:refs/mship/run/t1/api", "tok-abc"
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert _git("rev-parse", "refs/mship/run/t1/api", cwd=host_repo) == sha
 
 
 def test_a_real_push_without_the_bearer_is_rejected(tmp_path):
