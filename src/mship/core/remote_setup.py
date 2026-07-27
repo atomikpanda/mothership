@@ -36,6 +36,15 @@ FIRST_MATERIALIZATION_KEY = "first-materialization"
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9_-]")
 
+# How much of each name the filename carries for a human to read. `_TASK_NAME_RE`
+# bounds the charset of a task arriving over the wire but NOT its length, and a
+# name can be short enough for `.worktrees/<task>` yet overflow NAME_MAX (255)
+# once the repo and digest land beside it. Two of these plus the separators and
+# the digest come to 224 bytes, and `_safe` leaves only single-byte characters,
+# so the count is the byte count. Truncating costs nothing but legibility
+# because identity lives in the digest, taken over the UNtruncated pair.
+_READABLE_MAX = 100
+
 
 def _safe(name: str) -> str:
     """A filename component that cannot escape its directory.
@@ -44,7 +53,7 @@ def _safe(name: str) -> str:
     permits `.` and `/` — so `../..` would otherwise be a legal path component
     here.
     """
-    return _UNSAFE.sub("-", name) or "unnamed"
+    return (_UNSAFE.sub("-", name) or "unnamed")[:_READABLE_MAX]
 
 
 def key_file(workspace_root: Path, task: str, repo: str) -> Path:

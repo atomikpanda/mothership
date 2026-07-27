@@ -169,6 +169,25 @@ def test_the_pair_cannot_be_confused_across_its_boundary(tmp_path):
     assert key_file(tmp_path, "a", "__b") != key_file(tmp_path, "a__", "b")
 
 
+def test_a_long_name_still_produces_a_writable_file(tmp_path):
+    """`_TASK_NAME_RE` bounds the charset of a task arriving over the wire but
+    not its length, and a name can be short enough for `.worktrees/<task>` yet
+    overflow NAME_MAX once the suffix lands. Recording happens AFTER setup
+    succeeded, so an unwritable path throws away work already done."""
+    path = key_file(tmp_path, "t" * 300, "r" * 300)
+    assert len(path.name.encode("utf-8")) <= 255
+    record_setup(path, "abc")
+    assert not needs_setup(path, "abc")
+
+
+def test_long_names_sharing_a_truncated_prefix_stay_distinct(tmp_path):
+    """Truncation is only free because identity lives in the digest, which is
+    taken over the untruncated pair."""
+    a = key_file(tmp_path, "t" * 300 + "one", "api")
+    b = key_file(tmp_path, "t" * 300 + "two", "api")
+    assert a != b
+
+
 def test_a_task_name_cannot_escape_the_state_directory(tmp_path):
     """The task name arrives over the wire, where `core/serve.py` permits `/`
     and `.`, so `../..` would otherwise be a legal path component here."""
