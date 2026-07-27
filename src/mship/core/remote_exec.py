@@ -62,6 +62,8 @@ from typing import Iterator, Protocol
 
 from mship.core import capture as _cap
 from mship.core.config import WorkspaceConfig
+from mship.core.run_ref import RunRefNameError
+from mship.core.run_ref import run_ref as build_run_ref
 
 VERBS: tuple[str, ...] = ("run", "capture", "build")
 
@@ -359,6 +361,7 @@ def run_verb_stream(
     deps: RemoteExecDeps,
     kind: str = "all",
     nonce: str,
+    run_ref_repos: list[str] | None = None,
 ) -> Iterator[bytes]:
     """The serve-side body of `POST /exec/{verb}`.
 
@@ -373,6 +376,13 @@ def run_verb_stream(
          subdirectory) repos skip their own fetch/worktree-add and resolve
          to a path under their parent's worktree instead, mirroring
          `WorktreeManager.spawn`'s treatment of subdirectory services.
+      2b. A repo named in `run_ref_repos` is materialized from THIS host's own
+          scratch ref for the task instead — the operator pushed a commit
+          synthesized from their working tree straight here, so the revision is
+          already local and NO fetch (not even the base-freshness probe, which
+          exists only to refresh this host's view of origin) is issued for it.
+          Names are TOP-LEVEL git repo names, so a `git_root` child is covered
+          by its parent's entry.
       3. Resolve the repo's go-task target for `verb` + its env_runner;
          for `verb == "capture"` build the same env-var contract as local
          capture (`MSHIP_CAPTURE_DIR` a fresh remote temp dir,
@@ -435,6 +445,20 @@ def run_verb_stream(
         yield f"{EXIT_MARKER}:{nonce} 2\n".encode("utf-8")
         return
 
+    scratch_repos = sorted(set(run_ref_repos or []))
+    run_refs: dict[str, str] = {}
+    for scratch_repo in scratch_repos:
+        try:
+            run_refs[scratch_repo] = build_run_ref(task, scratch_repo)
+        except RunRefNameError as exc:
+            # The ref is interpolated into git commands run with shell=True, so
+            # a name that cannot form one is refused before anything runs — as
+            # stream DATA, never a raised exception mid-generator, matching the
+            # unknown-repo guard above.
+            yield f"error: cannot build a run ref for this request: {exc}\n".encode("utf-8")
+            yield f"{EXIT_MARKER}:{nonce} 2\n".encode("utf-8")
+            return
+
     materialized: dict[str, Path] = {}
     exit_code = 0
 
@@ -456,13 +480,22 @@ def run_verb_stream(
         rc = config.repos[top_repo]
         repo_path = rc.path
         worktree_path = hub / top_repo
+        ref = run_refs.get(top_repo)
 
-        warning = check_base_freshness(shell, repo_path, rc.base_branch)
-        if warning is not None:
-            yield f"{warning}\n".encode("utf-8")
+        if ref is None:
+            # Origin is the source of truth for this repo, so make sure this
+            # host's view of its base is current first (MOS-203). Skipped
+            # entirely on the scratch-ref path: nothing there comes from origin,
+            # and a fetch would be pure latency.
+            warning = check_base_freshness(shell, repo_path, rc.base_branch)
+            if warning is not None:
+                yield f"{warning}\n".encode("utf-8")
 
         try:
-            materialize_worktree(shell, repo_path, worktree_path, branch, repo_name=top_repo)
+            materialize_worktree(
+                shell, repo_path, worktree_path, branch,
+                repo_name=top_repo, run_ref=ref,
+            )
         except MaterializeError as exc:
             yield f"error: {exc}\n".encode("utf-8")
             yield f"{EXIT_MARKER}:{nonce} 1\n".encode("utf-8")

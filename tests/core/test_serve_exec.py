@@ -961,3 +961,167 @@ def test_without_a_run_ref_the_branch_path_is_unchanged(tmp_path):
         "git fetch origin feat/t1",
         f"git worktree add -B feat/t1 {worktree} origin/feat/t1",
     ]
+
+
+# --- exact copy: routing run_ref_repos through the streaming run -------------
+
+
+def test_run_verb_stream_uses_the_scratch_ref_for_named_repos(tmp_path):
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=fake, workspace_root=tmp_path,
+    )
+
+    list(remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None, deps=deps, nonce=_TEST_NONCE, run_ref_repos=["api"],
+    ))
+
+    commands = [cmd for cmd, _cwd in fake.run_calls]
+    assert any("refs/mship/run/t1/api" in c for c in commands)
+    # ac10: no fetch, not even the MOS-203 base-freshness probe, which exists
+    # only to keep this host's view of ORIGIN current.
+    assert not any("fetch" in c for c in commands)
+
+
+def test_a_repo_not_named_still_comes_from_origin(tmp_path):
+    """The mixed case: one repo transferred, another clean."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    deps = remote_exec.RemoteExecDeps(
+        config=_config_with_child(tmp_path), shell=fake, workspace_root=tmp_path,
+    )
+
+    list(remote_exec.run_verb_stream(
+        "run", "t1", ["app"], None, deps=deps, nonce=_TEST_NONCE, run_ref_repos=[],
+    ))
+
+    commands = [cmd for cmd, _cwd in fake.run_calls]
+    assert any("fetch origin feat/t1" in c for c in commands)
+    assert not any("refs/mship/run" in c for c in commands)
+
+
+def test_a_git_root_child_is_materialized_from_its_parents_scratch_ref(tmp_path):
+    """ac7 on the run host: one git repository, one ref. The client sends the
+    PARENT's name even when only the child was requested."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    deps = remote_exec.RemoteExecDeps(
+        config=_config_with_child(tmp_path), shell=fake, workspace_root=tmp_path,
+    )
+
+    list(remote_exec.run_verb_stream(
+        "run", "t1", ["server"], None, deps=deps, nonce=_TEST_NONCE, run_ref_repos=["app"],
+    ))
+
+    commands = [cmd for cmd, _cwd in fake.run_calls]
+    assert any("refs/mship/run/t1/app" in c for c in commands)
+
+
+def test_a_task_name_that_cannot_form_a_ref_fails_cleanly(tmp_path):
+    """The ref reaches a shell here, so a name that cannot form one is refused
+    BEFORE anything runs — as stream DATA (an error line + a non-zero exit
+    sentinel), never a raised exception mid-generator, matching how the
+    unknown-repo guard already behaves. `/exec` accepts `/` in a task name;
+    `run_ref` does not."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=fake, workspace_root=tmp_path,
+    )
+
+    lines = [
+        l.decode() for l in remote_exec.run_verb_stream(
+            "run", "a/b", ["api"], None, deps=deps, nonce=_TEST_NONCE,
+            run_ref_repos=["api"],
+        )
+    ]
+
+    assert lines[-1].startswith(f"{remote_exec.EXIT_MARKER}:{_TEST_NONCE} ")
+    assert int(lines[-1].split(" ", 1)[1].strip()) != 0
+    assert any("run ref" in l for l in lines[:-1])
+    assert fake.streaming_calls == []       # the task never started
+    assert fake.run_calls == []             # nor did any git command
+
+
+def test_the_base_freshness_probe_is_skipped_for_a_run_ref_repo(tmp_path):
+    """The hole the plan's own no-fetch assertion cannot see: `_config()` has no
+    `base_branch`, so `check_base_freshness` short-circuits and issues no fetch
+    even when it IS called. With a base branch configured it fetches, and calling
+    it unconditionally reopens exactly what ac10 closes — Task 6 lets a dirty
+    repo skip the BEHIND_ORIGIN preflight check ONLY because this path never
+    consults origin. So: no fetch, and no origin probe either."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path, base_branch="main"), shell=fake, workspace_root=tmp_path,
+    )
+
+    list(remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None, deps=deps, nonce=_TEST_NONCE, run_ref_repos=["api"],
+    ))
+
+    commands = [cmd for cmd, _cwd in fake.run_calls]
+    assert any("refs/mship/run/t1/api" in c for c in commands)
+    assert not any("fetch" in c for c in commands)
+    assert not any("origin" in c for c in commands)
+
+
+def _config_two_repos(tmp_path: Path) -> WorkspaceConfig:
+    """Two independent top-level repos, both with a base branch — the mixed
+    request's shape: one repo the operator transferred, one still from origin."""
+    repos = {}
+    for name in ("api", "web"):
+        repo_dir = tmp_path / name
+        repo_dir.mkdir(exist_ok=True)
+        repos[name] = RepoConfig(
+            path=repo_dir, type="service", base_branch="main",
+            tasks={"run": "start", "capture": "capture", "build": "build"},
+        )
+    return WorkspaceConfig(workspace="t", repos=repos)
+
+
+def test_a_mixed_run_routes_each_repo_by_its_own_source(tmp_path):
+    """One request, both sources. Each repo's git commands are partitioned by
+    the repo they ran in, so neither repo's routing can be inferred from the
+    other's — the scratch repo must see no origin traffic at all, and the clean
+    repo must still get the full branch path including the MOS-203 probe."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    deps = remote_exec.RemoteExecDeps(
+        config=_config_two_repos(tmp_path), shell=fake, workspace_root=tmp_path,
+    )
+
+    list(remote_exec.run_verb_stream(
+        "run", "t1", ["api", "web"], None, deps=deps, nonce=_TEST_NONCE,
+        run_ref_repos=["api"],
+    ))
+
+    in_api = [cmd for cmd, cwd in fake.run_calls if cwd == tmp_path / "api"]
+    in_web = [cmd for cmd, cwd in fake.run_calls if cwd == tmp_path / "web"]
+
+    assert any("refs/mship/run/t1/api" in c for c in in_api)
+    assert not any("fetch" in c for c in in_api)
+    assert not any("origin" in c for c in in_api)
+
+    assert "git fetch origin main" in in_web           # MOS-203 probe, still there
+    assert "git fetch origin feat/t1" in in_web        # branch path, unchanged
+    assert not any("refs/mship/run" in c for c in in_web)
+
+    # Both tasks ran, each in its own worktree.
+    assert [c["cwd"] for c in fake.streaming_calls] == [
+        tmp_path / ".worktrees" / "t1" / "api",
+        tmp_path / ".worktrees" / "t1" / "web",
+    ]
+
+
+def test_exec_endpoint_forwards_run_ref_repos_to_the_run(tmp_path, monkeypatch):
+    """End to end over HTTP: the field `ExecBody` already accepts has to reach
+    `run_verb_stream`, or the whole transfer is pushed and then ignored."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"], returncode=0))
+    _patch_shell(monkeypatch, fake)
+    client = TestClient(_app(tmp_path, config=_config(tmp_path, base_branch="main")))
+
+    r = client.post(
+        "/exec/run", json={"task": "t1", "repos": ["api"], "run_ref_repos": ["api"]},
+    )
+
+    assert r.status_code == 200
+    commands = [c for c, _cwd in fake.run_calls]
+    assert any("refs/mship/run/t1/api" in c for c in commands)
+    assert not any("fetch" in c for c in commands)
+    assert not any("origin" in c for c in commands)

@@ -1453,6 +1453,7 @@ def create_app(
         gen = remote_exec.run_verb_stream(
             verb, body.task, body.repos, body.platform,
             kind=body.kind, deps=deps, nonce=nonce,
+            run_ref_repos=body.run_ref_repos,
         )
         return StreamingResponse(
             iterate_in_threadpool(gen),
