@@ -105,7 +105,7 @@ def _run_remote(
     *,
     verb: str,
     remote_role: str,
-    task_slug: Optional[str],
+    task_obj,
     target_repos: list[str],
     config,
     container,
@@ -115,6 +115,13 @@ def _run_remote(
     role to a connection, POST to the remote's `/exec/{verb}`, and return the
     remote task's exit code (mirrored by the caller as `raise
     typer.Exit(code)`).
+
+    `task_obj` is the caller's already-resolved `Task` (`None` when nothing
+    resolved). The OBJECT, not its slug: the preflight below is mandatory, and
+    re-reading state to look the slug up again would open a window in which the
+    task is gone from the second read — which skipped the whole check and
+    dispatched anyway. There is nothing to re-read: `resolve_task` returns a task
+    out of the state the caller already loaded.
 
     `remote_role` is the raw `--remote` CLI value: `""` (bare flag) means
     auto-resolve the role (repo's declared `run_host`, else the sole
@@ -135,7 +142,7 @@ def _run_remote(
     from mship.core.remote_client import RemoteExecError, exec_remote
     from mship.core.run_host import RunHostError, RunHostStore, resolve_run_host
 
-    if task_slug is None:
+    if task_obj is None:
         output.error(
             "--remote requires a resolvable task: the remote materializes "
             "the task's branch, so there's no ad-hoc remote run. Pass "
@@ -153,8 +160,45 @@ def _run_remote(
         output.error(str(e))
         raise typer.Exit(code=1)
 
+    # The run host materializes the task's branch FROM ORIGIN, and nothing pushes
+    # during development (`git push -u` happens at `mship finish`). Without this
+    # check a remote run either fails with a confusing remote-side materialize
+    # error, or — worse — silently executes the last pushed revision and reports it
+    # as a result for code the operator is currently editing.
+    #
+    # Scoped to `target_repos` — the same `--repos`/`--tag`-filtered set that is
+    # dispatched below. Preflighting the task's other repos would refuse a run over
+    # work in progress it never touches, and push repos the operator did not name.
+    from mship.core import remote_preflight
+
+    pre = remote_preflight.inspect(task_obj, container.shell(), repos=target_repos)
+    if not pre.ok:
+        output.error(remote_preflight.blocked_message(pre))
+        raise typer.Exit(code=1)
+    for state in pre.untracked:
+        output.warning(
+            f"{state.repo}: untracked files will not exist on the run host "
+            f"(they are not part of the push)"
+        )
+    pushed, push_error = remote_preflight.push(pre, container.shell())
+    if push_error is not None:
+        output.error(push_error)
+        raise typer.Exit(code=1)
+    # Name the commit, not just the repo: "pushed" alone doesn't say WHICH sha
+    # landed on origin, and that identity is the guarantee this whole preflight
+    # exists to make (see remote_preflight.py).
+    pushed_sha = {s.repo: s.head_sha for s in pre.to_push}
+    for repo_name in pushed:
+        sha = pushed_sha.get(repo_name)
+        suffix = f" ({sha[:12]})" if sha else ""
+        output.breadcrumb(
+            f"pushed {repo_name}{suffix} so the run host sees your commits"
+        )
+
     try:
-        return exec_remote(verb=verb, conn=conn, task=task_slug, repos=target_repos)
+        return exec_remote(
+            verb=verb, conn=conn, task=task_obj.slug, repos=target_repos,
+        )
     except RemoteExecError as e:
         output.error(str(e))
         raise typer.Exit(code=1)
@@ -424,7 +468,9 @@ def register(app: typer.Typer, get_container):
         # multiple tasks" case degrades gracefully to "all repos" instead of
         # hard-erroring. An explicit --task or env that points at an unknown
         # slug is still an error.
-        task_slug: str | None
+        # The resolved Task itself, not just its slug — `_run_remote` preflights
+        # against it, and looking it up again is a read that can come back empty.
+        task_obj = None
         fallback_repos: list[str]
         try:
             t, _ = resolve_task(
@@ -434,14 +480,13 @@ def register(app: typer.Typer, get_container):
                 cwd=_P.cwd(),
             )
             fallback_repos = t.affected_repos
-            task_slug = t.slug
+            task_obj = t
         except UnknownTaskError as e:
             known = ", ".join(sorted(state.tasks.keys())) or "(none)"
             output.error(f"Unknown task: {e.slug}. Known: {known}.")
             raise typer.Exit(1)
         except (NoActiveTaskError, AmbiguousTaskError):
             fallback_repos = list(config.repos.keys())
-            task_slug = None
 
         try:
             target_repos = _resolve_repos(config, fallback_repos, repos, tag)
@@ -451,7 +496,7 @@ def register(app: typer.Typer, get_container):
 
         if remote is not None:
             code = _run_remote(
-                verb="run", remote_role=remote, task_slug=task_slug,
+                verb="run", remote_role=remote, task_obj=task_obj,
                 target_repos=target_repos, config=config, container=container,
                 output=output,
             )
@@ -567,7 +612,8 @@ def register(app: typer.Typer, get_container):
         # Scope repos to a task if one resolves (cwd / MSHIP_TASK / --task);
         # otherwise build the whole workspace. Mirrors `run`'s graceful
         # fallback — an explicit unknown --task is still an error.
-        task_slug: str | None
+        # The resolved Task itself, not just its slug — see `run` above.
+        task_obj = None
         fallback_repos: list[str]
         try:
             t, _ = resolve_task(
@@ -575,14 +621,14 @@ def register(app: typer.Typer, get_container):
                 env_task=_os.environ.get("MSHIP_TASK"), cwd=_P.cwd(),
             )
             fallback_repos = t.affected_repos
-            task_slug = t.slug
+            task_obj = t
         except UnknownTaskError as e:
             known = ", ".join(sorted(state.tasks.keys())) or "(none)"
             output.error(f"Unknown task: {e.slug}. Known: {known}.")
             raise typer.Exit(1)
         except (NoActiveTaskError, AmbiguousTaskError):
             fallback_repos = list(config.repos.keys())
-            task_slug = None
+        task_slug = task_obj.slug if task_obj is not None else None
 
         try:
             target_repos = _resolve_repos(config, fallback_repos, repos, tag)
@@ -592,7 +638,7 @@ def register(app: typer.Typer, get_container):
 
         if remote is not None:
             code = _run_remote(
-                verb="build", remote_role=remote, task_slug=task_slug,
+                verb="build", remote_role=remote, task_obj=task_obj,
                 target_repos=target_repos, config=config, container=container,
                 output=output,
             )

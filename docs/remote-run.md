@@ -100,6 +100,67 @@ These are deliberately out of scope for the first cut. Know them before you lean
 - **Remote task stdout is streamed to your terminal verbatim.** There is no ANSI / control-sequence sanitization — the remote host is trusted. Don't point `--remote` at a host you don't control.
 - **A `run_host:` set under a `capture:` block in `mothership.yaml` is silently ignored.** `CaptureConfig` has no `run_host` field; only the **repo-level** `run_host` (documented above under "Declaring roles") is honored. Put `run_host:` directly on the repo, not inside its `capture:` block.
 
+## Before it dispatches
+
+`--remote` runs the code that is on **origin**, because the run host materializes
+the task's branch by fetching it and hard-resetting to `origin/<branch>`. So before
+dispatching, mship asks origin itself (one `git ls-remote` per repo — a local
+`origin/<branch>` ref is a cache, and it goes stale in the dangerous direction) and
+compares against your HEAD:
+
+- **Clean, and origin is missing the branch or behind your HEAD** → it pushes for
+  you. Nothing is lost, and it is unambiguously what you meant.
+- **Origin has a commit you don't** — someone else pushed the branch, or you
+  haven't pulled — → it **refuses**. The run would execute that commit instead of
+  what you have checked out, and pushing cannot fix it: you can't fast-forward from
+  behind. It prints a `git pull --ff-only` for each affected repo (or reset to
+  origin deliberately), then re-run.
+- **Tracked changes present** → it refuses, and names the commands that unblock
+  you. Committing your work in progress is not a decision mship makes for you, and
+  running the previous revision while you are mid-edit is worse than stopping.
+- **Untracked files only** → it warns. They cannot change what the push carries,
+  but they will not exist on the run host either.
+- **The worktree isn't on the task's branch** — detached, or some other branch
+  checked out → it refuses, and prints the `git checkout <branch>` that fixes it.
+  Every check above reads the worktree's HEAD while the run host materializes the
+  *task's* branch, so the commit that was verified and the commit that would run
+  are two different things. (Nothing is quietly resolved for you: publishing that
+  HEAD would move the task's branch on origin to a commit you never named.)
+- **The repo can't be inspected at all** — `git status` fails, the worktree is
+  gone, origin won't answer → it refuses, naming which. Nothing about what the run
+  host would execute was established, and that is the one case that must never pass
+  silently.
+- **`--repos`/`--tag` names a repo that isn't one of the task's repos at all** — no
+  worktree, no branch, nothing to compare against origin → it refuses with the
+  same "missing worktree" message as a worktree that existed and vanished. The run
+  host would still materialize that repo's branch from origin regardless, so a
+  selection outside the task's own repos is never silently dropped from the check.
+
+When it does push for you, it pushes the exact sha it resolved HEAD to during
+inspection — `<sha>:refs/heads/<branch>` — rather than letting git resolve `HEAD`
+(or the branch) a second time when the push itself runs moments later. That
+closes the gap between inspecting and pushing: if something else commits in the
+worktree in between — a subagent, a background job, anything — the push still
+names the commit every check above actually cleared, not whatever HEAD has
+become by the time the push runs.
+
+That guarantee ends at origin, and this is a real limit, not a hypothetical one:
+**the commit *pushed* is the commit *inspected*; that is not the same claim as
+"the commit *executed* is the commit inspected."** Once the push lands, the
+branch on origin is a mutable ref, and mutable refs are exactly what this module
+cannot make safe — anyone with push access can advance the branch before the run
+host's own `git fetch` picks it up, and nothing here can see that happen or stop
+it: the write lands after mship has finished checking, on a different machine's
+clock, outside this process entirely. Closing that second gap would need the run
+host to materialize a specific, immutable revision — a commit, not a branch —
+instead of resolving the branch itself at fetch time; it does not do that today,
+and no amount of extra checking on the dispatching side substitutes for it.
+
+Every repo **the run will actually touch** is checked, not just the one you are
+standing in: a task has a branch per repo and the run host materializes each
+separately. `--repos` / `--tag` narrow the check as well as the run, so work in
+progress in a repo you excluded neither blocks the run nor gets pushed.
+
 ## Troubleshooting
 
 Start with `mship net status`. It reports every connectivity edge on this machine
