@@ -160,3 +160,56 @@ def test_the_real_commits_gate_and_finish_do_not_know_the_run_namespace_exists()
             f"consult run refs, that is a spec-level decision, not a silent "
             f"one."
         )
+
+
+# --- ac19: the docs say what travels ----------------------------------------
+
+DOCS = Path(__file__).resolve().parents[2] / "docs"
+
+
+def _remote_run_doc() -> str:
+    return (DOCS / "remote-run.md").read_text().lower()
+
+
+def test_docs_state_that_uncommitted_work_travels_and_never_reaches_origin():
+    t = _remote_run_doc()
+    assert "uncommitted" in t
+    assert "untracked" in t
+    assert "never" in t and "origin" in t
+
+
+def test_docs_state_what_does_not_travel():
+    """ac19: secrets, platform state, symlink_dirs/bind_files."""
+    t = _remote_run_doc()
+    assert ".env" in t or "secret" in t
+    assert "symlink_dirs" in t and "bind_files" in t
+    assert "gitignore" in t
+
+
+def test_docs_state_that_dependencies_are_derived_by_setup():
+    """ac19 + ac17, including that the first run on a fresh host is a one-time
+    cost rather than a regression."""
+    t = _remote_run_doc()
+    assert "task setup" in t
+    assert "setup_inputs" in t
+    assert "first" in t
+
+
+def test_docs_name_the_scratch_ref_as_throwaway():
+    """ac13: an operator reading the output must not think it is their commit."""
+    t = _remote_run_doc()
+    assert "refs/mship/run" in t
+    assert "throwaway" in t
+
+
+def test_docs_no_longer_claim_a_dirty_tree_is_refused():
+    """The #419 wording is now false; leaving it would be worse than silence."""
+    t = _remote_run_doc()
+    assert "tracked changes present" not in t
+
+
+def test_configuration_documents_setup_inputs():
+    """ac17: declaring them is what enables re-run-on-change."""
+    t = (DOCS / "configuration.md").read_text().lower()
+    assert "setup_inputs" in t
+    assert "re-run" in t or "rerun" in t
