@@ -54,10 +54,19 @@ _OID_RE = re.compile(rb"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\Z")
 # A `shallow <oid>` line, which a push from a shallow clone sends BEFORE its
 # commands. Reachable rather than theoretical: `git worktree add` from a
 # `--depth 1` clone succeeds and the worktree is shallow too, so an operator who
-# shallow-cloned a workspace repo gets shallow task worktrees. Exactly as strict
-# as git's own reader (`read_head_info`, receive-pack.c): the literal prefix then
-# a whole, valid oid and nothing else — git dies on anything laxer, and a laxer
-# skip here would be a way to hide a command from the scope check.
+# shallow-cloned a workspace repo gets shallow task worktrees.
+#
+# STRICTER than git's own reader, not equal to it: `read_head_info`
+# (receive-pack.c) parses the oid with `get_oid_hex`, which consumes exactly
+# hexsz hex characters and does NOT require the string to end there — so git
+# also skips `shallow <oid> junk` and `shallow <oid>deadbeef`, then accepts the
+# command after them and creates its ref (verified, git 2.43).
+#
+# The invariant is one-directional, and this pattern being a strict SUBSET of
+# what git skips is what gives it: OUR shallow skip implies GIT's, so a line
+# skipped here is never a line git would have read as a command. Refusing the
+# laxer shapes costs a real push nothing — git never sends them — so do not
+# relax this to "match git".
 _SHALLOW_RE = re.compile(rb"shallow (?:[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?)\Z")
 
 

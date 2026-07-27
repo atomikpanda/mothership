@@ -365,9 +365,22 @@ def test_a_shallow_push_still_has_its_refs_checked():
     b"shallow " + SHA.encode() + b" more",   # trailing junk after the oid
     b"shallowness is a virtue",              # only the exact prefix is a shallow line
 ])
-def test_a_line_git_would_not_read_as_shallow_is_still_refused(line):
-    """git's own reader dies on `shallow <not-an-oid>` rather than skipping it;
-    a laxer skip here would be a way to hide a command from the scope check."""
+def test_a_line_that_is_not_exactly_a_shallow_line_is_refused(line):
+    """Fail-closed, and STRICTER than git rather than equal to it.
+
+    git skips more than this. `read_head_info` parses the oid with
+    `get_oid_hex`, which consumes hexsz hex characters and does not require the
+    string to end there, so `shallow <oid> junk` and `shallow <oid>deadbeef` are
+    both skipped by git, which then accepts the following command and creates
+    its ref (verified, git 2.43). Of the three cases here only the first and
+    third actually die in git.
+
+    That direction is the safe one, and it is the invariant to hold: OUR shallow
+    skip must IMPLY GIT's, so that a line skipped here is never one git reads as
+    a command. This pattern is a strict subset of git's, which gives exactly
+    that. Refusing the laxer shapes costs a legitimate push nothing — git never
+    sends them.
+    """
     with pytest.raises(PktLineError):
         ref_commands(_body(line))
 
