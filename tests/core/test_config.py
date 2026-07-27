@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from mship.core.config import WorkspaceConfig, ConfigLoader, Dependency, Healthcheck
+from mship.core.config import WorkspaceConfig, ConfigLoader, Dependency, Healthcheck, RepoConfig
 
 
 def test_load_minimal_config(workspace: Path):
@@ -1260,4 +1260,35 @@ def test_git_root_child_depends_on_parent_still_loads(tmp_path: Path):
         "  web:\n    path: web\n    type: service\n    git_root: mono\n    depends_on: [mono]\n"
     )
     assert ConfigLoader.load(cfg).repos["web"].git_root == "mono"
+
+
+def test_setup_inputs_defaults_to_nothing_declared():
+    """ac17: no declaration is the honest default — there is nothing to
+    invalidate against, so setup runs on first materialization only."""
+    repo = RepoConfig(path=Path("./api"), type="service")
+    assert repo.setup_inputs == []
+
+
+def test_setup_inputs_accepts_manifests_and_globs():
+    repo = RepoConfig(
+        path=Path("./api"), type="service",
+        setup_inputs=["package.json", "uv.lock", "**/build.gradle"],
+    )
+    assert repo.setup_inputs == ["package.json", "uv.lock", "**/build.gradle"]
+
+
+def test_setup_inputs_parses_from_yaml(tmp_path):
+    config_path = tmp_path / "mothership.yaml"
+    (tmp_path / "api").mkdir()
+    (tmp_path / "api" / "Taskfile.yml").write_text("version: '3'\ntasks:\n  run:\n    cmds: [echo]\n")
+    config_path.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  api:\n"
+        "    path: ./api\n"
+        "    type: service\n"
+        "    setup_inputs: [pyproject.toml, uv.lock]\n"
+    )
+    config = ConfigLoader.load(config_path)
+    assert config.repos["api"].setup_inputs == ["pyproject.toml", "uv.lock"]
 
