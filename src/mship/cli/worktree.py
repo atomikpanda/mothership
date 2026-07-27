@@ -929,6 +929,21 @@ def register(app: typer.Typer, get_container):
             if not hr.ok:
                 output.warning(f"lifecycle hook '{hr.hook_name}' for task.closed failed: {hr.error}")
 
+        # Scratch refs left on run hosts by `--remote` (spec remote-exact-copy).
+        # Fail-open like the spec/WorkItem advances above: a run host that is
+        # off, unreachable, or was never mapped must not stop a close. The refs
+        # are on the operator's own machine, so a missed one is disk, not
+        # disclosure.
+        try:
+            from mship.core.run_host import RunHostStore
+            from mship.core.run_transfer import cleanup_run_refs
+            cleanup_run_refs(
+                task, config=config, store=RunHostStore(container.state_dir()),
+                shell=container.shell(), warn=output.warning,
+            )
+        except Exception:
+            pass
+
         wt_mgr = container.worktree_manager()
         from mship.core.worktree import WorktreeDirtyError
         try:

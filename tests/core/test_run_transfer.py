@@ -557,3 +557,107 @@ def test_a_real_push_lands_the_ref_and_writes_the_token_to_no_config_file(tmp_pa
     )
     assert "tok-abc" not in on_disk
     assert "tok-abc" not in (operator / ".git" / "config").read_text()
+
+
+# --- cleanup on close --------------------------------------------------------
+
+from mship.core.config import RepoConfig, WorkspaceConfig
+from mship.core.run_host import RunHostStore
+from mship.core.run_transfer import cleanup_run_refs
+
+
+class FakeTask:
+    def __init__(self, slug, affected_repos):
+        self.slug = slug
+        self.affected_repos = affected_repos
+
+
+def _run_host_config(tmp_path, **extra_repos) -> WorkspaceConfig:
+    repos = {"api": RepoConfig(path=tmp_path / "api", type="service", run_host="role-x")}
+    repos.update(extra_repos)
+    return WorkspaceConfig(workspace="t", run_hosts=["role-x"], repos=repos)
+
+
+def _store(tmp_path) -> RunHostStore:
+    store = RunHostStore(tmp_path / ".mothership")
+    store.set("role-x", RunHostConnection(url="http://remote.example", token="tok-abc"))
+    return store
+
+
+def test_close_deletes_the_tasks_scratch_ref(tmp_path):
+    """ac8: they do not accumulate."""
+    shell = RecordingShell()
+    warnings: list[str] = []
+
+    deleted = cleanup_run_refs(
+        FakeTask("t1", ["api"]),
+        config=_run_host_config(tmp_path), store=_store(tmp_path),
+        shell=shell, warn=warnings.append,
+    )
+
+    assert deleted == ["api"]
+    assert ":refs/mship/run/t1/api" in shell.calls[0][0]
+    assert warnings == []
+
+
+def test_a_git_root_child_is_cleaned_once_via_its_parent(tmp_path):
+    """ac7 again: one git repository, one ref, one delete."""
+    shell = RecordingShell()
+    config = _run_host_config(
+        tmp_path,
+        server=RepoConfig(path=Path("server"), type="service", git_root="api"),
+    )
+
+    deleted = cleanup_run_refs(
+        FakeTask("t1", ["api", "server"]), config=config, store=_store(tmp_path),
+        shell=shell, warn=lambda _m: None,
+    )
+
+    assert deleted == ["api"]
+    assert len(shell.calls) == 1
+
+
+def test_no_mapped_run_host_means_nothing_to_clean(tmp_path):
+    """A task that never ran remotely must not warn on every close."""
+    shell = RecordingShell()
+    warnings: list[str] = []
+
+    deleted = cleanup_run_refs(
+        FakeTask("t1", ["api"]),
+        config=WorkspaceConfig(
+            workspace="t",
+            repos={"api": RepoConfig(path=tmp_path / "api", type="service")},
+        ),
+        store=RunHostStore(tmp_path / ".mothership"),
+        shell=shell, warn=warnings.append,
+    )
+
+    assert deleted == [] and shell.calls == [] and warnings == []
+
+
+def test_a_failed_delete_warns_and_keeps_going(tmp_path):
+    """Cleanup must never block a close: a missed ref is disk, not disclosure."""
+    shell = RecordingShell(returncode=1, stderr="host unreachable\n")
+    warnings: list[str] = []
+
+    deleted = cleanup_run_refs(
+        FakeTask("t1", ["api"]), config=_run_host_config(tmp_path),
+        store=_store(tmp_path), shell=shell, warn=warnings.append,
+    )
+
+    assert deleted == []
+    assert warnings and "api" in warnings[0]
+
+
+def test_a_task_slug_that_cannot_form_a_ref_warns_rather_than_raising(tmp_path):
+    """`run_ref` refuses `/` in a slug; a close must not die on it."""
+    shell = RecordingShell()
+    warnings: list[str] = []
+
+    deleted = cleanup_run_refs(
+        FakeTask("a/b", ["api"]), config=_run_host_config(tmp_path),
+        store=_store(tmp_path), shell=shell, warn=warnings.append,
+    )
+
+    assert deleted == [] and shell.calls == []
+    assert warnings

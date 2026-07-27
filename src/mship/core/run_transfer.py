@@ -12,7 +12,7 @@ import shlex
 import tempfile
 from pathlib import Path
 
-from mship.core.run_ref import run_ref
+from mship.core.run_ref import RunRefNameError, run_ref
 
 # Pinned identity for synthesized commits. Deliberately NOT the operator's: this
 # is machinery, not a commit they made (spec ac13), and pinning it also means
@@ -216,3 +216,48 @@ def delete_run_ref(shell, repo_root: Path, *, conn, repo: str, task: str) -> Non
         shell, repo_root, conn=conn, url=url, refspec=f":{ref}",
         failure=f"could not delete {ref} from the run host at {url}",
     )
+
+
+def cleanup_run_refs(task, *, config, store, shell, warn) -> list[str]:
+    """Delete this task's scratch refs from the run hosts that hold them.
+
+    Called by `mship close`. Without it the refs are a slow leak of objects
+    nothing deletes — on the operator's own machine, so a missed one costs disk
+    rather than disclosure, which is exactly why every failure here WARNS and
+    the close continues.
+
+    One delete per GIT repository: a `git_root` child shares its parent's ref
+    (spec ac7). Issued from the repo's MAIN CHECKOUT rather than a task worktree,
+    which is about to be torn down. A repo with no mapped run host is silently
+    skipped — a task that never ran remotely must not warn on every close.
+    """
+    from mship.core.run_host import RunHostError, resolve_run_host
+
+    deleted: list[str] = []
+    seen: set[str] = set()
+    repos = getattr(config, "repos", {})
+    for repo in sorted(getattr(task, "affected_repos", None) or []):
+        repo_config = repos.get(repo)
+        if repo_config is None:
+            continue
+        git_repo = repo_config.git_root or repo
+        if git_repo in seen:
+            continue
+        seen.add(git_repo)
+        root_config = repos.get(git_repo)
+        if root_config is None:
+            continue
+        try:
+            conn = resolve_run_host(None, repo=root_config, config=config, store=store)
+        except RunHostError:
+            continue
+        try:
+            delete_run_ref(
+                shell, Path(root_config.path), conn=conn,
+                repo=git_repo, task=task.slug,
+            )
+        except (RunTransferError, RunRefNameError) as exc:
+            warn(f"could not delete {git_repo}'s run ref from the run host: {exc}")
+            continue
+        deleted.append(git_repo)
+    return deleted
