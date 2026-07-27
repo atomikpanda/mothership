@@ -33,7 +33,11 @@ RUN_REF_PREFIX = "refs/mship/run/"
 # run through a shell, and `core/remote_setup.py` derives a filename from the
 # same values. `.` and `..` are excluded outright so no traversal segment can
 # exist.
-_SEGMENT_RE = re.compile(r"^(?!\.{1,2}$)[A-Za-z0-9._-]+$")
+#
+# Anchored `\Z`, not `$`: Python's `$` also matches BEFORE a trailing newline,
+# so `$` accepts `api\n` — and a trailing newline TERMINATES a shell command,
+# which is the one character this charset exists to keep out.
+_SEGMENT_RE = re.compile(r"\A(?!\.{1,2}\Z)[A-Za-z0-9._-]+\Z")
 
 
 class RunRefNameError(ValueError):

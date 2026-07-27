@@ -19,10 +19,17 @@ def test_ref_is_outside_refs_heads():
     assert not run_ref("t1", "api").startswith("refs/heads/")
 
 
-@pytest.mark.parametrize("bad", ["..", ".", "a/b", "", "with space", "semi;colon", "dollar$"])
+@pytest.mark.parametrize("bad", [
+    "..", ".", "a/b", "", "with space", "semi;colon", "dollar$", "api\n",
+])
 def test_traversal_and_shell_metachars_are_refused(bad):
     """The ref reaches `git push` / `git reset --hard` through a shell and names
-    a file on disk, so anything outside the segment charset is refused up front."""
+    a file on disk, so anything outside the segment charset is refused up front.
+
+    `api\\n` is in the list because Python's `$` also matches BEFORE a trailing
+    newline, so an anchor written `$` accepts one — and a trailing newline
+    terminates a shell command. Harmless while nothing follows the ref on those
+    command lines; Task 8 onward appends flags after it."""
     with pytest.raises(RunRefNameError):
         run_ref(bad, "api")
     with pytest.raises(RunRefNameError):
@@ -42,6 +49,11 @@ def test_is_run_ref_accepts_exactly_two_segments():
     "refs/mship/run/../../heads/main",
     "HEAD",
     "",
+    "refs/mship/run/t1/api\n",
 ])
 def test_is_run_ref_refuses_everything_else(bad):
+    """The trailing-newline case is the scope control's own business, not git's.
+    Real receive-pack does refuse `refs/mship/run/t1/api\\n` ("refusing to update
+    funny ref"), so nothing was ever written — but this check advertises itself
+    as the last line of defence, and being saved by git downstream is not that."""
     assert not is_run_ref(bad)

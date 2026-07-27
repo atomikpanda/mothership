@@ -81,6 +81,31 @@ def test_unparseable_bodies_raise_rather_than_being_guessed_at(body):
         ref_commands(body)
 
 
+def test_a_ref_name_with_a_trailing_newline_is_out_of_scope():
+    """The command git genuinely reads as a newline-suffixed ref: the NUL that
+    starts the capabilities comes AFTER the newline, so the packet-level chomp
+    never reaches it. Fed exactly this, real receive-pack answers
+    `ng refs/mship/run/t1/api\\n funny refname` and creates nothing (verified) —
+    but that is GIT's validation saving the run host. This check advertises
+    itself as the one that decides, so it has to refuse the name itself."""
+    command = f"{ZERO} {SHA} refs/mship/run/t1/api\n".encode() + b"\x00report-status"
+    assert ref_commands(_body(command)) == ["refs/mship/run/t1/api\n"]
+    with pytest.raises(RefScopeError):
+        check_ref_scope(_body(command))
+
+
+def test_an_object_id_with_a_trailing_newline_is_not_an_object_id():
+    """Python's `$` also matches BEFORE a trailing newline, so an oid pattern
+    anchored with `$` reads `<40 hex>\\n` as a whole, valid oid and hands the
+    command on as in-scope. git's reader does not: it wants a space immediately
+    after the 40th hex character and dies otherwise (`protocol error: expected
+    old/new/ref, got ...` — verified). Refuse it where the parse IS the security
+    boundary rather than count on git to."""
+    command = f"{ZERO} {SHA}\n refs/mship/run/t1/api".encode()
+    with pytest.raises(PktLineError):
+        ref_commands(_body(command))
+
+
 def test_the_whole_remainder_of_a_command_is_the_ref_name():
     """git takes the ref name as everything after the two oids up to a NUL —
     spaces included: fed this command, real receive-pack answers

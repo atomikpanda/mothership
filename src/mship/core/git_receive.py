@@ -45,8 +45,11 @@ RESULT_CONTENT_TYPE = "application/x-git-receive-pack-result"
 
 # An object id as receive-pack's own `parse_oid_hex` accepts it: hex, either
 # hash algorithm's width, case-insensitive. Anything else is not a ref command
-# and is refused rather than read past.
-_OID_RE = re.compile(rb"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
+# and is refused rather than read past. `\Z`, not `$`: Python's `$` also matches
+# BEFORE a trailing newline, and `<40 hex>\n` is not an oid to git — its reader
+# wants a space immediately after the last hex character and dies otherwise
+# ("protocol error: expected old/new/ref", verified).
+_OID_RE = re.compile(rb"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\Z")
 
 # A `shallow <oid>` line, which a push from a shallow clone sends BEFORE its
 # commands. Reachable rather than theoretical: `git worktree add` from a
