@@ -4,12 +4,15 @@ Everything else about this feature is tested where it lives. What lands here is
 the class of claim that is about what the REST of the tree does not do, and so
 can only be checked by looking at all of it.
 
-ac14, the one guarded now: the run scratch namespace is throwaway, so no code
-path may branch from it, merge it, or open a pull request from it. That is a
+ac14 has three clauses. Two are guarded below already: no code path may
+branch from, merge, or open a pull request from the run namespace (the scan
+this file started with), and the namespace exists only on run hosts (ac3,
+pinned at the unit level in `tests/core/test_run_transfer.py::
+test_the_push_goes_to_the_run_host_not_origin` — nothing here duplicates
+it). Task 15 adds the third: `finish` still requires real commits. That is a
 property of every file in `src/mship`, not of `core/run_ref.py` — whose
 docstring cites this file, which is why it exists ahead of the task that fills
-it out. Task 15 extends it with the rest of the feature's cross-cutting
-invariants.
+it out.
 
 The scan is deliberately blunt: it reads source text, not behaviour, so it
 cannot prove a run ref is never merged — only that nothing in the tree spells
@@ -118,3 +121,42 @@ def test_the_detector_fires_on_the_shapes_it_claims_to_catch(sample):
     regexes the scan runs."""
     assert _NAMES_RUN_NAMESPACE.search(sample)
     assert any(p.search(sample) for p in _FORMS_HISTORY.values()), sample
+
+
+# The gate that decides whether `finish` pushes a branch and opens a PR for a
+# repo at all: `PRManager.count_commits_ahead` (`core/pr.py`) counts real
+# commits between base and the task's own branch, purely from that branch's
+# own git history; `finish` (`cli/worktree.py`) is the CLI command that acts
+# on the result. Neither module can start treating scratch state as a
+# substitute for a real commit if neither one can even name the scratch
+# namespace — that is the property this pins.
+FINISH_GATE_MODULES = (
+    "core/pr.py",
+    "cli/worktree.py",
+)
+
+
+def test_the_real_commits_gate_and_finish_do_not_know_the_run_namespace_exists():
+    """ac14's third clause: `finish` still requires real commits.
+
+    The scratch ref never reaches the operator's own branch (ac2, pinned in
+    `test_run_transfer.py::test_local_state_is_identical_before_and_after` and
+    `::test_the_commit_is_on_no_branch`), so today `count_commits_ahead` has
+    nothing to see. The risk this guards is a FUTURE one: `core/pr.py` or
+    `cli/worktree.py`'s `finish` growing a special case keyed on `is_run_ref`
+    or `RUN_REF_PREFIX` — e.g. "a run ref exists for this repo, treat it as
+    ready to finish" — which would let scratch state stand in for a commit
+    the operator never made. If neither module can name the namespace at all,
+    neither can special-case it.
+    """
+    for module in FINISH_GATE_MODULES:
+        path = SRC / module
+        assert path.exists(), f"{module} moved; update FINISH_GATE_MODULES"
+        source = path.read_text(encoding="utf-8")
+        assert not _NAMES_RUN_NAMESPACE.search(source), (
+            f"{module} now names the run scratch namespace. `finish` must "
+            f"keep deciding whether to push/open a PR from real branch "
+            f"history alone (spec ac14) — if {module} genuinely needs to "
+            f"consult run refs, that is a spec-level decision, not a silent "
+            f"one."
+        )
