@@ -180,25 +180,59 @@ def _run_checked(shell: ShellLike, command: str, cwd: Path, *, repo_name: str) -
 
 
 def materialize_worktree(
-    shell: ShellLike, repo_path: Path, worktree_path: Path, branch: str, *, repo_name: str
+    shell: ShellLike,
+    repo_path: Path,
+    worktree_path: Path,
+    branch: str,
+    *,
+    repo_name: str,
+    run_ref: str | None = None,
 ) -> None:
-    """Ensure `worktree_path` is a git worktree of `repo_path` sitting on
-    `branch`, fresh from origin.
+    """Ensure `worktree_path` is a git worktree of `repo_path` holding the
+    revision this run is supposed to execute.
 
-    `branch` already exists on origin (created by `mship spawn`/dispatch on
-    the operator's machine and pushed there) — this NEVER creates a new
-    branch here, it only fetches + tracks the existing one. Idempotent: a
-    worktree that already exists is fetched + hard-reset to the new tip
-    rather than re-added (the remote branch may have moved since the last
-    remote run); a first-time run creates it with `git worktree add -B`,
-    which is safe to re-run even if a stale local branch ref of the same
-    name exists (e.g. left over from a removed worktree).
+    Two modes.
 
-    Every git command runs through `_run_checked` (`repo_name` is only used
-    for that error message): a failure here (e.g. the branch not yet pushed,
-    a dirty/locked worktree) raises `MaterializeError` instead of silently
-    letting execution continue against a missing/stale checkout.
+    `run_ref` GIVEN (spec remote-exact-copy): the operator pushed a commit
+    synthesized from their working tree straight to this host, so the revision is
+    ALREADY in this repository. Materialization is a reset to a LOCAL ref with NO
+    FETCH — origin is not consulted at all, which is also why the caller skips
+    the base-freshness probe for these repos. HEAD is left DETACHED on purpose:
+    the scratch commit is throwaway state, and pointing a branch at it would
+    dress it up as history. `git clean -fd` removes leftovers from a previous
+    run so the result is an exact copy; it does not remove gitignored files, so
+    dependencies derived by `task setup` survive between runs.
+
+    `run_ref` NONE (unchanged from before): `branch` already exists on origin
+    (created by `mship spawn`/dispatch on the operator's machine and pushed
+    there) — this NEVER creates a new branch here, it only fetches + tracks the
+    existing one. Idempotent: an existing worktree is fetched + hard-reset to the
+    new tip; a first-time run creates it with `git worktree add -B`, which is
+    safe to re-run even if a stale local branch ref of the same name exists.
+
+    Every git command runs through `_run_checked` (`repo_name` is only used for
+    that error message): a failure here raises `MaterializeError` instead of
+    silently letting execution continue against a missing/stale checkout.
     """
+    if run_ref is not None:
+        if (worktree_path / ".git").exists():
+            # `checkout --detach` with NO ref keeps the current commit, so it
+            # succeeds even when the worktree is dirty from the last run
+            # (verified); the reset then moves detached HEAD without ever moving
+            # a branch.
+            _run_checked(shell, "git checkout --detach", worktree_path, repo_name=repo_name)
+            _run_checked(shell, f"git reset --hard {run_ref}", worktree_path, repo_name=repo_name)
+            _run_checked(shell, "git clean -fd", worktree_path, repo_name=repo_name)
+        else:
+            worktree_path.parent.mkdir(parents=True, exist_ok=True)
+            _run_checked(
+                shell,
+                f"git worktree add --detach {worktree_path} {run_ref}",
+                repo_path,
+                repo_name=repo_name,
+            )
+        return
+
     _run_checked(shell, f"git fetch origin {branch}", repo_path, repo_name=repo_name)
     if (worktree_path / ".git").exists():
         _run_checked(shell, f"git fetch origin {branch}", worktree_path, repo_name=repo_name)

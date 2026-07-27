@@ -766,3 +766,198 @@ def test_exec_body_defaults_run_ref_repos_to_empty(tmp_path, monkeypatch):
     r = TestClient(_app(tmp_path)).post("/exec/run", json={"task": "t1", "repos": ["api"]})
     assert r.status_code == 200
     assert any("fetch origin feat/t1" in cmd for cmd, _cwd in fake.run_calls)
+
+
+# --- exact copy: materializing from a pushed scratch ref ---------------------
+
+import os
+import subprocess
+
+from mship.util.shell import ShellRunner
+
+_REAL_GIT_ENV = {
+    **os.environ,
+    "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+    "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+}
+
+
+def _real_git(*args: str, cwd: Path) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True,
+        env=_REAL_GIT_ENV,
+    ).stdout.strip()
+
+
+def _host_repo_with_run_ref(tmp_path: Path) -> tuple[Path, str, str]:
+    """A run-host-shaped repo: a branch tip, plus a scratch ref holding
+    DIFFERENT content, as a push from the operator would have left it.
+
+    Deliberately has NO `origin` remote. That is load-bearing, not incidental:
+    every git command on the run-ref path runs through `_run_checked`, so if a
+    fetch is ever reintroduced there it cannot fail silently — it raises
+    `MaterializeError` and every test using this fixture goes red.
+    """
+    repo = tmp_path / "hostrepo"
+    repo.mkdir()
+    _real_git("init", "-q", "-b", "main", ".", cwd=repo)
+    (repo / "a.txt").write_text("branch tip\n")
+    _real_git("add", "-A", cwd=repo)
+    _real_git("commit", "-qm", "tip", cwd=repo)
+    _real_git("branch", "-f", "feat/t1", "HEAD", cwd=repo)
+    tip = _real_git("rev-parse", "HEAD", cwd=repo)
+
+    (repo / "a.txt").write_text("what the operator is editing\n")
+    (repo / "untracked.txt").write_text("scratch\n")
+    _real_git("add", "-A", cwd=repo)
+    _real_git("commit", "-qm", "synthesized", cwd=repo)
+    scratch = _real_git("rev-parse", "HEAD", cwd=repo)
+    _real_git("update-ref", "refs/mship/run/t1/api", scratch, cwd=repo)
+
+    _real_git("reset", "-q", "--hard", tip, cwd=repo)
+    assert _real_git("remote", cwd=repo) == ""      # nothing to fetch from
+    return repo, tip, scratch
+
+
+def test_materialize_from_a_run_ref_creates_a_detached_worktree(tmp_path):
+    """ac10, first materialization: no fetch at all, and HEAD is left detached
+    because the scratch commit is throwaway state, not a branch."""
+    repo, _tip, scratch = _host_repo_with_run_ref(tmp_path)
+    worktree = tmp_path / "wt" / "api"
+
+    remote_exec.materialize_worktree(
+        ShellRunner(), repo, worktree, "feat/t1",
+        repo_name="api", run_ref="refs/mship/run/t1/api",
+    )
+
+    assert _real_git("rev-parse", "HEAD", cwd=worktree) == scratch
+    assert (worktree / "a.txt").read_text() == "what the operator is editing\n"
+    assert (worktree / "untracked.txt").exists()
+
+
+def test_the_run_ref_worktree_is_detached_not_a_branch(tmp_path):
+    """ac14 on the run host: a branch pointing at a synthesized commit would
+    dress throwaway state up as history."""
+    repo, _tip, _scratch = _host_repo_with_run_ref(tmp_path)
+    worktree = tmp_path / "wt" / "api"
+    remote_exec.materialize_worktree(
+        ShellRunner(), repo, worktree, "feat/t1",
+        repo_name="api", run_ref="refs/mship/run/t1/api",
+    )
+    head_ref = subprocess.run(
+        ["git", "symbolic-ref", "--quiet", "HEAD"], cwd=worktree,
+        capture_output=True, text=True, env=_REAL_GIT_ENV,
+    )
+    assert head_ref.returncode != 0          # detached: no symbolic HEAD
+
+
+def test_a_stale_worktree_lands_on_the_pushed_tree_not_the_branch_tip(tmp_path):
+    """ac10, the decisive case: an existing worktree sitting on the branch, with
+    leftovers from a previous run, ends up at the pushed ref's tree."""
+    repo, tip, scratch = _host_repo_with_run_ref(tmp_path)
+    worktree = tmp_path / "wt" / "api"
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "worktree", "add", "-q", str(worktree), "feat/t1"],
+        cwd=repo, capture_output=True, check=True, env=_REAL_GIT_ENV,
+    )
+    (worktree / "a.txt").write_text("stale local edit\n")
+    (worktree / "leftover.txt").write_text("from the last run\n")
+
+    remote_exec.materialize_worktree(
+        ShellRunner(), repo, worktree, "feat/t1",
+        repo_name="api", run_ref="refs/mship/run/t1/api",
+    )
+
+    assert _real_git("rev-parse", "HEAD", cwd=worktree) == scratch != tip
+    assert (worktree / "a.txt").read_text() == "what the operator is editing\n"
+    assert not (worktree / "leftover.txt").exists()   # cleaned, so the copy is exact
+    assert _real_git("status", "--porcelain", cwd=worktree) == ""
+
+
+def test_re_materializing_never_moves_the_task_branch(tmp_path):
+    """ac14 on the re-materialize path, which is where it is easiest to lose:
+    checking the BRANCH out before the reset would drag `feat/t1` — a real ref,
+    shared with the run host — onto the synthesized commit."""
+    repo, tip, scratch = _host_repo_with_run_ref(tmp_path)
+    worktree = tmp_path / "wt" / "api"
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "worktree", "add", "-q", str(worktree), "feat/t1"],
+        cwd=repo, capture_output=True, check=True, env=_REAL_GIT_ENV,
+    )
+
+    remote_exec.materialize_worktree(
+        ShellRunner(), repo, worktree, "feat/t1",
+        repo_name="api", run_ref="refs/mship/run/t1/api",
+    )
+
+    assert _real_git("rev-parse", "feat/t1", cwd=repo) == tip != scratch
+    assert _real_git("rev-parse", "HEAD", cwd=repo) == tip
+    head_ref = subprocess.run(
+        ["git", "symbolic-ref", "--quiet", "HEAD"], cwd=worktree,
+        capture_output=True, text=True, env=_REAL_GIT_ENV,
+    )
+    assert head_ref.returncode != 0          # detached, so nothing to drag
+
+
+def test_materializing_leaves_the_run_hosts_own_checkout_alone(tmp_path):
+    """The run host's repository is not a scratch pad: materializing must not
+    move its HEAD, its branches, or the scratch ref, nor dirty its work tree."""
+    repo, tip, scratch = _host_repo_with_run_ref(tmp_path)
+    branches_before = _real_git("branch", "--format=%(refname) %(objectname)", cwd=repo)
+
+    remote_exec.materialize_worktree(
+        ShellRunner(), repo, tmp_path / "wt" / "api", "feat/t1",
+        repo_name="api", run_ref="refs/mship/run/t1/api",
+    )
+
+    assert _real_git("rev-parse", "HEAD", cwd=repo) == tip
+    assert _real_git("rev-parse", "feat/t1", cwd=repo) == tip
+    assert _real_git("rev-parse", "refs/mship/run/t1/api", cwd=repo) == scratch
+    assert _real_git("status", "--porcelain", cwd=repo) == ""
+    # ac14: no branch was created pointing at the synthesized commit.
+    assert _real_git("branch", "--format=%(refname) %(objectname)", cwd=repo) == branches_before
+
+
+def test_materializing_from_a_run_ref_issues_no_fetch(tmp_path):
+    """ac10 as a command-level invariant: origin is not consulted, at all."""
+    fake = _FakeShellRunner()
+    remote_exec.materialize_worktree(
+        fake, tmp_path / "api", tmp_path / "wt" / "api", "feat/t1",
+        repo_name="api", run_ref="refs/mship/run/t1/api",
+    )
+    assert not any("fetch" in cmd for cmd, _cwd in fake.run_calls)
+    assert not any("origin" in cmd for cmd, _cwd in fake.run_calls)
+
+
+def test_re_materializing_an_existing_worktree_issues_no_fetch(tmp_path):
+    """The same invariant on the OTHER branch of the function — the path a
+    second remote run takes, where a worktree is already there."""
+    fake = _FakeShellRunner()
+    worktree = tmp_path / "wt" / "api"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: elsewhere\n")
+
+    remote_exec.materialize_worktree(
+        fake, tmp_path / "api", worktree, "feat/t1",
+        repo_name="api", run_ref="refs/mship/run/t1/api",
+    )
+
+    assert fake.run_calls                            # it did do something
+    assert not any("fetch" in cmd for cmd, _cwd in fake.run_calls)
+    assert not any("origin" in cmd for cmd, _cwd in fake.run_calls)
+
+
+def test_without_a_run_ref_the_branch_path_is_unchanged(tmp_path):
+    """ac9: nothing about today's behaviour moves."""
+    fake = _FakeShellRunner()
+    worktree = tmp_path / "wt" / "api"
+    remote_exec.materialize_worktree(
+        fake, tmp_path / "api", worktree, "feat/t1", repo_name="api",
+    )
+    assert [cmd for cmd, _cwd in fake.run_calls] == [
+        "git fetch origin feat/t1",
+        f"git worktree add -B feat/t1 {worktree} origin/feat/t1",
+    ]
