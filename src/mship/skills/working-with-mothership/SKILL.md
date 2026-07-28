@@ -190,7 +190,8 @@ Two mship-native primitives for handing work to subagents. Use them instead of h
 - **`mship dispatch`** — turns an instruction source (ad-hoc `-i/--instruction`, or a plan anchor via `--plan-task`) into a subagent dispatch. Default output is a **closed stub** (record path, resolved model, mode, worktree, emit line) — launch the subagent with cwd set to the worktree and let its first command be `mship dispatch --emit`, which derives the full self-contained prompt (instruction/plan slice, task slug, journal, per-repo bases, live spec AC text) in the subagent's own context. Pass `--full` only when you genuinely want the inline prompt in YOUR context (then pipe it as the `prompt` field of a Claude Code `Task` dispatch or the analogous mechanism elsewhere).
 
   ```bash
-  mship dispatch --task my-task -i "implement the parser changes"   # prints a ready-to-use prompt to stdout
+  mship dispatch --task my-task -i "implement the parser changes"          # prints the closed stub; the subagent runs `mship dispatch --emit`
+  mship dispatch --task my-task -i "implement the parser changes" --full   # inline prompt in YOUR context (explicit escape)
   ```
 
   **Modes (`--mode`).** By default (`implementer`) the prompt scopes the subagent to the single task, tells it to ask clarifying questions, self-review, and report back — and explicitly **not** to open a PR, because the orchestrator owns integration and runs `mship finish` after review. This is what you want for per-task execution under an orchestrator. Pass `--mode standalone` for the alternative contract where the subagent finishes the work and opens its own PR (use it only for genuinely standalone, one-off dispatches).
