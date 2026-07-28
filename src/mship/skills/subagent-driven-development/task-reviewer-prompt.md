@@ -1,16 +1,26 @@
 # Task Reviewer Prompt Template
 
 Use this template when dispatching a task reviewer subagent. The reviewer
-reads the task's diff once and returns two verdicts: spec compliance and
-code quality.
+reads the task's review package once and returns two verdicts: spec
+compliance and code quality.
 
 **Purpose:** Verify one task's implementation matches its requirements (nothing
 more, nothing less) and is well-built (clean, tested, maintainable)
 
+**Before dispatching:** run `mship dispatch --mode reviewer --task <slug>`.
+It builds the review package (one raw diff file per affected repo +
+`manifest.json`, diffed from the prior dispatch's recorded base to live HEAD)
+under the dispatch record's `review/` directory and prints a closed stub.
+The stub's `worktree` is the reviewer's cwd and the stub's `model` fills
+`[MODEL]` below. The reviewer's own `mship dispatch --emit` prints the
+diff-file paths, the manifest path, the live acceptance criteria, the
+skipped-repo disclosure (if any), and the read-only dual-verdict contract —
+this template adds only what the CLI cannot know.
+
 ```
 Subagent (general-purpose):
   description: "Review Task N (spec + quality)"
-  model: [MODEL — REQUIRED: choose per SKILL.md Model Selection; an omitted
+  model: [MODEL — from the reviewer stub's resolved model line; an omitted
          model silently inherits the session's most expensive one]
   prompt: |
     You are reviewing one task's implementation: first whether it matches its
@@ -18,9 +28,22 @@ Subagent (general-purpose):
     not a merge review — a broad whole-branch review happens separately after
     all tasks are complete.
 
+    Work from: [worktree path from the reviewer stub]
+
+    Your FIRST command, from that directory:
+
+        mship dispatch --emit
+
+    It prints your review package: the diff-file paths and manifest on disk,
+    the acceptance criteria to check (live from the spec store), and your
+    read-only dual-verdict contract. That contract governs; everything below
+    supplements it.
+
     ## What Was Requested
 
-    Read the task brief: [BRIEF_FILE]
+    Read the plan task's anchored block — and only that block — in
+    [PLAN_FILE] (anchor `<!-- mship:task id=N -->`). It is the requirements,
+    with the exact values to use verbatim. Do not read the rest of the plan.
 
     Global constraints from the spec/design that bind this task:
     [GLOBAL_CONSTRAINTS]
@@ -31,20 +54,17 @@ Subagent (general-purpose):
 
     ## Diff Under Review
 
-    **Base:** [BASE_SHA]
-    **Head:** [HEAD_SHA]
-    **Diff file:** [DIFF_FILE]
-
-    Read the diff file once — it contains the commit list, a stat summary,
-    and the full diff with surrounding context, and it is your view of the
-    change. The diff's context lines ARE the changed files: do not Read a
-    changed file separately unless a hunk you must judge is cut off
-    mid-function — and say so in your report. Do not re-run git commands.
-    If the diff file is missing, fetch the diff yourself:
-    `git diff --stat [BASE_SHA]..[HEAD_SHA]` and `git diff [BASE_SHA]..[HEAD_SHA]`.
-    Do not crawl the broader codebase. Inspect code outside the diff only
-    to evaluate a concrete risk you can name — one focused check per named
-    risk, and name both the risk and what you checked in your report.
+    Read each diff file the emit listed once — together they are your view
+    of the change: the full per-repo diffs with surrounding context. The
+    diffs' context lines ARE the changed files: do not Read a changed file
+    separately unless a hunk you must judge is cut off mid-function — and
+    say so in your report. Do not re-run git commands. If the emit lists
+    repos under "Affected repos NOT included in this package", honor that
+    disclosure: your verdict cannot cover them — mark any acceptance
+    criterion touching them as can't-tell and state the omission in your
+    report. Do not crawl the broader codebase. Inspect code outside the diff
+    only to evaluate a concrete risk you can name — one focused check per
+    named risk, and name both the risk and what you checked in your report.
     Cross-cutting changes are legitimate named risks: if the diff changes
     lock ordering, a function or API contract, or shared mutable state,
     checking the call sites is the right method.
@@ -63,7 +83,7 @@ Subagent (general-purpose):
 
     ## Tests
 
-    The implementer already ran the tests and reported results with TDD
+    The implementer already ran `mship test` and reported results with TDD
     evidence for exactly this code. Do not re-run the suite to confirm their
     report. Run a test only when reading the code raises a specific doubt
     that no existing run answers — and then a focused test, never a
@@ -77,7 +97,8 @@ Subagent (general-purpose):
 
     ## Part 1: Spec Compliance
 
-    Compare the diff against What Was Requested:
+    Compare the diff against What Was Requested and the emitted acceptance
+    criteria:
 
     - **Missing:** requirements they skipped, missed, or claimed without
       implementing
@@ -87,8 +108,8 @@ Subagent (general-purpose):
       solved
 
     If a requirement cannot be verified from this diff alone (it lives in
-    unchanged code or spans tasks), report it as a ⚠️ item instead of
-    broadening your search.
+    unchanged code, spans tasks, or touches a skipped repo), report it as a
+    ⚠️ item instead of broadening your search.
 
     ## Part 2: Code Quality
 
@@ -143,8 +164,8 @@ Subagent (general-purpose):
     - ✅ Spec compliant | ❌ Issues found: [what's missing/extra/misunderstood,
       with file:line references]
     - ⚠️ Cannot verify from diff: [requirements you could not verify from the
-      diff alone, and what the controller should check — report alongside the
-      ✅/❌ verdict for everything you could verify]
+      diff alone — including skipped repos — and what the controller should
+      check; report alongside the ✅/❌ verdict for everything you could verify]
 
     ### Strengths
     [What's well done? Be specific.]
@@ -166,20 +187,21 @@ Subagent (general-purpose):
 ```
 
 **Placeholders:**
-- `[MODEL]` — REQUIRED: reviewer model per SKILL.md Model Selection
-- `[BRIEF_FILE]` — REQUIRED: the task brief file (`scripts/task-brief PLAN N`
-  prints the path; same file the implementer worked from)
+- `[MODEL]` — the resolved model line from the reviewer stub (`mship dispatch
+  --mode reviewer` resolves it: `--model` > `dispatch_models` config >
+  per-mode default)
+- `[PLAN_FILE]` — the plan file path; the reviewer reads only Task N's
+  anchored block (the same text the implementer's emit delivered)
 - `[GLOBAL_CONSTRAINTS]` — the binding requirements copied verbatim from
   the plan's Global Constraints section or the spec: exact values, formats,
   and stated relationships between components (not process rules — those
   are already in this template)
 - `[REPORT_FILE]` — REQUIRED: the file the implementer wrote its detailed
-  report to
-- `[BASE_SHA]` — commit before this task
-- `[HEAD_SHA]` — current commit
-- `[DIFF_FILE]` — REQUIRED: the path the controller wrote the review
-  package to (`scripts/review-package PLAN_FILE BASE HEAD` prints the unique
-  path it wrote; the package never enters the controller's context)
+  report to (next to the dispatch record)
+
+The diff files, manifest, base/head SHAs, acceptance criteria, and
+skipped-repo disclosure all come from the reviewer's own
+`mship dispatch --emit` — never paste diff content into the prompt.
 
 **Reviewer returns:** Spec Compliance verdict (✅/❌/⚠️), Strengths, Issues
 (Critical/Important/Minor), Task quality verdict

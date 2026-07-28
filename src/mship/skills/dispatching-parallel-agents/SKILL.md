@@ -158,6 +158,13 @@ Agent 3 → Fix tool-approval-race-conditions.test.ts
 
 **Integration:** All fixes independent, no conflicts, full suite green
 
+## Mothership Workspace
+
+Before dispatching parallel agents in a mothership workspace, confirm there is
+an anchored task (`mship status`) and set each agent's working directory to its
+task worktree (`.resolved_task.worktrees.<repo>`). Agents that run on `main`
+will be blocked by the pre-commit hook.
+
 ## Verification
 
 After agents return:

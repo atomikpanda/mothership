@@ -7,19 +7,32 @@ new breakage. It is not a fresh review — the full review already happened.
 **Purpose:** Verify each finding from the previous review was addressed, and
 that the fix itself broke nothing.
 
+**Before dispatching:** re-run `mship dispatch --mode reviewer --task <slug>`.
+The rebuilt package diffs to the new HEAD, so it contains the whole task's
+diff including the fix commits; this template scopes the re-reviewer to the
+fix range `[FIX_BASE_SHA]..[HEAD_SHA]` within it. The stub's `worktree` is
+the re-reviewer's cwd and the stub's `model` fills `[MODEL]`.
+
 ```
 Subagent (general-purpose):
   description: "Re-review Task N fix round R"
-  model: [MODEL — REQUIRED: choose per SKILL.md Model Selection; an omitted
-         model silently inherits the session's most expensive one]
+  model: [MODEL — from the reviewer stub's resolved model line; scoped
+         re-reviews of small fix diffs take a cheap-to-mid tier — say so
+         with --model on the dispatch if the configured default is higher]
   prompt: |
     You are re-reviewing one task's fix round. A previous review produced
     findings; an implementer has attempted to fix them. Your job is to
     verdict each finding and inspect the fix diff — nothing else.
 
-    ## The Task
+    Work from: [worktree path from the reviewer stub]
 
-    Read the task brief: [BRIEF_FILE]
+    Your FIRST command, from that directory:
+
+        mship dispatch --emit
+
+    It prints the review package: diff-file paths and manifest on disk,
+    acceptance criteria, and the read-only contract. The package spans the
+    whole task; YOUR scope is narrower — the fix range below.
 
     ## The Findings Under Verification
 
@@ -32,13 +45,13 @@ Subagent (general-purpose):
 
     **Fix base:** [FIX_BASE_SHA] (the head the previous review saw)
     **Head:** [HEAD_SHA]
-    **Diff file:** [DIFF_FILE]
 
-    Read the diff file once — it contains the fix commits, a stat summary,
-    and the fix diff with surrounding context. Do not re-run git commands.
-    If the diff file is missing, fetch the diff yourself:
-    `git diff --stat [FIX_BASE_SHA]..[HEAD_SHA]` and
-    `git diff [FIX_BASE_SHA]..[HEAD_SHA]`.
+    The package's diff files run from the task base to head; the fix commits
+    are the hunks after [FIX_BASE_SHA]. Identify the fix range from the
+    commit list (`git log --oneline [FIX_BASE_SHA]..[HEAD_SHA]`, read-only)
+    and judge only those changes. Do not re-run other git commands. Honor
+    any "Affected repos NOT included in this package" disclosure the emit
+    printed: findings in those repos are can't-tell, stated in your report.
 
     Your review is read-only on this checkout. Do not mutate the working
     tree, the index, HEAD, or branch state in any way.
@@ -54,13 +67,13 @@ Subagent (general-purpose):
 
     ## Tests
 
-    The implementer re-ran the tests covering the amended code and appended
-    the results to the report file. Treat the report as unverified claims:
-    confirm the fix report names the covering tests and shows their output,
-    and verify the claims against the diff. Do not re-run the suite to
-    confirm their report. Run a test only when reading the code raises a
-    specific doubt that no existing run answers — and then a focused test,
-    never a package-wide suite.
+    The implementer re-ran the tests covering the amended code (`mship
+    test` before committing) and appended the results to the report file.
+    Treat the report as unverified claims: confirm the fix report names the
+    covering tests and shows their output, and verify the claims against
+    the diff. Do not re-run the suite to confirm their report. Run a test
+    only when reading the code raises a specific doubt that no existing run
+    answers — and then a focused test, never a package-wide suite.
 
     ## Output Format
 
@@ -83,7 +96,7 @@ Subagent (general-purpose):
     ### Out-of-Scope Observations
 
     Issues you noticed entirely outside the fix diff. Non-blocking; the
-    controller ledgers these for the final review. "None" if none.
+    controller journals these for the final review. "None" if none.
 
     ### Verdict
 
@@ -92,15 +105,17 @@ Subagent (general-purpose):
 ```
 
 **Placeholders:**
-- `[MODEL]` — REQUIRED: reviewer model per SKILL.md Model Selection; scoped
+- `[MODEL]` — the resolved model line from the reviewer stub; scoped
   re-reviews of small fix diffs take a cheap-to-mid tier
-- `[BRIEF_FILE]` — the task brief file (same file the implementer worked from)
 - `[FINDINGS]` — the Critical/Important findings and spec gaps from the
   previous review, copied verbatim, one per bullet
 - `[REPORT_FILE]` — the implementer's report file (fix reports appended)
 - `[FIX_BASE_SHA]` — the head the previous review saw
 - `[HEAD_SHA]` — current commit
-- `[DIFF_FILE]` — the path `scripts/review-package PLAN_FILE FIX_BASE HEAD` printed
+
+The diff files and manifest come from the re-run of
+`mship dispatch --mode reviewer` via the re-reviewer's own
+`mship dispatch --emit` — never paste diff content into the prompt.
 
 **Re-reviewer returns:** per-finding verdicts (ADDRESSED / NOT ADDRESSED),
 new breakage in the fix diff, out-of-scope observations, and a round verdict.
