@@ -87,7 +87,7 @@ is theirs.
 
 ### Option 1: Merge Locally
 
-*In a mothership workspace, Option 1 is not the normal path — Option 2 (`mship finish` → PR → merge auto-advance) is. When your human partner explicitly chooses local-merge-no-PR, use the sanctioned sequence: run `mship finish --push-only` FIRST (stamps the task finished, pushes the branches, opens no PR), then do the merge below, then plain `mship close` — its gates pass (finished + merged/pushed), it records the task as "no PRs (pushed via --push-only)", and it advances the lifecycle exactly like a merged-PR close (bound spec → `implemented`, WorkItem → `done`). Never route a successful merge through `mship close --abandon`: that records delivered work as cancelled. `--abandon` is strictly for genuinely discarding work.*
+*In a mothership workspace, Option 1 is not the normal path — Option 2 (`mship finish` → PR → merge auto-advance) is. When your human partner explicitly chooses local-merge-no-PR, use the sanctioned sequence, IN THIS ORDER: run `mship finish --push-only` FIRST (stamps the task finished, pushes the branches, opens no PR), then do the merge below, then plain `mship close` LAST — close verifies the merge actually reached the base and only then advances the lifecycle exactly like a merged-PR close (bound spec → `implemented`, WorkItem → `done`), recording the task as "no PRs (pushed via --push-only)". Closing before the merge still works (the pushed branch is recoverable) but advances nothing — close notes "branch pushed but not merged; lifecycle not advanced". Never route a successful merge through `mship close --abandon`: that records delivered work as cancelled. `--abandon` is strictly for genuinely discarding work.*
 
 ```bash
 # Get main repo root for CWD safety

@@ -2501,7 +2501,7 @@ def test_close_still_succeeds_when_the_run_host_is_unreachable(configured_git_ap
 
 # --- push-only completion advances the lifecycle (finish --push-only → close) ---
 
-def _seed_pushonly_lifecycle(ws, *, spec_status="dispatched", finished=True):
+def _seed_pushonly_lifecycle(ws, *, spec_status="dispatched", finished=True, worktrees=None):
     """Task with a dispatched spec + a spec-less WorkItem; return (sm, spec_store, wi_store, wi_id)."""
     from datetime import datetime, timezone
     from mship.core.spec_draft import new_spec
@@ -2521,7 +2521,8 @@ def _seed_pushonly_lifecycle(ws, *, spec_status="dispatched", finished=True):
     sm = StateManager(ws / ".mothership")
     task = Task(
         slug="t", description="d", phase="review", created_at=now,
-        affected_repos=[], branch="feat/t",
+        affected_repos=list(worktrees or {}), branch="feat/t",
+        worktrees=worktrees or {},
         spec_id=spec.id, work_item_id=wi.id,
         finished_at=now if finished else None,
     )
@@ -2557,3 +2558,74 @@ def test_close_abandon_does_not_advance_lifecycle(configured_git_app):
     assert spec_store.find_by_id(spec_id).status == "dispatched"
     assert wi_store.get(wi_id).phase_override is None
     assert "t" not in sm.load().tasks
+
+
+def _pushonly_mock_run(merged: bool):
+    """Recovery-loop shell mock: 3 commits past base, pushed to origin, merged or not."""
+    from mship.util.shell import ShellResult
+
+    def mock_run(cmd, cwd, env=None):
+        if "git rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="3\n", stderr="")
+        if "git merge-base --is-ancestor" in cmd:
+            return ShellResult(returncode=0 if merged else 1, stdout="", stderr="")
+        if "git ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/feat/t\n", stderr="")
+        if "git rev-parse" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    return mock_run
+
+
+def test_close_push_only_without_local_merge_does_not_advance(configured_git_app):
+    """Greptile P1: finish --push-only then close BEFORE merging — the branch is
+    merely pushed (recoverable), so close proceeds, but completion is NOT earned:
+    spec stays dispatched, WorkItem unadvanced, and a stderr note says why."""
+    from unittest.mock import MagicMock
+    from mship.cli import container
+    from mship.util.shell import ShellRunner, ShellResult
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+
+    sm, spec_store, wi_store, wi_id, spec_id = _seed_pushonly_lifecycle(
+        configured_git_app, worktrees={"shared": str(configured_git_app / "shared")})
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = _pushonly_mock_run(merged=False)
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        r = CliRunner().invoke(_app, ["close", "--yes", "--task", "t"])
+        assert r.exit_code == 0, r.output
+        assert "not merged into" in r.output           # the stderr note
+        assert "lifecycle not advanced" in r.output
+        assert spec_store.find_by_id(spec_id).status == "dispatched"
+        assert wi_store.get(wi_id).phase_override is None
+        assert "t" not in sm.load().tasks              # close itself proceeded
+    finally:
+        container.shell.reset_override()
+
+
+def test_close_push_only_after_local_merge_advances(configured_git_app):
+    """The sanctioned order (merge locally, then close): delivery is verified via
+    merged-into-base, so the lifecycle advances."""
+    from unittest.mock import MagicMock
+    from mship.cli import container
+    from mship.util.shell import ShellRunner, ShellResult
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+
+    sm, spec_store, wi_store, wi_id, spec_id = _seed_pushonly_lifecycle(
+        configured_git_app, worktrees={"shared": str(configured_git_app / "shared")})
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = _pushonly_mock_run(merged=True)
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        r = CliRunner().invoke(_app, ["close", "--yes", "--task", "t"])
+        assert r.exit_code == 0, r.output
+        assert spec_store.find_by_id(spec_id).status == "implemented"
+        assert wi_store.get(wi_id).phase_override == "done"
+        assert "t" not in sm.load().tasks
+    finally:
+        container.shell.reset_override()

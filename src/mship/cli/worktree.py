@@ -651,6 +651,12 @@ def register(app: typer.Typer, get_container):
 
         # --- Recovery-path check ---
         had_unrecoverable = False
+        # Repos whose branch is recoverable (pushed / has a PR) but NOT verified
+        # delivered (commits past base, not merged into it). Feeds the push-only
+        # completion flag below: delivery must be EARNED by observation, never
+        # inferred from a pushed branch. Under --force the loop doesn't run, so
+        # this stays empty — but the flag below is False under --force anyway.
+        undelivered_repos: list[tuple[str, str]] = []  # (repo, base)
         if not force:
             from mship.core.base_resolver import resolve_base
             unrecoverable: list[tuple[str, int, str, str]] = []  # (repo, commits, branch, base)
@@ -670,12 +676,16 @@ def register(app: typer.Typer, get_container):
                     eff_base = "main"  # fall back to main when no base_branch configured
                 commits = pr_mgr.count_commits_ahead(wt_path, eff_base, task.branch)
                 if commits == 0:
-                    continue
+                    continue  # nothing past base — delivered by definition
                 # Recovery checks
                 merged = pr_mgr.check_merged_into_base(wt_path, task.branch, eff_base)
                 has_pr = repo_name in task.pr_urls
                 pushed = pr_mgr.check_pushed_to_origin(wt_path, task.branch)
                 if merged or has_pr or pushed:
+                    # Recoverable — but merely pushed/PR'd is NOT delivered:
+                    # only merged-into-base proves the work reached the base.
+                    if not merged:
+                        undelivered_repos.append((repo_name, eff_base))
                     continue
                 unrecoverable.append((repo_name, commits, task.branch, eff_base))
 
@@ -865,16 +875,30 @@ def register(app: typer.Typer, get_container):
         # existed, so merged_count can never say "delivered" — this flag asserts
         # completion explicitly rather than faking a merge count (the honest
         # parameter shape the lifecycle helpers take). Matches the
-        # "no PRs (pushed via --push-only)" log route above. --abandon never
-        # qualifies (discarded work stays unadvanced), and neither does --force:
-        # a forced close skips the recovery-path check, so we can't know the
-        # work actually reached anywhere.
+        # "no PRs (pushed via --push-only)" log route above. Completion is
+        # EARNED, not inferred: every affected repo with a live worktree must be
+        # verified delivered by the recovery-path loop above (commits_ahead == 0
+        # or merged into base) — a merely-pushed branch is recoverable but NOT
+        # delivered, so closing before the local merge advances nothing.
+        # --abandon never qualifies (discarded work stays unadvanced), and
+        # neither does --force: a forced close skips the recovery-path check,
+        # so we can't know the work actually reached anywhere.
         completed_without_prs = (
             not task.pr_urls
             and task.finished_at is not None
             and not abandon
             and not force
+            and not undelivered_repos
         )
+        if (
+            not task.pr_urls and task.finished_at is not None
+            and not abandon and not force and undelivered_repos
+        ):
+            _bases = ", ".join(sorted({b for _, b in undelivered_repos}))
+            output.warning(
+                f"closed without local merge — branch pushed but not merged "
+                f"into {_bases}; lifecycle not advanced"
+            )
 
         # Auto-advance bound spec dispatched→implemented when all PRs merged
         # (or on a push-only completion).
