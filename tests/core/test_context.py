@@ -609,3 +609,20 @@ def test_for_values_and_kind_values_are_the_documented_closed_set():
     --kind is spec/code-quality."""
     assert set(FOR_VALUES) == {"claude-code", "codex", "human", "reviewer"}
     assert set(KIND_VALUES) == {"spec", "code-quality"}
+
+
+def test_context_includes_dispatch_models(tmp_path: Path):
+    log_mgr = LogManager(tmp_path / "logs")
+    out = _build(WorkspaceState(), _config(tmp_path), log_mgr, tmp_path)
+    assert "dispatch_models" in out
+    assert out["dispatch_models"]["implementer"] == "inherit"
+    assert out["dispatch_models"]["reviewer"] == "sonnet"
+
+
+def test_context_dispatch_models_reflects_configured_override(tmp_path: Path):
+    log_mgr = LogManager(tmp_path / "logs")
+    cfg = _config(tmp_path)
+    cfg.dispatch_models = {"reviewer": "haiku"}
+    out = _build(WorkspaceState(), cfg, log_mgr, tmp_path)
+    assert out["dispatch_models"]["reviewer"] == "haiku"
+    assert out["dispatch_models"]["implementer"] == "inherit"
