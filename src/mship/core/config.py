@@ -370,6 +370,11 @@ class WorkspaceConfig(BaseModel):
     # which matches the bundled `brainstorming` / `writing-plans` skill
     # convention. See #113.
     spec_paths: list[str] | None = None
+    # Per-dispatch-mode model map for `mship dispatch` (spec mship-dispatch-v2).
+    # Keys: implementer | reviewer | standalone. Values are passed through
+    # verbatim (harness-specific). None = built-in defaults
+    # (core/dispatch_models.py). Precedence: --model flag > this map > builtin.
+    dispatch_models: dict[str, str] | None = None
     # When True, `mship phase dev` hard-blocks plan→dev unless a bound,
     # approved spec exists (status in approved/dispatched/implemented).
     # Default False so existing configs/tests are unaffected. See MOS-151.
