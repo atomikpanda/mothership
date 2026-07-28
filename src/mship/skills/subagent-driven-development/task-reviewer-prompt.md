@@ -70,7 +70,9 @@ Subagent (general-purpose):
     checking the call sites is the right method.
 
     Your review is read-only on this checkout. Do not mutate the working
-    tree, the index, HEAD, or branch state in any way.
+    tree, the index, HEAD, or branch state in any way. To red-verify a test
+    against pre-change code, extract the old version into a temp copy with
+    `git show <sha>:<path> > /tmp/...` — never `git stash` or `git checkout`.
 
     ## Do Not Trust the Report
 

@@ -137,7 +137,14 @@ After the spec review loop passes, ask the user to review the artifact before pr
 
 Wait for the user's response. If they request changes, make them and re-run the spec review loop. Only proceed once the user approves.
 
-**In a mothership workspace, when the user approves the spec in chat,** record their approval on their behalf (`mship spec verdict <id> <ac> approved` for each criterion, then `mship spec approve <id>`) — this is the operator's explicit instruction being executed, and writing-plans requires the spec to be `approved`, not `needs_review`.
+**In a mothership workspace, when the user approves the spec in chat,** record their approval on their behalf — this is the operator's explicit instruction being executed, and writing-plans requires the spec to be `approved`, not `needs_review`. The approve gate requires ALL criteria approved AND all questions answered, so fresh verdicts alone aren't always enough (a prior Ground Control review may have flagged a criterion or left open questions):
+
+1. Check the current review state: `mship spec review <id>` and `mship spec questions <id>`.
+2. Answer any open questions from the chat context (`mship spec answer <id> <question-id> "<answer>"`), or ask the operator.
+3. Record `mship spec verdict <id> <ac> approved` for each criterion — including any previously-flagged ones (the operator's explicit chat approval supersedes the earlier flag).
+4. Then `mship spec approve <id>`.
+
+`--bypass-gate` remains off-limits without explicit operator instruction, and the operator's Request-changes path (`mship spec request-changes`) stays untouched.
 
 **Implementation:**
 

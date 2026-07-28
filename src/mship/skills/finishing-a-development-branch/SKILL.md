@@ -87,7 +87,7 @@ is theirs.
 
 ### Option 1: Merge Locally
 
-*In a mothership workspace, Option 1 is not the normal path: a local merge never runs `mship finish`, and `mship close` REFUSES a task that hasn't been finished. Use Option 2 instead — `mship finish` opens the PR, and the merge auto-advance closes the loop. If your human partner genuinely wants to discard the mship task after a local merge, `mship close --abandon` is the exit — never as a paper-over for skipped finish.*
+*In a mothership workspace, Option 1 is not the normal path — Option 2 (`mship finish` → PR → merge auto-advance) is. When your human partner explicitly chooses local-merge-no-PR, use the sanctioned sequence: run `mship finish --push-only` FIRST (stamps the task finished, pushes the branches, opens no PR), then do the merge below, then plain `mship close` — its gates pass (finished + merged/pushed) and it records the task as "no PRs (pushed via --push-only)". Never route a successful merge through `mship close --abandon`: that records delivered work as cancelled. `--abandon` is strictly for genuinely discarding work.*
 
 ```bash
 # Get main repo root for CWD safety
@@ -202,9 +202,9 @@ and use the `GIT_DIR`/`GIT_COMMON`/`WORKTREE_PATH` values captured in
 Step 2, from before that directory change.
 
 **In a mothership workspace, `mship close` owns cleanup — no manual
-`git worktree remove`.** After a local merge (Option 1) or a confirmed
-discard, run `mship close --abandon` as described above (a task that never
-ran `mship finish` can only be closed via `--abandon`).
+`git worktree remove`.** After a local merge (Option 1, preceded by
+`mship finish --push-only` as described above), run plain `mship close`;
+after a confirmed discard, `mship close --abandon`.
 After a PR merges (Option 2), you usually run nothing at all: when
 `mship serve` is running, its watcher **auto-advances** the bound spec
 (`dispatched → implemented`) and its WorkItem (→ `done`, clearing
