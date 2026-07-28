@@ -13,12 +13,12 @@ Assume they are a skilled developer, but know almost nothing about our toolset o
 
 **Announce at start:** "I'm using the writing-plans skill to create the implementation plan."
 
-**Context:** This should be run in a dedicated worktree (created by brainstorming skill).
+**Context:** If working in an isolated worktree, it should have been created via the `using-git-worktrees` skill at execution time.
 
 **Mothership workspace:** In a mothership workspace, the input to a plan is an **approved `mship spec`** — reference its id in the plan header. `mship phase dev` may be gated on that approval (see the `working-with-mothership` skill).
 
 **Save plans to:** `<docs_dir>/plans/YYYY-MM-DD-<feature-name>.md`
-- Default `docs_dir` is `docs/plans/`; in a workspace, `docs_dir` comes from `mship context`.
+- Default `docs_dir` is `docs/`; in a workspace, `docs_dir` comes from `mship context`.
 - (User preferences for plan location override this default)
 
 ## Scope Check
@@ -35,6 +35,15 @@ Before defining tasks, map out which files will be created or modified and what 
 - In existing codebases, follow established patterns. If the codebase uses large files, don't unilaterally restructure - but if a file you're modifying has grown unwieldy, including a split in the plan is reasonable.
 
 This structure informs the task decomposition. Each task should produce self-contained changes that make sense independently.
+
+## Task Right-Sizing
+
+A task is the smallest unit that carries its own test cycle and is worth a
+fresh reviewer's gate. When drawing task boundaries: fold setup,
+configuration, scaffolding, and documentation steps into the task whose
+deliverable needs them; split only where a reviewer could meaningfully
+reject one task while approving its neighbor. Each task ends with an
+independently testable deliverable.
 
 ## Bite-Sized Task Granularity
 
@@ -60,6 +69,13 @@ This structure informs the task decomposition. Each task should produce self-con
 
 **Tech Stack:** [Key technologies/libraries]
 
+## Global Constraints
+
+[The spec's project-wide requirements — version floors, dependency limits,
+naming and copy rules, platform requirements — one line each, with exact
+values copied verbatim from the spec. Every task's requirements implicitly
+include this section.]
+
 ---
 ```
 
@@ -73,6 +89,12 @@ This structure informs the task decomposition. Each task should produce self-con
 - Create: `exact/path/to/file.py`
 - Modify: `exact/path/to/existing.py:123-145`
 - Test: `tests/exact/path/to/test.py`
+
+**Interfaces:**
+- Consumes: [what this task uses from earlier tasks — exact signatures]
+- Produces: [what later tasks rely on — exact function names, parameter
+  and return types. A task's implementer sees only their own task; this
+  block is how they learn the names and types neighboring tasks use.]
 
 - [ ] **Step 1: Write the failing test**
 
@@ -112,7 +134,7 @@ Pair the commit with a `mship journal` entry so other sessions can reconstruct p
 <!-- /mship:task -->
 ````
 
-Wrap each task in `<!-- mship:task id=N -->` … `<!-- /mship:task -->` anchors (id = the task number). A controller can then pull a single task's text with `mship dispatch --task <slug> --plan <plan-path> --plan-task <N>` instead of hand-assembling the prompt.
+Wrap each task in `<!-- mship:task id=N -->` … `<!-- /mship:task -->` anchors (id = the task number). An anchor may also declare which spec acceptance criteria the task serves via an `acs=` attribute (e.g. `<!-- mship:task id=3 acs=ac2,ac5 -->`) — `mship` uses that mapping to tie the task's evidence back to the spec. A controller then pulls a single task with `mship dispatch --task <slug> --plan-task <N>` (add `--plan <path>` only if the plan can't be auto-resolved from the task's WorkItem). By default that prints a **closed stub** to hand to the subagent — not the full prompt; the subagent derives its own instruction inside the worktree with `mship dispatch --emit`. Never hand-assemble the prompt inline.
 
 ## No Placeholders
 
@@ -123,12 +145,6 @@ Every step must contain the actual content an engineer needs. These are **plan f
 - "Similar to Task N" (repeat the code — the engineer may be reading tasks out of order)
 - Steps that describe what to do without showing how (code blocks required for code steps)
 - References to types, functions, or methods not defined in any task
-
-## Remember
-- Exact file paths always
-- Complete code in every step — if a step changes code, show the code
-- Exact commands with expected output
-- DRY, YAGNI, TDD, frequent commits
 
 ## Self-Review
 
@@ -157,7 +173,7 @@ After saving the plan, offer execution choice:
 **If Subagent-Driven chosen:**
 - **REQUIRED SUB-SKILL:** Use subagent-driven-development
 - Fresh subagent per task + two-stage review
-- Build each implementer prompt with `mship dispatch --task <slug> --plan <plan-path> --plan-task <N>` (the anchored task text becomes the instruction); subagents run `mship test` so `mship finish` has its evidence trail.
+- Build each implementer prompt with `mship dispatch --task <slug> --plan-task <N>` (hand the subagent the emitted stub; it runs `mship dispatch --emit` in the worktree to get the anchored task text as its instruction); subagents run `mship test` so `mship finish` has its evidence trail.
 
 **If Inline Execution chosen:**
 - **REQUIRED SUB-SKILL:** Use executing-plans

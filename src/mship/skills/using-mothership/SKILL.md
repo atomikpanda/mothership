@@ -41,7 +41,12 @@ mship ships its skills under `src/mship/skills/`. `mship skill list` shows what'
 
 ## Platform Adaptation
 
-Skills use Claude Code tool names. Non-CC platforms: see `references/copilot-tools.md` (Copilot CLI), `references/codex-tools.md` (Codex) for tool equivalents. Gemini CLI users get the tool mapping loaded automatically via GEMINI.md.
+Skills use Claude Code tool names. Non-CC platforms: read your harness's reference file for tool equivalents and special instructions:
+
+- Codex: `references/codex-tools.md`
+- Gemini CLI: `references/gemini-tools.md`
+- Antigravity: `references/antigravity-tools.md`
+- Pi: `references/pi-tools.md`
 
 # Using Skills
 
