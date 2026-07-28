@@ -406,12 +406,24 @@ function securityHeaders(headers = {}) {
   };
 }
 
+// Single owner of browser-origin acceptance. Loopback default: same-origin
+// plain http against the request's Host header, as upstream. Under the
+// https-proxy override the browser legitimately presents the PUBLIC_URL's
+// origin (scheme+host+port, validated https at startup) — accept exactly
+// that, by string equality. No wildcards, no suffix matching.
+function allowedOrigins(host) {
+  const origins = new Set();
+  if (host) origins.add('http://' + host);
+  if (!isLoopbackHost(HOST) && PUBLIC_URL) {
+    try { origins.add(new URL(PUBLIC_URL).origin); } catch (e) { /* validated at startup */ }
+  }
+  return origins;
+}
+
 function isAllowedWebSocketOrigin(req) {
   const origin = req.headers.origin;
   if (!origin) return true;
-  const host = req.headers.host;
-  if (!host) return false;
-  return origin === 'http://' + host;
+  return allowedOrigins(req.headers.host).has(origin);
 }
 
 // ========== HTTP Request Handler ==========
