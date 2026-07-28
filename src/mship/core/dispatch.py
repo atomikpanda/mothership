@@ -24,8 +24,38 @@ _CANONICAL_SKILL_NAMES: tuple[str, ...] = (
 )
 
 
-_TASK_OPEN_RE = re.compile(r"<!--\s*mship:task\s+id=([^\s>]+)\s*-->")
+_TASK_OPEN_RE = re.compile(r"<!--\s*mship:task\s+id=([^\s>]+)((?:\s+[a-z_]+=[^\s>]+)*)\s*-->")
 _TASK_CLOSE_RE = re.compile(r"<!--\s*/mship:task\s*-->")
+_ATTR_RE = re.compile(r"([a-z_]+)=([^\s>]+)")
+
+
+def extract_plan_task_meta(plan_text: str, task_id: str) -> tuple[str, dict]:
+    """Like extract_plan_task, but also returns parsed anchor attributes.
+
+    Attributes are optional `key=value` pairs after the id (e.g. an anchor
+    of the form mship:task id=3 acs=ac2,ac5). `acs` is split on commas into
+    a list. Unknown keys pass through as raw strings (forward-compatible).
+    """
+    opens = [m for m in _TASK_OPEN_RE.finditer(plan_text) if m.group(1) == task_id]
+    if not opens:
+        raise ValueError(
+            f"no task with id {task_id!r} in plan "
+            f"(expected an anchor mship:task id={task_id})"
+        )
+    if len(opens) > 1:
+        raise ValueError(f"duplicate task id {task_id!r} in plan ({len(opens)} anchors)")
+    open_m = opens[0]
+    close_m = _TASK_CLOSE_RE.search(plan_text, open_m.end())
+    next_open = _TASK_OPEN_RE.search(plan_text, open_m.end())
+    if close_m is None or (next_open is not None and next_open.start() < close_m.start()):
+        raise ValueError(
+            f"unterminated task block for id {task_id!r} "
+            f"(missing the closing /mship:task anchor)"
+        )
+    meta: dict = {}
+    for k, v in _ATTR_RE.findall(open_m.group(2) or ""):
+        meta[k] = v.split(",") if k == "acs" else v
+    return plan_text[open_m.end():close_m.start()].strip(), meta
 
 
 def extract_plan_task(plan_text: str, task_id: str) -> str:
@@ -38,25 +68,8 @@ def extract_plan_task(plan_text: str, task_id: str) -> str:
     Raises ValueError when the id is missing, appears more than once, or the
     block is unterminated (no closing anchor before the next open anchor / EOF).
     """
-    opens = [m for m in _TASK_OPEN_RE.finditer(plan_text) if m.group(1) == task_id]
-    if not opens:
-        raise ValueError(
-            f"no task with id {task_id!r} in plan "
-            f"(expected an anchor `<!-- mship:task id={task_id} -->`)"
-        )
-    if len(opens) > 1:
-        raise ValueError(
-            f"duplicate task id {task_id!r} in plan ({len(opens)} anchors)"
-        )
-    open_m = opens[0]
-    close_m = _TASK_CLOSE_RE.search(plan_text, open_m.end())
-    next_open = _TASK_OPEN_RE.search(plan_text, open_m.end())
-    if close_m is None or (next_open is not None and next_open.start() < close_m.start()):
-        raise ValueError(
-            f"unterminated task block for id {task_id!r} "
-            f"(missing closing `<!-- /mship:task -->`)"
-        )
-    return plan_text[open_m.end():close_m.start()].strip()
+    text, _ = extract_plan_task_meta(plan_text, task_id)
+    return text
 
 
 @dataclass(frozen=True)
