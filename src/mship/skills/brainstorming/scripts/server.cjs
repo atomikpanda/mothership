@@ -124,6 +124,12 @@ function isLoopbackHost(h) {
   const host = String(h);
   return host === 'localhost' || host === '::1' || /^127\./.test(host);
 }
+const ALLOW_NON_LOOPBACK = isTruthyEnv(process.env.BRAINSTORM_ALLOW_NON_LOOPBACK);
+// The override is two-part: allowing a non-loopback bind ALSO requires an
+// https public base URL (the operator's TLS front) that the keyed access URL
+// is built from — otherwise the key would cross cleartext on the very first
+// page load, before any browser-side guard can run.
+const PUBLIC_URL = (process.env.BRAINSTORM_PUBLIC_URL || '').trim().replace(/\/+$/, '');
 
 // Per-session secret key. The companion is reachable by any local browser tab
 // and, when bound to a non-loopback host, by any host that can route to it.
@@ -304,7 +310,12 @@ function urlHostForHttp(host) {
   return h.includes(':') ? '[' + h + ']' : h;
 }
 
-function companionUrl() {
+// Single owner of the keyed access URL. Loopback binds use the plain local
+// http URL (loopback traffic never leaves the machine); a non-loopback bind
+// publishes ONLY through the operator's https front (BRAINSTORM_PUBLIC_URL) —
+// never the raw host:port — so the key rides TLS even on the initial load.
+function buildAccessUrl() {
+  if (!isLoopbackHost(HOST)) return PUBLIC_URL + '/?key=' + TOKEN;
   return 'http://' + urlHostForHttp(URL_HOST) + ':' + PORT + '/?key=' + TOKEN;
 }
 
@@ -556,7 +567,7 @@ function maybeOpenBrowser() {
   if (!process.env.BRAINSTORM_OPEN) return; // opt-in: only after the user approves the companion
   if (HOST !== '127.0.0.1' && HOST !== 'localhost') return;
   if (clients.size > 0) return; // the user already opened it
-  const url = companionUrl(); // must carry the key or the gate 403s it
+  const url = buildAccessUrl(); // must carry the key or the gate 403s it
   const cp = require('child_process');
   // Operator-provided launcher: run as given (this env var is trusted operator input).
   if (process.env.BRAINSTORM_OPEN_CMD) {
@@ -597,11 +608,13 @@ const debounceTimers = new Map();
 // ========== Server Startup ==========
 
 function startServer() {
-  if (!isLoopbackHost(HOST) && !isTruthyEnv(process.env.BRAINSTORM_ALLOW_NON_LOOPBACK)) {
+  if (!isLoopbackHost(HOST) && !(ALLOW_NON_LOOPBACK && /^https:\/\//.test(PUBLIC_URL))) {
     console.error(
       'Refusing to bind ' + HOST + ': the session key would travel over cleartext http/ws. ' +
       'Bind loopback (the default) and tunnel to it, or terminate TLS in front of the ' +
-      'companion and set BRAINSTORM_ALLOW_NON_LOOPBACK=1.'
+      'companion and set BOTH BRAINSTORM_ALLOW_NON_LOOPBACK=1 AND ' +
+      'BRAINSTORM_PUBLIC_URL=https://<your-tls-front> — the keyed access URL is built ' +
+      'from that https base (missing or non-https refuses to start).'
     );
     process.exit(1);
   }
@@ -711,7 +724,7 @@ function startServer() {
     }
     const info = JSON.stringify({
       type: 'server-started', port: Number(PORT), host: HOST,
-      url_host: URL_HOST, url: companionUrl(),
+      url_host: URL_HOST, url: buildAccessUrl(),
       screen_dir: CONTENT_DIR, state_dir: STATE_DIR, idle_timeout_ms: IDLE_TIMEOUT_MS
     });
     console.log(info);
