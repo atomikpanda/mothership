@@ -79,7 +79,10 @@ def compute_finish_audit_scope(task, config, graph, pr_mgr) -> "frozenset[str]":
         if repo_cfg is None:
             continue
         base = repo_cfg.base_branch or "main"
-        if pr_mgr.count_commits_ahead(wt_path, base, task.branch) > 0:
+        # None = comparison failed → unknown. Fail closed: include the repo in
+        # the audit scope (audit inspects more, never silently less).
+        n = pr_mgr.count_commits_ahead(wt_path, base, task.branch)
+        if n is None or n > 0:
             repos_with_work.add(repo_name)
 
     in_scope: set[str] = set(repos_with_work)

@@ -98,7 +98,11 @@ is theirs.
 TASK_BASE=$(mship status | jq -r '.resolved_task.base_override // .resolved_task.base_branch // "main"')
 BRANCH=$(mship status | jq -r .resolved_task.branch)
 mship status | jq -r '.resolved_task.worktrees | to_entries[] | "\(.key)\t\(.value)"' | while IFS=$'\t' read -r repo wt; do
-  base=$(python3 -c "import yaml; c=yaml.safe_load(open('mothership.yaml')); print(((c.get('repos') or {}).get('$repo') or {}).get('base_branch') or '$TASK_BASE')")
+  # Values ride argv — never interpolated into the python source.
+  base=$(python3 -c 'import sys, yaml
+c = yaml.safe_load(open("mothership.yaml")) or {}
+repo, fallback = sys.argv[1], sys.argv[2]
+print(((c.get("repos") or {}).get(repo) or {}).get("base_branch") or fallback)' "$repo" "$TASK_BASE")
   main=$(git -C "$(git -C "$wt" rev-parse --git-common-dir)/.." rev-parse --show-toplevel)
   git -C "$main" checkout "$base" && git -C "$main" pull && git -C "$main" merge "$BRANCH"
 done

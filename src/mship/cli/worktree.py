@@ -661,7 +661,8 @@ def register(app: typer.Typer, get_container):
         undelivered_repos: list[tuple[str, str]] = []  # (repo, reason)
         if not force:
             from mship.core.base_resolver import resolve_base
-            unrecoverable: list[tuple[str, int, str, str]] = []  # (repo, commits, branch, base)
+            # (repo, commits, branch, base); commits is "?" when the comparison failed
+            unrecoverable: list[tuple[str, int | str, str, str]] = []
             for repo_name in task.affected_repos:
                 wt = task.worktrees.get(repo_name)
                 if wt is None or not Path(wt).exists():
@@ -679,9 +680,13 @@ def register(app: typer.Typer, get_container):
                 if eff_base is None:
                     eff_base = "main"  # fall back to main when no base_branch configured
                 try:
+                    # None = the comparison itself failed (count_commits_ahead
+                    # can no longer masquerade as 0): the repo must NOT read as
+                    # "nothing past base" — it falls through to the merge/push/
+                    # PR evidence checks like any repo with real work.
                     commits = pr_mgr.count_commits_ahead(wt_path, eff_base, task.branch)
                     if commits == 0:
-                        continue  # nothing past base — delivered by definition
+                        continue  # VERIFIED nothing past base — delivered
                     # Recovery checks
                     merged = pr_mgr.check_merged_into_base(wt_path, task.branch, eff_base)
                     has_pr = repo_name in task.pr_urls
@@ -695,7 +700,18 @@ def register(app: typer.Typer, get_container):
                     # Recoverable — but merely pushed/PR'd is NOT delivered:
                     # only merged-into-base proves the work reached the base.
                     if not merged:
-                        undelivered_repos.append((repo_name, f"not merged into {eff_base}"))
+                        undelivered_repos.append((
+                            repo_name,
+                            "comparison failed" if commits is None
+                            else f"not merged into {eff_base}",
+                        ))
+                    continue
+                if commits is None:
+                    # Comparison failed AND no merge/push/PR evidence: we can't
+                    # prove there is work, but we can't prove there isn't —
+                    # refuse to delete rather than skip the repo as clean.
+                    undelivered_repos.append((repo_name, "comparison failed"))
+                    unrecoverable.append((repo_name, "?", task.branch, eff_base))
                     continue
                 unrecoverable.append((repo_name, commits, task.branch, eff_base))
 
@@ -1514,6 +1530,9 @@ def register(app: typer.Typer, get_container):
                 if not pr_mgr.verify_base_exists(repo_path, eff_base):
                     missing.append((repo_name, eff_base))
                     continue
+                # None (comparison failed) is deliberately NOT "empty": the repo
+                # stays in the push/PR path, where a real failure surfaces loudly
+                # instead of the repo being silently skipped as untouched.
                 if pr_mgr.count_commits_ahead(repo_path, eff_base, task.branch) == 0:
                     empty_branches.append((repo_name, task.branch, eff_base))
 
@@ -1708,7 +1727,9 @@ def register(app: typer.Typer, get_container):
                 # count_commits_ahead(base=branch, branch=branch) counts commits
                 # on the local branch past origin's copy of that branch.
                 n = pr_mgr.count_commits_ahead(wt_path, task.branch, task.branch)
-                if n > 0:
+                # None (comparison failed) makes no claim — this is an advisory
+                # warning, and unknown is not evidence of unpushed commits.
+                if n is not None and n > 0:
                     stale_repos.append((repo_name, n))
             if stale_repos:
                 output.warning("Task has unpushed commits since last finish:")

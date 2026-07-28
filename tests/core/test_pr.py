@@ -86,10 +86,18 @@ def test_count_commits_ahead_zero_for_empty_output(mock_shell: MagicMock):
     assert mgr.count_commits_ahead(Path("/tmp/r"), "main", "feat/x") == 0
 
 
-def test_count_commits_ahead_zero_on_git_failure(mock_shell: MagicMock):
+def test_count_commits_ahead_none_on_git_failure(mock_shell: MagicMock):
+    """A failed comparison must be distinguishable from a verified-zero count —
+    callers treat 0 as proof of delivery/cleanliness."""
     mock_shell.run.return_value = ShellResult(returncode=128, stdout="", stderr="bad ref")
     mgr = PRManager(mock_shell)
-    assert mgr.count_commits_ahead(Path("/tmp/r"), "main", "feat/x") == 0
+    assert mgr.count_commits_ahead(Path("/tmp/r"), "main", "feat/x") is None
+
+
+def test_count_commits_ahead_none_on_unparsable_output(mock_shell: MagicMock):
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="garbage\n", stderr="")
+    mgr = PRManager(mock_shell)
+    assert mgr.count_commits_ahead(Path("/tmp/r"), "main", "feat/x") is None
 
 
 def test_update_pr_body(mock_shell: MagicMock):
