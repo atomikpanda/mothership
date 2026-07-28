@@ -867,6 +867,39 @@ def test_merge_auto_advances_spec_and_workitem_then_tears_down(tmp_path):
     assert any(c["kind"] == "event" and "merged" in c["text"] for c in msgs.append_calls)
 
 
+def test_merge_auto_close_removes_sdd_records(tmp_path):
+    from mship.core.sdd_store import SddStore, DispatchRecord
+    from datetime import datetime, timezone
+
+    spec, wi, wstore = _seed_dispatched_spec_and_workitem(tmp_path)
+
+    store = SddStore(tmp_path / ".mothership")
+    store.write(DispatchRecord(
+        task_slug="task-m", work_item_id=wi.id, mode="implementer", model="m",
+        repo="repo1", worktree=str(tmp_path / "wt"), base_branch="main",
+        base_sha=None, head_sha=None, plan_path=None, plan_task_id=None,
+        instruction="x", created_at=datetime.now(timezone.utc),
+    ))
+
+    msgs = FakeMessageStore()
+    url = "https://github.com/org/repo1/pull/1"
+    task = SimpleNamespace(
+        slug="task-m", pr_urls={"repo1": url}, work_item_id=wi.id,
+        spec_id=spec.id, worktrees={"repo1": str(tmp_path / "wt")},
+    )
+    tasks = {"task-m": task}
+    state = FakeStateManager(tasks)
+    fwm = FakeWorktreeManager(tasks)
+
+    watcher = PrWatcher(
+        msgs, wstore, state, lambda u: "merged", now_fn,
+        worktree_manager=fwm, workspace_root=tmp_path,
+    )
+    watcher.check_once()
+
+    assert not list((tmp_path / ".mothership" / "sdd").rglob("*/task-m"))
+
+
 def test_merge_auto_close_noop_without_worktree_manager(tmp_path):
     spec, wi, wstore = _seed_dispatched_spec_and_workitem(tmp_path)
     from mship.core.spec_store import SpecStore

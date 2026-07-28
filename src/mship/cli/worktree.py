@@ -973,6 +973,14 @@ def register(app: typer.Typer, get_container):
             ReconcileCache(container.state_dir()).remove_ignore(task_slug)
         except Exception:
             pass
+
+        # sdd dispatch records are per-task scratch — remove with the worktree
+        # (spec mship-dispatch-v2 ac6). Best-effort: cleanup never blocks close.
+        try:
+            from mship.core.sdd_store import SddStore
+            SddStore(container.state_dir()).remove_task(task_slug)
+        except Exception:
+            pass
         output.success(f"{log_msg.capitalize()}: {task_slug}")
 
         # Post-op diagnostic: if any affected repo's main-checkout path is

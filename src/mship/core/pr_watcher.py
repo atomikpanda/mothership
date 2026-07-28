@@ -287,6 +287,15 @@ class PrWatcher:
                     log.exception("pr_watcher: teardown-skip note failed (task=%s)", slug)
             else:
                 log.exception("pr_watcher: merge teardown failed (task=%s)", slug)
+            return
+
+        # sdd dispatch records are per-task scratch — remove with the worktree
+        # (spec mship-dispatch-v2 ac6). Best-effort: cleanup never blocks close.
+        try:
+            from mship.core.sdd_store import SddStore
+            SddStore(self.workspace_root / ".mothership").remove_task(slug)
+        except Exception:
+            log.exception("pr_watcher: sdd cleanup failed (task=%s)", slug)
 
     def _post_teardown_skipped_note(
         self, slug: str, task: Any, url: str, exc: Any,
