@@ -187,10 +187,11 @@ non-event message on the thread; serve does no drafting itself.
 
 Two mship-native primitives for handing work to subagents. Use them instead of hand-rolling task context:
 
-- **`mship dispatch`** — wraps your instruction (`-i/--instruction`, **required**) in a self-contained Markdown prompt for a subagent. Output includes your instruction plus the task slug, worktree path, phase, recent journal entries, affected repos, and per-repo bases. Pipe stdout directly as the `prompt` field of a Claude Code `Task` tool dispatch (or analogous mechanism in Codex / other agent platforms).
+- **`mship dispatch`** — turns an instruction source (ad-hoc `-i/--instruction`, or a plan anchor via `--plan-task`) into a subagent dispatch. Default output is a **closed stub** (record path, resolved model, mode, worktree, emit line) — launch the subagent with cwd set to the worktree and let its first command be `mship dispatch --emit`, which derives the full self-contained prompt (instruction/plan slice, task slug, journal, per-repo bases, live spec AC text) in the subagent's own context. Pass `--full` only when you genuinely want the inline prompt in YOUR context (then pipe it as the `prompt` field of a Claude Code `Task` dispatch or the analogous mechanism elsewhere).
 
   ```bash
-  mship dispatch --task my-task -i "implement the parser changes"   # prints a ready-to-use prompt to stdout
+  mship dispatch --task my-task -i "implement the parser changes"          # prints the closed stub; the subagent runs `mship dispatch --emit`
+  mship dispatch --task my-task -i "implement the parser changes" --full   # inline prompt in YOUR context (explicit escape)
   ```
 
   **Modes (`--mode`).** By default (`implementer`) the prompt scopes the subagent to the single task, tells it to ask clarifying questions, self-review, and report back — and explicitly **not** to open a PR, because the orchestrator owns integration and runs `mship finish` after review. This is what you want for per-task execution under an orchestrator. Pass `--mode standalone` for the alternative contract where the subagent finishes the work and opens its own PR (use it only for genuinely standalone, one-off dispatches).
@@ -199,17 +200,17 @@ Two mship-native primitives for handing work to subagents. Use them instead of h
   `dispatch_models:` in mothership.yaml > built-in per-mode default) and stamps
   it in the output — the worker never chooses its own model.
 
-  **Context isolation (SDD flow):** `mship dispatch --plan-task N` persists a
-  metadata-only record under `.mothership/sdd/` and prints a **closed stub**
+  **Context isolation (SDD flow):** every dispatch (plan-task or ad-hoc `-i`)
+  persists a metadata-only record under `.mothership/sdd/` and prints a **closed stub**
   (record path, model, mode, emit line). Do NOT expand it: launch the subagent
   with cwd set to the worktree and let its first command be
   `mship dispatch --emit`, which derives the full prompt (plan slice + live
   spec AC text) in the subagent's own context, printing drift warnings to
   stderr. Reviewer dispatches (`--mode reviewer`) build a review package
   (raw per-repo diff files + manifest) the reviewer reads from disk; the
-  reviewer's `--emit` prints diff paths, never diff content. `--full` prints
-  the old inline prompt when you genuinely need it in-context; `--stub` opts
-  an `--instruction` dispatch into the stub. Plan task anchors may declare
+  reviewer's `--emit` prints diff paths, never diff content. `--full` is the
+  ONLY inline escape — it prints the old full prompt when you genuinely need
+  it in your own context (`--stub` is a deprecated no-op). Plan task anchors may declare
   `acs=ac1,ac2` to map a task to the spec acceptance criteria it serves.
 
 - **`mship context`** — emits structured JSON for programmatic consumers. Use when feeding state into a non-Claude-Code LLM, logging for audit, or scripting decisions. `jq`-friendly.

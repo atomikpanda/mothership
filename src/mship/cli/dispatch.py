@@ -107,13 +107,14 @@ def register(app: typer.Typer, get_container):
         ),
         full: bool = typer.Option(
             False, "--full",
-            help="Print the full subagent prompt inline (legacy). Default for "
-                 "--plan-task is a closed stub; the subagent emits its own "
-                 "prompt via --emit.",
+            help="Print the full subagent prompt inline instead of the closed "
+                 "stub (the default for every dispatch). The subagent normally "
+                 "derives its own prompt via --emit.",
         ),
         stub: bool = typer.Option(
-            False, "--stub",
-            help="Print the closed stub even for --instruction dispatches.",
+            False, "--stub", hidden=True,
+            help="Deprecated no-op: the closed stub is now the default for "
+                 "every dispatch.",
         ),
         emit: bool = typer.Option(
             False, "--emit",
@@ -322,6 +323,24 @@ def register(app: typer.Typer, get_container):
                 "created_at": datetime.now(timezone.utc),
             })
             record_path = store.write(rec)
+            if full:
+                # Honor the universal inline escape: print the same reviewer
+                # prompt the subagent's --emit would derive (paths + live ACs
+                # + contract — never diff content).
+                try:
+                    _instr, ac_ids, warnings = resolve_instruction_and_acs(
+                        rec, Path(container.config_path()).parent
+                    )
+                except (OSError, ValueError) as e:
+                    output.error(f"cannot resolve acceptance criteria: {e}")
+                    raise typer.Exit(code=1)
+                spec = _load_bound_spec(container, task_obj, rec)
+                acceptance, ac_warnings = resolve_acceptance(ac_ids, spec)
+                warnings.extend(ac_warnings)
+                for w in warnings:
+                    print(f"warning: {w}", file=sys.stderr)
+                print(build_reviewer_prompt(rec, pkg, acceptance=acceptance or []))
+                return
             print(build_stub(rec, record_path=str(record_path)), end="")
             return
 
@@ -420,8 +439,16 @@ def register(app: typer.Typer, get_container):
         )
         record_path = SddStore(Path(container.state_dir())).write(rec)
 
-        want_stub = (plan_task is not None and not full) or stub
-        if want_stub:
+        if stub:
+            print(
+                "warning: --stub is deprecated and a no-op — the closed stub "
+                "is the default for every dispatch (use --full for the inline prompt)",
+                file=sys.stderr,
+            )
+        # The closed stub is the universal default: every byte of prompt
+        # content reaches only the subagent (via --emit). --full is the sole
+        # inline escape hatch.
+        if not full:
             print(build_stub(rec, record_path=str(record_path)), end="")
             return
 

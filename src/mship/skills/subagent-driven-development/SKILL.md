@@ -251,7 +251,7 @@ dispatch record; this copy is for your bookkeeping.)
   first command is `mship dispatch --emit`, which derives its full prompt
   (plan-task slice + live spec AC text + worktree, phase, journal, bases) in
   its own context — the task text never transits yours. For an ad-hoc
-  instruction not in the plan, use `mship dispatch --stub -i "<text>"` (or
+  instruction not in the plan, use `mship dispatch -i "<text>"` (or
   `-i -` for stdin); exactly one instruction source is allowed.
 - The default mode is **implementer** — it scopes the subagent to the single
   task and tells it to report back, NOT open a PR. That's what you want:
@@ -376,7 +376,7 @@ scoped re-review. Five rounds maximum per task:
 **Rounds 1-3 — resume the original implementer.** Send it the open findings
 verbatim. Its context is intact: it knows the task, the code, and its own
 choices. If your harness cannot send another message to a live subagent,
-dispatch a fresh implementer via `mship dispatch --stub -i -` with the
+dispatch a fresh implementer via `mship dispatch -i -` with the
 findings, the report-file path, and the covering-test names as the
 instruction — the report file is the persistent memory either way.
 
