@@ -48,7 +48,7 @@ Delta vocabulary (the spec's four kinds):
 
 ### finishing-a-development-branch
 
-- `finishing-a-development-branch/SKILL.md` — kind 2: PR path replaced by `mship finish --require-tests --body-file` (push+PR+state stamp, evidence-gated) with post-finish iteration via `mship commit`; Step 1 verification runs `mship test` (not a bare runner) so finish's evidence gate has something to read; merge path corrected (intent-scan + PR #443 review) — Option 1 is not the normal workspace path (Option 2 + merge auto-advance is); the sanctioned local-merge-no-PR sequence is `mship finish --push-only` → merge → plain `mship close` (gates pass, records "no PRs (pushed via --push-only)"), never `close --abandon` for delivered work; discard path routes through `mship close --abandon`. Non-workspace flows keep upstream's forge tooling.
+- `finishing-a-development-branch/SKILL.md` — kind 2: PR path replaced by `mship finish --require-tests --body-file` (push+PR+state stamp, evidence-gated) with post-finish iteration via `mship commit`; Step 1 verification runs `mship test` (not a bare runner) so finish's evidence gate has something to read; merge path corrected (intent-scan + PR #443 review) — Option 1 is not the normal workspace path (Option 2 + merge auto-advance is); the sanctioned local-merge-no-PR sequence is `mship finish --push-only` → merge → plain `mship close` (gates pass, records "no PRs (pushed via --push-only)", advances spec/WorkItem like a merged close), never `close --abandon` for delivered work; discard path routes through `mship close --abandon`. Non-workspace flows keep upstream's forge tooling.
 
 ### requesting-code-review
 

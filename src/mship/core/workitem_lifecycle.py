@@ -21,11 +21,17 @@ def advance_workitem_on_close(
     state,
     merged_count: int,
     closed_count: int,
+    completed_without_prs: bool = False,
 ) -> None:
     """Advance a WorkItem's completion state when its LAST live task closes after a clean merge.
 
-    Two cases, both gated on this being the WorkItem's last live task + a clean
-    full merge:
+    `completed_without_prs` mirrors advance_spec_on_close: the `finish
+    --push-only` → local merge → `close` route never has PRs, so the caller
+    asserts completion explicitly rather than faking a merge count. Only passed
+    for a finished, pushed, non-abandoned, non-forced close.
+
+    Two cases, both gated on this being the WorkItem's last live task + a
+    delivered close (clean full merge, or completed_without_prs):
 
     - **Spec-bound WorkItem:** advance its approved/dispatched spec to
       `implemented`; compute_phase then projects a terminal spec status to
@@ -50,7 +56,7 @@ def advance_workitem_on_close(
     wid = getattr(task, "work_item_id", None)
     if not wid:
         return
-    if merged_count == 0 or closed_count > 0:
+    if not completed_without_prs and (merged_count == 0 or closed_count > 0):
         return
 
     from mship.core.workitem_store import WorkItemStore

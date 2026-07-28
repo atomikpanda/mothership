@@ -860,7 +860,24 @@ def register(app: typer.Typer, get_container):
                 output.print("Cancelled")
                 raise typer.Exit(code=0)
 
-        # Auto-advance bound spec dispatched→implemented when all PRs merged.
+        # Push-only completion: `finish --push-only` → local merge → `close`.
+        # The task was finished and its branches pushed, but no PRs ever
+        # existed, so merged_count can never say "delivered" — this flag asserts
+        # completion explicitly rather than faking a merge count (the honest
+        # parameter shape the lifecycle helpers take). Matches the
+        # "no PRs (pushed via --push-only)" log route above. --abandon never
+        # qualifies (discarded work stays unadvanced), and neither does --force:
+        # a forced close skips the recovery-path check, so we can't know the
+        # work actually reached anywhere.
+        completed_without_prs = (
+            not task.pr_urls
+            and task.finished_at is not None
+            and not abandon
+            and not force
+        )
+
+        # Auto-advance bound spec dispatched→implemented when all PRs merged
+        # (or on a push-only completion).
         try:
             from mship.core.spec_store import SPECS_DIRNAME
             from mship.core.spec_lifecycle import advance_spec_on_close
@@ -869,6 +886,7 @@ def register(app: typer.Typer, get_container):
                 specs_dir=Path(container.config_path()).parent / SPECS_DIRNAME,
                 merged_count=merged_count,
                 closed_count=closed_count,
+                completed_without_prs=completed_without_prs,
             )
         except Exception:
             pass
@@ -890,6 +908,7 @@ def register(app: typer.Typer, get_container):
                 state=state,
                 merged_count=merged_count,
                 closed_count=closed_count,
+                completed_without_prs=completed_without_prs,
             )
         except Exception:
             pass

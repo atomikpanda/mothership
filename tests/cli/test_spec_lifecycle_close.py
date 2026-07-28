@@ -276,3 +276,35 @@ class TestSpecArchiveCommand:
         data = json.loads(result.output)
         assert data["id"] == spec_id
         assert data["status"] == "archived"
+
+
+class TestPushOnlyCompletion:
+    def test_completed_without_prs_advances_dispatched_spec(self, tmp_path):
+        """finish --push-only → close: no PRs, but the caller asserts completion —
+        the dispatched spec still advances to implemented."""
+        specs_dir = tmp_path / SPECS_DIRNAME
+        spec_id = _make_dispatched_spec(specs_dir, "mytask")
+        task = _make_task(tmp_path, spec_id=spec_id)  # no pr_urls
+
+        from mship.core.spec_lifecycle import advance_spec_on_close
+        advance_spec_on_close(
+            task=task,
+            specs_dir=specs_dir,
+            merged_count=0,
+            closed_count=0,
+            completed_without_prs=True,
+        )
+
+        assert SpecStore(specs_dir).find_by_id(spec_id).status == "implemented"
+
+    def test_default_flag_off_stays_unadvanced_without_merge(self, tmp_path):
+        specs_dir = tmp_path / SPECS_DIRNAME
+        spec_id = _make_dispatched_spec(specs_dir, "mytask")
+        task = _make_task(tmp_path, spec_id=spec_id)
+
+        from mship.core.spec_lifecycle import advance_spec_on_close
+        advance_spec_on_close(
+            task=task, specs_dir=specs_dir, merged_count=0, closed_count=0,
+        )
+
+        assert SpecStore(specs_dir).find_by_id(spec_id).status == "dispatched"

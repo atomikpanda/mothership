@@ -2497,3 +2497,63 @@ def test_close_still_succeeds_when_the_run_host_is_unreachable(configured_git_ap
 
     assert result.exit_code == 0, result.output
     assert "t" not in sm.load().tasks
+
+
+# --- push-only completion advances the lifecycle (finish --push-only → close) ---
+
+def _seed_pushonly_lifecycle(ws, *, spec_status="dispatched", finished=True):
+    """Task with a dispatched spec + a spec-less WorkItem; return (sm, spec_store, wi_store, wi_id)."""
+    from datetime import datetime, timezone
+    from mship.core.spec_draft import new_spec
+    from mship.core.spec_store import SpecStore
+    from mship.core.state import StateManager, Task, WorkspaceState
+    from mship.core.workitem_store import WorkItemStore
+
+    now = datetime.now(timezone.utc)
+    spec_store = SpecStore(ws / "specs")
+    spec = new_spec("Push-only feature", now=now, task_slug="t")
+    spec.status = spec_status
+    spec_store.save(spec)
+
+    wi_store = WorkItemStore(ws / ".mothership" / "workitems")
+    wi = wi_store.create(title="push-only item", kind="chore", workspace="ws", now=now)
+
+    sm = StateManager(ws / ".mothership")
+    task = Task(
+        slug="t", description="d", phase="review", created_at=now,
+        affected_repos=[], branch="feat/t",
+        spec_id=spec.id, work_item_id=wi.id,
+        finished_at=now if finished else None,
+    )
+    wi_store.add_task(wi.id, "t", now=now)
+    sm.save(WorkspaceState(tasks={"t": task}))
+    return sm, spec_store, wi_store, wi.id, spec.id
+
+
+def test_close_push_only_completion_advances_spec_and_workitem(configured_git_app):
+    """finish --push-only → local merge → close is completion: the bound spec
+    advances dispatched→implemented and the spec-less WorkItem derives done."""
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+
+    sm, spec_store, wi_store, wi_id, spec_id = _seed_pushonly_lifecycle(configured_git_app)
+    r = CliRunner().invoke(_app, ["close", "--yes", "--task", "t"])
+    assert r.exit_code == 0, r.output
+    assert "push-only" in r.output
+    assert spec_store.find_by_id(spec_id).status == "implemented"
+    assert wi_store.get(wi_id).phase_override == "done"
+    assert "t" not in sm.load().tasks
+
+
+def test_close_abandon_does_not_advance_lifecycle(configured_git_app):
+    """--abandon is discarded work: spec and WorkItem stay unadvanced."""
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+
+    sm, spec_store, wi_store, wi_id, spec_id = _seed_pushonly_lifecycle(
+        configured_git_app, finished=False)
+    r = CliRunner().invoke(_app, ["close", "--yes", "--abandon", "--task", "t"])
+    assert r.exit_code == 0, r.output
+    assert spec_store.find_by_id(spec_id).status == "dispatched"
+    assert wi_store.get(wi_id).phase_override is None
+    assert "t" not in sm.load().tasks
