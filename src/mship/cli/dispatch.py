@@ -235,9 +235,36 @@ def register(app: typer.Typer, get_container):
                     f"record supplies the plan pointer, ACs, and review range."
                 )
                 raise typer.Exit(code=1)
+            # Diff EVERY affected repo, not just the dispatched one — a
+            # single-repo package on a multi-repo task is an incomplete
+            # review presented as complete. The record's base_sha covers its
+            # own repo; the others get their base resolved the same way the
+            # dispatch path resolves it (repo config / task override).
+            config = container.config()
+            targets: list[tuple[str, str, str | None]] = []
+            for repo_name, wt_path in sorted(task_obj.worktrees.items()):
+                wt = Path(wt_path)
+                if not wt.is_dir():
+                    print(
+                        f"warning: worktree for repo {repo_name!r} is missing "
+                        f"({wt}) — skipping it in the review package",
+                        file=sys.stderr,
+                    )
+                    continue
+                if repo_name == prior.repo:
+                    repo_base_sha = prior.base_sha
+                else:
+                    effective_base = resolve_base(
+                        repo_name, config.repos.get(repo_name), cli_base=None,
+                        base_map={}, known_repos=config.repos.keys(),
+                        task_base=task_obj.base_override,
+                    ) or task_obj.base_branch or "main"
+                    repo_base_sha = _d.collect_base_sha_info(wt, effective_base).base_sha
+                targets.append((repo_name, str(wt), repo_base_sha))
             try:
                 pkg = build_review_package(
                     prior,
+                    targets=targets,
                     git_runner=container.shell().run,
                     state_dir=Path(container.state_dir()),
                 )
@@ -258,7 +285,7 @@ def register(app: typer.Typer, get_container):
             rec = prior.model_copy(update={
                 "mode": "reviewer",
                 "model": resolve_model(
-                    "reviewer", flag=model, configured=container.config().dispatch_models
+                    "reviewer", flag=model, configured=config.dispatch_models
                 ),
                 "created_at": datetime.now(timezone.utc),
             })

@@ -23,6 +23,26 @@ def _git(repo: Path, *args: str) -> str:
     return r.stdout.strip()
 
 
+def _targets(rec: DispatchRecord) -> list[tuple[str, str, str | None]]:
+    """The single-repo target list for a record (repo, worktree, base_sha)."""
+    return [(rec.repo, rec.worktree, rec.base_sha)]
+
+
+def _make_repo(path: Path, marker: str) -> tuple[str, str]:
+    """Init a git repo with a base commit + one commit; return (base, head) SHAs."""
+    path.mkdir()
+    _git(path, "init", "-q")
+    _git(path, "config", "user.email", "t@t")
+    _git(path, "config", "user.name", "t")
+    (path / "a.txt").write_text(f"{marker} base\n")
+    _git(path, "add", "-A")
+    _git(path, "commit", "-q", "-m", "base")
+    base = _git(path, "rev-parse", "HEAD")
+    (path / "a.txt").write_text(f"{marker} changed\n")
+    _git(path, "commit", "-q", "-am", "work")
+    return base, _git(path, "rev-parse", "HEAD")
+
+
 @dataclass
 class _Ws:
     record: DispatchRecord
@@ -55,7 +75,7 @@ def ws(tmp_path: Path) -> _Ws:
 
 
 def test_package_writes_manifest_and_diff_files(ws):
-    pkg = build_review_package(ws.record, git_runner=ws.shell, state_dir=ws.state_dir)
+    pkg = build_review_package(ws.record, targets=_targets(ws.record), git_runner=ws.shell, state_dir=ws.state_dir)
     assert pkg.manifest_path.name == "manifest.json"
     assert pkg.diff_paths and all(p.exists() for p in pkg.diff_paths)
     assert "diff --git" in pkg.diff_paths[0].read_text()  # the raw diff landed
@@ -65,7 +85,7 @@ def test_package_writes_manifest_and_diff_files(ws):
 
 
 def test_reviewer_prompt_references_paths_not_content(ws):
-    pkg = build_review_package(ws.record, git_runner=ws.shell, state_dir=ws.state_dir)
+    pkg = build_review_package(ws.record, targets=_targets(ws.record), git_runner=ws.shell, state_dir=ws.state_dir)
     prompt = build_reviewer_prompt(ws.record, pkg, acceptance=[("ac1", "does the thing")])
     assert str(pkg.diff_paths[0]) in prompt
     assert "diff --git" not in prompt             # never embedded
@@ -92,7 +112,7 @@ def test_manifest_head_sha_matches_the_diffed_head(ws):
 
     live_head = _git(Path(ws.record.worktree), "rev-parse", "HEAD")
     stale = ws.record.model_copy(update={"head_sha": "deadbee"})
-    pkg = build_review_package(stale, git_runner=ws.shell, state_dir=ws.state_dir)
+    pkg = build_review_package(stale, targets=_targets(stale), git_runner=ws.shell, state_dir=ws.state_dir)
     manifest = json.loads(pkg.manifest_path.read_text())
     assert manifest["head_sha"] == live_head
 
@@ -100,3 +120,35 @@ def test_manifest_head_sha_matches_the_diffed_head(ws):
 def test_reviewer_mode_is_dispatchable():
     from mship.core.dispatch import DISPATCH_MODES
     assert "reviewer" in DISPATCH_MODES
+
+
+def test_package_covers_every_target_repo(tmp_path: Path):
+    """A task spanning multiple repos gets one .diff per repo, all listed in
+    the manifest — a single-repo package would present an incomplete review
+    as complete (PR #439 P1)."""
+    import json
+
+    api_base, _ = _make_repo(tmp_path / "api", "api")
+    web_base, web_head = _make_repo(tmp_path / "web", "web")
+    rec = _record(worktree=str(tmp_path / "api"), base_sha=api_base)
+    pkg = build_review_package(
+        rec,
+        targets=[
+            ("api", str(tmp_path / "api"), api_base),
+            ("web", str(tmp_path / "web"), web_base),
+        ],
+        git_runner=ShellRunner().run,
+        state_dir=tmp_path / ".mothership",
+    )
+    assert sorted(p.name for p in pkg.diff_paths) == ["api.diff", "web.diff"]
+    assert all(p.exists() and "diff --git" in p.read_text() for p in pkg.diff_paths)
+    manifest = json.loads(pkg.manifest_path.read_text())
+    assert sorted(Path(f).name for f in manifest["diff_files"]) == ["api.diff", "web.diff"]
+    assert manifest["targets"]["web"] == {"base_sha": web_base, "head_sha": web_head}
+
+
+def test_package_requires_at_least_one_target(ws):
+    with pytest.raises(ValueError, match="target"):
+        build_review_package(
+            ws.record, targets=[], git_runner=ws.shell, state_dir=ws.state_dir
+        )

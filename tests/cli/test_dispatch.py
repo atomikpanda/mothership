@@ -670,11 +670,11 @@ def test_emit_rejects_instruction_sources(tmp_path: Path):
 
 # --- reviewer mode (Task 6) ---
 
-def _git_worktree(tmp_path: Path) -> Path:
+def _git_worktree(tmp_path: Path, name: str = "wt") -> Path:
     """A real git repo usable as the task worktree: base commit + one commit."""
     import subprocess
 
-    wt = tmp_path / "wt"; wt.mkdir()
+    wt = tmp_path / name; wt.mkdir()
 
     def g(*args):
         subprocess.run(["git", *args], cwd=wt, capture_output=True, text=True, check=True)
@@ -800,6 +800,53 @@ def test_reviewer_emit_with_corrupt_manifest_errors_cleanly(tmp_path: Path):
         assert result.exit_code == 1
         assert "manifest is corrupt" in result.output
         assert "Traceback" not in result.output
+    finally:
+        _reset()
+
+
+def test_reviewer_package_covers_all_affected_repos(tmp_path: Path):
+    """A multi-repo task's review package diffs EVERY affected repo, not just
+    the dispatched one, and --emit lists every diff file (PR #439 P1)."""
+    wt_a = _git_worktree(tmp_path, "wt-a")
+    wt_b = _git_worktree(tmp_path, "wt-b")
+    cfg, state_dir = _bootstrap(tmp_path, {"a": wt_a, "b": wt_b}, active_repo="a")
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer"])
+        assert result.exit_code == 0, result.output
+        review_dir = state_dir / "sdd" / "no-item" / "t" / "review"
+        assert sorted(p.name for p in review_dir.glob("*.diff")) == ["a.diff", "b.diff"]
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--emit"])
+        assert result.exit_code == 0, result.output
+        assert str(review_dir / "a.diff") in result.stdout
+        assert str(review_dir / "b.diff") in result.stdout
+        assert "diff --git" not in result.stdout
+    finally:
+        _reset()
+
+
+def test_reviewer_skips_missing_worktree_with_warning(tmp_path: Path):
+    """A gone worktree is skipped (stderr warning naming the repo) rather than
+    failing the whole package."""
+    import shutil
+
+    wt_a = _git_worktree(tmp_path, "wt-a")
+    wt_b = _git_worktree(tmp_path, "wt-b")
+    cfg, state_dir = _bootstrap(tmp_path, {"a": wt_a, "b": wt_b}, active_repo="a")
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        shutil.rmtree(wt_b)
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer"])
+        assert result.exit_code == 0, result.output
+        assert "'b'" in result.stderr and "skipping" in result.stderr
+        review_dir = state_dir / "sdd" / "no-item" / "t" / "review"
+        assert [p.name for p in review_dir.glob("*.diff")] == ["a.diff"]
     finally:
         _reset()
 

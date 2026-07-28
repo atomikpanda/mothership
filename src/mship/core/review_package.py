@@ -45,41 +45,62 @@ def load_review_package(rec: DispatchRecord, state_dir: Path) -> ReviewPackage:
     )
 
 
-def build_review_package(rec: DispatchRecord, *, git_runner, state_dir: Path) -> ReviewPackage:
-    """Write `<record-dir>/review/{manifest.json, <repo>.diff}`.
+def build_review_package(
+    rec: DispatchRecord,
+    *,
+    targets: list[tuple[str, str, str | None]],
+    git_runner,
+    state_dir: Path,
+) -> ReviewPackage:
+    """Write `<record-dir>/review/{manifest.json, <repo>.diff per target}`.
 
-    Diff range: `<base_sha>..HEAD` of the worktree (the task's commits —
-    HEAD at dispatch time may have moved past the recorded head_sha; the
-    record's base_sha anchors the review range). `git_runner(cmd, cwd=...)`
-    is the injected shell (same contract as container.shell().run) so tests
-    use a fixture repo.
+    `targets` is (repo, worktree, base_sha) for EVERY affected repo — a
+    multi-repo task reviewed from only the dispatched repo's diff would
+    present an incomplete review as complete. Diff range per target:
+    `<base_sha>..HEAD` of that worktree (HEAD at dispatch time may have
+    moved past the recorded head_sha; base_sha anchors the review range).
+    An empty diff is still written — the CLI warns per empty file.
+    `git_runner(cmd, cwd=...)` is the injected shell (same contract as
+    container.shell().run) so tests use fixture repos.
     """
-    if not rec.base_sha:
+    if not targets:
         raise ValueError(
-            f"dispatch record for {rec.task_slug!r} has no base_sha — "
-            f"cannot compute the review diff range"
+            f"no reviewable targets for task {rec.task_slug!r} — "
+            f"cannot build a review package"
         )
     d = review_dir(rec, state_dir)
     d.mkdir(parents=True, exist_ok=True)
     diff_paths: list[Path] = []
-    res = git_runner(f"git diff {rec.base_sha}..HEAD", cwd=Path(rec.worktree))
-    if res.returncode != 0:
-        raise ValueError(
-            f"git diff {rec.base_sha}..HEAD failed in {rec.worktree}: "
-            f"{res.stderr.strip() or 'unknown error'}"
-        )
-    diff_file = d / f"{rec.repo}.diff"
-    diff_file.write_text(res.stdout)
-    diff_paths.append(diff_file)
-    # The diff runs to LIVE HEAD (which may have moved past the dispatch-time
-    # rec.head_sha) — the manifest must describe the diff it sits beside, so
-    # record the resolved head, not the record's snapshot.
-    head = git_runner("git rev-parse HEAD", cwd=Path(rec.worktree))
+    targets_meta: dict[str, dict] = {}
+    for repo, worktree, base_sha in targets:
+        if not base_sha:
+            raise ValueError(
+                f"no base_sha for repo {repo!r} — cannot compute its review "
+                f"diff range"
+            )
+        res = git_runner(f"git diff {base_sha}..HEAD", cwd=Path(worktree))
+        if res.returncode != 0:
+            raise ValueError(
+                f"git diff {base_sha}..HEAD failed in {worktree}: "
+                f"{res.stderr.strip() or 'unknown error'}"
+            )
+        diff_file = d / f"{repo}.diff"
+        diff_file.write_text(res.stdout)
+        diff_paths.append(diff_file)
+        # Each diff runs to that worktree's LIVE HEAD — the manifest must
+        # describe the diff it sits beside, not the record's snapshot.
+        head = git_runner("git rev-parse HEAD", cwd=Path(worktree))
+        targets_meta[repo] = {
+            "base_sha": base_sha,
+            "head_sha": head.stdout.strip() if head.returncode == 0 else None,
+        }
     manifest = {
         "task_slug": rec.task_slug, "work_item_id": rec.work_item_id,
         "plan_path": rec.plan_path, "plan_task_id": rec.plan_task_id,
         "acs": rec.acs, "base_sha": rec.base_sha,
-        "head_sha": head.stdout.strip() if head.returncode == 0 else rec.head_sha,
+        # Dispatched repo's live head (record snapshot when it wasn't diffed).
+        "head_sha": targets_meta.get(rec.repo, {}).get("head_sha") or rec.head_sha,
+        "targets": targets_meta,
         "diff_files": [str(p) for p in diff_paths],
     }
     manifest_path = d / "manifest.json"
