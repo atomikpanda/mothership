@@ -13,9 +13,12 @@ Assume they are a skilled developer, but know almost nothing about our toolset o
 
 **Announce at start:** "I'm using the writing-plans skill to create the implementation plan."
 
-**Context:** If working in an isolated worktree, it should have been created via the `superpowers:using-git-worktrees` skill at execution time.
+**Context:** If working in an isolated worktree, it should have been created via the `using-git-worktrees` skill at execution time.
 
-**Save plans to:** `docs/superpowers/plans/YYYY-MM-DD-<feature-name>.md`
+**Mothership workspace:** In a mothership workspace, the input to a plan is an **approved `mship spec`** — reference its id in the plan header. `mship phase dev` may be gated on that approval (see the `working-with-mothership` skill).
+
+**Save plans to:** `<docs_dir>/plans/YYYY-MM-DD-<feature-name>.md`
+- Default `docs_dir` is `docs/`; in a workspace, `docs_dir` comes from `mship context`.
 - (User preferences for plan location override this default)
 
 ## Scope Check
@@ -58,7 +61,7 @@ independently testable deliverable.
 ```markdown
 # [Feature Name] Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development (recommended) or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** [One sentence describing what this builds]
 
@@ -79,6 +82,7 @@ include this section.]
 ## Task Structure
 
 ````markdown
+<!-- mship:task id=N -->
 ### Task N: [Component Name]
 
 **Files:**
@@ -117,13 +121,20 @@ def function(input):
 Run: `pytest tests/path/test.py::test_name -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit (pair with `mship journal` in a mothership workspace)**
 
 ```bash
 git add tests/path/test.py src/path/file.py
 git commit -m "feat: add specific feature"
+# In a mothership workspace, also record the step in the journal:
+mship journal "implemented specific feature; tests passing" --action committed
 ```
+
+Pair the commit with a `mship journal` entry so other sessions can reconstruct progress without reading every commit diff.
+<!-- /mship:task -->
 ````
+
+Wrap each task in `<!-- mship:task id=N -->` … `<!-- /mship:task -->` anchors (id = the task number). An anchor may also declare which spec acceptance criteria the task serves via an `acs=` attribute (e.g. `<!-- mship:task id=3 acs=ac2,ac5 -->`) — `mship` uses that mapping to tie the task's evidence back to the spec. A controller then pulls a single task with `mship dispatch --task <slug> --plan-task <N>` (add `--plan <path>` only if the plan can't be auto-resolved from the task's WorkItem). By default that prints a **closed stub** to hand to the subagent — not the full prompt; the subagent derives its own instruction inside the worktree with `mship dispatch --emit`. Never hand-assemble the prompt inline.
 
 ## No Placeholders
 
@@ -151,7 +162,7 @@ If you find issues, fix them inline. No need to re-review — just fix and move 
 
 After saving the plan, offer execution choice:
 
-**"Plan complete and saved to `docs/superpowers/plans/<filename>.md`. Two execution options:**
+**"Plan complete and saved to `docs/plans/<filename>.md`. Two execution options:**
 
 **1. Subagent-Driven (recommended)** - I dispatch a fresh subagent per task, review between tasks, fast iteration
 
@@ -160,9 +171,10 @@ After saving the plan, offer execution choice:
 **Which approach?"**
 
 **If Subagent-Driven chosen:**
-- **REQUIRED SUB-SKILL:** Use superpowers:subagent-driven-development
+- **REQUIRED SUB-SKILL:** Use subagent-driven-development
 - Fresh subagent per task + two-stage review
+- Build each implementer prompt with `mship dispatch --task <slug> --plan-task <N>` (hand the subagent the emitted stub; it runs `mship dispatch --emit` in the worktree to get the anchored task text as its instruction); subagents run `mship test` so `mship finish` has its evidence trail.
 
 **If Inline Execution chosen:**
-- **REQUIRED SUB-SKILL:** Use superpowers:executing-plans
+- **REQUIRED SUB-SKILL:** Use executing-plans
 - Batch execution with checkpoints for review
