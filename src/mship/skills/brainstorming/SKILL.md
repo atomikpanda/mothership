@@ -22,13 +22,11 @@ Every project goes through this process. A todo list, a single-function utility,
 You MUST create a task for each of these items and complete them in order:
 
 1. **Explore project context** — check files, docs, recent commits
-2. **Offer visual companion** (if topic will involve visual questions) — this is its own message, not combined with a clarifying question. See the Visual Companion section below.
+2. **Offer the visual companion just-in-time** — NOT upfront. The first time a question would genuinely be clearer shown than described, offer it then (its own message); on approval its browser tab opens for you. If no visual question ever arises, never offer it. See the Visual Companion section below.
 3. **Ask clarifying questions** — one at a time, understand purpose/constraints/success criteria
 4. **Propose 2-3 approaches** — with trade-offs and your recommendation
 5. **Present design** — in sections scaled to their complexity, get user approval after each section
-6. **Capture the design** — dual-path on workspace detection (is there a `mothership.yaml` at/above cwd?):
-   - **In a mothership workspace:** the design becomes a structured **`mship spec`**, not a doc file. Run `mship spec new --title "<title>"`, then populate it (`mship spec draft <id> [--from-text "..."]` → run the emitted prompt through an agent → `mship spec apply <id> --from-json <file>`), landing it in `needs_review`. This is the canonical artifact — it gets reviewed/approved (`mship spec review` / `verdict` / `approve`) and dispatched. See the `working-with-mothership` skill for the full lifecycle.
-   - **Outside a workspace:** write a plain design doc to `docs/specs/YYYY-MM-DD-<topic>-design.md` and commit it.
+6. **Write design doc** — save to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and commit
 7. **Spec self-review** — quick inline check for placeholders, contradictions, ambiguity, scope (see below)
 8. **User reviews written spec** — ask user to review the spec file before proceeding
 9. **Transition to implementation** — invoke writing-plans skill to create implementation plan
@@ -38,29 +36,24 @@ You MUST create a task for each of these items and complete them in order:
 ```dot
 digraph brainstorming {
     "Explore project context" [shape=box];
-    "Visual questions ahead?" [shape=diamond];
-    "Offer Visual Companion\n(own message, no other content)" [shape=box];
     "Ask clarifying questions" [shape=box];
     "Propose 2-3 approaches" [shape=box];
     "Present design sections" [shape=box];
     "User approves design?" [shape=diamond];
-    "Capture design\n(mship spec in a workspace, else design doc)" [shape=box];
+    "Write design doc" [shape=box];
     "Spec self-review\n(fix inline)" [shape=box];
     "User reviews spec?" [shape=diamond];
     "Invoke writing-plans skill" [shape=doublecircle];
 
-    "Explore project context" -> "Visual questions ahead?";
-    "Visual questions ahead?" -> "Offer Visual Companion\n(own message, no other content)" [label="yes"];
-    "Visual questions ahead?" -> "Ask clarifying questions" [label="no"];
-    "Offer Visual Companion\n(own message, no other content)" -> "Ask clarifying questions";
+    "Explore project context" -> "Ask clarifying questions";
     "Ask clarifying questions" -> "Propose 2-3 approaches";
     "Propose 2-3 approaches" -> "Present design sections";
     "Present design sections" -> "User approves design?";
     "User approves design?" -> "Present design sections" [label="no, revise"];
-    "User approves design?" -> "Capture design\n(mship spec in a workspace, else design doc)" [label="yes"];
-    "Capture design\n(mship spec in a workspace, else design doc)" -> "Spec self-review\n(fix inline)";
+    "User approves design?" -> "Write design doc" [label="yes"];
+    "Write design doc" -> "Spec self-review\n(fix inline)";
     "Spec self-review\n(fix inline)" -> "User reviews spec?";
-    "User reviews spec?" -> "Capture design\n(mship spec in a workspace, else design doc)" [label="changes requested"];
+    "User reviews spec?" -> "Write design doc" [label="changes requested"];
     "User reviews spec?" -> "Invoke writing-plans skill" [label="approved"];
 }
 ```
@@ -84,6 +77,7 @@ digraph brainstorming {
 - Propose 2-3 different approaches with trade-offs
 - Present options conversationally with your recommendation and reasoning
 - Lead with your recommended option and explain why
+- YAGNI ruthlessly - remove unnecessary features from every approach and design
 
 **Presenting the design:**
 
@@ -110,14 +104,10 @@ digraph brainstorming {
 
 **Documentation:**
 
-Capture the design using the dual-path based on workspace detection (is there a `mothership.yaml` at/above cwd?):
-
-- **In a mothership workspace:** the design becomes a structured **`mship spec`**, not a doc file. Run `mship spec new --title "<title>"`, then populate it (`mship spec draft <id> [--from-text "..."]` → run the emitted prompt through an agent → `mship spec apply <id> --from-json <file>`), landing it in `needs_review`. This is the canonical artifact — it gets reviewed/approved (`mship spec review` / `verdict` / `approve`) and dispatched. See the `working-with-mothership` skill for the full lifecycle.
-- **Outside a workspace:** write the validated design to `docs/specs/YYYY-MM-DD-<topic>-design.md` and commit it.
+- Write the validated design (spec) to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md`
   - (User preferences for spec location override this default)
-  - Use elements-of-style:writing-clearly-and-concisely skill if available
-
-**Where specs live (workspace-level, branch-stable):** an `mship spec` is a **workspace** artifact — the markdown-canonical file `<workspace>/specs/<date>-<id>.md` — authored during brainstorming **before** `mship spawn` / `mship spec dispatch`, and then *consumed* by the dispatched task. It does **not** live on a member-repo feature branch, so unlike an ad-hoc design doc committed on a branch it can't diverge across branches or go stale relative to `main`. Always create and edit a spec through the `mship spec` commands (`spec new` / `spec draft` / `spec apply` / `spec ask` / …) — never hand-edit the spec file inside a task worktree — so `mship view spec` (and the phone) always resolve the latest. This supersedes the older "commit the design doc on a branch" guidance: the main-vs-branch question is moot because `mship spec`s are not branch-scoped.
+- Use elements-of-style:writing-clearly-and-concisely skill if available
+- Commit the design document to git
 
 **Spec Self-Review:**
 After writing the spec document, look at it with fresh eyes:
@@ -130,12 +120,9 @@ After writing the spec document, look at it with fresh eyes:
 Fix any issues inline. No need to re-review — just fix and move on.
 
 **User Review Gate:**
-After the spec review loop passes, ask the user to review the artifact before proceeding. The message is path-aware:
+After the spec review loop passes, ask the user to review the written spec before proceeding:
 
-- **In a mothership workspace:** the artifact is the `mship spec` now in `needs_review` state.
-  > "Spec created and ready for review (id: `<id>`). You can review it with `mship spec review <id>` or `mship view spec` in the mobile app. Let me know if you want any changes before we start writing out the implementation plan."
-- **Outside a workspace:** the artifact is the committed design doc.
-  > "Design doc written and committed to `<path>`. Please review it and let me know if you want to make any changes before we start writing out the implementation plan."
+> "Spec written and committed to `<path>`. Please review it and let me know if you want to make any changes before we start writing out the implementation plan."
 
 Wait for the user's response. If they request changes, make them and re-run the spec review loop. Only proceed once the user approves.
 
@@ -144,23 +131,14 @@ Wait for the user's response. If they request changes, make them and re-run the 
 - Invoke the writing-plans skill to create a detailed implementation plan
 - Do NOT invoke any other skill. writing-plans is the next step.
 
-## Key Principles
-
-- **One question at a time** - Don't overwhelm with multiple questions
-- **Multiple choice preferred** - Easier to answer than open-ended when possible
-- **YAGNI ruthlessly** - Remove unnecessary features from all designs
-- **Explore alternatives** - Always propose 2-3 approaches before settling
-- **Incremental validation** - Present design, get approval before moving on
-- **Be flexible** - Go back and clarify when something doesn't make sense
-
 ## Visual Companion
 
 A browser-based companion for showing mockups, diagrams, and visual options during brainstorming. Available as a tool — not a mode. Accepting the companion means it's available for questions that benefit from visual treatment; it does NOT mean every question goes through the browser.
 
-**Offering the companion:** When you anticipate that upcoming questions will involve visual content (mockups, layouts, diagrams), offer it once for consent:
-> "Some of what we're working on might be easier to explain if I can show it to you in a web browser. I can put together mockups, diagrams, comparisons, and other visuals as we go. This feature is still new and can be token-intensive. Want to try it? (Requires opening a local URL)"
+**Offering the companion (just-in-time):** Do NOT offer it upfront. Wait until a question would genuinely be clearer shown than told — a real mockup / layout / diagram question, not merely a UI *topic*. The first time that happens, offer it then, as its own message:
+> "This next part might be easier if I show you — I can put together mockups, diagrams, and comparisons in a browser tab as we go. It's still new and can be token-intensive. Want me to? I'll open it for you."
 
-**This offer MUST be its own message.** Do not combine it with clarifying questions, context summaries, or any other content. The message should contain ONLY the offer above and nothing else. Wait for the user's response before continuing. If they decline, proceed with text-only brainstorming.
+**This offer MUST be its own message.** Only the offer — no clarifying question, summary, or other content. Wait for the user's response. If they accept, start the server with `--open` so their browser opens to the first screen automatically. If they decline, continue text-only and don't offer again unless they raise it.
 
 **Per-question decision:** Even after the user accepts, decide FOR EACH QUESTION whether to use the browser or the terminal. The test: **would the user understand this better by seeing it than reading it?**
 

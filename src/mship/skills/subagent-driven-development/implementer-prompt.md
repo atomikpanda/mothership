@@ -2,40 +2,18 @@
 
 Use this template when dispatching an implementer subagent.
 
-**IMPORTANT — before dispatching:** Check whether this is a mothership workspace
-(a `mothership.yaml` exists at the repo root or any ancestor). If yes:
-
-1. There MUST be a single, anchored mship task before you dispatch implementer
-   subagents. Run `mship status` — it always returns an envelope shape:
-   - If `.active_tasks` is empty (`mship status | jq '.active_tasks'` → `[]`),
-     refuse to dispatch. Every task needs a WorkItem: tell the user to run
-     `mship item new "<title>" --kind <feature|bug|chore|question>` then
-     `mship spawn "<description>" --work-item <id>` first.
-   - If `.active_tasks` is non-empty but `.resolved_task` is `null`, multiple
-     tasks are active with no anchor — refuse to dispatch, pick one with the
-     user, then set `MSHIP_TASK=<slug>` (or pass `--task <slug>`) and re-run
-     `mship status` to confirm `.resolved_task` is populated.
-   - Otherwise `.resolved_task` is the resolved task's detail (`slug`, `phase`,
-     `worktrees`, …). Use that for step 2.
-2. The subagent MUST work in the task's worktree, not the main checkout. Set
-   `Work from:` below to `.resolved_task.worktrees.<repo>` from the
-   `mship status` output. Never point it at the main repo root.
-3. The subagent MUST commit on the task's feature branch (inside the worktree).
-   The mship pre-commit hook will refuse commits from the main checkout, but
-   the prompt should say this explicitly so the subagent doesn't waste a cycle.
-
-If this is NOT a mothership workspace, point `Work from:` at the repo root and
-proceed as before.
-
 ```
-Task tool (general-purpose):
+Subagent (general-purpose):
   description: "Implement Task N: [task name]"
+  model: [MODEL — REQUIRED: choose per SKILL.md Model Selection; an omitted
+         model silently inherits the session's most expensive one]
   prompt: |
     You are implementing Task N: [task name]
 
     ## Task Description
 
-    [FULL TEXT of task from plan - paste it here, don't make subagent read file]
+    Read your task brief first: [BRIEF_FILE]
+    It contains the full task text from the plan.
 
     ## Context
 
@@ -56,32 +34,18 @@ Task tool (general-purpose):
     Once you're clear on requirements:
     1. Implement exactly what the task specifies
     2. Write tests (following TDD if task says to)
-    3. Verify implementation works — in a mothership workspace run `mship test`
-       (not a bare runner like `pytest`) so `mship finish` keeps the test-evidence trail
-    4. Commit your work on the current feature branch (see "Where to work" below)
+    3. Verify implementation works
+    4. Commit your work
     5. Self-review (see below)
     6. Report back
 
-    ## Where to work
-
-    Work from: [worktree path for this task, NOT the main repo root]
-
-    **If this is a mothership workspace (the controller set `Work from:` to a
-    path inside `.worktrees/`):**
-    - Stay inside that directory for ALL edits and commits. `cd` there at the
-      start if your shell isn't already in it.
-    - The worktree is checked out on the task's feature branch (e.g.
-      `feat/<task-slug>`). `git status` should show that branch, not `main`.
-    - **Never commit to `main`.** If you find yourself on `main`, stop and
-      report back as `BLOCKED` — the controller set up the wrong directory.
-      The mship pre-commit hook will refuse anyway, but don't waste a cycle.
-    - Don't run `git checkout -b` yourself. The branch already exists.
-
-    **If this is NOT a mothership workspace:** work from the given directory
-    and follow the project's conventional branching.
+    Work from: [directory]
 
     **While you work:** If you encounter something unexpected or unclear, **ask questions**.
     It's always OK to pause and clarify. Don't guess or make assumptions.
+
+    While iterating, run the focused test for what you're changing; run the
+    full suite once before committing, not after every edit.
 
     ## Code Organization
 
@@ -136,18 +100,41 @@ Task tool (general-purpose):
     - Do tests actually verify behavior (not just mock behavior)?
     - Did I follow TDD if required?
     - Are tests comprehensive?
+    - Is the test output pristine (no stray warnings or noise)?
 
     If you find issues during self-review, fix them now before reporting.
 
+    ## After Review Findings
+
+    If the task review finds issues, you will be resumed with the findings.
+    Fix them, re-run the tests that cover the amended code, and append a fix
+    report to your report file: what you changed, the covering tests you
+    ran, the command, and the output. Reviewers will not re-run tests for
+    you — your report is the test evidence. Then reply with the same short
+    status contract as your first report.
+
     ## Report Format
 
-    When done, report:
-    - **Status:** DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT
+    Write your full report to [REPORT_FILE]:
     - What you implemented (or what you attempted, if blocked)
     - What you tested and test results
+    - **TDD Evidence** (if TDD was required for this task):
+      - RED: command run, relevant failing output before implementation, and why the failure was expected
+      - GREEN: command run and relevant passing output after implementation
     - Files changed
     - Self-review findings (if any)
     - Any issues or concerns
+
+    Then report back with ONLY (under 15 lines — the detail lives in the
+    report file):
+    - **Status:** DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT
+    - Commits created (short SHA + subject)
+    - One-line test summary (e.g. "14/14 passing, output pristine")
+    - Your concerns, if any
+    - The report file path
+
+    If BLOCKED or NEEDS_CONTEXT, put the specifics in the final message
+    itself — the controller acts on it directly.
 
     Use DONE_WITH_CONCERNS if you completed the work but have doubts about correctness.
     Use BLOCKED if you cannot complete the task. Use NEEDS_CONTEXT if you need
