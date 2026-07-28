@@ -7,8 +7,17 @@
   function nextReconnectDelay(current, max) {
     return Math.min(current * 2, max);
   }
+  // Pure: directory base of the page's pathname ('/' or '/companion/'), same
+  // resolution a browser uses for relative URLs. WebSocket and recovery URLs
+  // build on it so the companion works behind a path-mounted reverse proxy
+  // (e.g. BRAINSTORM_PUBLIC_URL=https://host/companion) as well as at the
+  // origin root. Exported for unit tests.
+  function pathBase(pathname) {
+    if (!pathname) return '/';
+    return pathname.endsWith('/') ? pathname : pathname.replace(/[^/]*$/, '');
+  }
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { nextReconnectDelay, MIN_RECONNECT_MS, MAX_RECONNECT_MS, TOMBSTONE_AFTER_MS };
+    module.exports = { nextReconnectDelay, pathBase, MIN_RECONNECT_MS, MAX_RECONNECT_MS, TOMBSTONE_AFTER_MS };
   }
 
   // Everything below is browser-only; bail out when loaded in Node (tests).
@@ -43,19 +52,20 @@
 
   function websocketUrl() {
     const scheme = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+    const base = scheme + window.location.host + pathBase(window.location.pathname);
     const key = sessionKey();
     if (key && !keyTransportAllowed()) {
       console.error('brainstorm: refusing to send the session key over cleartext to a ' +
         'non-loopback host. Open the companion via loopback (localhost/127.0.0.1) or over https.');
-      return scheme + window.location.host;
+      return base;
     }
-    return scheme + window.location.host + (key ? '/?key=' + encodeURIComponent(key) : '');
+    return base + (key ? '?key=' + encodeURIComponent(key) : '');
   }
 
   function reloadAfterRecovery() {
     const key = sessionKey();
     if (key && keyTransportAllowed()) {
-      window.location.replace('/?key=' + encodeURIComponent(key));
+      window.location.replace(pathBase(window.location.pathname) + '?key=' + encodeURIComponent(key));
     } else {
       window.location.reload();
     }

@@ -9,7 +9,12 @@
 #   --project-dir <path>  Store session files under <path>/.mothership/brainstorm/
 #                         instead of /tmp. Files persist after server stops.
 #   --host <bind-host>    Host/interface to bind (default: 127.0.0.1).
-#                         Use 0.0.0.0 in remote/containerized environments.
+#                         Use 0.0.0.0 in remote/containerized environments —
+#                         non-loopback binds additionally require
+#                         BRAINSTORM_ALLOW_NON_LOOPBACK=1 and an https
+#                         BRAINSTORM_PUBLIC_URL (the operator's TLS front; the
+#                         session key only travels over it), or the server
+#                         refuses to start.
 #   --url-host <host>     Hostname shown in returned URL JSON.
 #   --idle-timeout-minutes <n>  Shut down after n minutes idle (default 240 = 4h).
 #   --open                Auto-open the browser on the first screen (use only

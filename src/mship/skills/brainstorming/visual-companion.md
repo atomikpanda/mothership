@@ -91,16 +91,17 @@ scripts/start-server.sh --project-dir /path/to/project --open --foreground
 
 **Other environments:** The server must keep running in the background across conversation turns. If your environment reaps detached processes, use `--foreground` and launch the command with your platform's background execution mechanism.
 
-If the URL is unreachable from your browser (common in remote/containerized setups), bind a non-loopback host:
+If the URL is unreachable from your browser (common in remote/containerized setups), bind a non-loopback host. This requires BOTH override variables — the session key only ever travels over the operator's TLS front, so the server refuses a bare non-loopback bind:
 
 ```bash
+BRAINSTORM_ALLOW_NON_LOOPBACK=1 \
+BRAINSTORM_PUBLIC_URL=https://companion.example.dev \
 scripts/start-server.sh \
   --project-dir /path/to/project \
-  --host 0.0.0.0 \
-  --url-host localhost
+  --host 0.0.0.0
 ```
 
-Use `--url-host` to control what hostname is printed in the returned URL JSON.
+`BRAINSTORM_PUBLIC_URL` is the https base of the TLS reverse proxy in front of the companion (a path-mounted base like `https://host/companion` works too); the returned `url` is built from it, never from the raw host:port. For loopback binds (the default), use `--url-host` to control what hostname is printed in the returned URL JSON.
 
 ## The Loop
 

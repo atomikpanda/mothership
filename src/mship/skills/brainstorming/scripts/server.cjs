@@ -218,7 +218,9 @@ function bootstrapPage(key) {
 <body>
 <script>
 try { sessionStorage.setItem('brainstorm-session-key', ${jsonKey}); } catch (e) {}
-location.replace('/');
+// Reload the same path (not the origin root) so a path-mounted reverse proxy
+// (BRAINSTORM_PUBLIC_URL with a path) stays inside its route.
+location.replace(location.pathname);
 </script>
 </body>
 </html>`;
