@@ -29,10 +29,16 @@ def review_dir(rec: DispatchRecord, state_dir: Path) -> Path:
 def load_review_package(rec: DispatchRecord, state_dir: Path) -> ReviewPackage:
     """Reload a previously built package from its manifest (the emit path).
 
-    Raises OSError when no package was built for this record.
+    Raises OSError when no package was built for this record, ValueError
+    (incl. json.JSONDecodeError) when the manifest is corrupt.
     """
     manifest_path = review_dir(rec, state_dir) / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
+    if not isinstance(manifest, dict) or "diff_files" not in manifest:
+        raise ValueError(
+            "review package manifest is corrupt — re-run "
+            "`mship dispatch --mode reviewer`"
+        )
     return ReviewPackage(
         manifest_path=manifest_path,
         diff_paths=[Path(p) for p in manifest["diff_files"]],

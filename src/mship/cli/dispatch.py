@@ -4,7 +4,6 @@ See docs/superpowers/specs/2026-04-17-mship-dispatch-design.md.
 """
 from __future__ import annotations
 
-import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -172,7 +171,7 @@ def register(app: typer.Typer, get_container):
                         f"controller runs `mship dispatch --mode reviewer` first."
                     )
                     raise typer.Exit(code=1)
-                except json.JSONDecodeError:
+                except ValueError:  # incl. json.JSONDecodeError (a subclass)
                     output.error(
                         "review package manifest is corrupt — re-run "
                         "`mship dispatch --mode reviewer`."
@@ -380,6 +379,7 @@ def register(app: typer.Typer, get_container):
             pkg_skills_source=pkg_skills_source(),
             state=state,
             mode=mode,
+            model=resolved_model,
         )
         # Print directly to stdout (NOT via Output.json — this is meant to be piped).
         print(prompt)

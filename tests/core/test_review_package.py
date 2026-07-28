@@ -71,6 +71,18 @@ def test_reviewer_prompt_references_paths_not_content(ws):
     assert "diff --git" not in prompt             # never embedded
     assert "spec-compliance" in prompt.lower() and "quality" in prompt.lower()
     assert "[ac1] does the thing" in prompt
+    # Content-absence: the manifest carries AC IDs, never the AC prose.
+    assert "does the thing" not in pkg.manifest_path.read_text()
+
+
+def test_load_package_rejects_manifest_missing_diff_files(ws):
+    from mship.core.review_package import load_review_package, review_dir
+
+    d = review_dir(ws.record, ws.state_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "manifest.json").write_text('{"task_slug": "my-task"}\n')  # valid JSON, no diff_files
+    with pytest.raises(ValueError, match="manifest is corrupt"):
+        load_review_package(ws.record, ws.state_dir)
 
 
 def test_manifest_head_sha_matches_the_diffed_head(ws):

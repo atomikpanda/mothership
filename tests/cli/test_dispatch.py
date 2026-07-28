@@ -488,6 +488,7 @@ def test_plan_task_dispatch_full_flag_prints_prompt(tmp_path: Path):
         assert result.exit_code == 0, result.output
         assert "Work from (mandatory)" in result.output
         assert "first thing" in result.output
+        assert "**Model:**" in result.output  # inline path stamps the resolved model too
     finally:
         _reset()
 
@@ -508,6 +509,10 @@ def test_plan_task_dispatch_persists_record(tmp_path: Path):
         assert rec.acs == ["ac2"]
         assert rec.instruction is None
         assert rec.plan_path is not None and rec.plan_path.endswith("t.md")
+        # Content-absence, not just field-absence: the record raw text must not
+        # carry the plan task's body prose (it is a pointer, spec ac2).
+        raw = next((state_dir / "sdd").rglob("record.json")).read_text()
+        assert "first thing" not in raw
     finally:
         _reset()
 
