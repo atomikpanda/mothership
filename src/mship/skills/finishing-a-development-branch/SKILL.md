@@ -89,18 +89,24 @@ is theirs.
 
 *In a mothership workspace, Option 1 is not the normal path — Option 2 (`mship finish` → PR → merge auto-advance) is. When your human partner explicitly chooses local-merge-no-PR, use the sanctioned sequence, IN THIS ORDER: run `mship finish --push-only` FIRST (stamps the task finished, pushes the branches, opens no PR), then merge EVERY affected repo's branch into its base (one merge per repo — the mship block below, not the single-repo block underneath it), then plain `mship close` LAST — close verifies each repo's merge actually reached its base and only then advances the lifecycle exactly like a merged-PR close (bound spec → `implemented`, WorkItem → `done`), recording the task as "no PRs (pushed via --push-only)". A partially-merged close prompts before removing the unmerged repos' worktrees and does not advance; closing before any merge is safe (the pushed branches are recoverable) but advances nothing — close notes the undelivered repos and "lifecycle not advanced". Never route a successful merge through `mship close --abandon`: that records delivered work as cancelled. `--abandon` is strictly for genuinely discarding work.*
 
+*Run this from the workspace root (it reads `mothership.yaml` for per-repo bases):*
+
 ```bash
-# Mothership: merge every affected repo's branch into its base, deriving each
-# worktree/branch/base from mship state (single-repo tasks = one iteration).
+# Mothership: merge every affected repo's branch into its OWN base, deriving
+# worktree/branch from mship state and each repo's base from mothership.yaml
+# (repo base_branch overrides the task default; single-repo tasks = one iteration).
+TASK_BASE=$(mship status | jq -r '.resolved_task.base_override // .resolved_task.base_branch // "main"')
 BRANCH=$(mship status | jq -r .resolved_task.branch)
-BASE=$(mship status | jq -r '.resolved_task.base_override // .resolved_task.base_branch // "main"')
-mship status | jq -r '.resolved_task.worktrees[]' | while read -r wt; do
+mship status | jq -r '.resolved_task.worktrees | to_entries[] | "\(.key)\t\(.value)"' | while IFS=$'\t' read -r repo wt; do
+  base=$(python3 -c "import yaml; c=yaml.safe_load(open('mothership.yaml')); print(((c.get('repos') or {}).get('$repo') or {}).get('base_branch') or '$TASK_BASE')")
   main=$(git -C "$(git -C "$wt" rev-parse --git-common-dir)/.." rev-parse --show-toplevel)
-  git -C "$main" checkout "$BASE" && git -C "$main" pull && git -C "$main" merge "$BRANCH"
+  git -C "$main" checkout "$base" && git -C "$main" pull && git -C "$main" merge "$BRANCH"
 done
 
 # Verify tests on the merged result (mship test — see Step 1), then `mship close`.
 ```
+
+*A task spawned with `--base` (stacked) records it as `base_override`, which the task-level default already reflects.*
 
 *Outside a mothership workspace, merge the single current repo:*
 
