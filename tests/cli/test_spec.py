@@ -430,6 +430,52 @@ def test_spec_verdict_rejects_unknown_criterion(configured_app_with_task: Path, 
     assert "ac99" in result.output
 
 
+def test_spec_verdict_prose_section_records_and_persists(configured_app_with_task: Path, tmp_path):
+    """A prose-section id routes to set_prose_verdict instead of erroring."""
+    _apply_dq(tmp_path)
+    result = runner.invoke(app, ["spec", "verdict", "dq", "approach", "approved"])
+    assert result.exit_code == 0, result.output
+    review = _json.loads(runner.invoke(app, ["spec", "review", "dq"]).output)
+    assert review["prose_verdicts"]["approach"]["verdict"] == "approved"
+
+
+def test_spec_verdict_prose_clears_approve_gate(configured_app_with_task: Path, tmp_path):
+    """A previously-flagged prose section blocks approve; re-verdicting it via the
+    same `spec verdict` command clears the gate."""
+    from mship.core.spec_review import set_prose_verdict
+    _apply_dq(tmp_path)
+    store = _store(configured_app_with_task)
+    spec = store.find_by_id("dq")
+    set_prose_verdict(spec, "approach", "flagged")
+    store.save(spec)
+    # Satisfy the other gate legs: AC approved + open question answered.
+    assert runner.invoke(app, ["spec", "verdict", "dq", "ac1", "approved"]).exit_code == 0
+    assert runner.invoke(app, ["spec", "answer", "dq", "q1", "yes"]).exit_code == 0
+    blocked = runner.invoke(app, ["spec", "approve", "dq"])
+    assert blocked.exit_code != 0
+    assert "approach" in blocked.output
+    assert runner.invoke(app, ["spec", "verdict", "dq", "approach", "approved"]).exit_code == 0
+    approved = runner.invoke(app, ["spec", "approve", "dq"])
+    assert approved.exit_code == 0, approved.output
+    assert store.find_by_id("dq").status == "approved"
+
+
+def test_spec_verdict_prose_rejects_bad_verdict(configured_app_with_task: Path, tmp_path):
+    _apply_dq(tmp_path)
+    result = runner.invoke(app, ["spec", "verdict", "dq", "approach", "bogus"])
+    assert result.exit_code != 0
+    assert "bogus" in result.output
+
+
+def test_spec_verdict_unknown_id_lists_both_vocabularies(configured_app_with_task: Path, tmp_path):
+    """An id that is neither an AC nor a prose section errors listing both."""
+    _apply_dq(tmp_path)
+    result = runner.invoke(app, ["spec", "verdict", "dq", "nope", "approved"])
+    assert result.exit_code != 0
+    assert "ac1" in result.output          # acceptance-criterion vocabulary
+    assert "approach" in result.output     # prose-section vocabulary
+
+
 # --- spec evidence (AC evidence loop) ---
 
 

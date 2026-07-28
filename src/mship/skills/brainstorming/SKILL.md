@@ -141,7 +141,7 @@ Wait for the user's response. If they request changes, make them and re-run the 
 
 1. Check the current review state: `mship spec review <id>` and `mship spec questions <id>`.
 2. Answer any open questions from the chat context (`mship spec answer <id> <question-id> "<answer>"`), or ask the operator.
-3. Record `mship spec verdict <id> <ac> approved` for each criterion — including any previously-flagged ones (the operator's explicit chat approval supersedes the earlier flag).
+3. Record `mship spec verdict <id> <ac> approved` for each criterion — including any previously-flagged ones (the operator's explicit chat approval supersedes the earlier flag). Previously-flagged PROSE sections (problem, user_story, approach, non_goals, risks, scope_risk) clear the same way: `mship spec verdict <id> <section> approved`.
 4. Then `mship spec approve <id>`.
 
 `--bypass-gate` remains off-limits without explicit operator instruction, and the operator's Request-changes path (`mship spec request-changes`) stays untouched.
