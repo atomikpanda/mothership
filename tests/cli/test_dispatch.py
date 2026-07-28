@@ -130,7 +130,7 @@ def test_dispatch_plan_task_uses_extracted_section(tmp_path: Path):
     _override(cfg, state_dir)
     try:
         result = runner.invoke(
-            app, ["dispatch", "--task", "t", "--plan", str(plan), "--plan-task", "7"]
+            app, ["dispatch", "--task", "t", "--plan", str(plan), "--plan-task", "7", "--full"]
         )
         assert result.exit_code == 0, result.output
         assert "wire the parser" in result.output
@@ -194,7 +194,7 @@ def test_dispatch_task_auto_resolves_convention_plan(tmp_path: Path):
     )
     _override(cfg, state_dir)
     try:
-        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "2"])
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "2", "--full"])
         assert result.exit_code == 0, result.output
         assert "Task 2" in result.output
         assert "second thing" in result.output
@@ -225,7 +225,7 @@ def test_dispatch_task_auto_resolves_workitem_linked_plan(tmp_path: Path):
     StateManager(state_dir).save(WorkspaceState(tasks={"t": task}))
     _override(cfg, state_dir)
     try:
-        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "3"])
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "3", "--full"])
         assert result.exit_code == 0, result.output
         assert "linked plan body" in result.output
     finally:
@@ -245,7 +245,7 @@ def test_dispatch_explicit_plan_overrides_linked(tmp_path: Path):
     _override(cfg, state_dir)
     try:
         result = runner.invoke(
-            app, ["dispatch", "--task", "t", "--plan", str(explicit), "--plan-task", "2"]
+            app, ["dispatch", "--task", "t", "--plan", str(explicit), "--plan-task", "2", "--full"]
         )
         assert result.exit_code == 0, result.output
         assert "explicit thing" in result.output
@@ -449,6 +449,117 @@ def test_dispatch_repo_missing_from_config_falls_back_to_main(tmp_path: Path):
         result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "x"])
         assert result.exit_code == 0, result.output
         assert "- **base branch:** main" in result.output
+    finally:
+        _reset()
+
+
+def _write_convention_plan(tmp_path: Path) -> None:
+    plans = tmp_path / "docs" / "plans"; plans.mkdir(parents=True)
+    (plans / "t.md").write_text(
+        "<!-- mship:task id=1 acs=ac2 -->\n### Task 1\n\nfirst thing\n<!-- /mship:task -->\n"
+    )
+
+
+def test_plan_task_dispatch_prints_stub_not_prompt(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        assert "record:" in result.output and "model:" in result.output
+        assert "Work from (mandatory)" not in result.output
+        assert "Your instruction" not in result.output
+        assert "first thing" not in result.output
+    finally:
+        _reset()
+
+
+def test_plan_task_dispatch_full_flag_prints_prompt(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(
+            app, ["dispatch", "--task", "t", "--plan-task", "1", "--full"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Work from (mandatory)" in result.output
+        assert "first thing" in result.output
+    finally:
+        _reset()
+
+
+def test_plan_task_dispatch_persists_record(tmp_path: Path):
+    from mship.core.sdd_store import SddStore
+
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        rec = SddStore(state_dir).find_for_slug("t")
+        assert rec is not None
+        assert rec.plan_task_id == "1"
+        assert rec.acs == ["ac2"]
+        assert rec.instruction is None
+        assert rec.plan_path is not None and rec.plan_path.endswith("t.md")
+    finally:
+        _reset()
+
+
+def test_instruction_dispatch_keeps_full_output_and_persists_record(tmp_path: Path):
+    from mship.core.sdd_store import SddStore
+
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "do the thing"])
+        assert result.exit_code == 0, result.output
+        assert "> do the thing" in result.output  # unchanged default output
+        rec = SddStore(state_dir).find_for_slug("t")
+        assert rec is not None
+        assert rec.instruction == "do the thing"
+        assert rec.plan_path is None and rec.plan_task_id is None
+    finally:
+        _reset()
+
+
+def test_instruction_dispatch_stub_flag_opts_into_stub(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(
+            app, ["dispatch", "--task", "t", "-i", "do the thing", "--stub"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "record:" in result.output
+        assert "do the thing" not in result.output
+    finally:
+        _reset()
+
+
+def test_dispatch_model_flag_recorded(tmp_path: Path):
+    from mship.core.sdd_store import SddStore
+
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(
+            app, ["dispatch", "--task", "t", "--plan-task", "1", "--model", "haiku"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "model: haiku" in result.output
+        rec = SddStore(state_dir).find_for_slug("t")
+        assert rec is not None and rec.model == "haiku"
     finally:
         _reset()
 

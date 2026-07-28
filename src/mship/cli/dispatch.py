@@ -5,6 +5,7 @@ See docs/superpowers/specs/2026-04-17-mship-dispatch-design.md.
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -14,6 +15,9 @@ from mship.cli._resolve import resolve_for_command
 from mship.cli.output import Output
 from mship.core import dispatch as _d
 from mship.core.base_resolver import resolve_base
+from mship.core.dispatch_models import resolve_model
+from mship.core.dispatch_stub import build_stub
+from mship.core.sdd_store import DispatchRecord, SddStore
 from mship.core.plan import resolve_plan_path
 from mship.core.skill_install import pkg_skills_source
 from mship.core.workitem_store import WorkItemStore
@@ -61,6 +65,21 @@ def register(app: typer.Typer, get_container):
                 "orchestrator that owns finishing. 'standalone': finish the work and "
                 "open the PR via `mship finish`."
             ),
+        ),
+        model: Optional[str] = typer.Option(
+            None, "--model",
+            help="Model for the subagent. Default: dispatch_models map in "
+                 "mothership.yaml, else built-in per-mode default.",
+        ),
+        full: bool = typer.Option(
+            False, "--full",
+            help="Print the full subagent prompt inline (legacy). Default for "
+                 "--plan-task is a closed stub; the subagent emits its own "
+                 "prompt via --emit.",
+        ),
+        stub: bool = typer.Option(
+            False, "--stub",
+            help="Print the closed stub even for --instruction dispatches.",
         ),
     ):
         """Emit a self-contained markdown subagent prompt to stdout.
@@ -119,7 +138,7 @@ def register(app: typer.Typer, get_container):
                 output.error(f"cannot read plan {str(plan_path)!r}: {e}")
                 raise typer.Exit(code=2)
             try:
-                resolved_instruction = _d.extract_plan_task(plan_text, plan_task)
+                resolved_instruction, plan_meta = _d.extract_plan_task_meta(plan_text, plan_task)
             except ValueError as e:
                 output.error(str(e))
                 raise typer.Exit(code=2)
@@ -146,6 +165,35 @@ def register(app: typer.Typer, get_container):
             known_repos=config.repos.keys(), task_base=task_obj.base_override,
         ) or task_obj.base_branch or "main"
         base_sha_info = _d.collect_base_sha_info(worktree, effective_base)
+
+        resolved_model = resolve_model(
+            mode, flag=model, configured=config.dispatch_models
+        )
+
+        # Persist the record (pointer + metadata; never plan prose).
+        acs = plan_meta.get("acs", []) if plan_task is not None else []
+        rec = DispatchRecord(
+            task_slug=task_obj.slug,
+            work_item_id=getattr(task_obj, "work_item_id", None),
+            mode=mode,
+            model=resolved_model,
+            repo=resolved_repo,
+            worktree=str(worktree),
+            base_branch=effective_base,
+            base_sha=base_sha_info.base_sha,
+            head_sha=base_sha_info.head_sha,
+            plan_path=str(plan_path) if plan_task is not None else None,
+            plan_task_id=plan_task,
+            acs=acs,
+            instruction=None if plan_task is not None else resolved_instruction,
+            created_at=datetime.now(timezone.utc),
+        )
+        record_path = SddStore(Path(container.state_dir())).write(rec)
+
+        want_stub = (plan_task is not None and not full) or stub
+        if want_stub:
+            print(build_stub(rec, record_path=str(record_path)), end="")
+            return
 
         log_mgr = container.log_manager()
         journal_entries = log_mgr.read(task_obj.slug, last=10)
