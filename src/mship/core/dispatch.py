@@ -325,6 +325,8 @@ def build_dispatch_prompt(
     pkg_skills_source: Path,
     state=None,
     mode: str = "implementer",
+    model: str | None = None,
+    acceptance: list | None = None,   # list of (ac_id, text) pairs
 ) -> str:
     """Return the full markdown dispatch prompt for a fresh subagent.
 
@@ -347,6 +349,14 @@ def build_dispatch_prompt(
     journal_block = _render_journal(journal_entries)
     base_block = _render_base_sha_block(base_sha_info, base_branch)
     dependencies_block = _format_dependencies_section(task, state=state)
+    model_line = f"- **Model:** {model}\n" if model else ""
+    acceptance_block = ""
+    if acceptance:
+        joined = "\n".join(f"- [{ac_id}] {text}" for ac_id, text in acceptance)
+        acceptance_block = (
+            "## Acceptance criteria this task serves (from the spec store — live text)\n\n"
+            f"{joined}\n\n"
+        )
     conventions_recap = _conventions_recap(mode)
     closing_heading, closing_body = _closing_section(mode)
     agents_line = f"\nFull doc: `{agents_md_path}`." if agents_md_path else ""
@@ -372,9 +382,9 @@ This is a git worktree checked out on branch `{task.branch}`. Every edit, test r
 - **branch:** {task.branch}
 - **base branch:** {base_branch}
 - **active repo:** {repo}
-
+{model_line}
 {dependencies_block}
-## Where the branch stands
+{acceptance_block}## Where the branch stands
 
 {base_block}
 

@@ -592,3 +592,44 @@ def test_dispatch_prompt_includes_dependencies_section(tmp_path: Path):
         assert "not ready" in result.output
     finally:
         _reset()
+
+
+def test_emit_after_plan_task_dispatch_prints_prompt(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--emit"])
+        assert result.exit_code == 0, result.output
+        assert "first thing" in result.output      # plan body, derived live
+        assert "Model:" in result.output
+        assert "Work from (mandatory)" in result.output
+    finally:
+        _reset()
+
+
+def test_emit_without_record_errors(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--emit"])
+        assert result.exit_code != 0
+        assert "no dispatch record" in result.output
+    finally:
+        _reset()
+
+
+def test_emit_rejects_instruction_sources(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--emit", "--plan-task", "1"])
+        assert result.exit_code == 2
+        assert "--emit" in result.output
+    finally:
+        _reset()

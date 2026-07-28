@@ -15,6 +15,7 @@ from mship.cli._resolve import resolve_for_command
 from mship.cli.output import Output
 from mship.core import dispatch as _d
 from mship.core.base_resolver import resolve_base
+from mship.core.dispatch_emit import build_emitted_prompt
 from mship.core.dispatch_models import resolve_model
 from mship.core.dispatch_stub import build_stub
 from mship.core.sdd_store import DispatchRecord, SddStore
@@ -39,6 +40,15 @@ def _resolve_task_plan(container, task_obj) -> Optional[Path]:
         if wi is not None:
             linked = wi.plan_path
     return resolve_plan_path(task_obj.slug, linked, workspace_root, docs_dir)
+
+
+def _journal_and_agents(container, slug: str) -> tuple[list, Optional[Path]]:
+    """Gather the journal tail and the workspace AGENTS.md (if present) —
+    shared by the full-prompt and --emit paths."""
+    journal_entries = container.log_manager().read(slug, last=10)
+    # AGENTS.md lives next to the config file (workspace root).
+    agents_md = Path(container.config_path()).parent / "AGENTS.md"
+    return journal_entries, agents_md if agents_md.is_file() else None
 
 
 def register(app: typer.Typer, get_container):
@@ -81,6 +91,12 @@ def register(app: typer.Typer, get_container):
             False, "--stub",
             help="Print the closed stub even for --instruction dispatches.",
         ),
+        emit: bool = typer.Option(
+            False, "--emit",
+            help="Subagent-side: derive and print MY full prompt from the "
+                 "dispatch record (cwd-resolved task). Prints drift warnings "
+                 "to stderr.",
+        ),
     ):
         """Emit a self-contained markdown subagent prompt to stdout.
 
@@ -97,6 +113,57 @@ def register(app: typer.Typer, get_container):
                 f"--mode must be one of: {', '.join(_d.DISPATCH_MODES)} (got {mode!r})."
             )
             raise typer.Exit(code=2)
+
+        # --- subagent-side emit: derive the prompt from the persisted record ---
+        if emit:
+            if instruction is not None or plan is not None or plan_task is not None:
+                output.error(
+                    "--emit derives everything from the dispatch record; drop "
+                    "--instruction/--plan/--plan-task."
+                )
+                raise typer.Exit(code=2)
+            container = get_container()
+            state = container.state_manager().load()
+            resolved = resolve_for_command("dispatch", state, task, output)
+            task_obj = resolved.task
+            rec = SddStore(Path(container.state_dir())).find_for_slug(task_obj.slug)
+            if rec is None:
+                output.error(
+                    f"no dispatch record for task {task_obj.slug!r} — the "
+                    f"controller runs `mship dispatch --plan-task N` first."
+                )
+                raise typer.Exit(code=1)
+            spec = None
+            if rec.acs or rec.plan_task_id is not None:
+                spec_id = getattr(task_obj, "spec_id", None)
+                if spec_id:
+                    from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+                    spec = SpecStore(
+                        Path(container.config_path()).parent / SPECS_DIRNAME
+                    ).find_by_id(spec_id)
+            workspace_root = Path(container.config_path()).parent
+            journal_entries, agents_md_path = _journal_and_agents(container, task_obj.slug)
+            base_sha_info = _d.collect_base_sha_info(Path(rec.worktree), rec.base_branch)
+            try:
+                prompt, warnings = build_emitted_prompt(
+                    rec,
+                    workspace_root=workspace_root,
+                    spec=spec,
+                    task=task_obj,
+                    journal_entries=journal_entries,
+                    base_sha_info=base_sha_info,
+                    base_branch=rec.base_branch,
+                    agents_md_path=agents_md_path,
+                    pkg_skills_source=pkg_skills_source(),
+                    state=state,
+                )
+            except (OSError, ValueError) as e:
+                output.error(f"cannot derive the prompt from the record: {e}")
+                raise typer.Exit(code=1)
+            for w in warnings:
+                print(f"warning: {w}", file=sys.stderr)
+            print(prompt)
+            return
 
         # --- resolve the instruction source (exactly one of) ---
         if (instruction is not None) == (plan_task is not None):
@@ -195,13 +262,7 @@ def register(app: typer.Typer, get_container):
             print(build_stub(rec, record_path=str(record_path)), end="")
             return
 
-        log_mgr = container.log_manager()
-        journal_entries = log_mgr.read(task_obj.slug, last=10)
-
-        # AGENTS.md lives next to the config file (workspace root).
-        config_path = Path(container.config_path())
-        agents_md = config_path.parent / "AGENTS.md"
-        agents_md_path = agents_md if agents_md.is_file() else None
+        journal_entries, agents_md_path = _journal_and_agents(container, task_obj.slug)
 
         prompt = _d.build_dispatch_prompt(
             task=task_obj,
