@@ -323,6 +323,24 @@ def register(app: typer.Typer, get_container):
                 "created_at": datetime.now(timezone.utc),
             })
             record_path = store.write(rec)
+            if full:
+                # Honor the universal inline escape: print the same reviewer
+                # prompt the subagent's --emit would derive (paths + live ACs
+                # + contract — never diff content).
+                try:
+                    _instr, ac_ids, warnings = resolve_instruction_and_acs(
+                        rec, Path(container.config_path()).parent
+                    )
+                except (OSError, ValueError) as e:
+                    output.error(f"cannot resolve acceptance criteria: {e}")
+                    raise typer.Exit(code=1)
+                spec = _load_bound_spec(container, task_obj, rec)
+                acceptance, ac_warnings = resolve_acceptance(ac_ids, spec)
+                warnings.extend(ac_warnings)
+                for w in warnings:
+                    print(f"warning: {w}", file=sys.stderr)
+                print(build_reviewer_prompt(rec, pkg, acceptance=acceptance or []))
+                return
             print(build_stub(rec, record_path=str(record_path)), end="")
             return
 

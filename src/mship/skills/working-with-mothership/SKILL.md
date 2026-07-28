@@ -187,7 +187,7 @@ non-event message on the thread; serve does no drafting itself.
 
 Two mship-native primitives for handing work to subagents. Use them instead of hand-rolling task context:
 
-- **`mship dispatch`** — wraps your instruction (`-i/--instruction`, **required**) in a self-contained Markdown prompt for a subagent. Output includes your instruction plus the task slug, worktree path, phase, recent journal entries, affected repos, and per-repo bases. Pipe stdout directly as the `prompt` field of a Claude Code `Task` tool dispatch (or analogous mechanism in Codex / other agent platforms).
+- **`mship dispatch`** — turns an instruction source (ad-hoc `-i/--instruction`, or a plan anchor via `--plan-task`) into a subagent dispatch. Default output is a **closed stub** (record path, resolved model, mode, worktree, emit line) — launch the subagent with cwd set to the worktree and let its first command be `mship dispatch --emit`, which derives the full self-contained prompt (instruction/plan slice, task slug, journal, per-repo bases, live spec AC text) in the subagent's own context. Pass `--full` only when you genuinely want the inline prompt in YOUR context (then pipe it as the `prompt` field of a Claude Code `Task` dispatch or the analogous mechanism elsewhere).
 
   ```bash
   mship dispatch --task my-task -i "implement the parser changes"   # prints a ready-to-use prompt to stdout

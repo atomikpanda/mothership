@@ -1001,3 +1001,37 @@ def test_reviewer_record_write_preserves_review_dir(tmp_path: Path):
         assert (review_dir / "manifest.json").is_file()    # survived the write
     finally:
         _reset()
+
+
+def test_reviewer_dispatch_honors_full_flag(tmp_path: Path):
+    """--full is the universal inline escape: reviewer mode must honor it
+    (previously it silently printed the stub regardless)."""
+    import subprocess
+    wt = tmp_path / "wt"; wt.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=wt, check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-q", "--allow-empty", "-m", "base"], cwd=wt, check=True)
+    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt,
+                          capture_output=True, text=True, check=True).stdout.strip()
+    (wt / "f.txt").write_text("x\n")
+    subprocess.run(["git", "add", "."], cwd=wt, check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-q", "-m", "change"], cwd=wt, check=True)
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _override(cfg, state_dir)
+    try:
+        r1 = runner.invoke(app, ["dispatch", "--task", "t", "-i", "impl work"])
+        assert r1.exit_code == 0, r1.output
+        # base_sha in the record comes from the bootstrap task's branch state;
+        # patch the record to the real base for a valid diff range
+        from mship.core.sdd_store import SddStore
+        store = SddStore(state_dir)
+        rec = store.find_for_slug("t")
+        store.write(rec.model_copy(update={"base_sha": base}))
+        r2 = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer", "--full"])
+        assert r2.exit_code == 0, r2.output
+        assert "record:" not in r2.stdout          # not the stub
+        assert "Diff files to read" in r2.stdout   # the reviewer prompt
+        assert "diff --git" not in r2.stdout       # never diff content
+    finally:
+        _reset()
