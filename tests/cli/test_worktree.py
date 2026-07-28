@@ -2687,3 +2687,103 @@ def test_close_push_only_comparison_failure_does_not_advance(configured_git_app)
         assert wi_store.get(wi_id).phase_override is None
     finally:
         container.shell.reset_override()
+
+
+def _multi_repo_mock_run(merged_repos):
+    """Per-cwd recovery-loop mock: every repo has 3 commits ahead and is pushed;
+    only repos named in `merged_repos` are merged into base."""
+    from mship.util.shell import ShellResult
+
+    def mock_run(cmd, cwd, env=None):
+        merged = any(m in str(cwd) for m in merged_repos)
+        if "git rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="3\n", stderr="")
+        if "git merge-base --is-ancestor" in cmd:
+            return ShellResult(returncode=0 if merged else 1, stdout="", stderr="")
+        if "git ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/feat/t\n", stderr="")
+        if "git rev-parse" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    return mock_run
+
+
+def _seed_two_repo_pushonly(ws):
+    return _seed_pushonly_lifecycle(ws, worktrees={
+        "shared": str(ws / "shared"),
+        "auth-service": str(ws / "auth-service"),
+    })
+
+
+def test_close_push_only_partial_delivery_non_tty_requires_yes(configured_git_app):
+    """One repo merged, one merely pushed: non-TTY close without --yes refuses,
+    naming the undelivered repo — its worktree holds a mid-flight merge."""
+    from unittest.mock import MagicMock
+    from mship.cli import container
+    from mship.util.shell import ShellRunner, ShellResult
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+
+    sm, spec_store, wi_store, wi_id, spec_id = _seed_two_repo_pushonly(configured_git_app)
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = _multi_repo_mock_run(merged_repos=["shared"])
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        r = CliRunner().invoke(_app, ["close", "--task", "t"])
+        assert r.exit_code != 0, r.output
+        assert "auth-service" in r.output
+        assert "--yes" in r.output
+        assert "t" in sm.load().tasks                       # nothing torn down
+        assert spec_store.find_by_id(spec_id).status == "dispatched"
+    finally:
+        container.shell.reset_override()
+
+
+def test_close_push_only_partial_delivery_yes_closes_without_advancing(configured_git_app):
+    """--yes makes the partial close explicit: it proceeds, warns, and advances nothing."""
+    from unittest.mock import MagicMock
+    from mship.cli import container
+    from mship.util.shell import ShellRunner, ShellResult
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+
+    sm, spec_store, wi_store, wi_id, spec_id = _seed_two_repo_pushonly(configured_git_app)
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = _multi_repo_mock_run(merged_repos=["shared"])
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        r = CliRunner().invoke(_app, ["close", "--yes", "--task", "t"])
+        assert r.exit_code == 0, r.output
+        assert "lifecycle not advanced" in r.output
+        assert "auth-service" in r.output
+        assert spec_store.find_by_id(spec_id).status == "dispatched"
+        assert wi_store.get(wi_id).phase_override is None
+        assert "t" not in sm.load().tasks
+    finally:
+        container.shell.reset_override()
+
+
+def test_close_push_only_fully_merged_multi_repo_advances_without_prompt(configured_git_app):
+    """Every repo merged into its base: no confirmation needed, lifecycle advances."""
+    from unittest.mock import MagicMock
+    from mship.cli import container
+    from mship.util.shell import ShellRunner, ShellResult
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+
+    sm, spec_store, wi_store, wi_id, spec_id = _seed_two_repo_pushonly(configured_git_app)
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = _multi_repo_mock_run(merged_repos=["shared", "auth-service"])
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        r = CliRunner().invoke(_app, ["close", "--task", "t"])  # no --yes needed
+        assert r.exit_code == 0, r.output
+        assert spec_store.find_by_id(spec_id).status == "implemented"
+        assert wi_store.get(wi_id).phase_override == "done"
+        assert "t" not in sm.load().tasks
+    finally:
+        container.shell.reset_override()

@@ -870,6 +870,47 @@ def register(app: typer.Typer, get_container):
         if bypassed_base_ancestry and "(forced base-ancestry bypass)" not in log_msg:
             log_msg = log_msg + " (forced base-ancestry bypass)"
 
+        # Partial multi-repo delivery guard (push-only route). When some repos
+        # are undelivered AND have real work mid-flight — "not merged into
+        # <base>" / "comparison failed" (a "worktree missing" entry has nothing
+        # to preserve) — unconditional teardown would silently delete the
+        # operator's in-progress merge workspaces. Nothing is LOST (the
+        # recovery gate already guarantees the branches are pushed), but the
+        # close must be an explicit choice. --abandon/--force never reach here
+        # (the route excludes them; both are already explicit destructive
+        # intents).
+        _pushonly_route = (
+            not task.pr_urls and task.finished_at is not None
+            and not abandon and not force
+        )
+        _midflight = [(r, why) for r, why in undelivered_repos
+                      if why != "worktree missing"]
+        if _pushonly_route and _midflight and not yes:
+            if output.is_tty:
+                lines = "\n".join(f"  {r}: {why}" for r, why in _midflight)
+                proceed = typer.confirm(
+                    f"Undelivered repos:\n{lines}\n"
+                    f"Branches are pushed and recoverable, but these worktrees "
+                    f"will be removed and the lifecycle will NOT advance. "
+                    f"Close anyway?",
+                    default=False,
+                )
+                if not proceed:
+                    output.print(
+                        "close aborted — finish the local merge in each repo, "
+                        "then re-run mship close"
+                    )
+                    raise typer.Exit(code=0)
+            else:
+                names = ", ".join(r for r, _ in _midflight)
+                output.error(
+                    f"close refused: undelivered repos mid-delivery: {names}. "
+                    f"Finish the local merge in each repo and re-run mship close, "
+                    f"or pass --yes to close anyway (worktrees removed, "
+                    f"lifecycle not advanced)."
+                )
+                raise typer.Exit(code=1)
+
         if not yes and output.is_tty:
             from InquirerPy import inquirer
             confirm = inquirer.confirm(
