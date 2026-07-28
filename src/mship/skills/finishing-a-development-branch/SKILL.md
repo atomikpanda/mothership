@@ -15,6 +15,8 @@ description: Use when implementation is complete, all tests pass, and you need t
 
 Run the project's full test suite (`npm test` / `cargo test` / `pytest` / `go test ./...`).
 
+**In a mothership workspace, run `mship test` instead of a bare runner** — it records the result as evidence, so `mship finish`'s evidence gate has something to read. Bare runners are for non-mship repos.
+
 **If tests fail**, report the failures and stop — the menu comes after a green suite:
 
 ```
@@ -85,7 +87,7 @@ is theirs.
 
 ### Option 1: Merge Locally
 
-*In a mothership workspace, run `mship close` after this block. It records the merge in state and cleans up the worktree. Safe to run even after `git branch -d` — `mship close` tolerates an already-deleted branch.*
+*In a mothership workspace, Option 1 is not the normal path: a local merge never runs `mship finish`, and `mship close` REFUSES a task that hasn't been finished. Use Option 2 instead — `mship finish` opens the PR, and the merge auto-advance closes the loop. If your human partner genuinely wants to discard the mship task after a local merge, `mship close --abandon` is the exit — never as a paper-over for skipped finish.*
 
 ```bash
 # Get main repo root for CWD safety
@@ -126,8 +128,8 @@ cat > /tmp/pr-body.md <<'EOF'
 - [ ] <verification steps>
 EOF
 
-# Pushes the branch, opens the PR, stamps state
-mship finish --body-file /tmp/pr-body.md
+# Pushes the branch, opens the PR, stamps state; blocks without passing test evidence
+mship finish --require-tests --body-file /tmp/pr-body.md
 ```
 
 **Post-finish iteration (reviewer feedback, CI fixes, typos):** don't
@@ -201,7 +203,8 @@ Step 2, from before that directory change.
 
 **In a mothership workspace, `mship close` owns cleanup — no manual
 `git worktree remove`.** After a local merge (Option 1) or a confirmed
-discard, run `mship close` / `mship close --abandon` as described above.
+discard, run `mship close --abandon` as described above (a task that never
+ran `mship finish` can only be closed via `--abandon`).
 After a PR merges (Option 2), you usually run nothing at all: when
 `mship serve` is running, its watcher **auto-advances** the bound spec
 (`dispatched → implemented`) and its WorkItem (→ `done`, clearing

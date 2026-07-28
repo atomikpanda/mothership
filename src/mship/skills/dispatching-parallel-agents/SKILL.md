@@ -160,10 +160,22 @@ Agent 3 → Fix tool-approval-race-conditions.test.ts
 
 ## Mothership Workspace
 
-Before dispatching parallel agents in a mothership workspace, confirm there is
-an anchored task (`mship status`) and set each agent's working directory to its
-task worktree (`.resolved_task.worktrees.<repo>`). Agents that run on `main`
-will be blocked by the pre-commit hook.
+**Parallel IMPLEMENTERS on one task/worktree are forbidden** — they conflict
+on the same files and state (this is subagent-driven-development's one-
+implementer-at-a-time rule). Two parallel patterns DO work:
+
+- **Read-only agents** (reviewers, researchers) sharing one worktree — they
+  never write, so they can't conflict.
+- **One TASK per agent** — a separate `mship spawn` per work item, each agent
+  working in its own task's worktree. Pin each agent to its task with
+  `MSHIP_TASK=<slug>` or `--task <slug>` so no command falls through to the
+  wrong task.
+
+Confirm the anchoring with `mship status` and set each agent's working
+directory to its task's worktree (`.resolved_task.worktrees.<repo>`). Agents
+that run on `main` will be blocked by the pre-commit hook. See
+working-with-mothership's "Working on multiple tasks at once" section for the
+multi-task resolution rules.
 
 ## Verification
 

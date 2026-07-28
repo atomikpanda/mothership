@@ -25,6 +25,11 @@ Subagent (general-purpose):
     **Base:** [BASE_SHA]
     **Head:** [HEAD_SHA]
 
+    **Review bundle (optional):** [REVIEW_BUNDLE_PATH]
+
+    When a bundle/package path is provided, read the diff files from disk —
+    do not re-run git. Otherwise, generate the diff yourself:
+
     ```bash
     git diff --stat [BASE_SHA]..[HEAD_SHA]
     git diff [BASE_SHA]..[HEAD_SHA]
@@ -130,6 +135,7 @@ Subagent (general-purpose):
 - `[PLAN_OR_REQUIREMENTS]` — what it should do (plan file path, task text, or requirements)
 - `[BASE_SHA]` — starting commit
 - `[HEAD_SHA]` — ending commit
+- `[REVIEW_BUNDLE_PATH]` — optional: path to a review bundle/package (e.g. from `mship dispatch --mode reviewer`) whose diff files the reviewer reads from disk instead of re-running git; omit the line when there is no bundle
 
 **Reviewer returns:** Strengths, Issues (Critical / Important / Minor), Recommendations, Assessment
 

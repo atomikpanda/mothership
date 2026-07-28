@@ -9,10 +9,11 @@ Dispatch a code reviewer subagent to catch issues before they cascade. The revie
 
 **Core principle:** Review early, review often.
 
+**Scope:** Subagent-driven development owns its own per-task and final reviews (package-based, via `mship dispatch --mode reviewer` and SDD's task-reviewer/re-review prompts) — follow that skill's protocol there. This skill covers ad-hoc and mid-task reviews OUTSIDE that flow.
+
 ## When to Request Review
 
 **Mandatory:**
-- After each task in subagent-driven development
 - After completing major feature
 - Before merge to main
 
@@ -66,7 +67,7 @@ HEAD_SHA=$(git rev-parse HEAD)
   Issues:
     Important: Missing progress indicators
     Minor: Magic number (100) for reporting interval
-  Assessment: Ready to proceed
+  Assessment: Ready to merge? With fixes
 
 You: [Fix progress indicators]
 [Continue to Task 3]

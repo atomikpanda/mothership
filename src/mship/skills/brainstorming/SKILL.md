@@ -13,6 +13,8 @@ Start by understanding the current project context, then ask questions one at a 
 Do NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.
 </HARD-GATE>
 
+**Subagent exemption:** Dispatched implementers executing an already-approved spec/plan skip this skill — the design gate was already passed.
+
 ## Anti-Pattern: "This Is Too Simple To Need A Design"
 
 Every project goes through this process. A todo list, a single-function utility, a config change — all of them. "Simple" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple projects), but you MUST present it and get approval.
@@ -129,11 +131,13 @@ Fix any issues inline. No need to re-review — just fix and move on.
 After the spec review loop passes, ask the user to review the artifact before proceeding. The message is path-aware:
 
 - **In a mothership workspace:** the artifact is the `mship spec` now in `needs_review` state.
-  > "Spec created and ready for review (id: `<id>`). You can review it with `mship spec review <id>` or `mship view spec` in the mobile app. Let me know if you want any changes before we start writing out the implementation plan."
+  > "Spec created and ready for review (id: `<id>`). You can review it with `mship spec review <id>` or `mship view spec` in the mobile app — or tell me it's approved and I'll record your approval. Let me know if you want any changes before we start writing out the implementation plan."
 - **Outside a workspace:** the artifact is the committed design doc.
   > "Design doc written and committed to `<path>`. Please review it and let me know if you want to make any changes before we start writing out the implementation plan."
 
 Wait for the user's response. If they request changes, make them and re-run the spec review loop. Only proceed once the user approves.
+
+**In a mothership workspace, when the user approves the spec in chat,** record their approval on their behalf (`mship spec verdict <id> <ac> approved` for each criterion, then `mship spec approve <id>`) — this is the operator's explicit instruction being executed, and writing-plans requires the spec to be `approved`, not `needs_review`.
 
 **Implementation:**
 

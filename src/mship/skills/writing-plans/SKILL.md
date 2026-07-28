@@ -20,6 +20,7 @@ Assume they are a skilled developer, but know almost nothing about our toolset o
 **Save plans to:** `<docs_dir>/plans/YYYY-MM-DD-<feature-name>.md`
 - Default `docs_dir` is `docs/`; in a workspace, `docs_dir` comes from `mship context`.
 - (User preferences for plan location override this default)
+- **In a mothership workspace the plan FILENAME must stem-match the task slug** (`<date>-<task-slug>.md`) or be linked via `mship item link-plan` — otherwise the feature plan gate at `mship phase dev`/`finish` cannot resolve it and hard-blocks.
 
 ## Scope Check
 
@@ -173,7 +174,7 @@ After saving the plan, offer execution choice:
 **If Subagent-Driven chosen:**
 - **REQUIRED SUB-SKILL:** Use subagent-driven-development
 - Fresh subagent per task + two-stage review
-- Build each implementer prompt with `mship dispatch --task <slug> --plan-task <N>` (hand the subagent the emitted stub; it runs `mship dispatch --emit` in the worktree to get the anchored task text as its instruction); subagents run `mship test` so `mship finish` has its evidence trail.
+- Build each implementer prompt with `mship dispatch --task <slug> --plan-task <N>` (hand the subagent the emitted stub; it runs `mship dispatch --emit` in the worktree to get the anchored task text as its instruction); subagents run `mship test` so `mship finish --require-tests` has its evidence trail.
 
 **If Inline Execution chosen:**
 - **REQUIRED SUB-SKILL:** Use executing-plans

@@ -11,13 +11,13 @@ Load plan, review critically, execute all tasks, report when complete.
 
 **Announce at start:** "I'm using the executing-plans skill to implement this plan."
 
-**Note:** Tell your human partner that Superpowers works much better with access to subagents (Claude Code, Codex CLI, Codex App, Copilot CLI, and Gemini CLI all qualify). If subagents are available, use subagent-driven-development instead of this skill.
+**Note:** Tell your human partner that Superpowers works much better with access to subagents (Claude Code, Codex CLI, Codex App, Copilot CLI, and Gemini CLI all qualify). subagent-driven-development is recommended when subagents are available; when your human partner explicitly chose inline execution, honor that choice.
 
 ## The Process
 
 ### Step 1: Load and Review Plan
 1. Ensure an isolated workspace: use using-git-worktrees to create one or verify the existing one
-2. **If this is a mothership workspace** (`mothership.yaml` at any ancestor): verify `mship status` shows an active task BEFORE starting (`mship status | jq .resolved_task` should be non-null, or `.active_tasks` should contain the slug you intend to anchor). No active task → stop. Every task needs a WorkItem: tell the user to run `mship item new "<title>" --kind <feature|bug|chore|question>` then `mship spawn "<description>" --work-item <id>` first. Then `cd` into `.resolved_task.worktrees.<repo>` and do all work and commits there. The mship pre-commit hook refuses commits from outside the worktree, so "just commit on main" is both wrong and blocked. If `require_approved_spec: true`, the task needs a bound, approved spec before `mship phase dev` will advance — create/approve one (`mship spec …`) or pass `mship phase dev --bypass-spec-gate`. See `working-with-mothership`.
+2. **If this is a mothership workspace** (`mothership.yaml` at any ancestor): verify `mship status` shows an active task BEFORE starting (`mship status | jq .resolved_task` should be non-null, or `.active_tasks` should contain the slug you intend to anchor). No active task → stop. Every task needs a WorkItem: tell the user to run `mship item new "<title>" --kind <feature|bug|chore|question>` then `mship spawn "<description>" --work-item <id>` first. Then `cd` into `.resolved_task.worktrees.<repo>` and do all work and commits there. The mship pre-commit hook refuses commits from outside the worktree, so "just commit on main" is both wrong and blocked. A feature-kind WorkItem always needs a bound, approved spec before `mship phase dev` will advance (the kind gate — not opt-in); `require_approved_spec: true` adds a legacy task-scoped layer on top. If the gate blocks you, stop and ask the operator — bypass only on their explicit instruction. See `working-with-mothership`.
 3. Read plan file
 4. Review critically - identify any questions or concerns about the plan
 5. If concerns: Raise them with your human partner before starting

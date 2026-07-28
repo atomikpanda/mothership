@@ -120,7 +120,11 @@ mship spec dispatch <id>                     # bind the approved spec to a task 
 
 Review a spec without the CLI via `mship view spec [--web]`, or over HTTP via `mship serve` (the Ground Control phone path).
 
-**The approval gate.** With `require_approved_spec: true` in `mothership.yaml`, `mship phase dev` is **hard-blocked** until a bound, approved spec exists — escape with `mship phase dev --bypass-spec-gate`. **This is opt-in: the default is OFF**, so by default `phase dev` only warns when no spec is found. Spec-first is the recommended methodology regardless of the gate.
+**The approval gate — three layers.** (1) The **kind gate is always on**: a task linked to a **feature**-kind WorkItem is **hard-blocked** at both `mship phase dev` and `mship finish` until a bound, approved spec exists — this is not opt-in and has no config switch. (2) `require_approved_spec: true` in `mothership.yaml` adds a **legacy, task-scoped** layer on top (that one IS opt-in, default OFF). (3) Independently of both, `phase dev` warns (never blocks) when no spec file is found at all. Bypass flags (`--bypass-spec-gate`, `--bypass-plan-gate`, `--hotfix`, `MSHIP_BYPASS_GATE`, `--no-verify`) require the operator's explicit authorization — the bypass log is audit, not permission.
+
+**Verdicts and approval are the OPERATOR's decision.** Run `mship spec verdict`/`mship spec approve` only when the operator has explicitly said to approve — you are recording their decision on their behalf; never self-initiated, never inferred from silence. `spec approve --bypass-gate` approves a spec that still has open questions or unreviewed criteria — never use it without explicit operator instruction.
+
+**The plan gate.** Feature-kind WorkItems are also **hard-blocked** at `phase dev` and `finish` until an implementation plan resolves: either the WorkItem's `plan_path` (set via `mship item link-plan <wi> <path>`) or a `<docs_dir>/plans/` file whose **stem exactly matches** the task slug (or `<date>-<slug>`), containing at least one `mship:task` anchor. Escapes: `--bypass-plan-gate` / `--hotfix` (operator-authorized only).
 
 ## Spec storage & visibility (`spec_storage`)
 
@@ -163,9 +167,13 @@ mship item list                    # one line per item: `<id>  [phase]  <title> 
 mship item show <id>               # full JSON: linked spec/tasks/threads/links + phase_override
                                    #   (use `mship item list --json` for the live derived phase)
 mship item link-spec <id> <spec-id>        # bind the design artifact
+mship item link-plan <id> <path>           # bind the implementation plan (satisfies the plan gate)
 mship item link-task <id> <task-slug>      # bind an execution worktree (repeatable)
+mship item link-issue <id> <ref>           # link a GitHub tracker issue — auto-closes it when the task's PRs merge
 mship item link-url  <id> <url> [--provider github|linear|notion|jira|url] [--title T]
 mship item phase <id> <phase>      # manual override ("nudge") when the derived phase is wrong
+mship item archive <id> [--force]  # soft-delete: hidden from `item list` unless --all
+mship item unarchive <id>          # restore an archived item
 mship item migrate                 # backfill items from existing specs/tasks (one-time)
 ```
 
@@ -194,7 +202,7 @@ Two mship-native primitives for handing work to subagents. Use them instead of h
   mship dispatch --task my-task -i "implement the parser changes" --full   # inline prompt in YOUR context (explicit escape)
   ```
 
-  **Modes (`--mode`).** By default (`implementer`) the prompt scopes the subagent to the single task, tells it to ask clarifying questions, self-review, and report back — and explicitly **not** to open a PR, because the orchestrator owns integration and runs `mship finish` after review. This is what you want for per-task execution under an orchestrator. Pass `--mode standalone` for the alternative contract where the subagent finishes the work and opens its own PR (use it only for genuinely standalone, one-off dispatches).
+  **Modes (`--mode`).** By default (`implementer`) the prompt scopes the subagent to the single task, tells it to ask clarifying questions, self-review, and report back — and explicitly **not** to open a PR, because the orchestrator owns integration and runs `mship finish` after review. This is what you want for per-task execution under an orchestrator. Pass `--mode standalone` for the alternative contract where the subagent finishes the work and opens its own PR (use it only for genuinely standalone, one-off dispatches). This skips the finishing options menu — the human gate moves to spec approval before and PR review after (the overnight-worker model). For multi-repo tasks prefer orchestrated finish: standalone opens the full coordinated PR set with no human eye on the repo split first.
 
   **Model resolution:** dispatch resolves the subagent's model (`--model` >
   `dispatch_models:` in mothership.yaml > built-in per-mode default) and stamps
@@ -242,7 +250,7 @@ Four phases progress linearly. Always transition explicitly with `mship phase <t
 | `run` | Start services, integration test, deploy | depends on environment |
 
 **Soft gates** warn (don't block) when preconditions aren't met:
-- `phase dev` → warns if no spec is found (default); **hard-blocks when `require_approved_spec: true`** in `mothership.yaml` — escape with `--bypass-spec-gate`. See [Specs: the spec lifecycle](#specs-the-spec-lifecycle-mship-spec) above.
+- `phase dev` → warns if no spec file is found. Separately from that warning, `phase dev` **hard-blocks** for a feature-kind WorkItem without an approved spec and a resolvable implementation plan (the kind gate — always on), and additionally when the legacy opt-in `require_approved_spec: true` is set in `mothership.yaml`. Escapes (`--bypass-spec-gate`, `--bypass-plan-gate`) require explicit operator authorization. See [Specs: the spec lifecycle](#specs-the-spec-lifecycle-mship-spec) above.
 - `phase review` → warns if tests haven't passed
 - `phase run` → warns if there are uncommitted changes
 
@@ -273,7 +281,7 @@ mship doctor                          # always run after init
 ### Working on a task
 
 ```bash
-mship spawn "description" --work-item <id> [--repos a,b] [--skip-setup] [--base <branch>] [--depends-on a,b]
+mship spawn "description" --work-item <id> [--repos a,b] [--skip-setup] [--base <branch>] [--depends-on a,b] [--closes <ref>] [--slug S] [--yes] [--offline] [--bypass-reconcile]
 mship switch <repo>                   # before starting work in a different repo
 mship phase plan|dev|review|run [-f]  # `-f` overrides blocked or finished-task guardrail
 mship block "reason" | mship unblock
@@ -282,8 +290,8 @@ mship build [--all] [--repos|--tag]   # runs `task build` across repos in dep or
 mship capture [--repo R] [--platform P] [--kind image|layout|all] [--out DIR] [--evidence SPEC:AC]
 mship journal "msg" [--action X] [--open Y] [--repo R] [--test-state pass|fail|mixed]
 mship journal --show-open                 # what am I blocked on across this task?
-mship finish [--base B] [--base-map ...] [--push-only] [--handoff] [--force-audit] [--body-file F | --body TEXT] [--force] [--require-tests] [--title T] [--body-map ...]
-mship close [--yes] [--abandon] [--force] [--skip-pr-check]   # --force also required to tear down a dirty/unpushed worktree
+mship finish [--base B] [--base-map ...] [--push-only] [--handoff] [--force-audit] [--body-file F | --body TEXT] [--force] [--require-tests] [--require-evidence] [--title T] [--body-map ...] [--token T] [--bypass-reconcile]
+mship close [--yes] [--abandon] [--force] [--skip-pr-check] [--bypass-base-ancestry] [--bypass-reconcile]   # --force also required to tear down a dirty/unpushed worktree
 ```
 
 **Merge auto-advance (`mship serve`).** With `mship serve` running, the PR-watcher auto-closes the loop: when a task's PR(s) merge it advances the bound spec `dispatched → implemented` and the WorkItem to `done` (clearing the `needs_review` attention), then tears the worktree down — so **no manual `mship close` is needed** in the common case. `mship close` is now needed only to force-teardown a worktree with **uncommitted or unpushed** changes: every teardown path (merge auto-close, `mship close`, `mship close --abandon`) refuses to delete such a worktree unless you pass `--force`, so work is never lost. When auto-teardown is skipped for a dirty worktree, the spec/WorkItem still advance and a note is posted on the thread — resolve, then `mship close` (or `--force`).
@@ -299,10 +307,10 @@ mship spawn "<description>" --work-item <id> [--repos a,b]
 
 `spawn` refuses without `--work-item`; `--hotfix` overrides it for emergencies and the override is recorded to `.mothership/bypass-log.jsonl`. Kind controls what's required downstream:
 
-- **feature**-kind WorkItems also need an **approved spec** before `mship phase dev` or `mship finish` will proceed — bind and approve one (`mship spec …`, approved in Ground Control or via the CLI), or skip the check with `mship phase dev --bypass-spec-gate` / `mship finish --hotfix` (both logged).
+- **feature**-kind WorkItems also need an **approved spec** before `mship phase dev` or `mship finish` will proceed — bind one and get it approved (`mship spec …`; the operator approves in Ground Control, or explicitly instructs you to record their approval via the CLI). If the gate blocks you, stop and ask the operator — `mship phase dev --bypass-spec-gate` / `mship finish --hotfix` are logged escapes for the operator to authorize, not alternatives to approval.
 - **bug/chore/question**-kind WorkItems need only the linked WorkItem — no spec required.
 
-This is enforced everywhere a task's identity matters, not just at `spawn`: the `git commit`/`git push` hooks and the PreToolUse edit-guard hook all check that the active task carries a passing WorkItem gate, and refuse (with an actionable message) if it doesn't. Their escape hatch is `MSHIP_BYPASS_GATE=1` (or `git commit`/`push --no-verify`), which is also bypass-logged. See [Work items: the cross-artifact spine](#work-items-the-cross-artifact-spine-mship-item) above for the full WorkItem model.
+This is enforced everywhere a task's identity matters, not just at `spawn`: the `git commit`/`git push` hooks and the PreToolUse edit-guard hook all check that the active task carries a passing WorkItem gate, and refuse (with an actionable message) if it doesn't. Their escape hatch is `MSHIP_BYPASS_GATE=1` (or `git commit`/`push --no-verify`), which is also bypass-logged — and requires explicit operator authorization. Note `--no-verify` disables **every** pre-commit check, not just this gate. See [Work items: the cross-artifact spine](#work-items-the-cross-artifact-spine-mship-item) above for the full WorkItem model.
 
 **`capture` is the UI analog of `test`.** For UI work (mobile screens, web), run
 `mship capture` to grab the running app's rendered state — a screenshot (`image`)
@@ -333,7 +341,7 @@ test, and the reviewer sees it without asking you for a screenshot.
 
 **MANDATORY after `spawn` (or `switch`): `cd` into the worktree BEFORE editing ANY files.** The spawn output prints the worktree path for each repo. Do not start editing, committing, or running anything task-related until your shell's cwd is inside the worktree. If you start editing from the main checkout, every change lands on the wrong branch and the task's feature branch stays empty. Common signs you're in the wrong place: `git status` shows unrelated changes, `git branch` shows `main` instead of `feat/<slug>`, `mship journal` prints the "running from … not the active repo's worktree" warning.
 
-The pre-commit hook enforces this at the git level: if you try `git commit` anywhere except the task's assigned worktree while a task is active, the commit is refused. Use `git commit --no-verify` to bypass for exceptional cases.
+The pre-commit hook enforces this at the git level: if you try `git commit` anywhere except the task's assigned worktree while a task is active, the commit is refused. Fix your location (`cd` into the worktree) instead of reaching for `git commit --no-verify` — it disables **every** pre-commit check, not just the location guard, and requires explicit operator authorization.
 
 **`switch` is required when crossing repos.** It snapshots each dep's HEAD SHA so the next `switch` back can show "what changed in dependencies since you were last here." Without it, you lose the cross-repo orientation anchor.
 
@@ -421,7 +429,7 @@ For larger changes — new features, significant refactors — spawn a new task 
 mship status                          # task, phase, branch, drift, last log, finished warning
 mship audit [--repos r] [--json]
 mship pr                              # aggregate PR state across all active tasks
-mship view status|journal|diff|spec [--watch]
+mship view status|journal|diff|spec|item|items|queue [--watch]
 mship view spec --web                 # serves HTML on localhost
 mship graph
 mship worktrees

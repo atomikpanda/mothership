@@ -124,3 +124,8 @@ Skip any step = lying, not verifying
 In a mothership workspace, run verification via `mship test` so the result is
 recorded as evidence; `mship finish --require-tests` enforces that gate before
 a PR is opened. See `working-with-mothership`.
+
+**Controller role in subagent-driven flows:** the controller may accept a
+subagent's reported `mship test` evidence once a reviewer has verified the
+work — delegation with review IS the verification path. Claims you make from
+your own work still require fresh evidence you ran yourself.

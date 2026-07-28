@@ -30,7 +30,7 @@ Delta vocabulary (the spec's four kinds):
 
 ### brainstorming
 
-- `brainstorming/SKILL.md` — kind 2 (mship routing): design capture is dual-path on workspace detection — in a mothership workspace the design becomes an `mship spec` (new/draft/apply → needs_review, workspace-level and branch-stable), outside one a plain `docs/specs/` design doc. Flowchart and review-gate messages updated to match.
+- `brainstorming/SKILL.md` — kind 2 (mship routing): design capture is dual-path on workspace detection — in a mothership workspace the design becomes an `mship spec` (new/draft/apply → needs_review, workspace-level and branch-stable), outside one a plain `docs/specs/` design doc. Flowchart and review-gate messages updated to match. Also kind 2: on in-chat spec approval the agent records it on the operator's behalf (`spec verdict` per criterion + `spec approve`; review-gate message offers this path), and a subagent-exemption note (dispatched implementers on an already-approved spec/plan skip the design gate).
 - `brainstorming/spec-document-reviewer-prompt.md` — kind 2: dispatch-after condition rewritten for the dual-path capture (`mship spec review <id>` in a workspace, `docs/specs/` doc otherwise); drops the upstream `docs/superpowers/specs/` path.
 - `brainstorming/scripts/server.cjs` — security patch: (a) CodeQL js/reflected-xss alert #37 — the `/?key=` bootstrap reflected the request's key into a `<script>` body; now escapes `<`/`>`/`&` as `\uXXXX` in the JSON literal and reflects the server's own `TOKEN` instead of the request copy; (b) cleartext key transport — refuses to bind a non-loopback host (the session key rides plain http/ws URLs) unless BOTH `BRAINSTORM_ALLOW_NON_LOOPBACK=1` AND an https `BRAINSTORM_PUBLIC_URL` (the operator's TLS front) are set; all keyed access URLs are built by a single `buildAccessUrl()` owner, which under the override emits only the https public URL — never the raw host:port — so the key rides TLS even on the initial page load, and browser-origin acceptance is owned by one `allowedOrigins()` helper — same-origin `http://<Host>` on loopback (upstream behavior) plus, under the override only, exact string equality with the `BRAINSTORM_PUBLIC_URL` origin (no wildcards) so proxied wss upgrades aren't destroyed (Origin never carries a path, so a path-mounted `BRAINSTORM_PUBLIC_URL` needs no origin change), and the bootstrap page reloads `location.pathname` instead of the origin root so a path-mounted proxy stays inside its route; (c) undisclosed third-party fetch — the primeradiant.com brand image is now opt-in via `SUPERPOWERS_ENABLE_REMOTE_BRANDING`; default render makes no external request (local attribution text instead).
 - `brainstorming/scripts/helper.js` — security patch (cleartext key transport): the browser helper attaches the session key to ws/URL navigations only when the page is loopback or served over https (then wss); otherwise it connects keyless and logs a clear use-loopback-or-TLS error instead of leaking the bearer key over the network. All its URLs are same-origin/relative, so under the server's https `BRAINSTORM_PUBLIC_URL` front they inherit TLS and the guard permits the key; WebSocket/recovery URLs build on the page's own path base (pure `pathBase()`), not the origin root, so path-mounted reverse proxies (e.g. `https://host/companion`) work as well as root-mounted ones.
@@ -40,19 +40,20 @@ Delta vocabulary (the spec's four kinds):
 
 ### dispatching-parallel-agents
 
-- `dispatching-parallel-agents/SKILL.md` — kind 3 (subagent anchoring): appended "Mothership Workspace" section — confirm an anchored task via `mship status` and set each agent's cwd to its task worktree (`.resolved_task.worktrees.<repo>`); agents on `main` are blocked by the pre-commit hook.
+- `dispatching-parallel-agents/SKILL.md` — kind 3 (subagent anchoring): appended "Mothership Workspace" section — confirm an anchored task via `mship status` and set each agent's cwd to its task worktree (`.resolved_task.worktrees.<repo>`); agents on `main` are blocked by the pre-commit hook. Rewritten (intent-scan): parallel implementers on one task/worktree are forbidden (SDD rule); the working parallel patterns are read-only agents sharing a worktree or one task per agent (separate `mship spawn`, pinned via `MSHIP_TASK`/`--task`); points at working-with-mothership's multi-task section.
 
 ### executing-plans
 
-- `executing-plans/SKILL.md` — kind 2 + residual kind 1: anchored-task precondition inserted (verify `mship status` resolves a task, WorkItem-first `mship item new` → `mship spawn --work-item`, work from the task worktree, spec-gate note) and finishing routed via `mship finish --body-file`; remaining upstream skill-namespace (`superpowers`) prefixes dropped.
+- `executing-plans/SKILL.md` — kind 2 + residual kind 1: anchored-task precondition inserted (verify `mship status` resolves a task, WorkItem-first `mship item new` → `mship spawn --work-item`, work from the task worktree, spec-gate note) and finishing routed via `mship finish --body-file`; remaining upstream skill-namespace (`superpowers`) prefixes dropped. Spec-gate note corrected (intent-scan): feature-kind WorkItems always hard-block at `phase dev` (kind gate); `require_approved_spec` is the legacy opt-in layer; bypass replaced with stop-and-ask-the-operator. Unconditional "use subagent-driven-development instead" softened to honor an explicit inline-execution choice.
 
 ### finishing-a-development-branch
 
-- `finishing-a-development-branch/SKILL.md` — kind 2: merge path adds `mship close` after local merge; PR path replaced by `mship finish --body-file` (push+PR+state stamp) with post-finish iteration via `mship commit`; discard path routes through `mship close --abandon`. Non-workspace flows keep upstream's forge tooling.
+- `finishing-a-development-branch/SKILL.md` — kind 2: PR path replaced by `mship finish --require-tests --body-file` (push+PR+state stamp, evidence-gated) with post-finish iteration via `mship commit`; Step 1 verification runs `mship test` (not a bare runner) so finish's evidence gate has something to read; merge path corrected (intent-scan) — a local merge never runs finish and `mship close` refuses unfinished tasks, so Option 1 is not the normal workspace path (Option 2 + merge auto-advance is; `mship close --abandon` only for a genuine discard); discard path routes through `mship close --abandon`. Non-workspace flows keep upstream's forge tooling.
 
 ### requesting-code-review
 
-- `requesting-code-review/SKILL.md` — de-branding: example plan path `docs/superpowers/plans/` → `docs/plans/`.
+- `requesting-code-review/SKILL.md` — de-branding: example plan path `docs/superpowers/plans/` → `docs/plans/`. Kind 3 (intent-scan re-scope): SDD flows own their per-task and final reviews (package-based, `mship dispatch --mode reviewer` + SDD prompts); this skill covers ad-hoc/mid-task reviews outside that flow — the "after each SDD task" mandatory trigger removed; worked example's verdict aligned to the template's "Ready to merge?" vocabulary.
+- `requesting-code-review/code-reviewer.md` — kind 3: optional `[REVIEW_BUNDLE_PATH]` placeholder — when a bundle/package path is provided the reviewer reads diff files from disk instead of re-running git (reconciles SDD's final-review usage); git instructions kept for the no-bundle case.
 
 ### subagent-driven-development
 
@@ -87,11 +88,11 @@ Vendored from upstream `using-superpowers/references/` (see structural exclusion
 
 ### verification-before-completion
 
-- `verification-before-completion/SKILL.md` — kind 4: "Mothership Workspace" section — verify via `mship test` so the result is recorded as evidence for the `mship finish --require-tests` gate.
+- `verification-before-completion/SKILL.md` — kind 4: "Mothership Workspace" section — verify via `mship test` so the result is recorded as evidence for the `mship finish --require-tests` gate; controller-role paragraph added (intent-scan) — in subagent-driven flows the controller may accept a subagent's reported `mship test` evidence once a reviewer verified the work; own-work claims still need fresh self-run evidence.
 
 ### writing-plans
 
-- `writing-plans/SKILL.md` — kind 3 + kind 2 + residual kind 1: plan input is an approved `mship spec` (id in the plan header, `mship phase dev` gate); save path parametrized on `docs_dir` from `mship context`; `<!-- mship:task id=N -->` anchors around plan tasks for `--plan-task` dispatch; commit steps paired with `mship journal`; remaining upstream skill-namespace (`superpowers`) prefixes dropped.
+- `writing-plans/SKILL.md` — kind 3 + kind 2 + residual kind 1: plan input is an approved `mship spec` (id in the plan header, `mship phase dev` gate); save path parametrized on `docs_dir` from `mship context`; `<!-- mship:task id=N -->` anchors around plan tasks for `--plan-task` dispatch; commit steps paired with `mship journal`; remaining upstream skill-namespace (`superpowers`) prefixes dropped. Plan-gate warning added at the save-location line (intent-scan): filename must stem-match the task slug or be linked via `mship item link-plan`, else the feature plan gate hard-blocks; canonical finish reference now `mship finish --require-tests`.
 
 ### writing-skills
 
