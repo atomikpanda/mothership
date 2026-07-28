@@ -53,6 +53,29 @@ def resolve_instruction_and_acs(
     return text, meta.get("acs", list(rec.acs)), warnings
 
 
+def resolve_acceptance(ac_ids: list[str], spec) -> tuple[list[tuple[str, str]] | None, list]:
+    """Map AC ids to live (id, text) pairs from the spec. An unknown AC id,
+    or ids with spec=None, appends a string warning (never an error)."""
+    warnings: list = []
+    if not ac_ids:
+        return None, warnings
+    if spec is None:
+        warnings.append(
+            f"acceptance criteria {', '.join(ac_ids)} referenced but no spec "
+            f"is bound to this task — emitting without AC text"
+        )
+        return None, warnings
+    by_id = {ac.id: ac.text for ac in spec.acceptance_criteria}
+    acceptance = [(i, by_id[i]) for i in ac_ids if i in by_id]
+    unknown = [i for i in ac_ids if i not in by_id]
+    if unknown:
+        warnings.append(
+            f"AC id(s) {', '.join(unknown)} not found in spec {spec.id!r} "
+            f"— emitting without them"
+        )
+    return acceptance, warnings
+
+
 def _minimal_task(rec: DispatchRecord) -> Task:
     """Reconstruct just what build_dispatch_prompt reads from a Task.
 
@@ -114,23 +137,8 @@ def build_emitted_prompt(
     AC id, or acs with spec=None, appends a string warning (never an error).
     """
     instruction, ac_ids, warnings = resolve_instruction_and_acs(rec, workspace_root)
-
-    acceptance: list[tuple[str, str]] | None = None
-    if ac_ids:
-        if spec is None:
-            warnings.append(
-                f"acceptance criteria {', '.join(ac_ids)} referenced but no spec "
-                f"is bound to this task — emitting without AC text"
-            )
-        else:
-            by_id = {ac.id: ac.text for ac in spec.acceptance_criteria}
-            acceptance = [(i, by_id[i]) for i in ac_ids if i in by_id]
-            unknown = [i for i in ac_ids if i not in by_id]
-            if unknown:
-                warnings.append(
-                    f"AC id(s) {', '.join(unknown)} not found in spec {spec.id!r} "
-                    f"— emitting without them"
-                )
+    acceptance, ac_warnings = resolve_acceptance(ac_ids, spec)
+    warnings.extend(ac_warnings)
 
     if pkg_skills_source is None:
         from mship.core.skill_install import pkg_skills_source as _pkg_src

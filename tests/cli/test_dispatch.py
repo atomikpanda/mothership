@@ -661,3 +661,114 @@ def test_emit_rejects_instruction_sources(tmp_path: Path):
         assert "--emit" in result.output
     finally:
         _reset()
+
+
+# --- reviewer mode (Task 6) ---
+
+def _git_worktree(tmp_path: Path) -> Path:
+    """A real git repo usable as the task worktree: base commit + one commit."""
+    import subprocess
+
+    wt = tmp_path / "wt"; wt.mkdir()
+
+    def g(*args):
+        subprocess.run(["git", *args], cwd=wt, capture_output=True, text=True, check=True)
+
+    g("init", "-q"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
+    (wt / "f.txt").write_text("base\n")
+    g("add", "-A"); g("commit", "-q", "-m", "base")
+    g("checkout", "-q", "-B", "main")     # local base branch at the base commit
+    g("checkout", "-q", "-b", "feat/t")
+    (wt / "f.txt").write_text("changed\n")
+    g("commit", "-q", "-am", "work")
+    return wt
+
+
+def test_reviewer_dispatch_prints_stub_and_writes_package(tmp_path: Path):
+    wt = _git_worktree(tmp_path)
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer"])
+        assert result.exit_code == 0, result.output
+        assert "record:" in result.output and "mode: reviewer" in result.output
+        review_dir = state_dir / "sdd" / "no-item" / "t" / "review"
+        assert (review_dir / "manifest.json").is_file()
+        assert list(review_dir.glob("*.diff"))
+    finally:
+        _reset()
+
+
+def test_reviewer_emit_prints_paths_and_contract_not_diff(tmp_path: Path):
+    wt = _git_worktree(tmp_path)
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--emit"])
+        assert result.exit_code == 0, result.output
+        review_dir = state_dir / "sdd" / "no-item" / "t" / "review"
+        assert str(next(review_dir.glob("*.diff"))) in result.stdout
+        assert "diff --git" not in result.stdout          # paths, never content
+        assert "spec-compliance" in result.stdout.lower()
+        assert "quality" in result.stdout.lower()
+        assert "READ-ONLY" in result.stdout
+    finally:
+        _reset()
+
+
+def test_reviewer_dispatch_without_prior_record_errors(tmp_path: Path):
+    wt = _git_worktree(tmp_path)
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer"])
+        assert result.exit_code != 0
+        assert "no dispatch record" in result.output
+    finally:
+        _reset()
+
+
+def test_reviewer_dispatch_rejects_instruction_sources(tmp_path: Path):
+    wt = _git_worktree(tmp_path)
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(
+            app, ["dispatch", "--task", "t", "--mode", "reviewer", "--plan-task", "1"]
+        )
+        assert result.exit_code == 2
+        assert "reviewer" in result.output
+    finally:
+        _reset()
+
+
+def test_reviewer_record_write_preserves_review_dir(tmp_path: Path):
+    """The reviewer record supersedes the implementer record in the SAME keyed
+    dir — the review/ package written just before must survive the write."""
+    from mship.core.sdd_store import SddStore
+
+    wt = _git_worktree(tmp_path)
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer"])
+        assert result.exit_code == 0, result.output
+        rec = SddStore(state_dir).find_for_slug("t")
+        assert rec is not None and rec.mode == "reviewer"
+        assert rec.model == "sonnet"                       # reviewer builtin default
+        assert rec.plan_task_id == "1" and rec.acs == ["ac2"]  # pointer fields kept
+        review_dir = state_dir / "sdd" / "no-item" / "t" / "review"
+        assert (review_dir / "manifest.json").is_file()    # survived the write
+    finally:
+        _reset()

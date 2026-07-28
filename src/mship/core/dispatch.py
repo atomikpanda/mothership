@@ -204,7 +204,7 @@ def _summarize_base_sha(
     return "; ".join(parts) if parts else "unknown"
 
 
-DISPATCH_MODES: tuple[str, ...] = ("implementer", "standalone")
+DISPATCH_MODES: tuple[str, ...] = ("implementer", "standalone", "reviewer")
 
 
 _CONVENTIONS_INTRO = "These are strictly enforced in this workspace:"
@@ -254,8 +254,29 @@ If you get stuck or the task is wrong-shaped, stop and report what you tried and
 """
 
 
+# Reviewer: read-only over a prepared review package; one reviewer returns
+# both verdicts (upstream 6.2.0 task-reviewer contract).
+_REVIEW_CONTRACT = """\
+You are a READ-ONLY reviewer. Do not edit files, run git write commands, or
+check out branches — a reviewer mutating the worktree orphans commits.
+
+Read the diff files listed above (they are on disk — read them as files, do
+not ask for them to be pasted). Then return BOTH verdicts in one report:
+
+1. **Spec-compliance** — does the change satisfy each listed acceptance
+   criterion? Verdict per criterion: satisfied / not-satisfied / can't-tell,
+   with the evidence line (file:line) that convinced you.
+2. **Code quality** — correctness, tests, naming, duplication, style fit with
+   the surrounding code. Findings ranked by severity; state what you verified,
+   not just what you suspect.
+
+Report back as text. Do NOT open a PR, do not run `mship finish`."""
+
+
 def _closing_section(mode: str) -> tuple[str, str]:
     """Return the (heading, body) for the prompt's closing section."""
+    if mode == "reviewer":
+        return "Review contract (read-only; both verdicts)", _REVIEW_CONTRACT
     if mode == "standalone":
         return "How to finish", _FINISH_CONTRACT
     return "Report back (do not open a PR)", _REPORT_CONTRACT

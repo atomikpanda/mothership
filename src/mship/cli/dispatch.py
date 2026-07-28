@@ -15,9 +15,18 @@ from mship.cli._resolve import resolve_for_command
 from mship.cli.output import Output
 from mship.core import dispatch as _d
 from mship.core.base_resolver import resolve_base
-from mship.core.dispatch_emit import build_emitted_prompt
+from mship.core.dispatch_emit import (
+    build_emitted_prompt,
+    resolve_acceptance,
+    resolve_instruction_and_acs,
+)
 from mship.core.dispatch_models import resolve_model
 from mship.core.dispatch_stub import build_stub
+from mship.core.review_package import (
+    build_review_package,
+    build_reviewer_prompt,
+    load_review_package,
+)
 from mship.core.sdd_store import DispatchRecord, SddStore
 from mship.core.plan import resolve_plan_path
 from mship.core.skill_install import pkg_skills_source
@@ -51,6 +60,20 @@ def _journal_and_agents(container, slug: str) -> tuple[list, Optional[Path]]:
     return journal_entries, agents_md if agents_md.is_file() else None
 
 
+def _load_bound_spec(container, task_obj, rec):
+    """Load the task's bound spec when the record references ACs/a plan slice
+    (both emit sub-paths resolve acceptance text the same way)."""
+    if not (rec.acs or rec.plan_task_id is not None):
+        return None
+    spec_id = getattr(task_obj, "spec_id", None)
+    if not spec_id:
+        return None
+    from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+    return SpecStore(
+        Path(container.config_path()).parent / SPECS_DIRNAME
+    ).find_by_id(spec_id)
+
+
 def register(app: typer.Typer, get_container):
     @app.command(rich_help_panel="Inspection")
     def dispatch(
@@ -73,7 +96,8 @@ def register(app: typer.Typer, get_container):
                 "Closing framing. 'implementer' (default): scope to a single task, "
                 "report back, do not open a PR — for per-task execution under an "
                 "orchestrator that owns finishing. 'standalone': finish the work and "
-                "open the PR via `mship finish`."
+                "open the PR via `mship finish`. 'reviewer': read-only dual-verdict "
+                "review of the prior dispatch's diff (takes no instruction source)."
             ),
         ),
         model: Optional[str] = typer.Option(
@@ -133,15 +157,33 @@ def register(app: typer.Typer, get_container):
                     f"controller runs `mship dispatch --plan-task N` first."
                 )
                 raise typer.Exit(code=1)
-            spec = None
-            if rec.acs or rec.plan_task_id is not None:
-                spec_id = getattr(task_obj, "spec_id", None)
-                if spec_id:
-                    from mship.core.spec_store import SPECS_DIRNAME, SpecStore
-                    spec = SpecStore(
-                        Path(container.config_path()).parent / SPECS_DIRNAME
-                    ).find_by_id(spec_id)
+            spec = _load_bound_spec(container, task_obj, rec)
             workspace_root = Path(container.config_path()).parent
+            if rec.mode == "reviewer":
+                # The reviewer's content IS the prepared package: print its
+                # paths + live ACs + the read-only dual-verdict contract —
+                # never the diff content itself.
+                try:
+                    pkg = load_review_package(rec, Path(container.state_dir()))
+                except OSError:
+                    output.error(
+                        f"no review package for task {task_obj.slug!r} — the "
+                        f"controller runs `mship dispatch --mode reviewer` first."
+                    )
+                    raise typer.Exit(code=1)
+                try:
+                    _instr, ac_ids, warnings = resolve_instruction_and_acs(
+                        rec, workspace_root
+                    )
+                except (OSError, ValueError) as e:
+                    output.error(f"cannot resolve acceptance criteria: {e}")
+                    raise typer.Exit(code=1)
+                acceptance, ac_warnings = resolve_acceptance(ac_ids, spec)
+                warnings.extend(ac_warnings)
+                for w in warnings:
+                    print(f"warning: {w}", file=sys.stderr)
+                print(build_reviewer_prompt(rec, pkg, acceptance=acceptance or []))
+                return
             journal_entries, agents_md_path = _journal_and_agents(container, task_obj.slug)
             base_sha_info = _d.collect_base_sha_info(Path(rec.worktree), rec.base_branch)
             try:
@@ -163,6 +205,51 @@ def register(app: typer.Typer, get_container):
             for w in warnings:
                 print(f"warning: {w}", file=sys.stderr)
             print(prompt)
+            return
+
+        # --- controller-side reviewer dispatch: package the existing record ---
+        if mode == "reviewer":
+            if instruction is not None or plan is not None or plan_task is not None:
+                output.error(
+                    "--mode reviewer takes no instruction source (its content is "
+                    "the review package built from the prior dispatch record); "
+                    "drop --instruction/--plan/--plan-task."
+                )
+                raise typer.Exit(code=2)
+            container = get_container()
+            state = container.state_manager().load()
+            resolved = resolve_for_command("dispatch", state, task, output)
+            task_obj = resolved.task
+            store = SddStore(Path(container.state_dir()))
+            prior = store.find_for_slug(task_obj.slug)
+            if prior is None:
+                output.error(
+                    f"no dispatch record for task {task_obj.slug!r} — dispatch "
+                    f"the implementer first (`mship dispatch --plan-task N`); its "
+                    f"record supplies the plan pointer, ACs, and review range."
+                )
+                raise typer.Exit(code=1)
+            try:
+                pkg = build_review_package(
+                    prior,
+                    git_runner=container.shell().run,
+                    state_dir=Path(container.state_dir()),
+                )
+            except (OSError, ValueError) as e:
+                output.error(f"cannot build the review package: {e}")
+                raise typer.Exit(code=1)
+            # Same work-item key as the implementer record -> record.json is
+            # overwritten in place and the review/ dir beside it survives
+            # (SddStore.write only prunes dirs under OTHER keys).
+            rec = prior.model_copy(update={
+                "mode": "reviewer",
+                "model": resolve_model(
+                    "reviewer", flag=model, configured=container.config().dispatch_models
+                ),
+                "created_at": datetime.now(timezone.utc),
+            })
+            record_path = store.write(rec)
+            print(build_stub(rec, record_path=str(record_path)), end="")
             return
 
         # --- resolve the instruction source (exactly one of) ---
