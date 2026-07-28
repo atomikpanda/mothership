@@ -51,6 +51,7 @@ def build_review_package(
     targets: list[tuple[str, str, str | None]],
     git_runner,
     state_dir: Path,
+    excludes: dict[str, list[str]] | None = None,
 ) -> ReviewPackage:
     """Write `<record-dir>/review/{manifest.json, <repo>.diff per target}`.
 
@@ -62,6 +63,14 @@ def build_review_package(
     An empty diff is still written — the CLI warns per empty file.
     `git_runner(cmd, cwd=...)` is the injected shell (same contract as
     container.shell().run) so tests use fixture repos.
+
+    Every diff is pathspec-scoped with `-- .` relative to the target's
+    worktree: a git_root child (whose worktree is a subdirectory of its
+    parent's checkout) diffs only its own subtree instead of mislabeling the
+    parent's whole diff; a normal repo run from its root is unaffected.
+    `excludes` maps repo -> subtree paths to drop from that repo's diff
+    (the CLI passes a git_root parent's co-targeted children here so no
+    hunk appears in two files).
     """
     if not targets:
         raise ValueError(
@@ -78,7 +87,10 @@ def build_review_package(
                 f"no base_sha for repo {repo!r} — cannot compute its review "
                 f"diff range"
             )
-        res = git_runner(f"git diff {base_sha}..HEAD", cwd=Path(worktree))
+        pathspec = " ".join(
+            ["."] + [f"':(exclude){sub}'" for sub in (excludes or {}).get(repo, [])]
+        )
+        res = git_runner(f"git diff {base_sha}..HEAD -- {pathspec}", cwd=Path(worktree))
         if res.returncode != 0:
             raise ValueError(
                 f"git diff {base_sha}..HEAD failed in {worktree}: "

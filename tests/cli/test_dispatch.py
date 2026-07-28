@@ -851,6 +851,102 @@ def test_reviewer_skips_missing_worktree_with_warning(tmp_path: Path):
         _reset()
 
 
+def test_reviewer_skips_passive_repos_without_warning(tmp_path: Path):
+    """Passive worktrees (in task.worktrees but not affected_repos) are
+    context checkouts, not reviewable surface — never diffed, nothing warns
+    or aborts even when they have no local base ref."""
+    wt_a = _git_worktree(tmp_path, "wt-a")
+    wt_p = tmp_path / "wt-p"; wt_p.mkdir()   # no local base ref at all
+    state_dir = tmp_path / ".mothership"; state_dir.mkdir()
+    cfg = tmp_path / "mothership.yaml"; cfg.write_text("workspace: t\nrepos: {}\n")
+    task = Task(
+        slug="t", description="d", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["a"],                 # p is NOT affected
+        worktrees={"a": wt_a, "p": wt_p}, branch="feat/t",
+        base_branch="main", active_repo="a", passive_repos={"p"},
+    )
+    StateManager(state_dir).save(WorkspaceState(tasks={"t": task}))
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer"])
+        assert result.exit_code == 0, result.output
+        assert "'p'" not in result.stderr and "warning" not in result.stderr
+        review_dir = state_dir / "sdd" / "no-item" / "t" / "review"
+        assert [p.name for p in review_dir.glob("*.diff")] == ["a.diff"]
+    finally:
+        _reset()
+
+
+def test_reviewer_git_root_child_diff_scoped_no_duplication(tmp_path: Path):
+    """A git_root child shares the parent's checkout: its .diff carries only
+    its subtree and the parent's .diff excludes it — no mislabeled parent
+    diff, no hunk in two files."""
+    import subprocess
+
+    # Source checkout (config-declared paths must exist with go-task files).
+    src = tmp_path / "parent-src"; (src / "sub").mkdir(parents=True)
+    (src / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    (src / "sub" / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+
+    # The shared task worktree: one git repo, child nested at sub/.
+    wt = tmp_path / "wt"; (wt / "sub").mkdir(parents=True)
+
+    def g(*args):
+        subprocess.run(["git", *args], cwd=wt, capture_output=True, text=True, check=True)
+
+    g("init", "-q"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
+    (wt / "root.txt").write_text("base\n")
+    (wt / "sub" / "child.txt").write_text("base\n")
+    g("add", "-A"); g("commit", "-q", "-m", "base")
+    g("checkout", "-q", "-B", "main")
+    g("checkout", "-q", "-b", "feat/t")
+    (wt / "root.txt").write_text("changed\n")
+    (wt / "sub" / "child.txt").write_text("changed\n")
+    g("commit", "-q", "-am", "work")
+
+    state_dir = tmp_path / ".mothership"; state_dir.mkdir()
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  parent:\n"
+        f"    path: {src}\n"
+        "    type: library\n"
+        "  child:\n"
+        "    git_root: parent\n"
+        "    path: sub\n"
+        "    type: library\n"
+    )
+    task = Task(
+        slug="t", description="d", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["parent", "child"],
+        worktrees={"parent": wt, "child": wt / "sub"}, branch="feat/t",
+        base_branch="main", active_repo="parent",
+    )
+    StateManager(state_dir).save(WorkspaceState(tasks={"t": task}))
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer"])
+        assert result.exit_code == 0, result.output
+        review_dir = state_dir / "sdd" / "no-item" / "t" / "review"
+        diffs = {p.name: p.read_text() for p in review_dir.glob("*.diff")}
+        assert sorted(diffs) == ["child.diff", "parent.diff"]
+        assert "sub/child.txt" in diffs["child.diff"]
+        assert "root.txt" not in diffs["child.diff"]
+        assert "root.txt" in diffs["parent.diff"]
+        assert "sub/child.txt" not in diffs["parent.diff"]
+    finally:
+        _reset()
+
+
 def test_reviewer_record_write_preserves_review_dir(tmp_path: Path):
     """The reviewer record supersedes the implementer record in the SAME keyed
     dir — the review/ package written just before must survive the write."""

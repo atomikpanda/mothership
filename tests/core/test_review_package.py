@@ -147,6 +147,44 @@ def test_package_covers_every_target_repo(tmp_path: Path):
     assert manifest["targets"]["web"] == {"base_sha": web_base, "head_sha": web_head}
 
 
+def test_git_root_child_diff_is_scoped_and_never_duplicated(tmp_path: Path):
+    """A git_root child shares its parent's checkout — its diff must cover
+    only its subtree (not the parent's whole diff mislabeled), and the
+    parent's diff must exclude the co-targeted child so no hunk appears in
+    both files (PR #439 P1 follow-up)."""
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    (parent / "sub").mkdir(parents=True)
+    _git(parent, "init", "-q")
+    _git(parent, "config", "user.email", "t@t")
+    _git(parent, "config", "user.name", "t")
+    (parent / "root.txt").write_text("base\n")
+    (parent / "sub" / "child.txt").write_text("base\n")
+    _git(parent, "add", "-A")
+    _git(parent, "commit", "-q", "-m", "base")
+    base = _git(parent, "rev-parse", "HEAD")
+    (parent / "root.txt").write_text("changed\n")
+    (parent / "sub" / "child.txt").write_text("changed\n")
+    _git(parent, "commit", "-q", "-am", "work")
+
+    rec = _record(worktree=str(parent), base_sha=base, repo="parent")
+    pkg = build_review_package(
+        rec,
+        targets=[
+            ("parent", str(parent), base),
+            ("child", str(parent / "sub"), base),
+        ],
+        excludes={"parent": ["sub"]},
+        git_runner=ShellRunner().run,
+        state_dir=tmp_path / ".mothership",
+    )
+    diffs = {p.name: p.read_text() for p in pkg.diff_paths}
+    assert "sub/child.txt" in diffs["child.diff"]        # child subtree hunks
+    assert "root.txt" not in diffs["child.diff"]         # ...and nothing else
+    assert "root.txt" in diffs["parent.diff"]            # parent keeps the rest
+    assert "sub/child.txt" not in diffs["parent.diff"]   # no hunk in both files
+
+
 def test_package_requires_at_least_one_target(ws):
     with pytest.raises(ValueError, match="target"):
         build_review_package(

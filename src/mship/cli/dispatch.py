@@ -237,12 +237,18 @@ def register(app: typer.Typer, get_container):
                 raise typer.Exit(code=1)
             # Diff EVERY affected repo, not just the dispatched one — a
             # single-repo package on a multi-repo task is an incomplete
-            # review presented as complete. The record's base_sha covers its
-            # own repo; the others get their base resolved the same way the
-            # dispatch path resolves it (repo config / task override).
+            # review presented as complete. Affected repos are the reviewable
+            # surface; passive repos (context checkouts, detached, possibly
+            # no local base ref) live only in task.worktrees and are never
+            # diffed. The record's base_sha covers its own repo; the others
+            # get their base resolved the same way the dispatch path
+            # resolves it (repo config / task override).
             config = container.config()
             targets: list[tuple[str, str, str | None]] = []
-            for repo_name, wt_path in sorted(task_obj.worktrees.items()):
+            for repo_name in task_obj.affected_repos:
+                wt_path = task_obj.worktrees.get(repo_name)
+                if wt_path is None:
+                    continue
                 wt = Path(wt_path)
                 if not wt.is_dir():
                     print(
@@ -260,13 +266,32 @@ def register(app: typer.Typer, get_container):
                         task_base=task_obj.base_override,
                     ) or task_obj.base_branch or "main"
                     repo_base_sha = _d.collect_base_sha_info(wt, effective_base).base_sha
+                if repo_base_sha is None:
+                    print(
+                        f"warning: no resolvable local base for repo "
+                        f"{repo_name!r} — skipping it in the review package",
+                        file=sys.stderr,
+                    )
+                    continue
                 targets.append((repo_name, str(wt), repo_base_sha))
+            # A git_root child's worktree is a subdirectory of its parent's
+            # checkout; when both are targeted, drop the child subtree from
+            # the parent's diff so no hunk lands in two files.
+            targeted = {t[0] for t in targets}
+            excludes: dict[str, list[str]] = {}
+            for repo_name in targeted:
+                repo_config = config.repos.get(repo_name)
+                if repo_config is not None and repo_config.git_root in targeted:
+                    excludes.setdefault(repo_config.git_root, []).append(
+                        str(repo_config.path)
+                    )
             try:
                 pkg = build_review_package(
                     prior,
                     targets=targets,
                     git_runner=container.shell().run,
                     state_dir=Path(container.state_dir()),
+                    excludes=excludes,
                 )
             except (OSError, ValueError) as e:
                 output.error(f"cannot build the review package: {e}")
