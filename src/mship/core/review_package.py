@@ -8,7 +8,7 @@ measured token win (~2x faster, ~50% fewer review tokens in their evals).
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from mship.core.dispatch import _closing_section, _conventions_recap
@@ -19,6 +19,9 @@ from mship.core.sdd_store import DispatchRecord, SddStore
 class ReviewPackage:
     manifest_path: Path
     diff_paths: list[Path]
+    # Affected repos OMITTED from the package (repo -> reason). First-class in
+    # the artifact: a verdict over a partial package must disclose the gap.
+    skipped: dict[str, str] = field(default_factory=dict)
 
 
 def review_dir(rec: DispatchRecord, state_dir: Path) -> Path:
@@ -42,6 +45,7 @@ def load_review_package(rec: DispatchRecord, state_dir: Path) -> ReviewPackage:
     return ReviewPackage(
         manifest_path=manifest_path,
         diff_paths=[Path(p) for p in manifest["diff_files"]],
+        skipped=manifest.get("skipped", {}),  # tolerate pre-"skipped" manifests
     )
 
 
@@ -52,6 +56,7 @@ def build_review_package(
     git_runner,
     state_dir: Path,
     excludes: dict[str, list[str]] | None = None,
+    skipped: dict[str, str] | None = None,
 ) -> ReviewPackage:
     """Write `<record-dir>/review/{manifest.json, <repo>.diff per target}`.
 
@@ -71,6 +76,11 @@ def build_review_package(
     `excludes` maps repo -> subtree paths to drop from that repo's diff
     (the CLI passes a git_root parent's co-targeted children here so no
     hunk appears in two files).
+
+    `skipped` is repo -> reason for affected repos the caller OMITTED
+    (missing worktree, unresolvable base): recorded in the manifest and
+    disclosed to the reviewer, so a partial package never reads as full
+    coverage.
     """
     if not targets:
         raise ValueError(
@@ -114,10 +124,13 @@ def build_review_package(
         "head_sha": targets_meta.get(rec.repo, {}).get("head_sha") or rec.head_sha,
         "targets": targets_meta,
         "diff_files": [str(p) for p in diff_paths],
+        "skipped": skipped or {},
     }
     manifest_path = d / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-    return ReviewPackage(manifest_path=manifest_path, diff_paths=diff_paths)
+    return ReviewPackage(
+        manifest_path=manifest_path, diff_paths=diff_paths, skipped=skipped or {}
+    )
 
 
 def build_reviewer_prompt(
@@ -128,6 +141,16 @@ def build_reviewer_prompt(
     the contract text lives once, in core.dispatch)."""
     ac_block = "\n".join(f"- [{ac_id}] {text}" for ac_id, text in acceptance) or "(none mapped)"
     files_block = "\n".join(f"- `{p}`" for p in pkg.diff_paths)
+    skipped_block = ""
+    if pkg.skipped:
+        skipped_lines = "\n".join(f"- `{repo}` — {reason}" for repo, reason in pkg.skipped.items())
+        skipped_block = f"""
+## Affected repos NOT included in this package
+
+{skipped_lines}
+
+Your verdict cannot cover these — mark any acceptance criterion touching them as can't-tell and state the omission in your report.
+"""
     closing_heading, closing_body = _closing_section("reviewer")
     return f"""\
 # Review: task {rec.task_slug} (plan task {rec.plan_task_id or 'ad-hoc'})
@@ -139,7 +162,7 @@ def build_reviewer_prompt(
 {files_block}
 
 Manifest: `{pkg.manifest_path}`
-
+{skipped_block}
 ## Acceptance criteria to check (live from the spec store)
 
 {ac_block}

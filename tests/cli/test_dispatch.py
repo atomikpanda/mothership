@@ -847,6 +847,17 @@ def test_reviewer_skips_missing_worktree_with_warning(tmp_path: Path):
         assert "'b'" in result.stderr and "skipping" in result.stderr
         review_dir = state_dir / "sdd" / "no-item" / "t" / "review"
         assert [p.name for p in review_dir.glob("*.diff")] == ["a.diff"]
+        # The omission is first-class in the artifact, not just controller
+        # stderr: manifest records it and the emitted prompt discloses it.
+        import json
+        manifest = json.loads((review_dir / "manifest.json").read_text())
+        assert "b" in manifest["skipped"]
+        assert "worktree missing" in manifest["skipped"]["b"]
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--emit"])
+        assert result.exit_code == 0, result.output
+        assert "NOT included" in result.stdout
+        assert "`b`" in result.stdout and "worktree missing" in result.stdout
+        assert "can't-tell" in result.stdout
     finally:
         _reset()
 

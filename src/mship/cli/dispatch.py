@@ -245,12 +245,17 @@ def register(app: typer.Typer, get_container):
             # resolves it (repo config / task override).
             config = container.config()
             targets: list[tuple[str, str, str | None]] = []
+            # Skips are first-class: warned here for the controller AND
+            # recorded in the manifest so the reviewer knows the package is
+            # partial (a silent omission reads as full coverage).
+            skipped: dict[str, str] = {}
             for repo_name in task_obj.affected_repos:
                 wt_path = task_obj.worktrees.get(repo_name)
                 if wt_path is None:
                     continue
                 wt = Path(wt_path)
                 if not wt.is_dir():
+                    skipped[repo_name] = f"worktree missing ({wt})"
                     print(
                         f"warning: worktree for repo {repo_name!r} is missing "
                         f"({wt}) — skipping it in the review package",
@@ -267,6 +272,7 @@ def register(app: typer.Typer, get_container):
                     ) or task_obj.base_branch or "main"
                     repo_base_sha = _d.collect_base_sha_info(wt, effective_base).base_sha
                 if repo_base_sha is None:
+                    skipped[repo_name] = "no resolvable local base"
                     print(
                         f"warning: no resolvable local base for repo "
                         f"{repo_name!r} — skipping it in the review package",
@@ -292,6 +298,7 @@ def register(app: typer.Typer, get_container):
                     git_runner=container.shell().run,
                     state_dir=Path(container.state_dir()),
                     excludes=excludes,
+                    skipped=skipped,
                 )
             except (OSError, ValueError) as e:
                 output.error(f"cannot build the review package: {e}")

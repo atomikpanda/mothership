@@ -91,6 +91,26 @@ def test_reviewer_prompt_references_paths_not_content(ws):
     assert "diff --git" not in prompt             # never embedded
     assert "spec-compliance" in prompt.lower() and "quality" in prompt.lower()
     assert "[ac1] does the thing" in prompt
+    assert "NOT included" not in prompt           # no skips -> no omission section
+
+
+def test_skipped_repos_are_disclosed_in_manifest_and_prompt(ws):
+    """An omitted affected repo must be first-class in the artifact — a
+    verdict over a partial package that doesn't say so implies full
+    coverage (PR #439, Greptile 3/5)."""
+    import json
+
+    pkg = build_review_package(
+        ws.record, targets=_targets(ws.record),
+        skipped={"web": "worktree missing (/gone/web)"},
+        git_runner=ws.shell, state_dir=ws.state_dir,
+    )
+    manifest = json.loads(pkg.manifest_path.read_text())
+    assert manifest["skipped"] == {"web": "worktree missing (/gone/web)"}
+    prompt = build_reviewer_prompt(ws.record, pkg, acceptance=[])
+    assert "NOT included" in prompt
+    assert "web" in prompt and "worktree missing" in prompt
+    assert "can't-tell" in prompt
     # Content-absence: the manifest carries AC IDs, never the AC prose.
     assert "does the thing" not in pkg.manifest_path.read_text()
 
