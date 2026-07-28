@@ -110,7 +110,20 @@ const TELEMETRY_DISABLE_ENV_VARS = [
   'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'
 ];
 const SUPERPOWERS_TELEMETRY_DISABLED = TELEMETRY_DISABLE_ENV_VARS.some(name => isTruthyEnv(process.env[name]));
+// Local security patch: the remote brand image is a third-party request
+// (primeradiant.com) fired by the default page render. Make it strictly
+// opt-in — nothing leaves the machine unless the operator sets this.
+const SUPERPOWERS_REMOTE_BRANDING_ENABLED =
+  isTruthyEnv(process.env.SUPERPOWERS_ENABLE_REMOTE_BRANDING) && !SUPERPOWERS_TELEMETRY_DISABLED;
 let ownerPid = process.env.BRAINSTORM_OWNER_PID ? Number(process.env.BRAINSTORM_OWNER_PID) : null;
+
+// Local security patch: the session key rides plain http/ws URLs, so a
+// non-loopback bind would send it over the network in cleartext. Enforce the
+// loopback default loudly; an operator terminating TLS in front can opt out.
+function isLoopbackHost(h) {
+  const host = String(h);
+  return host === 'localhost' || host === '::1' || /^127\./.test(host);
+}
 
 // Per-session secret key. The companion is reachable by any local browser tab
 // and, when bound to a non-loopback host, by any host that can route to it.
@@ -186,7 +199,13 @@ h1 { color: #333; } p { color: #666; } code { background: #f0f0f0; padding: 0.1e
 <code>?key=&hellip;</code> part. Copy the complete URL and open it again.</p></body></html>`;
 
 function bootstrapPage(key) {
-  const jsonKey = JSON.stringify(String(key));
+  // Local security patch (CodeQL js/reflected-xss, alert #37): the key lands
+  // inside a <script> body, so escape <, >, & as \uXXXX within the JSON string
+  // literal — a crafted value can no longer break out via `</script>`.
+  const jsonKey = JSON.stringify(String(key))
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026');
   return `<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>Opening Brainstorm Companion</title></head>
@@ -241,12 +260,14 @@ function escapeHtmlText(value) {
 
 function brandMarkup() {
   const version = escapeHtmlText(SUPERPOWERS_VERSION);
-  const text = SUPERPOWERS_TELEMETRY_DISABLED
-    ? 'Prime Radiant Superpowers v' + version
-    : 'Superpowers v' + version;
-  const logo = SUPERPOWERS_TELEMETRY_DISABLED
-    ? ''
-    : '<img class="brand-logo" src="' + SUPERPOWERS_BRAND_IMAGE_URL + '?v=' + encodeURIComponent(SUPERPOWERS_VERSION) + '" alt="Prime Radiant" referrerpolicy="no-referrer" decoding="async">';
+  // Local security patch: remote logo only when explicitly opted in (above);
+  // the default is local text with the same attribution.
+  const logo = SUPERPOWERS_REMOTE_BRANDING_ENABLED
+    ? '<img class="brand-logo" src="' + SUPERPOWERS_BRAND_IMAGE_URL + '?v=' + encodeURIComponent(SUPERPOWERS_VERSION) + '" alt="Prime Radiant" referrerpolicy="no-referrer" decoding="async">'
+    : '';
+  const text = logo
+    ? 'Superpowers v' + version
+    : 'Prime Radiant Superpowers v' + version;
 
   return '<div class="brand"><a href="https://github.com/obra/superpowers">' + logo + '<span class="brand-copy">' + text + '</span></a></div>';
 }
@@ -402,7 +423,9 @@ function handleRequest(req, res) {
   const keyFromQuery = queryKey(req.url);
   if (req.method === 'GET' && pathname === '/' && keyFromQuery && timingSafeEqualStr(keyFromQuery, TOKEN)) {
     res.writeHead(200, securityHeaders({ 'Content-Type': 'text/html; charset=utf-8' }));
-    res.end(bootstrapPage(keyFromQuery));
+    // Reflect the server's own token, not the request's copy — they compare
+    // equal above, and this removes the user-controlled flow (CodeQL alert #37).
+    res.end(bootstrapPage(TOKEN));
   } else if (req.method === 'GET' && pathname === '/') {
     const screenFile = getNewestScreen();
     let html = screenFile
@@ -574,6 +597,14 @@ const debounceTimers = new Map();
 // ========== Server Startup ==========
 
 function startServer() {
+  if (!isLoopbackHost(HOST) && !isTruthyEnv(process.env.BRAINSTORM_ALLOW_NON_LOOPBACK)) {
+    console.error(
+      'Refusing to bind ' + HOST + ': the session key would travel over cleartext http/ws. ' +
+      'Bind loopback (the default) and tunnel to it, or terminate TLS in front of the ' +
+      'companion and set BRAINSTORM_ALLOW_NON_LOOPBACK=1.'
+    );
+    process.exit(1);
+  }
   if (!fs.existsSync(CONTENT_DIR)) fs.mkdirSync(CONTENT_DIR, { recursive: true });
   if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR, { recursive: true });
 

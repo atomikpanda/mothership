@@ -29,14 +29,32 @@
     return null;
   }
 
+  function isLoopbackHost(hostname) {
+    return hostname === 'localhost' || hostname === '::1' ||
+      hostname === '[::1]' || /^127\./.test(hostname);
+  }
+
+  // Local security patch: never attach the session key to a cleartext URL
+  // aimed at a non-loopback host — it would cross the network unencrypted.
+  // Loopback or TLS (https/wss) only.
+  function keyTransportAllowed() {
+    return window.location.protocol === 'https:' || isLoopbackHost(window.location.hostname);
+  }
+
   function websocketUrl() {
+    const scheme = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
     const key = sessionKey();
-    return 'ws://' + window.location.host + (key ? '/?key=' + encodeURIComponent(key) : '');
+    if (key && !keyTransportAllowed()) {
+      console.error('brainstorm: refusing to send the session key over cleartext to a ' +
+        'non-loopback host. Open the companion via loopback (localhost/127.0.0.1) or over https.');
+      return scheme + window.location.host;
+    }
+    return scheme + window.location.host + (key ? '/?key=' + encodeURIComponent(key) : '');
   }
 
   function reloadAfterRecovery() {
     const key = sessionKey();
-    if (key) {
+    if (key && keyTransportAllowed()) {
       window.location.replace('/?key=' + encodeURIComponent(key));
     } else {
       window.location.reload();
