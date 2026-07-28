@@ -24,7 +24,7 @@
 - `src/mship/skills/writing-plans/SKILL.md` — drop prefix from 3 references.
 - `src/mship/skills/writing-skills/SKILL.md` — drop prefix from 4 references.
 - `src/mship/skills/writing-skills/testing-skills-with-subagents.md` — drop prefix from 1 reference.
-- `src/mship/skills/subagent-driven-development/code-quality-reviewer-prompt.md` — drop prefix from 1 reference.
+- `src/mship/skills/subagent-driven-development/code-quality-reviewer-prompt` — drop prefix from 1 reference.
 
 **Renamed files:**
 - `src/mship/skills/using-superpowers/` → `src/mship/skills/using-mothership/` (directory move).
@@ -391,7 +391,7 @@ mship journal "renamed the session-entry skill to match mothership branding; fro
 - Modify: `src/mship/skills/systematic-debugging/SKILL.md` (3 occurrences)
 - Modify: `src/mship/skills/requesting-code-review/SKILL.md` (3 occurrences)
 - Modify: `src/mship/skills/subagent-driven-development/SKILL.md` (7 occurrences)
-- Modify: `src/mship/skills/subagent-driven-development/code-quality-reviewer-prompt.md` (1 occurrence)
+- Modify: `src/mship/skills/subagent-driven-development/code-quality-reviewer-prompt` (1 occurrence)
 - Modify: `src/mship/skills/writing-plans/SKILL.md` (3 occurrences)
 - Modify: `src/mship/skills/writing-skills/SKILL.md` (4 occurrences)
 - Modify: `src/mship/skills/writing-skills/testing-skills-with-subagents.md` (1 occurrence)
@@ -408,7 +408,7 @@ for f in \
   src/mship/skills/systematic-debugging/SKILL.md \
   src/mship/skills/requesting-code-review/SKILL.md \
   src/mship/skills/subagent-driven-development/SKILL.md \
-  src/mship/skills/subagent-driven-development/code-quality-reviewer-prompt.md \
+  src/mship/skills/subagent-driven-development/code-quality-reviewer-prompt \
   src/mship/skills/writing-plans/SKILL.md \
   src/mship/skills/writing-skills/SKILL.md \
   src/mship/skills/writing-skills/testing-skills-with-subagents.md; do
