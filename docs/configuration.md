@@ -235,6 +235,7 @@ Additional keys on each entry under `repos:` (alongside `path`, `type`, `depends
 | `allow_extra_worktrees` | Allow extra worktrees on the repo without failing the drift audit. Default: `false`. |
 | `capture` | UI-capture config — a `platforms:` list `mship capture` can target (`--platform` required when more than one). |
 | `run_host` | Logical run-host role this repo uses for `--remote` execution (`mship build`/`capture`). Must name an entry in the workspace `run_hosts:` list. |
+| `setup_inputs` | Manifests/lockfiles whose content decides whether a **remote** run re-runs `task setup` on the run host (glob patterns, matched inside the materialized worktree). Undeclared means setup runs on first materialization only — declaring them is what enables re-run-on-change. See [`remote-run.md`](remote-run.md). |
 
 ```yaml
 repos:
@@ -255,6 +256,7 @@ repos:
     path: ground-control
     type: service
     run_host: android-emu-host     # `mship build/capture --remote` targets this role
+    setup_inputs: [build.gradle, gradle/libs.versions.toml]   # remote runs re-run `task setup` when these change
     capture:
       platforms: [android, ios]    # `mship capture --platform android|ios`
 ```

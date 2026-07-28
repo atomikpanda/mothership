@@ -13,6 +13,16 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
+# The only fastapi names imported at MODULE scope, and they have to be: this
+# module is `from __future__ import annotations`, so a handler's annotations are
+# strings that FastAPI resolves against the function's __globals__. A `Request`
+# imported inside `create_app` is a closure local, invisible there — FastAPI
+# then reads `request: Request` as an ordinary query parameter and every push
+# 422s before the body is ever read (observed, not theorised). Same reason
+# `core/relay/egress/proxy.py` imports it at module scope. Everything else stays
+# a deferred import inside `create_app`.
+from fastapi import Request, Response
+
 from mship.core.gh_app import GhAppError, mint_installation_token, resolve_installation
 from mship.core.pr import PRManager
 from mship.core.pr_watcher import PrWatcher
@@ -120,6 +130,11 @@ class ExecBody(BaseModel):
     # Only meaningful for verb == "capture"; mirrors `cli/capture.py`'s
     # `--kind` default. Optional so run/build callers can omit it.
     kind: str = "all"
+    # Repos whose working tree the caller pushed to this host's own scratch ref
+    # for this task (spec remote-exact-copy). Materialized from that LOCAL ref
+    # instead of from origin — no fetch. Absent or empty means today's behaviour
+    # for every repo in the request, so an older client is unaffected.
+    run_ref_repos: list[str] = []
 
 
 def _make_auth_dependency(token: str):
@@ -1438,11 +1453,99 @@ def create_app(
         gen = remote_exec.run_verb_stream(
             verb, body.task, body.repos, body.platform,
             kind=body.kind, deps=deps, nonce=nonce,
+            run_ref_repos=body.run_ref_repos,
         )
         return StreamingResponse(
             iterate_in_threadpool(gen),
             media_type="application/octet-stream",
             headers={"X-Mship-Exec-Nonce": nonce},
         )
+
+    # --- scoped git receive (spec remote-exact-copy) -------------------------
+    # Where `mship run --remote` lands the operator's working tree: a commit
+    # synthesized from it and pushed straight here, so uncommitted work never
+    # travels through origin. Narrow by construction — `core/git_receive.py`
+    # owns both controls (the repo allowlist and the run-scratch ref-name
+    # constraint) and explains why an unscoped version would be an
+    # arbitrary-ref-write primitive against this host. Auth is the app-wide
+    # bearer dependency every other route already inherits.
+    from starlette.concurrency import run_in_threadpool
+
+    from mship.core import git_receive
+
+    def _receive_repo(repo: str) -> Path:
+        if config is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "remote workspace not bootstrapped: this serve host has no "
+                    "workspace config wired in, so there is no repo to receive "
+                    "a push for — bootstrap this machine as an mship workspace "
+                    "(mothership.yaml present) and restart `mship serve`"
+                ),
+            )
+        try:
+            return git_receive.receive_repo_path(config, repo)
+        except git_receive.UnknownReceiveRepoError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+
+    @app.get("/git/{repo}/info/refs")
+    async def get_git_info_refs(repo: str, service: str = ""):
+        if service != git_receive.RECEIVE_SERVICE:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"only service={git_receive.RECEIVE_SERVICE} is served here; "
+                    f"this is a receive path for `mship run --remote`, not a git host"
+                ),
+            )
+        repo_path = _receive_repo(repo)
+        # `advertise_refs` and `receive_pack` both block on a git subprocess, so
+        # they run in the threadpool: an `async def` handler runs ON the event
+        # loop, and a blocking call there would stall every other request this
+        # serve is handling — including the phone's. (The exec route reaches for
+        # `iterate_in_threadpool` for the same reason; sync `def` handlers
+        # elsewhere get the threadpool from Starlette automatically.)
+        try:
+            body = await run_in_threadpool(git_receive.advertise_refs, repo_path)
+        except git_receive.ReceivePackError as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+        return Response(
+            content=body,
+            media_type=git_receive.ADVERTISEMENT_CONTENT_TYPE,
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    @app.post("/git/{repo}/git-receive-pack")
+    async def post_git_receive_pack(repo: str, request: Request):
+        encoding = (request.headers.get("content-encoding") or "").strip().lower()
+        if encoding not in ("", "identity"):
+            # git does not compress a receive-pack request (verified). A body we
+            # cannot read is a body whose refs we cannot check, so refuse it
+            # rather than hand it to receive-pack unexamined.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"unsupported Content-Encoding {encoding!r}; send the body "
+                    f"uncompressed"
+                ),
+            )
+        repo_path = _receive_repo(repo)
+        # The RAW body, deliberately: `await request.body()` is the bytes off the
+        # wire with nothing between (this app installs no middleware, and no
+        # content-type-driven parsing happens because the handler declares no
+        # body model). Verified byte-identical for a binary packfile, chunked and
+        # unchunked. It matters — the bytes handed to receive-pack MUST be the
+        # bytes whose refs were scope-checked.
+        body = await request.body()
+        try:
+            result = await run_in_threadpool(git_receive.receive_pack, repo_path, body)
+        except git_receive.RefScopeError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        except git_receive.PktLineError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except git_receive.ReceivePackError as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+        return Response(content=result, media_type=git_receive.RESULT_CONTENT_TYPE)
 
     return app

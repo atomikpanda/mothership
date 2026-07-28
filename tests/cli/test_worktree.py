@@ -2348,3 +2348,85 @@ def test_finish_body_unchanged_when_no_linked_issues(configured_git_app: Path):
         assert "Closes acme" not in captured.get("create_cmd", "")
     finally:
         cli_container.shell.reset_override()
+
+
+def test_close_deletes_scratch_refs_from_the_run_host(configured_git_app):
+    """ac8, wired: closing a task removes what `--remote` left on the host."""
+    from datetime import datetime, timezone
+
+    from mship.core.run_host import RunHostConnection, RunHostStore
+
+    config_path = configured_git_app / "mothership.yaml"
+    config_path.write_text(
+        config_path.read_text().replace(
+            "workspace: test-platform",
+            "workspace: test-platform\nrun_hosts: [role-x]",
+        ).replace(
+            "  shared:\n    path: ./shared\n    type: library\n",
+            "  shared:\n    path: ./shared\n    type: library\n    run_host: role-x\n",
+        )
+    )
+    container.config.reset()
+    RunHostStore(configured_git_app / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+
+    sm = StateManager(configured_git_app / ".mothership")
+    sm.save(WorkspaceState(tasks={"t": Task(
+        slug="t", description="d", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["shared"], branch="feat/t",
+    )}))
+
+    result = runner.invoke(app, ["close", "--yes", "--abandon", "--task", "t"])
+
+    assert result.exit_code == 0, result.output
+    shell = container.shell()
+    assert any(
+        ":refs/mship/run/t/shared" in call.args[0]
+        for call in shell.run.call_args_list
+    )
+
+
+def test_close_still_succeeds_when_the_run_host_is_unreachable(configured_git_app):
+    """Fail-open: a run host that is off must never stop a close."""
+    from datetime import datetime, timezone
+
+    from mship.core.run_host import RunHostConnection, RunHostStore
+
+    config_path = configured_git_app / "mothership.yaml"
+    config_path.write_text(
+        config_path.read_text().replace(
+            "workspace: test-platform",
+            "workspace: test-platform\nrun_hosts: [role-x]",
+        ).replace(
+            "  shared:\n    path: ./shared\n    type: library\n",
+            "  shared:\n    path: ./shared\n    type: library\n    run_host: role-x\n",
+        )
+    )
+    container.config.reset()
+    RunHostStore(configured_git_app / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+
+    shell = container.shell()
+    original = shell.run.side_effect
+
+    def _fail_pushes(cmd, cwd=None, env=None, **kw):
+        if cmd.startswith("git push"):
+            return ShellResult(returncode=1, stdout="", stderr="host unreachable\n")
+        return original(cmd, cwd, env)
+
+    shell.run.side_effect = _fail_pushes
+
+    sm = StateManager(configured_git_app / ".mothership")
+    sm.save(WorkspaceState(tasks={"t": Task(
+        slug="t", description="d", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["shared"], branch="feat/t",
+    )}))
+
+    result = runner.invoke(app, ["close", "--yes", "--abandon", "--task", "t"])
+
+    assert result.exit_code == 0, result.output
+    assert "t" not in sm.load().tasks

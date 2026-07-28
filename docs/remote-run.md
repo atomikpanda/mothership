@@ -96,70 +96,116 @@ so `discover_artifacts` and anything reading captures locally (including an agen
 
 These are deliberately out of scope for the first cut. Know them before you lean on `--remote` for a repo with heavier setup needs.
 
-- **The remote worktree is a bare `git fetch` + `git worktree add`.** It does **not** replicate the local `WorktreeManager.spawn` machinery — `symlink_dirs` / `bind_files` and any `task setup` step are not run on the remote. So remote `capture` (which observes a running app) works, but remote `run`/`build` for a repo that depends on symlinked gitignored deps (a shared `.venv`, `node_modules`, etc.) may fail because those deps aren't present in the freshly-added remote worktree. If your `run`/`build` needs them, run it locally for now.
+- **`symlink_dirs` / `bind_files` are not replicated on the remote worktree.** `task setup` now runs there (see "Dependencies are derived there, not copied"), so a repo whose deps come from tracked manifests works. A repo that depends on symlinked gitignored material from your source checkout still does not.
 - **Remote task stdout is streamed to your terminal verbatim.** There is no ANSI / control-sequence sanitization — the remote host is trusted. Don't point `--remote` at a host you don't control.
 - **A `run_host:` set under a `capture:` block in `mothership.yaml` is silently ignored.** `CaptureConfig` has no `run_host` field; only the **repo-level** `run_host` (documented above under "Declaring roles") is honored. Put `run_host:` directly on the repo, not inside its `capture:` block.
 
-## Before it dispatches
+## What travels to the run host
 
-`--remote` runs the code that is on **origin**, because the run host materializes
-the task's branch by fetching it and hard-resetting to `origin/<branch>`. So before
-dispatching, mship asks origin itself (one `git ls-remote` per repo — a local
-`origin/<branch>` ref is a cache, and it goes stale in the dangerous direction) and
-compares against your HEAD:
+`--remote` runs the code you are looking at, **including work you have not
+committed**. Before dispatching, mship reads every repo the task touches and
+takes one of three paths per repo:
 
-- **Clean, and origin is missing the branch or behind your HEAD** → it pushes for
-  you. Nothing is lost, and it is unambiguously what you meant.
-- **Origin has a commit you don't** — someone else pushed the branch, or you
-  haven't pulled — → it **refuses**. The run would execute that commit instead of
-  what you have checked out, and pushing cannot fix it: you can't fast-forward from
-  behind. It prints a `git pull --ff-only` for each affected repo (or reset to
-  origin deliberately), then re-run.
-- **Tracked changes present** → it refuses, and names the commands that unblock
-  you. Committing your work in progress is not a decision mship makes for you, and
-  running the previous revision while you are mid-edit is worse than stopping.
-- **Untracked files only** → it warns. They cannot change what the push carries,
-  but they will not exist on the run host either.
-- **The worktree isn't on the task's branch** — detached, or some other branch
-  checked out → it refuses, and prints the `git checkout <branch>` that fixes it.
-  Every check above reads the worktree's HEAD while the run host materializes the
-  *task's* branch, so the commit that was verified and the commit that would run
-  are two different things. (Nothing is quietly resolved for you: publishing that
-  HEAD would move the task's branch on origin to a commit you never named.)
-- **The repo can't be inspected at all** — `git status` fails, the worktree is
-  gone, origin won't answer → it refuses, naming which. Nothing about what the run
-  host would execute was established, and that is the one case that must never pass
-  silently.
-- **`--repos`/`--tag` names a repo that isn't one of the task's repos at all** — no
-  worktree, no branch, nothing to compare against origin → it refuses with the
-  same "missing worktree" message as a worktree that existed and vanished. The run
-  host would still materialize that repo's branch from origin regardless, so a
-  selection outside the task's own repos is never silently dropped from the check.
+- **Working tree differs from HEAD** — tracked edits, untracked files, or both →
+  mship builds a commit from your working tree and pushes it **straight to the
+  run host**, onto a throwaway ref (`refs/mship/run/<task>/<repo>`). The host
+  resets a worktree to that ref and runs it. **Nothing is pushed to origin on
+  this path**, and nothing on your machine changes: your HEAD, your branch, your
+  index and `git status` are exactly as you left them, and the synthesized commit
+  belongs to no branch. mship names it as a throwaway run ref in the output for
+  that reason — do not build on it.
+- **Clean, but origin is missing the branch or is behind it** → mship pushes the
+  branch to origin for you, then dispatches. There is nothing extra to send, so
+  this is the old, fast path. If origin has a commit you do not, mship **refuses**
+  — a push cannot fast-forward from behind, and the run would execute a commit
+  you have never seen. It prints the `git pull --ff-only` that fixes it.
+- **Mid-merge, mid-rebase, or with unmerged paths** → mship **refuses**, and
+  names the command that unblocks you. Files in that state hold conflict markers,
+  and a remote failure over a conflict marker tells you nothing about the edit
+  you were making.
 
-When it does push for you, it pushes the exact sha it resolved HEAD to during
-inspection — `<sha>:refs/heads/<branch>` — rather than letting git resolve `HEAD`
-(or the branch) a second time when the push itself runs moments later. That
-closes the gap between inspecting and pushing: if something else commits in the
-worktree in between — a subagent, a background job, anything — the push still
-names the commit every check above actually cleared, not whatever HEAD has
-become by the time the push runs.
-
-That guarantee ends at origin, and this is a real limit, not a hypothetical one:
-**the commit *pushed* is the commit *inspected*; that is not the same claim as
-"the commit *executed* is the commit inspected."** Once the push lands, the
-branch on origin is a mutable ref, and mutable refs are exactly what this module
-cannot make safe — anyone with push access can advance the branch before the run
-host's own `git fetch` picks it up, and nothing here can see that happen or stop
-it: the write lands after mship has finished checking, on a different machine's
-clock, outside this process entirely. Closing that second gap would need the run
-host to materialize a specific, immutable revision — a commit, not a branch —
-instead of resolving the branch itself at fetch time; it does not do that today,
-and no amount of extra checking on the dispatching side substitutes for it.
+It also still refuses a worktree that is not on the task's branch, a repo whose
+git state it cannot read, and a worktree that is missing — in each case naming
+which, because the remedies differ.
 
 Every repo **the run will actually touch** is checked, not just the one you are
 standing in: a task has a branch per repo and the run host materializes each
 separately. `--repos` / `--tag` narrow the check as well as the run, so work in
-progress in a repo you excluded neither blocks the run nor gets pushed.
+progress in a repo you excluded neither blocks the run nor gets sent.
+
+### Why the run host and not origin
+
+Routing uncommitted work through origin would publish it. `git add -A` sweeps in
+untracked files, so a debug dump, a data sample or a throwaway script with a
+token in it would land on GitHub. Refs under `refs/mship/` are outside the
+default fetch refspec but they are not private — `git ls-remote` enumerates them
+and anyone with read access can fetch them, which on a public repo means anyone —
+and deleting the ref afterwards does not retract the objects, because they stay
+reachable by sha. The destination is your own machine, so there is no reason for
+a third party to be in the path. **Real history goes to origin; throwaway state
+goes host to host.**
+
+The run host accepts these pushes on a purpose-built endpoint (`/git/<repo>`)
+that is bearer-authenticated with the same run-host token, accepts only repos
+that workspace declares, and accepts writes only onto the `refs/mship/run/*`
+namespace. It is not a mirror, not a remote you add by hand, and not a path for
+real history. Each run force-updates its own ref, and `mship close` deletes the
+task's scratch refs from the host.
+
+Nothing here changes what `mship finish` requires. The scratch namespace is not
+a branch, is not PR-able, and no code path merges or branches from it — so
+nothing reaches a PR unreviewed.
+
+### The guarantee, and where it stops
+
+On the clean path mship pushes the **exact sha it resolved HEAD to** during
+inspection — `<sha>:refs/heads/<branch>` — rather than letting git resolve `HEAD`
+(or the branch) a second time when the push runs moments later. On the dirty path
+the same sha becomes the synthesized snapshot's parent. Either way, if something
+else commits in the worktree in between — a subagent, a background job — the run
+still carries the commit every check actually cleared.
+
+That guarantee ends at origin, and this is a real limit, not a hypothetical one:
+**the commit *pushed* is the commit *inspected*; that is not the same claim as
+"the commit *executed* is the commit inspected."** Once a push to origin lands,
+the branch there is a mutable ref, and anyone with push access can advance it
+before the run host fetches it — after mship has finished checking, on a
+different machine's clock, outside this process entirely. Closing that gap would
+need the run host to materialize an immutable revision instead of resolving a
+branch at fetch time. The **dirty path already does exactly that**: it
+materializes a specific commit from a ref nothing else writes, with no fetch at
+all. The clean path does not.
+
+### Dependencies are derived there, not copied
+
+Git carries source, not `node_modules`. So after materializing, the run host runs
+**`task setup`** in that worktree, rebuilding dependencies from the manifests the
+push just delivered.
+
+That is keyed, or it would defeat the fast loop this exists to enable:
+
+- setup runs the **first time** a worktree is materialized for a task on that
+  host — so the first remote run on a fresh host is the slowest it will ever be,
+  a one-time cost rather than a regression;
+- and again whenever the repo's declared **`setup_inputs`** (its manifests and
+  lockfiles — `package.json`, `uv.lock`, `build.gradle`) differ from what that
+  host last set up at.
+
+A source-only edit, the common case, pays nothing. A dependency change pays once.
+**A repo that declares no `setup_inputs` gets setup on first materialization
+only**, because there is nothing to invalidate against — declaring them is what
+buys re-run-on-change. A repo that defines no `setup` target at all is skipped
+rather than failed. If setup fails, the run stops and you see setup's own output.
+
+### What does not travel
+
+- **Gitignored files.** `.env` and other secrets, build output, virtualenvs,
+  `node_modules`. Where they can be rebuilt from tracked manifests that is now
+  setup's job; where they cannot — secrets, platform state — they simply are not
+  there, and you put them on the run host yourself.
+- **`symlink_dirs` / `bind_files`.** Still not replicated on the run host.
+- **Your machine.** The source is exact and the dependency environment is derived
+  from it, but the run host is not a clone of your box.
 
 ## Troubleshooting
 

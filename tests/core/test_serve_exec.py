@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 
 from mship.core import remote_exec
 from mship.core.config import RepoConfig, WorkspaceConfig
-from mship.core.serve import create_app
+from mship.core.serve import ExecBody, create_app
 from mship.core.state import StateManager
 from mship.util.shell import ShellResult
 
@@ -743,3 +743,613 @@ def test_exec_run_and_build_never_emit_artifact_block(tmp_path, monkeypatch):
         r = client.post(f"/exec/{verb}", json={"task": "t1", "repos": ["api"]})
         assert r.status_code == 200
         assert b"__MSHIP_ARTIFACTS__" not in r.content
+
+
+def test_exec_body_accepts_run_ref_repos(tmp_path, monkeypatch):
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    _patch_shell(monkeypatch, fake)
+    client = TestClient(_app(tmp_path))
+    r = client.post(
+        "/exec/run", json={"task": "t1", "repos": ["api"], "run_ref_repos": ["api"]},
+    )
+    assert r.status_code == 200
+    # A 200 alone doesn't prove the field was captured — pydantic silently
+    # drops unrecognized keys by default, so a body without the field would
+    # also 200. Assert directly on the model to catch that.
+    assert ExecBody(task="t1", repos=["api"], run_ref_repos=["api"]).run_ref_repos == ["api"]
+
+
+def test_exec_body_defaults_run_ref_repos_to_empty(tmp_path, monkeypatch):
+    """An older client omits the key; the host must behave exactly as before."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    _patch_shell(monkeypatch, fake)
+    r = TestClient(_app(tmp_path)).post("/exec/run", json={"task": "t1", "repos": ["api"]})
+    assert r.status_code == 200
+    assert any("fetch origin feat/t1" in cmd for cmd, _cwd in fake.run_calls)
+
+
+# --- exact copy: materializing from a pushed scratch ref ---------------------
+
+import os
+import subprocess
+
+from mship.util.shell import ShellRunner
+
+_REAL_GIT_ENV = {
+    **os.environ,
+    "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+    "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+}
+
+
+def _real_git(*args: str, cwd: Path) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True,
+        env=_REAL_GIT_ENV,
+    ).stdout.strip()
+
+
+def _host_repo_with_run_ref(tmp_path: Path) -> tuple[Path, str, str]:
+    """A run-host-shaped repo: a branch tip, plus a scratch ref holding
+    DIFFERENT content, as a push from the operator would have left it.
+
+    Deliberately has NO `origin` remote. That is load-bearing, not incidental:
+    every git command on the run-ref path runs through `_run_checked`, so if a
+    fetch is ever reintroduced there it cannot fail silently — it raises
+    `MaterializeError` and every test using this fixture goes red.
+    """
+    repo = tmp_path / "hostrepo"
+    repo.mkdir()
+    _real_git("init", "-q", "-b", "main", ".", cwd=repo)
+    (repo / "a.txt").write_text("branch tip\n")
+    _real_git("add", "-A", cwd=repo)
+    _real_git("commit", "-qm", "tip", cwd=repo)
+    _real_git("branch", "-f", "feat/t1", "HEAD", cwd=repo)
+    tip = _real_git("rev-parse", "HEAD", cwd=repo)
+
+    (repo / "a.txt").write_text("what the operator is editing\n")
+    (repo / "untracked.txt").write_text("scratch\n")
+    _real_git("add", "-A", cwd=repo)
+    _real_git("commit", "-qm", "synthesized", cwd=repo)
+    scratch = _real_git("rev-parse", "HEAD", cwd=repo)
+    _real_git("update-ref", "refs/mship/run/t1/api", scratch, cwd=repo)
+
+    _real_git("reset", "-q", "--hard", tip, cwd=repo)
+    assert _real_git("remote", cwd=repo) == ""      # nothing to fetch from
+    return repo, tip, scratch
+
+
+def test_materialize_from_a_run_ref_creates_a_detached_worktree(tmp_path):
+    """ac10, first materialization: no fetch at all, and HEAD is left detached
+    because the scratch commit is throwaway state, not a branch."""
+    repo, _tip, scratch = _host_repo_with_run_ref(tmp_path)
+    worktree = tmp_path / "wt" / "api"
+
+    remote_exec.materialize_worktree(
+        ShellRunner(), repo, worktree, "feat/t1",
+        repo_name="api", run_ref="refs/mship/run/t1/api",
+    )
+
+    assert _real_git("rev-parse", "HEAD", cwd=worktree) == scratch
+    assert (worktree / "a.txt").read_text() == "what the operator is editing\n"
+    assert (worktree / "untracked.txt").exists()
+
+
+def test_the_run_ref_worktree_is_detached_not_a_branch(tmp_path):
+    """ac14 on the run host: a branch pointing at a synthesized commit would
+    dress throwaway state up as history."""
+    repo, _tip, _scratch = _host_repo_with_run_ref(tmp_path)
+    worktree = tmp_path / "wt" / "api"
+    remote_exec.materialize_worktree(
+        ShellRunner(), repo, worktree, "feat/t1",
+        repo_name="api", run_ref="refs/mship/run/t1/api",
+    )
+    head_ref = subprocess.run(
+        ["git", "symbolic-ref", "--quiet", "HEAD"], cwd=worktree,
+        capture_output=True, text=True, env=_REAL_GIT_ENV,
+    )
+    assert head_ref.returncode != 0          # detached: no symbolic HEAD
+
+
+def test_a_stale_worktree_lands_on_the_pushed_tree_not_the_branch_tip(tmp_path):
+    """ac10, the decisive case: an existing worktree sitting on the branch, with
+    leftovers from a previous run, ends up at the pushed ref's tree."""
+    repo, tip, scratch = _host_repo_with_run_ref(tmp_path)
+    worktree = tmp_path / "wt" / "api"
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "worktree", "add", "-q", str(worktree), "feat/t1"],
+        cwd=repo, capture_output=True, check=True, env=_REAL_GIT_ENV,
+    )
+    (worktree / "a.txt").write_text("stale local edit\n")
+    (worktree / "leftover.txt").write_text("from the last run\n")
+
+    remote_exec.materialize_worktree(
+        ShellRunner(), repo, worktree, "feat/t1",
+        repo_name="api", run_ref="refs/mship/run/t1/api",
+    )
+
+    assert _real_git("rev-parse", "HEAD", cwd=worktree) == scratch != tip
+    assert (worktree / "a.txt").read_text() == "what the operator is editing\n"
+    assert not (worktree / "leftover.txt").exists()   # cleaned, so the copy is exact
+    assert _real_git("status", "--porcelain", cwd=worktree) == ""
+
+
+def test_re_materializing_never_moves_the_task_branch(tmp_path):
+    """ac14 on the re-materialize path, which is where it is easiest to lose:
+    checking the BRANCH out before the reset would drag `feat/t1` — a real ref,
+    shared with the run host — onto the synthesized commit."""
+    repo, tip, scratch = _host_repo_with_run_ref(tmp_path)
+    worktree = tmp_path / "wt" / "api"
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "worktree", "add", "-q", str(worktree), "feat/t1"],
+        cwd=repo, capture_output=True, check=True, env=_REAL_GIT_ENV,
+    )
+
+    remote_exec.materialize_worktree(
+        ShellRunner(), repo, worktree, "feat/t1",
+        repo_name="api", run_ref="refs/mship/run/t1/api",
+    )
+
+    assert _real_git("rev-parse", "feat/t1", cwd=repo) == tip != scratch
+    assert _real_git("rev-parse", "HEAD", cwd=repo) == tip
+    head_ref = subprocess.run(
+        ["git", "symbolic-ref", "--quiet", "HEAD"], cwd=worktree,
+        capture_output=True, text=True, env=_REAL_GIT_ENV,
+    )
+    assert head_ref.returncode != 0          # detached, so nothing to drag
+
+
+def test_materializing_leaves_the_run_hosts_own_checkout_alone(tmp_path):
+    """The run host's repository is not a scratch pad: materializing must not
+    move its HEAD, its branches, or the scratch ref, nor dirty its work tree."""
+    repo, tip, scratch = _host_repo_with_run_ref(tmp_path)
+    branches_before = _real_git("branch", "--format=%(refname) %(objectname)", cwd=repo)
+
+    remote_exec.materialize_worktree(
+        ShellRunner(), repo, tmp_path / "wt" / "api", "feat/t1",
+        repo_name="api", run_ref="refs/mship/run/t1/api",
+    )
+
+    assert _real_git("rev-parse", "HEAD", cwd=repo) == tip
+    assert _real_git("rev-parse", "feat/t1", cwd=repo) == tip
+    assert _real_git("rev-parse", "refs/mship/run/t1/api", cwd=repo) == scratch
+    assert _real_git("status", "--porcelain", cwd=repo) == ""
+    # ac14: no branch was created pointing at the synthesized commit.
+    assert _real_git("branch", "--format=%(refname) %(objectname)", cwd=repo) == branches_before
+
+
+def test_materializing_from_a_run_ref_issues_no_fetch(tmp_path):
+    """ac10 as a command-level invariant: origin is not consulted, at all."""
+    fake = _FakeShellRunner()
+    remote_exec.materialize_worktree(
+        fake, tmp_path / "api", tmp_path / "wt" / "api", "feat/t1",
+        repo_name="api", run_ref="refs/mship/run/t1/api",
+    )
+    assert not any("fetch" in cmd for cmd, _cwd in fake.run_calls)
+    assert not any("origin" in cmd for cmd, _cwd in fake.run_calls)
+
+
+def test_re_materializing_an_existing_worktree_issues_no_fetch(tmp_path):
+    """The same invariant on the OTHER branch of the function — the path a
+    second remote run takes, where a worktree is already there."""
+    fake = _FakeShellRunner()
+    worktree = tmp_path / "wt" / "api"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: elsewhere\n")
+
+    remote_exec.materialize_worktree(
+        fake, tmp_path / "api", worktree, "feat/t1",
+        repo_name="api", run_ref="refs/mship/run/t1/api",
+    )
+
+    assert fake.run_calls                            # it did do something
+    assert not any("fetch" in cmd for cmd, _cwd in fake.run_calls)
+    assert not any("origin" in cmd for cmd, _cwd in fake.run_calls)
+
+
+def test_without_a_run_ref_the_branch_path_is_unchanged(tmp_path):
+    """ac9: nothing about today's behaviour moves."""
+    fake = _FakeShellRunner()
+    worktree = tmp_path / "wt" / "api"
+    remote_exec.materialize_worktree(
+        fake, tmp_path / "api", worktree, "feat/t1", repo_name="api",
+    )
+    assert [cmd for cmd, _cwd in fake.run_calls] == [
+        "git fetch origin feat/t1",
+        f"git worktree add -B feat/t1 {worktree} origin/feat/t1",
+    ]
+
+
+# --- exact copy: routing run_ref_repos through the streaming run -------------
+
+
+def test_run_verb_stream_uses_the_scratch_ref_for_named_repos(tmp_path):
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=fake, workspace_root=tmp_path,
+    )
+
+    list(remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None, deps=deps, nonce=_TEST_NONCE, run_ref_repos=["api"],
+    ))
+
+    commands = [cmd for cmd, _cwd in fake.run_calls]
+    assert any("refs/mship/run/t1/api" in c for c in commands)
+    # ac10: no fetch, not even the MOS-203 base-freshness probe, which exists
+    # only to keep this host's view of ORIGIN current.
+    assert not any("fetch" in c for c in commands)
+
+
+def test_a_repo_not_named_still_comes_from_origin(tmp_path):
+    """The mixed case: one repo transferred, another clean."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    deps = remote_exec.RemoteExecDeps(
+        config=_config_with_child(tmp_path), shell=fake, workspace_root=tmp_path,
+    )
+
+    list(remote_exec.run_verb_stream(
+        "run", "t1", ["app"], None, deps=deps, nonce=_TEST_NONCE, run_ref_repos=[],
+    ))
+
+    commands = [cmd for cmd, _cwd in fake.run_calls]
+    assert any("fetch origin feat/t1" in c for c in commands)
+    assert not any("refs/mship/run" in c for c in commands)
+
+
+def test_a_git_root_child_is_materialized_from_its_parents_scratch_ref(tmp_path):
+    """ac7 on the run host: one git repository, one ref. The client sends the
+    PARENT's name even when only the child was requested."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    deps = remote_exec.RemoteExecDeps(
+        config=_config_with_child(tmp_path), shell=fake, workspace_root=tmp_path,
+    )
+
+    list(remote_exec.run_verb_stream(
+        "run", "t1", ["server"], None, deps=deps, nonce=_TEST_NONCE, run_ref_repos=["app"],
+    ))
+
+    commands = [cmd for cmd, _cwd in fake.run_calls]
+    assert any("refs/mship/run/t1/app" in c for c in commands)
+
+
+def test_a_task_name_that_cannot_form_a_ref_fails_cleanly(tmp_path):
+    """The ref reaches a shell here, so a name that cannot form one is refused
+    BEFORE anything runs — as stream DATA (an error line + a non-zero exit
+    sentinel), never a raised exception mid-generator, matching how the
+    unknown-repo guard already behaves. `/exec` accepts `/` in a task name;
+    `run_ref` does not."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=fake, workspace_root=tmp_path,
+    )
+
+    lines = [
+        l.decode() for l in remote_exec.run_verb_stream(
+            "run", "a/b", ["api"], None, deps=deps, nonce=_TEST_NONCE,
+            run_ref_repos=["api"],
+        )
+    ]
+
+    assert lines[-1].startswith(f"{remote_exec.EXIT_MARKER}:{_TEST_NONCE} ")
+    assert int(lines[-1].split(" ", 1)[1].strip()) != 0
+    assert any("run ref" in l for l in lines[:-1])
+    assert fake.streaming_calls == []       # the task never started
+    assert fake.run_calls == []             # nor did any git command
+
+
+def test_the_base_freshness_probe_is_skipped_for_a_run_ref_repo(tmp_path):
+    """The hole the plan's own no-fetch assertion cannot see: `_config()` has no
+    `base_branch`, so `check_base_freshness` short-circuits and issues no fetch
+    even when it IS called. With a base branch configured it fetches, and calling
+    it unconditionally reopens exactly what ac10 closes — Task 6 lets a dirty
+    repo skip the BEHIND_ORIGIN preflight check ONLY because this path never
+    consults origin. So: no fetch, and no origin probe either."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path, base_branch="main"), shell=fake, workspace_root=tmp_path,
+    )
+
+    list(remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None, deps=deps, nonce=_TEST_NONCE, run_ref_repos=["api"],
+    ))
+
+    commands = [cmd for cmd, _cwd in fake.run_calls]
+    assert any("refs/mship/run/t1/api" in c for c in commands)
+    assert not any("fetch" in c for c in commands)
+    assert not any("origin" in c for c in commands)
+
+
+def _config_two_repos(tmp_path: Path) -> WorkspaceConfig:
+    """Two independent top-level repos, both with a base branch — the mixed
+    request's shape: one repo the operator transferred, one still from origin."""
+    repos = {}
+    for name in ("api", "web"):
+        repo_dir = tmp_path / name
+        repo_dir.mkdir(exist_ok=True)
+        repos[name] = RepoConfig(
+            path=repo_dir, type="service", base_branch="main",
+            tasks={"run": "start", "capture": "capture", "build": "build"},
+        )
+    return WorkspaceConfig(workspace="t", repos=repos)
+
+
+def test_a_mixed_run_routes_each_repo_by_its_own_source(tmp_path):
+    """One request, both sources. Each repo's git commands are partitioned by
+    the repo they ran in, so neither repo's routing can be inferred from the
+    other's — the scratch repo must see no origin traffic at all, and the clean
+    repo must still get the full branch path including the MOS-203 probe."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    deps = remote_exec.RemoteExecDeps(
+        config=_config_two_repos(tmp_path), shell=fake, workspace_root=tmp_path,
+    )
+
+    list(remote_exec.run_verb_stream(
+        "run", "t1", ["api", "web"], None, deps=deps, nonce=_TEST_NONCE,
+        run_ref_repos=["api"],
+    ))
+
+    in_api = [cmd for cmd, cwd in fake.run_calls if cwd == tmp_path / "api"]
+    in_web = [cmd for cmd, cwd in fake.run_calls if cwd == tmp_path / "web"]
+
+    assert any("refs/mship/run/t1/api" in c for c in in_api)
+    assert not any("fetch" in c for c in in_api)
+    assert not any("origin" in c for c in in_api)
+
+    assert "git fetch origin main" in in_web           # MOS-203 probe, still there
+    assert "git fetch origin feat/t1" in in_web        # branch path, unchanged
+    assert not any("refs/mship/run" in c for c in in_web)
+
+    # Both tasks ran, each in its own worktree.
+    assert [c["cwd"] for c in fake.streaming_calls] == [
+        tmp_path / ".worktrees" / "t1" / "api",
+        tmp_path / ".worktrees" / "t1" / "web",
+    ]
+
+
+def test_exec_endpoint_forwards_run_ref_repos_to_the_run(tmp_path, monkeypatch):
+    """End to end over HTTP: the field `ExecBody` already accepts has to reach
+    `run_verb_stream`, or the whole transfer is pushed and then ignored."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"], returncode=0))
+    _patch_shell(monkeypatch, fake)
+    client = TestClient(_app(tmp_path, config=_config(tmp_path, base_branch="main")))
+
+    r = client.post(
+        "/exec/run", json={"task": "t1", "repos": ["api"], "run_ref_repos": ["api"]},
+    )
+
+    assert r.status_code == 200
+    commands = [c for c, _cwd in fake.run_calls]
+    assert any("refs/mship/run/t1/api" in c for c in commands)
+    assert not any("fetch" in c for c in commands)
+    assert not any("origin" in c for c in commands)
+
+
+# --- setup on the run host, keyed --------------------------------------------
+
+def _config_with_setup(tmp_path: Path, *, setup_inputs=None) -> WorkspaceConfig:
+    """A repo whose MATERIALIZED WORKTREE really has a Taskfile declaring
+    `setup`. The Taskfile has to exist on disk because `taskfile_has_target`
+    reads it — the fake shell cannot answer for it."""
+    repo_dir = tmp_path / "api"
+    repo_dir.mkdir(exist_ok=True)
+    worktree = tmp_path / ".worktrees" / "t1" / "api"
+    worktree.mkdir(parents=True, exist_ok=True)
+    (worktree / "Taskfile.yml").write_text(
+        "version: '3'\ntasks:\n  setup:\n    cmds: [echo setup]\n"
+        "  start:\n    cmds: [echo run]\n"
+    )
+    (worktree / "package.json").write_text('{"deps": 1}\n')
+    return WorkspaceConfig(
+        workspace="t",
+        repos={
+            "api": RepoConfig(
+                path=repo_dir, type="service",
+                tasks={"run": "start"},
+                setup_inputs=setup_inputs or [],
+            ),
+        },
+    )
+
+
+def _stream_run(deps, **kw) -> list[str]:
+    return [
+        l.decode() for l in remote_exec.run_verb_stream(
+            "run", "t1", ["api"], None, deps=deps, nonce=_TEST_NONCE, **kw
+        )
+    ]
+
+
+def test_setup_runs_the_first_time_a_worktree_is_materialized(tmp_path):
+    """ac15: a fresh host builds its dependencies from the delivered source
+    instead of failing on missing ones."""
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    deps = remote_exec.RemoteExecDeps(
+        config=_config_with_setup(tmp_path), shell=fake, workspace_root=tmp_path,
+    )
+
+    _stream_run(deps)
+
+    assert [c["command"] for c in fake.streaming_calls] == ["task setup", "task start"]
+    # WHERE setup ran, not just that it ran: "from the delivered source" is the
+    # whole of ac15. Run in the repo's own checkout instead of the materialized
+    # worktree, setup would derive dependencies for the run host's stale tree
+    # while the operator's exact source executes against them — the
+    # exact-source-with-stale-deps trap this feature exists to close. Every
+    # other setup test here asserts only the command, which cannot see that.
+    worktree = tmp_path / ".worktrees" / "t1" / "api"
+    assert [c["cwd"] for c in fake.streaming_calls] == [worktree, worktree]
+
+
+def test_setup_is_skipped_on_the_next_run(tmp_path):
+    """ac16: a source-only iteration pays no setup cost."""
+    config = _config_with_setup(tmp_path)
+    first = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=first, workspace_root=tmp_path))
+
+    second = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=second, workspace_root=tmp_path))
+
+    assert [c["command"] for c in second.streaming_calls] == ["task start"]
+
+
+def test_setup_re_runs_when_a_declared_input_changes(tmp_path):
+    """ac16: a dependency change pays once."""
+    config = _config_with_setup(tmp_path, setup_inputs=["package.json"])
+    first = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=first, workspace_root=tmp_path))
+
+    (tmp_path / ".worktrees" / "t1" / "api" / "package.json").write_text('{"deps": 2}\n')
+    second = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=second, workspace_root=tmp_path))
+
+    assert [c["command"] for c in second.streaming_calls] == ["task setup", "task start"]
+
+
+def test_declaring_no_inputs_means_setup_runs_once_only(tmp_path):
+    """ac17: nothing to invalidate against, even when a manifest changes."""
+    config = _config_with_setup(tmp_path)
+    first = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=first, workspace_root=tmp_path))
+
+    (tmp_path / ".worktrees" / "t1" / "api" / "package.json").write_text('{"deps": 9}\n')
+    second = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=second, workspace_root=tmp_path))
+
+    assert [c["command"] for c in second.streaming_calls] == ["task start"]
+
+
+def test_a_failing_setup_fails_the_run_with_its_own_output(tmp_path):
+    """ac18: not a downstream error that does not name the real cause."""
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["npm ERR! ENOENT\n"], returncode=3),
+    )
+    deps = remote_exec.RemoteExecDeps(
+        config=_config_with_setup(tmp_path), shell=fake, workspace_root=tmp_path,
+    )
+
+    lines = _stream_run(deps)
+
+    assert "npm ERR! ENOENT\n" in lines                       # setup's own output
+    assert any(l.startswith("error:") and "setup" in l and "api" in l for l in lines)
+    assert lines[-1] == f"{remote_exec.EXIT_MARKER}:{_TEST_NONCE} 3\n"
+    assert [c["command"] for c in fake.streaming_calls] == ["task setup"]  # run never started
+
+
+def test_a_failed_setup_is_not_recorded_as_done(tmp_path):
+    """Caching a failure would skip the retry."""
+    config = _config_with_setup(tmp_path)
+    failing = _FakeShellRunner(streaming_proc=_FakeProc(returncode=1))
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=failing, workspace_root=tmp_path))
+
+    second = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=second, workspace_root=tmp_path))
+
+    assert [c["command"] for c in second.streaming_calls][0] == "task setup"
+
+
+def test_a_repo_with_no_setup_target_is_not_failed_over_it(tmp_path):
+    """ac15's second half: `task setup` in a repo that never declared one exits
+    non-zero, and that must not turn every remote run into a failure."""
+    config = _config_with_setup(tmp_path)
+    (tmp_path / ".worktrees" / "t1" / "api" / "Taskfile.yml").write_text(
+        "version: '3'\ntasks:\n  start:\n    cmds: [echo run]\n"
+    )
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=fake, workspace_root=tmp_path))
+
+    assert [c["command"] for c in fake.streaming_calls] == ["task start"]
+
+
+def test_a_repo_declaring_setup_not_applicable_skips_it(tmp_path):
+    config = _config_with_setup(tmp_path)
+    config.repos["api"].not_applicable = ["setup"]
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=fake, workspace_root=tmp_path))
+
+    assert [c["command"] for c in fake.streaming_calls] == ["task start"]
+
+
+def test_setup_honours_an_aliased_target_name(tmp_path):
+    """A repo may spell its setup target something else via `tasks:`."""
+    config = _config_with_setup(tmp_path)
+    config.repos["api"].tasks = {"run": "start", "setup": "bootstrap"}
+    (tmp_path / ".worktrees" / "t1" / "api" / "Taskfile.yml").write_text(
+        "version: '3'\ntasks:\n  bootstrap:\n    cmds: [echo boot]\n"
+        "  start:\n    cmds: [echo run]\n"
+    )
+    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+
+    _stream_run(remote_exec.RemoteExecDeps(
+        config=config, shell=fake, workspace_root=tmp_path))
+
+    assert [c["command"] for c in fake.streaming_calls] == ["task bootstrap", "task start"]
+
+
+class _MaterializingShellRunner(_FakeShellRunner):
+    """Like `_FakeShellRunner`, but `.run()` actually creates the worktree
+    directory + a `setup`-declaring Taskfile as a side effect of the real
+    `git worktree add` command — standing in for what a real git checkout
+    does to disk.
+
+    `_config_with_setup`'s fixture pre-creates the Taskfile at the
+    destination path regardless of call order, so a test built on it can't
+    tell "setup ran before materialization" from "setup ran after" — the
+    file is there either way. This fake makes the file's existence
+    CONDITIONAL on materialization having actually run, which is the only
+    way to pin that ordering.
+    """
+
+    def run(self, command, cwd, env=None):
+        result = super().run(command, cwd, env=env)
+        if command.startswith("git worktree add"):
+            # `git worktree add -B <branch> <worktree_path> origin/<branch>`
+            worktree_path = Path(command.split()[5])
+            worktree_path.mkdir(parents=True, exist_ok=True)
+            (worktree_path / "Taskfile.yml").write_text(
+                "version: '3'\ntasks:\n  setup:\n    cmds: [echo setup]\n"
+                "  start:\n    cmds: [echo run]\n"
+            )
+        return result
+
+
+def test_setup_runs_only_after_materialization_creates_the_worktree(tmp_path):
+    """Pins the ordering the plan calls out explicitly: setup must run AFTER
+    the worktree is materialized (the files don't exist before that), never
+    before. A shell fake that only produces the Taskfile as a side effect of
+    the real `git worktree add` command proves it — unlike
+    `_config_with_setup`'s pre-created fixture, this one distinguishes "ran
+    before materialize" (no Taskfile yet, so setup is skipped as
+    not-applicable and only `task start` streams) from "ran after" (Taskfile
+    exists, `task setup` streams first)."""
+    repo_dir = tmp_path / "api"
+    repo_dir.mkdir(exist_ok=True)
+    config = WorkspaceConfig(
+        workspace="t",
+        repos={
+            "api": RepoConfig(
+                path=repo_dir, type="service",
+                tasks={"run": "start"},
+            ),
+        },
+    )
+    fake = _MaterializingShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
+    deps = remote_exec.RemoteExecDeps(config=config, shell=fake, workspace_root=tmp_path)
+
+    _stream_run(deps)
+
+    assert [c["command"] for c in fake.streaming_calls] == ["task setup", "task start"]

@@ -61,7 +61,11 @@ from pathlib import Path
 from typing import Iterator, Protocol
 
 from mship.core import capture as _cap
+from mship.core import remote_setup
 from mship.core.config import WorkspaceConfig
+from mship.core.run_ref import RunRefNameError
+from mship.core.run_ref import run_ref as build_run_ref
+from mship.util.taskfile import taskfile_has_target
 
 VERBS: tuple[str, ...] = ("run", "capture", "build")
 
@@ -180,25 +184,59 @@ def _run_checked(shell: ShellLike, command: str, cwd: Path, *, repo_name: str) -
 
 
 def materialize_worktree(
-    shell: ShellLike, repo_path: Path, worktree_path: Path, branch: str, *, repo_name: str
+    shell: ShellLike,
+    repo_path: Path,
+    worktree_path: Path,
+    branch: str,
+    *,
+    repo_name: str,
+    run_ref: str | None = None,
 ) -> None:
-    """Ensure `worktree_path` is a git worktree of `repo_path` sitting on
-    `branch`, fresh from origin.
+    """Ensure `worktree_path` is a git worktree of `repo_path` holding the
+    revision this run is supposed to execute.
 
-    `branch` already exists on origin (created by `mship spawn`/dispatch on
-    the operator's machine and pushed there) — this NEVER creates a new
-    branch here, it only fetches + tracks the existing one. Idempotent: a
-    worktree that already exists is fetched + hard-reset to the new tip
-    rather than re-added (the remote branch may have moved since the last
-    remote run); a first-time run creates it with `git worktree add -B`,
-    which is safe to re-run even if a stale local branch ref of the same
-    name exists (e.g. left over from a removed worktree).
+    Two modes.
 
-    Every git command runs through `_run_checked` (`repo_name` is only used
-    for that error message): a failure here (e.g. the branch not yet pushed,
-    a dirty/locked worktree) raises `MaterializeError` instead of silently
-    letting execution continue against a missing/stale checkout.
+    `run_ref` GIVEN (spec remote-exact-copy): the operator pushed a commit
+    synthesized from their working tree straight to this host, so the revision is
+    ALREADY in this repository. Materialization is a reset to a LOCAL ref with NO
+    FETCH — origin is not consulted at all, which is also why the caller skips
+    the base-freshness probe for these repos. HEAD is left DETACHED on purpose:
+    the scratch commit is throwaway state, and pointing a branch at it would
+    dress it up as history. `git clean -fd` removes leftovers from a previous
+    run so the result is an exact copy; it does not remove gitignored files, so
+    dependencies derived by `task setup` survive between runs.
+
+    `run_ref` NONE (unchanged from before): `branch` already exists on origin
+    (created by `mship spawn`/dispatch on the operator's machine and pushed
+    there) — this NEVER creates a new branch here, it only fetches + tracks the
+    existing one. Idempotent: an existing worktree is fetched + hard-reset to the
+    new tip; a first-time run creates it with `git worktree add -B`, which is
+    safe to re-run even if a stale local branch ref of the same name exists.
+
+    Every git command runs through `_run_checked` (`repo_name` is only used for
+    that error message): a failure here raises `MaterializeError` instead of
+    silently letting execution continue against a missing/stale checkout.
     """
+    if run_ref is not None:
+        if (worktree_path / ".git").exists():
+            # `checkout --detach` with NO ref keeps the current commit, so it
+            # succeeds even when the worktree is dirty from the last run
+            # (verified); the reset then moves detached HEAD without ever moving
+            # a branch.
+            _run_checked(shell, "git checkout --detach", worktree_path, repo_name=repo_name)
+            _run_checked(shell, f"git reset --hard {run_ref}", worktree_path, repo_name=repo_name)
+            _run_checked(shell, "git clean -fd", worktree_path, repo_name=repo_name)
+        else:
+            worktree_path.parent.mkdir(parents=True, exist_ok=True)
+            _run_checked(
+                shell,
+                f"git worktree add --detach {worktree_path} {run_ref}",
+                repo_path,
+                repo_name=repo_name,
+            )
+        return
+
     _run_checked(shell, f"git fetch origin {branch}", repo_path, repo_name=repo_name)
     if (worktree_path / ".git").exists():
         _run_checked(shell, f"git fetch origin {branch}", worktree_path, repo_name=repo_name)
@@ -325,6 +363,7 @@ def run_verb_stream(
     deps: RemoteExecDeps,
     kind: str = "all",
     nonce: str,
+    run_ref_repos: list[str] | None = None,
 ) -> Iterator[bytes]:
     """The serve-side body of `POST /exec/{verb}`.
 
@@ -339,6 +378,13 @@ def run_verb_stream(
          subdirectory) repos skip their own fetch/worktree-add and resolve
          to a path under their parent's worktree instead, mirroring
          `WorktreeManager.spawn`'s treatment of subdirectory services.
+      2b. A repo named in `run_ref_repos` is materialized from THIS host's own
+          scratch ref for the task instead — the operator pushed a commit
+          synthesized from their working tree straight here, so the revision is
+          already local and NO fetch (not even the base-freshness probe, which
+          exists only to refresh this host's view of origin) is issued for it.
+          Names are TOP-LEVEL git repo names, so a `git_root` child is covered
+          by its parent's entry.
       3. Resolve the repo's go-task target for `verb` + its env_runner;
          for `verb == "capture"` build the same env-var contract as local
          capture (`MSHIP_CAPTURE_DIR` a fresh remote temp dir,
@@ -401,6 +447,20 @@ def run_verb_stream(
         yield f"{EXIT_MARKER}:{nonce} 2\n".encode("utf-8")
         return
 
+    scratch_repos = sorted(set(run_ref_repos or []))
+    run_refs: dict[str, str] = {}
+    for scratch_repo in scratch_repos:
+        try:
+            run_refs[scratch_repo] = build_run_ref(task, scratch_repo)
+        except RunRefNameError as exc:
+            # The ref is interpolated into git commands run with shell=True, so
+            # a name that cannot form one is refused before anything runs — as
+            # stream DATA, never a raised exception mid-generator, matching the
+            # unknown-repo guard above.
+            yield f"error: cannot build a run ref for this request: {exc}\n".encode("utf-8")
+            yield f"{EXIT_MARKER}:{nonce} 2\n".encode("utf-8")
+            return
+
     materialized: dict[str, Path] = {}
     exit_code = 0
 
@@ -422,19 +482,86 @@ def run_verb_stream(
         rc = config.repos[top_repo]
         repo_path = rc.path
         worktree_path = hub / top_repo
+        ref = run_refs.get(top_repo)
 
-        warning = check_base_freshness(shell, repo_path, rc.base_branch)
-        if warning is not None:
-            yield f"{warning}\n".encode("utf-8")
+        if ref is None:
+            # Origin is the source of truth for this repo, so make sure this
+            # host's view of its base is current first (MOS-203). Skipped
+            # entirely on the scratch-ref path: nothing there comes from origin,
+            # and a fetch would be pure latency.
+            warning = check_base_freshness(shell, repo_path, rc.base_branch)
+            if warning is not None:
+                yield f"{warning}\n".encode("utf-8")
 
         try:
-            materialize_worktree(shell, repo_path, worktree_path, branch, repo_name=top_repo)
+            materialize_worktree(
+                shell, repo_path, worktree_path, branch,
+                repo_name=top_repo, run_ref=ref,
+            )
         except MaterializeError as exc:
             yield f"error: {exc}\n".encode("utf-8")
             yield f"{EXIT_MARKER}:{nonce} 1\n".encode("utf-8")
             return False
 
         materialized[top_repo] = worktree_path
+        return True
+
+    def _ensure_setup(repo_name: str, repo_config, worktree_path: Path) -> Iterator[bytes]:
+        """Run `task setup` in a freshly-materialized worktree when it is
+        needed, streaming its output live exactly like the verb itself.
+
+        Git carries source, not dependencies. Without this, an exact-source run
+        against stale dependencies fails with a module-not-found that has no
+        visible relationship to the edit — the same confusing-staleness class
+        the rest of this feature exists to eliminate. So the host DERIVES them.
+
+        Keyed (see `core/remote_setup.py`): the first materialization on this
+        host, then only when the repo's declared `setup_inputs` change. Skipped
+        entirely for a repo that declares `setup` not applicable or whose
+        Taskfile has no such target — `task setup` in a repo that never defined
+        one exits non-zero, and that must not fail every remote run.
+
+        PEP 380 value: True to continue, False when setup FAILED — in which case
+        the error line and the exit sentinel have ALREADY been emitted and the
+        caller MUST return, exactly like `_ensure_materialized`.
+        """
+        if "setup" in repo_config.not_applicable:
+            return True
+        actual_setup = repo_config.tasks.get("setup", "setup")
+        if not taskfile_has_target(worktree_path, actual_setup):
+            return True
+
+        key = remote_setup.setup_key(worktree_path, repo_config.setup_inputs)
+        key_path = remote_setup.key_file(deps.workspace_root, task, repo_name)
+        if not remote_setup.needs_setup(key_path, key):
+            return True
+
+        yield f"setup: {repo_name} (task {actual_setup})\n".encode("utf-8")
+        env_runner = repo_config.env_runner or config.env_runner
+        command = shell.build_command(f"task {actual_setup}", env_runner)
+        proc = None
+        try:
+            proc = shell.run_streaming(command, cwd=worktree_path, env=None)
+            yield from _stream_proc_lines(proc)
+            setup_code = proc.wait()
+        finally:
+            _terminate_proc(proc)
+
+        if setup_code != 0:
+            # Surface setup's OWN failure rather than letting the verb run
+            # against half-built dependencies and report something that does not
+            # name the real cause (spec ac18).
+            yield (
+                f"error: `task {actual_setup}` failed on the run host for repo "
+                f"{repo_name!r} (exit {setup_code}); the output above is setup's "
+                f"own. The {verb} was not started.\n"
+            ).encode("utf-8")
+            yield f"{EXIT_MARKER}:{nonce} {setup_code}\n".encode("utf-8")
+            return False
+
+        # Recorded only after a SUCCESSFUL setup: caching a failure would skip
+        # the retry that fixes it.
+        remote_setup.record_setup(key_path, key)
         return True
 
     for repo_name in repos:
@@ -457,6 +584,9 @@ def run_verb_stream(
             if not (yield from _ensure_materialized(repo_name)):
                 return
             worktree_path = materialized[repo_name]
+
+        if not (yield from _ensure_setup(repo_name, repo_config, worktree_path)):
+            return
 
         actual_task_name = repo_config.tasks.get(verb, verb)
         env_runner = repo_config.env_runner or config.env_runner

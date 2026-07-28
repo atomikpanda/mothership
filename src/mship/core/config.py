@@ -203,6 +203,17 @@ class RepoConfig(BaseModel):
     # role lives in the gitignored `.mothership/run-hosts.yaml` store, never
     # here. See mship.core.run_host.resolve_run_host.
     run_host: str | None = None
+    # Files whose CONTENT decides whether a remote run re-runs `task setup` on
+    # the run host — this repo's manifests and lockfiles (e.g. package.json,
+    # uv.lock, build.gradle). Glob patterns, matched inside the materialized
+    # worktree. See mship.core.remote_setup.
+    #
+    # Empty (the default) is NOT "never run setup": it means there is nothing to
+    # invalidate against, so setup runs the first time a worktree is
+    # materialized on a host and not again. DECLARING inputs is what buys
+    # re-run-on-change. Deliberately explicit rather than inferred — an operator
+    # can see and widen a declared key; they cannot inspect a heuristic.
+    setup_inputs: list[str] = []
 
     @field_validator("url", mode="after")
     @classmethod

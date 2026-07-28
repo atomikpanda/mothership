@@ -13,9 +13,10 @@ import os
 import subprocess
 from pathlib import Path
 
+from mship.core.config import RepoConfig, WorkspaceConfig
 from mship.core.remote_preflight import (
     BEHIND_ORIGIN,
-    DIRTY,
+    IN_PROGRESS,
     MISSING_WORKTREE,
     ORIGIN_UNREACHABLE,
     UNREADABLE,
@@ -59,9 +60,13 @@ class FakeShell:
         self.pushes: list[tuple[str, Path]] = []
         self.touched: set[str] = set()
         self.pair_calls: dict[str, int] = {}
+        # Every command issued, in order — the only way to assert that a query
+        # was NOT made (e.g. that a dirty repo never asks origin).
+        self.commands: list[str] = []
 
     def run(self, cmd, cwd=None, **kw):
         key = Path(cwd).name
+        self.commands.append(cmd)
         spec = self._answers[key]
         self.touched.add(key)
         err = ""
@@ -78,6 +83,13 @@ class FakeShell:
                 out, rc = "", 0
             else:
                 out, rc = f"{spec['origin']}\trefs/heads/feat/x\n", 0
+        elif "rev-parse --git-dir" in cmd:
+            # `_inspect_repo` asks for the per-worktree git dir to look for an
+            # interrupted merge/rebase (MERGE_HEAD, rebase-merge/, ...). Real
+            # git returns an absolute path in a linked worktree and may return a
+            # bare `.git` at a repo root; either is fine here because the
+            # production code resolves a relative answer against `cwd`.
+            out, rc = spec.get("git_dir", str(Path(cwd) / ".git")), 0
         elif "rev-parse HEAD" in cmd and "refs/heads/" in cmd:
             # The atomic branch-identity + sha read `_inspect_repo` makes:
             # one call answering both "which branch is HEAD on" and "what sha
@@ -129,44 +141,69 @@ def _clean(**over):
     return {"status": "", "origin": "headsha", "head": "headsha", **over}
 
 
-# --- what must be refused ---------------------------------------------------
+# --- what must be TRANSFERRED, not refused ----------------------------------
+#
+# These five were refusals under PR #419, for a reason that no longer holds:
+# inventing a commit out of someone's work in progress was not a decision the
+# tool could make, because that commit would have gone to ORIGIN. It now goes
+# only to the operator's own run host, on a ref nothing else writes, leaving
+# their repository untouched — so the same repo shapes route instead of stopping.
 
-def test_tracked_changes_block_the_run(tmp_path):
-    """The dangerous case: the remote would run the last pushed revision."""
+def test_tracked_changes_are_transferred_not_refused(tmp_path):
+    """The whole point of the spec: run what the operator is editing."""
     api = _repo(tmp_path, "api")
-    task = FakeTask({"api": api})
     shell = FakeShell({"api": _clean(status=" M src/app.py\n")})
 
-    pre = inspect(task, shell)
-    assert not pre.ok
-    assert [s.repo for s in pre.blocked] == ["api"]
-    assert shell.pushes == []                       # nothing pushed while blocked
+    pre = inspect(FakeTask({"api": api}), shell)
 
-    msg = blocked_message(pre)
-    assert "uncommitted changes in api" in msg
-    assert "last PUSHED revision" in msg
-    assert "mship commit" in msg                    # multi-repo commit named first
-    assert str(api) in msg                          # exact per-repo push command
+    assert pre.ok
+    assert [s.repo for s in pre.dirty] == ["api"]
+    assert pre.to_push == []            # ac3: origin is not in this path
+    assert shell.pushes == []
 
 
-def test_staged_but_uncommitted_also_blocks(tmp_path):
+def test_staged_but_uncommitted_is_also_transferred(tmp_path):
     api = _repo(tmp_path, "api")
     shell = FakeShell({"api": _clean(status="M  src/app.py\n")})
-    assert not inspect(FakeTask({"api": api}), shell).ok
+    pre = inspect(FakeTask({"api": api}), shell)
+    assert pre.ok and [s.repo for s in pre.dirty] == ["api"]
 
 
-def test_every_dirty_repo_is_named_not_just_the_first(tmp_path):
-    """A multi-repo task must not report one repo and leave the others to
-    surface one at a time."""
+def test_every_dirty_repo_is_transferred_not_just_the_first(tmp_path):
+    """A multi-repo task must send every repo's tree; sending one and leaving
+    the others on origin's revision is the stale-code failure again."""
     api, web = _repo(tmp_path, "api"), _repo(tmp_path, "web")
     shell = FakeShell({
         "api": _clean(status=" M a.py\n"),
         "web": _clean(status=" M b.ts\n"),
     })
     pre = inspect(FakeTask({"api": api, "web": web}), shell)
-    assert sorted(s.repo for s in pre.blocked) == ["api", "web"]
-    assert "api, web" in blocked_message(pre)
+    assert sorted(s.repo for s in pre.dirty) == ["api", "web"]
+    assert pre.ok and shell.pushes == []
 
+
+def test_untracked_only_counts_as_dirty_and_travels(tmp_path):
+    """ac9/ac11. Under #419 this only warned, because untracked files could not
+    change what a push to origin carried. They are part of what the operator
+    sees, and they now travel only between the operator's own two machines — so
+    ANY porcelain output at all is dirty, or untracked files would never travel
+    and ac11 would be unsatisfiable."""
+    api = _repo(tmp_path, "api")
+    shell = FakeShell({"api": _clean(status="?? scratch.txt\n")})
+    pre = inspect(FakeTask({"api": api}), shell)
+    assert pre.ok
+    assert [s.repo for s in pre.dirty] == ["api"]
+    assert pre.to_push == []
+
+
+def test_untracked_alongside_tracked_is_transferred_once(tmp_path):
+    api = _repo(tmp_path, "api")
+    shell = FakeShell({"api": _clean(status="?? new.py\n M old.py\n")})
+    pre = inspect(FakeTask({"api": api}), shell)
+    assert pre.ok and [s.repo for s in pre.dirty] == ["api"]
+
+
+# --- what must be refused ---------------------------------------------------
 
 def test_a_failed_git_status_blocks_rather_than_reading_as_clean(tmp_path):
     """A broken repo's `git status` exits non-zero with EMPTY stdout, which is
@@ -406,13 +443,15 @@ def test_a_detached_worktree_is_refused_and_says_so(tmp_path):
 
 
 def test_the_branch_is_checked_before_the_tree_is_judged_dirty(tmp_path):
-    """A wrong-branch worktree that is also dirty must report the branch: telling
-    the operator to `mship commit` would commit their work onto the wrong
-    branch, which is worse than the state they are already in."""
+    """A wrong-branch worktree that is also dirty must report the branch. Under
+    #419 the alternative was telling the operator to `mship commit` onto the
+    wrong branch; now it is silently SENDING that branch's tree as if it were
+    the task's, which is worse still. So WRONG_BRANCH keeps winning."""
     api = _repo(tmp_path, "api")
     shell = FakeShell({"api": _clean(status=" M a.py\n", head_ref="refs/heads/main")})
-    assert [s.blocked_reason for s in inspect(FakeTask({"api": api}), shell).blocked] \
-        == [WRONG_BRANCH]
+    pre = inspect(FakeTask({"api": api}), shell)
+    assert [s.blocked_reason for s in pre.blocked] == [WRONG_BRANCH]
+    assert pre.dirty == []
 
 
 def test_a_path_that_is_not_a_git_repo_is_unreadable_not_wrong_branch(tmp_path):
@@ -442,17 +481,84 @@ def test_an_unreachable_origin_blocks(tmp_path):
 
 
 def test_each_blocked_reason_gets_its_own_section(tmp_path):
-    """A dirty repo and a stale one need BOTH remedies, not whichever was found
-    first — the fix for one is actively wrong for the other."""
+    """A conflicted repo and a stale one need BOTH remedies, not whichever was
+    found first — the fix for one is actively wrong for the other."""
     api, web = _repo(tmp_path, "api"), _repo(tmp_path, "web")
+    (api / ".git").mkdir(parents=True, exist_ok=True)
+    (api / ".git" / "MERGE_HEAD").write_text("abc\n")
     shell = FakeShell({
-        "api": _clean(status=" M a.py\n"),
+        "api": _clean(status="UU a.py\n"),
         "web": _clean(origin="beefbeefbeef", head="oldsha", contains=[]),
     })
     msg = blocked_message(inspect(FakeTask({"api": api, "web": web}), shell))
-    assert "uncommitted changes in api" in msg
+    assert "merge or rebase in progress in api" in msg
     assert "unpulled commits on origin in web" in msg
-    assert "mship commit" in msg and "pull --ff-only" in msg
+    assert "--abort" in msg and "pull --ff-only" in msg
+
+
+def test_a_conflicted_repo_is_refused(tmp_path):
+    """ac12: the working tree IS what gets sent, and mid-conflict it holds
+    conflict markers rather than code anyone meant to run."""
+    api = _repo(tmp_path, "api")
+    shell = FakeShell({"api": _clean(status="UU src/app.py\n")})
+
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert not pre.ok
+    assert [s.blocked_reason for s in pre.blocked] == [IN_PROGRESS]
+    assert pre.dirty == [] and shell.pushes == []
+
+    msg = blocked_message(pre)
+    assert "merge or rebase in progress in api" in msg
+    assert "src/app.py" in msg          # which file, exactly
+    assert "--abort" in msg             # the way out
+
+
+def test_a_mid_rebase_repo_is_refused_ahead_of_the_branch_check(tmp_path):
+    """Ordering matters, and it is not cosmetic: `git rebase` DETACHES HEAD, so
+    checking the branch first would refuse this as WRONG_BRANCH and print
+    `git checkout <branch>` — a command that abandons the rebase. The
+    in-progress check is deliberately ordered ahead of it."""
+    api = _repo(tmp_path, "api")
+    (api / ".git" / "rebase-merge").mkdir(parents=True)
+    shell = FakeShell({"api": _clean(status="", head_ref="")})   # detached
+
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert [s.blocked_reason for s in pre.blocked] == [IN_PROGRESS]
+    msg = blocked_message(pre)
+    assert "rebase" in msg
+    assert "checkout" not in msg        # NOT the wrong-branch remedy
+
+
+def test_a_mid_merge_repo_is_refused_even_with_a_clean_tree(tmp_path):
+    """`git merge --no-commit` leaves MERGE_HEAD with nothing unmerged: the
+    porcelain alone cannot see it, which is why the git dir is consulted."""
+    api = _repo(tmp_path, "api")
+    (api / ".git").mkdir(parents=True, exist_ok=True)
+    (api / ".git" / "MERGE_HEAD").write_text("abc\n")
+    shell = FakeShell({"api": _clean(status="")})
+    assert [s.blocked_reason for s in inspect(FakeTask({"api": api}), shell).blocked] \
+        == [IN_PROGRESS]
+
+
+def test_a_cherry_pick_in_progress_is_refused(tmp_path):
+    api = _repo(tmp_path, "api")
+    (api / ".git").mkdir(parents=True, exist_ok=True)
+    (api / ".git" / "CHERRY_PICK_HEAD").write_text("abc\n")
+    shell = FakeShell({"api": _clean(status="")})
+    assert [s.blocked_reason for s in inspect(FakeTask({"api": api}), shell).blocked] \
+        == [IN_PROGRESS]
+
+
+def test_an_unanswerable_git_dir_is_unreadable_not_transferred(tmp_path):
+    """Same rule as fix 1's `git status` guard: a repo whose state could not be
+    established is refused, never assumed clean — and never shipped."""
+    api = _repo(tmp_path, "api")
+    shell = FakeShell({"api": _clean(status=" M a.py\n", git_dir="")})
+    pre = inspect(FakeTask({"api": api}), shell)
+    assert [s.blocked_reason for s in pre.blocked] == [UNREADABLE]
+    assert pre.dirty == []
 
 
 # --- what must be pushed ----------------------------------------------------
@@ -520,30 +626,11 @@ def test_a_failed_push_stops_the_run(tmp_path):
     assert "could not push api" in err and "permission denied" in err
 
 
-# --- what must only warn ----------------------------------------------------
-
-def test_untracked_files_warn_rather_than_block(tmp_path):
-    """They cannot change what a push carries, so blocking over a stray scratch
-    file would be obstruction — but they will not exist on the run host."""
-    api = _repo(tmp_path, "api")
-    shell = FakeShell({"api": _clean(status="?? scratch.txt\n")})
-    pre = inspect(FakeTask({"api": api}), shell)
-    assert pre.ok
-    assert [s.repo for s in pre.untracked] == ["api"]
-
-
-def test_untracked_alongside_tracked_still_blocks(tmp_path):
-    api = _repo(tmp_path, "api")
-    shell = FakeShell({"api": _clean(status="?? new.py\n M old.py\n")})
-    pre = inspect(FakeTask({"api": api}), shell)
-    assert not pre.ok
-
-
 # --- scoping to the repos actually dispatched -------------------------------
 
 def test_repos_scoping_ignores_a_dirty_repo_the_run_never_touches(tmp_path):
-    """`--repos api` dispatches only api; work in progress in web cannot make
-    api's run execute stale code, so refusing over it is pure obstruction."""
+    """`--repos api` dispatches only api; work in progress in web is neither a
+    reason to stop nor a tree to ship."""
     api, web = _repo(tmp_path, "api"), _repo(tmp_path, "web")
     shell = FakeShell({
         "api": _clean(),
@@ -552,6 +639,7 @@ def test_repos_scoping_ignores_a_dirty_repo_the_run_never_touches(tmp_path):
     pre = inspect(FakeTask({"api": api, "web": web}), shell, repos=["api"])
     assert pre.ok
     assert [s.repo for s in pre.states] == ["api"]
+    assert pre.dirty == []
 
 
 def test_repos_scoping_does_not_push_an_unselected_repo(tmp_path):
@@ -571,6 +659,71 @@ def test_no_scope_means_every_repo_the_task_touches(tmp_path):
     shell = FakeShell({"api": _clean(), "web": _clean()})
     pre = inspect(FakeTask({"api": api, "web": web}), shell)
     assert [s.repo for s in pre.states] == ["api", "web"]
+
+
+# --- how a dirty repo is routed ---------------------------------------------
+
+def test_a_dirty_repo_never_asks_origin(tmp_path):
+    """BEHIND_ORIGIN and ORIGIN_UNREACHABLE exist because the run host
+    materializes a BRANCH from origin. On this path it materializes a scratch
+    ref this machine pushes, with no fetch at all, so origin's answer cannot
+    change what executes — and a round trip that cannot change the outcome is a
+    round trip not worth taking. Both refusals keep their full force on the
+    clean path (see the tests above)."""
+    api = _repo(tmp_path, "api")
+    shell = FakeShell({"api": _clean(
+        status=" M a.py\n",
+        origin="0123456789abcdef", head="oldsha", contains=[],   # would be BEHIND_ORIGIN
+    )})
+
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert pre.ok
+    assert [s.repo for s in pre.dirty] == ["api"]
+    assert pre.blocked == []                                # not BEHIND_ORIGIN
+    assert not any("ls-remote" in c for c in shell.commands)
+    assert not any("merge-base" in c for c in shell.commands)
+
+
+def test_a_dirty_repo_carries_the_sha_inspect_certified(tmp_path):
+    """Fix 9, carried onto the new path: `synthesize_commit` parents the
+    snapshot on THIS sha rather than re-resolving HEAD moments later."""
+    api = _repo(tmp_path, "api")
+    shell = FakeShell({"api": _clean(status=" M a.py\n", head="certified")})
+    pre = inspect(FakeTask({"api": api}), shell)
+    assert [s.head_sha for s in pre.dirty] == ["certified"]
+
+
+def test_a_git_root_child_and_its_parent_dedupe_to_one_transfer(tmp_path):
+    """ac7: one git repository, one scratch ref. The child's tree IS the
+    parent's, so pushing both would send the same objects twice under two names
+    — and the run host resolves the child under the materialized parent anyway.
+    The parent is the survivor because that is the name the host materializes."""
+    mono = _repo(tmp_path, "mono")
+    child = _repo(tmp_path / "mono", "pkg")
+    shell = FakeShell({
+        "mono": _clean(status=" M a.py\n"),
+        "pkg": _clean(status=" M a.py\n"),
+    })
+    config = WorkspaceConfig(workspace="t", repos={
+        "mono": RepoConfig(path=mono, type="service"),
+        "pkg": RepoConfig(path=Path("pkg"), type="service", git_root="mono"),
+    })
+
+    pre = inspect(FakeTask({"mono": mono, "pkg": child}), shell, config=config)
+
+    assert [s.git_repo for s in pre.dirty] == ["mono"]
+    assert [s.repo for s in pre.dirty] == ["mono"]
+    assert [s.repo for s in pre.states] == ["mono", "pkg"]   # both still inspected
+
+
+def test_without_a_config_every_repo_is_its_own_git_repo(tmp_path):
+    """`config` is optional so the 25 untouched tests in this file keep calling
+    `inspect(task, shell)`. Absent it there is nothing to collapse against."""
+    api = _repo(tmp_path, "api")
+    shell = FakeShell({"api": _clean(status=" M a.py\n")})
+    pre = inspect(FakeTask({"api": api}), shell)
+    assert [s.git_repo for s in pre.dirty] == ["api"]
 
 
 # --- against real git, where staleness is real ------------------------------
@@ -814,3 +967,39 @@ def test_real_repo_that_is_not_a_git_worktree_blocks(tmp_path):
     plain.mkdir()
     pre = inspect(FakeTask({"api": plain}), RealShell())
     assert [s.blocked_reason for s in pre.blocked] == [UNREADABLE]
+
+
+def test_a_real_dirty_repo_is_transferred_and_origin_is_untouched(tmp_path):
+    """ac3 against real git: the whole point is that origin sees nothing."""
+    origin, work = _real_repo(tmp_path)
+    before = _git(origin, "rev-parse", "refs/heads/feat/x")
+    (work / "f.txt").write_text("uncommitted\n")
+    (work / "scratch.txt").write_text("untracked\n")
+
+    shell = RealShell()
+    pre = inspect(FakeTask({"api": work}), shell)
+
+    assert pre.ok
+    assert [s.repo for s in pre.dirty] == ["api"]
+    assert pre.to_push == []
+    assert push(pre, shell) == ([], None)
+    assert _git(origin, "rev-parse", "refs/heads/feat/x") == before
+
+
+def test_a_real_conflicted_repo_is_refused(tmp_path):
+    """ac12 against real git: a real merge conflict, real MERGE_HEAD, real
+    `UU` porcelain — the exact state a mock can only assert about."""
+    _, work = _real_repo(tmp_path)
+    _git(work, "checkout", "-b", "side")
+    (work / "f.txt").write_text("side\n")
+    _git(work, "commit", "-am", "side")
+    _git(work, "checkout", "feat/x")
+    (work / "f.txt").write_text("mine\n")
+    _git(work, "commit", "-am", "mine")
+    subprocess.run(["git", "merge", "side"], cwd=work, capture_output=True, env=_GIT_ENV)
+
+    pre = inspect(FakeTask({"api": work}), RealShell())
+
+    assert [s.blocked_reason for s in pre.blocked] == [IN_PROGRESS]
+    assert pre.dirty == []
+    assert "--abort" in blocked_message(pre)

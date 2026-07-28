@@ -1021,15 +1021,20 @@ def _git_shell(spec: dict | dict[str, dict], *, push_rc: int = 0):
         spec = {"api": spec}
     shell = MagicMock(spec=ShellRunner)
     pushes: list[str] = []
+    push_envs: list[dict] = []
     touched: set[str] = set()
 
-    def _run(cmd, cwd=None, **kw):
+    def _run(cmd, cwd=None, env=None, **kw):
         touched.add(Path(cwd).name)
         s = spec[Path(cwd).name]
         if "status --porcelain" in cmd:
             return ShellResult(
                 returncode=s["status_rc"], stdout=s["status"], stderr=s["status_err"],
             )
+        if "rev-parse --git-dir" in cmd:
+            # `_inspect_repo` looks here for MERGE_HEAD / rebase-merge — a test
+            # that wants the in-progress refusal creates the marker itself.
+            return ShellResult(returncode=0, stdout=str(Path(cwd) / ".git"), stderr="")
         if "symbolic-ref" in cmd:
             return ShellResult(
                 returncode=0 if s["head_ref"] else 1, stdout=s["head_ref"], stderr="",
@@ -1054,25 +1059,161 @@ def _git_shell(spec: dict | dict[str, dict], *, push_rc: int = 0):
             tip = cmd.split()[-2].strip("'")
             return ShellResult(returncode=0 if tip in s["contains"] else 1,
                                stdout="", stderr="")
+        # --- commit synthesis (core/run_transfer.py) -------------------------
+        if "write-tree" in cmd:
+            return ShellResult(returncode=0, stdout="tree1111\n", stderr="")
+        if "commit-tree" in cmd:
+            return ShellResult(returncode=0, stdout="synth2222\n", stderr="")
         if cmd.startswith("git push"):
             pushes.append(cmd)
+            push_envs.append(dict(env or {}))
             return ShellResult(returncode=push_rc, stdout="", stderr="denied\n")
         return ShellResult(returncode=0, stdout="", stderr="")
 
     shell.run.side_effect = _run
     shell.run_task.return_value = ShellResult(returncode=0, stdout="ok\n", stderr="")
     shell.pushes = pushes
+    shell.push_envs = push_envs
     shell.touched = touched
     return shell
 
 
-def test_remote_run_is_refused_when_the_worktree_is_dirty(tmp_path, monkeypatch):
-    """The dangerous case: the run host would materialize the last PUSHED commit
-    and report a result for code the operator is still editing."""
+def test_a_dirty_worktree_is_sent_to_the_run_host_not_to_origin(tmp_path, monkeypatch):
+    """ac1 + ac3 + ac7 through the CLI: the operator's uncommitted content is
+    synthesized into a commit and pushed straight to the run host, and origin
+    sees nothing at all. Under PR #419 this exact repo shape was a refusal."""
+    _write_run_workspace(tmp_path, run_hosts=["role-x"])
+    _seed_task_with_worktree(tmp_path, "t1", "api")
+    _configure(tmp_path)
+    shell = _git_shell(_repo_git(" M src/app.py\n?? scratch.txt\n"))
+    container.shell.override(shell)
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+    recorder: dict = {}
+    try:
+        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame(["ok\n"], exit_code=0))):
+            result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
+        assert result.exit_code == 0, result.output
+
+        assert len(shell.pushes) == 1
+        assert "synth2222:refs/mship/run/t1/api" in shell.pushes[0]
+        assert "http://remote.example/git/api" in shell.pushes[0]
+        assert "origin" not in shell.pushes[0]              # ac3
+        assert recorder["json"]["run_ref_repos"] == ["api"]
+        # The snapshot is rooted on the sha the preflight CERTIFIED HEAD to be
+        # at, not on a re-resolved `HEAD`: a subagent committing in this
+        # worktree between inspection and synthesis would otherwise re-parent it
+        # on a commit nothing verified — the same bypass `remote_preflight.push`
+        # closes for the origin path. Passing the literal "HEAD" here reads
+        # identically in every other assertion, so it is asserted directly.
+        commands = [c.args[0] for c in shell.run.call_args_list]
+        assert any(c.startswith("git commit-tree tree1111 -p headsha ")
+                   for c in commands), commands
+    finally:
+        container.shell.reset_override()
+        _reset()
+
+
+def test_a_git_root_child_is_transferred_under_its_parents_name(tmp_path, monkeypatch):
+    """ac7 through the CLI: a `git_root` child has no git directory of its own —
+    its tree IS the parent's — so the ref, the receive URL and `run_ref_repos`
+    all name the PARENT, which is what the run host materializes and the only
+    name the receive endpoint accepts. This is the one thing the `config=`
+    argument on the preflight buys: without it every repo is its own git repo
+    and this run would push `pkg` to an endpoint that has no such repository."""
+    (tmp_path / "mono" / "pkg").mkdir(parents=True)
+    taskfile = "version: '3'\ntasks:\n  run:\n    cmds:\n      - echo run\n"
+    (tmp_path / "mono" / "Taskfile.yml").write_text(taskfile)
+    (tmp_path / "mono" / "pkg" / "Taskfile.yml").write_text(taskfile)
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\n"
+        "run_hosts: [role-x]\n"
+        "repos:\n"
+        "  mono:\n    path: ./mono\n    type: service\n"
+        "  pkg:\n    path: pkg\n    type: service\n    git_root: mono\n"
+    )
+    wt_mono = tmp_path / ".worktrees" / "t1" / "mono"
+    wt_pkg = wt_mono / "pkg"
+    wt_pkg.mkdir(parents=True)
+    _seed_task(tmp_path, slug="t1", repos=["mono", "pkg"],
+               worktrees={"mono": str(wt_mono), "pkg": str(wt_pkg)})
+    _configure(tmp_path)
+    shell = _git_shell({"mono": _repo_git(), "pkg": _repo_git(" M pkg/a.py\n")})
+    container.shell.override(shell)
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+    recorder: dict = {}
+    try:
+        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame(["ok\n"], exit_code=0))):
+            result = runner.invoke(
+                app, ["run", "--task", "t1", "--repos", "pkg", "--remote=role-x"]
+            )
+        assert result.exit_code == 0, result.output
+        assert len(shell.pushes) == 1
+        assert "synth2222:refs/mship/run/t1/mono" in shell.pushes[0]
+        assert "http://remote.example/git/mono" in shell.pushes[0]
+        assert recorder["json"]["run_ref_repos"] == ["mono"]
+        assert recorder["json"]["repos"] == ["pkg"]   # the RUN's scope is unchanged
+    finally:
+        container.shell.reset_override()
+        _reset()
+
+
+def test_the_bearer_never_reaches_the_push_command_line(tmp_path, monkeypatch):
+    """ac4, end to end through the CLI: argv is world-readable via /proc."""
+    _write_run_workspace(tmp_path, run_hosts=["role-x"])
+    _seed_task_with_worktree(tmp_path, "t1", "api")
+    _configure(tmp_path)
+    shell = _git_shell(_repo_git(" M src/app.py\n"))
+    container.shell.override(shell)
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+    try:
+        with _ClientPatch(monkeypatch, _recording_handler({}, _frame(["ok\n"], exit_code=0))):
+            runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
+        assert "tok-abc" not in shell.pushes[0]
+        assert "Authorization: Bearer tok-abc" in shell.push_envs[0].values()
+    finally:
+        container.shell.reset_override()
+        _reset()
+
+
+def test_the_output_names_the_revision_as_a_throwaway_run_ref(tmp_path, monkeypatch):
+    """ac13: nobody should `git show` it and try to build on it.
+
+    `MSHIP_JSON=0` is required, not decorative: `Output.breadcrumb` is gated on
+    `human_mode`, and `json_mode` defaults to `not is_tty` — so under CliRunner
+    breadcrumbs are suppressed and `result.output` would never contain the line.
+    """
+    monkeypatch.setenv("MSHIP_JSON", "0")
     _write_run_workspace(tmp_path, run_hosts=["role-x"])
     _seed_task_with_worktree(tmp_path, "t1", "api")
     _configure(tmp_path)
     container.shell.override(_git_shell(_repo_git(" M src/app.py\n")))
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+    try:
+        with _ClientPatch(monkeypatch, _recording_handler({}, _frame(["ok\n"], exit_code=0))):
+            result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
+        assert "throwaway" in result.output
+        assert "refs/mship/run/t1/api" in result.output
+        assert "synth2222"[:12] in result.output
+    finally:
+        container.shell.reset_override()
+        _reset()
+
+
+def test_a_failed_transfer_aborts_before_dispatch(tmp_path, monkeypatch):
+    """Dispatching after a failed transfer would run the previous ref's tree —
+    the same silent-stale-code failure, one layer along."""
+    _write_run_workspace(tmp_path, run_hosts=["role-x"])
+    _seed_task_with_worktree(tmp_path, "t1", "api")
+    _configure(tmp_path)
+    container.shell.override(_git_shell(_repo_git(" M src/app.py\n"), push_rc=1))
     RunHostStore(tmp_path / ".mothership").set(
         "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
     )
@@ -1081,9 +1222,32 @@ def test_remote_run_is_refused_when_the_worktree_is_dirty(tmp_path, monkeypatch)
         with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert result.exit_code == 1, result.output
-        assert "uncommitted changes in api" in result.output
-        assert "last PUSHED revision" in result.output
-        # the decisive assertion: the remote was never contacted
+        assert "run host" in result.output and "denied" in result.output
+        assert recorder == {}                       # never contacted
+    finally:
+        container.shell.reset_override()
+        _reset()
+
+
+def test_a_mid_rebase_repo_is_refused_before_anything_is_sent(tmp_path, monkeypatch):
+    """ac12 through the CLI."""
+    _write_run_workspace(tmp_path, run_hosts=["role-x"])
+    wts = _seed_task_with_worktree(tmp_path, "t1", "api")
+    (wts["api"] / ".git" / "rebase-merge").mkdir(parents=True)
+    _configure(tmp_path)
+    shell = _git_shell(_repo_git("UU src/app.py\n"))
+    container.shell.override(shell)
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+    recorder: dict = {}
+    try:
+        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+            result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
+        assert result.exit_code == 1, result.output
+        assert "merge or rebase in progress in api" in result.output
+        assert "--abort" in result.output
+        assert shell.pushes == []
         assert recorder == {}
     finally:
         container.shell.reset_override()
@@ -1284,13 +1448,16 @@ def test_a_task_missing_from_a_later_state_read_does_not_skip_the_preflight(
 ):
     """The preflight is mandatory. Looking the resolved slug up in a SECOND
     state read made it conditional on that read succeeding: a task gone by then
-    dispatched with no check at all, over a repo (here, dirty) that the first
-    read had every fact needed to refuse. The remedy is not to report the race
-    but to remove it — the caller already holds the resolved task."""
+    dispatched with no check at all, over a repo (here, one whose git state
+    cannot be read at all) that the first read had every fact needed to refuse.
+    The remedy is not to report the race but to remove it — the caller already
+    holds the resolved task."""
     _write_run_workspace(tmp_path, run_hosts=["role-x"])
     _seed_task_with_worktree(tmp_path, "t1", "api")
     _configure(tmp_path)
-    container.shell.override(_git_shell(_repo_git(" M src/app.py\n")))
+    container.shell.override(_git_shell(_repo_git(
+        "", status_rc=128, status_err="fatal: not a git repository\n",
+    )))
     container.state_manager.override(
         _TaskVanishesAfterFirstRead(StateManager(tmp_path / ".mothership"))
     )
@@ -1302,7 +1469,7 @@ def test_a_task_missing_from_a_later_state_read_does_not_skip_the_preflight(
         with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert result.exit_code == 1, result.output
-        assert "uncommitted changes in api" in result.output
+        assert "unreadable git state in api" in result.output
         assert recorder == {}                    # the remote was never contacted
     finally:
         container.shell.reset_override()
@@ -1328,6 +1495,7 @@ def test_repos_scope_keeps_an_unrelated_dirty_repo_from_blocking(tmp_path, monke
             )
         assert result.exit_code == 0, result.output
         assert recorder["json"]["repos"] == ["api"]
+        assert "run_ref_repos" not in recorder["json"]   # web was never transferred
     finally:
         container.shell.reset_override()
         _reset()
@@ -1387,3 +1555,34 @@ def test_repos_scope_does_not_push_a_repo_the_operator_did_not_name(tmp_path, mo
     finally:
         container.shell.reset_override()
         _reset()
+
+
+# --- exact copy: which repos come from a scratch ref -------------------------
+
+def test_exec_remote_sends_run_ref_repos_when_there_are_any():
+    recorder: dict = {}
+    conn = RunHostConnection(url="http://remote.example", token="tok")
+
+    remote_client.exec_remote(
+        verb="run", conn=conn, task="t1", repos=["api", "web"],
+        run_ref_repos=["api"], print_fn=lambda _l: None,
+        transport=_mock_transport(_recording_handler(recorder, _frame(["ok\n"], exit_code=0))),
+    )
+
+    assert recorder["json"] == {
+        "task": "t1", "repos": ["api", "web"], "kind": "all", "run_ref_repos": ["api"],
+    }
+
+
+def test_exec_remote_omits_the_key_entirely_when_nothing_was_transferred():
+    """ac9: a clean run must be byte-identical on the wire to today's, so a run
+    host on an older mship keeps working."""
+    recorder: dict = {}
+    conn = RunHostConnection(url="http://remote.example", token="tok")
+
+    remote_client.exec_remote(
+        verb="run", conn=conn, task="t1", repos=["api"], print_fn=lambda _l: None,
+        transport=_mock_transport(_recording_handler(recorder, _frame(["ok\n"], exit_code=0))),
+    )
+
+    assert recorder["json"] == {"task": "t1", "repos": ["api"], "kind": "all"}
