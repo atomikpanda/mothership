@@ -47,6 +47,12 @@ class SddStore:
 
     def write(self, rec: DispatchRecord) -> Path:
         d = self._dir(rec.work_item_id, rec.task_slug)
+        # Supersede: a slug has at most one live record. A task that gains a
+        # WorkItem between dispatches would otherwise leave a stale record
+        # under the old key shadowing the new one in find_for_slug ("no-item"
+        # sorts before "wi-*"); dropping the whole dir also clears stale
+        # review/ artifacts beside it.
+        self._remove_dirs_for_slug(rec.task_slug, keep=d)
         d.mkdir(parents=True, exist_ok=True)
         path = d / "record.json"
         path.write_text(rec.model_dump_json(indent=2) + "\n")
@@ -65,10 +71,16 @@ class SddStore:
 
     def remove_task(self, task_slug: str) -> None:
         """Remove every record dir for this slug (close-time teardown)."""
+        self._remove_dirs_for_slug(task_slug, keep=None)
+
+    def _remove_dirs_for_slug(self, task_slug: str, *, keep: Path | None) -> None:
+        """Remove record dirs for `task_slug` (except `keep`), pruning
+        work-item dirs left empty."""
         if not self.root.is_dir():
             return
         for d in self.root.glob(f"*/{task_slug}"):
-            shutil.rmtree(d, ignore_errors=True)
+            if d != keep:
+                shutil.rmtree(d, ignore_errors=True)
         for item_dir in self.root.iterdir():
             if item_dir.is_dir() and not any(item_dir.iterdir()):
                 item_dir.rmdir()

@@ -40,6 +40,19 @@ def test_record_never_contains_plan_body(tmp_path):
     for field in ("body", "task_text", "prompt", "template"):
         assert f'"{field}"' not in raw
 
+def test_write_supersedes_record_under_other_workitem_key(tmp_path):
+    """A slug has at most one live record: gaining a WorkItem after a no-item
+    dispatch must not leave a stale no-item record shadowing the new one
+    (find_for_slug returns the first sorted glob — "no-item" sorts before
+    "wi-*")."""
+    store = SddStore(tmp_path / ".mothership")
+    store.write(_record(work_item_id=None, plan_task_id="1"))
+    store.write(_record(work_item_id="wi-1", plan_task_id="2"))
+    rec = store.find_for_slug("my-task")
+    assert rec is not None and rec.work_item_id == "wi-1" and rec.plan_task_id == "2"
+    assert not (tmp_path / ".mothership" / "sdd" / "no-item" / "my-task").exists()
+
+
 def test_remove_task_removes_all_records_for_slug(tmp_path):
     store = SddStore(tmp_path / ".mothership")
     store.write(_record())

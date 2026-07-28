@@ -5,8 +5,10 @@ from tests.core.test_sdd_store import _record  # reuse the fixture factory
 def test_stub_contains_exactly_the_closed_fields():
     rec = _record()
     stub = build_stub(rec, record_path="/ws/.mothership/sdd/wi-1/my-task/record.json")
-    for label in ("record:", "model:", "mode:", "emit:"):
-        assert label in stub
+    labels = tuple(line.split(":", 1)[0] for line in stub.splitlines())
+    # Every field present, in order, and NOTHING else — a new field must be
+    # added to STUB_FIELDS and consciously accepted here (that's the point).
+    assert labels == STUB_FIELDS
 
 
 def test_stub_carries_no_prompt_content():
