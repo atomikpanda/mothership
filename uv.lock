@@ -559,7 +559,7 @@ wheels = [
 
 [[package]]
 name = "mothership"
-version = "0.5.15"
+version = "0.5.34"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
@@ -567,6 +567,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "inquirerpy" },
+    { name = "jinja2" },
     { name = "pydantic" },
     { name = "pyjwt", extra = ["crypto"] },
     { name = "pyyaml" },
@@ -595,6 +596,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.110" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "inquirerpy", specifier = ">=0.3" },
+    { name = "jinja2", specifier = ">=3.1" },
     { name = "pydantic", specifier = ">=2.13" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8" },
     { name = "pyyaml", specifier = ">=6.0" },
