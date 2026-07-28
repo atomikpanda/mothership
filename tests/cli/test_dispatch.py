@@ -750,6 +750,55 @@ def test_reviewer_dispatch_rejects_instruction_sources(tmp_path: Path):
         _reset()
 
 
+def test_reviewer_dispatch_warns_on_empty_diff(tmp_path: Path):
+    """base_sha == HEAD (no commits past base) -> a 0-byte .diff; the
+    controller must hear it's dispatching a reviewer at nothing."""
+    import subprocess
+
+    wt = tmp_path / "wt"; wt.mkdir()
+
+    def g(*args):
+        subprocess.run(["git", *args], cwd=wt, capture_output=True, text=True, check=True)
+
+    g("init", "-q"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
+    (wt / "f.txt").write_text("base\n")
+    g("add", "-A"); g("commit", "-q", "-m", "base")
+    g("checkout", "-q", "-B", "main")     # base branch AT HEAD: nothing to diff
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer"])
+        assert result.exit_code == 0, result.output
+        assert "review package diff is empty" in result.stderr
+        assert "reviews nothing" in result.stderr
+        assert "review package diff is empty" not in result.stdout  # stub stays pipeable
+    finally:
+        _reset()
+
+
+def test_reviewer_emit_with_corrupt_manifest_errors_cleanly(tmp_path: Path):
+    wt = _git_worktree(tmp_path)
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer"])
+        assert result.exit_code == 0, result.output
+        manifest = state_dir / "sdd" / "no-item" / "t" / "review" / "manifest.json"
+        manifest.write_text("{not json")
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--emit"])
+        assert result.exit_code == 1
+        assert "manifest is corrupt" in result.output
+        assert "Traceback" not in result.output
+    finally:
+        _reset()
+
+
 def test_reviewer_record_write_preserves_review_dir(tmp_path: Path):
     """The reviewer record supersedes the implementer record in the SAME keyed
     dir — the review/ package written just before must survive the write."""

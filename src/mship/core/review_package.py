@@ -65,10 +65,15 @@ def build_review_package(rec: DispatchRecord, *, git_runner, state_dir: Path) ->
     diff_file = d / f"{rec.repo}.diff"
     diff_file.write_text(res.stdout)
     diff_paths.append(diff_file)
+    # The diff runs to LIVE HEAD (which may have moved past the dispatch-time
+    # rec.head_sha) — the manifest must describe the diff it sits beside, so
+    # record the resolved head, not the record's snapshot.
+    head = git_runner("git rev-parse HEAD", cwd=Path(rec.worktree))
     manifest = {
         "task_slug": rec.task_slug, "work_item_id": rec.work_item_id,
         "plan_path": rec.plan_path, "plan_task_id": rec.plan_task_id,
-        "acs": rec.acs, "base_sha": rec.base_sha, "head_sha": rec.head_sha,
+        "acs": rec.acs, "base_sha": rec.base_sha,
+        "head_sha": head.stdout.strip() if head.returncode == 0 else rec.head_sha,
         "diff_files": [str(p) for p in diff_paths],
     }
     manifest_path = d / "manifest.json"

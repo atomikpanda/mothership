@@ -4,6 +4,7 @@ See docs/superpowers/specs/2026-04-17-mship-dispatch-design.md.
 """
 from __future__ import annotations
 
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -171,6 +172,12 @@ def register(app: typer.Typer, get_container):
                         f"controller runs `mship dispatch --mode reviewer` first."
                     )
                     raise typer.Exit(code=1)
+                except json.JSONDecodeError:
+                    output.error(
+                        "review package manifest is corrupt — re-run "
+                        "`mship dispatch --mode reviewer`."
+                    )
+                    raise typer.Exit(code=1)
                 try:
                     _instr, ac_ids, warnings = resolve_instruction_and_acs(
                         rec, workspace_root
@@ -238,6 +245,14 @@ def register(app: typer.Typer, get_container):
             except (OSError, ValueError) as e:
                 output.error(f"cannot build the review package: {e}")
                 raise typer.Exit(code=1)
+            for p in pkg.diff_paths:
+                if p.stat().st_size == 0:
+                    print(
+                        f"warning: review package diff is empty ({p.name}) — 0 "
+                        f"commits past {prior.base_sha}; dispatching a reviewer "
+                        f"now reviews nothing",
+                        file=sys.stderr,
+                    )
             # Same work-item key as the implementer record -> record.json is
             # overwritten in place and the review/ dir beside it survives
             # (SddStore.write only prunes dirs under OTHER keys).

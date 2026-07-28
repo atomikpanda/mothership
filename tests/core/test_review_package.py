@@ -73,6 +73,18 @@ def test_reviewer_prompt_references_paths_not_content(ws):
     assert "[ac1] does the thing" in prompt
 
 
+def test_manifest_head_sha_matches_the_diffed_head(ws):
+    """The diff runs to live HEAD, which may have moved past the dispatch-time
+    rec.head_sha — the manifest must describe the diff it sits beside."""
+    import json
+
+    live_head = _git(Path(ws.record.worktree), "rev-parse", "HEAD")
+    stale = ws.record.model_copy(update={"head_sha": "deadbee"})
+    pkg = build_review_package(stale, git_runner=ws.shell, state_dir=ws.state_dir)
+    manifest = json.loads(pkg.manifest_path.read_text())
+    assert manifest["head_sha"] == live_head
+
+
 def test_reviewer_mode_is_dispatchable():
     from mship.core.dispatch import DISPATCH_MODES
     assert "reviewer" in DISPATCH_MODES
