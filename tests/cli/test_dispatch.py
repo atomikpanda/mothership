@@ -46,7 +46,7 @@ def test_dispatch_single_repo_task_prints_prompt(tmp_path: Path):
     container.config_path.override(cfg)
     container.state_dir.override(state_dir)
     try:
-        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "do the thing"])
+        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "do the thing", "--full"])
         assert result.exit_code == 0, result.output
         assert f"cd {wt}" in result.output
         assert "> do the thing" in result.output
@@ -63,7 +63,7 @@ def test_dispatch_multi_repo_no_active_errors(tmp_path: Path):
     container.config_path.override(cfg)
     container.state_dir.override(state_dir)
     try:
-        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "x"])
+        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "x", "--full"])
         assert result.exit_code == 1
         assert "affects 2 repos" in result.output
     finally:
@@ -78,7 +78,7 @@ def test_dispatch_multi_repo_with_repo_flag_picks_that_one(tmp_path: Path):
     container.config_path.override(cfg)
     container.state_dir.override(state_dir)
     try:
-        result = runner.invoke(app, ["dispatch", "--task", "t", "--repo", "b", "-i", "x"])
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--repo", "b", "-i", "x", "--full"])
         assert result.exit_code == 0, result.output
         assert f"cd {b}" in result.output
         assert f"cd {a}" not in result.output
@@ -93,7 +93,7 @@ def test_dispatch_unknown_repo_errors(tmp_path: Path):
     container.config_path.override(cfg)
     container.state_dir.override(state_dir)
     try:
-        result = runner.invoke(app, ["dispatch", "--task", "t", "--repo", "nope", "-i", "x"])
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--repo", "nope", "-i", "x", "--full"])
         assert result.exit_code == 1
         assert "unknown repo" in result.output
     finally:
@@ -275,7 +275,9 @@ def test_dispatch_instruction_dash_reads_stdin(tmp_path: Path):
     cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
     _override(cfg, state_dir)
     try:
-        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "-"], input="from stdin\n")
+        result = runner.invoke(
+            app, ["dispatch", "--task", "t", "-i", "-", "--full"], input="from stdin\n"
+        )
         assert result.exit_code == 0, result.output
         assert "> from stdin" in result.output
     finally:
@@ -287,7 +289,7 @@ def test_dispatch_default_mode_reports_back_no_pr(tmp_path: Path):
     cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
     _override(cfg, state_dir)
     try:
-        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "do the thing"])
+        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "do the thing", "--full"])
         assert result.exit_code == 0, result.output
         assert "Report back" in result.output
         assert "status report" in result.output.lower()
@@ -302,7 +304,7 @@ def test_dispatch_standalone_mode_has_finish_contract(tmp_path: Path):
     cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
     _override(cfg, state_dir)
     try:
-        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "standalone", "-i", "x"])
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "standalone", "-i", "x", "--full"])
         assert result.exit_code == 0, result.output
         assert "How to finish" in result.output
         assert "mship finish --body-file" in result.output
@@ -374,7 +376,7 @@ def test_dispatch_uses_repo_config_base_branch(tmp_path: Path):
     container.config_path.override(cfg)
     container.state_dir.override(state_dir)
     try:
-        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "do the thing"])
+        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "do the thing", "--full"])
         assert result.exit_code == 0, result.output
         assert "- **base branch:** dev" in result.output
         assert "base (dev)" in result.output
@@ -392,7 +394,7 @@ def test_dispatch_base_override_wins_over_repo_config(tmp_path: Path):
     container.config_path.override(cfg)
     container.state_dir.override(state_dir)
     try:
-        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "do the thing"])
+        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "do the thing", "--full"])
         assert result.exit_code == 0, result.output
         assert "- **base branch:** stacked" in result.output
     finally:
@@ -409,7 +411,7 @@ def test_dispatch_falls_back_to_main_when_repo_config_has_no_base_branch(tmp_pat
     container.config_path.override(cfg)
     container.state_dir.override(state_dir)
     try:
-        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "do the thing"])
+        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "do the thing", "--full"])
         assert result.exit_code == 0, result.output
         assert "- **base branch:** main" in result.output
     finally:
@@ -429,7 +431,7 @@ def test_dispatch_falls_back_to_stored_task_base_before_main(tmp_path: Path):
     container.config_path.override(cfg)
     container.state_dir.override(state_dir)
     try:
-        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "do the thing"])
+        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "do the thing", "--full"])
         assert result.exit_code == 0, result.output
         assert "- **base branch:** staging" in result.output
     finally:
@@ -446,7 +448,7 @@ def test_dispatch_repo_missing_from_config_falls_back_to_main(tmp_path: Path):
     container.config_path.override(cfg)
     container.state_dir.override(state_dir)
     try:
-        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "x"])
+        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "x", "--full"])
         assert result.exit_code == 0, result.output
         assert "- **base branch:** main" in result.output
     finally:
@@ -517,7 +519,9 @@ def test_plan_task_dispatch_persists_record(tmp_path: Path):
         _reset()
 
 
-def test_instruction_dispatch_keeps_full_output_and_persists_record(tmp_path: Path):
+def test_instruction_dispatch_defaults_to_stub_and_persists_record(tmp_path: Path):
+    """The stub is the universal default: ad-hoc dispatches leak neither the
+    template nor the instruction back into the controller's stdout."""
     from mship.core.sdd_store import SddStore
 
     wt = tmp_path / "wt"; wt.mkdir()
@@ -526,7 +530,8 @@ def test_instruction_dispatch_keeps_full_output_and_persists_record(tmp_path: Pa
     try:
         result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "do the thing"])
         assert result.exit_code == 0, result.output
-        assert "> do the thing" in result.output  # unchanged default output
+        assert "record:" in result.output
+        assert "do the thing" not in result.output
         rec = SddStore(state_dir).find_for_slug("t")
         assert rec is not None
         assert rec.instruction == "do the thing"
@@ -535,7 +540,22 @@ def test_instruction_dispatch_keeps_full_output_and_persists_record(tmp_path: Pa
         _reset()
 
 
-def test_instruction_dispatch_stub_flag_opts_into_stub(tmp_path: Path):
+def test_instruction_dispatch_full_flag_prints_prompt(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(
+            app, ["dispatch", "--task", "t", "-i", "do the thing", "--full"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "> do the thing" in result.output
+        assert "Work from (mandatory)" in result.output
+    finally:
+        _reset()
+
+
+def test_stub_flag_is_a_deprecated_noop(tmp_path: Path):
     wt = tmp_path / "wt"; wt.mkdir()
     cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
     _override(cfg, state_dir)
@@ -545,7 +565,8 @@ def test_instruction_dispatch_stub_flag_opts_into_stub(tmp_path: Path):
         )
         assert result.exit_code == 0, result.output
         assert "record:" in result.output
-        assert "do the thing" not in result.output
+        assert "do the thing" not in result.stdout
+        assert "deprecated" in result.stderr
     finally:
         _reset()
 
@@ -590,7 +611,7 @@ def test_dispatch_prompt_includes_dependencies_section(tmp_path: Path):
     container.config_path.override(cfg)
     container.state_dir.override(state_dir)
     try:
-        result = runner.invoke(app, ["dispatch", "--task", "b", "-i", "go"])
+        result = runner.invoke(app, ["dispatch", "--task", "b", "-i", "go", "--full"])
         assert result.exit_code == 0, result.output
         assert "## Dependencies" in result.output
         assert "a" in result.output

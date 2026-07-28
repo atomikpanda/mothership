@@ -107,13 +107,14 @@ def register(app: typer.Typer, get_container):
         ),
         full: bool = typer.Option(
             False, "--full",
-            help="Print the full subagent prompt inline (legacy). Default for "
-                 "--plan-task is a closed stub; the subagent emits its own "
-                 "prompt via --emit.",
+            help="Print the full subagent prompt inline instead of the closed "
+                 "stub (the default for every dispatch). The subagent normally "
+                 "derives its own prompt via --emit.",
         ),
         stub: bool = typer.Option(
-            False, "--stub",
-            help="Print the closed stub even for --instruction dispatches.",
+            False, "--stub", hidden=True,
+            help="Deprecated no-op: the closed stub is now the default for "
+                 "every dispatch.",
         ),
         emit: bool = typer.Option(
             False, "--emit",
@@ -420,8 +421,16 @@ def register(app: typer.Typer, get_container):
         )
         record_path = SddStore(Path(container.state_dir())).write(rec)
 
-        want_stub = (plan_task is not None and not full) or stub
-        if want_stub:
+        if stub:
+            print(
+                "warning: --stub is deprecated and a no-op — the closed stub "
+                "is the default for every dispatch (use --full for the inline prompt)",
+                file=sys.stderr,
+            )
+        # The closed stub is the universal default: every byte of prompt
+        # content reaches only the subagent (via --emit). --full is the sole
+        # inline escape hatch.
+        if not full:
             print(build_stub(rec, record_path=str(record_path)), end="")
             return
 
