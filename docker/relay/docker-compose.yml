@@ -29,7 +29,14 @@ services:
       - --private-keys-directory=/keys
       - --bind-random-subdomains=false      # honor the requested subdomain
       - --bind-random-ports=false
-      - --idle-connection=false
+      # Leave idle-connection at sish's default (true): it is the only thing that
+      # wraps a proxied stream in IdleTimeoutConn, so disabling it means a tunnel
+      # peer that vanishes without a clean close (cell handoff, NAT eviction,
+      # suspend) is never reaped — its route stays registered and its goroutines
+      # leak. 120s sits above the client's keepalive budget
+      # (ServerAliveInterval=30 x ServerAliveCountMax=3, see relay/tunnel.py), so a
+      # live-but-quiet tunnel refreshes the deadline long before it expires.
+      - --idle-connection-timeout=120s
 
   caddy:
     image: caddy:2

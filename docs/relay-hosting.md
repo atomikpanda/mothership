@@ -98,6 +98,33 @@ The compose file (`docker/relay/docker-compose.yml`) starts two services:
 - **sish** — `--https=false`, HTTP on internal `127.0.0.1:8080`, SSH on `:2222`. Mounts `./pubkeys` (read-only key allowlist) and `./keys` (sish host key).
 - **caddy** — `network_mode: host` so it can bind `:80`/`:443` directly and reach the sish and enroll-server loopback addresses. Mounts `./Caddyfile`, `./caddy-data`, and `./caddy-config`.
 
+### Idle-connection reaping
+
+sish's `--idle-connection` (default `true`) is the only switch that wraps a proxied
+stream in `IdleTimeoutConn`, which re-arms a deadline on every read and write. With it
+disabled, a stream between an inbound HTTP connection and its SSH channel has **no
+deadline in either direction** — so a tunnel peer that disappears without a clean close
+(cell handoff, NAT eviction, laptop suspend, i.e. the normal life of a phone tunnel) is
+never detected. The connection is never torn down, its subdomain route stays registered,
+and sish keeps queueing failed-channel messages onto an unbuffered channel nothing
+drains: goroutines accumulate in `chan send` until the relay degrades. Stale routes from
+tunnels that "should" be gone are the visible symptom — a new tunnel for the same
+subdomain collides with a dead one.
+
+So leave the reaper on and tune the timeout instead:
+
+```yaml
+- --idle-connection-timeout=120s
+```
+
+**The timeout must stay above the client's keepalive budget.** `mship` opens its tunnel
+with `ServerAliveInterval=30` and `ServerAliveCountMax=3` (see
+`src/mship/core/relay/tunnel.py`), so a live-but-quiet tunnel produces traffic every 30s
+and refreshes the deadline long before 120s elapses. Drop the timeout near or below 30s
+and you will start disconnecting healthy idle tunnels; raise the client's interval
+without raising this timeout and you get the same. A third-party client that sends no
+keepalives at all needs either its own keepalive or a longer timeout here.
+
 The `Caddyfile` (`docker/relay/Caddyfile`) wires:
 
 - `enroll.{$RELAY_DOMAIN}` → `127.0.0.1:47180` (enroll-server; only `POST /enroll` and `GET /status/*` are forwarded — everything else returns 404).
@@ -274,6 +301,8 @@ Data directories (`keys/`, `pubkeys/`, `caddy-data/`, `caddy-config/`) are mount
 ## Troubleshooting
 
 **Tunnel connection refused** — confirm port 2222 is open (`nc -zv relay.example.com 2222`) and the client public key is in `docker/relay/pubkeys/`.
+
+**A subdomain stops receiving after a reconnect, or the relay slows down over weeks of uptime** — a dead tunnel was never reaped, so its route is still registered and a new tunnel for the same subdomain collides with it. Check that sish is running with idle-connection reaping on (`docker compose -f docker/relay/docker-compose.yml exec sish ps` or inspect the container's command line); see [Idle-connection reaping](#idle-connection-reaping). A relay left with `--idle-connection=false` leaks a goroutine per inbound request to every dead tunnel.
 
 **Certificate errors** — verify the wildcard DNS record resolves to the relay IP, and that ports 80 and 443 are open. Caddy writes ACME state to `docker/relay/caddy-data/`; check `docker compose logs caddy` for ACME errors.
 
