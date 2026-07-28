@@ -85,6 +85,8 @@ is theirs.
 
 ### Option 1: Merge Locally
 
+*In a mothership workspace, run `mship close` after this block. It records the merge in state and cleans up the worktree. Safe to run even after `git branch -d` — `mship close` tolerates an already-deleted branch.*
+
 ```bash
 # Get main repo root for CWD safety
 MAIN_ROOT=$(git -C "$(git rev-parse --git-common-dir)/.." rev-parse --show-toplevel)
@@ -111,6 +113,31 @@ git branch -d <feature-branch>
 ```
 
 ### Option 2: Push and Create PR
+
+**In a mothership workspace**, don't push or open the PR by hand — write
+the PR body to a file and let `mship finish` do all of it:
+
+```bash
+cat > /tmp/pr-body.md <<'EOF'
+## Summary
+<2-3 bullets of what changed>
+
+## Test plan
+- [ ] <verification steps>
+EOF
+
+# Pushes the branch, opens the PR, stamps state
+mship finish --body-file /tmp/pr-body.md
+```
+
+**Post-finish iteration (reviewer feedback, CI fixes, typos):** don't
+spawn a new task. Stage the fix in the worktree and run
+`mship commit "<msg>"` — it commits across the task's affected repos,
+pushes to the existing PR, and journals per repo. Use this for small
+iterations until the PR merges.
+
+**Outside a mothership workspace**, push and create the PR with the
+forge's tooling:
 
 ```bash
 git push -u origin <feature-branch>
@@ -143,7 +170,15 @@ This will permanently delete:
 Type 'discard' to confirm.
 ```
 
-Wait for that exact confirmation. When it arrives:
+Wait for that exact confirmation. When it arrives, in a mothership
+workspace one command abandons the task, deletes the branch, and cleans
+the worktree in state:
+
+```bash
+mship close --abandon
+```
+
+Outside a mothership workspace:
 
 ```bash
 MAIN_ROOT=$(git -C "$(git rev-parse --git-common-dir)/.." rev-parse --show-toplevel)
@@ -163,6 +198,23 @@ preserve the worktree. Both callers have already changed directory to the
 main repo root — worktree removal must run from outside the worktree —
 and use the `GIT_DIR`/`GIT_COMMON`/`WORKTREE_PATH` values captured in
 Step 2, from before that directory change.
+
+**In a mothership workspace, `mship close` owns cleanup — no manual
+`git worktree remove`.** After a local merge (Option 1) or a confirmed
+discard, run `mship close` / `mship close --abandon` as described above.
+After a PR merges (Option 2), you usually run nothing at all: when
+`mship serve` is running, its watcher **auto-advances** the bound spec
+(`dispatched → implemented`) and its WorkItem (→ `done`, clearing
+`needs_review`) and tears the worktree down — zero manual steps in the
+clean case (check via `mship pr` for an aggregate view across tasks, or
+`mship reconcile` for drift). You only need `mship close` when the
+worktree still has **uncommitted or unpushed** changes: auto-teardown
+skips it to protect that work (the spec/WorkItem still advance, and a
+note is posted on the task's thread) — resolve (commit/push) then
+`mship close`, or `mship close --force` to discard. `--force` is the
+only way to delete a dirty/unpushed worktree, and the guard is universal
+(it also applies to `mship close --abandon`), so uncommitted/unpushed
+work is **never** deleted without `--force`.
 
 **If `GIT_DIR == GIT_COMMON`:** Normal repo, no worktree to clean up. Done.
 

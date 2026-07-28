@@ -13,6 +13,19 @@ Ensure work happens in an isolated workspace. Prefer your platform's native work
 
 **Announce at start:** "I'm using the using-git-worktrees skill to set up an isolated workspace."
 
+## In a Mothership Workspace
+
+If a `mothership.yaml` is present at any ancestor directory, `mship spawn` is your native worktree tool — use it instead of the manual steps below. Every task needs a WorkItem first:
+
+```bash
+mship item new "<title>" --kind <feature|bug|chore|question>   # prints an id
+mship spawn '<description>' --work-item <id>
+```
+
+`spawn` refuses to run without `--work-item` (`--hotfix` overrides, and the override is logged). It creates the worktree, registers it in workspace state, runs each repo's `task setup`, and symlinks any configured `symlink_dirs` — so Step 2 (Project Setup) is already done; go straight to Step 3 (Verify Clean Baseline). Cleanup later routes through `mship close` (see finishing-a-development-branch), never manual `git worktree remove`.
+
+Steps 0–2 below apply only when you're not spawning a mship task — quick read-only exploration, or a repo outside any mship workspace.
+
 ## Step 0: Detect Existing Isolation
 
 **Before creating anything, check if you are already in an isolated workspace.**
@@ -143,6 +156,7 @@ Ready to implement <feature-name>
 
 | Situation | Action |
 |-----------|--------|
+| `mothership.yaml` in an ancestor dir | `mship item new` → `mship spawn --work-item <id>` |
 | Already in linked worktree | Skip creation (Step 0) |
 | In a submodule | Treat as normal repo (Step 0 guard) |
 | Native worktree tool available | Use it (Step 1a) |
