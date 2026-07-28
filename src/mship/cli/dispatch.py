@@ -5,6 +5,7 @@ See docs/superpowers/specs/2026-04-17-mship-dispatch-design.md.
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -14,6 +15,19 @@ from mship.cli._resolve import resolve_for_command
 from mship.cli.output import Output
 from mship.core import dispatch as _d
 from mship.core.base_resolver import resolve_base
+from mship.core.dispatch_emit import (
+    build_emitted_prompt,
+    resolve_acceptance,
+    resolve_instruction_and_acs,
+)
+from mship.core.dispatch_models import resolve_model
+from mship.core.dispatch_stub import build_stub
+from mship.core.review_package import (
+    build_review_package,
+    build_reviewer_prompt,
+    load_review_package,
+)
+from mship.core.sdd_store import DispatchRecord, SddStore
 from mship.core.plan import resolve_plan_path
 from mship.core.skill_install import pkg_skills_source
 from mship.core.workitem_store import WorkItemStore
@@ -35,6 +49,29 @@ def _resolve_task_plan(container, task_obj) -> Optional[Path]:
         if wi is not None:
             linked = wi.plan_path
     return resolve_plan_path(task_obj.slug, linked, workspace_root, docs_dir)
+
+
+def _journal_and_agents(container, slug: str) -> tuple[list, Optional[Path]]:
+    """Gather the journal tail and the workspace AGENTS.md (if present) —
+    shared by the full-prompt and --emit paths."""
+    journal_entries = container.log_manager().read(slug, last=10)
+    # AGENTS.md lives next to the config file (workspace root).
+    agents_md = Path(container.config_path()).parent / "AGENTS.md"
+    return journal_entries, agents_md if agents_md.is_file() else None
+
+
+def _load_bound_spec(container, task_obj, rec):
+    """Load the task's bound spec when the record references ACs/a plan slice
+    (both emit sub-paths resolve acceptance text the same way)."""
+    if not (rec.acs or rec.plan_task_id is not None):
+        return None
+    spec_id = getattr(task_obj, "spec_id", None)
+    if not spec_id:
+        return None
+    from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+    return SpecStore(
+        Path(container.config_path()).parent / SPECS_DIRNAME
+    ).find_by_id(spec_id)
 
 
 def register(app: typer.Typer, get_container):
@@ -59,8 +96,30 @@ def register(app: typer.Typer, get_container):
                 "Closing framing. 'implementer' (default): scope to a single task, "
                 "report back, do not open a PR — for per-task execution under an "
                 "orchestrator that owns finishing. 'standalone': finish the work and "
-                "open the PR via `mship finish`."
+                "open the PR via `mship finish`. 'reviewer': read-only dual-verdict "
+                "review of the prior dispatch's diff (takes no instruction source)."
             ),
+        ),
+        model: Optional[str] = typer.Option(
+            None, "--model",
+            help="Model for the subagent. Default: dispatch_models map in "
+                 "mothership.yaml, else built-in per-mode default.",
+        ),
+        full: bool = typer.Option(
+            False, "--full",
+            help="Print the full subagent prompt inline (legacy). Default for "
+                 "--plan-task is a closed stub; the subagent emits its own "
+                 "prompt via --emit.",
+        ),
+        stub: bool = typer.Option(
+            False, "--stub",
+            help="Print the closed stub even for --instruction dispatches.",
+        ),
+        emit: bool = typer.Option(
+            False, "--emit",
+            help="Subagent-side: derive and print MY full prompt from the "
+                 "dispatch record (cwd-resolved task). Prints drift warnings "
+                 "to stderr.",
         ),
     ):
         """Emit a self-contained markdown subagent prompt to stdout.
@@ -78,6 +137,193 @@ def register(app: typer.Typer, get_container):
                 f"--mode must be one of: {', '.join(_d.DISPATCH_MODES)} (got {mode!r})."
             )
             raise typer.Exit(code=2)
+
+        # --- subagent-side emit: derive the prompt from the persisted record ---
+        if emit:
+            if instruction is not None or plan is not None or plan_task is not None:
+                output.error(
+                    "--emit derives everything from the dispatch record; drop "
+                    "--instruction/--plan/--plan-task."
+                )
+                raise typer.Exit(code=2)
+            container = get_container()
+            state = container.state_manager().load()
+            resolved = resolve_for_command("dispatch", state, task, output)
+            task_obj = resolved.task
+            rec = SddStore(Path(container.state_dir())).find_for_slug(task_obj.slug)
+            if rec is None:
+                output.error(
+                    f"no dispatch record for task {task_obj.slug!r} — the "
+                    f"controller runs `mship dispatch --plan-task N` first."
+                )
+                raise typer.Exit(code=1)
+            spec = _load_bound_spec(container, task_obj, rec)
+            workspace_root = Path(container.config_path()).parent
+            if rec.mode == "reviewer":
+                # The reviewer's content IS the prepared package: print its
+                # paths + live ACs + the read-only dual-verdict contract —
+                # never the diff content itself.
+                try:
+                    pkg = load_review_package(rec, Path(container.state_dir()))
+                except OSError:
+                    output.error(
+                        f"no review package for task {task_obj.slug!r} — the "
+                        f"controller runs `mship dispatch --mode reviewer` first."
+                    )
+                    raise typer.Exit(code=1)
+                except ValueError:  # incl. json.JSONDecodeError (a subclass)
+                    output.error(
+                        "review package manifest is corrupt — re-run "
+                        "`mship dispatch --mode reviewer`."
+                    )
+                    raise typer.Exit(code=1)
+                try:
+                    _instr, ac_ids, warnings = resolve_instruction_and_acs(
+                        rec, workspace_root
+                    )
+                except (OSError, ValueError) as e:
+                    output.error(f"cannot resolve acceptance criteria: {e}")
+                    raise typer.Exit(code=1)
+                acceptance, ac_warnings = resolve_acceptance(ac_ids, spec)
+                warnings.extend(ac_warnings)
+                for w in warnings:
+                    print(f"warning: {w}", file=sys.stderr)
+                print(build_reviewer_prompt(rec, pkg, acceptance=acceptance or []))
+                return
+            journal_entries, agents_md_path = _journal_and_agents(container, task_obj.slug)
+            base_sha_info = _d.collect_base_sha_info(Path(rec.worktree), rec.base_branch)
+            try:
+                prompt, warnings = build_emitted_prompt(
+                    rec,
+                    workspace_root=workspace_root,
+                    spec=spec,
+                    task=task_obj,
+                    journal_entries=journal_entries,
+                    base_sha_info=base_sha_info,
+                    base_branch=rec.base_branch,
+                    agents_md_path=agents_md_path,
+                    pkg_skills_source=pkg_skills_source(),
+                    state=state,
+                )
+            except (OSError, ValueError) as e:
+                output.error(f"cannot derive the prompt from the record: {e}")
+                raise typer.Exit(code=1)
+            for w in warnings:
+                print(f"warning: {w}", file=sys.stderr)
+            print(prompt)
+            return
+
+        # --- controller-side reviewer dispatch: package the existing record ---
+        if mode == "reviewer":
+            if instruction is not None or plan is not None or plan_task is not None:
+                output.error(
+                    "--mode reviewer takes no instruction source (its content is "
+                    "the review package built from the prior dispatch record); "
+                    "drop --instruction/--plan/--plan-task."
+                )
+                raise typer.Exit(code=2)
+            container = get_container()
+            state = container.state_manager().load()
+            resolved = resolve_for_command("dispatch", state, task, output)
+            task_obj = resolved.task
+            store = SddStore(Path(container.state_dir()))
+            prior = store.find_for_slug(task_obj.slug)
+            if prior is None:
+                output.error(
+                    f"no dispatch record for task {task_obj.slug!r} — dispatch "
+                    f"the implementer first (`mship dispatch --plan-task N`); its "
+                    f"record supplies the plan pointer, ACs, and review range."
+                )
+                raise typer.Exit(code=1)
+            # Diff EVERY affected repo, not just the dispatched one — a
+            # single-repo package on a multi-repo task is an incomplete
+            # review presented as complete. Affected repos are the reviewable
+            # surface; passive repos (context checkouts, detached, possibly
+            # no local base ref) live only in task.worktrees and are never
+            # diffed. The record's base_sha covers its own repo; the others
+            # get their base resolved the same way the dispatch path
+            # resolves it (repo config / task override).
+            config = container.config()
+            targets: list[tuple[str, str, str | None]] = []
+            # Skips are first-class: warned here for the controller AND
+            # recorded in the manifest so the reviewer knows the package is
+            # partial (a silent omission reads as full coverage).
+            skipped: dict[str, str] = {}
+            for repo_name in task_obj.affected_repos:
+                wt_path = task_obj.worktrees.get(repo_name)
+                if wt_path is None:
+                    continue
+                wt = Path(wt_path)
+                if not wt.is_dir():
+                    skipped[repo_name] = f"worktree missing ({wt})"
+                    print(
+                        f"warning: worktree for repo {repo_name!r} is missing "
+                        f"({wt}) — skipping it in the review package",
+                        file=sys.stderr,
+                    )
+                    continue
+                if repo_name == prior.repo:
+                    repo_base_sha = prior.base_sha
+                else:
+                    effective_base = resolve_base(
+                        repo_name, config.repos.get(repo_name), cli_base=None,
+                        base_map={}, known_repos=config.repos.keys(),
+                        task_base=task_obj.base_override,
+                    ) or task_obj.base_branch or "main"
+                    repo_base_sha = _d.collect_base_sha_info(wt, effective_base).base_sha
+                if repo_base_sha is None:
+                    skipped[repo_name] = "no resolvable local base"
+                    print(
+                        f"warning: no resolvable local base for repo "
+                        f"{repo_name!r} — skipping it in the review package",
+                        file=sys.stderr,
+                    )
+                    continue
+                targets.append((repo_name, str(wt), repo_base_sha))
+            # A git_root child's worktree is a subdirectory of its parent's
+            # checkout; when both are targeted, drop the child subtree from
+            # the parent's diff so no hunk lands in two files.
+            targeted = {t[0] for t in targets}
+            excludes: dict[str, list[str]] = {}
+            for repo_name in targeted:
+                repo_config = config.repos.get(repo_name)
+                if repo_config is not None and repo_config.git_root in targeted:
+                    excludes.setdefault(repo_config.git_root, []).append(
+                        str(repo_config.path)
+                    )
+            try:
+                pkg = build_review_package(
+                    prior,
+                    targets=targets,
+                    git_runner=container.shell().run,
+                    state_dir=Path(container.state_dir()),
+                    excludes=excludes,
+                    skipped=skipped,
+                )
+            except (OSError, ValueError) as e:
+                output.error(f"cannot build the review package: {e}")
+                raise typer.Exit(code=1)
+            for p in pkg.diff_paths:
+                if p.stat().st_size == 0:
+                    print(
+                        f"warning: review package diff is empty ({p.name}) — 0 "
+                        f"commits past {prior.base_sha}; dispatching a reviewer "
+                        f"now reviews nothing",
+                        file=sys.stderr,
+                    )
+            # Same work-item key as the implementer record -> record.json is
+            # overwritten in place and the review/ dir beside it survives
+            # (SddStore.write only prunes dirs under OTHER keys).
+            rec = prior.model_copy(update={
+                "mode": "reviewer",
+                "model": resolve_model(
+                    "reviewer", flag=model, configured=config.dispatch_models
+                ),
+                "created_at": datetime.now(timezone.utc),
+            })
+            record_path = store.write(rec)
+            print(build_stub(rec, record_path=str(record_path)), end="")
+            return
 
         # --- resolve the instruction source (exactly one of) ---
         if (instruction is not None) == (plan_task is not None):
@@ -119,7 +365,7 @@ def register(app: typer.Typer, get_container):
                 output.error(f"cannot read plan {str(plan_path)!r}: {e}")
                 raise typer.Exit(code=2)
             try:
-                resolved_instruction = _d.extract_plan_task(plan_text, plan_task)
+                resolved_instruction, plan_meta = _d.extract_plan_task_meta(plan_text, plan_task)
             except ValueError as e:
                 output.error(str(e))
                 raise typer.Exit(code=2)
@@ -147,13 +393,39 @@ def register(app: typer.Typer, get_container):
         ) or task_obj.base_branch or "main"
         base_sha_info = _d.collect_base_sha_info(worktree, effective_base)
 
-        log_mgr = container.log_manager()
-        journal_entries = log_mgr.read(task_obj.slug, last=10)
+        resolved_model = resolve_model(
+            mode, flag=model, configured=config.dispatch_models
+        )
 
-        # AGENTS.md lives next to the config file (workspace root).
-        config_path = Path(container.config_path())
-        agents_md = config_path.parent / "AGENTS.md"
-        agents_md_path = agents_md if agents_md.is_file() else None
+        # Persist the record (pointer + metadata; never plan prose).
+        acs = plan_meta.get("acs", []) if plan_task is not None else []
+        rec = DispatchRecord(
+            task_slug=task_obj.slug,
+            work_item_id=getattr(task_obj, "work_item_id", None),
+            mode=mode,
+            model=resolved_model,
+            repo=resolved_repo,
+            worktree=str(worktree),
+            base_branch=effective_base,
+            base_sha=base_sha_info.base_sha,
+            head_sha=base_sha_info.head_sha,
+            # Resolved (absolute) so emit reads exactly the file extracted from
+            # here — an explicit relative --plan recorded as-typed would depend
+            # on the emit-time cwd instead.
+            plan_path=str(plan_path.resolve()) if plan_task is not None else None,
+            plan_task_id=plan_task,
+            acs=acs,
+            instruction=None if plan_task is not None else resolved_instruction,
+            created_at=datetime.now(timezone.utc),
+        )
+        record_path = SddStore(Path(container.state_dir())).write(rec)
+
+        want_stub = (plan_task is not None and not full) or stub
+        if want_stub:
+            print(build_stub(rec, record_path=str(record_path)), end="")
+            return
+
+        journal_entries, agents_md_path = _journal_and_agents(container, task_obj.slug)
 
         prompt = _d.build_dispatch_prompt(
             task=task_obj,
@@ -166,6 +438,7 @@ def register(app: typer.Typer, get_container):
             pkg_skills_source=pkg_skills_source(),
             state=state,
             mode=mode,
+            model=resolved_model,
         )
         # Print directly to stdout (NOT via Output.json — this is meant to be piped).
         print(prompt)

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from mship.core.dispatch import BaseShaInfo, SkillRef, canonical_skills, collect_base_sha_info, resolve_repo, build_dispatch_prompt, extract_plan_task
+from mship.core.dispatch import BaseShaInfo, SkillRef, canonical_skills, collect_base_sha_info, resolve_repo, build_dispatch_prompt, extract_plan_task, extract_plan_task_meta
 from mship.core.log import LogEntry
 from mship.core.state import Task
 
@@ -67,6 +67,46 @@ def test_extract_unterminated_block_raises():
     bad = "<!-- mship:task id=1 -->\nno closing anchor here\n"
     with pytest.raises(ValueError, match="unterminated"):
         extract_plan_task(bad, "1")
+
+
+PLAN_WITH_ACS = (
+    "<!-- mship:" "task id=3 acs=ac2,ac5 -->\n"
+    "### Task 3: Thing\n"
+    "body here\n"
+    "<!-- /mship:" "task -->\n"
+)
+
+
+def test_extract_plan_task_ignores_attributes():
+    assert "body here" in extract_plan_task(PLAN_WITH_ACS, "3")
+
+
+def test_extract_plan_task_meta_returns_acs():
+    text, meta = extract_plan_task_meta(PLAN_WITH_ACS, "3")
+    assert "body here" in text
+    assert meta == {"acs": ["ac2", "ac5"]}
+    # empty segments (trailing/doubled commas) are dropped, not kept as ''
+    trailing = PLAN_WITH_ACS.replace("acs=ac2,ac5", "acs=ac2,ac5,")
+    _, meta = extract_plan_task_meta(trailing, "3")
+    assert meta == {"acs": ["ac2", "ac5"]}
+
+
+def test_extract_plan_task_meta_malformed_attrs_diagnosed():
+    # space after the comma makes the anchor unmatchable — the error must say
+    # the attributes are malformed, not that the id is missing
+    plan = (
+        "<!-- mship:" "task id=3 acs=ac1, ac2 -->\n"
+        "body\n"
+        "<!-- /mship:" "task -->\n"
+    )
+    with pytest.raises(ValueError, match="attributes are malformed"):
+        extract_plan_task_meta(plan, "3")
+
+
+def test_extract_plan_task_meta_no_attrs():
+    plan = "<!-- mship:" "task id=1 -->\nx\n<!-- /mship:" "task -->"
+    text, meta = extract_plan_task_meta(plan, "1")
+    assert meta == {}
 
 
 def test_extract_unterminated_when_next_open_precedes_close():

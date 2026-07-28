@@ -11,7 +11,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-_TASK_ANCHOR_RE = re.compile(r"<!--\s*mship:task\s+id=([^\s>]+)\s*-->")
+# Keep in sync with dispatch._TASK_OPEN_RE
+_TASK_ANCHOR_RE = re.compile(r"<!--\s*mship:task\s+id=([^\s>]+)(?:\s+[a-z_]+=[^\s>]+)*\s*-->")
 
 
 def _plan_stem_matches_slug(stem: str, task_slug: str) -> bool:

@@ -55,3 +55,7 @@ def test_resolve_plan_path_rejects_absolute_escape(tmp_path):
 def test_resolve_plan_path_rejects_dotdot_traversal(tmp_path):
     (tmp_path.parent / "esc-plan.md").write_text(_PLAN)
     assert resolve_plan_path("add-labels", "../esc-plan.md", tmp_path, "docs") is None
+
+
+def test_plan_has_tasks_with_attributes():
+    assert plan_has_tasks("<!-- mship:" "task id=1 acs=ac1 -->\nx\n<!-- /mship:" "task -->")

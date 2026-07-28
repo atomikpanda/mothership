@@ -24,8 +24,48 @@ _CANONICAL_SKILL_NAMES: tuple[str, ...] = (
 )
 
 
-_TASK_OPEN_RE = re.compile(r"<!--\s*mship:task\s+id=([^\s>]+)\s*-->")
+# Keep in sync with plan._TASK_ANCHOR_RE
+_TASK_OPEN_RE = re.compile(r"<!--\s*mship:task\s+id=([^\s>]+)((?:\s+[a-z_]+=[^\s>]+)*)\s*-->")
 _TASK_CLOSE_RE = re.compile(r"<!--\s*/mship:task\s*-->")
+_ATTR_RE = re.compile(r"([a-z_]+)=([^\s>]+)")
+
+
+def extract_plan_task_meta(plan_text: str, task_id: str) -> tuple[str, dict]:
+    """Like extract_plan_task, but also returns parsed anchor attributes.
+
+    Attributes are optional `key=value` pairs after the id (e.g. an anchor
+    of the form mship:task id=3 acs=ac2,ac5). `acs` is split on commas into
+    a list. Unknown keys pass through as raw strings (forward-compatible).
+    """
+    opens = [m for m in _TASK_OPEN_RE.finditer(plan_text) if m.group(1) == task_id]
+    if not opens:
+        # A malformed attribute (uppercase key, space in a value, empty value)
+        # makes the whole anchor unmatchable — distinguish that near-miss from
+        # a genuinely absent id so the error points at the real problem.
+        if re.search(rf"mship:task\s+id={re.escape(task_id)}", plan_text):
+            raise ValueError(
+                f"anchor for task id {task_id!r} found but its attributes are "
+                f"malformed (keys are [a-z_]+, values may not contain spaces; "
+                f"e.g. write acs=ac1,ac2 with no space after the comma)"
+            )
+        raise ValueError(
+            f"no task with id {task_id!r} in plan "
+            f"(expected an anchor mship:task id={task_id})"
+        )
+    if len(opens) > 1:
+        raise ValueError(f"duplicate task id {task_id!r} in plan ({len(opens)} anchors)")
+    open_m = opens[0]
+    close_m = _TASK_CLOSE_RE.search(plan_text, open_m.end())
+    next_open = _TASK_OPEN_RE.search(plan_text, open_m.end())
+    if close_m is None or (next_open is not None and next_open.start() < close_m.start()):
+        raise ValueError(
+            f"unterminated task block for id {task_id!r} "
+            f"(missing the closing /mship:task anchor)"
+        )
+    meta: dict = {}
+    for k, v in _ATTR_RE.findall(open_m.group(2) or ""):
+        meta[k] = [p for p in v.split(",") if p] if k == "acs" else v
+    return plan_text[open_m.end():close_m.start()].strip(), meta
 
 
 def extract_plan_task(plan_text: str, task_id: str) -> str:
@@ -38,25 +78,8 @@ def extract_plan_task(plan_text: str, task_id: str) -> str:
     Raises ValueError when the id is missing, appears more than once, or the
     block is unterminated (no closing anchor before the next open anchor / EOF).
     """
-    opens = [m for m in _TASK_OPEN_RE.finditer(plan_text) if m.group(1) == task_id]
-    if not opens:
-        raise ValueError(
-            f"no task with id {task_id!r} in plan "
-            f"(expected an anchor `<!-- mship:task id={task_id} -->`)"
-        )
-    if len(opens) > 1:
-        raise ValueError(
-            f"duplicate task id {task_id!r} in plan ({len(opens)} anchors)"
-        )
-    open_m = opens[0]
-    close_m = _TASK_CLOSE_RE.search(plan_text, open_m.end())
-    next_open = _TASK_OPEN_RE.search(plan_text, open_m.end())
-    if close_m is None or (next_open is not None and next_open.start() < close_m.start()):
-        raise ValueError(
-            f"unterminated task block for id {task_id!r} "
-            f"(missing closing `<!-- /mship:task -->`)"
-        )
-    return plan_text[open_m.end():close_m.start()].strip()
+    text, _ = extract_plan_task_meta(plan_text, task_id)
+    return text
 
 
 @dataclass(frozen=True)
@@ -181,7 +204,7 @@ def _summarize_base_sha(
     return "; ".join(parts) if parts else "unknown"
 
 
-DISPATCH_MODES: tuple[str, ...] = ("implementer", "standalone")
+DISPATCH_MODES: tuple[str, ...] = ("implementer", "standalone", "reviewer")
 
 
 _CONVENTIONS_INTRO = "These are strictly enforced in this workspace:"
@@ -231,8 +254,29 @@ If you get stuck or the task is wrong-shaped, stop and report what you tried and
 """
 
 
+# Reviewer: read-only over a prepared review package; one reviewer returns
+# both verdicts (upstream 6.2.0 task-reviewer contract).
+_REVIEW_CONTRACT = """\
+You are a READ-ONLY reviewer. Do not edit files, run git write commands, or
+check out branches — a reviewer mutating the worktree orphans commits.
+
+Read the diff files listed above (they are on disk — read them as files, do
+not ask for them to be pasted). Then return BOTH verdicts in one report:
+
+1. **Spec-compliance** — does the change satisfy each listed acceptance
+   criterion? Verdict per criterion: satisfied / not-satisfied / can't-tell,
+   with the evidence line (file:line) that convinced you.
+2. **Code quality** — correctness, tests, naming, duplication, style fit with
+   the surrounding code. Findings ranked by severity; state what you verified,
+   not just what you suspect.
+
+Report back as text. Do NOT open a PR, do not run `mship finish`."""
+
+
 def _closing_section(mode: str) -> tuple[str, str]:
     """Return the (heading, body) for the prompt's closing section."""
+    if mode == "reviewer":
+        return "Review contract (read-only; both verdicts)", _REVIEW_CONTRACT
     if mode == "standalone":
         return "How to finish", _FINISH_CONTRACT
     return "Report back (do not open a PR)", _REPORT_CONTRACT
@@ -302,6 +346,8 @@ def build_dispatch_prompt(
     pkg_skills_source: Path,
     state=None,
     mode: str = "implementer",
+    model: str | None = None,
+    acceptance: list | None = None,   # list of (ac_id, text) pairs
 ) -> str:
     """Return the full markdown dispatch prompt for a fresh subagent.
 
@@ -324,6 +370,14 @@ def build_dispatch_prompt(
     journal_block = _render_journal(journal_entries)
     base_block = _render_base_sha_block(base_sha_info, base_branch)
     dependencies_block = _format_dependencies_section(task, state=state)
+    model_line = f"- **Model:** {model}\n" if model else ""
+    acceptance_block = ""
+    if acceptance:
+        joined = "\n".join(f"- [{ac_id}] {text}" for ac_id, text in acceptance)
+        acceptance_block = (
+            "## Acceptance criteria this task serves (from the spec store — live text)\n\n"
+            f"{joined}\n\n"
+        )
     conventions_recap = _conventions_recap(mode)
     closing_heading, closing_body = _closing_section(mode)
     agents_line = f"\nFull doc: `{agents_md_path}`." if agents_md_path else ""
@@ -349,9 +403,9 @@ This is a git worktree checked out on branch `{task.branch}`. Every edit, test r
 - **branch:** {task.branch}
 - **base branch:** {base_branch}
 - **active repo:** {repo}
-
+{model_line}
 {dependencies_block}
-## Where the branch stands
+{acceptance_block}## Where the branch stands
 
 {base_block}
 

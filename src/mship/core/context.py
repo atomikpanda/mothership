@@ -18,6 +18,7 @@ from typing import Any, Callable, Optional
 
 from mship.core.base_resolver import resolve_base
 from mship.core.config import WorkspaceConfig
+from mship.core.dispatch_models import BUILTIN_MODEL_DEFAULTS, resolve_model
 from mship.core.log import LogManager
 from mship.core.reconcile.cache import ReconcileCache
 from mship.core.state import Task, WorkspaceState
@@ -418,6 +419,10 @@ def build_context(
         "mship_binary_matches_editable_install": binary_check(),
         "last_workspace_fetch_at": last_sync.isoformat() if last_sync else None,
         "last_drift_check_at": _last_drift_check_at(cache),
+        "dispatch_models": {
+            mode: resolve_model(mode, flag=None, configured=config.dispatch_models)
+            for mode in BUILTIN_MODEL_DEFAULTS
+        },
     }
     if audience is not None:
         payload["audience"] = audience

@@ -130,7 +130,7 @@ def test_dispatch_plan_task_uses_extracted_section(tmp_path: Path):
     _override(cfg, state_dir)
     try:
         result = runner.invoke(
-            app, ["dispatch", "--task", "t", "--plan", str(plan), "--plan-task", "7"]
+            app, ["dispatch", "--task", "t", "--plan", str(plan), "--plan-task", "7", "--full"]
         )
         assert result.exit_code == 0, result.output
         assert "wire the parser" in result.output
@@ -194,7 +194,7 @@ def test_dispatch_task_auto_resolves_convention_plan(tmp_path: Path):
     )
     _override(cfg, state_dir)
     try:
-        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "2"])
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "2", "--full"])
         assert result.exit_code == 0, result.output
         assert "Task 2" in result.output
         assert "second thing" in result.output
@@ -225,7 +225,7 @@ def test_dispatch_task_auto_resolves_workitem_linked_plan(tmp_path: Path):
     StateManager(state_dir).save(WorkspaceState(tasks={"t": task}))
     _override(cfg, state_dir)
     try:
-        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "3"])
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "3", "--full"])
         assert result.exit_code == 0, result.output
         assert "linked plan body" in result.output
     finally:
@@ -245,7 +245,7 @@ def test_dispatch_explicit_plan_overrides_linked(tmp_path: Path):
     _override(cfg, state_dir)
     try:
         result = runner.invoke(
-            app, ["dispatch", "--task", "t", "--plan", str(explicit), "--plan-task", "2"]
+            app, ["dispatch", "--task", "t", "--plan", str(explicit), "--plan-task", "2", "--full"]
         )
         assert result.exit_code == 0, result.output
         assert "explicit thing" in result.output
@@ -453,6 +453,122 @@ def test_dispatch_repo_missing_from_config_falls_back_to_main(tmp_path: Path):
         _reset()
 
 
+def _write_convention_plan(tmp_path: Path) -> None:
+    plans = tmp_path / "docs" / "plans"; plans.mkdir(parents=True)
+    (plans / "t.md").write_text(
+        "<!-- mship:task id=1 acs=ac2 -->\n### Task 1\n\nfirst thing\n<!-- /mship:task -->\n"
+    )
+
+
+def test_plan_task_dispatch_prints_stub_not_prompt(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        assert "record:" in result.output and "model:" in result.output
+        assert "Work from (mandatory)" not in result.output
+        assert "Your instruction" not in result.output
+        assert "first thing" not in result.output
+    finally:
+        _reset()
+
+
+def test_plan_task_dispatch_full_flag_prints_prompt(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(
+            app, ["dispatch", "--task", "t", "--plan-task", "1", "--full"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Work from (mandatory)" in result.output
+        assert "first thing" in result.output
+        assert "**Model:**" in result.output  # inline path stamps the resolved model too
+    finally:
+        _reset()
+
+
+def test_plan_task_dispatch_persists_record(tmp_path: Path):
+    from mship.core.sdd_store import SddStore
+
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        rec = SddStore(state_dir).find_for_slug("t")
+        assert rec is not None
+        assert rec.plan_task_id == "1"
+        assert rec.acs == ["ac2"]
+        assert rec.instruction is None
+        assert rec.plan_path is not None and rec.plan_path.endswith("t.md")
+        # Content-absence, not just field-absence: the record raw text must not
+        # carry the plan task's body prose (it is a pointer, spec ac2).
+        raw = next((state_dir / "sdd").rglob("record.json")).read_text()
+        assert "first thing" not in raw
+    finally:
+        _reset()
+
+
+def test_instruction_dispatch_keeps_full_output_and_persists_record(tmp_path: Path):
+    from mship.core.sdd_store import SddStore
+
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "do the thing"])
+        assert result.exit_code == 0, result.output
+        assert "> do the thing" in result.output  # unchanged default output
+        rec = SddStore(state_dir).find_for_slug("t")
+        assert rec is not None
+        assert rec.instruction == "do the thing"
+        assert rec.plan_path is None and rec.plan_task_id is None
+    finally:
+        _reset()
+
+
+def test_instruction_dispatch_stub_flag_opts_into_stub(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(
+            app, ["dispatch", "--task", "t", "-i", "do the thing", "--stub"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "record:" in result.output
+        assert "do the thing" not in result.output
+    finally:
+        _reset()
+
+
+def test_dispatch_model_flag_recorded(tmp_path: Path):
+    from mship.core.sdd_store import SddStore
+
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(
+            app, ["dispatch", "--task", "t", "--plan-task", "1", "--model", "haiku"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "model: haiku" in result.output
+        rec = SddStore(state_dir).find_for_slug("t")
+        assert rec is not None and rec.model == "haiku"
+    finally:
+        _reset()
+
+
 def test_dispatch_prompt_includes_dependencies_section(tmp_path: Path):
     now = datetime.now(timezone.utc)
     wt_a = tmp_path / "wt-a"; wt_a.mkdir()
@@ -479,5 +595,388 @@ def test_dispatch_prompt_includes_dependencies_section(tmp_path: Path):
         assert "## Dependencies" in result.output
         assert "a" in result.output
         assert "not ready" in result.output
+    finally:
+        _reset()
+
+
+def test_emit_after_plan_task_dispatch_prints_prompt(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--emit"])
+        assert result.exit_code == 0, result.output
+        assert "first thing" in result.output      # plan body, derived live
+        assert "Model:" in result.output
+        assert "Work from (mandatory)" in result.output
+        # Warnings (here: acs=ac2 with no bound spec) go ONLY to stderr — the
+        # stdout prompt must stay cleanly pipeable.
+        assert "warning:" in result.stderr
+        assert "warning:" not in result.stdout  # .output is the combined stream
+    finally:
+        _reset()
+
+
+def test_emit_uses_recorded_resolved_plan_path(tmp_path: Path, monkeypatch):
+    # An explicit relative --plan is resolved against the dispatch-time cwd
+    # when recorded, so a later --emit (any cwd) reads exactly that file.
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    sub = tmp_path / "sub"; sub.mkdir()
+    (sub / "plan.md").write_text(
+        "<!-- mship:task id=7 -->\n### Task 7\n\nsubdir plan body\n<!-- /mship:task -->\n"
+    )
+    _override(cfg, state_dir)
+    try:
+        monkeypatch.chdir(sub)
+        result = runner.invoke(
+            app, ["dispatch", "--task", "t", "--plan", "plan.md", "--plan-task", "7"]
+        )
+        assert result.exit_code == 0, result.output
+        monkeypatch.chdir(tmp_path)  # different cwd at emit time
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--emit"])
+        assert result.exit_code == 0, result.output
+        assert "subdir plan body" in result.output
+    finally:
+        _reset()
+
+
+def test_emit_without_record_errors(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--emit"])
+        assert result.exit_code != 0
+        assert "no dispatch record" in result.output
+    finally:
+        _reset()
+
+
+def test_emit_rejects_instruction_sources(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--emit", "--plan-task", "1"])
+        assert result.exit_code == 2
+        assert "--emit" in result.output
+    finally:
+        _reset()
+
+
+# --- reviewer mode (Task 6) ---
+
+def _git_worktree(tmp_path: Path, name: str = "wt") -> Path:
+    """A real git repo usable as the task worktree: base commit + one commit."""
+    import subprocess
+
+    wt = tmp_path / name; wt.mkdir()
+
+    def g(*args):
+        subprocess.run(["git", *args], cwd=wt, capture_output=True, text=True, check=True)
+
+    g("init", "-q"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
+    (wt / "f.txt").write_text("base\n")
+    g("add", "-A"); g("commit", "-q", "-m", "base")
+    g("checkout", "-q", "-B", "main")     # local base branch at the base commit
+    g("checkout", "-q", "-b", "feat/t")
+    (wt / "f.txt").write_text("changed\n")
+    g("commit", "-q", "-am", "work")
+    return wt
+
+
+def test_reviewer_dispatch_prints_stub_and_writes_package(tmp_path: Path):
+    wt = _git_worktree(tmp_path)
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer"])
+        assert result.exit_code == 0, result.output
+        assert "record:" in result.output and "mode: reviewer" in result.output
+        review_dir = state_dir / "sdd" / "no-item" / "t" / "review"
+        assert (review_dir / "manifest.json").is_file()
+        assert list(review_dir.glob("*.diff"))
+    finally:
+        _reset()
+
+
+def test_reviewer_emit_prints_paths_and_contract_not_diff(tmp_path: Path):
+    wt = _git_worktree(tmp_path)
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--emit"])
+        assert result.exit_code == 0, result.output
+        review_dir = state_dir / "sdd" / "no-item" / "t" / "review"
+        assert str(next(review_dir.glob("*.diff"))) in result.stdout
+        assert "diff --git" not in result.stdout          # paths, never content
+        assert "spec-compliance" in result.stdout.lower()
+        assert "quality" in result.stdout.lower()
+        assert "READ-ONLY" in result.stdout
+    finally:
+        _reset()
+
+
+def test_reviewer_dispatch_without_prior_record_errors(tmp_path: Path):
+    wt = _git_worktree(tmp_path)
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer"])
+        assert result.exit_code != 0
+        assert "no dispatch record" in result.output
+    finally:
+        _reset()
+
+
+def test_reviewer_dispatch_rejects_instruction_sources(tmp_path: Path):
+    wt = _git_worktree(tmp_path)
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(
+            app, ["dispatch", "--task", "t", "--mode", "reviewer", "--plan-task", "1"]
+        )
+        assert result.exit_code == 2
+        assert "reviewer" in result.output
+    finally:
+        _reset()
+
+
+def test_reviewer_dispatch_warns_on_empty_diff(tmp_path: Path):
+    """base_sha == HEAD (no commits past base) -> a 0-byte .diff; the
+    controller must hear it's dispatching a reviewer at nothing."""
+    import subprocess
+
+    wt = tmp_path / "wt"; wt.mkdir()
+
+    def g(*args):
+        subprocess.run(["git", *args], cwd=wt, capture_output=True, text=True, check=True)
+
+    g("init", "-q"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
+    (wt / "f.txt").write_text("base\n")
+    g("add", "-A"); g("commit", "-q", "-m", "base")
+    g("checkout", "-q", "-B", "main")     # base branch AT HEAD: nothing to diff
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer"])
+        assert result.exit_code == 0, result.output
+        assert "review package diff is empty" in result.stderr
+        assert "reviews nothing" in result.stderr
+        assert "review package diff is empty" not in result.stdout  # stub stays pipeable
+    finally:
+        _reset()
+
+
+def test_reviewer_emit_with_corrupt_manifest_errors_cleanly(tmp_path: Path):
+    wt = _git_worktree(tmp_path)
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer"])
+        assert result.exit_code == 0, result.output
+        manifest = state_dir / "sdd" / "no-item" / "t" / "review" / "manifest.json"
+        manifest.write_text("{not json")
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--emit"])
+        assert result.exit_code == 1
+        assert "manifest is corrupt" in result.output
+        assert "Traceback" not in result.output
+    finally:
+        _reset()
+
+
+def test_reviewer_package_covers_all_affected_repos(tmp_path: Path):
+    """A multi-repo task's review package diffs EVERY affected repo, not just
+    the dispatched one, and --emit lists every diff file (PR #439 P1)."""
+    wt_a = _git_worktree(tmp_path, "wt-a")
+    wt_b = _git_worktree(tmp_path, "wt-b")
+    cfg, state_dir = _bootstrap(tmp_path, {"a": wt_a, "b": wt_b}, active_repo="a")
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer"])
+        assert result.exit_code == 0, result.output
+        review_dir = state_dir / "sdd" / "no-item" / "t" / "review"
+        assert sorted(p.name for p in review_dir.glob("*.diff")) == ["a.diff", "b.diff"]
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--emit"])
+        assert result.exit_code == 0, result.output
+        assert str(review_dir / "a.diff") in result.stdout
+        assert str(review_dir / "b.diff") in result.stdout
+        assert "diff --git" not in result.stdout
+    finally:
+        _reset()
+
+
+def test_reviewer_skips_missing_worktree_with_warning(tmp_path: Path):
+    """A gone worktree is skipped (stderr warning naming the repo) rather than
+    failing the whole package."""
+    import shutil
+
+    wt_a = _git_worktree(tmp_path, "wt-a")
+    wt_b = _git_worktree(tmp_path, "wt-b")
+    cfg, state_dir = _bootstrap(tmp_path, {"a": wt_a, "b": wt_b}, active_repo="a")
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        shutil.rmtree(wt_b)
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer"])
+        assert result.exit_code == 0, result.output
+        assert "'b'" in result.stderr and "skipping" in result.stderr
+        review_dir = state_dir / "sdd" / "no-item" / "t" / "review"
+        assert [p.name for p in review_dir.glob("*.diff")] == ["a.diff"]
+        # The omission is first-class in the artifact, not just controller
+        # stderr: manifest records it and the emitted prompt discloses it.
+        import json
+        manifest = json.loads((review_dir / "manifest.json").read_text())
+        assert "b" in manifest["skipped"]
+        assert "worktree missing" in manifest["skipped"]["b"]
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--emit"])
+        assert result.exit_code == 0, result.output
+        assert "NOT included" in result.stdout
+        assert "`b`" in result.stdout and "worktree missing" in result.stdout
+        assert "can't-tell" in result.stdout
+    finally:
+        _reset()
+
+
+def test_reviewer_skips_passive_repos_without_warning(tmp_path: Path):
+    """Passive worktrees (in task.worktrees but not affected_repos) are
+    context checkouts, not reviewable surface — never diffed, nothing warns
+    or aborts even when they have no local base ref."""
+    wt_a = _git_worktree(tmp_path, "wt-a")
+    wt_p = tmp_path / "wt-p"; wt_p.mkdir()   # no local base ref at all
+    state_dir = tmp_path / ".mothership"; state_dir.mkdir()
+    cfg = tmp_path / "mothership.yaml"; cfg.write_text("workspace: t\nrepos: {}\n")
+    task = Task(
+        slug="t", description="d", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["a"],                 # p is NOT affected
+        worktrees={"a": wt_a, "p": wt_p}, branch="feat/t",
+        base_branch="main", active_repo="a", passive_repos={"p"},
+    )
+    StateManager(state_dir).save(WorkspaceState(tasks={"t": task}))
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer"])
+        assert result.exit_code == 0, result.output
+        assert "'p'" not in result.stderr and "warning" not in result.stderr
+        review_dir = state_dir / "sdd" / "no-item" / "t" / "review"
+        assert [p.name for p in review_dir.glob("*.diff")] == ["a.diff"]
+    finally:
+        _reset()
+
+
+def test_reviewer_git_root_child_diff_scoped_no_duplication(tmp_path: Path):
+    """A git_root child shares the parent's checkout: its .diff carries only
+    its subtree and the parent's .diff excludes it — no mislabeled parent
+    diff, no hunk in two files."""
+    import subprocess
+
+    # Source checkout (config-declared paths must exist with go-task files).
+    src = tmp_path / "parent-src"; (src / "sub").mkdir(parents=True)
+    (src / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    (src / "sub" / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+
+    # The shared task worktree: one git repo, child nested at sub/.
+    wt = tmp_path / "wt"; (wt / "sub").mkdir(parents=True)
+
+    def g(*args):
+        subprocess.run(["git", *args], cwd=wt, capture_output=True, text=True, check=True)
+
+    g("init", "-q"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
+    (wt / "root.txt").write_text("base\n")
+    (wt / "sub" / "child.txt").write_text("base\n")
+    g("add", "-A"); g("commit", "-q", "-m", "base")
+    g("checkout", "-q", "-B", "main")
+    g("checkout", "-q", "-b", "feat/t")
+    (wt / "root.txt").write_text("changed\n")
+    (wt / "sub" / "child.txt").write_text("changed\n")
+    g("commit", "-q", "-am", "work")
+
+    state_dir = tmp_path / ".mothership"; state_dir.mkdir()
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  parent:\n"
+        f"    path: {src}\n"
+        "    type: library\n"
+        "  child:\n"
+        "    git_root: parent\n"
+        "    path: sub\n"
+        "    type: library\n"
+    )
+    task = Task(
+        slug="t", description="d", phase="dev",
+        created_at=datetime.now(timezone.utc),
+        affected_repos=["parent", "child"],
+        worktrees={"parent": wt, "child": wt / "sub"}, branch="feat/t",
+        base_branch="main", active_repo="parent",
+    )
+    StateManager(state_dir).save(WorkspaceState(tasks={"t": task}))
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer"])
+        assert result.exit_code == 0, result.output
+        review_dir = state_dir / "sdd" / "no-item" / "t" / "review"
+        diffs = {p.name: p.read_text() for p in review_dir.glob("*.diff")}
+        assert sorted(diffs) == ["child.diff", "parent.diff"]
+        assert "sub/child.txt" in diffs["child.diff"]
+        assert "root.txt" not in diffs["child.diff"]
+        assert "root.txt" in diffs["parent.diff"]
+        assert "sub/child.txt" not in diffs["parent.diff"]
+    finally:
+        _reset()
+
+
+def test_reviewer_record_write_preserves_review_dir(tmp_path: Path):
+    """The reviewer record supersedes the implementer record in the SAME keyed
+    dir — the review/ package written just before must survive the write."""
+    from mship.core.sdd_store import SddStore
+
+    wt = _git_worktree(tmp_path)
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _write_convention_plan(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--plan-task", "1"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer"])
+        assert result.exit_code == 0, result.output
+        rec = SddStore(state_dir).find_for_slug("t")
+        assert rec is not None and rec.mode == "reviewer"
+        assert rec.model == "sonnet"                       # reviewer builtin default
+        assert rec.plan_task_id == "1" and rec.acs == ["ac2"]  # pointer fields kept
+        review_dir = state_dir / "sdd" / "no-item" / "t" / "review"
+        assert (review_dir / "manifest.json").is_file()    # survived the write
     finally:
         _reset()
