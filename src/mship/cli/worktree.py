@@ -651,22 +651,26 @@ def register(app: typer.Typer, get_container):
 
         # --- Recovery-path check ---
         had_unrecoverable = False
-        # Repos whose branch is recoverable (pushed / has a PR) but NOT verified
-        # delivered (commits past base, not merged into it). Feeds the push-only
-        # completion flag below: delivery must be EARNED by observation, never
-        # inferred from a pushed branch. Under --force the loop doesn't run, so
-        # this stays empty — but the flag below is False under --force anyway.
-        undelivered_repos: list[tuple[str, str]] = []  # (repo, base)
+        # Repos NOT positively verified delivered. Feeds the push-only
+        # completion flag below: delivery must be EARNED by observation
+        # (live worktree AND (nothing past base OR merged into base)), never
+        # inferred — so a merely-pushed branch, a missing worktree, and a
+        # failed git comparison all land here (fail-closed). Under --force the
+        # loop doesn't run, so this stays empty — but the flag below is False
+        # under --force anyway.
+        undelivered_repos: list[tuple[str, str]] = []  # (repo, reason)
         if not force:
             from mship.core.base_resolver import resolve_base
             unrecoverable: list[tuple[str, int, str, str]] = []  # (repo, commits, branch, base)
             for repo_name in task.affected_repos:
                 wt = task.worktrees.get(repo_name)
-                if wt is None:
+                if wt is None or not Path(wt).exists():
+                    # No worktree to inspect → cannot verify delivery (fail-closed).
+                    # Recovery-wise this repo has always been skipped, so close
+                    # still proceeds as before.
+                    undelivered_repos.append((repo_name, "worktree missing"))
                     continue
                 wt_path = Path(wt)
-                if not wt_path.exists():
-                    continue
                 eff_base = resolve_base(
                     repo_name, config.repos[repo_name],
                     cli_base=None, base_map={}, known_repos=config.repos.keys(),
@@ -674,18 +678,24 @@ def register(app: typer.Typer, get_container):
                 )
                 if eff_base is None:
                     eff_base = "main"  # fall back to main when no base_branch configured
-                commits = pr_mgr.count_commits_ahead(wt_path, eff_base, task.branch)
-                if commits == 0:
-                    continue  # nothing past base — delivered by definition
-                # Recovery checks
-                merged = pr_mgr.check_merged_into_base(wt_path, task.branch, eff_base)
-                has_pr = repo_name in task.pr_urls
-                pushed = pr_mgr.check_pushed_to_origin(wt_path, task.branch)
+                try:
+                    commits = pr_mgr.count_commits_ahead(wt_path, eff_base, task.branch)
+                    if commits == 0:
+                        continue  # nothing past base — delivered by definition
+                    # Recovery checks
+                    merged = pr_mgr.check_merged_into_base(wt_path, task.branch, eff_base)
+                    has_pr = repo_name in task.pr_urls
+                    pushed = pr_mgr.check_pushed_to_origin(wt_path, task.branch)
+                except Exception:
+                    # An errored git comparison proves nothing → not delivered
+                    # (fail-closed). Close still proceeds; only advancement is off.
+                    undelivered_repos.append((repo_name, "comparison failed"))
+                    continue
                 if merged or has_pr or pushed:
                     # Recoverable — but merely pushed/PR'd is NOT delivered:
                     # only merged-into-base proves the work reached the base.
                     if not merged:
-                        undelivered_repos.append((repo_name, eff_base))
+                        undelivered_repos.append((repo_name, f"not merged into {eff_base}"))
                     continue
                 unrecoverable.append((repo_name, commits, task.branch, eff_base))
 
@@ -894,10 +904,10 @@ def register(app: typer.Typer, get_container):
             not task.pr_urls and task.finished_at is not None
             and not abandon and not force and undelivered_repos
         ):
-            _bases = ", ".join(sorted({b for _, b in undelivered_repos}))
+            _reasons = "; ".join(f"{r}: {why}" for r, why in undelivered_repos)
             output.warning(
-                f"closed without local merge — branch pushed but not merged "
-                f"into {_bases}; lifecycle not advanced"
+                f"closed without verified delivery ({_reasons}); "
+                f"lifecycle not advanced"
             )
 
         # Auto-advance bound spec dispatched→implemented when all PRs merged

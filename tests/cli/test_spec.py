@@ -1049,3 +1049,16 @@ def test_spec_dispatch_closes_invalid_ref_fails_loud(configured_app_with_task: P
     _approve_add_labels(configured_app_with_task, tmp_path)
     result = runner.invoke(app, ["spec", "dispatch", "add-labels", "--closes", "nope"])
     assert result.exit_code == 1
+
+
+def test_spec_review_human_mode_renders_prose_verdicts(configured_app_with_task: Path, tmp_path):
+    """The chat-approval recipe points at `spec review` to find flagged prose —
+    the human (TTY) rendering must actually show section id + verdict."""
+    from mship.cli.output import reset_output_settings
+    _apply_dq(tmp_path)
+    assert runner.invoke(app, ["spec", "verdict", "dq", "approach", "flagged"]).exit_code == 0
+    reset_output_settings()
+    result = runner.invoke(app, ["spec", "review", "dq"], env={"MSHIP_JSON": "0"})
+    assert result.exit_code == 0, result.output
+    assert "prose approach" in result.output   # section id, labeled as prose
+    assert "[flagged] prose approach" in result.output  # verdict rendered literally

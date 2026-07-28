@@ -236,11 +236,20 @@ def register(parent: typer.Typer, get_container):
             output.print(f"[bold]{payload['id']}[/bold] ({payload['status']})")
             if payload["clarification_reason"]:
                 output.print(f"  [bold yellow]Requested changes:[/bold yellow] {payload['clarification_reason']}")
+            # NB: leading `\[` renders a literal bracket — bare `[verdict]`
+            # would be eaten as rich markup and the verdict would vanish.
             for c in payload["acceptance_criteria"]:
-                output.print(f"  [{c['verdict']}] {c['id']}: {c['text']}")
+                output.print(f"  \\[{c['verdict']}] {c['id']}: {c['text']}")
                 for ev in c["evidence"]:
                     note = f" ({ev['note']})" if ev.get("note") else ""
                     output.print(f"      · {ev['kind']}: {ev['ref']}{note}")
+            # Prose-section verdicts (recorded ones only — absent sections don't
+            # gate approval), rendered like the acceptance criteria above so
+            # `spec review` surfaces flagged prose in human mode too.
+            for sid in sorted(payload["prose_verdicts"]):
+                pv = payload["prose_verdicts"][sid]
+                comment = f" — {pv['comment']}" if pv.get("comment") else ""
+                output.print(f"  \\[{pv['verdict']}] prose {sid}{comment}")
             s = payload["summary"]
             output.print(
                 f"  summary: {s['approved']} approved, {s['flagged']} flagged, "

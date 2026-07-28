@@ -2629,3 +2629,61 @@ def test_close_push_only_after_local_merge_advances(configured_git_app):
         assert "t" not in sm.load().tasks
     finally:
         container.shell.reset_override()
+
+
+def test_close_push_only_missing_worktree_does_not_advance(configured_git_app):
+    """Fail-closed delivery: an affected repo whose worktree is gone can't be
+    verified delivered — close proceeds but the lifecycle stays unadvanced."""
+    from unittest.mock import MagicMock
+    from mship.cli import container
+    from mship.util.shell import ShellRunner, ShellResult
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+
+    sm, spec_store, wi_store, wi_id, spec_id = _seed_pushonly_lifecycle(
+        configured_git_app, worktrees={"shared": str(configured_git_app / "gone-worktree")})
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        r = CliRunner().invoke(_app, ["close", "--yes", "--task", "t"])
+        assert r.exit_code == 0, r.output
+        assert "worktree missing" in r.output
+        assert "lifecycle not advanced" in r.output
+        assert spec_store.find_by_id(spec_id).status == "dispatched"
+        assert wi_store.get(wi_id).phase_override is None
+    finally:
+        container.shell.reset_override()
+
+
+def test_close_push_only_comparison_failure_does_not_advance(configured_git_app):
+    """Fail-closed delivery: a git comparison that errors can't prove delivery —
+    close proceeds but the lifecycle stays unadvanced."""
+    from unittest.mock import MagicMock
+    from mship.cli import container
+    from mship.util.shell import ShellRunner, ShellResult
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+
+    sm, spec_store, wi_store, wi_id, spec_id = _seed_pushonly_lifecycle(
+        configured_git_app, worktrees={"shared": str(configured_git_app / "shared")})
+
+    def mock_run(cmd, cwd, env=None):
+        if "git rev-list --count" in cmd:
+            raise RuntimeError("git exploded")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell = MagicMock(spec=ShellRunner)
+    mock_shell.run.side_effect = mock_run
+    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    container.shell.override(mock_shell)
+    try:
+        r = CliRunner().invoke(_app, ["close", "--yes", "--task", "t"])
+        assert r.exit_code == 0, r.output
+        assert "comparison failed" in r.output
+        assert "lifecycle not advanced" in r.output
+        assert spec_store.find_by_id(spec_id).status == "dispatched"
+        assert wi_store.get(wi_id).phase_override is None
+    finally:
+        container.shell.reset_override()
