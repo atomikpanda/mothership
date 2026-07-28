@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+# Keep in sync with dispatch._TASK_OPEN_RE
 _TASK_ANCHOR_RE = re.compile(r"<!--\s*mship:task\s+id=([^\s>]+)(?:\s+[a-z_]+=[^\s>]+)*\s*-->")
 
 

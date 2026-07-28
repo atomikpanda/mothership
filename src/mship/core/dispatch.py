@@ -24,6 +24,7 @@ _CANONICAL_SKILL_NAMES: tuple[str, ...] = (
 )
 
 
+# Keep in sync with plan._TASK_ANCHOR_RE
 _TASK_OPEN_RE = re.compile(r"<!--\s*mship:task\s+id=([^\s>]+)((?:\s+[a-z_]+=[^\s>]+)*)\s*-->")
 _TASK_CLOSE_RE = re.compile(r"<!--\s*/mship:task\s*-->")
 _ATTR_RE = re.compile(r"([a-z_]+)=([^\s>]+)")
@@ -38,6 +39,15 @@ def extract_plan_task_meta(plan_text: str, task_id: str) -> tuple[str, dict]:
     """
     opens = [m for m in _TASK_OPEN_RE.finditer(plan_text) if m.group(1) == task_id]
     if not opens:
+        # A malformed attribute (uppercase key, space in a value, empty value)
+        # makes the whole anchor unmatchable — distinguish that near-miss from
+        # a genuinely absent id so the error points at the real problem.
+        if re.search(rf"mship:task\s+id={re.escape(task_id)}", plan_text):
+            raise ValueError(
+                f"anchor for task id {task_id!r} found but its attributes are "
+                f"malformed (keys are [a-z_]+, values may not contain spaces; "
+                f"e.g. write acs=ac1,ac2 with no space after the comma)"
+            )
         raise ValueError(
             f"no task with id {task_id!r} in plan "
             f"(expected an anchor mship:task id={task_id})"
@@ -54,7 +64,7 @@ def extract_plan_task_meta(plan_text: str, task_id: str) -> tuple[str, dict]:
         )
     meta: dict = {}
     for k, v in _ATTR_RE.findall(open_m.group(2) or ""):
-        meta[k] = v.split(",") if k == "acs" else v
+        meta[k] = [p for p in v.split(",") if p] if k == "acs" else v
     return plan_text[open_m.end():close_m.start()].strip(), meta
 
 

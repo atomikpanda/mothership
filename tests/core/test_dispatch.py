@@ -85,6 +85,22 @@ def test_extract_plan_task_meta_returns_acs():
     text, meta = extract_plan_task_meta(PLAN_WITH_ACS, "3")
     assert "body here" in text
     assert meta == {"acs": ["ac2", "ac5"]}
+    # empty segments (trailing/doubled commas) are dropped, not kept as ''
+    trailing = PLAN_WITH_ACS.replace("acs=ac2,ac5", "acs=ac2,ac5,")
+    _, meta = extract_plan_task_meta(trailing, "3")
+    assert meta == {"acs": ["ac2", "ac5"]}
+
+
+def test_extract_plan_task_meta_malformed_attrs_diagnosed():
+    # space after the comma makes the anchor unmatchable — the error must say
+    # the attributes are malformed, not that the id is missing
+    plan = (
+        "<!-- mship:" "task id=3 acs=ac1, ac2 -->\n"
+        "body\n"
+        "<!-- /mship:" "task -->\n"
+    )
+    with pytest.raises(ValueError, match="attributes are malformed"):
+        extract_plan_task_meta(plan, "3")
 
 
 def test_extract_plan_task_meta_no_attrs():
