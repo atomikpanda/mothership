@@ -195,6 +195,23 @@ Two mship-native primitives for handing work to subagents. Use them instead of h
 
   **Modes (`--mode`).** By default (`implementer`) the prompt scopes the subagent to the single task, tells it to ask clarifying questions, self-review, and report back — and explicitly **not** to open a PR, because the orchestrator owns integration and runs `mship finish` after review. This is what you want for per-task execution under an orchestrator. Pass `--mode standalone` for the alternative contract where the subagent finishes the work and opens its own PR (use it only for genuinely standalone, one-off dispatches).
 
+  **Model resolution:** dispatch resolves the subagent's model (`--model` >
+  `dispatch_models:` in mothership.yaml > built-in per-mode default) and stamps
+  it in the output — the worker never chooses its own model.
+
+  **Context isolation (SDD flow):** `mship dispatch --plan-task N` persists a
+  metadata-only record under `.mothership/sdd/` and prints a **closed stub**
+  (record path, model, mode, emit line). Do NOT expand it: launch the subagent
+  with cwd set to the worktree and let its first command be
+  `mship dispatch --emit`, which derives the full prompt (plan slice + live
+  spec AC text) in the subagent's own context, printing drift warnings to
+  stderr. Reviewer dispatches (`--mode reviewer`) build a review package
+  (raw per-repo diff files + manifest) the reviewer reads from disk; the
+  reviewer's `--emit` prints diff paths, never diff content. `--full` prints
+  the old inline prompt when you genuinely need it in-context; `--stub` opts
+  an `--instruction` dispatch into the stub. Plan task anchors may declare
+  `acs=ac1,ac2` to map a task to the spec acceptance criteria it serves.
+
 - **`mship context`** — emits structured JSON for programmatic consumers. Use when feeding state into a non-Claude-Code LLM, logging for audit, or scripting decisions. `jq`-friendly.
 
   ```bash
