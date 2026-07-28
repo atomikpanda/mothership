@@ -317,6 +317,7 @@ def test_close_removes_sdd_records(configured_git_app):
         base_sha=None, head_sha=None, plan_path=None, plan_task_id=None,
         instruction="x", created_at=datetime.now(timezone.utc),
     ))
+    assert (state_dir / "sdd" / "wi-x" / "t" / "record.json").exists()
 
     from unittest.mock import MagicMock
     from mship.util.shell import ShellRunner, ShellResult
@@ -2110,6 +2111,28 @@ def test_close_cascade_removes_downstream(configured_git_app: Path):
     assert result.exit_code == 0, result.output
     state = sm.load()
     assert state.tasks == {}
+
+
+def test_close_cascade_removes_downstream_sdd_records(configured_git_app: Path):
+    """--cascade also removes the downstream task's sdd records, not just its state."""
+    from mship.core.sdd_store import SddStore, DispatchRecord
+    from datetime import datetime, timezone
+
+    sm = _seed_ab_tasks(configured_git_app)
+    state_dir = configured_git_app / ".mothership"
+    store = SddStore(state_dir)
+    store.write(DispatchRecord(
+        task_slug="b", work_item_id="wi-x", mode="implementer", model="m",
+        repo="shared", worktree=str(configured_git_app), base_branch="main",
+        base_sha=None, head_sha=None, plan_path=None, plan_task_id=None,
+        instruction="x", created_at=datetime.now(timezone.utc),
+    ))
+    assert (state_dir / "sdd" / "wi-x" / "b" / "record.json").exists()
+
+    result = runner.invoke(app, ["close", "a", "--yes", "--skip-pr-check", "--cascade"])
+    assert result.exit_code == 0, result.output
+    assert sm.load().tasks == {}
+    assert not list((state_dir / "sdd").rglob("*/b"))
 
 
 # ---------------------------------------------------------------------------

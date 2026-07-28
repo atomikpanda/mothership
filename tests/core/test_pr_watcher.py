@@ -880,6 +880,7 @@ def test_merge_auto_close_removes_sdd_records(tmp_path):
         base_sha=None, head_sha=None, plan_path=None, plan_task_id=None,
         instruction="x", created_at=datetime.now(timezone.utc),
     ))
+    assert (tmp_path / ".mothership" / "sdd" / wi.id / "task-m" / "record.json").exists()
 
     msgs = FakeMessageStore()
     url = "https://github.com/org/repo1/pull/1"
