@@ -92,12 +92,12 @@ is theirs.
 *Run this from the workspace root (it reads `mothership.yaml` for per-repo bases):*
 
 ```bash
-# Mothership: merge every affected repo's branch into its OWN base, deriving
+# Mothership: merge every AFFECTED repo's branch into its OWN base, deriving
 # worktree/branch from mship state and each repo's base from mothership.yaml
 # (repo base_branch overrides the task default; single-repo tasks = one iteration).
 TASK_BASE=$(mship status | jq -r '.resolved_task.base_override // .resolved_task.base_branch // "main"')
 BRANCH=$(mship status | jq -r .resolved_task.branch)
-mship status | jq -r '.resolved_task.worktrees | to_entries[] | "\(.key)\t\(.value)"' | while IFS=$'\t' read -r repo wt; do
+mship status | jq -r '.resolved_task as $t | $t.affected_repos[] | select($t.worktrees[.] != null) | "\(.)\t\($t.worktrees[.])"' | while IFS=$'\t' read -r repo wt; do
   # Values ride argv — never interpolated into the python source.
   base=$(python3 -c 'import sys, yaml
 c = yaml.safe_load(open("mothership.yaml")) or {}
@@ -110,7 +110,7 @@ done
 # Verify tests on the merged result (mship test — see Step 1), then `mship close`.
 ```
 
-*A task spawned with `--base` (stacked) records it as `base_override`, which the task-level default already reflects.*
+*A task spawned with `--base` (stacked) records it as `base_override`, which the task-level default already reflects. The loop is driven by `affected_repos`, not the worktrees map: passive worktrees are context checkouts (detached dependency repos) and are deliberately not merged.*
 
 *Outside a mothership workspace, merge the single current repo:*
 
