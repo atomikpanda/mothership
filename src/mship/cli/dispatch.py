@@ -249,7 +249,10 @@ def register(app: typer.Typer, get_container):
             base_branch=effective_base,
             base_sha=base_sha_info.base_sha,
             head_sha=base_sha_info.head_sha,
-            plan_path=str(plan_path) if plan_task is not None else None,
+            # Resolved (absolute) so emit reads exactly the file extracted from
+            # here — an explicit relative --plan recorded as-typed would depend
+            # on the emit-time cwd instead.
+            plan_path=str(plan_path.resolve()) if plan_task is not None else None,
             plan_task_id=plan_task,
             acs=acs,
             instruction=None if plan_task is not None else resolved_instruction,

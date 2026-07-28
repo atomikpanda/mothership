@@ -607,6 +607,34 @@ def test_emit_after_plan_task_dispatch_prints_prompt(tmp_path: Path):
         assert "first thing" in result.output      # plan body, derived live
         assert "Model:" in result.output
         assert "Work from (mandatory)" in result.output
+        # Warnings (here: acs=ac2 with no bound spec) go ONLY to stderr — the
+        # stdout prompt must stay cleanly pipeable.
+        assert "warning:" in result.stderr
+        assert "warning:" not in result.stdout  # .output is the combined stream
+    finally:
+        _reset()
+
+
+def test_emit_uses_recorded_resolved_plan_path(tmp_path: Path, monkeypatch):
+    # An explicit relative --plan is resolved against the dispatch-time cwd
+    # when recorded, so a later --emit (any cwd) reads exactly that file.
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    sub = tmp_path / "sub"; sub.mkdir()
+    (sub / "plan.md").write_text(
+        "<!-- mship:task id=7 -->\n### Task 7\n\nsubdir plan body\n<!-- /mship:task -->\n"
+    )
+    _override(cfg, state_dir)
+    try:
+        monkeypatch.chdir(sub)
+        result = runner.invoke(
+            app, ["dispatch", "--task", "t", "--plan", "plan.md", "--plan-task", "7"]
+        )
+        assert result.exit_code == 0, result.output
+        monkeypatch.chdir(tmp_path)  # different cwd at emit time
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--emit"])
+        assert result.exit_code == 0, result.output
+        assert "subdir plan body" in result.output
     finally:
         _reset()
 
