@@ -39,11 +39,16 @@ def register(parent: typer.Typer, get_container):
             output.error("Provide --task or --plan.")
             raise typer.Exit(1)
 
-        workspace_root = Path(container.config_path()).parent
-        try:
-            docs_dir = ConfigLoader.load(Path(container.config_path()), require_paths=False).docs_dir
-        except Exception:
-            docs_dir = "docs"
+        config_path = Path(container.config_path())
+        workspace_root = config_path.parent
+        # Fall back to "docs" only when there is no config file (e.g. invoked
+        # outside a materialized workspace); a present-but-malformed config must
+        # surface, not be swallowed behind a plausible default.
+        docs_dir = (
+            ConfigLoader.load(config_path, require_paths=False).docs_dir
+            if config_path.is_file()
+            else "docs"
+        )
 
         resolved = resolve_plan_path(task or "", plan, workspace_root, docs_dir)
         if resolved is None:
