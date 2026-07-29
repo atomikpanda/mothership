@@ -1600,6 +1600,15 @@ def register(app: typer.Typer, get_container):
             if "test" in config.repos[r].not_applicable
         }
         decision = decide_finish_gate(evidence, exempt_repos, opt_out=no_require_tests)
+        # Name exempt repos in EVERY outcome that has them, not only the
+        # all-exempt warn_no_target branch below — otherwise a mixed finish
+        # (some repos test-exempt, others gated) drops them from the output and
+        # they read as covered by passing evidence rather than exempt.
+        if decision.exempt_repos and decision.action != "warn_no_target":
+            output.warning(
+                "No test target configured (evidence not required) for: "
+                + ", ".join(decision.exempt_repos)
+            )
         if decision.action == "block":
             output.error("Test evidence missing — blocking finish:")
             for line in format_missing_summary(

@@ -1065,6 +1065,51 @@ def test_finish_warns_not_blocks_when_test_target_not_applicable(finish_workspac
     assert "shared" in lower
 
 
+def test_finish_names_exempt_repo_in_mixed_finish(finish_workspace):
+    """A finish touching both a test-exempt repo (`not_applicable: [test]`) and a
+    gated repo with passing evidence proceeds, but must still NAME the exempt repo
+    — otherwise it silently reads as covered rather than exempt. See #81 / PR #445."""
+    import yaml
+
+    workspace, mock_shell = finish_workspace
+    cfg_path = workspace / "mothership.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["repos"]["shared"]["not_applicable"] = ["test"]
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    container.config.reset()
+
+    result = runner.invoke(
+        app, ["spawn", "--hotfix", "mixed exempt", "--repos", "shared,auth-service", "--force-audit"]
+    )
+    assert result.exit_code == 0, result.output
+
+    # Passing evidence for the gated repo so the outcome is pass, not block —
+    # this isolates the exempt-naming behavior from the block/waive paths.
+    from mship.cli import container as cli_container
+    cli_container.log_manager().append("mixed-exempt", "ran pytest", test_state="pass")
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://x/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "mixed-exempt", "--force-audit"])
+    assert result.exit_code == 0, result.output
+    lower = result.output.lower()
+    assert "no test target" in lower
+    assert "shared" in lower
+
+
 def test_require_tests_flag_is_deprecated_noop(finish_workspace):
     """--require-tests is now a hidden no-op (evidence required by default);
     passing it only emits a deprecation warning."""
