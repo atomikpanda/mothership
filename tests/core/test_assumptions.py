@@ -43,3 +43,15 @@ def test_soft_cap_warns_over_twenty(tmp_path):
     store = AssumptionStore(tmp_path)
     warn = store.save(rows)  # returns a warning string (or None under cap)
     assert warn and "20" in warn
+
+
+def test_pipe_in_cell_round_trips_without_row_loss(tmp_path):
+    """A literal `|` in a free-text cell must survive save/load, not silently
+    drop the row (Greptile Wave-2 review). Reachable once `mship assumptions
+    add/edit` lets a human type arbitrary position/options text."""
+    from mship.core.assumptions import AssumptionRow, AssumptionStore
+    rows = [AssumptionRow(axis="repo topology", options="single | mono | meta",
+                          position="meta | shipped together", triggers="git/*")]
+    store = AssumptionStore(tmp_path)
+    store.save(rows)
+    assert store.load() == rows

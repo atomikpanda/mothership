@@ -179,12 +179,40 @@ class AssumptionStore:
             raise
 
 
+# A literal `|` in a cell would otherwise be read as a column separator and
+# silently drop the whole row on load. Escape on render, unescape on parse, and
+# split only on UNescaped pipes — free-text cells (position/options edited by
+# hand via `mship assumptions`) are round-trip safe (Greptile #448 Wave-2 review).
+_ESCAPED_PIPE = "\\|"
+
+
+def _split_unescaped_pipes(body: str) -> list[str]:
+    """Split a table row body on `|`, treating `\\|` as a literal pipe."""
+    cells: list[str] = []
+    buf: list[str] = []
+    i = 0
+    while i < len(body):
+        if body[i] == "\\" and i + 1 < len(body) and body[i + 1] == "|":
+            buf.append("|")
+            i += 2
+            continue
+        if body[i] == "|":
+            cells.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(body[i])
+        i += 1
+    cells.append("".join(buf))
+    return cells
+
+
 def _render_table(rows: list[AssumptionRow]) -> str:
     header = "| " + " | ".join(_COLUMNS) + " |"
     separator = "| " + " | ".join("--" for _ in _COLUMNS) + " |"
     lines = [header, separator]
     for row in rows:
-        cells = [getattr(row, col) for col in _COLUMNS]
+        cells = [getattr(row, col).replace("|", _ESCAPED_PIPE) for col in _COLUMNS]
         lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
 
@@ -195,7 +223,10 @@ def _parse_table(text: str) -> list[AssumptionRow]:
         return []
     rows = []
     for line in lines[2:]:  # skip header + separator
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        body = line.strip()
+        body = body[1:] if body.startswith("|") else body
+        body = body[:-1] if body.endswith("|") else body
+        cells = [cell.strip() for cell in _split_unescaped_pipes(body)]
         if len(cells) != len(_COLUMNS):
             continue
         rows.append(AssumptionRow(**dict(zip(_COLUMNS, cells))))
