@@ -891,7 +891,9 @@ def test_finish_warns_when_no_test_evidence_default(finish_workspace):
 
 
 def test_finish_blocks_when_require_tests_and_no_evidence(finish_workspace):
-    """--require-tests escalates missing evidence to a BLOCK. See #81."""
+    """Missing test evidence BLOCKs by default now. --require-tests is a
+    deprecated no-op kept for backward compatibility; passing it does not
+    change the outcome. See #81."""
     workspace, mock_shell = finish_workspace
 
     result = runner.invoke(app, ["spawn", "--hotfix", "require block", "--repos", "shared", "--force-audit"])
@@ -921,8 +923,8 @@ def test_finish_blocks_when_require_tests_and_no_evidence(finish_workspace):
         app, ["finish", "--hotfix", "--task", "require-block", "--force-audit", "--require-tests"]
     )
     assert result.exit_code != 0
-    assert pushed == [], "finish must block before pushing when --require-tests"
-    assert prs == [], "finish must block before creating PRs when --require-tests"
+    assert pushed == [], "finish must block before pushing when evidence is missing"
+    assert prs == [], "finish must block before creating PRs when evidence is missing"
     assert "require-tests" in result.output.lower() or "blocking" in result.output.lower()
 
 

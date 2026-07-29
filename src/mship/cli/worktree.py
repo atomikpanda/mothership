@@ -1618,11 +1618,12 @@ def register(app: typer.Typer, get_container):
                 + ", ".join(decision.missing_repos)
             )
         elif decision.action == "warn_no_target":
-            output.warning(
-                "No test target configured for: "
-                + ", ".join(decision.exempt_repos)
-                + " — evidence gate downgraded to a warning."
-            )
+            if decision.exempt_repos:
+                output.warning(
+                    "No test target configured for: "
+                    + ", ".join(decision.exempt_repos)
+                    + " — evidence gate downgraded to a warning."
+                )
 
         # --- Acceptance-criteria evidence gate (ac-evidence-loop) ---
         # Mirror the test-evidence gate: WARN by default when any AC on the bound
