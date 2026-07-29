@@ -125,8 +125,12 @@ class AssumptionStore:
         return [_normalize_axis(row.axis) for row in self.load()]
 
     def render(self) -> str:
+        """The injected/rendered block. Header is 'Assumptions to disposition'
+        (a directive) — deliberately NOT the L3 plan-block name 'Assumptions
+        checked', which is the header the *plan* must contain; reusing it here
+        would both read as already-done and risk being echoed into the plan."""
         rows = self.load()
-        lines = ["## Assumptions checked"]
+        lines = ["## Assumptions to disposition"]
         for row in rows:
             lines.append(f"- {row.axis} — options: {row.options} · position: {row.position}")
         return "\n".join(lines) + "\n"

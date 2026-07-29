@@ -175,6 +175,7 @@ def build_emitted_prompt(
             workspace_root, docs_dir=docs_dir, mode=resolve_mode(workspace_root)
         )
         store.seed()
-        prompt += "\n\n## Assumptions to disposition\n" + store.render()
+        # render() already carries the "## Assumptions to disposition" header.
+        prompt += "\n\n" + store.render()
 
     return prompt, warnings
