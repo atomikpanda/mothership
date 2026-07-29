@@ -95,3 +95,16 @@ def test_encrypted_mode_writes_enc_file(tmp_path):
     assert res.exit_code == 0, res.output
     assert (tmp_path / "docs" / "product_assumptions.md.enc").is_file()
     assert not (tmp_path / "docs" / "product_assumptions.md").exists()
+
+
+def test_cli_honors_non_default_docs_dir(tmp_path):
+    """`mship assumptions` must write to <docs_dir>/ so its edits are visible to
+    check-assumptions and the plan-phase injection, which honor docs_dir
+    (final-review #2)."""
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\nrepos: {}\ndocs_dir: customdocs\n"
+    )
+    res = CliRunner().invoke(_app(tmp_path), ["assumptions", "list"])  # auto-seeds
+    assert res.exit_code == 0, res.output
+    assert (tmp_path / "customdocs" / "product_assumptions.md").is_file()
+    assert not (tmp_path / "docs" / "product_assumptions.md").exists()

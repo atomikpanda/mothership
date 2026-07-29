@@ -78,3 +78,24 @@ def test_emit_for_non_plan_phase_task_omits_assumption_block(tmp_path: Path):
         assert "## Assumptions to disposition" not in result.output
     finally:
         _reset()
+
+
+def test_emit_plan_phase_encrypted_store_missing_key_errors_cleanly(tmp_path: Path):
+    """An encrypted assumptions store with no key (worker without it) must fail
+    the plan-phase emit CLEANLY (exit 1 + message), not a raw traceback
+    (final-review #1)."""
+    from mship.core import spec_key
+    from mship.core.assumptions import AssumptionStore, SEED_ROWS
+    cfg, state_dir = _bootstrap(tmp_path, phase="plan")
+    cfg.write_text("workspace: t\nrepos: {}\nassumption_storage: encrypted\n")
+    AssumptionStore(tmp_path, mode="encrypted").save(list(SEED_ROWS))  # generates key
+    spec_key.keyfile_path(tmp_path).unlink()  # simulate a worker without the key
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "plan it"])
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["dispatch", "--task", "t", "--emit"])
+        assert result.exit_code == 1
+        assert "cannot derive the prompt" in result.output
+    finally:
+        _reset()

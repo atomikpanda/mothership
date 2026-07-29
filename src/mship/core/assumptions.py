@@ -137,6 +137,16 @@ class AssumptionStore:
 
     # --- write -------------------------------------------------------
     def save(self, rows: list[AssumptionRow]) -> str | None:
+        # A newline in a cell would break the one-row-per-line markdown table and
+        # silently drop the row on load (the remaining hole after pipe-escaping).
+        # Reject at the boundary rather than corrupt the store (fail loud).
+        for row in rows:
+            for col in _COLUMNS:
+                if "\n" in getattr(row, col) or "\r" in getattr(row, col):
+                    raise ValueError(
+                        f"assumption {row.axis!r}: {col} contains a newline; "
+                        "table cells must be single-line"
+                    )
         path = self.path
         path.parent.mkdir(parents=True, exist_ok=True)
         text = _render_table(rows)

@@ -24,11 +24,24 @@ def register(parent: typer.Typer, get_container):
         from pathlib import Path
         from mship.core.assumptions import AssumptionStore, resolve_mode
 
+        from mship.core.config import ConfigLoader
+
         container = get_container()
         config_path = Path(container.config_path())
         workspace_root = config_path.parent
         mode = resolve_mode(workspace_root)
-        return AssumptionStore(workspace_root, mode=mode)
+        # Honor a non-default docs_dir — check-assumptions and the plan-phase
+        # injection both read from <docs_dir>/product_assumptions.md, so the CLI
+        # that EDITS it must write to the same place or the operator's edits are
+        # invisible to the very consumers this feature feeds (final-review #2).
+        # Resolve from the config file (like resolve_mode); fall back only when
+        # there is no config file, so a malformed config still fails loud.
+        docs_dir = (
+            ConfigLoader.load(config_path, require_paths=False).docs_dir
+            if config_path.is_file()
+            else "docs"
+        )
+        return AssumptionStore(workspace_root, docs_dir=docs_dir, mode=mode)
 
     def _rows_to_dicts(rows) -> list[dict]:
         return [

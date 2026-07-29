@@ -55,3 +55,13 @@ def test_pipe_in_cell_round_trips_without_row_loss(tmp_path):
     store = AssumptionStore(tmp_path)
     store.save(rows)
     assert store.load() == rows
+
+
+def test_newline_in_cell_rejected_on_save(tmp_path):
+    """A newline in a cell would break the one-row-per-line table and drop the
+    row on load — reject it at the boundary (final-review #3)."""
+    import pytest
+    from mship.core.assumptions import AssumptionRow, AssumptionStore
+    store = AssumptionStore(tmp_path)
+    with pytest.raises(ValueError, match="newline"):
+        store.save([AssumptionRow(axis="x", options="a/b", position="line1\nline2", triggers="t")])

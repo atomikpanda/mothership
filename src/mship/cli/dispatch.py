@@ -15,11 +15,19 @@ from mship.cli._resolve import resolve_for_command
 from mship.cli.output import Output
 from mship.core import dispatch as _d
 from mship.core.base_resolver import resolve_base
+from cryptography.fernet import InvalidToken as _InvalidToken
 from mship.core.dispatch_emit import (
     build_emitted_prompt,
     resolve_acceptance,
     resolve_instruction_and_acs,
 )
+from mship.core.spec_key import SpecKeyMissing as _SpecKeyMissing
+
+# Errors deriving an emitted prompt from a record. Includes the encrypted-store
+# key errors (missing key, or a bad/corrupt key) raised by plan-phase assumption
+# injection reading an encrypted store — e.g. a worker that has the encrypted
+# doc but not the key. Flat tuple: an except clause can't nest a sub-tuple.
+_EMIT_ERRORS = (OSError, ValueError, _SpecKeyMissing, _InvalidToken)
 from mship.core.dispatch_models import resolve_model
 from mship.core.dispatch_stub import build_stub
 from mship.core.review_package import (
@@ -208,7 +216,10 @@ def register(app: typer.Typer, get_container):
                     state=state,
                     docs_dir=docs_dir,
                 )
-            except (OSError, ValueError) as e:
+            except _EMIT_ERRORS as e:
+                # Includes the encrypted-store key errors from plan-phase
+                # assumption injection — surface a clean error, not a raw
+                # traceback (fail loud, cleanly).
                 output.error(f"cannot derive the prompt from the record: {e}")
                 raise typer.Exit(code=1)
             for w in warnings:
