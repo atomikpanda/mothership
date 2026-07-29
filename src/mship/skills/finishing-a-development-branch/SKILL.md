@@ -157,8 +157,8 @@ cat > /tmp/pr-body.md <<'EOF'
 - [ ] <verification steps>
 EOF
 
-# Pushes the branch, opens the PR, stamps state; blocks without passing test evidence
-mship finish --require-tests --body-file /tmp/pr-body.md
+# Pushes the branch, opens the PR, stamps state; blocks without passing test evidence by default
+mship finish --body-file /tmp/pr-body.md
 ```
 
 **Post-finish iteration (reviewer feedback, CI fixes, typos):** don't

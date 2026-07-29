@@ -73,7 +73,7 @@ def test_finish_not_blocked_by_config_only_dirty(cfg_only_workspace):
     workspace, set_porcelain = cfg_only_workspace
     _spawn_bug(workspace, "cfg only edit")           # spawn with a clean worktree
     set_porcelain(" M mothership.yaml\n")             # now config-only dirty for finish
-    result = runner.invoke(app, ["finish", "--task", "cfg-only-edit"])
+    result = runner.invoke(app, ["finish", "--task", "cfg-only-edit", "--no-require-tests"])
     assert result.exit_code == 0, result.output
     state = StateManager(workspace / ".mothership").load()
     assert state.tasks["cfg-only-edit"].pr_urls.get("shared") == "https://github.com/org/shared/pull/1"

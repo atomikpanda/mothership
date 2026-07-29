@@ -62,7 +62,7 @@ def test_finish_single_repo_no_coordination_block(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "single-repo-test"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "single-repo-test", "--no-require-tests"])
     assert result.exit_code == 0, result.output
 
     mgr = StateManager(workspace / ".mothership")
@@ -104,7 +104,7 @@ def test_finish_multi_repo_adds_coordination(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "multi-repo-test"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "multi-repo-test", "--no-require-tests"])
     assert result.exit_code == 0, result.output
 
     # Verify 2 PRs created
@@ -137,7 +137,7 @@ def test_finish_idempotent_rerun(finish_workspace):
         return ShellResult(returncode=0, stdout="", stderr="")
     mock_shell.run.side_effect = _first_finish_run
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "idempotent-test"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "idempotent-test", "--no-require-tests"])
     assert result.exit_code == 0, result.output
 
     # Second finish — should skip existing PR
@@ -151,7 +151,7 @@ def test_finish_idempotent_rerun(finish_workspace):
 
     mock_shell.run.side_effect = tracking_run
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "idempotent-test"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "idempotent-test", "--no-require-tests"])
     assert result.exit_code == 0, result.output
 
     # No gh pr create on second run
@@ -215,7 +215,7 @@ def test_finish_not_blocked_by_own_worktree(finish_workspace):
     from mship.cli import container
     container.state_manager.reset()
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", slug])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", slug, "--no-require-tests"])
     assert result.exit_code == 0, result.output
     assert "extra_worktrees" not in result.output
 
@@ -265,7 +265,7 @@ def test_finish_passes_base_from_config(finish_workspace, tmp_path):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "base-test"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "base-test", "--no-require-tests"])
     assert result.exit_code == 0, result.output
 
     create_calls = [c for c in call_log if "gh pr create" in c]
@@ -312,7 +312,7 @@ def test_finish_uses_spawn_base_override(finish_workspace):
     mock_shell.run.side_effect = mock_run
 
     # No --base at finish: the base must come from the task's spawn-time override.
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "stacked"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "stacked", "--no-require-tests"])
     assert result.exit_code == 0, result.output
 
     create_calls = [c for c in call_log if "gh pr create" in c]
@@ -439,7 +439,7 @@ def test_finish_unrelated_dirty_repo_does_not_block(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "unrelated-test"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "unrelated-test", "--no-require-tests"])
     assert result.exit_code == 0, result.output
 
 
@@ -489,7 +489,7 @@ def test_finish_skips_untouched_repos_in_multi_repo_task(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "partial-work", "--force-audit"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "partial-work", "--force-audit", "--no-require-tests"])
     assert result.exit_code == 0, result.output
     # auth-service was untouched → no PR created there.
     assert not any("auth-service" in c for c in create_calls), create_calls
@@ -564,7 +564,7 @@ def test_finish_stamps_finished_at(finish_workspace):
     result = runner.invoke(app, ["spawn", "--hotfix", "stamp test", "--repos", "shared", "--force-audit"])
     assert result.exit_code == 0, result.output
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "stamp-test"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "stamp-test", "--no-require-tests"])
     assert result.exit_code == 0, result.output
     assert "mship close" in result.output
 
@@ -666,7 +666,7 @@ def test_finish_suppresses_no_upstream_for_task_branch(finish_workspace):
     mock_shell.run.side_effect = mock_run
 
     # NO --force-audit — this is the whole point of the fix.
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "noupstream-fix"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "noupstream-fix", "--no-require-tests"])
     assert result.exit_code == 0, result.output
     assert "BYPASSED AUDIT" not in result.output
 
@@ -763,7 +763,7 @@ def test_finish_does_not_block_on_drift_in_unrelated_repo(finish_workspace):
 
     result = runner.invoke(
         app,
-        ["finish", "--hotfix", "--task", "scoped-finish", "--body", "## Summary\nx\n## Test plan\n- [x] manual"],
+        ["finish", "--hotfix", "--task", "scoped-finish", "--body", "## Summary\nx\n## Test plan\n- [x] manual", "--no-require-tests"],
     )
     # Tailrd's dirty_worktree is out of scope (no commits) → does not block.
     # Shared has commits and clean state → finish proceeds.
@@ -815,7 +815,7 @@ def test_finish_auto_links_issue_refs_in_description(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "fix-42-something-important"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "fix-42-something-important", "--no-require-tests"])
     assert result.exit_code == 0, result.output
     assert captured_body, "expected gh pr create to be invoked"
     assert "Closes #42" in captured_body[0]
@@ -854,7 +854,7 @@ def test_finish_pr_body_unchanged_when_no_issue_refs(finish_workspace):
 
     mock_shell.run.side_effect = mock_run
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--force-audit", "--task", "ordinary-task-description"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--force-audit", "--task", "ordinary-task-description", "--no-require-tests"])
     assert result.exit_code == 0, result.output
     assert captured_body
     assert "Closes" not in captured_body[0]
@@ -862,7 +862,7 @@ def test_finish_pr_body_unchanged_when_no_issue_refs(finish_workspace):
 
 
 def test_finish_warns_when_no_test_evidence_default(finish_workspace):
-    """Default: missing test evidence is a WARNING (not a block). See #81."""
+    """Default: missing test evidence now BLOCKS finish (inverted). See #81."""
     workspace, mock_shell = finish_workspace
 
     result = runner.invoke(app, ["spawn", "--hotfix", "no evidence", "--repos", "shared", "--force-audit"])
@@ -884,15 +884,16 @@ def test_finish_warns_when_no_test_evidence_default(finish_workspace):
     mock_shell.run.side_effect = mock_run
 
     result = runner.invoke(app, ["finish", "--hotfix", "--task", "no-evidence", "--force-audit"])
-    # Finish still succeeds; the warning is advisory.
-    assert result.exit_code == 0, result.output
-    # Warning text references the evidence gap.
+    # Finish now blocks by default.
+    assert result.exit_code == 1, result.output
     lower = result.output.lower()
-    assert "test" in lower and ("not run" in lower or "missing" in lower or "evidence" in lower)
+    assert "test evidence missing" in lower
 
 
 def test_finish_blocks_when_require_tests_and_no_evidence(finish_workspace):
-    """--require-tests escalates missing evidence to a BLOCK. See #81."""
+    """Missing test evidence BLOCKs by default now. --require-tests is a
+    deprecated no-op kept for backward compatibility; passing it does not
+    change the outcome. See #81."""
     workspace, mock_shell = finish_workspace
 
     result = runner.invoke(app, ["spawn", "--hotfix", "require block", "--repos", "shared", "--force-audit"])
@@ -922,8 +923,8 @@ def test_finish_blocks_when_require_tests_and_no_evidence(finish_workspace):
         app, ["finish", "--hotfix", "--task", "require-block", "--force-audit", "--require-tests"]
     )
     assert result.exit_code != 0
-    assert pushed == [], "finish must block before pushing when --require-tests"
-    assert prs == [], "finish must block before creating PRs when --require-tests"
+    assert pushed == [], "finish must block before pushing when evidence is missing"
+    assert prs == [], "finish must block before creating PRs when evidence is missing"
     assert "require-tests" in result.output.lower() or "blocking" in result.output.lower()
 
 
@@ -960,6 +961,187 @@ def test_finish_evidence_via_journal_suppresses_warning(finish_workspace, tmp_pa
     lower = result.output.lower()
     assert "test-evidence warnings" not in lower
     assert "not run" not in lower
+
+
+def test_finish_blocks_by_default_without_evidence(finish_workspace):
+    """Default (no flags): missing test evidence BLOCKS finish. See #81 inversion."""
+    workspace, mock_shell = finish_workspace
+
+    result = runner.invoke(app, ["spawn", "--hotfix", "no evidence block", "--repos", "shared", "--force-audit"])
+    assert result.exit_code == 0, result.output
+
+    pushed: list[str] = []
+    prs: list[str] = []
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "git push" in cmd:
+            pushed.append(cmd)
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            prs.append(cmd)
+            return ShellResult(returncode=0, stdout="https://x/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "no-evidence-block", "--force-audit"])
+    assert result.exit_code == 1, result.output
+    assert pushed == [], "finish must block before pushing without evidence"
+    assert prs == [], "finish must block before creating PRs without evidence"
+    lower = result.output.lower()
+    assert "test evidence missing" in lower
+    assert "--no-require-tests" in lower
+
+
+def test_finish_proceeds_with_no_require_tests_and_prints_waiver(finish_workspace):
+    """--no-require-tests opts out: finish proceeds and prints a waiver line."""
+    workspace, mock_shell = finish_workspace
+
+    result = runner.invoke(app, ["spawn", "--hotfix", "waiver test", "--repos", "shared", "--force-audit"])
+    assert result.exit_code == 0, result.output
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://x/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    result = runner.invoke(
+        app, ["finish", "--hotfix", "--task", "waiver-test", "--force-audit", "--no-require-tests"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "evidence gate waived" in result.output.lower()
+
+
+def test_finish_warns_not_blocks_when_test_target_not_applicable(finish_workspace):
+    """A repo declaring `not_applicable: [test]` can't produce evidence — the gate
+    downgrades to a warning naming the exempt repo, never blocks. See #81."""
+    import yaml
+
+    workspace, mock_shell = finish_workspace
+    cfg_path = workspace / "mothership.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["repos"]["shared"]["not_applicable"] = ["test"]
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    container.config.reset()
+
+    result = runner.invoke(app, ["spawn", "--hotfix", "docs only", "--repos", "shared", "--force-audit"])
+    assert result.exit_code == 0, result.output
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://x/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "docs-only", "--force-audit"])
+    assert result.exit_code == 0, result.output
+    lower = result.output.lower()
+    assert "no test target" in lower
+    assert "shared" in lower
+
+
+def test_finish_names_exempt_repo_in_mixed_finish(finish_workspace):
+    """A finish touching both a test-exempt repo (`not_applicable: [test]`) and a
+    gated repo with passing evidence proceeds, but must still NAME the exempt repo
+    — otherwise it silently reads as covered rather than exempt. See #81 / PR #445."""
+    import yaml
+
+    workspace, mock_shell = finish_workspace
+    cfg_path = workspace / "mothership.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["repos"]["shared"]["not_applicable"] = ["test"]
+    cfg_path.write_text(yaml.safe_dump(cfg))
+    container.config.reset()
+
+    result = runner.invoke(
+        app, ["spawn", "--hotfix", "mixed exempt", "--repos", "shared,auth-service", "--force-audit"]
+    )
+    assert result.exit_code == 0, result.output
+
+    # Passing evidence for the gated repo so the outcome is pass, not block —
+    # this isolates the exempt-naming behavior from the block/waive paths.
+    from mship.cli import container as cli_container
+    cli_container.log_manager().append("mixed-exempt", "ran pytest", test_state="pass")
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://x/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "mixed-exempt", "--force-audit"])
+    assert result.exit_code == 0, result.output
+    lower = result.output.lower()
+    assert "no test target" in lower
+    assert "shared" in lower
+
+
+def test_require_tests_flag_is_deprecated_noop(finish_workspace):
+    """--require-tests is now a hidden no-op (evidence required by default);
+    passing it only emits a deprecation warning."""
+    workspace, mock_shell = finish_workspace
+
+    result = runner.invoke(app, ["spawn", "--hotfix", "deprecated flag", "--repos", "shared", "--force-audit"])
+    assert result.exit_code == 0, result.output
+
+    from mship.cli import container as cli_container
+    log_mgr = cli_container.log_manager()
+    log_mgr.append("deprecated-flag", "ran pytest", test_state="pass")
+
+    def mock_run(cmd, cwd, env=None):
+        if "gh auth status" in cmd:
+            return ShellResult(returncode=0, stdout="Logged in", stderr="")
+        if "ls-remote" in cmd:
+            return ShellResult(returncode=0, stdout="abc123\trefs/heads/main\n", stderr="")
+        if "rev-list --count" in cmd:
+            return ShellResult(returncode=0, stdout="1\n", stderr="")
+        if "git push" in cmd:
+            return ShellResult(returncode=0, stdout="", stderr="")
+        if "gh pr create" in cmd:
+            return ShellResult(returncode=0, stdout="https://x/1\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    mock_shell.run.side_effect = mock_run
+
+    result = runner.invoke(
+        app, ["finish", "--hotfix", "--task", "deprecated-flag", "--force-audit", "--require-tests"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "--require-tests is deprecated" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -1008,7 +1190,7 @@ def test_finish_fires_task_finished_hook(finish_workspace):
         lambda command, env_runner=None: f"{env_runner} {command}" if env_runner else command
     )
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "hook-finish-test"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "hook-finish-test", "--no-require-tests"])
     assert result.exit_code == 0, result.output
 
     assert any("notify-finished" in c for c in call_log)
@@ -1077,7 +1259,7 @@ def test_finish_non_required_hook_failure_never_blocks_finished_stamp(finish_wor
         lambda command, env_runner=None: f"{env_runner} {command}" if env_runner else command
     )
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "hook-non-required-test"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "hook-non-required-test", "--no-require-tests"])
     assert result.exit_code == 0, result.output
 
     mgr = StateManager(workspace / ".mothership")

@@ -290,7 +290,7 @@ mship build [--all] [--repos|--tag]   # runs `task build` across repos in dep or
 mship capture [--repo R] [--platform P] [--kind image|layout|all] [--out DIR] [--evidence SPEC:AC]
 mship journal "msg" [--action X] [--open Y] [--repo R] [--test-state pass|fail|mixed]
 mship journal --show-open                 # what am I blocked on across this task?
-mship finish [--base B] [--base-map ...] [--push-only] [--handoff] [--force-audit] [--body-file F | --body TEXT] [--force] [--require-tests] [--require-evidence] [--title T] [--body-map ...] [--token T] [--bypass-reconcile]
+mship finish [--base B] [--base-map ...] [--push-only] [--handoff] [--force-audit] [--body-file F | --body TEXT] [--force] [--no-require-tests] [--require-evidence] [--title T] [--body-map ...] [--token T] [--bypass-reconcile]
 mship close [--yes] [--abandon] [--force] [--skip-pr-check] [--bypass-base-ancestry] [--bypass-reconcile]   # --force also required to tear down a dirty/unpushed worktree
 ```
 
@@ -357,7 +357,7 @@ If you don't, your edits in the shell affect the main checkout, not the feature 
 
 **Structured debugging entries.** `mship debug hypothesis|rule-out|resolved` records structured debugging entries into the task journal. `mship test` auto-attaches to the open hypothesis if one exists. See the `systematic-debugging` skill for the full workflow.
 
-**`finish`:** PR base resolves as `--base-map` entry > `--base` > the task's spawn-time `--base` (see stacked PRs below) > `repo.base_branch` in config > gh default. Every base is verified on origin before any push; empty branches and missing bases fail fast with no partial state. `--require-tests` blocks (not just warns) when no passing test evidence exists for the task. `--title` overrides the PR title; `--body-map` sets per-repo bodies when repos need different PR descriptions. `--force`/`-f` re-pushes new commits to an already-finished task's existing PR (useful when iterating post-finish without opening a new task).
+**`finish`:** PR base resolves as `--base-map` entry > `--base` > the task's spawn-time `--base` (see stacked PRs below) > `repo.base_branch` in config > gh default. Every base is verified on origin before any push; empty branches and missing bases fail fast with no partial state. By default `finish` blocks when a repo with a configured test target lacks passing test evidence; pass `--no-require-tests` to waive (repos with no test target downgrade to a warning naming them). `--title` overrides the PR title; `--body-map` sets per-repo bodies when repos need different PR descriptions. `--force`/`-f` re-pushes new commits to an already-finished task's existing PR (useful when iterating post-finish without opening a new task).
 
 **`finish` PR body — write a real one.** By default the PR body is just the task description plus a `Closes #N` footer for any issue refs found in the description, journal, and commit subjects. That's a placeholder, not a body. For agent-driven finishes, pass `--body-file <path>` (or `--body '<inline>'`, or `--body -` for stdin) with a real Summary and Test plan. Empty bodies are rejected — that's deliberate. If you forgot at finish time, follow up immediately with `gh pr edit <url> --body-file <path>`. A bare task-description PR is treated as incomplete.
 

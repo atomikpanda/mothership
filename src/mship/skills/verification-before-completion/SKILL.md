@@ -122,7 +122,7 @@ Skip any step = lying, not verifying
 ## Mothership Workspace
 
 In a mothership workspace, run verification via `mship test` so the result is
-recorded as evidence; `mship finish --require-tests` enforces that gate before
+recorded as evidence; `mship finish` enforces that gate by default before
 a PR is opened. See `working-with-mothership`.
 
 **Controller role in subagent-driven flows:** the controller may accept a

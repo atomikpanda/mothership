@@ -51,3 +51,17 @@ def test_working_with_mothership_documents_model_resolution():
 
 def test_configuration_docs_cover_dispatch_models():
     assert "dispatch_models" in (_REPO_ROOT / "docs" / "configuration.md").read_text()
+
+
+def _skill_markdown_files() -> list[Path]:
+    return sorted(pkg_skills_source().rglob("*.md"))
+
+
+def test_no_skill_instructs_require_tests_flag():
+    """Skills must describe the gate as the default, never instruct passing
+    `mship finish --require-tests` (now a deprecated no-op)."""
+    for path in _skill_markdown_files():
+        text = path.read_text()
+        assert "finish --require-tests" not in text, (
+            f"{path} still instructs the deprecated --require-tests flag"
+        )

@@ -233,3 +233,54 @@ def test_format_missing_summary_groups_by_status(tmp_path: Path):
     assert "b" in text  # failing
     assert any("missing" in l.lower() or "not run" in l.lower() for l in lines)
     assert any("failing" in l.lower() for l in lines)
+
+
+def _ev(status):
+    from mship.core.test_evidence import RepoEvidence
+    return RepoEvidence(status=status, source="test_results", at=None)
+
+
+def test_blocks_when_expectable_repo_missing_and_not_opted_out():
+    from mship.core.test_evidence import decide_finish_gate
+    d = decide_finish_gate({"api": _ev("missing")}, exempt_repos=set(), opt_out=False)
+    assert d.action == "block"
+    assert d.missing_repos == ["api"]
+
+
+def test_passes_when_all_expectable_repos_passing():
+    from mship.core.test_evidence import decide_finish_gate
+    d = decide_finish_gate({"api": _ev("passed")}, exempt_repos=set(), opt_out=False)
+    assert d.action == "pass"
+    assert d.missing_repos == []
+
+
+def test_waives_when_opted_out_with_missing_evidence():
+    from mship.core.test_evidence import decide_finish_gate
+    d = decide_finish_gate({"api": _ev("missing")}, exempt_repos=set(), opt_out=True)
+    assert d.action == "waive"
+    assert d.missing_repos == ["api"]
+
+
+def test_warns_when_every_touched_repo_is_exempt():
+    from mship.core.test_evidence import decide_finish_gate
+    d = decide_finish_gate({"docs": _ev("missing")}, exempt_repos={"docs"}, opt_out=False)
+    assert d.action == "warn_no_target"
+    assert d.exempt_repos == ["docs"]
+
+
+def test_mixed_blocks_on_expectable_and_names_exempt():
+    from mship.core.test_evidence import decide_finish_gate
+    d = decide_finish_gate(
+        {"api": _ev("missing"), "docs": _ev("missing")},
+        exempt_repos={"docs"},
+        opt_out=False,
+    )
+    assert d.action == "block"
+    assert d.missing_repos == ["api"]
+    assert d.exempt_repos == ["docs"]
+
+
+def test_stale_counts_as_missing():
+    from mship.core.test_evidence import decide_finish_gate
+    d = decide_finish_gate({"api": _ev("stale")}, exempt_repos=set(), opt_out=False)
+    assert d.action == "block"

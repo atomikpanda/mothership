@@ -174,7 +174,7 @@ After saving the plan, offer execution choice:
 **If Subagent-Driven chosen:**
 - **REQUIRED SUB-SKILL:** Use subagent-driven-development
 - Fresh subagent per task + two-stage review
-- Build each implementer prompt with `mship dispatch --task <slug> --plan-task <N>` (hand the subagent the emitted stub; it runs `mship dispatch --emit` in the worktree to get the anchored task text as its instruction); subagents run `mship test` so `mship finish --require-tests` has its evidence trail.
+- Build each implementer prompt with `mship dispatch --task <slug> --plan-task <N>` (hand the subagent the emitted stub; it runs `mship dispatch --emit` in the worktree to get the anchored task text as its instruction); subagents run `mship test` so `mship finish` has its evidence trail (it requires passing test evidence by default).
 
 **If Inline Execution chosen:**
 - **REQUIRED SUB-SKILL:** Use executing-plans
