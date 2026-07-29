@@ -150,6 +150,35 @@ def _head_commit_time(
         return None
 
 
+@dataclass(frozen=True)
+class FinishGateDecision:
+    action: Literal["pass", "block", "waive", "warn_no_target"]
+    missing_repos: list[str]
+    exempt_repos: list[str]
+
+
+def decide_finish_gate(
+    evidence: dict[str, RepoEvidence],
+    exempt_repos: set[str],
+    opt_out: bool,
+) -> FinishGateDecision:
+    """Decide the finish test-evidence gate outcome (pure — no I/O).
+
+    `evidence` maps each finish-touched repo to its RepoEvidence. `exempt_repos`
+    are repos with no configured `test` target (`"test" in repo.not_applicable`),
+    which cannot produce evidence and never block. `opt_out` is `--no-require-tests`.
+    """
+    exempt_sorted = sorted(exempt_repos)
+    expectable = set(evidence) - exempt_repos
+    missing = sorted(r for r in expectable if evidence[r].status != "passed")
+    if not expectable:
+        return FinishGateDecision("warn_no_target", missing, exempt_sorted)
+    if not missing:
+        return FinishGateDecision("pass", missing, exempt_sorted)
+    action = "waive" if opt_out else "block"
+    return FinishGateDecision(action, missing, exempt_sorted)
+
+
 def format_missing_summary(
     evidence: dict[str, RepoEvidence],
 ) -> list[str]:
