@@ -71,8 +71,16 @@ mship gh preflight --relay-url "<relay-url>" --run-token "<run-token>"
 
 # d. Implement the assigned spec (normal mship phase workflow).
 
-# e. Push + open the PR(s) — routed through the relay by the git config
-#    bootstrap wrote (e.g. mship finish).
+# e. Run the test suite and record evidence BEFORE finishing. `mship finish`
+#    blocks by default on any repo with a configured test target and no
+#    passing evidence — it reads evidence, it never runs tests itself — so an
+#    unattended worker that skips this step burns the whole run only to fail
+#    at the last step:
+mship test
+
+# f. Push + open the PR(s) — routed through the relay by the git config
+#    bootstrap wrote (e.g. mship finish). If (e) failed, do not finish;
+#    report the failure and stop instead.
 ```
 
 ## Guarantees
