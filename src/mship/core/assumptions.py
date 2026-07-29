@@ -217,6 +217,20 @@ def _render_table(rows: list[AssumptionRow]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def resolve_mode(workspace_root: Path) -> AssumptionMode:
+    """Best-effort read of `assumption_storage` from the workspace's
+    mothership.yaml. Mirrors `spec_storage.resolve_mode` (single source of
+    truth is the workspace config; no config file -> committed; an invalid
+    value fails loud via the config model)."""
+    cfg_path = Path(workspace_root) / "mothership.yaml"
+    if not cfg_path.is_file():
+        return "committed"
+    from mship.core.config import ConfigLoader
+
+    config = ConfigLoader.load(cfg_path, require_paths=False)
+    return getattr(config, "assumption_storage", "committed")
+
+
 def _parse_table(text: str) -> list[AssumptionRow]:
     lines = [line for line in text.splitlines() if line.strip().startswith("|")]
     if len(lines) < 2:

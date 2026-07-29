@@ -352,6 +352,12 @@ class WorkspaceConfig(BaseModel):
     # unreadable without `.mothership/spec-key`. Applied transparently by
     # core/spec_storage.py; an invalid value fails loud at config load.
     spec_storage: Literal["committed", "local", "encrypted"] = "committed"
+    # Where this workspace's L1 product-assumptions doc
+    # (`docs/product_assumptions.md`) lives — mirrors `spec_storage`'s modes and
+    # semantics (committed/local/encrypted). Applied transparently by
+    # core/assumptions.py::AssumptionStore; an invalid value fails loud at
+    # config load, same as `spec_storage`.
+    assumption_storage: Literal["committed", "local", "encrypted"] = "committed"
     # Storage mode for acceptance-criterion artifact evidence. `None` inherits
     # `spec_storage` — the safe default, so evidence is governed exactly like the
     # spec it backs unless an operator deliberately diverges (prose is bytes,
