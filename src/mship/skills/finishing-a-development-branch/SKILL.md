@@ -107,13 +107,14 @@ c = yaml.safe_load(open("mothership.yaml")) or {}
 override, repo, fallback = sys.argv[1], sys.argv[2], sys.argv[3]
 print(override or ((c.get("repos") or {}).get(repo) or {}).get("base_branch") or fallback)' "$BASE_OVERRIDE" "$repo" "$TASK_BASE")
   main=$(git -C "$(git -C "$wt" rev-parse --git-common-dir)/.." rev-parse --show-toplevel)
-  git -C "$main" checkout "$base" && git -C "$main" pull && git -C "$main" merge "$BRANCH"
+  git -C "$main" checkout "$base" && git -C "$main" pull && git -C "$main" merge "$BRANCH" \
+    || { echo "merge failed in $repo — resolve it (or git merge --abort), then re-run" >&2; exit 1; }
 done
 
 # Verify tests on the merged result (mship test — see Step 1), then `mship close`.
 ```
 
-*A stacked task's `--base` (recorded as `base_override`) overrides per-repo config for every repo — it was pinned deliberately. The loop is driven by `affected_repos`, not the worktrees map: passive worktrees are context checkouts (detached dependency repos) and are deliberately not merged.*
+*The loop stops at the first failure so you never continue past a conflicted checkout; already-merged repos are fine to re-run (merge is idempotent once delivered, and close verifies per-repo). A stacked task's `--base` (recorded as `base_override`) overrides per-repo config for every repo — it was pinned deliberately. The loop is driven by `affected_repos`, not the worktrees map: passive worktrees are context checkouts (detached dependency repos) and are deliberately not merged.*
 
 *Outside a mothership workspace, merge the single current repo:*
 
