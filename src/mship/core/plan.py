@@ -29,28 +29,47 @@ SEED_AXES: tuple[str, ...] = (
 
 # "## Assumptions checked" (any case), then consecutive "- <axis> <sep> <disposition>"
 # bullet lines. Separator is an em-dash or one/two hyphens. Axis = text before the
-# first separator, normalized (lowercased, internal whitespace collapsed).
+# first separator; disposition = the rest of the line.
 _ASSUMPTIONS_HEADING_RE = re.compile(r"^#{1,6}\s+assumptions\s+checked\s*$", re.IGNORECASE | re.MULTILINE)
-_ASSUMPTION_ROW_RE = re.compile(r"^\s*[-*]\s+(?P<axis>.+?)\s*(?:—|--|-)\s+\S", re.MULTILINE)
+_ASSUMPTION_ROW_RE = re.compile(r"^\s*[-*]\s+(?P<axis>.+?)\s*(?:—|--|-)\s+(?P<disposition>\S.*)$", re.MULTILINE)
 
 
 def _normalize_axis(raw: str) -> str:
     return " ".join(raw.strip().lower().split())
 
 
-def dispositioned_axes(plan_text: str) -> set[str]:
-    """Axis names dispositioned in the plan's 'Assumptions checked' block.
+def _is_real_disposition(disposition: str) -> bool:
+    """True unless the disposition is only an unfilled template placeholder.
 
-    Returns the normalized axis name of each bullet row under the first
-    '## Assumptions checked' heading, up to the next heading. Empty set when
-    there is no such block (an unchecked plan)."""
+    The writing-plans template seeds each row with a `[...]`/`<...>` placeholder
+    (e.g. `[covered/N/A: one line]`). A copied-but-unfilled template must NOT
+    count as dispositioned, or the checker greenlights a plan with no actual
+    assumption analysis (Greptile #448). Only a disposition that is ENTIRELY a
+    single bracketed token is rejected — a real disposition that merely contains
+    brackets (e.g. `covered [see #123]`) still counts."""
+    d = disposition.strip()
+    return not ((d.startswith("[") and d.endswith("]")) or (d.startswith("<") and d.endswith(">")))
+
+
+def dispositioned_axes(plan_text: str) -> set[str]:
+    """Axis names GENUINELY dispositioned in the plan's 'Assumptions checked'
+    block.
+
+    Returns the normalized axis name of each bullet row (under the first
+    '## Assumptions checked' heading, up to the next heading) whose disposition
+    is real — an unfilled `[...]`/`<...>` template placeholder does not count.
+    Empty set when there is no such block (an unchecked plan)."""
     m = _ASSUMPTIONS_HEADING_RE.search(plan_text)
     if m is None:
         return set()
     rest = plan_text[m.end():]
     next_heading = re.search(r"^#{1,6}\s+\S", rest, re.MULTILINE)
     block = rest[: next_heading.start()] if next_heading else rest
-    return {_normalize_axis(row.group("axis")) for row in _ASSUMPTION_ROW_RE.finditer(block)}
+    return {
+        _normalize_axis(row.group("axis"))
+        for row in _ASSUMPTION_ROW_RE.finditer(block)
+        if _is_real_disposition(row.group("disposition"))
+    }
 
 
 def missing_assumption_axes(plan_text: str, expected_axes: Iterable[str]) -> list[str]:

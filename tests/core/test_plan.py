@@ -116,3 +116,30 @@ def test_na_disposition_counts_as_covered():
 
 def test_no_block_reports_all_expected_missing():
     assert missing_assumption_axes("## Approach\nx\n", SEED_AXES) == list(SEED_AXES)
+
+
+def test_unfilled_bracket_placeholder_does_not_count():
+    """A copied-but-unfilled template placeholder ([...]/<...>) must NOT parse as
+    a real disposition (Greptile #448) — else an untouched template greenlights."""
+    plan = (
+        "## Assumptions checked\n"
+        "- repo topology — [covered/N/A: one line]\n"
+        "- credential locus — <covered/N/A: one line>\n"
+    )
+    assert dispositioned_axes(plan) == set()
+
+
+def test_unfilled_template_reports_all_axes_missing():
+    """The writing-plans template, copied verbatim with every row left as a
+    placeholder, must report ALL seed axes missing (ok would be false)."""
+    block = "## Assumptions checked\n" + "".join(
+        f"- {a} — [covered/N/A: one line]\n" for a in SEED_AXES
+    )
+    assert missing_assumption_axes(block, SEED_AXES) == list(SEED_AXES)
+
+
+def test_real_disposition_containing_brackets_still_counts():
+    """Only a disposition that is ENTIRELY a bracketed token is rejected; a real
+    disposition that merely contains brackets still counts."""
+    plan = "## Assumptions checked\n- repo topology — covered [see #123], metarepo\n"
+    assert dispositioned_axes(plan) == {"repo topology"}
