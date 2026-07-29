@@ -10,9 +10,79 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Iterable
 
 # Keep in sync with dispatch._TASK_OPEN_RE
 _TASK_ANCHOR_RE = re.compile(r"<!--\s*mship:task\s+id=([^\s>]+)(?:\s+[a-z_]+=[^\s>]+)*\s*-->")
+
+# The 7 seed assumptions (issue #444). Canonical lowercase axis names.
+# SINGLE SOURCE for Wave 1; Wave 2's L1 store supersedes this constant.
+SEED_AXES: tuple[str, ...] = (
+    "repo topology",
+    "credential locus",
+    "execution locus",
+    "state durability",
+    "review surface",
+    "agent stream",
+    "dispatched model",
+)
+
+# "## Assumptions checked" (any case), then consecutive "- <axis> <sep> <disposition>"
+# bullet lines. Separator is an em-dash or one/two hyphens. Axis = text before the
+# first separator; disposition = the rest of the line.
+_ASSUMPTIONS_HEADING_RE = re.compile(r"^#{1,6}\s+assumptions\s+checked\s*$", re.IGNORECASE | re.MULTILINE)
+_ASSUMPTION_ROW_RE = re.compile(r"^\s*[-*]\s+(?P<axis>.+?)\s*(?:—|--|-)\s+(?P<disposition>\S.*)$", re.MULTILINE)
+
+
+def _normalize_axis(raw: str) -> str:
+    return " ".join(raw.strip().lower().split())
+
+
+def _is_real_disposition(disposition: str) -> bool:
+    """True unless the disposition is still the unfilled template placeholder.
+
+    The writing-plans template seeds each row with `[covered/N/A: one line]`. A
+    copied-but-unfilled template must NOT count as dispositioned, or the checker
+    greenlights a plan with no actual assumption analysis (Greptile #448). The
+    unmistakable unfilled marker is the literal `covered/N/A` choice — a real
+    disposition PICKS one ("covered" or "N/A") and never writes the slash-form.
+    Keying off that marker (rather than "is bracketed") means a filled
+    disposition that merely retains brackets — e.g.
+    `[covered: metarepo handles clones]` — still counts."""
+    compact = re.sub(r"\s+", "", disposition).lower()
+    return "covered/n/a" not in compact
+
+
+def dispositioned_axes(plan_text: str) -> set[str]:
+    """Axis names GENUINELY dispositioned in the plan's 'Assumptions checked'
+    block.
+
+    Returns the normalized axis name of each bullet row (under the first
+    '## Assumptions checked' heading, up to the next heading) whose disposition
+    is real — an unfilled `[...]`/`<...>` template placeholder does not count.
+    Empty set when there is no such block (an unchecked plan)."""
+    m = _ASSUMPTIONS_HEADING_RE.search(plan_text)
+    if m is None:
+        return set()
+    rest = plan_text[m.end():]
+    next_heading = re.search(r"^#{1,6}\s+\S", rest, re.MULTILINE)
+    block = rest[: next_heading.start()] if next_heading else rest
+    return {
+        _normalize_axis(row.group("axis"))
+        for row in _ASSUMPTION_ROW_RE.finditer(block)
+        if _is_real_disposition(row.group("disposition"))
+    }
+
+
+def missing_assumption_axes(plan_text: str, expected_axes: Iterable[str]) -> list[str]:
+    """Expected assumption axes the plan does NOT disposition, in expected order.
+
+    N/A counts as dispositioned (an explicit N/A IS a disposition — that is the
+    HAZOP discipline). Empty list ⇒ well-formed. `expected_axes` is injected so
+    the live source (Wave 1: SEED_AXES; Wave 2: the L1 store) is the caller's
+    choice, not baked in here."""
+    covered = dispositioned_axes(plan_text)
+    return [a for a in (_normalize_axis(x) for x in expected_axes) if a not in covered]
 
 
 def _plan_stem_matches_slug(stem: str, task_slug: str) -> bool:

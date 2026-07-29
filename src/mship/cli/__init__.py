@@ -131,6 +131,7 @@ from mship.cli import message as _message_mod
 from mship.cli import net as _net_mod
 from mship.cli import pair as _pair_mod
 from mship.cli import phase as _phase_mod
+from mship.cli import plan as _plan_mod
 from mship.cli import pr as _pr_mod
 from mship.cli import prune as _prune_mod
 from mship.cli import reconcile as _reconcile_mod
@@ -195,6 +196,7 @@ _log_mod.register(app, get_container)
 _message_mod.register(app, get_container)
 _pair_mod.register(app, get_container)
 _phase_mod.register(app, get_container)
+_plan_mod.register(app, get_container)
 _pr_mod.register(app, get_container)
 _prune_mod.register(app, get_container)
 _reconcile_mod.register(app, get_container)

@@ -66,6 +66,23 @@ independently testable deliverable.
 
 **Goal:** [One sentence describing what this builds]
 
+## Assumptions checked
+
+[Before naming an approach, disposition every current assumption axis —
+`covered` (one line on how) or `N/A` (one line why). Wave 1's axis list is
+the seed set in `core/plan.SEED_AXES` (repo topology, credential locus,
+execution locus, state durability, review surface, agent stream, dispatched
+model); a later wave replaces this fixed list with a live store. Self-check
+with `mship plan check-assumptions --plan <path>`.]
+
+- repo topology — [covered/N/A: one line]
+- credential locus — [covered/N/A: one line]
+- execution locus — [covered/N/A: one line]
+- state durability — [covered/N/A: one line]
+- review surface — [covered/N/A: one line]
+- agent stream — [covered/N/A: one line]
+- dispatched model — [covered/N/A: one line]
+
 **Architecture:** [2-3 sentences about approach]
 
 **Tech Stack:** [Key technologies/libraries]
