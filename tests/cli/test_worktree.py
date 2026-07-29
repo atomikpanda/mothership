@@ -564,7 +564,7 @@ def test_finish_creates_prs(configured_git_app: Path):
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "test-prs"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "test-prs", "--no-require-tests"])
     assert result.exit_code == 0, result.output
 
     # Verify PR URL stored in state
@@ -625,7 +625,7 @@ def test_finish_broker_pull_sends_owner_repo(configured_git_app: Path, monkeypat
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "brk-test"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "brk-test", "--no-require-tests"])
     assert result.exit_code == 0, result.output
     assert captured["repos"] == ["acme/shared"]
 
@@ -665,7 +665,7 @@ def test_finish_body_file_passed_to_gh_pr_create(configured_git_app: Path):
     cli_container.shell.override(mock_shell)
     try:
         result = runner.invoke(
-            app, ["finish", "--hotfix", "--task", "body-test", "--body-file", str(body_path)]
+            app, ["finish", "--hotfix", "--task", "body-test", "--body-file", str(body_path), "--no-require-tests"]
         )
         assert result.exit_code == 0, result.output
         assert "create_cmd" in captured
@@ -722,6 +722,7 @@ def test_finish_body_map_per_repo_bodies(configured_git_app: Path):
                 "--task", "body-map",
                 "--body-map", f"shared={shared_body}",
                 "--body-file", str(fallback_body),
+                "--no-require-tests",
             ],
         )
         assert result.exit_code == 0, result.output
@@ -850,6 +851,7 @@ def test_finish_title_override_passed_to_gh_pr_create(configured_git_app: Path):
                 "finish", "--hotfix",
                 "--task", "a-long-verbose-description-that-shouldnt",
                 "--title", "feat(spawn): concise PR title",
+                "--no-require-tests",
             ],
         )
         assert result.exit_code == 0, result.output
@@ -1014,7 +1016,7 @@ def test_finish_force_repushes_to_existing_pr(configured_git_app: Path):
     try:
         import time
         time.sleep(0.01)  # ensure a new finished_at timestamp differs from `before`
-        result = runner.invoke(app, ["finish", "--hotfix", "--force", "--task", "rp"])
+        result = runner.invoke(app, ["finish", "--hotfix", "--force", "--task", "rp", "--no-require-tests"])
         assert result.exit_code == 0, result.output
         assert len(captured["push"]) == 1, f"expected one push, got {captured['push']}"
         assert captured["pr_create"] == [], "should NOT create a new PR under --force"
@@ -1037,7 +1039,7 @@ def test_finish_without_force_warns_about_unpushed_commits(configured_git_app: P
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
     try:
-        result = runner.invoke(app, ["finish", "--hotfix", "--task", "warn"])
+        result = runner.invoke(app, ["finish", "--hotfix", "--task", "warn", "--no-require-tests"])
         assert result.exit_code == 0, result.output
         assert "unpushed commits" in result.output
         assert "--force" in result.output
@@ -1496,7 +1498,7 @@ def test_finish_shared_git_root_creates_one_pr_records_on_all(configured_git_app
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "group-prs"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "group-prs", "--no-require-tests"])
     assert result.exit_code == 0, result.output
     assert create_pr_call_count == 1, f"Expected 1 gh pr create call, got {create_pr_call_count}"
 
@@ -1543,7 +1545,7 @@ def test_finish_harvests_existing_pr_instead_of_creating(configured_git_app: Pat
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "reuse-pr"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "reuse-pr", "--no-require-tests"])
     assert result.exit_code == 0, result.output
     assert create_pr_called is False, "gh pr create should not be called when PR already exists"
 
@@ -1600,7 +1602,7 @@ def test_finish_harvests_on_create_pr_duplicate_stderr(configured_git_app: Path)
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "race-pr"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "race-pr", "--no-require-tests"])
     assert result.exit_code == 0, result.output
     assert list_call_count == 2, "Expected pre-check + fallback list calls"
 
@@ -1661,7 +1663,7 @@ def test_finish_calls_ensure_upstream_after_push(configured_git_app: Path):
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "upstream-check"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "upstream-check", "--no-require-tests"])
     assert result.exit_code == 0, result.output
     assert set_upstream_called, "ensure_upstream should have run set-upstream-to"
 
@@ -1712,7 +1714,7 @@ def test_finish_captures_diagnostic_when_main_is_dirty_post_op(configured_git_ap
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "dirty-diag", "--force-audit"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "dirty-diag", "--force-audit", "--no-require-tests"])
     # Finish succeeds (diagnostic is silent).
     assert result.exit_code == 0, result.output
 
@@ -1759,7 +1761,7 @@ def test_finish_does_not_capture_diagnostic_when_main_is_clean(configured_git_ap
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
 
-    result = runner.invoke(app, ["finish", "--hotfix", "--task", "clean-diag"])
+    result = runner.invoke(app, ["finish", "--hotfix", "--task", "clean-diag", "--no-require-tests"])
     assert result.exit_code == 0, result.output
 
     diag_dir = configured_git_app / ".mothership" / "diagnostics"
@@ -2376,7 +2378,7 @@ def test_finish_injects_linked_issue_closes_trailer(configured_git_app: Path):
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
     try:
-        result = runner.invoke(app, ["finish", "--task", "trailer-test"])
+        result = runner.invoke(app, ["finish", "--task", "trailer-test", "--no-require-tests"])
         assert result.exit_code == 0, result.output
         assert "create_cmd" in captured
         # Test repo's origin is not github -> cross-repo (full) form expected.
@@ -2410,7 +2412,7 @@ def test_finish_body_unchanged_when_no_linked_issues(configured_git_app: Path):
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
     try:
-        result = runner.invoke(app, ["finish", "--hotfix", "--task", "no-trailer"])
+        result = runner.invoke(app, ["finish", "--hotfix", "--task", "no-trailer", "--no-require-tests"])
         assert result.exit_code == 0, result.output
         assert "Closes acme" not in captured.get("create_cmd", "")
     finally:

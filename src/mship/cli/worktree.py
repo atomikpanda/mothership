@@ -1134,11 +1134,17 @@ def register(app: typer.Typer, get_container):
                  "Updates finished_at and appends a `re-finished` journal entry. "
                  "Does not touch the PR body — use `gh pr edit` for that.",
         ),
+        no_require_tests: bool = typer.Option(
+            False, "--no-require-tests",
+            help="Opt out of the default test-evidence gate: open the PR even "
+                 "when a repo with a configured test target lacks passing "
+                 "evidence. Prints a waiver line. Legitimate for evidence-less "
+                 "tasks; not bypass-logged.",
+        ),
         require_tests: bool = typer.Option(
-            False, "--require-tests",
-            help="Block finish when any affected repo lacks passing test evidence "
-                 "(task.test_results or journal test_state=pass). Default: WARN only. "
-                 "See #81.",
+            False, "--require-tests", hidden=True,
+            help="Deprecated no-op: test evidence is now required by default. "
+                 "Use --no-require-tests to opt out.",
         ),
         require_evidence: bool = typer.Option(
             False, "--require-evidence",
@@ -1171,6 +1177,12 @@ def register(app: typer.Typer, get_container):
         container = get_container()
         output = Output()
         _run_gate(get_container, command="finish", bypass=bypass_reconcile, output=output)
+
+        if require_tests:
+            output.warning(
+                "--require-tests is deprecated and a no-op — test evidence is "
+                "now required by default; use --no-require-tests to opt out."
+            )
 
         if push_only and (handoff or base is not None or base_map is not None):
             output.error("--push-only is incompatible with --handoff/--base/--base-map")
@@ -1557,11 +1569,12 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=1)
 
         # --- Test-evidence gate (#81) ---
-        # Consult task.test_results + journal test_state entries. WARN by
-        # default; block only with --require-tests. Skipped-untouched repos
-        # don't need evidence (we're not finishing them).
+        # Consult task.test_results + journal test_state entries. BLOCK by
+        # default; pass --no-require-tests to waive. Repos declaring
+        # `not_applicable: [test]` can't produce evidence and only warn.
+        # Skipped-untouched repos don't need evidence (we're not finishing them).
         from mship.core.test_evidence import (
-            format_missing_summary, read_evidence,
+            decide_finish_gate, format_missing_summary, read_evidence,
         )
 
         evidence_repo_paths: dict[str, Path] = {}
@@ -1582,25 +1595,33 @@ def register(app: typer.Typer, get_container):
             evidence_task, container.log_manager(),
             shell=shell, repo_paths=evidence_repo_paths,
         )
-        evidence_lines = format_missing_summary(evidence)
-        if evidence_lines:
-            if require_tests:
-                output.error("Test evidence missing — blocking finish (--require-tests):")
-                for line in evidence_lines:
-                    output.error(f"  {line}")
-                output.error(
-                    "Run `mship test` or record evidence via "
-                    "`mship journal \"tests verified externally\" --test-state pass`, "
-                    "then retry."
-                )
-                raise typer.Exit(code=1)
-            output.warning("Test-evidence warnings:")
-            for line in evidence_lines:
-                output.warning(f"  {line}")
+        exempt_repos = {
+            r for r in evidence_repo_paths
+            if "test" in config.repos[r].not_applicable
+        }
+        decision = decide_finish_gate(evidence, exempt_repos, opt_out=no_require_tests)
+        if decision.action == "block":
+            output.error("Test evidence missing — blocking finish:")
+            for line in format_missing_summary(
+                {r: evidence[r] for r in decision.missing_repos}
+            ):
+                output.error(f"  {line}")
+            output.error(
+                "Run `mship test`, record evidence via "
+                "`mship journal \"tests verified externally\" --test-state pass`, "
+                "or pass --no-require-tests to waive."
+            )
+            raise typer.Exit(code=1)
+        if decision.action == "waive":
             output.warning(
-                "Pass `--require-tests` to treat as blocking, or record evidence via "
-                "`mship test` / "
-                "`mship journal \"tests verified externally\" --test-state pass`."
+                "Test-evidence gate waived (--no-require-tests); missing: "
+                + ", ".join(decision.missing_repos)
+            )
+        elif decision.action == "warn_no_target":
+            output.warning(
+                "No test target configured for: "
+                + ", ".join(decision.exempt_repos)
+                + " — evidence gate downgraded to a warning."
             )
 
         # --- Acceptance-criteria evidence gate (ac-evidence-loop) ---
