@@ -139,7 +139,14 @@ def test_unfilled_template_reports_all_axes_missing():
 
 
 def test_real_disposition_containing_brackets_still_counts():
-    """Only a disposition that is ENTIRELY a bracketed token is rejected; a real
-    disposition that merely contains brackets still counts."""
+    """A real disposition that merely contains brackets still counts."""
     plan = "## Assumptions checked\n- repo topology — covered [see #123], metarepo\n"
+    assert dispositioned_axes(plan) == {"repo topology"}
+
+
+def test_filled_but_bracketed_disposition_counts():
+    """A filled disposition that keeps the template's brackets but replaced the
+    `covered/N/A` choice with real content counts — only the unfilled slash-form
+    marker is rejected, not brackets per se (Greptile #448 follow-up)."""
+    plan = "## Assumptions checked\n- repo topology — [covered: metarepo handles clones across repos]\n"
     assert dispositioned_axes(plan) == {"repo topology"}

@@ -39,16 +39,18 @@ def _normalize_axis(raw: str) -> str:
 
 
 def _is_real_disposition(disposition: str) -> bool:
-    """True unless the disposition is only an unfilled template placeholder.
+    """True unless the disposition is still the unfilled template placeholder.
 
-    The writing-plans template seeds each row with a `[...]`/`<...>` placeholder
-    (e.g. `[covered/N/A: one line]`). A copied-but-unfilled template must NOT
-    count as dispositioned, or the checker greenlights a plan with no actual
-    assumption analysis (Greptile #448). Only a disposition that is ENTIRELY a
-    single bracketed token is rejected — a real disposition that merely contains
-    brackets (e.g. `covered [see #123]`) still counts."""
-    d = disposition.strip()
-    return not ((d.startswith("[") and d.endswith("]")) or (d.startswith("<") and d.endswith(">")))
+    The writing-plans template seeds each row with `[covered/N/A: one line]`. A
+    copied-but-unfilled template must NOT count as dispositioned, or the checker
+    greenlights a plan with no actual assumption analysis (Greptile #448). The
+    unmistakable unfilled marker is the literal `covered/N/A` choice — a real
+    disposition PICKS one ("covered" or "N/A") and never writes the slash-form.
+    Keying off that marker (rather than "is bracketed") means a filled
+    disposition that merely retains brackets — e.g.
+    `[covered: metarepo handles clones]` — still counts."""
+    compact = re.sub(r"\s+", "", disposition).lower()
+    return "covered/n/a" not in compact
 
 
 def dispositioned_axes(plan_text: str) -> set[str]:
