@@ -239,13 +239,18 @@ class PRManager:
         url = payload.get("html_url")
         return url if isinstance(url, str) and url else None
 
-    def count_commits_ahead(self, repo_path: Path, base: str, branch: str) -> int:
-        """Return the number of commits on `branch` not on `base`.
+    def count_commits_ahead(self, repo_path: Path, base: str, branch: str) -> int | None:
+        """Return the number of commits on `branch` not on `base`, or None when
+        the comparison itself fails (non-zero git exit or unparsable output).
 
         Uses `origin/<base>` so the comparison is against the remote (same
-        reference gh will use). Returns 0 on any git failure (fail-closed: a
-        caller treating 0 as "empty" will surface a clear error instead of
-        attempting a doomed push).
+        reference gh will use). The None case exists because callers treat 0 as
+        PROOF — close's delivery gate reads 0 as "nothing past base, delivered"
+        and the recovery check reads 0 as "trivially clean, safe to delete" —
+        so a failed comparison must be distinguishable from a verified-empty
+        branch rather than silently reading as delivered/clean. Each caller
+        decides what unknown means at its site (fail-closed for delivery,
+        fall-through for recovery, no-claim for advisory warnings).
         """
         spec = f"origin/{base}..{branch}"
         result = self._shell.run(
@@ -253,11 +258,11 @@ class PRManager:
             cwd=repo_path,
         )
         if result.returncode != 0:
-            return 0
+            return None
         try:
             return int(result.stdout.strip() or "0")
         except ValueError:
-            return 0
+            return None
 
     def check_merged_into_base(self, repo_path: Path, branch: str, base: str) -> bool:
         """True if `branch` is an ancestor of `base` (i.e. already merged).

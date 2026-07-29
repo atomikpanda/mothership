@@ -213,10 +213,13 @@ def register(parent: typer.Typer, get_container) -> None:
         if output.json_mode:
             typer.echo(json.dumps(rows))
         else:
+            # Documented legend (working-with-mothership): A needs-approval,
+            # D needs-decision, B blocked, R needs-review — explicit mapping,
+            # not the field name's first letter (which collapses to "N,N,B,N").
+            flag_letters = (("needs_approval", "A"), ("needs_decision", "D"),
+                            ("blocked", "B"), ("needs_review", "R"))
             for r in rows:
-                flags = "".join(k[0].upper() for k in
-                                ("needs_approval", "needs_decision", "blocked", "needs_review")
-                                if r[k])
+                flags = "".join(letter for k, letter in flag_letters if r[k])
                 typer.echo(f"{r['id']}  [{r['phase']}]  {r['title']}  {flags}")
             if not rows:
                 typer.echo("(no work items)")

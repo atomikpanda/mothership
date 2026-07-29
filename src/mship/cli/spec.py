@@ -236,11 +236,20 @@ def register(parent: typer.Typer, get_container):
             output.print(f"[bold]{payload['id']}[/bold] ({payload['status']})")
             if payload["clarification_reason"]:
                 output.print(f"  [bold yellow]Requested changes:[/bold yellow] {payload['clarification_reason']}")
+            # NB: leading `\[` renders a literal bracket — bare `[verdict]`
+            # would be eaten as rich markup and the verdict would vanish.
             for c in payload["acceptance_criteria"]:
-                output.print(f"  [{c['verdict']}] {c['id']}: {c['text']}")
+                output.print(f"  \\[{c['verdict']}] {c['id']}: {c['text']}")
                 for ev in c["evidence"]:
                     note = f" ({ev['note']})" if ev.get("note") else ""
                     output.print(f"      · {ev['kind']}: {ev['ref']}{note}")
+            # Prose-section verdicts (recorded ones only — absent sections don't
+            # gate approval), rendered like the acceptance criteria above so
+            # `spec review` surfaces flagged prose in human mode too.
+            for sid in sorted(payload["prose_verdicts"]):
+                pv = payload["prose_verdicts"][sid]
+                comment = f" — {pv['comment']}" if pv.get("comment") else ""
+                output.print(f"  \\[{pv['verdict']}] prose {sid}{comment}")
             s = payload["summary"]
             output.print(
                 f"  summary: {s['approved']} approved, {s['flagged']} flagged, "
@@ -253,12 +262,17 @@ def register(parent: typer.Typer, get_container):
     @spec_app.command("verdict")
     def verdict(
         spec_id: str = typer.Argument(..., help="Spec id."),
-        criterion_id: str = typer.Argument(..., help="Acceptance criterion id (e.g. ac1)."),
+        criterion_id: str = typer.Argument(
+            ..., metavar="UNIT_ID",
+            help="Acceptance criterion id (e.g. ac1) or prose-section id "
+                 "(problem, user_story, approach, non_goals, risks, scope_risk)."),
         verdict_value: str = typer.Argument(..., metavar="VERDICT", help="unreviewed | approved | flagged."),
     ):
-        """Record a verdict on one acceptance criterion (no status change)."""
+        """Record a verdict on one acceptance criterion or prose section (no status change)."""
         from datetime import datetime, timezone
-        from mship.core.spec_review import set_criterion_verdict
+        from mship.core.spec_review import (
+            PROSE_UNIT_IDS, set_criterion_verdict, set_prose_verdict,
+        )
 
         output = Output()
         store = _spec_store()
@@ -267,8 +281,23 @@ def register(parent: typer.Typer, get_container):
             output.error(f"No spec with id {spec_id!r}.")
             raise typer.Exit(1)
 
+        # Route on the unit id: prose sections (PROSE_UNIT_IDS) get a prose
+        # verdict; anything else goes down the unchanged AC path. An id that is
+        # neither errors listing BOTH vocabularies — the core setters each only
+        # know their own.
+        ac_ids = [c.id for c in spec.acceptance_criteria]
         try:
-            set_criterion_verdict(spec, criterion_id, verdict_value)
+            if criterion_id in PROSE_UNIT_IDS:
+                set_prose_verdict(spec, criterion_id, verdict_value)
+            elif criterion_id in ac_ids:
+                set_criterion_verdict(spec, criterion_id, verdict_value)
+            else:
+                output.error(
+                    f"no acceptance criterion or prose section {criterion_id!r}; "
+                    f"acceptance criteria: {', '.join(ac_ids) or '(none)'}; "
+                    f"prose sections: {', '.join(sorted(PROSE_UNIT_IDS))}"
+                )
+                raise typer.Exit(1)
         except ValueError as e:
             output.error(str(e))
             raise typer.Exit(1)

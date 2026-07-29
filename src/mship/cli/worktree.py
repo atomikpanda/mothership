@@ -651,16 +651,27 @@ def register(app: typer.Typer, get_container):
 
         # --- Recovery-path check ---
         had_unrecoverable = False
+        # Repos NOT positively verified delivered. Feeds the push-only
+        # completion flag below: delivery must be EARNED by observation
+        # (live worktree AND (nothing past base OR merged into base)), never
+        # inferred — so a merely-pushed branch, a missing worktree, and a
+        # failed git comparison all land here (fail-closed). Under --force the
+        # loop doesn't run, so this stays empty — but the flag below is False
+        # under --force anyway.
+        undelivered_repos: list[tuple[str, str]] = []  # (repo, reason)
         if not force:
             from mship.core.base_resolver import resolve_base
-            unrecoverable: list[tuple[str, int, str, str]] = []  # (repo, commits, branch, base)
+            # (repo, commits, branch, base); commits is "?" when the comparison failed
+            unrecoverable: list[tuple[str, int | str, str, str]] = []
             for repo_name in task.affected_repos:
                 wt = task.worktrees.get(repo_name)
-                if wt is None:
+                if wt is None or not Path(wt).exists():
+                    # No worktree to inspect → cannot verify delivery (fail-closed).
+                    # Recovery-wise this repo has always been skipped, so close
+                    # still proceeds as before.
+                    undelivered_repos.append((repo_name, "worktree missing"))
                     continue
                 wt_path = Path(wt)
-                if not wt_path.exists():
-                    continue
                 eff_base = resolve_base(
                     repo_name, config.repos[repo_name],
                     cli_base=None, base_map={}, known_repos=config.repos.keys(),
@@ -668,14 +679,39 @@ def register(app: typer.Typer, get_container):
                 )
                 if eff_base is None:
                     eff_base = "main"  # fall back to main when no base_branch configured
-                commits = pr_mgr.count_commits_ahead(wt_path, eff_base, task.branch)
-                if commits == 0:
+                try:
+                    # None = the comparison itself failed (count_commits_ahead
+                    # can no longer masquerade as 0): the repo must NOT read as
+                    # "nothing past base" — it falls through to the merge/push/
+                    # PR evidence checks like any repo with real work.
+                    commits = pr_mgr.count_commits_ahead(wt_path, eff_base, task.branch)
+                    if commits == 0:
+                        continue  # VERIFIED nothing past base — delivered
+                    # Recovery checks
+                    merged = pr_mgr.check_merged_into_base(wt_path, task.branch, eff_base)
+                    has_pr = repo_name in task.pr_urls
+                    pushed = pr_mgr.check_pushed_to_origin(wt_path, task.branch)
+                except Exception:
+                    # An errored git comparison proves nothing → not delivered
+                    # (fail-closed). Close still proceeds; only advancement is off.
+                    undelivered_repos.append((repo_name, "comparison failed"))
                     continue
-                # Recovery checks
-                merged = pr_mgr.check_merged_into_base(wt_path, task.branch, eff_base)
-                has_pr = repo_name in task.pr_urls
-                pushed = pr_mgr.check_pushed_to_origin(wt_path, task.branch)
                 if merged or has_pr or pushed:
+                    # Recoverable — but merely pushed/PR'd is NOT delivered:
+                    # only merged-into-base proves the work reached the base.
+                    if not merged:
+                        undelivered_repos.append((
+                            repo_name,
+                            "comparison failed" if commits is None
+                            else f"not merged into {eff_base}",
+                        ))
+                    continue
+                if commits is None:
+                    # Comparison failed AND no merge/push/PR evidence: we can't
+                    # prove there is work, but we can't prove there isn't —
+                    # refuse to delete rather than skip the repo as clean.
+                    undelivered_repos.append((repo_name, "comparison failed"))
+                    unrecoverable.append((repo_name, "?", task.branch, eff_base))
                     continue
                 unrecoverable.append((repo_name, commits, task.branch, eff_base))
 
@@ -850,6 +886,47 @@ def register(app: typer.Typer, get_container):
         if bypassed_base_ancestry and "(forced base-ancestry bypass)" not in log_msg:
             log_msg = log_msg + " (forced base-ancestry bypass)"
 
+        # Partial multi-repo delivery guard (push-only route). When some repos
+        # are undelivered AND have real work mid-flight — "not merged into
+        # <base>" / "comparison failed" (a "worktree missing" entry has nothing
+        # to preserve) — unconditional teardown would silently delete the
+        # operator's in-progress merge workspaces. Nothing is LOST (the
+        # recovery gate already guarantees the branches are pushed), but the
+        # close must be an explicit choice. --abandon/--force never reach here
+        # (the route excludes them; both are already explicit destructive
+        # intents).
+        _pushonly_route = (
+            not task.pr_urls and task.finished_at is not None
+            and not abandon and not force
+        )
+        _midflight = [(r, why) for r, why in undelivered_repos
+                      if why != "worktree missing"]
+        if _pushonly_route and _midflight and not yes:
+            if output.is_tty:
+                lines = "\n".join(f"  {r}: {why}" for r, why in _midflight)
+                proceed = typer.confirm(
+                    f"Undelivered repos:\n{lines}\n"
+                    f"Branches are pushed and recoverable, but these worktrees "
+                    f"will be removed and the lifecycle will NOT advance. "
+                    f"Close anyway?",
+                    default=False,
+                )
+                if not proceed:
+                    output.print(
+                        "close aborted — finish the local merge in each repo, "
+                        "then re-run mship close"
+                    )
+                    raise typer.Exit(code=0)
+            else:
+                names = ", ".join(r for r, _ in _midflight)
+                output.error(
+                    f"close refused: undelivered repos mid-delivery: {names}. "
+                    f"Finish the local merge in each repo and re-run mship close, "
+                    f"or pass --yes to close anyway (worktrees removed, "
+                    f"lifecycle not advanced)."
+                )
+                raise typer.Exit(code=1)
+
         if not yes and output.is_tty:
             from InquirerPy import inquirer
             confirm = inquirer.confirm(
@@ -860,7 +937,38 @@ def register(app: typer.Typer, get_container):
                 output.print("Cancelled")
                 raise typer.Exit(code=0)
 
-        # Auto-advance bound spec dispatched→implemented when all PRs merged.
+        # Push-only completion: `finish --push-only` → local merge → `close`.
+        # The task was finished and its branches pushed, but no PRs ever
+        # existed, so merged_count can never say "delivered" — this flag asserts
+        # completion explicitly rather than faking a merge count (the honest
+        # parameter shape the lifecycle helpers take). Matches the
+        # "no PRs (pushed via --push-only)" log route above. Completion is
+        # EARNED, not inferred: every affected repo with a live worktree must be
+        # verified delivered by the recovery-path loop above (commits_ahead == 0
+        # or merged into base) — a merely-pushed branch is recoverable but NOT
+        # delivered, so closing before the local merge advances nothing.
+        # --abandon never qualifies (discarded work stays unadvanced), and
+        # neither does --force: a forced close skips the recovery-path check,
+        # so we can't know the work actually reached anywhere.
+        completed_without_prs = (
+            not task.pr_urls
+            and task.finished_at is not None
+            and not abandon
+            and not force
+            and not undelivered_repos
+        )
+        if (
+            not task.pr_urls and task.finished_at is not None
+            and not abandon and not force and undelivered_repos
+        ):
+            _reasons = "; ".join(f"{r}: {why}" for r, why in undelivered_repos)
+            output.warning(
+                f"closed without verified delivery ({_reasons}); "
+                f"lifecycle not advanced"
+            )
+
+        # Auto-advance bound spec dispatched→implemented when all PRs merged
+        # (or on a push-only completion).
         try:
             from mship.core.spec_store import SPECS_DIRNAME
             from mship.core.spec_lifecycle import advance_spec_on_close
@@ -869,6 +977,7 @@ def register(app: typer.Typer, get_container):
                 specs_dir=Path(container.config_path()).parent / SPECS_DIRNAME,
                 merged_count=merged_count,
                 closed_count=closed_count,
+                completed_without_prs=completed_without_prs,
             )
         except Exception:
             pass
@@ -890,6 +999,7 @@ def register(app: typer.Typer, get_container):
                 state=state,
                 merged_count=merged_count,
                 closed_count=closed_count,
+                completed_without_prs=completed_without_prs,
             )
         except Exception:
             pass
@@ -1420,6 +1530,9 @@ def register(app: typer.Typer, get_container):
                 if not pr_mgr.verify_base_exists(repo_path, eff_base):
                     missing.append((repo_name, eff_base))
                     continue
+                # None (comparison failed) is deliberately NOT "empty": the repo
+                # stays in the push/PR path, where a real failure surfaces loudly
+                # instead of the repo being silently skipped as untouched.
                 if pr_mgr.count_commits_ahead(repo_path, eff_base, task.branch) == 0:
                     empty_branches.append((repo_name, task.branch, eff_base))
 
@@ -1614,7 +1727,9 @@ def register(app: typer.Typer, get_container):
                 # count_commits_ahead(base=branch, branch=branch) counts commits
                 # on the local branch past origin's copy of that branch.
                 n = pr_mgr.count_commits_ahead(wt_path, task.branch, task.branch)
-                if n > 0:
+                # None (comparison failed) makes no claim — this is an advisory
+                # warning, and unknown is not evidence of unpushed commits.
+                if n is not None and n > 0:
                     stale_repos.append((repo_name, n))
             if stale_repos:
                 output.warning("Task has unpushed commits since last finish:")

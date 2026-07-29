@@ -730,3 +730,75 @@ def test_link_issue_missing_item_fails_loud_via_helper(tmp_path):
             link_issue_to_item(store, "wi-nope", "acme/widgets#1", default_slug=None)
     finally:
         _reset()
+
+
+# --- `item list` attention-flag rendering (documented legend: A/D/B/R) ---
+
+def _flags_fixture(tmp_path, *, approval=False, decision=False, blocked=False, review=False):
+    """Create one feature item with the requested attention conditions; return its id."""
+    from mship.core.message_store import MessageStore
+    from mship.core.workitem_store import WorkItemStore
+
+    res = runner.invoke(app, ["item", "new", "Flag rendering", "--kind", "feature"])
+    assert res.exit_code == 0, res.output
+    item_id = res.output.strip()
+    if approval:  # A: linked spec awaiting review
+        SpecStore(tmp_path / "specs").save(Spec(
+            id="s-flags", title="t", status="needs_review",
+            created_at=_NOW, updated_at=_NOW))
+        assert runner.invoke(app, ["item", "link-spec", item_id, "s-flags"]).exit_code == 0
+    if blocked or review:  # B: blocked task; R: task with a live PR
+        sm = StateManager(tmp_path / ".mothership")
+        sm.mutate(lambda s: s.tasks.__setitem__("t-flags", Task(
+            slug="t-flags", description="d", phase="dev", created_at=_NOW,
+            affected_repos=["mothership"], branch="feat/t-flags",
+            blocked_reason="waiting" if blocked else None,
+            blocked_at=_NOW if blocked else None,
+            pr_urls={"mothership": "http://pr"} if review else {})))
+        assert runner.invoke(app, ["item", "link-task", item_id, "t-flags"]).exit_code == 0
+    if decision:  # D: thread with an unanswered agent needs_you message
+        msgs = MessageStore(tmp_path / ".mothership" / "messages")
+        th = msgs.create_thread("subject", "operator opener", now=_NOW)
+        msgs.append(th.id, "agent", "need a decision", now=_NOW, kind="needs_you")
+        WorkItemStore(tmp_path / ".mothership" / "workitems").add_thread(item_id, th.id)
+    return item_id
+
+
+def _human_list_line(item_id):
+    """`item list` in human mode (MSHIP_JSON=0 beats the non-TTY JSON default).
+
+    An earlier in-process `--json` invocation leaves the process-global flag
+    state sticky (flag > env), so clear it first via the reset exported for
+    repeated in-process invocations."""
+    from mship.cli.output import reset_output_settings
+    reset_output_settings()
+    res = runner.invoke(app, ["item", "list"], env={"MSHIP_JSON": "0"})
+    assert res.exit_code == 0, res.output
+    line = next(l for l in res.output.splitlines() if item_id in l)
+    return line
+
+
+def test_item_list_flags_render_documented_legend_all_four(tmp_path):
+    # The legend is A needs-approval, D needs-decision, B blocked, R needs-review —
+    # NOT the first letter of each field name (which renders "NNBN").
+    _isolate(tmp_path)
+    try:
+        item_id = _flags_fixture(tmp_path, approval=True, decision=True,
+                                 blocked=True, review=True)
+        assert _human_list_line(item_id).endswith("ADBR")
+    finally:
+        _reset()
+
+
+def test_item_list_flags_each_single_condition(tmp_path):
+    _isolate(tmp_path)
+    try:
+        for kw, letter in (("approval", "A"), ("decision", "D"),
+                           ("blocked", "B"), ("review", "R")):
+            (tmp_path / kw).mkdir()
+            _isolate(tmp_path / kw)
+            item_id = _flags_fixture(tmp_path / kw, **{kw: True})
+            line = _human_list_line(item_id)
+            assert line.endswith(f"  {letter}"), line
+    finally:
+        _reset()

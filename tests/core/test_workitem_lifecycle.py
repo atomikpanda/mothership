@@ -211,3 +211,34 @@ def test_spec_bound_missing_spec_no_raise(tmp_path):
     _call(tmp_path, t, state)  # no exception
 
     assert store.get(wi.id).phase_override is None
+
+
+# --- push-only completion (completed_without_prs) ------------------------------
+
+def test_completed_without_prs_marks_spec_less_workitem_done(tmp_path):
+    """finish --push-only → close: no PRs (merged_count=0), but the caller vouches
+    for completion — the spec-less item still stamps done."""
+    store, wi = _store_with_item(tmp_path)
+    store.add_task(wi.id, "task-a", now=_now())
+    t = _task("task-a", wi.id)
+    state = WorkspaceState(tasks={"task-a": t})
+
+    workitems_dir, specs_dir = _dirs(tmp_path)
+    advance_workitem_on_close(
+        task=t, workitems_dir=workitems_dir, specs_dir=specs_dir, state=state,
+        merged_count=0, closed_count=0, completed_without_prs=True,
+    )
+
+    assert store.get(wi.id).phase_override == "done"
+
+
+def test_no_completion_flag_and_no_merge_stays_unadvanced(tmp_path):
+    """Default (completed_without_prs=False) with no merged PRs remains a no-op."""
+    store, wi = _store_with_item(tmp_path)
+    store.add_task(wi.id, "task-a", now=_now())
+    t = _task("task-a", wi.id)
+    state = WorkspaceState(tasks={"task-a": t})
+
+    _call(tmp_path, t, state, merged_count=0)
+
+    assert store.get(wi.id).phase_override is None

@@ -15,6 +15,8 @@ description: Use when implementation is complete, all tests pass, and you need t
 
 Run the project's full test suite (`npm test` / `cargo test` / `pytest` / `go test ./...`).
 
+**In a mothership workspace, run `mship test` instead of a bare runner** — it records the result as evidence, so `mship finish`'s evidence gate has something to read. Bare runners are for non-mship repos.
+
 **If tests fail**, report the failures and stop — the menu comes after a green suite:
 
 ```
@@ -85,7 +87,36 @@ is theirs.
 
 ### Option 1: Merge Locally
 
-*In a mothership workspace, run `mship close` after this block. It records the merge in state and cleans up the worktree. Safe to run even after `git branch -d` — `mship close` tolerates an already-deleted branch.*
+*In a mothership workspace, Option 1 is not the normal path — Option 2 (`mship finish` → PR → merge auto-advance) is. When your human partner explicitly chooses local-merge-no-PR, use the sanctioned sequence, IN THIS ORDER: run `mship finish --push-only` FIRST (stamps the task finished, pushes the branches, opens no PR), then merge EVERY affected repo's branch into its base (one merge per repo — the mship block below, not the single-repo block underneath it), then plain `mship close` LAST — close verifies each repo's merge actually reached its base and only then advances the lifecycle exactly like a merged-PR close (bound spec → `implemented`, WorkItem → `done`), recording the task as "no PRs (pushed via --push-only)". A partially-merged close prompts before removing the unmerged repos' worktrees and does not advance; closing before any merge is safe (the pushed branches are recoverable) but advances nothing — close notes the undelivered repos and "lifecycle not advanced". Never route a successful merge through `mship close --abandon`: that records delivered work as cancelled. `--abandon` is strictly for genuinely discarding work.*
+
+*Run this from the workspace root (it reads `mothership.yaml` for per-repo bases). Set TASK to the slug you are closing (`mship status` lists active slugs):*
+
+```bash
+# Mothership: merge every AFFECTED repo's branch into its OWN base, deriving
+# worktree/branch from mship state and each repo's base from mothership.yaml
+# (single-repo tasks = one iteration). Base precedence matches mship's own
+# resolver: task base_override (stacked --base) > repo base_branch > task default.
+TASK=<your-task-slug>
+BASE_OVERRIDE=$(mship status --task "$TASK" | jq -r '.resolved_task.base_override // ""')
+TASK_BASE=$(mship status --task "$TASK" | jq -r '.resolved_task.base_branch // "main"')
+BRANCH=$(mship status --task "$TASK" | jq -r .resolved_task.branch)
+mship status --task "$TASK" | jq -r '.resolved_task as $t | $t.affected_repos[] | select($t.worktrees[.] != null) | "\(.)\t\($t.worktrees[.])"' | while IFS=$'\t' read -r repo wt; do
+  # Values ride argv — never interpolated into the python source.
+  base=$(python3 -c 'import sys, yaml
+c = yaml.safe_load(open("mothership.yaml")) or {}
+override, repo, fallback = sys.argv[1], sys.argv[2], sys.argv[3]
+print(override or ((c.get("repos") or {}).get(repo) or {}).get("base_branch") or fallback)' "$BASE_OVERRIDE" "$repo" "$TASK_BASE")
+  main=$(git -C "$(git -C "$wt" rev-parse --git-common-dir)/.." rev-parse --show-toplevel)
+  git -C "$main" checkout "$base" && git -C "$main" pull && git -C "$main" merge "$BRANCH" \
+    || { echo "merge failed in $repo — resolve it (or git merge --abort), then re-run" >&2; exit 1; }
+done
+
+# Verify tests on the merged result (mship test — see Step 1), then `mship close`.
+```
+
+*The loop stops at the first failure so you never continue past a conflicted checkout; already-merged repos are fine to re-run (merge is idempotent once delivered, and close verifies per-repo). A stacked task's `--base` (recorded as `base_override`) overrides per-repo config for every repo — it was pinned deliberately. The loop is driven by `affected_repos`, not the worktrees map: passive worktrees are context checkouts (detached dependency repos) and are deliberately not merged.*
+
+*Outside a mothership workspace, merge the single current repo:*
 
 ```bash
 # Get main repo root for CWD safety
@@ -126,8 +157,8 @@ cat > /tmp/pr-body.md <<'EOF'
 - [ ] <verification steps>
 EOF
 
-# Pushes the branch, opens the PR, stamps state
-mship finish --body-file /tmp/pr-body.md
+# Pushes the branch, opens the PR, stamps state; blocks without passing test evidence
+mship finish --require-tests --body-file /tmp/pr-body.md
 ```
 
 **Post-finish iteration (reviewer feedback, CI fixes, typos):** don't
@@ -200,8 +231,9 @@ and use the `GIT_DIR`/`GIT_COMMON`/`WORKTREE_PATH` values captured in
 Step 2, from before that directory change.
 
 **In a mothership workspace, `mship close` owns cleanup — no manual
-`git worktree remove`.** After a local merge (Option 1) or a confirmed
-discard, run `mship close` / `mship close --abandon` as described above.
+`git worktree remove`.** After a local merge (Option 1, preceded by
+`mship finish --push-only` as described above), run plain `mship close`;
+after a confirmed discard, `mship close --abandon`.
 After a PR merges (Option 2), you usually run nothing at all: when
 `mship serve` is running, its watcher **auto-advances** the bound spec
 (`dispatched → implemented`) and its WorkItem (→ `done`, clearing
