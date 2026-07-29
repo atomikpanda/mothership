@@ -118,6 +118,7 @@ def build_emitted_prompt(
     agents_md_path: Path | None = None,
     pkg_skills_source: Path | None = None,
     state=None,
+    docs_dir: str = "docs",
 ) -> tuple[str, list]:
     """Return (prompt, warnings) — the full dispatch prompt derived live.
 
@@ -135,6 +136,13 @@ def build_emitted_prompt(
 
     `spec` supplies live acceptance text for the record's AC ids. An unknown
     AC id, or acs with spec=None, appends a string warning (never an error).
+
+    - docs_dir: workspace docs directory, used only to locate the product
+      assumptions store (see below). Default "docs".
+
+    Plan-phase tasks (`task.phase == "plan"`) get the product assumptions
+    table auto-appended (auto-seeded if absent) so the planner receives the
+    rows to disposition without a separate fetch. Other phases are unaffected.
     """
     instruction, ac_ids, warnings = resolve_instruction_and_acs(rec, workspace_root)
     acceptance, ac_warnings = resolve_acceptance(ac_ids, spec)
@@ -158,4 +166,15 @@ def build_emitted_prompt(
         model=rec.model,
         acceptance=acceptance,
     )
+
+    resolved_task = task if task is not None else _minimal_task(rec)
+    if resolved_task.phase == "plan":
+        from mship.core.assumptions import AssumptionStore, resolve_mode
+
+        store = AssumptionStore(
+            workspace_root, docs_dir=docs_dir, mode=resolve_mode(workspace_root)
+        )
+        store.seed()
+        prompt += "\n\n## Assumptions to disposition\n" + store.render()
+
     return prompt, warnings

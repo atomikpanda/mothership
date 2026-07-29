@@ -193,6 +193,7 @@ def register(app: typer.Typer, get_container):
                 return
             journal_entries, agents_md_path = _journal_and_agents(container, task_obj.slug)
             base_sha_info = _d.collect_base_sha_info(Path(rec.worktree), rec.base_branch)
+            docs_dir = getattr(container.config(), "docs_dir", "docs")
             try:
                 prompt, warnings = build_emitted_prompt(
                     rec,
@@ -205,6 +206,7 @@ def register(app: typer.Typer, get_container):
                     agents_md_path=agents_md_path,
                     pkg_skills_source=pkg_skills_source(),
                     state=state,
+                    docs_dir=docs_dir,
                 )
             except (OSError, ValueError) as e:
                 output.error(f"cannot derive the prompt from the record: {e}")
