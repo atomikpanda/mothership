@@ -7,6 +7,7 @@ from mship.core.plan import (
     SEED_AXES,
     discover_plan_path,
     dispositioned_axes,
+    missing_assumption_axes,
     plan_has_tasks,
     resolve_plan_path,
 )
@@ -90,3 +91,28 @@ def test_dispositioned_axes_normalizes_case_and_whitespace():
 def test_seed_axes_has_seven_including_repo_topology():
     assert len(SEED_AXES) == 7
     assert "repo topology" in SEED_AXES
+
+
+_FULL_BLOCK = "## Assumptions checked\n" + "".join(
+    f"- {a} — disposition line\n" for a in SEED_AXES
+)
+
+
+def test_missing_none_when_all_dispositioned():
+    assert missing_assumption_axes(_FULL_BLOCK, SEED_AXES) == []
+
+
+def test_missing_lists_omitted_axis_in_expected_order():
+    partial = "## Assumptions checked\n- repo topology — meta\n- execution locus — cloud\n"
+    missing = missing_assumption_axes(partial, SEED_AXES)
+    assert "credential locus" in missing
+    assert missing == [a for a in SEED_AXES if a not in {"repo topology", "execution locus"}]
+
+
+def test_na_disposition_counts_as_covered():
+    block = "## Assumptions checked\n" + "".join(f"- {a} — N/A\n" for a in SEED_AXES)
+    assert missing_assumption_axes(block, SEED_AXES) == []
+
+
+def test_no_block_reports_all_expected_missing():
+    assert missing_assumption_axes("## Approach\nx\n", SEED_AXES) == list(SEED_AXES)

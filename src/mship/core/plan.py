@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Iterable
 
 # Keep in sync with dispatch._TASK_OPEN_RE
 _TASK_ANCHOR_RE = re.compile(r"<!--\s*mship:task\s+id=([^\s>]+)(?:\s+[a-z_]+=[^\s>]+)*\s*-->")
@@ -50,6 +51,17 @@ def dispositioned_axes(plan_text: str) -> set[str]:
     next_heading = re.search(r"^#{1,6}\s+\S", rest, re.MULTILINE)
     block = rest[: next_heading.start()] if next_heading else rest
     return {_normalize_axis(row.group("axis")) for row in _ASSUMPTION_ROW_RE.finditer(block)}
+
+
+def missing_assumption_axes(plan_text: str, expected_axes: Iterable[str]) -> list[str]:
+    """Expected assumption axes the plan does NOT disposition, in expected order.
+
+    N/A counts as dispositioned (an explicit N/A IS a disposition — that is the
+    HAZOP discipline). Empty list ⇒ well-formed. `expected_axes` is injected so
+    the live source (Wave 1: SEED_AXES; Wave 2: the L1 store) is the caller's
+    choice, not baked in here."""
+    covered = dispositioned_axes(plan_text)
+    return [a for a in (_normalize_axis(x) for x in expected_axes) if a not in covered]
 
 
 def _plan_stem_matches_slug(stem: str, task_slug: str) -> bool:
