@@ -14,6 +14,43 @@ from pathlib import Path
 # Keep in sync with dispatch._TASK_OPEN_RE
 _TASK_ANCHOR_RE = re.compile(r"<!--\s*mship:task\s+id=([^\s>]+)(?:\s+[a-z_]+=[^\s>]+)*\s*-->")
 
+# The 7 seed assumptions (issue #444). Canonical lowercase axis names.
+# SINGLE SOURCE for Wave 1; Wave 2's L1 store supersedes this constant.
+SEED_AXES: tuple[str, ...] = (
+    "repo topology",
+    "credential locus",
+    "execution locus",
+    "state durability",
+    "review surface",
+    "agent stream",
+    "dispatched model",
+)
+
+# "## Assumptions checked" (any case), then consecutive "- <axis> <sep> <disposition>"
+# bullet lines. Separator is an em-dash or one/two hyphens. Axis = text before the
+# first separator, normalized (lowercased, internal whitespace collapsed).
+_ASSUMPTIONS_HEADING_RE = re.compile(r"^#{1,6}\s+assumptions\s+checked\s*$", re.IGNORECASE | re.MULTILINE)
+_ASSUMPTION_ROW_RE = re.compile(r"^\s*[-*]\s+(?P<axis>.+?)\s*(?:—|--|-)\s+\S", re.MULTILINE)
+
+
+def _normalize_axis(raw: str) -> str:
+    return " ".join(raw.strip().lower().split())
+
+
+def dispositioned_axes(plan_text: str) -> set[str]:
+    """Axis names dispositioned in the plan's 'Assumptions checked' block.
+
+    Returns the normalized axis name of each bullet row under the first
+    '## Assumptions checked' heading, up to the next heading. Empty set when
+    there is no such block (an unchecked plan)."""
+    m = _ASSUMPTIONS_HEADING_RE.search(plan_text)
+    if m is None:
+        return set()
+    rest = plan_text[m.end():]
+    next_heading = re.search(r"^#{1,6}\s+\S", rest, re.MULTILINE)
+    block = rest[: next_heading.start()] if next_heading else rest
+    return {_normalize_axis(row.group("axis")) for row in _ASSUMPTION_ROW_RE.finditer(block)}
+
 
 def _plan_stem_matches_slug(stem: str, task_slug: str) -> bool:
     """Precise match, not substring: either the stem IS the slug, or it's the

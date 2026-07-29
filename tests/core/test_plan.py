@@ -3,7 +3,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from mship.core.plan import discover_plan_path, plan_has_tasks, resolve_plan_path
+from mship.core.plan import (
+    SEED_AXES,
+    discover_plan_path,
+    dispositioned_axes,
+    plan_has_tasks,
+    resolve_plan_path,
+)
 
 _PLAN = "# Plan\n\n<!-- mship:task id=1 -->\n### Task 1\n<!-- /mship:task -->\n"
 
@@ -59,3 +65,28 @@ def test_resolve_plan_path_rejects_dotdot_traversal(tmp_path):
 
 def test_plan_has_tasks_with_attributes():
     assert plan_has_tasks("<!-- mship:" "task id=1 acs=ac1 -->\nx\n<!-- /mship:" "task -->")
+
+
+def test_dispositioned_axes_parses_block_with_em_dash_and_hyphen():
+    plan = (
+        "## Assumptions checked\n"
+        "- repo topology — metarepo; covers clone across N repos\n"
+        "- credential locus - N/A, no credential handling\n"
+        "- execution locus -- cloud worker\n\n"
+        "## Approach\nsomething\n"
+    )
+    assert dispositioned_axes(plan) == {"repo topology", "credential locus", "execution locus"}
+
+
+def test_dispositioned_axes_no_block_returns_empty():
+    assert dispositioned_axes("## Approach\nno assumptions block here\n") == set()
+
+
+def test_dispositioned_axes_normalizes_case_and_whitespace():
+    plan = "## Assumptions Checked\n- Repo   Topology — meta\n"
+    assert dispositioned_axes(plan) == {"repo topology"}
+
+
+def test_seed_axes_has_seven_including_repo_topology():
+    assert len(SEED_AXES) == 7
+    assert "repo topology" in SEED_AXES
