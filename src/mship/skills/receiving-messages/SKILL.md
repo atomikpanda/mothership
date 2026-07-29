@@ -15,16 +15,24 @@ mechanisms surface them to a live agent (one serve + one agent per workspace):
 ## The idle arm/re-arm loop
 
 1. When you finish your work and would otherwise go idle, run **in the
-   background**: `mship inbox wait --timeout 50` (like backgrounding a test run).
-   It blocks until a new *human* message arrives (or it times out), then returns
-   JSON `{threads, cursor, timed_out}` and your harness re-invokes you.
+   background**: `mship inbox wait --timeout 1800` (like backgrounding a test
+   run). It blocks until a new *human* message arrives (or it times out), then
+   returns JSON `{threads, cursor, timed_out}` and your harness re-invokes you.
+   The timeout is a **long-poll cap, not a poll interval** — a message wakes you
+   the instant it lands, regardless of the value — so keep it long (minutes, not
+   seconds) to avoid a stream of no-op re-arm wake-ups while idle. It is NOT a
+   liveness safeguard: if the background poll *crashes or exits*, your harness
+   already fires a completion notification and you re-arm. The timeout only
+   bounds the rare case of a poll that stays alive but wedged (e.g. a hung
+   connection that never returns and never exits); a large value handles that
+   cheaply.
 2. On wake with `threads`, answer each and clear it:
    `mship reply <thread-id> "<your answer>"`. If the pending line isn't enough
    context, read the whole conversation first with `mship messages <thread-id>`.
-3. **Re-arm** with the returned cursor: `mship inbox wait --since <cursor> --timeout 50`.
+3. **Re-arm** with the returned cursor: `mship inbox wait --since <cursor> --timeout 1800`.
    The `--since` cursor means you never re-wake for a message you already handled
    (or for your own reply).
-4. On `timed_out: true`, just re-arm again.
+4. On `timed_out: true`, just re-arm again (rare with a long timeout).
 5. If the result has `"skipped_duplicate_listener": true` (with a `holder_pid`),
    **another agent in this workspace already holds the inbox lease — do NOT
    re-arm.** Stand down; that other session is the listener. (One agent per
