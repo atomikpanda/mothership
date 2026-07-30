@@ -99,6 +99,48 @@ def test_journal(tmp_path):
     assert client.get("/journal/nope").status_code == 404
 
 
+def _write_plan(tmp_path: Path, name: str, body: str) -> Path:
+    plans = tmp_path / "docs" / "plans"
+    plans.mkdir(parents=True, exist_ok=True)
+    path = plans / name
+    path.write_text(body)
+    return path
+
+
+def test_get_plan_assumptions_pending_flag(tmp_path):
+    from mship.core.plan_check import Flag, PlanCheckResult, PlanCheckStore, plan_hash
+
+    sm, log = _seed_task(tmp_path)
+    plan_path = _write_plan(tmp_path, "2026-07-30-dq.md", "# Plan\n\nSome body.\n")
+    PlanCheckStore(tmp_path / ".mothership").save(PlanCheckResult(
+        task_slug="dq",
+        plan_hash=plan_hash(plan_path.read_text()),
+        verdicts=[],
+        flags=[Flag(axis="repo topology", source="checker", reason="not addressed")],
+    ))
+
+    client = TestClient(_app_with(tmp_path, sm, log))
+    body = client.get("/plan-assumptions/dq").json()
+    assert body == {
+        "task": "dq",
+        "fresh": True,
+        "pending": 1,
+        "flags": [{
+            "axis": "repo topology", "source": "checker", "reason": "not addressed",
+            "approved": False, "approved_by": None, "approved_reason": None,
+        }],
+    }
+
+
+def test_get_plan_assumptions_absent_result(tmp_path):
+    sm, log = _seed_task(tmp_path)
+    client = TestClient(_app_with(tmp_path, sm, log))
+    assert client.get("/plan-assumptions/dq").json() == {
+        "task": "dq", "fresh": False, "pending": 0, "flags": [],
+    }
+    assert client.get("/plan-assumptions/nope").status_code == 404
+
+
 def test_post_is_405(tmp_path):
     # No write routes registered → POST to a GET path is 405 (Method Not Allowed).
     r = TestClient(_app(tmp_path)).post("/specs/dq/review")
