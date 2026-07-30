@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import re
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -53,13 +55,33 @@ class PlanCheckResult(BaseModel):
     flags: list[Flag]
 
 
-def flags_from_verdicts(verdicts: list[AxisVerdict]) -> list[Flag]:
-    """One `source="checker"` flag per `not-covered` verdict; `covered`/`n-a` produce none."""
-    return [
-        Flag(axis=v.axis, source="checker", reason=v.reason)
-        for v in verdicts
-        if v.verdict == "not-covered"
-    ]
+def flags_from_verdicts(verdicts: list[AxisVerdict], rows: list["AssumptionRow"]) -> list[Flag]:
+    """One `source="checker"` pending flag per CANONICAL row the checker did not
+    dispose of as covered/n-a — driven by `rows`, NOT by the verdict array, so the
+    gate enforces completeness:
+
+    - a `not-covered` verdict → pending flag (reason = the checker's line);
+    - NO verdict for the row (the checker's JSON omitted it) → pending flag. An
+      omitted row must never silently pass the plan→dev gate — that is exactly the
+      "disposition every assumption" invariant this system exists to hold (#444);
+    - `covered`/`n-a` → no checker flag (a triggered `n-a` is still caught by
+      `cross_check`).
+
+    Verdicts whose axis is NOT a current row are IGNORED — an invented or
+    misspelled axis must not manufacture a phantom flag the operator then has to
+    approve for a row that does not exist."""
+    verdict_by_axis = {_normalize_axis(v.axis): v for v in verdicts}
+    flags: list[Flag] = []
+    for row in rows:
+        v = verdict_by_axis.get(_normalize_axis(row.axis))
+        if v is None:
+            flags.append(
+                Flag(axis=row.axis, source="checker",
+                     reason="checker returned no verdict for this row")
+            )
+        elif v.verdict == "not-covered":
+            flags.append(Flag(axis=row.axis, source="checker", reason=v.reason))
+    return flags
 
 
 def _triggers_match(triggers: str, plan_text: str, task_text: str, affected_repos: list[str]) -> bool:
@@ -100,9 +122,12 @@ def cross_check(
 ) -> list[Flag]:
     """Deterministic (no LLM) trigger cross-check: for each assumption row whose
     `triggers` match the plan/task context, the plan must have addressed that axis
-    as `covered` or `not-covered`. A matching `n-a` verdict, or no verdict at all,
-    is a contradiction between the declared position and the plan's own triggers —
-    surfaced as a `source="cross-check"` flag. Only adds flags; never removes the
+    as `covered` or `not-covered`. A matching `n-a` verdict is a contradiction
+    between the declared position and the plan's own triggers — surfaced as a
+    `source="cross-check"` flag. A row with no verdict at all is NOT handled here:
+    `flags_from_verdicts` already raises a completeness flag for every
+    un-dispositioned row (triggered or not), so flagging it again here would force
+    the operator to approve the same row twice. Only adds flags; never removes the
     checker's own `not-covered` flags."""
     verdict_by_axis = {_normalize_axis(v.axis): v for v in verdicts}
     flags: list[Flag] = []
@@ -110,18 +135,7 @@ def cross_check(
         if not _triggers_match(row.triggers, plan_text, task_text, affected_repos):
             continue
         verdict = verdict_by_axis.get(_normalize_axis(row.axis))
-        if verdict is None:
-            flags.append(
-                Flag(
-                    axis=row.axis,
-                    source="cross-check",
-                    reason=(
-                        f"triggers for '{row.axis}' match this plan/task, but the plan "
-                        "has no verdict for this axis"
-                    ),
-                )
-            )
-        elif verdict.verdict == "n-a":
+        if verdict is not None and verdict.verdict == "n-a":
             flags.append(
                 Flag(
                     axis=row.axis,
@@ -143,7 +157,37 @@ class PlanCheckStore:
         self._dir = Path(state_dir) / "plan-checks"
 
     def path(self, task_slug: str) -> Path:
+        # Validate the slug the same way WorkItemStore._path does — a task_slug is
+        # always a state-validated key upstream, but a per-id file store must not
+        # let a stray separator/`..` escape the plan-checks dir at the boundary.
+        if (not task_slug or "/" in task_slug or "\\" in task_slug
+                or task_slug in (".", "..") or task_slug.startswith(".")):
+            raise ValueError(f"unsafe task slug: {task_slug!r}")
         return self._dir / f"{task_slug}.json"
+
+    def _lock_path(self, task_slug: str) -> Path:
+        """Per-task lock file (`<slug>.json.lock`). Reuses `path`'s slug
+        validation; not matched by any `*.json` read glob."""
+        p = self.path(task_slug)
+        return p.with_name(p.name + ".lock")
+
+    @contextmanager
+    def transaction(self, task_slug: str):
+        """Exclusive per-task advisory lock spanning a read-modify-write (mirrors
+        WorkItemStore._locked). `result` and `approve` both get→mutate→save the
+        same task record; without a lock spanning the whole transaction, an
+        approval overlapping a checker refresh (or two approvals) can silently
+        clobber each other's write. Per-task granularity lets different tasks
+        proceed in parallel."""
+        self._dir.mkdir(parents=True, exist_ok=True)
+        lock_path = self._lock_path(task_slug)
+        lock_path.touch(exist_ok=True)
+        with open(lock_path, "r+") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
 
     def save(self, result: PlanCheckResult) -> Path:
         self._dir.mkdir(parents=True, exist_ok=True)

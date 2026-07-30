@@ -172,6 +172,31 @@ modes aren't fetchable by GitHub, so the PR names the artifact instead of
 showing it. Embedding therefore means the screenshots are readable by anyone
 who can read the repo the pull request targets.
 
+## Product assumptions (`assumption_storage`, `assumption_gate`)
+
+The product-assumptions system (#444) makes agents explicitly disposition the
+assumptions a plan is built on. Two workspace-level fields govern it:
+
+`assumption_storage` — where this workspace's L1 assumptions doc
+(`docs/product_assumptions.md`) lives, mirroring `spec_storage`'s modes:
+`committed` (default, plaintext + pushed), `local` (plaintext but git-ignored),
+or `encrypted` (Fernet ciphertext, unreadable without `.mothership/spec-key`).
+Applied transparently by `core/assumptions.py`; an invalid value fails loud at
+config load.
+
+`assumption_gate` — the L4 plan→dev gate. `off` (default) enforces nothing:
+merging the feature does not change existing behaviour, so the gate rolls out
+dark. `enforce` additionally requires a **fresh, fully-approved**
+`PlanCheckResult` before a feature WorkItem may transition `plan → dev` — every
+assumption the checker flagged as not-covered (or left un-dispositioned) must
+carry an explicit `mship plan assumptions approve <axis>` sign-off. Freshness is
+plan-hash bound, so editing the plan after a check re-arms the gate.
+
+```yaml
+assumption_storage: committed   # committed | local | encrypted
+assumption_gate: off            # off | enforce
+```
+
 ## Workspace-level fields
 
 Top-level keys on `mothership.yaml` (alongside `workspace`, `env_runner`, `branch_pattern`, `audit`, and `repos`, all covered above):

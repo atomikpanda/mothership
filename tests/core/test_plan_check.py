@@ -22,23 +22,51 @@ def test_plan_hash_changes_on_content_edit():
     assert plan_hash(a) != plan_hash(b)
 
 
+def _row(axis: str, triggers: str = "") -> AssumptionRow:
+    return AssumptionRow(axis=axis, options="a / b", position="**a**", triggers=triggers)
+
+
 def test_flags_from_verdicts_only_not_covered():
+    rows = [_row("rollback"), _row("security"), _row("perf")]
     verdicts = [
         AxisVerdict(axis="rollback", verdict="covered", reason="handled in step 3"),
         AxisVerdict(axis="security", verdict="not-covered", reason="no auth check"),
         AxisVerdict(axis="perf", verdict="n-a", reason="no hot path"),
     ]
-    flags = flags_from_verdicts(verdicts)
+    flags = flags_from_verdicts(verdicts, rows)
     assert len(flags) == 1
     assert flags[0] == Flag(axis="security", source="checker", reason="no auth check")
 
 
 def test_flags_from_verdicts_none_when_all_covered_or_na():
+    rows = [_row("rollback"), _row("perf")]
     verdicts = [
         AxisVerdict(axis="rollback", verdict="covered", reason="ok"),
         AxisVerdict(axis="perf", verdict="n-a", reason="n/a"),
     ]
-    assert flags_from_verdicts(verdicts) == []
+    assert flags_from_verdicts(verdicts, rows) == []
+
+
+def test_flags_from_verdicts_missing_row_is_flagged():
+    """A canonical row the checker OMITS a verdict for must still flag — an
+    un-dispositioned row can't silently pass the gate (Greptile #451)."""
+    rows = [_row("rollback"), _row("security")]
+    verdicts = [AxisVerdict(axis="rollback", verdict="covered", reason="ok")]
+    flags = flags_from_verdicts(verdicts, rows)
+    assert len(flags) == 1
+    assert flags[0].axis == "security"
+    assert flags[0].source == "checker"
+
+
+def test_flags_from_verdicts_ignores_unknown_axis():
+    """A verdict for an axis that is NOT a current row (invented/misspelled) must
+    NOT create a phantom flag the operator has to approve (Greptile #451)."""
+    rows = [_row("rollback")]
+    verdicts = [
+        AxisVerdict(axis="rollback", verdict="covered", reason="ok"),
+        AxisVerdict(axis="totally-made-up", verdict="not-covered", reason="phantom"),
+    ]
+    assert flags_from_verdicts(verdicts, rows) == []
 
 
 def test_plan_check_store_roundtrip(tmp_path):
@@ -113,14 +141,19 @@ def test_cross_check_no_flag_when_triggered_and_not_covered():
     assert flags == []
 
 
-def test_cross_check_flags_triggered_axis_with_no_verdict_at_all():
+def test_cross_check_no_longer_flags_missing_verdict():
+    """A row with no verdict is a COMPLETENESS failure owned by
+    flags_from_verdicts (which flags every un-dispositioned row, triggered or
+    not). cross_check must NOT also flag it, or a triggered+missing row would be
+    flagged twice and the operator would have to approve the same row twice
+    (Greptile #451)."""
     rows = [_repo_topology_row()]
     flags = cross_check(
         [], rows, plan_text="we'll add a git/clone step", task_text="", affected_repos=[]
     )
-    assert len(flags) == 1
-    assert flags[0].axis == "repo topology"
-    assert flags[0].source == "cross-check"
+    assert flags == []
+    # The completeness net still catches it:
+    assert len(flags_from_verdicts([], rows)) == 1
 
 
 def test_cross_check_prefix_token_matches_by_prefix_not_substring():
@@ -173,7 +206,7 @@ def test_cross_check_never_removes_checker_flags():
     is additive at the caller."""
     rows = [_repo_topology_row()]
     verdicts = [AxisVerdict(axis="repo topology", verdict="not-covered", reason="missing")]
-    checker_flags = flags_from_verdicts(verdicts)
+    checker_flags = flags_from_verdicts(verdicts, rows)
     cc_flags = cross_check(
         verdicts, rows, plan_text="we'll add a git/clone step", task_text="", affected_repos=[]
     )

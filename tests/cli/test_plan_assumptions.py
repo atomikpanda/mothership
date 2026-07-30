@@ -236,6 +236,7 @@ def test_status_reports_fresh_false_when_plan_changed_after_check(tmp_path):
 
 
 def test_approve_clears_exactly_one_pending_flag_and_drops_pending_count(tmp_path):
+    from mship.core.assumptions import SEED_ROWS
     from mship.core.plan_check import PlanCheckStore
 
     AssumptionStore = __import__("mship.core.assumptions", fromlist=["AssumptionStore"]).AssumptionStore
@@ -243,10 +244,18 @@ def test_approve_clears_exactly_one_pending_flag_and_drops_pending_count(tmp_pat
 
     plan_path = _write_plan(tmp_path, "2026-07-30-t1.md", "# Plan\n\nNo mention of anything special here.\n")
 
+    # A COMPLETE verdict set (every seed row) so only repo topology is pending —
+    # an omitted row now flags too (completeness gate), so partial verdicts would
+    # leave more than one pending flag.
+    verdicts = [
+        {"axis": row.axis, "verdict": "covered", "reason": "ok"}
+        for row in SEED_ROWS if row.axis != "repo topology"
+    ]
+    verdicts.append(
+        {"axis": "repo topology", "verdict": "not-covered", "reason": "plan never says how repos are handled"}
+    )
     verdicts_file = tmp_path / "verdicts.json"
-    verdicts_file.write_text(json.dumps([
-        {"axis": "repo topology", "verdict": "not-covered", "reason": "plan never says how repos are handled"},
-    ]))
+    verdicts_file.write_text(json.dumps(verdicts))
 
     runner = CliRunner()
     app = _app(tmp_path, task=_task())

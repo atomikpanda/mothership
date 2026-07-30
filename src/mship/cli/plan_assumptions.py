@@ -180,7 +180,7 @@ def register(plan_app: typer.Typer, get_container):
         plan_text = plan_path.read_text()
         request_text = _request_text(workspace_root, task_obj)
 
-        flags = flags_from_verdicts(verdicts) + cross_check(
+        flags = flags_from_verdicts(verdicts, rows) + cross_check(
             verdicts, rows,
             plan_text=plan_text,
             task_text=request_text,
@@ -193,31 +193,34 @@ def register(plan_app: typer.Typer, get_container):
         # wipe sign-offs. A CHANGED plan (different hash) correctly drops them —
         # an approval against the old plan mustn't survive an edit (Wave 3a review).
         pcstore = PlanCheckStore(workspace_root / ".mothership")
-        prior = pcstore.get(task_obj.slug)
-        if prior is not None and prior.plan_hash == new_hash:
-            # Key on (axis, source) only — NOT the checker's free-text reason.
-            # (axis, source) is unique per check run (one checker flag per axis,
-            # one cross-check flag per axis), and the human signed off on "this
-            # axis, for this plan version" — the plan_hash already pins the
-            # version. Including the LLM-paraphrased reason would silently drop a
-            # real sign-off when the checker re-runs and re-words the same gap.
-            approved = {
-                (f.axis, f.source): f for f in prior.flags if f.approved
-            }
-            for f in flags:
-                keep = approved.get((f.axis, f.source))
-                if keep is not None:
-                    f.approved = True
-                    f.approved_by = keep.approved_by
-                    f.approved_reason = keep.approved_reason
+        # Lock spans read-prior → merge approvals → save so a concurrent approve
+        # (or a second result) can't clobber this write (Greptile #451).
+        with pcstore.transaction(task_obj.slug):
+            prior = pcstore.get(task_obj.slug)
+            if prior is not None and prior.plan_hash == new_hash:
+                # Key on (axis, source) only — NOT the checker's free-text reason.
+                # (axis, source) is unique per check run (one checker flag per axis,
+                # one cross-check flag per axis), and the human signed off on "this
+                # axis, for this plan version" — the plan_hash already pins the
+                # version. Including the LLM-paraphrased reason would silently drop a
+                # real sign-off when the checker re-runs and re-words the same gap.
+                approved = {
+                    (f.axis, f.source): f for f in prior.flags if f.approved
+                }
+                for f in flags:
+                    keep = approved.get((f.axis, f.source))
+                    if keep is not None:
+                        f.approved = True
+                        f.approved_by = keep.approved_by
+                        f.approved_reason = keep.approved_reason
 
-        check_result = PlanCheckResult(
-            task_slug=task_obj.slug,
-            plan_hash=new_hash,
-            verdicts=verdicts,
-            flags=flags,
-        )
-        pcstore.save(check_result)
+            check_result = PlanCheckResult(
+                task_slug=task_obj.slug,
+                plan_hash=new_hash,
+                verdicts=verdicts,
+                flags=flags,
+            )
+            pcstore.save(check_result)
 
         pending = sum(1 for f in flags if not f.approved)
 
@@ -297,24 +300,27 @@ def register(plan_app: typer.Typer, get_container):
         )
 
         store = PlanCheckStore(workspace_root / ".mothership")
-        stored = store.get(task_obj.slug)
-        if stored is None:
-            output.error(f"No stored plan-check for {task_obj.slug}.")
-            raise typer.Exit(1)
+        # Lock spans get → mutate → save so a concurrent approve/result can't
+        # overwrite this sign-off (Greptile #451).
+        with store.transaction(task_obj.slug):
+            stored = store.get(task_obj.slug)
+            if stored is None:
+                output.error(f"No stored plan-check for {task_obj.slug}.")
+                raise typer.Exit(1)
 
-        target_axis = _normalize_axis(axis)
-        match = next(
-            (f for f in stored.flags if not f.approved and _normalize_axis(f.axis) == target_axis),
-            None,
-        )
-        if match is None:
-            output.error(f"No pending flag for axis {axis!r} on {task_obj.slug}.")
-            raise typer.Exit(1)
+            target_axis = _normalize_axis(axis)
+            match = next(
+                (f for f in stored.flags if not f.approved and _normalize_axis(f.axis) == target_axis),
+                None,
+            )
+            if match is None:
+                output.error(f"No pending flag for axis {axis!r} on {task_obj.slug}.")
+                raise typer.Exit(1)
 
-        match.approved = True
-        match.approved_reason = reason
-        match.approved_by = os.environ.get("USER") or "unknown"
-        store.save(stored)
+            match.approved = True
+            match.approved_reason = reason
+            match.approved_by = os.environ.get("USER") or "unknown"
+            store.save(stored)
 
         pending = sum(1 for f in stored.flags if not f.approved)
 
