@@ -168,14 +168,29 @@ def build_emitted_prompt(
     )
 
     resolved_task = task if task is not None else _minimal_task(rec)
-    if resolved_task.phase == "plan":
-        from mship.core.assumptions import AssumptionStore, resolve_mode
-
-        store = AssumptionStore(
-            workspace_root, docs_dir=docs_dir, mode=resolve_mode(workspace_root)
-        )
-        store.seed()
-        # render() already carries the "## Assumptions to disposition" header.
-        prompt += "\n\n" + store.render()
+    prompt = append_plan_assumptions(prompt, resolved_task, workspace_root, docs_dir)
 
     return prompt, warnings
+
+
+def append_plan_assumptions(
+    prompt: str, task, workspace_root: Path, docs_dir: str = "docs"
+) -> str:
+    """Append the rendered product-assumptions table to a PLAN-phase task's
+    prompt (deterministic L2 injection); no-op for other phases.
+
+    Shared by `build_emitted_prompt` (`--emit`) AND the `--full` inline dispatch
+    path (`cli/dispatch.py`) so EVERY plan-dispatch route injects — otherwise a
+    `--full` dispatch silently omits the assumptions (Greptile #450). May raise
+    for an encrypted store without a key / a malformed store; callers surface it
+    cleanly (they catch OSError/ValueError/key errors)."""
+    if task.phase != "plan":
+        return prompt
+    from mship.core.assumptions import AssumptionStore, resolve_mode
+
+    store = AssumptionStore(
+        workspace_root, docs_dir=docs_dir, mode=resolve_mode(workspace_root)
+    )
+    store.seed()
+    # render() already carries the "## Assumptions to disposition" header.
+    return prompt + "\n\n" + store.render()

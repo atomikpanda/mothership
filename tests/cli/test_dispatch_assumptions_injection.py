@@ -99,3 +99,29 @@ def test_emit_plan_phase_encrypted_store_missing_key_errors_cleanly(tmp_path: Pa
         assert "cannot derive the prompt" in result.output
     finally:
         _reset()
+
+
+def test_full_dispatch_for_plan_phase_injects_assumptions(tmp_path: Path):
+    """`dispatch --full` (the inline prompt path) must ALSO inject assumptions
+    for a plan-phase task — not only `--emit` (Greptile #450)."""
+    cfg, state_dir = _bootstrap(tmp_path, phase="plan")
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "plan it", "--full"])
+        assert result.exit_code == 0, result.output
+        assert "## Assumptions to disposition" in result.output
+        for row in SEED_ROWS:
+            assert row.axis in result.output
+    finally:
+        _reset()
+
+
+def test_full_dispatch_for_non_plan_phase_omits_assumptions(tmp_path: Path):
+    cfg, state_dir = _bootstrap(tmp_path, phase="dev")
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["dispatch", "--task", "t", "-i", "build it", "--full"])
+        assert result.exit_code == 0, result.output
+        assert "## Assumptions to disposition" not in result.output
+    finally:
+        _reset()

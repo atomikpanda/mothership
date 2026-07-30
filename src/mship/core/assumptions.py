@@ -246,9 +246,18 @@ def resolve_mode(workspace_root: Path) -> AssumptionMode:
 
 
 def _parse_table(text: str) -> list[AssumptionRow]:
+    """Parse the canonical table. FAILS LOUD on a malformed store rather than
+    silently returning a reduced row set — a dropped row would make an
+    incomplete plan pass coverage and shrink the injected/authoritative set
+    (Greptile #450). No table at all → [] (an absent/empty store is legitimate);
+    a broken header/separator or a wrong-cell-count row → ValueError."""
     lines = [line for line in text.splitlines() if line.strip().startswith("|")]
-    if len(lines) < 2:
+    if not lines:
         return []
+    if len(lines) < 2:
+        raise ValueError(
+            "malformed assumptions store: missing table header/separator"
+        )
     rows = []
     for line in lines[2:]:  # skip header + separator
         body = line.strip()
@@ -256,6 +265,9 @@ def _parse_table(text: str) -> list[AssumptionRow]:
         body = body[:-1] if body.endswith("|") else body
         cells = [cell.strip() for cell in _split_unescaped_pipes(body)]
         if len(cells) != len(_COLUMNS):
-            continue
+            raise ValueError(
+                f"malformed assumptions store: row has {len(cells)} cells, "
+                f"expected {len(_COLUMNS)}: {line.strip()!r}"
+            )
         rows.append(AssumptionRow(**dict(zip(_COLUMNS, cells))))
     return rows

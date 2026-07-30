@@ -65,3 +65,17 @@ def test_newline_in_cell_rejected_on_save(tmp_path):
     store = AssumptionStore(tmp_path)
     with pytest.raises(ValueError, match="newline"):
         store.save([AssumptionRow(axis="x", options="a/b", position="line1\nline2", triggers="t")])
+
+
+def test_malformed_store_raises_on_load(tmp_path):
+    """A malformed canonical file must FAIL LOUD, not silently return a reduced
+    row set (which would let an incomplete plan pass + shrink injection)
+    (Greptile #450)."""
+    import pytest
+    from mship.core.assumptions import AssumptionStore
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "product_assumptions.md").write_text(
+        "| axis | options | position | triggers |\n| -- | -- | -- | -- |\n| a | b | c |\n"  # 3 cells
+    )
+    with pytest.raises(ValueError, match="malformed"):
+        AssumptionStore(tmp_path).load()

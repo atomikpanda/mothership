@@ -58,7 +58,13 @@ def register(parent: typer.Typer, get_container):
             raise typer.Exit(1)
 
         store = AssumptionStore(workspace_root, docs_dir=docs_dir, mode=resolve_mode(workspace_root))
-        expected = store.axes() if store.path.is_file() else list(SEED_AXES)
+        try:
+            expected = store.axes() if store.path.is_file() else list(SEED_AXES)
+        except ValueError as e:
+            # A malformed store must fail loud, not silently shrink the expected
+            # set and let an incomplete plan pass coverage (Greptile #450).
+            output.error(str(e))
+            raise typer.Exit(1)
 
         missing = missing_assumption_axes(resolved.read_text(), expected)
         ok = not missing

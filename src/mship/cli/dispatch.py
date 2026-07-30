@@ -480,5 +480,17 @@ def register(app: typer.Typer, get_container):
             mode=mode,
             model=resolved_model,
         )
+        # Deterministic assumption injection applies to the --full inline prompt
+        # too, not just --emit — otherwise a plan-phase --full dispatch silently
+        # omits the assumptions (Greptile #450).
+        try:
+            from mship.core.dispatch_emit import append_plan_assumptions
+
+            _wr = Path(container.config_path()).parent
+            _dd = getattr(container.config(), "docs_dir", "docs")
+            prompt = append_plan_assumptions(prompt, task_obj, _wr, _dd)
+        except _EMIT_ERRORS as e:
+            output.error(f"cannot inject assumptions into the prompt: {e}")
+            raise typer.Exit(code=1)
         # Print directly to stdout (NOT via Output.json — this is meant to be piped).
         print(prompt)

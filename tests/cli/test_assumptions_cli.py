@@ -108,3 +108,27 @@ def test_cli_honors_non_default_docs_dir(tmp_path):
     assert res.exit_code == 0, res.output
     assert (tmp_path / "customdocs" / "product_assumptions.md").is_file()
     assert not (tmp_path / "docs" / "product_assumptions.md").exists()
+
+
+def test_add_on_fresh_workspace_seeds_baseline_first(tmp_path):
+    """`add` as the FIRST assumptions command must seed the 7 baseline rows, not
+    save only the added one and drop the baseline (Greptile #450)."""
+    from mship.core.assumptions import SEED_ROWS
+    res = CliRunner().invoke(_app(tmp_path), [
+        "assumptions", "add", "--axis", "new axis", "--options", "a/b",
+        "--position", "p", "--triggers", "t",
+    ])
+    assert res.exit_code == 0, res.output
+    assert json.loads(res.output)["count"] == len(SEED_ROWS) + 1  # 7 seed + 1, not 1
+
+
+def test_list_on_malformed_store_errors_cleanly(tmp_path):
+    """A malformed store surfaces a clean CLI error, not a traceback (Greptile #450)."""
+    (tmp_path / "mothership.yaml").write_text("workspace: t\nrepos: {}\n")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "product_assumptions.md").write_text(
+        "| axis | options | position | triggers |\n| -- | -- | -- | -- |\n| a | b | c |\n"
+    )
+    res = CliRunner().invoke(_app(tmp_path), ["assumptions", "list"])
+    assert res.exit_code == 1
+    assert "malformed" in res.output

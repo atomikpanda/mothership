@@ -43,6 +43,15 @@ def register(parent: typer.Typer, get_container):
         )
         return AssumptionStore(workspace_root, docs_dir=docs_dir, mode=mode)
 
+    def _seed(store, output):
+        """seed() (create-if-absent, else load), surfacing a malformed-store
+        ValueError as a clean CLI error instead of a traceback (Greptile #450)."""
+        try:
+            return store.seed()
+        except ValueError as e:
+            output.error(str(e))
+            raise typer.Exit(1)
+
     def _rows_to_dicts(rows) -> list[dict]:
         return [
             {
@@ -59,7 +68,7 @@ def register(parent: typer.Typer, get_container):
         """List assumption rows, auto-seeding the store if absent."""
         output = Output()
         store = _store()
-        rows = store.seed()
+        rows = _seed(store, output)
 
         if output.human_mode:
             output.table(
@@ -86,7 +95,7 @@ def register(parent: typer.Typer, get_container):
 
         output = Output()
         store = _store()
-        rows = store.load()
+        rows = _seed(store, output)
         rows.append(AssumptionRow(axis=axis, options=options, position=position, triggers=triggers))
         warning = store.save(rows)
         if warning:
@@ -109,7 +118,7 @@ def register(parent: typer.Typer, get_container):
 
         output = Output()
         store = _store()
-        rows = store.load()
+        rows = _seed(store, output)
 
         idx = next((i for i, r in enumerate(rows) if r.axis == axis), None)
         if idx is None:
@@ -139,6 +148,11 @@ def register(parent: typer.Typer, get_container):
         into a plan, or L2 tooling)."""
         output = Output()
         store = _store()
-        output.print(store.render())
+        try:
+            block = store.render()
+        except ValueError as e:
+            output.error(str(e))
+            raise typer.Exit(1)
+        output.print(block)
 
     parent.add_typer(assumptions_app, rich_help_panel="Work items & specs")
