@@ -43,9 +43,27 @@ class Flag(BaseModel):
     axis: str
     source: Literal["checker", "cross-check"]
     reason: str
+    # Fingerprint of the assumption ROW's definition (options/position/triggers)
+    # this flag was generated from. A human sign-off is bound to the exact
+    # assumption it approved: on a same-plan re-check the approval carries over
+    # only when this fingerprint still matches, so editing what the assumption
+    # MEANS (without touching the plan) correctly drops the stale approval
+    # (Greptile #451). Optional for backward-compat with pre-fingerprint records.
+    axis_fingerprint: str | None = None
     approved: bool = False
     approved_by: str | None = None
     approved_reason: str | None = None
+
+
+def axis_fingerprint(row: "AssumptionRow") -> str:
+    """Stable hash of an assumption row's DEFINITION — the operator-authored
+    meaning (options/position/triggers), keyed under the normalized axis. NOT the
+    checker's free-text reason (that re-words harmlessly). Used to bind an
+    approval to the exact assumption it was granted against."""
+    raw = "\x1f".join([
+        _normalize_axis(row.axis), row.options, row.position, row.triggers,
+    ])
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 class PlanCheckResult(BaseModel):
@@ -77,10 +95,12 @@ def flags_from_verdicts(verdicts: list[AxisVerdict], rows: list["AssumptionRow"]
         if v is None:
             flags.append(
                 Flag(axis=row.axis, source="checker",
-                     reason="checker returned no verdict for this row")
+                     reason="checker returned no verdict for this row",
+                     axis_fingerprint=axis_fingerprint(row))
             )
         elif v.verdict == "not-covered":
-            flags.append(Flag(axis=row.axis, source="checker", reason=v.reason))
+            flags.append(Flag(axis=row.axis, source="checker", reason=v.reason,
+                              axis_fingerprint=axis_fingerprint(row)))
     return flags
 
 
@@ -144,6 +164,7 @@ def cross_check(
                         f"triggers for '{row.axis}' match this plan/task, but the plan "
                         "declared it n/a"
                     ),
+                    axis_fingerprint=axis_fingerprint(row),
                 )
             )
     return flags

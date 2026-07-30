@@ -216,18 +216,20 @@ def register(plan_app: typer.Typer, get_container):
         with pcstore.transaction(task_obj.slug):
             prior = pcstore.get(task_obj.slug)
             if prior is not None and prior.plan_hash == new_hash:
-                # Key on (axis, source) only — NOT the checker's free-text reason.
-                # (axis, source) is unique per check run (one checker flag per axis,
-                # one cross-check flag per axis), and the human signed off on "this
-                # axis, for this plan version" — the plan_hash already pins the
-                # version. Including the LLM-paraphrased reason would silently drop a
-                # real sign-off when the checker re-runs and re-words the same gap.
+                # Key on (axis, source) — NOT the checker's free-text reason, which
+                # re-words harmlessly and would drop real sign-offs. But an approval
+                # is bound to the exact assumption it approved: carry it over only
+                # when the row's DEFINITION fingerprint (options/position/triggers)
+                # also still matches, so editing what the assumption MEANS drops the
+                # stale sign-off even on an unchanged plan (Greptile #451). plan_hash
+                # (outer guard) + axis_fingerprint together pin everything the
+                # approval was granted against.
                 approved = {
                     (f.axis, f.source): f for f in prior.flags if f.approved
                 }
                 for f in flags:
                     keep = approved.get((f.axis, f.source))
-                    if keep is not None:
+                    if keep is not None and keep.axis_fingerprint == f.axis_fingerprint:
                         f.approved = True
                         f.approved_by = keep.approved_by
                         f.approved_reason = keep.approved_reason

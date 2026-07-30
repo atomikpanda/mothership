@@ -35,7 +35,8 @@ def test_flags_from_verdicts_only_not_covered():
     ]
     flags = flags_from_verdicts(verdicts, rows)
     assert len(flags) == 1
-    assert flags[0] == Flag(axis="security", source="checker", reason="no auth check")
+    assert (flags[0].axis, flags[0].source, flags[0].reason) == ("security", "checker", "no auth check")
+    assert flags[0].axis_fingerprint  # stamped from the row's definition
 
 
 def test_flags_from_verdicts_none_when_all_covered_or_na():

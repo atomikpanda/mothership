@@ -127,6 +127,7 @@ def test_get_plan_assumptions_pending_flag(tmp_path):
         "pending": 1,
         "flags": [{
             "axis": "repo topology", "source": "checker", "reason": "not addressed",
+            "axis_fingerprint": None,
             "approved": False, "approved_by": None, "approved_reason": None,
         }],
     }

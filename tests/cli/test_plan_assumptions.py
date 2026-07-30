@@ -414,6 +414,52 @@ def test_result_preserves_prior_approvals_when_plan_unchanged(tmp_path):
     assert len(match) == 1 and match[0].approved is False
 
 
+def test_result_drops_approval_when_assumption_definition_changes(tmp_path):
+    """A sign-off is bound to the assumption it approved: editing the row's
+    definition (position/options/triggers) drops the stale approval even on an
+    unchanged plan, so the changed assumption gets fresh review (Greptile #451)."""
+    from mship.core.assumptions import AssumptionRow, AssumptionStore
+    from mship.core.plan_check import PlanCheckStore
+
+    store = AssumptionStore(tmp_path)
+    store.seed()
+
+    plan_path = _write_plan(tmp_path, "2026-07-30-t1.md", "# Plan\n\nStable body.\n")
+    verdicts_file = tmp_path / "verdicts.json"
+    verdicts_file.write_text(json.dumps([
+        {"axis": "repo topology", "verdict": "not-covered", "reason": "a gap"},
+    ]))
+
+    runner = CliRunner()
+    app = _app(tmp_path, task=_task())
+
+    def _result():
+        return runner.invoke(app, [
+            "plan", "assumptions", "result",
+            "--task", "t1", "--plan", str(plan_path), "--from-json", str(verdicts_file),
+        ])
+
+    assert _result().exit_code == 0
+    assert runner.invoke(app, [
+        "plan", "assumptions", "approve", "repo topology",
+        "--reason", "ok for the old definition", "--task", "t1", "--plan", str(plan_path),
+    ]).exit_code == 0
+
+    # Change what the "repo topology" assumption MEANS (its position), plan untouched.
+    rows = store.load()
+    edited = [
+        AssumptionRow(axis=r.axis, options=r.options, position="**single** (was meta)", triggers=r.triggers)
+        if r.axis == "repo topology" else r
+        for r in rows
+    ]
+    store.save(edited)
+
+    assert _result().exit_code == 0
+    match = [f for f in PlanCheckStore(tmp_path / ".mothership").get("t1").flags
+             if f.axis == "repo topology"]
+    assert len(match) == 1 and match[0].approved is False
+
+
 def test_result_at_linked_nonconvention_plan_lets_gate_pass(tmp_path):
     """End-to-end: a feature WorkItem whose plan is linked at a NON-convention
     path. `result` (no --plan) must record the check against the SAME plan the
