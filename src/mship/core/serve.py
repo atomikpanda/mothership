@@ -121,6 +121,11 @@ class PhaseOverrideBody(BaseModel):
     phase: Phase | None = None
 
 
+class PlanFlagApproveBody(BaseModel):
+    axis: str
+    reason: str | None = None
+
+
 class ExecBody(BaseModel):
     """POST /exec/{verb} request body — see `mship.core.remote_exec` for the
     full wire contract (how the response streams task output + exit code)."""
@@ -672,23 +677,19 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"no task {slug!r}")
         return jsonable_encoder(log_manager.read(slug, last=50))
 
-    @app.get("/plan-assumptions/{slug}")
-    def get_plan_assumptions(slug: str):
-        """Read-only, LLM-free pending-flags envelope for the Wave 3a
-        plan-check gate — the contract Ground Control (Wave 3b) consumes.
-        Same shape `mship plan assumptions status` prints
+    def _plan_assumptions_envelope(slug: str) -> dict:
+        """Shared envelope builder for GET and POST /plan-assumptions/{slug} —
+        same shape `mship plan assumptions status` prints
         (`cli/plan_assumptions.py::status`): `fresh` compares the stored
         result's `plan_hash` against the CURRENT plan text's hash (docs_dir
         resolved the same way, off this machine's own committed
-        `docs/plans/`, not a task worktree)."""
+        `docs/plans/`, not a task worktree). Caller is responsible for the
+        404-on-unknown-task check before calling this."""
         from mship.core.assumptions import AssumptionStore, resolve_mode
         from mship.core.plan import effective_plan_path
         from mship.core.plan_check import PlanCheckStore, is_fresh
 
         state = state_manager.load()
-        if slug not in state.tasks:
-            raise HTTPException(status_code=404, detail=f"no task {slug!r}")
-
         docs_dir = getattr(config, "docs_dir", "docs") if config is not None else "docs"
         plan_check_store = PlanCheckStore(workspace_root / ".mothership")
         stored = plan_check_store.get(slug)
@@ -710,6 +711,43 @@ def create_app(
             "pending": pending,
             "flags": [f.model_dump() for f in stored.flags],
         }
+
+    @app.get("/plan-assumptions/{slug}")
+    def get_plan_assumptions(slug: str):
+        """Read-only, LLM-free pending-flags envelope for the Wave 3a
+        plan-check gate — the contract Ground Control (Wave 3b) consumes."""
+        state = state_manager.load()
+        if slug not in state.tasks:
+            raise HTTPException(status_code=404, detail=f"no task {slug!r}")
+        return _plan_assumptions_envelope(slug)
+
+    @app.post("/plan-assumptions/{slug}/approve")
+    def approve_plan_assumption(slug: str, body: PlanFlagApproveBody):
+        """Operator sign-off on a pending plan-assumption flag — the write
+        counterpart to GET /plan-assumptions/{slug}, sharing its envelope via
+        `_plan_assumptions_envelope`. Delegates the mutation to
+        `mship.core.plan_assumptions_transition.approve_flag` (shared with the
+        CLI verb `mship plan assumptions approve`) so they cannot drift."""
+        from mship.core.plan_assumptions_transition import (
+            NoStoredCheck, UnknownAxis, approve_flag,
+        )
+        from mship.core.plan_check import PlanCheckStore
+
+        state = state_manager.load()
+        if slug not in state.tasks:
+            raise HTTPException(status_code=404, detail=f"no task {slug!r}")
+        store = PlanCheckStore(workspace_root / ".mothership")
+        try:
+            approve_flag(store, slug, body.axis, body.reason, approved_by="operator")
+        except NoStoredCheck:
+            raise HTTPException(
+                status_code=404, detail=f"no plan-assumption check for {slug!r}"
+            )
+        except UnknownAxis:
+            raise HTTPException(
+                status_code=404, detail=f"no pending flag for axis {body.axis!r}"
+            )
+        return _plan_assumptions_envelope(slug)
 
     # --- gh-token: two brokers, one contract ---
     # Both brokers return the same shape {"token", "expires_at", "repositories"}.
