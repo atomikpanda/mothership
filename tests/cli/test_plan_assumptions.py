@@ -197,3 +197,127 @@ def test_result_stored_plan_hash_matches_plan_text(tmp_path):
     stored = PlanCheckStore(tmp_path / ".mothership").get("t1")
     assert stored is not None
     assert stored.plan_hash == plan_hash(plan_path.read_text())
+
+
+def test_status_reports_fresh_false_when_plan_changed_after_check(tmp_path):
+    AssumptionStore = __import__("mship.core.assumptions", fromlist=["AssumptionStore"]).AssumptionStore
+    AssumptionStore(tmp_path).seed()
+
+    plan_path = _write_plan(tmp_path, "2026-07-30-t1.md", "# Plan\n\nOriginal body.\n")
+
+    verdicts_file = tmp_path / "verdicts.json"
+    verdicts_file.write_text(json.dumps([
+        {"axis": "repo topology", "verdict": "covered", "reason": "ok"},
+    ]))
+
+    runner = CliRunner()
+    app = _app(tmp_path, task=_task())
+    res = runner.invoke(
+        app,
+        [
+            "plan", "assumptions", "result",
+            "--task", "t1", "--plan", str(plan_path),
+            "--from-json", str(verdicts_file),
+        ],
+    )
+    assert res.exit_code == 0, res.output
+
+    # Plan changes after the check was stored -> hash mismatch -> stale.
+    plan_path.write_text("# Plan\n\nOriginal body, now edited.\n")
+
+    res = runner.invoke(
+        app,
+        ["plan", "assumptions", "status", "--task", "t1", "--plan", str(plan_path)],
+    )
+    assert res.exit_code == 0, res.output
+    data = json.loads(res.output)
+    assert data["task"] == "t1"
+    assert data["fresh"] is False
+
+
+def test_approve_clears_exactly_one_pending_flag_and_drops_pending_count(tmp_path):
+    from mship.core.plan_check import PlanCheckStore
+
+    AssumptionStore = __import__("mship.core.assumptions", fromlist=["AssumptionStore"]).AssumptionStore
+    AssumptionStore(tmp_path).seed()
+
+    plan_path = _write_plan(tmp_path, "2026-07-30-t1.md", "# Plan\n\nNo mention of anything special here.\n")
+
+    verdicts_file = tmp_path / "verdicts.json"
+    verdicts_file.write_text(json.dumps([
+        {"axis": "repo topology", "verdict": "not-covered", "reason": "plan never says how repos are handled"},
+    ]))
+
+    runner = CliRunner()
+    app = _app(tmp_path, task=_task())
+    res = runner.invoke(
+        app,
+        [
+            "plan", "assumptions", "result",
+            "--task", "t1", "--plan", str(plan_path),
+            "--from-json", str(verdicts_file),
+        ],
+    )
+    assert res.exit_code == 0, res.output
+
+    before = PlanCheckStore(tmp_path / ".mothership").get("t1")
+    pending_before = sum(1 for f in before.flags if not f.approved)
+    assert pending_before == 1
+
+    res = runner.invoke(
+        app,
+        [
+            "plan", "assumptions", "approve", "repo topology",
+            "--reason", "signed off by hand",
+            "--task", "t1", "--plan", str(plan_path),
+        ],
+    )
+    assert res.exit_code == 0, res.output
+
+    after = PlanCheckStore(tmp_path / ".mothership").get("t1")
+    pending_after = sum(1 for f in after.flags if not f.approved)
+    assert pending_after == pending_before - 1
+
+    matching = [f for f in after.flags if f.axis == "repo topology"]
+    assert len(matching) == 1
+    assert matching[0].approved is True
+    assert matching[0].approved_reason == "signed off by hand"
+    assert matching[0].approved_by
+
+
+def test_approve_unknown_or_already_covered_axis_exits_1(tmp_path):
+    AssumptionStore = __import__("mship.core.assumptions", fromlist=["AssumptionStore"]).AssumptionStore
+    AssumptionStore(tmp_path).seed()
+
+    plan_path = _write_plan(tmp_path, "2026-07-30-t1.md", "# Plan\n\nNo mention of anything special here.\n")
+
+    verdicts_file = tmp_path / "verdicts.json"
+    verdicts_file.write_text(json.dumps([
+        {"axis": "repo topology", "verdict": "covered", "reason": "handled explicitly"},
+    ]))
+
+    runner = CliRunner()
+    app = _app(tmp_path, task=_task())
+    res = runner.invoke(
+        app,
+        [
+            "plan", "assumptions", "result",
+            "--task", "t1", "--plan", str(plan_path),
+            "--from-json", str(verdicts_file),
+        ],
+    )
+    assert res.exit_code == 0, res.output
+
+    # Axis has a verdict but no pending flag (it was covered, not not-covered).
+    res = runner.invoke(
+        app,
+        ["plan", "assumptions", "approve", "repo topology", "--task", "t1", "--plan", str(plan_path)],
+    )
+    assert res.exit_code == 1
+
+    # Axis that never existed at all.
+    res = runner.invoke(
+        app,
+        ["plan", "assumptions", "approve", "nonexistent axis", "--task", "t1", "--plan", str(plan_path)],
+    )
+    assert res.exit_code == 1

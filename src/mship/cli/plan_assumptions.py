@@ -207,4 +207,98 @@ def register(plan_app: typer.Typer, get_container):
                 "pending": pending,
             })
 
+    @assumptions_app.command("status")
+    def status(
+        task: Optional[str] = typer.Option(
+            None, "--task", help="Task slug; resolved like other state-changing commands (cwd/MSHIP_TASK fallback)."
+        ),
+        plan: Optional[str] = typer.Option(None, "--plan", help="Explicit plan path (workspace-relative)."),
+    ):
+        """Report whether the stored plan-check for this task is fresh (plan
+        unchanged since the check), stale (plan edited after), or absent."""
+        from mship.core.plan_check import PlanCheckStore, plan_hash
+
+        output = Output()
+        container, _workspace_root, _docs_dir, task_obj, plan_path = _resolve_common(
+            get_container, task, plan, output
+        )
+
+        stored = PlanCheckStore(Path(container.state_dir())).get(task_obj.slug)
+        if stored is None:
+            if output.human_mode:
+                output.print(f"No stored plan-check for {task_obj.slug}.")
+            else:
+                output.json({"task": task_obj.slug, "fresh": False, "pending": 0, "flags": []})
+            return
+
+        fresh = stored.plan_hash == plan_hash(plan_path.read_text())
+        pending = sum(1 for f in stored.flags if not f.approved)
+
+        if output.human_mode:
+            state = "fresh" if fresh else "stale"
+            output.print(f"{task_obj.slug}: {state}, {pending} pending flag(s).")
+            for f in stored.flags:
+                mark = "approved" if f.approved else "pending"
+                output.print(f"  [{mark}] {f.axis} ({f.source}): {f.reason}")
+        else:
+            output.json({
+                "task": task_obj.slug,
+                "fresh": fresh,
+                "pending": pending,
+                "flags": [f.model_dump() for f in stored.flags],
+            })
+
+    @assumptions_app.command("approve")
+    def approve(
+        axis: str = typer.Argument(..., help="Axis name of the pending flag to approve."),
+        reason: Optional[str] = typer.Option(None, "--reason", help="Why this flag is approved."),
+        task: Optional[str] = typer.Option(
+            None, "--task", help="Task slug; resolved like other state-changing commands (cwd/MSHIP_TASK fallback)."
+        ),
+        plan: Optional[str] = typer.Option(None, "--plan", help="Explicit plan path (workspace-relative)."),
+    ):
+        """Mark the matching pending flag as approved (human sign-off) and
+        re-save. The only way a flag clears."""
+        import os
+
+        from mship.core.plan import _normalize_axis
+        from mship.core.plan_check import PlanCheckStore
+
+        output = Output()
+        container, _workspace_root, _docs_dir, task_obj, _plan_path = _resolve_common(
+            get_container, task, plan, output
+        )
+
+        store = PlanCheckStore(Path(container.state_dir()))
+        stored = store.get(task_obj.slug)
+        if stored is None:
+            output.error(f"No stored plan-check for {task_obj.slug}.")
+            raise typer.Exit(1)
+
+        target_axis = _normalize_axis(axis)
+        match = next(
+            (f for f in stored.flags if not f.approved and _normalize_axis(f.axis) == target_axis),
+            None,
+        )
+        if match is None:
+            output.error(f"No pending flag for axis {axis!r} on {task_obj.slug}.")
+            raise typer.Exit(1)
+
+        match.approved = True
+        match.approved_reason = reason
+        match.approved_by = os.environ.get("USER") or "unknown"
+        store.save(stored)
+
+        pending = sum(1 for f in stored.flags if not f.approved)
+
+        if output.human_mode:
+            output.success(f"Approved {axis!r} for {task_obj.slug}: {pending} pending flag(s) remain.")
+        else:
+            output.json({
+                "task": task_obj.slug,
+                "axis": match.axis,
+                "pending": pending,
+                "flags": [f.model_dump() for f in stored.flags],
+            })
+
     plan_app.add_typer(assumptions_app)
