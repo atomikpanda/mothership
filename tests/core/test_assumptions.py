@@ -79,3 +79,34 @@ def test_malformed_store_raises_on_load(tmp_path):
     )
     with pytest.raises(ValueError, match="malformed"):
         AssumptionStore(tmp_path).load()
+
+
+def test_duplicate_axes_rejected_on_save(tmp_path):
+    """Two rows normalizing to the same axis would resolve one verdict and leave
+    the second assumption undispositioned — a gate bypass. Reject at the write
+    boundary (Greptile #451)."""
+    import pytest
+    from mship.core.assumptions import AssumptionRow, AssumptionStore
+    store = AssumptionStore(tmp_path)
+    with pytest.raises(ValueError, match="duplicate assumption axis"):
+        store.save([
+            AssumptionRow(axis="repo topology", options="a/b", position="x", triggers="t"),
+            AssumptionRow(axis="Repo  Topology", options="a/b", position="y", triggers="t"),
+        ])
+
+
+def test_duplicate_axes_rejected_on_load(tmp_path):
+    """The read boundary also rejects a hand-edited store with duplicate axes, so
+    a duplicate can't reach the verdict→flag path from a file we didn't write
+    (Greptile #451)."""
+    import pytest
+    from mship.core.assumptions import AssumptionStore
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "product_assumptions.md").write_text(
+        "| axis | options | position | triggers |\n"
+        "| -- | -- | -- | -- |\n"
+        "| repo topology | a/b | x | t |\n"
+        "| Repo Topology | a/b | y | t |\n"
+    )
+    with pytest.raises(ValueError, match="duplicate assumption axis"):
+        AssumptionStore(tmp_path).load()
