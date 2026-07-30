@@ -317,6 +317,11 @@ def register(plan_app: typer.Typer, get_container):
         import os
 
         from mship.core.plan import _normalize_axis
+        from mship.core.plan_assumptions_transition import (
+            NoStoredCheck,
+            UnknownAxis,
+            approve_flag,
+        )
         from mship.core.plan_check import PlanCheckStore
 
         output = Output()
@@ -325,28 +330,18 @@ def register(plan_app: typer.Typer, get_container):
         )
 
         store = PlanCheckStore(workspace_root / ".mothership")
-        # Lock spans get → mutate → save so a concurrent approve/result can't
-        # overwrite this sign-off (Greptile #451).
-        with store.transaction(task_obj.slug):
-            stored = store.get(task_obj.slug)
-            if stored is None:
-                output.error(f"No stored plan-check for {task_obj.slug}.")
-                raise typer.Exit(1)
+        approved_by = os.environ.get("USER") or "unknown"
+        try:
+            stored = approve_flag(store, task_obj.slug, axis, reason, approved_by)
+        except NoStoredCheck:
+            output.error(f"No stored plan-check for {task_obj.slug}.")
+            raise typer.Exit(1)
+        except UnknownAxis:
+            output.error(f"No pending flag for axis {axis!r} on {task_obj.slug}.")
+            raise typer.Exit(1)
 
-            target_axis = _normalize_axis(axis)
-            match = next(
-                (f for f in stored.flags if not f.approved and _normalize_axis(f.axis) == target_axis),
-                None,
-            )
-            if match is None:
-                output.error(f"No pending flag for axis {axis!r} on {task_obj.slug}.")
-                raise typer.Exit(1)
-
-            match.approved = True
-            match.approved_reason = reason
-            match.approved_by = os.environ.get("USER") or "unknown"
-            store.save(stored)
-
+        target_axis = _normalize_axis(axis)
+        match = next(f for f in stored.flags if _normalize_axis(f.axis) == target_axis)
         pending = sum(1 for f in stored.flags if not f.approved)
 
         if output.human_mode:
