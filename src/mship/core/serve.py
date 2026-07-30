@@ -681,7 +681,7 @@ def create_app(
         result's `plan_hash` against the CURRENT plan text's hash (docs_dir
         resolved the same way, off this machine's own committed
         `docs/plans/`, not a task worktree)."""
-        from mship.core.plan import resolve_plan_path
+        from mship.core.plan import effective_plan_path
         from mship.core.plan_check import PlanCheckStore, plan_hash
 
         state = state_manager.load()
@@ -694,7 +694,9 @@ def create_app(
         if stored is None:
             return {"task": slug, "fresh": False, "pending": 0, "flags": []}
 
-        plan_path = resolve_plan_path(slug, None, workspace_root, docs_dir)
+        # SAME resolution as the gate + CLI recorder (WorkItem plan_path, else
+        # convention) so `fresh` here agrees with the gate (Wave 3a review).
+        plan_path = effective_plan_path(state.tasks[slug], workspace_root, docs_dir)
         fresh = plan_path is not None and stored.plan_hash == plan_hash(plan_path.read_text())
         pending = sum(1 for f in stored.flags if not f.approved)
         return {

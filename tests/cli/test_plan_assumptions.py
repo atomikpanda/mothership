@@ -321,3 +321,110 @@ def test_approve_unknown_or_already_covered_axis_exits_1(tmp_path):
         ["plan", "assumptions", "approve", "nonexistent axis", "--task", "t1", "--plan", str(plan_path)],
     )
     assert res.exit_code == 1
+
+
+def test_result_preserves_prior_approvals_when_plan_unchanged(tmp_path):
+    """Re-running the checker against the SAME plan (unchanged hash) must NOT
+    wipe a human sign-off; a CHANGED plan correctly drops it (Wave 3a review)."""
+    from mship.core.plan_check import PlanCheckStore
+
+    AssumptionStore = __import__("mship.core.assumptions", fromlist=["AssumptionStore"]).AssumptionStore
+    AssumptionStore(tmp_path).seed()
+
+    plan_path = _write_plan(tmp_path, "2026-07-30-t1.md", "# Plan\n\nOriginal body.\n")
+
+    verdicts_file = tmp_path / "verdicts.json"
+    verdicts_file.write_text(json.dumps([
+        {"axis": "repo topology", "verdict": "not-covered", "reason": "plan never says how repos are handled"},
+    ]))
+
+    runner = CliRunner()
+    app = _app(tmp_path, task=_task())
+
+    def _result():
+        return runner.invoke(app, [
+            "plan", "assumptions", "result",
+            "--task", "t1", "--plan", str(plan_path), "--from-json", str(verdicts_file),
+        ])
+
+    assert _result().exit_code == 0
+    res = runner.invoke(app, [
+        "plan", "assumptions", "approve", "repo topology",
+        "--reason", "signed off", "--task", "t1", "--plan", str(plan_path),
+    ])
+    assert res.exit_code == 0, res.output
+
+    # Re-check the SAME plan text -> the sign-off survives.
+    assert _result().exit_code == 0
+    stored = PlanCheckStore(tmp_path / ".mothership").get("t1")
+    match = [f for f in stored.flags if f.axis == "repo topology"]
+    assert len(match) == 1 and match[0].approved is True
+    assert match[0].approved_reason == "signed off"
+
+    # Re-running the cold checker on the SAME plan may RE-WORD the same gap. The
+    # sign-off keys on (axis, source), not the LLM's free-text reason, so a
+    # re-phrased reason must NOT drop a real approval (Wave 3a re-review).
+    verdicts_file.write_text(json.dumps([
+        {"axis": "repo topology", "verdict": "not-covered", "reason": "totally different wording for the same gap"},
+    ]))
+    assert _result().exit_code == 0
+    stored = PlanCheckStore(tmp_path / ".mothership").get("t1")
+    match = [f for f in stored.flags if f.axis == "repo topology"]
+    assert len(match) == 1 and match[0].approved is True
+
+    # Edit the plan -> hash changes -> the stale approval is dropped.
+    plan_path.write_text("# Plan\n\nOriginal body, now edited.\n")
+    assert _result().exit_code == 0
+    stored = PlanCheckStore(tmp_path / ".mothership").get("t1")
+    match = [f for f in stored.flags if f.axis == "repo topology"]
+    assert len(match) == 1 and match[0].approved is False
+
+
+def test_result_at_linked_nonconvention_plan_lets_gate_pass(tmp_path):
+    """End-to-end: a feature WorkItem whose plan is linked at a NON-convention
+    path. `result` (no --plan) must record the check against the SAME plan the
+    gate reads (the WorkItem's linked plan_path), so a fresh, flag-free check
+    makes the assumption gate pass. Before the shared `effective_plan_path`, the
+    CLI hashed the convention path while the gate hashed the linked path, so the
+    hashes never matched and the WorkItem was permanently mis-gated."""
+    from mship.core.assumptions import AssumptionStore, SEED_ROWS
+    from mship.core.spec import Spec
+    from mship.core.spec_store import SpecStore
+    from mship.core.workitem_gate import check_task_gate
+    from mship.core.workitem_store import WorkItemStore
+
+    AssumptionStore(tmp_path).seed()
+
+    # Feature WorkItem + approved spec so only the assumption gate is in play.
+    now = datetime.now(timezone.utc)
+    specs = SpecStore(tmp_path / "specs")
+    specs.save(Spec(id="spec-1", title="Spec", status="approved", created_at=now, updated_at=now))
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="add thing", kind="feature", workspace="ws", now=now)
+    items.link_spec(wi.id, "spec-1", now=now)
+
+    # Plan lives OFF the convention path; link it explicitly.
+    plan_body = "# Plan\n\n<!-- mship:task id=1 -->\n### Task 1\n<!-- /mship:task -->\n"
+    custom = tmp_path / "custom" / "myplan.md"
+    custom.parent.mkdir(parents=True)
+    custom.write_text(plan_body)
+    items.link_plan(wi.id, "custom/myplan.md", now=now)
+
+    task = _task(work_item_id=wi.id)
+
+    # Every axis covered, no trigger words -> zero flags.
+    verdicts_file = tmp_path / "verdicts.json"
+    verdicts_file.write_text(json.dumps(
+        [{"axis": row.axis, "verdict": "covered", "reason": "ok"} for row in SEED_ROWS]
+    ))
+
+    runner = CliRunner()
+    app = _app(tmp_path, task=task)
+    # No --plan: effective_plan_path must follow the WorkItem's linked plan_path.
+    res = runner.invoke(app, [
+        "plan", "assumptions", "result", "--task", "t1", "--from-json", str(verdicts_file),
+    ])
+    assert res.exit_code == 0, res.output
+
+    gate = check_task_gate(task, tmp_path, require_plan=True, require_assumption_gate=True)
+    assert gate.ok is True, gate.reason

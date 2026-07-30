@@ -173,16 +173,16 @@ def _feature_assumption_gate_reason(wi: WorkItem, task, workspace_root: Path) ->
     resolves — callers run this after the plan-exists gate, so a missing/
     unreadable plan here is reported the same as "no check on record" rather
     than duplicating `_feature_has_plan`'s error."""
-    from mship.core.plan import resolve_plan_path
+    from mship.core.plan import effective_plan_path
     from mship.core.plan_check import PlanCheckStore, plan_hash
 
     no_check_msg = (
         "no fresh plan-assumption check on record — run "
         "`mship plan assumptions check --emit` (agent runs it) then `result --from-json`"
     )
-    p = resolve_plan_path(
-        task.slug, getattr(wi, "plan_path", None), workspace_root, _docs_dir(workspace_root)
-    )
+    # SAME resolution as the CLI recorder + serve (WorkItem plan_path, else
+    # convention) so the hash we check matches the hash that was recorded.
+    p = effective_plan_path(task, workspace_root, _docs_dir(workspace_root))
     if p is None:
         return no_check_msg
     try:

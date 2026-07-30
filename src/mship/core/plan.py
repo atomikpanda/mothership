@@ -144,3 +144,23 @@ def resolve_plan_path(
             return None
         return p if p.is_file() else None
     return discover_plan_path(root, task_slug, docs_dir)
+
+
+def effective_plan_path(task, workspace_root, docs_dir: str = "docs", *, cli_plan: str | None = None):
+    """THE plan for a task, resolved identically at every L4 site — the CLI that
+    RECORDS a check, the plan→dev gate, and the serve endpoint. An explicit
+    `--plan` wins; else the task's WorkItem `plan_path`; else the
+    `docs/plans/<date>-<slug>.md` convention. Single source of truth so the
+    `plan_hash` the recorder computes equals the hash the gate and serve compute
+    — a linked-plan WorkItem (`mship item link-plan`) was otherwise hashed at the
+    convention path by the CLI but at the linked path by the gate, permanently
+    mis-gating it (Wave 3a whole-branch review)."""
+    plan_ref = cli_plan
+    if plan_ref is None:
+        wid = getattr(task, "work_item_id", None)
+        if wid:
+            from mship.core.workitem_store import WorkItemStore
+
+            wi = WorkItemStore(Path(workspace_root) / ".mothership" / "workitems").get(wid)
+            plan_ref = getattr(wi, "plan_path", None) if wi else None
+    return resolve_plan_path(task.slug, plan_ref, Path(workspace_root), docs_dir)

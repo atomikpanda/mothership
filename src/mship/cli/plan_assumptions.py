@@ -51,7 +51,7 @@ def _resolve_common(get_container, task: Optional[str], plan: Optional[str], out
     cli/plan.py's check-assumptions), the resolved Task (via the same
     resolver every state-changing verb uses), and the resolved plan path."""
     from mship.core.config import ConfigLoader
-    from mship.core.plan import resolve_plan_path
+    from mship.core.plan import effective_plan_path
 
     container = get_container()
     config_path = Path(container.config_path())
@@ -66,7 +66,10 @@ def _resolve_common(get_container, task: Optional[str], plan: Optional[str], out
     resolved = resolve_for_command("plan assumptions", state, task, output)
     task_obj = resolved.task
 
-    plan_path = resolve_plan_path(task_obj.slug, plan, workspace_root, docs_dir)
+    # Resolve the plan the SAME way the gate and serve do (WorkItem plan_path,
+    # else convention) so the recorded plan_hash matches theirs — a linked-plan
+    # WorkItem was otherwise mis-gated (Wave 3a review).
+    plan_path = effective_plan_path(task_obj, workspace_root, docs_dir, cli_plan=plan)
     if plan_path is None:
         where = f"for task {task_obj.slug!r}" if plan is None else f"at {plan!r}"
         output.error(f"No plan found {where}.")
@@ -184,13 +187,37 @@ def register(plan_app: typer.Typer, get_container):
             affected_repos=list(task_obj.affected_repos),
         )
 
+        new_hash = plan_hash(plan_text)
+        # Carry over prior approvals when RE-checking the SAME plan (unchanged
+        # hash): re-running the checker to refresh a verdict shouldn't silently
+        # wipe sign-offs. A CHANGED plan (different hash) correctly drops them —
+        # an approval against the old plan mustn't survive an edit (Wave 3a review).
+        pcstore = PlanCheckStore(workspace_root / ".mothership")
+        prior = pcstore.get(task_obj.slug)
+        if prior is not None and prior.plan_hash == new_hash:
+            # Key on (axis, source) only — NOT the checker's free-text reason.
+            # (axis, source) is unique per check run (one checker flag per axis,
+            # one cross-check flag per axis), and the human signed off on "this
+            # axis, for this plan version" — the plan_hash already pins the
+            # version. Including the LLM-paraphrased reason would silently drop a
+            # real sign-off when the checker re-runs and re-words the same gap.
+            approved = {
+                (f.axis, f.source): f for f in prior.flags if f.approved
+            }
+            for f in flags:
+                keep = approved.get((f.axis, f.source))
+                if keep is not None:
+                    f.approved = True
+                    f.approved_by = keep.approved_by
+                    f.approved_reason = keep.approved_reason
+
         check_result = PlanCheckResult(
             task_slug=task_obj.slug,
-            plan_hash=plan_hash(plan_text),
+            plan_hash=new_hash,
             verdicts=verdicts,
             flags=flags,
         )
-        PlanCheckStore(Path(container.state_dir())).save(check_result)
+        pcstore.save(check_result)
 
         pending = sum(1 for f in flags if not f.approved)
 
@@ -219,11 +246,11 @@ def register(plan_app: typer.Typer, get_container):
         from mship.core.plan_check import PlanCheckStore, plan_hash
 
         output = Output()
-        container, _workspace_root, _docs_dir, task_obj, plan_path = _resolve_common(
+        container, workspace_root, _docs_dir, task_obj, plan_path = _resolve_common(
             get_container, task, plan, output
         )
 
-        stored = PlanCheckStore(Path(container.state_dir())).get(task_obj.slug)
+        stored = PlanCheckStore(workspace_root / ".mothership").get(task_obj.slug)
         if stored is None:
             if output.human_mode:
                 output.print(f"No stored plan-check for {task_obj.slug}.")
@@ -265,11 +292,11 @@ def register(plan_app: typer.Typer, get_container):
         from mship.core.plan_check import PlanCheckStore
 
         output = Output()
-        container, _workspace_root, _docs_dir, task_obj, _plan_path = _resolve_common(
+        container, workspace_root, _docs_dir, task_obj, _plan_path = _resolve_common(
             get_container, task, plan, output
         )
 
-        store = PlanCheckStore(Path(container.state_dir()))
+        store = PlanCheckStore(workspace_root / ".mothership")
         stored = store.get(task_obj.slug)
         if stored is None:
             output.error(f"No stored plan-check for {task_obj.slug}.")
