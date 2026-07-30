@@ -119,7 +119,9 @@ class AssumptionStore:
         if not self.path.is_file():
             return []
         text = self._decode(self.path)
-        return _parse_table(text)
+        rows = _parse_table(text)
+        _reject_duplicate_axes(rows)
+        return rows
 
     def axes(self) -> list[str]:
         return [_normalize_axis(row.axis) for row in self.load()]
@@ -147,6 +149,7 @@ class AssumptionStore:
                         f"assumption {row.axis!r}: {col} contains a newline; "
                         "table cells must be single-line"
                     )
+        _reject_duplicate_axes(rows)
         path = self.path
         path.parent.mkdir(parents=True, exist_ok=True)
         text = _render_table(rows)
@@ -243,6 +246,25 @@ def resolve_mode(workspace_root: Path) -> AssumptionMode:
 
     config = ConfigLoader.load(cfg_path, require_paths=False)
     return getattr(config, "assumption_storage", "committed")
+
+
+def _reject_duplicate_axes(rows: list[AssumptionRow]) -> None:
+    """Fail loud if two rows normalize to the same axis. Downstream keys verdicts
+    by normalized axis (core/plan_check.py), so a duplicate row would resolve the
+    same verdict for both and leave the second assumption with no independent
+    disposition — an unchecked assumption could then pass the plan→dev gate
+    (Greptile #451). Enforced at BOTH the read (load) and write (save) boundaries
+    so no duplicate can reach the verdict→flag path from any source; the axis set
+    is the store's single source of truth and must stay unique."""
+    from collections import Counter
+
+    counts = Counter(_normalize_axis(row.axis) for row in rows)
+    dups = sorted(axis for axis, n in counts.items() if n > 1)
+    if dups:
+        raise ValueError(
+            f"duplicate assumption axis/axes (normalized): {', '.join(dups)}. "
+            "Each axis must be unique; merge or rename the rows."
+        )
 
 
 def _parse_table(text: str) -> list[AssumptionRow]:

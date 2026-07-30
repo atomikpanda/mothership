@@ -23,11 +23,16 @@ class GateResult:
     reason: str | None = None  # actionable message when not ok
 
 
-def check_task_gate(task, workspace_root: Path, require_plan: bool = False) -> GateResult:
+def check_task_gate(
+    task, workspace_root: Path, require_plan: bool = False, require_assumption_gate: bool = False
+) -> GateResult:
     """Universal: a task must have a WorkItem. Kind-gated: a feature WorkItem
     must have an approved spec. When `require_plan` is set — only at phase
     plan→dev and finish, never at spawn — a feature WorkItem must ALSO have a
-    valid implementation plan. bug/chore/question need only the WorkItem."""
+    valid implementation plan. When `require_assumption_gate` is also set
+    (opt-in via `assumption_gate: enforce` in mothership.yaml, #444 L4) a
+    feature WorkItem must ALSO have a fresh, fully-approved plan-assumption
+    check on record. bug/chore/question need only the WorkItem."""
     if getattr(task, "work_item_id", None) is None:
         return GateResult(False, "no WorkItem — create one with `mship item new --kind <kind>` "
                                  "and spawn with `--work-item <id>` (or pass `--hotfix` to override)")
@@ -44,6 +49,10 @@ def check_task_gate(task, workspace_root: Path, require_plan: bool = False) -> G
                                  f"write one (writing-plans) at {dd}/plans/<date>-{task.slug}.md, or link it "
                                  f"with `mship item link-plan {task.work_item_id} <path>`. "
                                  f"Use --bypass-plan-gate / --hotfix to skip.")
+    if require_assumption_gate and wi.kind == "feature":
+        reason = _feature_assumption_gate_reason(wi, task, workspace_root)
+        if reason is not None:
+            return GateResult(False, reason)
     return GateResult(True)
 
 
@@ -155,6 +164,54 @@ def _feature_has_plan(wi: WorkItem, task, workspace_root: Path) -> bool:
         # / binary file (UnicodeDecodeError). Treat as no valid plan so the gate
         # fails with its actionable message, NOT the generic corrupt-store error.
         return False
+
+
+def _feature_assumption_gate_reason(wi: WorkItem, task, workspace_root: Path) -> str | None:
+    """L4 assumption gate (#444): None if the feature's plan-assumption check is
+    fresh (`plan_hash` matches the current plan text) AND every flag is
+    approved; otherwise an actionable message. Only meaningful once a plan
+    resolves — callers run this after the plan-exists gate, so a missing/
+    unreadable plan here is reported the same as "no check on record" rather
+    than duplicating `_feature_has_plan`'s error."""
+    from mship.core.assumptions import AssumptionStore, resolve_mode
+    from mship.core.plan import effective_plan_path
+    from mship.core.plan_check import PlanCheckStore, is_fresh
+
+    no_check_msg = (
+        "no fresh plan-assumption check on record — run "
+        "`mship plan assumptions check --emit` (agent runs it) then `result --from-json`"
+    )
+    # SAME resolution as the CLI recorder + serve (WorkItem plan_path, else
+    # convention) so the hash we check matches the hash that was recorded.
+    docs_dir = _docs_dir(workspace_root)
+    p = effective_plan_path(task, workspace_root, docs_dir)
+    if p is None:
+        return no_check_msg
+    try:
+        plan_text = p.read_text()
+    except (OSError, UnicodeDecodeError):
+        return no_check_msg
+    # Freshness is vs BOTH the plan AND the current assumption set — a changed or
+    # newly-added assumption (plan untouched) must re-block the gate, not ride an
+    # obsolete stored check (Greptile #451). A store that can't load (malformed /
+    # missing key) fails safe: block with the re-check message.
+    try:
+        rows = AssumptionStore(
+            Path(workspace_root), docs_dir=docs_dir, mode=resolve_mode(workspace_root)
+        ).load()
+    except Exception:
+        return no_check_msg
+    store = PlanCheckStore(Path(workspace_root) / ".mothership")
+    result = store.get(task.slug)
+    if result is None or not is_fresh(result, plan_text, rows):
+        return no_check_msg
+    pending = [f.axis for f in result.flags if not f.approved]
+    if pending:
+        return (
+            f"{len(pending)} assumption(s) need sign-off: "
+            f"`mship plan assumptions approve <axis>` (pending: {', '.join(pending)})"
+        )
+    return None
 
 
 def log_hotfix(workspace_root: Path, where: str, task_slug: str) -> None:

@@ -672,6 +672,45 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"no task {slug!r}")
         return jsonable_encoder(log_manager.read(slug, last=50))
 
+    @app.get("/plan-assumptions/{slug}")
+    def get_plan_assumptions(slug: str):
+        """Read-only, LLM-free pending-flags envelope for the Wave 3a
+        plan-check gate — the contract Ground Control (Wave 3b) consumes.
+        Same shape `mship plan assumptions status` prints
+        (`cli/plan_assumptions.py::status`): `fresh` compares the stored
+        result's `plan_hash` against the CURRENT plan text's hash (docs_dir
+        resolved the same way, off this machine's own committed
+        `docs/plans/`, not a task worktree)."""
+        from mship.core.assumptions import AssumptionStore, resolve_mode
+        from mship.core.plan import effective_plan_path
+        from mship.core.plan_check import PlanCheckStore, is_fresh
+
+        state = state_manager.load()
+        if slug not in state.tasks:
+            raise HTTPException(status_code=404, detail=f"no task {slug!r}")
+
+        docs_dir = getattr(config, "docs_dir", "docs") if config is not None else "docs"
+        plan_check_store = PlanCheckStore(workspace_root / ".mothership")
+        stored = plan_check_store.get(slug)
+        if stored is None:
+            return {"task": slug, "fresh": False, "pending": 0, "flags": []}
+
+        # SAME freshness contract as the gate + CLI (plan_hash AND assumptions_hash,
+        # same plan resolution) so `fresh` here agrees with the gate (Wave 3a
+        # review; Greptile #451 assumption-set staleness).
+        plan_path = effective_plan_path(state.tasks[slug], workspace_root, docs_dir)
+        rows = AssumptionStore(
+            workspace_root, docs_dir=docs_dir, mode=resolve_mode(workspace_root)
+        ).load()
+        fresh = plan_path is not None and is_fresh(stored, plan_path.read_text(), rows)
+        pending = sum(1 for f in stored.flags if not f.approved)
+        return {
+            "task": slug,
+            "fresh": fresh,
+            "pending": pending,
+            "flags": [f.model_dump() for f in stored.flags],
+        }
+
     # --- gh-token: two brokers, one contract ---
     # Both brokers return the same shape {"token", "expires_at", "repositories"}.
     # Broker selection is decided PURELY by whether App creds (gh_app_id AND

@@ -22,6 +22,10 @@ def register(parent: typer.Typer, get_container):
         no_args_is_help=True,
     )
 
+    from mship.cli.plan_assumptions import register as register_plan_assumptions
+
+    register_plan_assumptions(plan_app, get_container)
+
     @plan_app.command("check-assumptions")
     def check_assumptions(
         task: Optional[str] = typer.Option(None, "--task", help="Task slug; resolves the plan via the docs/plans/<date>-<slug>.md convention."),

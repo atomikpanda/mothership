@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from mship.core.message_store import MessageStore
+from mship.core.plan_check import Flag, PlanCheckResult, PlanCheckStore
 from mship.core.workitem_store import ThreadAlreadyLinkedError, WorkItemStore
 
 _BASE = datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc)
@@ -149,6 +150,58 @@ def _claim_shared_thread_worker(workitems_dir_str: str, item_id: str, thread_id:
         store.add_thread(item_id, thread_id)
     except ThreadAlreadyLinkedError:
         pass  # a concurrent worker won the race first; exclusive membership held
+
+
+# ---------------------------------------------------------------------------
+# PlanCheckStore.transaction: N processes each approving DISTINCT flags on ONE
+# task record. Without the exclusive per-task lock spanning get->approve->save,
+# concurrent approvals clobber each other (Greptile #451).
+# ---------------------------------------------------------------------------
+
+def _approve_worker(state_dir_str: str, slug: str, axes: list[str]) -> None:
+    store = PlanCheckStore(Path(state_dir_str))
+    for axis in axes:
+        with store.transaction(slug):
+            result = store.get(slug)
+            for f in result.flags:
+                if f.axis == axis:
+                    f.approved = True
+            store.save(result)
+
+
+def test_concurrent_approvals_to_same_task_do_not_lose_updates(tmp_path: Path):
+    state_dir = tmp_path / ".mothership"
+    store = PlanCheckStore(state_dir)
+
+    workers, rounds = 8, 4
+    total = workers * rounds
+    store.save(PlanCheckResult(
+        task_slug="t",
+        plan_hash="h",
+        verdicts=[],
+        flags=[Flag(axis=f"axis-{i}", source="checker", reason="x") for i in range(total)],
+    ))
+
+    procs = [
+        multiprocessing.Process(
+            target=_approve_worker,
+            args=(str(state_dir), "t", [f"axis-{w * rounds + j}" for j in range(rounds)]),
+        )
+        for w in range(workers)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=60)
+        assert p.exitcode == 0, f"worker crashed (exitcode={p.exitcode})"
+
+    got = store.get("t")
+    assert got is not None
+    approved = {f.axis for f in got.flags if f.approved}
+    expected = {f"axis-{i}" for i in range(total)}
+    missing = expected - approved
+    assert not missing, f"lost {len(missing)} approvals: {sorted(missing)}"
+    assert all(f.approved for f in got.flags)
 
 
 def test_concurrent_add_same_thread_to_different_items_stays_exclusive(tmp_path: Path):

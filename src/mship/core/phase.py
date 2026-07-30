@@ -94,11 +94,20 @@ class PhaseManager:
                     # already skips this call entirely as the escape hatch;
                     # without --bypass-spec-gate we still want a clean,
                     # actionable SpecGateError instead of a traceback.
+                    # L4 assumption gate (#444) is opt-in: only enforced when
+                    # `assumption_gate: enforce` in mothership.yaml. Off by
+                    # default so merging this doesn't newly block anyone.
+                    # --bypass-plan-gate also drops this clause — it's built
+                    # on top of the plan clause and inert without a plan.
+                    assumption_gate_enforced = (
+                        self._config is not None and self._config.assumption_gate == "enforce"
+                    )
                     try:
                         gate_result = check_task_gate(
                             task,
                             self._workspace_root,
                             require_plan=not bypass_plan_gate,
+                            require_assumption_gate=assumption_gate_enforced and not bypass_plan_gate,
                         )
                     except Exception as e:
                         raise SpecGateError(
@@ -106,15 +115,20 @@ class PhaseManager:
                         ) from e
                     if not gate_result.ok:
                         raise SpecGateError(gate_result.reason)
-                    # A plan-gate bypass only counts if the plan clause WOULD have
-                    # blocked (not a no-op override on a non-feature item or when a
-                    # plan is already present). Compute it here, but DON'T log yet —
-                    # a later gate below can still reject the transition, and we must
-                    # not record a bypass for a transition that then fails (Greptile).
+                    # A plan-gate bypass only counts if the plan (or assumption)
+                    # clause WOULD have blocked (not a no-op override on a
+                    # non-feature item or when a plan is already present and
+                    # assumptions are approved). Compute it here, but DON'T log
+                    # yet — a later gate below can still reject the transition,
+                    # and we must not record a bypass for a transition that then
+                    # fails (Greptile).
                     if bypass_plan_gate:
                         try:
                             with_plan = check_task_gate(
-                                task, self._workspace_root, require_plan=True
+                                task,
+                                self._workspace_root,
+                                require_plan=True,
+                                require_assumption_gate=assumption_gate_enforced,
                             )
                         except Exception:
                             with_plan = None

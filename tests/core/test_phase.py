@@ -452,7 +452,7 @@ def test_a7_dispatched_spec_also_satisfies_gate(
 # (workitem-mandatory-kind-gated-approval)
 # ---------------------------------------------------------------------------
 
-def _workitem_gate_env(tmp_path: Path):
+def _workitem_gate_env(tmp_path: Path, assumption_gate: str = "off"):
     """Build a (StateManager, PhaseManager) pair with workspace_root wired in,
     but no task saved yet — callers save their own task/WorkItem combination."""
     from mship.core.config import RepoConfig, WorkspaceConfig
@@ -463,6 +463,7 @@ def _workitem_gate_env(tmp_path: Path):
     config = WorkspaceConfig(
         workspace="test",
         repos={"shared": RepoConfig(path=Path("./shared"), type="library")},
+        assumption_gate=assumption_gate,
     )
     pm = PhaseManager(sm, MagicMock(spec=LogManager), config=config, workspace_root=tmp_path)
     return sm, pm
@@ -711,6 +712,119 @@ def test_plan_to_dev_bypass_plan_gate_still_enforces_spec(tmp_path: Path):
     sm.save(WorkspaceState(tasks={"wi-task": _plan_task(work_item_id=wi.id)}))
     with pytest.raises(SpecGateError, match="approved spec"):
         pm.transition("wi-task", "dev", bypass_plan_gate=True)
+
+
+# ---------------------------------------------------------------------------
+# Task 5: L4 assumption gate at plan→dev (assumption_gate: enforce), #444.
+# Opt-in via WorkspaceConfig.assumption_gate — "off" (default) is a no-op;
+# "enforce" additionally requires a fresh, fully-approved PlanCheckResult.
+# ---------------------------------------------------------------------------
+
+
+def _save_plan_check(tmp_path: Path, slug: str, plan_text: str, flags=None):
+    from mship.core.assumptions import AssumptionStore
+    from mship.core.plan_check import (
+        PlanCheckResult, PlanCheckStore, assumptions_hash, plan_hash,
+    )
+
+    rows = AssumptionStore(tmp_path).seed()
+    PlanCheckStore(tmp_path / ".mothership").save(
+        PlanCheckResult(
+            task_slug=slug, plan_hash=plan_hash(plan_text),
+            assumptions_hash=assumptions_hash(rows), verdicts=[], flags=flags or [],
+        )
+    )
+
+
+def test_plan_to_dev_assumption_gate_off_ignores_missing_check(tmp_path: Path):
+    """Default assumption_gate="off" must not enforce L4 at all — plan→dev
+    behaves exactly as before this task, even with no PlanCheckResult."""
+    wi = _seed_feature_wi_with_approved_spec(tmp_path)
+    _write_plan_doc(tmp_path)
+    sm, pm = _workitem_gate_env(tmp_path, assumption_gate="off")
+    sm.save(WorkspaceState(tasks={"wi-task": _plan_task(work_item_id=wi.id)}))
+    result = pm.transition("wi-task", "dev")
+    assert result.new_phase == "dev"
+
+
+def test_plan_to_dev_assumption_gate_enforced_blocks_without_check(tmp_path: Path):
+    wi = _seed_feature_wi_with_approved_spec(tmp_path)
+    _write_plan_doc(tmp_path)
+    sm, pm = _workitem_gate_env(tmp_path, assumption_gate="enforce")
+    sm.save(WorkspaceState(tasks={"wi-task": _plan_task(work_item_id=wi.id)}))
+    with pytest.raises(SpecGateError, match="plan assumptions check"):
+        pm.transition("wi-task", "dev")
+
+
+def test_plan_to_dev_assumption_gate_enforced_blocks_stale_check(tmp_path: Path):
+    wi = _seed_feature_wi_with_approved_spec(tmp_path)
+    _write_plan_doc(tmp_path)
+    _save_plan_check(tmp_path, "wi-task", "# a different plan\n")
+    sm, pm = _workitem_gate_env(tmp_path, assumption_gate="enforce")
+    sm.save(WorkspaceState(tasks={"wi-task": _plan_task(work_item_id=wi.id)}))
+    with pytest.raises(SpecGateError, match="plan assumptions check"):
+        pm.transition("wi-task", "dev")
+
+
+def test_plan_to_dev_assumption_gate_enforced_blocks_pending_flag(tmp_path: Path):
+    from mship.core.plan_check import Flag
+
+    wi = _seed_feature_wi_with_approved_spec(tmp_path)
+    _write_plan_doc(tmp_path)
+    _save_plan_check(
+        tmp_path, "wi-task", _PLAN_DOC,
+        flags=[Flag(axis="rollout", source="checker", reason="not covered")],
+    )
+    sm, pm = _workitem_gate_env(tmp_path, assumption_gate="enforce")
+    sm.save(WorkspaceState(tasks={"wi-task": _plan_task(work_item_id=wi.id)}))
+    with pytest.raises(SpecGateError, match="sign-off") as exc_info:
+        pm.transition("wi-task", "dev")
+    assert "rollout" in str(exc_info.value)
+
+
+def test_plan_to_dev_assumption_gate_enforced_passes_fresh_all_approved(tmp_path: Path):
+    from mship.core.plan_check import Flag
+
+    wi = _seed_feature_wi_with_approved_spec(tmp_path)
+    _write_plan_doc(tmp_path)
+    _save_plan_check(
+        tmp_path, "wi-task", _PLAN_DOC,
+        flags=[Flag(axis="rollout", source="checker", reason="ok", approved=True)],
+    )
+    sm, pm = _workitem_gate_env(tmp_path, assumption_gate="enforce")
+    sm.save(WorkspaceState(tasks={"wi-task": _plan_task(work_item_id=wi.id)}))
+    result = pm.transition("wi-task", "dev")
+    assert result.new_phase == "dev"
+
+
+def test_plan_to_dev_assumption_gate_enforced_bug_unaffected(tmp_path: Path):
+    """A bug WorkItem is never plan/assumption gated, even with enforce on."""
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="fix it", kind="bug", workspace="test",
+                      now=datetime(2026, 4, 10, tzinfo=timezone.utc))
+    sm, pm = _workitem_gate_env(tmp_path, assumption_gate="enforce")
+    sm.save(WorkspaceState(tasks={"wi-task": _plan_task(work_item_id=wi.id)}))
+    result = pm.transition("wi-task", "dev")
+    assert result.new_phase == "dev"
+
+
+def test_plan_to_dev_assumption_gate_enforced_bypass_plan_gate_allows_and_logs(tmp_path: Path):
+    """--bypass-plan-gate is built on top of the plan clause and drops the
+    assumption clause too — same bypass, one flag."""
+    import json
+
+    wi = _seed_feature_wi_with_approved_spec(tmp_path)
+    _write_plan_doc(tmp_path)  # plan present, but NO PlanCheckResult on record
+    sm, pm = _workitem_gate_env(tmp_path, assumption_gate="enforce")
+    sm.save(WorkspaceState(tasks={"wi-task": _plan_task(work_item_id=wi.id)}))
+
+    result = pm.transition("wi-task", "dev", bypass_plan_gate=True)
+    assert result.new_phase == "dev"
+
+    log_path = tmp_path / ".mothership" / "bypass-log.jsonl"
+    assert log_path.is_file()
+    line = json.loads(log_path.read_text().splitlines()[-1])
+    assert line["op"] == "phase-dev-plan"
 
 
 # ---------------------------------------------------------------------------

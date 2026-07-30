@@ -210,6 +210,119 @@ def test_bug_never_plan_gated(tmp_path):
     assert check_task_gate(task, tmp_path, require_plan=True).ok is True
 
 
+# ---------------------------------------------------------------------------
+# L4 assumption gate (#444): opt-in via `require_assumption_gate` — a feature
+# WorkItem must ALSO have a fresh, fully-approved PlanCheckResult. Off by
+# default (require_assumption_gate=False), mirroring require_plan's rollout.
+# ---------------------------------------------------------------------------
+
+
+def _save_plan_check(tmp_path, slug, plan_text, flags=None, rows=None):
+    """Seed the assumption store and record a check keyed to BOTH the plan and the
+    current assumption set (the freshness contract the gate now enforces)."""
+    from mship.core.assumptions import AssumptionStore
+    from mship.core.plan_check import (
+        PlanCheckResult, PlanCheckStore, assumptions_hash, plan_hash,
+    )
+    seeded = AssumptionStore(tmp_path).seed() if rows is None else rows
+    PlanCheckStore(tmp_path / ".mothership").save(
+        PlanCheckResult(
+            task_slug=slug, plan_hash=plan_hash(plan_text),
+            assumptions_hash=assumptions_hash(seeded), verdicts=[], flags=flags or [],
+        )
+    )
+
+
+def test_assumption_gate_not_required_by_default(tmp_path):
+    _items, _wi, task = _approved_feature(tmp_path)
+    plans = tmp_path / "docs" / "plans"
+    plans.mkdir(parents=True)
+    (plans / "2026-07-12-t.md").write_text(_PLAN_WITH_TASK)
+    res = check_task_gate(task, tmp_path, require_plan=True, require_assumption_gate=False)
+    assert res.ok is True
+
+
+def test_assumption_gate_blocks_when_no_check_on_record(tmp_path):
+    _items, _wi, task = _approved_feature(tmp_path)
+    plans = tmp_path / "docs" / "plans"
+    plans.mkdir(parents=True)
+    (plans / "2026-07-12-t.md").write_text(_PLAN_WITH_TASK)
+    res = check_task_gate(task, tmp_path, require_plan=True, require_assumption_gate=True)
+    assert res.ok is False
+    assert "plan assumptions check" in res.reason
+
+
+def test_assumption_gate_blocks_when_stale(tmp_path):
+    _items, _wi, task = _approved_feature(tmp_path)
+    plans = tmp_path / "docs" / "plans"
+    plans.mkdir(parents=True)
+    (plans / "2026-07-12-t.md").write_text(_PLAN_WITH_TASK)
+    _save_plan_check(tmp_path, "t", "# stale plan text\n")
+    res = check_task_gate(task, tmp_path, require_plan=True, require_assumption_gate=True)
+    assert res.ok is False
+    assert "plan assumptions check" in res.reason
+
+
+def test_assumption_gate_blocks_when_flag_pending(tmp_path):
+    from mship.core.plan_check import Flag
+
+    _items, _wi, task = _approved_feature(tmp_path)
+    plans = tmp_path / "docs" / "plans"
+    plans.mkdir(parents=True)
+    (plans / "2026-07-12-t.md").write_text(_PLAN_WITH_TASK)
+    _save_plan_check(tmp_path, "t", _PLAN_WITH_TASK,
+                      flags=[Flag(axis="rollout", source="checker", reason="not covered")])
+    res = check_task_gate(task, tmp_path, require_plan=True, require_assumption_gate=True)
+    assert res.ok is False
+    assert "sign-off" in res.reason
+    assert "rollout" in res.reason
+
+
+def test_assumption_gate_passes_when_fresh_and_all_approved(tmp_path):
+    from mship.core.plan_check import Flag
+
+    _items, _wi, task = _approved_feature(tmp_path)
+    plans = tmp_path / "docs" / "plans"
+    plans.mkdir(parents=True)
+    (plans / "2026-07-12-t.md").write_text(_PLAN_WITH_TASK)
+    _save_plan_check(tmp_path, "t", _PLAN_WITH_TASK,
+                      flags=[Flag(axis="rollout", source="checker", reason="ok", approved=True)])
+    res = check_task_gate(task, tmp_path, require_plan=True, require_assumption_gate=True)
+    assert res.ok is True
+
+
+def test_assumption_gate_reblocks_when_assumption_set_changes(tmp_path):
+    """The gate's freshness is vs BOTH plan and assumption set: editing a row or
+    adding one after approval — plan untouched — must re-block, not ride the stale
+    stored check (Greptile #451)."""
+    from mship.core.assumptions import AssumptionRow, AssumptionStore
+    from mship.core.plan_check import Flag
+
+    _items, _wi, task = _approved_feature(tmp_path)
+    plans = tmp_path / "docs" / "plans"
+    plans.mkdir(parents=True)
+    (plans / "2026-07-12-t.md").write_text(_PLAN_WITH_TASK)
+    seeded = AssumptionStore(tmp_path).seed()
+    _save_plan_check(tmp_path, "t", _PLAN_WITH_TASK, rows=seeded,
+                      flags=[Flag(axis="rollout", source="checker", reason="ok", approved=True)])
+    assert check_task_gate(task, tmp_path, require_plan=True, require_assumption_gate=True).ok is True
+
+    # Add a new assumption row (plan unchanged) -> stored check is now stale.
+    AssumptionStore(tmp_path).save(
+        seeded + [AssumptionRow(axis="brand new axis", options="a/b", position="x", triggers="t")]
+    )
+    res = check_task_gate(task, tmp_path, require_plan=True, require_assumption_gate=True)
+    assert res.ok is False
+    assert "plan assumptions check" in res.reason
+
+
+def test_bug_never_assumption_gated(tmp_path):
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="fix it", kind="bug", workspace="ws", now=_now())
+    task = _task(work_item_id=wi.id)
+    assert check_task_gate(task, tmp_path, require_plan=True, require_assumption_gate=True).ok is True
+
+
 def test_workitem_migrate_shares_the_same_approved_statuses_object():
     """workitem_migrate must import (not redefine) workitem_gate's set —
     an identity check, not just an equality check, so a stray local copy
