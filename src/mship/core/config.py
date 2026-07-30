@@ -358,6 +358,12 @@ class WorkspaceConfig(BaseModel):
     # core/assumptions.py::AssumptionStore; an invalid value fails loud at
     # config load, same as `spec_storage`.
     assumption_storage: Literal["committed", "local", "encrypted"] = "committed"
+    # L4 plan→dev gate (#444): "off" (default) — merging this does NOT enforce
+    # anything; existing plan-exists gate is unchanged. "enforce" additionally
+    # requires a fresh, fully-approved `PlanCheckResult` (core/plan_check.py)
+    # before a feature WorkItem may transition plan→dev. See core/workitem_gate.py
+    # ::_feature_assumption_gate_reason.
+    assumption_gate: Literal["off", "enforce"] = "off"
     # Storage mode for acceptance-criterion artifact evidence. `None` inherits
     # `spec_storage` — the safe default, so evidence is governed exactly like the
     # spec it backs unless an operator deliberately diverges (prose is bytes,
