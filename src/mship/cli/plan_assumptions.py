@@ -316,28 +316,40 @@ def register(plan_app: typer.Typer, get_container):
         re-save. The only way a flag clears."""
         import os
 
+        from mship.core.assumptions import AssumptionStore, resolve_mode
         from mship.core.plan import _normalize_axis
         from mship.core.plan_assumptions_transition import (
             NoStoredCheck,
+            StaleCheck,
             UnknownAxis,
             approve_flag,
         )
         from mship.core.plan_check import PlanCheckStore
 
         output = Output()
-        container, workspace_root, _docs_dir, task_obj, _plan_path = _resolve_common(
+        container, workspace_root, docs_dir, task_obj, plan_path = _resolve_common(
             get_container, task, plan, output
         )
 
         store = PlanCheckStore(workspace_root / ".mothership")
         approved_by = os.environ.get("USER") or "unknown"
+        plan_text = plan_path.read_text()
+        rows = AssumptionStore(workspace_root, docs_dir=docs_dir, mode=resolve_mode(workspace_root)).load()
         try:
-            stored = approve_flag(store, task_obj.slug, axis, reason, approved_by)
+            stored = approve_flag(
+                store, task_obj.slug, axis, reason, approved_by,
+                plan_text=plan_text, rows=rows,
+            )
         except NoStoredCheck:
             output.error(f"No stored plan-check for {task_obj.slug}.")
             raise typer.Exit(1)
         except UnknownAxis:
             output.error(f"No pending flag for axis {axis!r} on {task_obj.slug}.")
+            raise typer.Exit(1)
+        except StaleCheck:
+            output.error(
+                "plan or assumptions changed since the check; re-run `mship plan assumptions result` first."
+            )
             raise typer.Exit(1)
 
         target_axis = _normalize_axis(axis)

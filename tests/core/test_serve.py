@@ -188,6 +188,34 @@ def test_post_plan_assumptions_approve_unknown_axis_404(tmp_path):
     assert r.status_code == 404
 
 
+def test_post_plan_assumptions_approve_stale_check_409(tmp_path):
+    """The stored check was recorded against an OLDER plan text than what's on
+    disk now — the server must refuse the approve (409), not silently accept
+    it and leave the plan->dev gate (which uses is_fresh) still blocked
+    (Greptile #453)."""
+    from mship.core.assumptions import AssumptionStore
+    from mship.core.plan_check import (
+        Flag, PlanCheckResult, PlanCheckStore, assumptions_hash, plan_hash,
+    )
+    sm, log = _seed_task(tmp_path)
+    rows = AssumptionStore(tmp_path).seed()
+    plan_path = _write_plan(tmp_path, "2026-07-30-dq.md", "# Plan\n\nBody.\n")
+    PlanCheckStore(tmp_path / ".mothership").save(PlanCheckResult(
+        task_slug="dq", plan_hash=plan_hash("# Plan\n\nOLD body the check ran against.\n"),
+        assumptions_hash=assumptions_hash(rows), verdicts=[],
+        flags=[Flag(axis="repo topology", source="checker", reason="gap")],
+    ))
+    # plan_path on disk ("# Plan\n\nBody.\n") no longer matches the hash the
+    # check was recorded against ("...OLD body...")
+
+    client = TestClient(_app_with(tmp_path, sm, log))
+    r = client.post("/plan-assumptions/dq/approve", json={"axis": "repo topology"})
+    assert r.status_code == 409
+
+    stored = PlanCheckStore(tmp_path / ".mothership").get("dq")
+    assert stored.flags[0].approved is False  # not mutated by the rejected approve
+
+
 def test_post_plan_assumptions_approve_unknown_task_404(tmp_path):
     sm, log = _seed_task(tmp_path)
     client = TestClient(_app_with(tmp_path, sm, log))

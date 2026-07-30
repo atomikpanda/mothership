@@ -357,6 +357,43 @@ def test_approve_unknown_or_already_covered_axis_exits_1(tmp_path):
     assert res.exit_code == 1
 
 
+def test_approve_exits_1_when_plan_changed_since_the_check_ran(tmp_path):
+    """The server (here: the CLI verb, which shares the same core transition)
+    is the freshness authority — approving against a plan that was edited
+    after the checker ran must be refused, not silently accepted only to be
+    discarded by the next `result` (Greptile #453)."""
+    AssumptionStore = __import__("mship.core.assumptions", fromlist=["AssumptionStore"]).AssumptionStore
+    AssumptionStore(tmp_path).seed()
+
+    plan_path = _write_plan(tmp_path, "2026-07-30-t1.md", "# Plan\n\nOriginal body.\n")
+
+    verdicts_file = tmp_path / "verdicts.json"
+    verdicts_file.write_text(json.dumps([
+        {"axis": "repo topology", "verdict": "not-covered", "reason": "plan never says how repos are handled"},
+    ]))
+
+    runner = CliRunner()
+    app = _app(tmp_path, task=_task())
+    res = runner.invoke(
+        app,
+        [
+            "plan", "assumptions", "result",
+            "--task", "t1", "--plan", str(plan_path),
+            "--from-json", str(verdicts_file),
+        ],
+    )
+    assert res.exit_code == 0, res.output
+
+    # plan edited AFTER the check was recorded
+    plan_path.write_text("# Plan\n\nOriginal body, now revised.\n")
+
+    res = runner.invoke(
+        app,
+        ["plan", "assumptions", "approve", "repo topology", "--task", "t1", "--plan", str(plan_path)],
+    )
+    assert res.exit_code == 1
+
+
 def test_result_preserves_prior_approvals_when_plan_unchanged(tmp_path):
     """Re-running the checker against the SAME plan (unchanged hash) must NOT
     wipe a human sign-off; a CHANGED plan correctly drops it (Wave 3a review)."""

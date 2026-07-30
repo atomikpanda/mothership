@@ -728,8 +728,10 @@ def create_app(
         `_plan_assumptions_envelope`. Delegates the mutation to
         `mship.core.plan_assumptions_transition.approve_flag` (shared with the
         CLI verb `mship plan assumptions approve`) so they cannot drift."""
+        from mship.core.assumptions import AssumptionStore, resolve_mode
+        from mship.core.plan import effective_plan_path
         from mship.core.plan_assumptions_transition import (
-            NoStoredCheck, UnknownAxis, approve_flag,
+            NoStoredCheck, StaleCheck, UnknownAxis, approve_flag,
         )
         from mship.core.plan_check import PlanCheckStore
 
@@ -737,8 +739,17 @@ def create_app(
         if slug not in state.tasks:
             raise HTTPException(status_code=404, detail=f"no task {slug!r}")
         store = PlanCheckStore(workspace_root / ".mothership")
+        docs_dir = getattr(config, "docs_dir", "docs") if config is not None else "docs"
+        plan_path = effective_plan_path(state.tasks[slug], workspace_root, docs_dir)
+        plan_text = plan_path.read_text() if plan_path is not None else ""
+        rows = AssumptionStore(
+            workspace_root, docs_dir=docs_dir, mode=resolve_mode(workspace_root)
+        ).load()
         try:
-            approve_flag(store, slug, body.axis, body.reason, approved_by="operator")
+            approve_flag(
+                store, slug, body.axis, body.reason, approved_by="operator",
+                plan_text=plan_text, rows=rows,
+            )
         except NoStoredCheck:
             raise HTTPException(
                 status_code=404, detail=f"no plan-assumption check for {slug!r}"
@@ -746,6 +757,11 @@ def create_app(
         except UnknownAxis:
             raise HTTPException(
                 status_code=404, detail=f"no pending flag for axis {body.axis!r}"
+            )
+        except StaleCheck:
+            raise HTTPException(
+                status_code=409,
+                detail="plan or assumptions changed since this check; re-run `mship plan assumptions result`",
             )
         return _plan_assumptions_envelope(slug)
 
