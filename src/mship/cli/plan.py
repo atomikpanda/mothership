@@ -29,6 +29,7 @@ def register(parent: typer.Typer, get_container):
     ):
         """Report which seed assumption axes the plan's 'Assumptions checked'
         block leaves undispositioned. Advisory only — always exits 0."""
+        from mship.core.assumptions import AssumptionStore, resolve_mode
         from mship.core.config import ConfigLoader
         from mship.core.plan import SEED_AXES, missing_assumption_axes, resolve_plan_path
 
@@ -56,7 +57,16 @@ def register(parent: typer.Typer, get_container):
             output.error(f"No plan found {where}.")
             raise typer.Exit(1)
 
-        missing = missing_assumption_axes(resolved.read_text(), SEED_AXES)
+        store = AssumptionStore(workspace_root, docs_dir=docs_dir, mode=resolve_mode(workspace_root))
+        try:
+            expected = store.axes() if store.path.is_file() else list(SEED_AXES)
+        except ValueError as e:
+            # A malformed store must fail loud, not silently shrink the expected
+            # set and let an incomplete plan pass coverage (Greptile #450).
+            output.error(str(e))
+            raise typer.Exit(1)
+
+        missing = missing_assumption_axes(resolved.read_text(), expected)
         ok = not missing
 
         if output.human_mode:
@@ -70,7 +80,7 @@ def register(parent: typer.Typer, get_container):
         else:
             output.json({
                 "plan": str(resolved),
-                "expected": list(SEED_AXES),
+                "expected": expected,
                 "missing": missing,
                 "ok": ok,
             })

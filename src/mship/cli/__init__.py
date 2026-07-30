@@ -108,6 +108,7 @@ def get_container(required: bool = True) -> "Container | None":
 
 
 # Register command modules
+from mship.cli import assumptions as _assumptions_mod
 from mship.cli import audit as _audit_mod
 from mship.cli import bind as _bind_mod
 from mship.cli import capture as _capture_mod
@@ -174,6 +175,7 @@ def run() -> None:
     app()
 
 
+_assumptions_mod.register(app, get_container)
 _audit_mod.register(app, get_container)
 _bind_mod.register(app, get_container)
 _capture_mod.register(app, get_container)

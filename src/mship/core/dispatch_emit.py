@@ -118,6 +118,7 @@ def build_emitted_prompt(
     agents_md_path: Path | None = None,
     pkg_skills_source: Path | None = None,
     state=None,
+    docs_dir: str = "docs",
 ) -> tuple[str, list]:
     """Return (prompt, warnings) — the full dispatch prompt derived live.
 
@@ -135,6 +136,13 @@ def build_emitted_prompt(
 
     `spec` supplies live acceptance text for the record's AC ids. An unknown
     AC id, or acs with spec=None, appends a string warning (never an error).
+
+    - docs_dir: workspace docs directory, used only to locate the product
+      assumptions store (see below). Default "docs".
+
+    Plan-phase tasks (`task.phase == "plan"`) get the product assumptions
+    table auto-appended (auto-seeded if absent) so the planner receives the
+    rows to disposition without a separate fetch. Other phases are unaffected.
     """
     instruction, ac_ids, warnings = resolve_instruction_and_acs(rec, workspace_root)
     acceptance, ac_warnings = resolve_acceptance(ac_ids, spec)
@@ -158,4 +166,31 @@ def build_emitted_prompt(
         model=rec.model,
         acceptance=acceptance,
     )
+
+    resolved_task = task if task is not None else _minimal_task(rec)
+    prompt = append_plan_assumptions(prompt, resolved_task, workspace_root, docs_dir)
+
     return prompt, warnings
+
+
+def append_plan_assumptions(
+    prompt: str, task, workspace_root: Path, docs_dir: str = "docs"
+) -> str:
+    """Append the rendered product-assumptions table to a PLAN-phase task's
+    prompt (deterministic L2 injection); no-op for other phases.
+
+    Shared by `build_emitted_prompt` (`--emit`) AND the `--full` inline dispatch
+    path (`cli/dispatch.py`) so EVERY plan-dispatch route injects — otherwise a
+    `--full` dispatch silently omits the assumptions (Greptile #450). May raise
+    for an encrypted store without a key / a malformed store; callers surface it
+    cleanly (they catch OSError/ValueError/key errors)."""
+    if task.phase != "plan":
+        return prompt
+    from mship.core.assumptions import AssumptionStore, resolve_mode
+
+    store = AssumptionStore(
+        workspace_root, docs_dir=docs_dir, mode=resolve_mode(workspace_root)
+    )
+    store.seed()
+    # render() already carries the "## Assumptions to disposition" header.
+    return prompt + "\n\n" + store.render()

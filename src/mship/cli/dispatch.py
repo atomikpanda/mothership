@@ -15,11 +15,19 @@ from mship.cli._resolve import resolve_for_command
 from mship.cli.output import Output
 from mship.core import dispatch as _d
 from mship.core.base_resolver import resolve_base
+from cryptography.fernet import InvalidToken as _InvalidToken
 from mship.core.dispatch_emit import (
     build_emitted_prompt,
     resolve_acceptance,
     resolve_instruction_and_acs,
 )
+from mship.core.spec_key import SpecKeyMissing as _SpecKeyMissing
+
+# Errors deriving an emitted prompt from a record. Includes the encrypted-store
+# key errors (missing key, or a bad/corrupt key) raised by plan-phase assumption
+# injection reading an encrypted store — e.g. a worker that has the encrypted
+# doc but not the key. Flat tuple: an except clause can't nest a sub-tuple.
+_EMIT_ERRORS = (OSError, ValueError, _SpecKeyMissing, _InvalidToken)
 from mship.core.dispatch_models import resolve_model
 from mship.core.dispatch_stub import build_stub
 from mship.core.review_package import (
@@ -193,6 +201,7 @@ def register(app: typer.Typer, get_container):
                 return
             journal_entries, agents_md_path = _journal_and_agents(container, task_obj.slug)
             base_sha_info = _d.collect_base_sha_info(Path(rec.worktree), rec.base_branch)
+            docs_dir = getattr(container.config(), "docs_dir", "docs")
             try:
                 prompt, warnings = build_emitted_prompt(
                     rec,
@@ -205,8 +214,12 @@ def register(app: typer.Typer, get_container):
                     agents_md_path=agents_md_path,
                     pkg_skills_source=pkg_skills_source(),
                     state=state,
+                    docs_dir=docs_dir,
                 )
-            except (OSError, ValueError) as e:
+            except _EMIT_ERRORS as e:
+                # Includes the encrypted-store key errors from plan-phase
+                # assumption injection — surface a clean error, not a raw
+                # traceback (fail loud, cleanly).
                 output.error(f"cannot derive the prompt from the record: {e}")
                 raise typer.Exit(code=1)
             for w in warnings:
@@ -467,5 +480,17 @@ def register(app: typer.Typer, get_container):
             mode=mode,
             model=resolved_model,
         )
+        # Deterministic assumption injection applies to the --full inline prompt
+        # too, not just --emit — otherwise a plan-phase --full dispatch silently
+        # omits the assumptions (Greptile #450).
+        try:
+            from mship.core.dispatch_emit import append_plan_assumptions
+
+            _wr = Path(container.config_path()).parent
+            _dd = getattr(container.config(), "docs_dir", "docs")
+            prompt = append_plan_assumptions(prompt, task_obj, _wr, _dd)
+        except _EMIT_ERRORS as e:
+            output.error(f"cannot inject assumptions into the prompt: {e}")
+            raise typer.Exit(code=1)
         # Print directly to stdout (NOT via Output.json — this is meant to be piped).
         print(prompt)
