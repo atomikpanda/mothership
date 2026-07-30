@@ -108,13 +108,18 @@ def _write_plan(tmp_path: Path, name: str, body: str) -> Path:
 
 
 def test_get_plan_assumptions_pending_flag(tmp_path):
-    from mship.core.plan_check import Flag, PlanCheckResult, PlanCheckStore, plan_hash
+    from mship.core.assumptions import AssumptionStore
+    from mship.core.plan_check import (
+        Flag, PlanCheckResult, PlanCheckStore, assumptions_hash, plan_hash,
+    )
 
     sm, log = _seed_task(tmp_path)
+    rows = AssumptionStore(tmp_path).seed()
     plan_path = _write_plan(tmp_path, "2026-07-30-dq.md", "# Plan\n\nSome body.\n")
     PlanCheckStore(tmp_path / ".mothership").save(PlanCheckResult(
         task_slug="dq",
         plan_hash=plan_hash(plan_path.read_text()),
+        assumptions_hash=assumptions_hash(rows),
         verdicts=[],
         flags=[Flag(axis="repo topology", source="checker", reason="not addressed")],
     ))

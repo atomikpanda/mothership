@@ -144,6 +144,7 @@ def register(plan_app: typer.Typer, get_container):
             AxisVerdict,
             PlanCheckResult,
             PlanCheckStore,
+            assumptions_hash,
             cross_check,
             flags_from_verdicts,
             plan_hash,
@@ -237,6 +238,7 @@ def register(plan_app: typer.Typer, get_container):
             check_result = PlanCheckResult(
                 task_slug=task_obj.slug,
                 plan_hash=new_hash,
+                assumptions_hash=assumptions_hash(rows),
                 verdicts=verdicts,
                 flags=flags,
             )
@@ -264,12 +266,14 @@ def register(plan_app: typer.Typer, get_container):
         ),
         plan: Optional[str] = typer.Option(None, "--plan", help="Explicit plan path (workspace-relative)."),
     ):
-        """Report whether the stored plan-check for this task is fresh (plan
-        unchanged since the check), stale (plan edited after), or absent."""
-        from mship.core.plan_check import PlanCheckStore, plan_hash
+        """Report whether the stored plan-check for this task is fresh (plan AND
+        assumption set unchanged since the check), stale (either edited after), or
+        absent."""
+        from mship.core.assumptions import AssumptionStore, resolve_mode
+        from mship.core.plan_check import PlanCheckStore, is_fresh
 
         output = Output()
-        container, workspace_root, _docs_dir, task_obj, plan_path = _resolve_common(
+        container, workspace_root, docs_dir, task_obj, plan_path = _resolve_common(
             get_container, task, plan, output
         )
 
@@ -281,7 +285,8 @@ def register(plan_app: typer.Typer, get_container):
                 output.json({"task": task_obj.slug, "fresh": False, "pending": 0, "flags": []})
             return
 
-        fresh = stored.plan_hash == plan_hash(plan_path.read_text())
+        rows = AssumptionStore(workspace_root, docs_dir=docs_dir, mode=resolve_mode(workspace_root)).load()
+        fresh = is_fresh(stored, plan_path.read_text(), rows)
         pending = sum(1 for f in stored.flags if not f.approved)
 
         if output.human_mode:

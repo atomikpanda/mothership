@@ -173,8 +173,9 @@ def _feature_assumption_gate_reason(wi: WorkItem, task, workspace_root: Path) ->
     resolves — callers run this after the plan-exists gate, so a missing/
     unreadable plan here is reported the same as "no check on record" rather
     than duplicating `_feature_has_plan`'s error."""
+    from mship.core.assumptions import AssumptionStore, resolve_mode
     from mship.core.plan import effective_plan_path
-    from mship.core.plan_check import PlanCheckStore, plan_hash
+    from mship.core.plan_check import PlanCheckStore, is_fresh
 
     no_check_msg = (
         "no fresh plan-assumption check on record — run "
@@ -182,16 +183,27 @@ def _feature_assumption_gate_reason(wi: WorkItem, task, workspace_root: Path) ->
     )
     # SAME resolution as the CLI recorder + serve (WorkItem plan_path, else
     # convention) so the hash we check matches the hash that was recorded.
-    p = effective_plan_path(task, workspace_root, _docs_dir(workspace_root))
+    docs_dir = _docs_dir(workspace_root)
+    p = effective_plan_path(task, workspace_root, docs_dir)
     if p is None:
         return no_check_msg
     try:
-        current_hash = plan_hash(p.read_text())
+        plan_text = p.read_text()
     except (OSError, UnicodeDecodeError):
+        return no_check_msg
+    # Freshness is vs BOTH the plan AND the current assumption set — a changed or
+    # newly-added assumption (plan untouched) must re-block the gate, not ride an
+    # obsolete stored check (Greptile #451). A store that can't load (malformed /
+    # missing key) fails safe: block with the re-check message.
+    try:
+        rows = AssumptionStore(
+            Path(workspace_root), docs_dir=docs_dir, mode=resolve_mode(workspace_root)
+        ).load()
+    except Exception:
         return no_check_msg
     store = PlanCheckStore(Path(workspace_root) / ".mothership")
     result = store.get(task.slug)
-    if result is None or result.plan_hash != current_hash:
+    if result is None or not is_fresh(result, plan_text, rows):
         return no_check_msg
     pending = [f.axis for f in result.flags if not f.approved]
     if pending:

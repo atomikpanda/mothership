@@ -681,8 +681,9 @@ def create_app(
         result's `plan_hash` against the CURRENT plan text's hash (docs_dir
         resolved the same way, off this machine's own committed
         `docs/plans/`, not a task worktree)."""
+        from mship.core.assumptions import AssumptionStore, resolve_mode
         from mship.core.plan import effective_plan_path
-        from mship.core.plan_check import PlanCheckStore, plan_hash
+        from mship.core.plan_check import PlanCheckStore, is_fresh
 
         state = state_manager.load()
         if slug not in state.tasks:
@@ -694,10 +695,14 @@ def create_app(
         if stored is None:
             return {"task": slug, "fresh": False, "pending": 0, "flags": []}
 
-        # SAME resolution as the gate + CLI recorder (WorkItem plan_path, else
-        # convention) so `fresh` here agrees with the gate (Wave 3a review).
+        # SAME freshness contract as the gate + CLI (plan_hash AND assumptions_hash,
+        # same plan resolution) so `fresh` here agrees with the gate (Wave 3a
+        # review; Greptile #451 assumption-set staleness).
         plan_path = effective_plan_path(state.tasks[slug], workspace_root, docs_dir)
-        fresh = plan_path is not None and stored.plan_hash == plan_hash(plan_path.read_text())
+        rows = AssumptionStore(
+            workspace_root, docs_dir=docs_dir, mode=resolve_mode(workspace_root)
+        ).load()
+        fresh = plan_path is not None and is_fresh(stored, plan_path.read_text(), rows)
         pending = sum(1 for f in stored.flags if not f.approved)
         return {
             "task": slug,

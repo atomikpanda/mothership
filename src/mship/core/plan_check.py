@@ -20,8 +20,11 @@ __all__ = [
     "Flag",
     "PlanCheckResult",
     "PlanCheckStore",
+    "assumptions_hash",
+    "axis_fingerprint",
     "cross_check",
     "flags_from_verdicts",
+    "is_fresh",
     "plan_hash",
 ]
 
@@ -66,9 +69,39 @@ def axis_fingerprint(row: "AssumptionRow") -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
+def assumptions_hash(rows: list["AssumptionRow"]) -> str:
+    """Order-independent hash of the CURRENT assumption SET's definitions. A
+    stored plan-check is fresh only while this still matches: adding, removing, or
+    editing ANY row invalidates it, forcing a re-check so a newly-added assumption
+    gets a disposition and an edited one loses its stale approval. Pairs with
+    `plan_hash` — freshness = plan unchanged AND assumptions unchanged (#444)."""
+    return hashlib.sha256(
+        "\x1f".join(sorted(axis_fingerprint(r) for r in rows)).encode()
+    ).hexdigest()[:16]
+
+
+def is_fresh(stored: "PlanCheckResult", plan_text: str, rows: list["AssumptionRow"]) -> bool:
+    """THE freshness contract, shared by the plan→dev gate, `status`, and serve so
+    none can drift: a stored check is fresh iff the plan AND the assumption set are
+    both unchanged since it was recorded. A record predating assumption-hashing
+    (`assumptions_hash is None`) is NOT fresh — fail toward re-checking (Greptile
+    #451: the gate must notice a changed/added assumption, not only a changed plan)."""
+    return (
+        stored.plan_hash == plan_hash(plan_text)
+        and stored.assumptions_hash is not None
+        and stored.assumptions_hash == assumptions_hash(rows)
+    )
+
+
 class PlanCheckResult(BaseModel):
     task_slug: str
     plan_hash: str
+    # Hash of the assumption SET this check was recorded against (see
+    # `assumptions_hash`). A stored check is fresh only while BOTH the plan and
+    # the assumption set are unchanged — the gate enforces this, so adding or
+    # editing a row invalidates the record even on an unchanged plan (Greptile
+    # #451). Optional for backward-compat with pre-hash records (treated as stale).
+    assumptions_hash: str | None = None
     verdicts: list[AxisVerdict]
     flags: list[Flag]
 

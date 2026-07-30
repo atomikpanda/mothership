@@ -722,11 +722,16 @@ def test_plan_to_dev_bypass_plan_gate_still_enforces_spec(tmp_path: Path):
 
 
 def _save_plan_check(tmp_path: Path, slug: str, plan_text: str, flags=None):
-    from mship.core.plan_check import PlanCheckResult, PlanCheckStore, plan_hash
+    from mship.core.assumptions import AssumptionStore
+    from mship.core.plan_check import (
+        PlanCheckResult, PlanCheckStore, assumptions_hash, plan_hash,
+    )
 
+    rows = AssumptionStore(tmp_path).seed()
     PlanCheckStore(tmp_path / ".mothership").save(
         PlanCheckResult(
-            task_slug=slug, plan_hash=plan_hash(plan_text), verdicts=[], flags=flags or [],
+            task_slug=slug, plan_hash=plan_hash(plan_text),
+            assumptions_hash=assumptions_hash(rows), verdicts=[], flags=flags or [],
         )
     )
 
