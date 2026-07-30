@@ -210,6 +210,18 @@ def test_bug_never_plan_gated(tmp_path):
     assert check_task_gate(task, tmp_path, require_plan=True).ok is True
 
 
+def test_feature_plan_gate_passes_with_metarepo_layout(tmp_path, metarepo_workspace):
+    """The plan->dev gate must work against the product's core layout (metarepo),
+    not only single/2-repo -- L0 makes metarepo a first-class dev-phase fixture."""
+    workspace_root, _mock_shell = metarepo_workspace
+    _items, _wi, task = _approved_feature(workspace_root)
+    plans = workspace_root / "docs" / "plans"
+    plans.mkdir(parents=True)
+    (plans / "2026-07-12-t.md").write_text(_PLAN_WITH_TASK)
+    res = check_task_gate(task, workspace_root, require_plan=True)
+    assert res.ok is True
+
+
 # ---------------------------------------------------------------------------
 # L4 assumption gate (#444): opt-in via `require_assumption_gate` — a feature
 # WorkItem must ALSO have a fresh, fully-approved PlanCheckResult. Off by
