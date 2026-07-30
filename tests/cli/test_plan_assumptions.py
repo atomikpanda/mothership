@@ -130,6 +130,31 @@ def test_result_not_covered_stores_pending_checker_flag(tmp_path):
     assert data["pending"] >= 1
 
 
+def test_result_rejects_duplicate_axis_verdicts(tmp_path):
+    """A duplicate axis (last-wins keying) could let a `covered` duplicate erase a
+    `not-covered` gap and pass the gate — a false negative. Reject at ingestion
+    (Greptile #451 re-review)."""
+    AssumptionStore = __import__("mship.core.assumptions", fromlist=["AssumptionStore"]).AssumptionStore
+    AssumptionStore(tmp_path).seed()
+
+    plan_path = _write_plan(tmp_path, "2026-07-30-t1.md", "# Plan\n\nbody\n")
+
+    verdicts_file = tmp_path / "verdicts.json"
+    verdicts_file.write_text(json.dumps([
+        {"axis": "repo topology", "verdict": "not-covered", "reason": "a real gap"},
+        {"axis": "Repo  Topology", "verdict": "covered", "reason": "duplicate that would erase the gap"},
+    ]))
+
+    res = CliRunner().invoke(
+        _app(tmp_path, task=_task()),
+        ["plan", "assumptions", "result", "--task", "t1", "--plan", str(plan_path),
+         "--from-json", str(verdicts_file)],
+    )
+    assert res.exit_code == 1
+    assert "duplicate axis" in res.output.lower()
+    assert "repo topology" in res.output.lower()
+
+
 def test_result_na_verdict_on_triggered_axis_stores_cross_check_flag(tmp_path):
     from mship.core.assumptions import AssumptionStore, SEED_ROWS
     from mship.core.plan_check import PlanCheckStore

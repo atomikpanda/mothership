@@ -175,6 +175,24 @@ def register(plan_app: typer.Typer, get_container):
             output.error(f"Invalid verdicts JSON from --from-json: {e}")
             raise typer.Exit(1)
 
+        # Fail loud on duplicate axes: downstream keys verdicts by normalized axis
+        # (last-wins), so a duplicate `covered` verdict would silently erase a
+        # `not-covered` gap for the same axis and let the gate pass — a false
+        # negative in exactly the direction this system must never fail (Greptile
+        # #451 re-review). One verdict per axis; reject ambiguous input at the edge.
+        from collections import Counter
+
+        from mship.core.plan import _normalize_axis
+
+        axis_counts = Counter(_normalize_axis(v.axis) for v in verdicts)
+        dups = sorted(axis for axis, n in axis_counts.items() if n > 1)
+        if dups:
+            output.error(
+                f"Duplicate axis verdict(s) in --from-json: {', '.join(dups)}. "
+                "Return exactly one verdict per axis."
+            )
+            raise typer.Exit(1)
+
         store = AssumptionStore(workspace_root, docs_dir=docs_dir, mode=resolve_mode(workspace_root))
         rows = store.load()
         plan_text = plan_path.read_text()
