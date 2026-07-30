@@ -157,13 +157,21 @@ class PlanCheckStore:
         self._dir = Path(state_dir) / "plan-checks"
 
     def path(self, task_slug: str) -> Path:
-        # Validate the slug the same way WorkItemStore._path does — a task_slug is
-        # always a state-validated key upstream, but a per-id file store must not
-        # let a stray separator/`..` escape the plan-checks dir at the boundary.
-        if (not task_slug or "/" in task_slug or "\\" in task_slug
-                or task_slug in (".", "..") or task_slug.startswith(".")):
+        # `slug` can reach here from an HTTP path param (serve
+        # /plan-assumptions/{slug}), so treat it as untrusted at this boundary.
+        # Resolve the candidate and require it to sit DIRECTLY inside plan-checks/
+        # — a positive containment proof (the sanitizer pattern that clears
+        # CodeQL py/path-injection, mirroring resolve_plan_path's is_relative_to
+        # guard), which also subsumes any separator / `..` / absolute-path slug.
+        # Callers still validate the slug against state.tasks upstream; this is
+        # defense in depth, not the only guard.
+        if not task_slug:
+            raise ValueError("empty task slug")
+        base = self._dir.resolve()
+        candidate = (base / f"{task_slug}.json").resolve()
+        if candidate.parent != base:
             raise ValueError(f"unsafe task slug: {task_slug!r}")
-        return self._dir / f"{task_slug}.json"
+        return candidate
 
     def _lock_path(self, task_slug: str) -> Path:
         """Per-task lock file (`<slug>.json.lock`). Reuses `path`'s slug

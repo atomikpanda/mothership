@@ -88,6 +88,21 @@ def test_plan_check_store_get_absent_returns_none(tmp_path):
     assert store.get("no-such-task") is None
 
 
+def test_plan_check_store_rejects_path_traversal_slug(tmp_path):
+    """`slug` can arrive from an HTTP path param (serve /plan-assumptions/{slug}),
+    so a traversal/separator/absolute slug must not escape plan-checks/ — the
+    resolved path must sit directly inside it (CodeQL py/path-injection #38/#39)."""
+    import pytest
+    store = PlanCheckStore(tmp_path)
+    # Slugs that would escape plan-checks/ (separators or absolute) must raise.
+    for bad in ["../evil", "../../etc/passwd", "sub/dir", "/etc/passwd"]:
+        with pytest.raises(ValueError):
+            store.path(bad)
+        # get()/is_file must not read outside the dir either
+        with pytest.raises(ValueError):
+            store.get(bad)
+
+
 def _repo_topology_row() -> AssumptionRow:
     return AssumptionRow(
         axis="repo topology",
