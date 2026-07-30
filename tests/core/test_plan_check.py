@@ -179,3 +179,20 @@ def test_cross_check_never_removes_checker_flags():
     )
     assert len(checker_flags) == 1
     assert cc_flags == []
+
+
+def test_cross_check_prefix_matches_segment_not_midword():
+    """`run/*` must match `run/foo` (real segment) but NOT `prerun/config`
+    (mid-word) — a false flag spends operator attention (#444 backtest)."""
+    from mship.core.plan_check import _triggers_match
+    assert _triggers_match("run/*", "touches run/config today", "", []) is True
+    assert _triggers_match("run/*", "touches prerun/config today", "", []) is False
+
+
+def test_cross_check_plain_token_matches_on_word_boundary_only():
+    """`run` matches the whole word `run` but NOT `brunch`; `UI` not in `build`."""
+    from mship.core.plan_check import _triggers_match
+    assert _triggers_match("run", "we run the worker", "", []) is True
+    assert _triggers_match("run", "we had brunch after", "", []) is False
+    assert _triggers_match("ui", "the review UI card", "", []) is True
+    assert _triggers_match("ui", "we build the thing", "", []) is False

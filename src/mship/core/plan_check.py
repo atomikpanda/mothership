@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -62,9 +63,12 @@ def flags_from_verdicts(verdicts: list[AxisVerdict]) -> list[Flag]:
 
 
 def _triggers_match(triggers: str, plan_text: str, task_text: str, affected_repos: list[str]) -> bool:
-    """A row's `triggers` cell is comma-separated tokens. A `foo/*` token matches by
-    prefix `foo/` against either text blob; a plain token matches as a case-insensitive
-    substring of either text blob, or equals an `affected_repos` entry (case-insensitive)."""
+    """A row's `triggers` cell is comma-separated tokens. A `foo/*` token matches a
+    `foo/` path SEGMENT (segment boundary, not mid-word — so `run/*` does NOT match
+    `prerun/config`); a plain token matches on a WORD boundary (so `run` does NOT
+    match `brunch`, and `UI` does NOT match `build`) or equals an `affected_repos`
+    entry. Word/segment boundaries keep the cross-check precise — false flags spend
+    the scarce resource, operator attention (#444 backtest)."""
     haystacks = [plan_text.lower(), task_text.lower()]
     repos_lower = [r.lower() for r in affected_repos]
     for raw_token in triggers.split(","):
@@ -72,11 +76,14 @@ def _triggers_match(triggers: str, plan_text: str, task_text: str, affected_repo
         if not token:
             continue
         if token.endswith("/*"):
-            prefix = token[:-1]  # keep trailing "/"
-            if any(prefix in haystack for haystack in haystacks):
+            # `foo/` must start a path segment: at string start or after a non-word,
+            # non-slash char (so `prerun/` does not satisfy `run/*`).
+            pat = r"(?:^|[^\w/])" + re.escape(token[:-1])
+            if any(re.search(pat, h) for h in haystacks):
                 return True
         else:
-            if any(token in haystack for haystack in haystacks):
+            pat = r"\b" + re.escape(token) + r"\b"
+            if any(re.search(pat, h) for h in haystacks):
                 return True
             if token in repos_lower:
                 return True
