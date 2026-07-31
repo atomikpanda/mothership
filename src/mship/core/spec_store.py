@@ -65,6 +65,14 @@ class SpecStore:
             storage = storage_from_workspace(self._dir)
         self._storage = storage
 
+    @property
+    def workspace_root(self) -> Path:
+        """The workspace root this store's specs live under (`<root>/specs`).
+        Reuses `SpecStorage`'s already-computed root — the single place that
+        derives it — so callers needing e.g. `<root>/.mothership/logs`
+        (view/actions.py's LogManager) don't restate the convention."""
+        return self._storage.workspace_root
+
     def path_for(self, spec: Spec) -> Path:
         """Logical `.md` stem for a spec: `<specs_dir>/<created_at date>-<id>.md`.
 

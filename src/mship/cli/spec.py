@@ -623,8 +623,8 @@ def register(parent: typer.Typer, get_container):
         """
         import os
 
-        from mship.core.spec import InvalidTransition, validate_transition
-        from mship.core.spec_transition import record_rejection, request_changes_spec
+        from mship.core.spec import InvalidTransition
+        from mship.core.spec_transition import request_changes_spec
         output = Output()
         container = get_container()
         store = _spec_store()
@@ -632,33 +632,26 @@ def register(parent: typer.Typer, get_container):
         if spec is None:
             output.error(f"No spec with id {spec_id!r}.")
             raise typer.Exit(1)
+        # #458 P1 class fix: the durable rejection record is now written
+        # inside `request_changes_spec` itself (record-then-transition,
+        # fail-loud on a write failure — CLAUDE.md: fail loud at the
+        # boundary), so every caller — CLI, serve, and the TUI views — gets
+        # it automatically instead of each remembering its own
+        # `record_rejection` call. This also supersedes the old decorative
+        # "spec request-changes: …" log line — the structured record is the
+        # parsed source now.
         try:
-            validate_transition(spec.status, "draft")
-        except InvalidTransition as e:
-            output.error(str(e))
-            raise typer.Exit(1)
-        # #447 review: the durable rejection record must be written BEFORE the
-        # status transition, and a write failure must fail loud (not be
-        # swallowed) — otherwise a journal-append failure could leave the spec
-        # durably flipped to draft with no record of why it was rejected
-        # (CLAUDE.md: fail loud at the boundary; never swallow exceptions).
-        # This also supersedes the old decorative "spec request-changes: …"
-        # log line — the structured record below is the parsed source now.
-        try:
-            record_rejection(
-                container.log_manager(),
-                spec.id,
-                os.environ.get("USER") or "unknown",
-                reason,
-                datetime.now(timezone.utc),
+            request_changes_spec(
+                spec, store, reason,
+                log_manager=container.log_manager(),
+                actor=os.environ.get("USER") or "unknown",
             )
         except ValueError as e:
             output.error(str(e))
             raise typer.Exit(1)
-        except Exception as e:
-            output.error(f"Could not record rejection: {e}")
+        except InvalidTransition as e:
+            output.error(str(e))
             raise typer.Exit(1)
-        request_changes_spec(spec, store, reason)
         if output.human_mode:
             output.success(f"Requested changes ({spec.status}): {reason}")
         else:
@@ -701,6 +694,11 @@ def register(parent: typer.Typer, get_container):
                 try:
                     payload = _json.loads(entry.message)
                 except (ValueError, TypeError):
+                    continue
+                # P1 (#458): a valid-but-non-dict payload (`null`, a number, an
+                # array) passes json.loads but must not reach `.get()` — skip
+                # it the same as a not-json-at-all entry.
+                if not isinstance(payload, dict):
                     continue
                 out.append({
                     "spec_id": sid,

@@ -52,3 +52,24 @@ def test_missing_spec_is_safe(tmp_path):
     store = SpecStore(tmp_path / "specs")
     assert not approve_spec_by_id(store, "nope").ok
     assert not approve_spec_by_id(store, None).ok
+
+
+def test_request_changes_by_id_writes_durable_rejection_record(tmp_path):
+    """P1 (#458): the TUI request-changes path (`mship view queue/spec/
+    workitem`) must record a durable rejection just like CLI/serve — before
+    this fix, `request_changes_by_id` transitioned the spec without ever
+    calling `record_rejection`, silently dropping a whole rejection path
+    from the journal."""
+    import json
+
+    from mship.core.log import LogManager
+
+    store = _store(tmp_path)
+    out = request_changes_by_id(store, "s1", "tighten AC2")
+    assert out.ok and out.new_status == "draft"
+
+    log = LogManager(tmp_path / ".mothership" / "logs")
+    rejected = [e for e in log.read("s1") if e.action == "rejected"]
+    assert len(rejected) == 1
+    payload = json.loads(rejected[0].message)
+    assert payload == {"actor": "operator", "reason": "tighten AC2"}

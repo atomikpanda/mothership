@@ -30,7 +30,6 @@ from mship.core.spec import SpecDraft
 from mship.core.spec_transition import (
     ApprovalBlocked,
     approve_spec,
-    record_rejection,
     request_changes_spec,
 )
 from mship.core.view.thread_links import index_thread_work_items
@@ -987,18 +986,14 @@ def create_app(
             validate_transition(spec.status, "draft")
         except InvalidTransition as e:
             raise HTTPException(status_code=409, detail=str(e))
-        # #447 review: the durable rejection record must be written BEFORE the
-        # status transition, and a write failure must fail loud (propagate,
-        # not be swallowed) — otherwise a journal-append failure could leave
-        # the spec durably flipped to draft with no record of why (CLAUDE.md:
-        # fail loud at the boundary). This also supersedes the old decorative
-        # "spec request-changes (api): …" log line — the structured record
-        # below is the parsed source now.
-        if log_manager is not None:
-            record_rejection(
-                log_manager, spec.id, "operator", body.reason, datetime.now(timezone.utc)
-            )
-        request_changes_spec(spec, store, body.reason)
+        # #458 P1 class fix: the durable rejection record is now written
+        # inside `request_changes_spec` itself (record-then-transition,
+        # fail-loud on a write failure), so every caller — CLI, serve, and
+        # the TUI views — gets it automatically instead of each remembering
+        # its own `record_rejection` call. This also supersedes the old
+        # decorative "spec request-changes (api): …" log line — the
+        # structured record is the parsed source now.
+        request_changes_spec(spec, store, body.reason, log_manager=log_manager, actor="operator")
         return build_review(spec)
 
     @app.post("/specs/{spec_id}/archive")

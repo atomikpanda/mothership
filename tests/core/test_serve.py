@@ -470,7 +470,7 @@ def test_post_request_changes_fails_loud_when_journal_write_fails(tmp_path, monk
     and must leave the spec's status untouched — record-then-transition
     ordering means a failed append happens before the spec ever flips to
     draft, so the operator sees a real error and can retry cleanly."""
-    import mship.core.serve as serve_mod
+    import mship.core.spec_transition as st
 
     _seed_spec(tmp_path)
     log = LogManager(tmp_path / ".mothership" / "logs")
@@ -478,7 +478,7 @@ def test_post_request_changes_fails_loud_when_journal_write_fails(tmp_path, monk
 
     def _boom(*a, **kw):
         raise OSError("disk full")
-    monkeypatch.setattr(serve_mod, "record_rejection", _boom)
+    monkeypatch.setattr(st, "record_rejection", _boom)
 
     with pytest.raises(OSError):
         client.post("/specs/dq/request-changes", json={"reason": "tighten scope"})

@@ -127,6 +127,26 @@ def test_rejections_skips_malformed_entry(configured_app_with_task: Path, tmp_pa
     assert data[0]["reason"] == "tighten scope"
 
 
+def test_rejections_skips_non_dict_json_entry(configured_app_with_task: Path, tmp_path):
+    """P1 (#458): a valid-but-non-dict JSON payload (`null`, a number, an
+    array) passes `json.loads` but must not reach `.get()` unconditionally —
+    that crashes the whole query instead of just skipping the bad entry,
+    same as the existing not-json-at-all handling."""
+    _apply(tmp_path, "dq")
+    _reject("dq", "tighten scope")
+
+    log_manager = container.log_manager()
+    log_manager.append("dq", "null", action="rejected")
+    log_manager.append("dq", "42", action="rejected")
+    log_manager.append("dq", "[1, 2]", action="rejected")
+
+    result = runner.invoke(app, ["spec", "rejections", "dq"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert len(data) == 1
+    assert data[0]["reason"] == "tighten scope"
+
+
 def test_rejections_no_id_and_no_all_errors(configured_app_with_task: Path):
     result = runner.invoke(app, ["spec", "rejections"])
     assert result.exit_code != 0

@@ -75,10 +75,34 @@ def record_rejection(
     )
 
 
-def request_changes_spec(spec: Spec, store: SpecStore, reason: str) -> None:
-    """needs_review/approved -> draft carrying `reason`. Raises InvalidTransition."""
+def request_changes_spec(
+    spec: Spec,
+    store: SpecStore,
+    reason: str,
+    *,
+    log_manager: LogManager | None,
+    actor: str,
+    now: datetime | None = None,
+) -> None:
+    """needs_review/approved -> draft carrying `reason`. Raises InvalidTransition.
+
+    Writes the durable rejection record itself (record_rejection), in this
+    order: reject empty/whitespace reason -> validate_transition -> durable
+    record -> status flip -> save. Folding the record into the shared
+    transition (rather than leaving it to each caller) is the class fix for
+    #458 P1: the CLI, serve, and the TUI views (core/view/actions.py) all
+    call this one function, so none of them can transition a spec without
+    also logging why — the earlier per-caller convention let the view path
+    (`mship view queue/spec/workitem`) silently skip it.
+    """
+    if not reason or not reason.strip():
+        raise ValueError("reason must not be empty")
     validate_transition(spec.status, "draft")
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if log_manager is not None:
+        record_rejection(log_manager, spec.id, actor, reason, now)
     spec.status = "draft"
     spec.clarification_reason = reason
-    spec.updated_at = datetime.now(timezone.utc)
+    spec.updated_at = now
     store.save(spec)
