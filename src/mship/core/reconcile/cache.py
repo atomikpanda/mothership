@@ -10,6 +10,12 @@ from pathlib import Path
 CACHE_FILENAME = "reconcile.cache.json"
 DEFAULT_TTL_SECONDS = 300
 
+# Bump whenever the *logic that produces `results`* changes (e.g. #461's
+# per-repo base resolution) so an already-cached, TTL-fresh entry computed
+# under the old logic is treated as a miss and recomputed, instead of being
+# served stale until the TTL lapses or a manual refresh (#461 follow-up).
+SCHEMA_VERSION = 2
+
 
 @dataclass
 class CachePayload:
@@ -17,6 +23,7 @@ class CachePayload:
     ttl_seconds: int
     results: dict[str, dict]
     ignored: list[str] = field(default_factory=list)
+    schema_version: int = SCHEMA_VERSION
 
 
 class ReconcileCache:
@@ -39,6 +46,10 @@ class ReconcileCache:
                 ttl_seconds=int(data.get("ttl_seconds", DEFAULT_TTL_SECONDS)),
                 results=dict(data.get("results", {})),
                 ignored=list(data.get("ignored", [])),
+                # Entries written before this field existed have no "schema_version"
+                # key; default to 0 so they never collide with a real SCHEMA_VERSION
+                # and are correctly treated as stale by is_fresh().
+                schema_version=int(data.get("schema_version", 0)),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -50,12 +61,17 @@ class ReconcileCache:
             "ttl_seconds": payload.ttl_seconds,
             "results": payload.results,
             "ignored": payload.ignored,
+            # Always stamp the current version: `write()` is only ever called with
+            # freshly-computed `results`, never with a re-serialized old payload.
+            "schema_version": SCHEMA_VERSION,
         }
         tmp = self._path.with_suffix(".tmp")
         tmp.write_text(json.dumps(body, indent=2))
         tmp.replace(self._path)
 
     def is_fresh(self, payload: CachePayload) -> bool:
+        if payload.schema_version != SCHEMA_VERSION:
+            return False
         return (time.time() - payload.fetched_at) < payload.ttl_seconds
 
     # --- ignore list ---

@@ -129,6 +129,63 @@ def test_reconcile_now_resolves_base_per_repo_for_multi_repo_task(tmp_path: Path
     assert decisions["a"].state == UpstreamState.in_sync
 
 
+def test_reconcile_now_recomputes_when_cache_schema_is_stale(tmp_path: Path):
+    """#461 follow-up: a cache entry written under the OLD (pre-#461) single-repo
+    base-resolution logic can carry a spurious base_changed. Such an entry is
+    still within its 300s TTL when the #461 fix deploys, so a naive freshness
+    check would serve the stale verdict and shadow the fix until the TTL lapses
+    or a manual refresh. The cache payload must carry a schema version so a
+    pre-fix entry is treated as a miss (recomputed under the new per-repo
+    resolution) rather than served as-is.
+    """
+    class _RepoDev:
+        base_branch = "dev"
+
+    config = type("Config", (), {"repos": {"r": _RepoDev()}})()
+    cache = ReconcileCache(tmp_path)
+    # Hand-craft a fresh-by-TTL cache entry on disk as the OLD (pre-schema-version,
+    # pre-#461) logic would have written it: no "schema_version" key at all, and a
+    # spurious base_changed from comparing against the wrong base. `cache.write()`
+    # always stamps the CURRENT schema_version, so it can't produce this shape —
+    # write the raw file directly to simulate a cache from before this fix existed.
+    import json
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "reconcile.cache.json").write_text(json.dumps({
+        "fetched_at": time.time(),
+        "ttl_seconds": 300,
+        "results": {"a": {"state": "base_changed", "pr_url": "u", "pr_number": 1, "base": "dev"}},
+        "ignored": [],
+    }))
+    state = WorkspaceState(tasks={"a": _task("a", base_branch="main")})
+
+    def _fetcher(branches, wts):
+        return (
+            {"feat/a": PRSnapshot(head_ref="feat/a", state="OPEN", base_ref="dev",
+                                   merge_commit=None, url="https://x/pr/1", updated_at="z")},
+            {"feat/a": GitSnapshot(has_upstream=True, behind=0, ahead=1)},
+        )
+
+    decisions = reconcile_now(state, cache=cache, fetcher=_fetcher, config=config)
+    assert decisions["a"].state == UpstreamState.in_sync
+
+
+def test_reconcile_now_uses_fresh_cache_with_current_schema_version(tmp_path: Path):
+    """A cache entry written under the CURRENT schema version is still used as-is
+    (caching must not be broken by the version check)."""
+    cache = ReconcileCache(tmp_path)
+    cache.write(CachePayload(
+        fetched_at=time.time(), ttl_seconds=300,
+        results={"a": {"state": "merged", "pr_url": "u", "pr_number": 1, "base": "main"}},
+        ignored=[],
+    ))
+    state = WorkspaceState(tasks={"a": _task("a")})
+    decisions = reconcile_now(
+        state, cache=cache,
+        fetcher=lambda *_: (_ for _ in ()).throw(AssertionError("should not fetch")),
+    )
+    assert decisions["a"].state == UpstreamState.merged
+
+
 def test_reconcile_now_refetches_when_stale(tmp_path: Path):
     cache = ReconcileCache(tmp_path)
     cache.write(CachePayload(
