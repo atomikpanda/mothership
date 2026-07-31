@@ -269,3 +269,11 @@ class PlanCheckStore:
         if not path.is_file():
             return None
         return PlanCheckResult.model_validate_json(path.read_text())
+
+    def list_slugs(self) -> list[str]:
+        """Task slugs with a stored plan-check (`<dir>/*.json` stems). Empty when the
+        dir doesn't exist. Lets the serve list endpoint enumerate without reaching
+        into the private dir."""
+        if not self._dir.is_dir():
+            return []
+        return sorted(p.stem for p in self._dir.glob("*.json"))

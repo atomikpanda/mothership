@@ -677,6 +677,19 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"no task {slug!r}")
         return jsonable_encoder(log_manager.read(slug, last=50))
 
+    def _task_assumption_summary(slug: str, stored, rows, docs_dir: str, state) -> dict:
+        """`{task, fresh, pending}` for one stored `PlanCheckResult` — the freshness
+        contract shared by the per-task envelope and the fleet-wide list endpoint
+        (SAME plan_hash + assumptions_hash comparison as the gate + CLI, so `fresh`
+        here agrees with the gate; Wave 3a review, Greptile #451)."""
+        from mship.core.plan import effective_plan_path
+        from mship.core.plan_check import is_fresh
+
+        plan_path = effective_plan_path(state.tasks[slug], workspace_root, docs_dir)
+        fresh = plan_path is not None and is_fresh(stored, plan_path.read_text(), rows)
+        pending = sum(1 for f in stored.flags if not f.approved)
+        return {"task": slug, "fresh": fresh, "pending": pending}
+
     def _plan_assumptions_envelope(slug: str) -> dict:
         """Shared envelope builder for GET and POST /plan-assumptions/{slug} —
         same shape `mship plan assumptions status` prints
@@ -686,8 +699,7 @@ def create_app(
         `docs/plans/`, not a task worktree). Caller is responsible for the
         404-on-unknown-task check before calling this."""
         from mship.core.assumptions import AssumptionStore, resolve_mode
-        from mship.core.plan import effective_plan_path
-        from mship.core.plan_check import PlanCheckStore, is_fresh
+        from mship.core.plan_check import PlanCheckStore
 
         state = state_manager.load()
         docs_dir = getattr(config, "docs_dir", "docs") if config is not None else "docs"
@@ -696,21 +708,36 @@ def create_app(
         if stored is None:
             return {"task": slug, "fresh": False, "pending": 0, "flags": []}
 
-        # SAME freshness contract as the gate + CLI (plan_hash AND assumptions_hash,
-        # same plan resolution) so `fresh` here agrees with the gate (Wave 3a
-        # review; Greptile #451 assumption-set staleness).
-        plan_path = effective_plan_path(state.tasks[slug], workspace_root, docs_dir)
         rows = AssumptionStore(
             workspace_root, docs_dir=docs_dir, mode=resolve_mode(workspace_root)
         ).load()
-        fresh = plan_path is not None and is_fresh(stored, plan_path.read_text(), rows)
-        pending = sum(1 for f in stored.flags if not f.approved)
-        return {
-            "task": slug,
-            "fresh": fresh,
-            "pending": pending,
-            "flags": [f.model_dump() for f in stored.flags],
-        }
+        summary = _task_assumption_summary(slug, stored, rows, docs_dir, state)
+        return {**summary, "flags": [f.model_dump() for f in stored.flags]}
+
+    @app.get("/plan-assumptions")
+    def list_plan_assumptions():
+        """Fleet-wide pending-flags summary — one row per task with a stored
+        plan-check, reusing the same freshness/pending computation as the
+        per-task envelope. `rows` (the workspace assumption set) is loaded
+        once for the whole list, not per task."""
+        from mship.core.assumptions import AssumptionStore, resolve_mode
+        from mship.core.plan_check import PlanCheckStore
+
+        state = state_manager.load()
+        docs_dir = getattr(config, "docs_dir", "docs") if config is not None else "docs"
+        rows = AssumptionStore(
+            workspace_root, docs_dir=docs_dir, mode=resolve_mode(workspace_root)
+        ).load()
+        pcstore = PlanCheckStore(workspace_root / ".mothership")
+        out = []
+        for slug in pcstore.list_slugs():
+            if slug not in state.tasks:
+                continue
+            stored = pcstore.get(slug)
+            if stored is None:
+                continue
+            out.append(_task_assumption_summary(slug, stored, rows, docs_dir, state))
+        return out
 
     @app.get("/plan-assumptions/{slug}")
     def get_plan_assumptions(slug: str):

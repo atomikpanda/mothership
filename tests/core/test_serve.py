@@ -170,6 +170,22 @@ def test_post_plan_assumptions_approve_marks_flag_and_returns_envelope(tmp_path)
     assert flag["approved_reason"] == "ok"
 
 
+def test_get_plan_assumptions_list_returns_pending_per_task(tmp_path):
+    from mship.core.assumptions import AssumptionStore
+    from mship.core.plan_check import Flag, PlanCheckResult, PlanCheckStore, assumptions_hash, plan_hash
+    sm, log = _seed_task(tmp_path)          # task "dq"
+    rows = AssumptionStore(tmp_path).seed()
+    plan_path = _write_plan(tmp_path, "2026-07-30-dq.md", "# Plan\n\nBody.\n")
+    PlanCheckStore(tmp_path / ".mothership").save(PlanCheckResult(
+        task_slug="dq", plan_hash=plan_hash(plan_path.read_text()),
+        assumptions_hash=assumptions_hash(rows), verdicts=[],
+        flags=[Flag(axis="repo topology", source="checker", reason="gap")]))
+    client = TestClient(_app_with(tmp_path, sm, log))
+    body = client.get("/plan-assumptions").json()
+    row = next(r for r in body if r["task"] == "dq")
+    assert row["pending"] == 1 and row["fresh"] is True
+
+
 def test_post_plan_assumptions_approve_unknown_axis_404(tmp_path):
     from mship.core.assumptions import AssumptionStore
     from mship.core.plan_check import (
