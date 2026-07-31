@@ -65,6 +65,33 @@ def test_reconcile_now_applies_dependency_stale_from_fresh_cache(tmp_path: Path)
     assert decisions["b"].state == UpstreamState.dependency_stale
 
 
+def test_reconcile_now_resolves_base_via_repo_config_not_raw_recorded_base(tmp_path: Path):
+    """#455 Part 1: task.base_branch records the spawn-time default ('main'),
+    but `finish` opens the PR against the RESOLVED base (repo_config.base_branch
+    when no --base override was pinned). If a repo's configured base is 'dev',
+    a PR opened against 'dev' is NOT drift — reconcile must compare against the
+    same resolved base finish uses, not the raw recorded task.base_branch.
+    """
+    from mship.core.reconcile.fetch import FetchError  # noqa: F401 (documents fetcher contract)
+
+    class _Repo:
+        base_branch = "dev"
+
+    config = type("Config", (), {"repos": {"r": _Repo()}})()
+    cache = ReconcileCache(tmp_path)
+    state = WorkspaceState(tasks={"a": _task("a", base_branch="main")})
+
+    def _fetcher(branches, wts):
+        return (
+            {"feat/a": PRSnapshot(head_ref="feat/a", state="OPEN", base_ref="dev",
+                                   merge_commit=None, url="https://x/pr/1", updated_at="z")},
+            {"feat/a": GitSnapshot(has_upstream=True, behind=0, ahead=1)},
+        )
+
+    decisions = reconcile_now(state, cache=cache, fetcher=_fetcher, config=config)
+    assert decisions["a"].state == UpstreamState.in_sync
+
+
 def test_reconcile_now_refetches_when_stale(tmp_path: Path):
     cache = ReconcileCache(tmp_path)
     cache.write(CachePayload(

@@ -11,7 +11,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Literal
 
-from mship.core.state import WorkspaceState
+from mship.core.state import WorkspaceState, Task
+from mship.core.base_resolver import resolve_base
 from mship.core.reconcile.cache import ReconcileCache, CachePayload, DEFAULT_TTL_SECONDS
 from mship.core.reconcile.detect import (
     Detection, GitSnapshot, PRSnapshot, UpstreamState, detect_many,
@@ -80,6 +81,33 @@ def should_block(decision: Decision, *, command: Command, ignored: list[str]) ->
     return _MATRIX[decision.state.value][command]
 
 
+def _resolved_task_base(task: Task, config) -> str | None:
+    """The base finish/PR-creation would target for this task (#455).
+
+    `task.base_branch` is the spawn-time recorded default (usually the
+    workspace default, e.g. "main") — NOT necessarily where `finish` opens
+    the PR. `finish` resolves the real target via
+    `mship.core.base_resolver.resolve_base` (base_map > cli_base >
+    base_override > repo_config.base_branch); reconcile has no CLI overrides
+    in play, so only `base_override` and the repo's configured base apply
+    here — same precedence, same resolver, no duplicated logic (mirrors
+    `mship.core.context._effective_base_for_repo`).
+
+    Falls back to `task.base_branch` when there's no config or no repo to
+    resolve against, preserving prior behavior for config-less workspaces.
+    """
+    if config is None:
+        return task.base_branch
+    repo = task.active_repo or (task.affected_repos[0] if task.affected_repos else None)
+    if repo is None:
+        return task.base_branch
+    resolved = resolve_base(
+        repo, config.repos.get(repo), cli_base=None, base_map={},
+        known_repos=config.repos.keys(), task_base=task.base_override,
+    )
+    return resolved if resolved is not None else task.base_branch
+
+
 Fetcher = Callable[[list[str], dict[str, Path]], tuple[dict[str, PRSnapshot], dict[str, GitSnapshot]]]
 
 
@@ -132,6 +160,7 @@ def reconcile_now(
     cache: ReconcileCache,
     fetcher: Fetcher,
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
+    config=None,
 ) -> dict[str, Decision]:
     """Cache-first; fetch on stale; fall back on error. Never raises."""
     payload = cache.read()
@@ -151,7 +180,9 @@ def reconcile_now(
             return _decisions_from_cache(state, payload)
         return {}
 
-    tasks_tuples = [(t.slug, t.branch, t.base_branch) for t in state.tasks.values()]
+    tasks_tuples = [
+        (t.slug, t.branch, _resolved_task_base(t, config)) for t in state.tasks.values()
+    ]
     detections = detect_many(tasks_tuples, pr_by_head, git_by_branch)
 
     results = {

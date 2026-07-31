@@ -181,6 +181,33 @@ def test_finish_bypass_lets_through(tmp_path: Path):
         _reset_container()
 
 
+def test_finish_gate_scoped_to_finishing_task_not_blocked_by_other_task_drift(tmp_path: Path):
+    """#455 Part 2: task 'beta' has merged-PR drift (would block finish on its
+    own), but we're finishing unrelated task 'alpha'. alpha's finish must not
+    be refused because of beta's drift — the gate scopes to the task being
+    finished, not every task in the workspace.
+    """
+    runner = CliRunner()
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text("workspace: t\nrepos: {}\n")
+    tasks = {"alpha": _task("alpha"), "beta": _task("beta")}
+    StateManager(state_dir).save(WorkspaceState(tasks=tasks))
+    _seed_merged_cache(state_dir, "beta")
+
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(cfg)
+    container.state_dir.override(state_dir)
+    try:
+        result = runner.invoke(app, ["finish", "--task", "alpha"])
+        assert "upstream drift" not in result.output
+        assert "beta" not in result.output
+    finally:
+        _reset_container()
+
+
 def test_reconcile_clear_ignores(tmp_path: Path):
     runner = CliRunner()
     cfg, state_dir = _bootstrap(tmp_path, ["a", "b"])
