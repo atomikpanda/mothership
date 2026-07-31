@@ -104,6 +104,17 @@ def test_plan_check_store_rejects_path_traversal_slug(tmp_path):
             store.get(bad)
 
 
+def test_list_slugs_returns_stored_task_slugs(tmp_path):
+    store = PlanCheckStore(tmp_path)
+    store.save(PlanCheckResult(task_slug="a", plan_hash="h", assumptions_hash="x", verdicts=[], flags=[]))
+    store.save(PlanCheckResult(task_slug="b", plan_hash="h", assumptions_hash="x", verdicts=[], flags=[]))
+    assert sorted(store.list_slugs()) == ["a", "b"]
+
+
+def test_list_slugs_empty_when_no_dir(tmp_path):
+    assert PlanCheckStore(tmp_path / "nope").list_slugs() == []
+
+
 def _repo_topology_row() -> AssumptionRow:
     return AssumptionRow(
         axis="repo topology",

@@ -172,6 +172,75 @@ def test_post_plan_assumptions_approve_marks_flag_and_returns_envelope(tmp_path)
     assert flag["approved_reason"] == "ok"
 
 
+def test_get_plan_assumptions_list_returns_pending_per_task(tmp_path):
+    from mship.core.assumptions import AssumptionStore
+    from mship.core.plan_check import Flag, PlanCheckResult, PlanCheckStore, assumptions_hash, plan_hash
+    sm, log = _seed_task(tmp_path)          # task "dq"
+    rows = AssumptionStore(tmp_path).seed()
+    plan_path = _write_plan(tmp_path, "2026-07-30-dq.md", "# Plan\n\nBody.\n")
+    PlanCheckStore(tmp_path / ".mothership").save(PlanCheckResult(
+        task_slug="dq", plan_hash=plan_hash(plan_path.read_text()),
+        assumptions_hash=assumptions_hash(rows), verdicts=[],
+        flags=[Flag(axis="repo topology", source="checker", reason="gap")]))
+    client = TestClient(_app_with(tmp_path, sm, log))
+    body = client.get("/plan-assumptions").json()
+    row = next(r for r in body if r["task"] == "dq")
+    assert row["pending"] == 1 and row["fresh"] is True
+
+
+def test_get_plan_assumptions_list_tolerates_one_task_unreadable_plan(tmp_path):
+    """A task's plan file can go bad-encoding/unreadable between the stored
+    plan-check lingering and the plan being pruned (e.g. `mship close`) —
+    that task's summary must be skipped, not blow up the WHOLE list (500),
+    which would blank the Queue cards for every other task too (Greptile P1,
+    Wave 3c)."""
+    from mship.core.assumptions import AssumptionStore
+    from mship.core.plan_check import Flag, PlanCheckResult, PlanCheckStore, assumptions_hash, plan_hash
+
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir(exist_ok=True)
+    sm = StateManager(state_dir)
+    sm.save(WorkspaceState(tasks={
+        "dq": Task(slug="dq", description="d", phase="dev",
+                   created_at=datetime(2026, 6, 14, tzinfo=timezone.utc),
+                   affected_repos=["mothership"], branch="feat/dq"),
+        "ok": Task(slug="ok", description="d", phase="dev",
+                   created_at=datetime(2026, 6, 14, tzinfo=timezone.utc),
+                   affected_repos=["mothership"], branch="feat/ok"),
+    }))
+    log = LogManager(state_dir / "logs")
+
+    rows = AssumptionStore(tmp_path).seed()
+
+    # "dq"'s plan file is present but unreadable text (bad encoding) — the
+    # race the finding describes (plan removed/corrupted after the check was
+    # recorded, before the list endpoint reads it).
+    bad_plan = _write_plan(tmp_path, "2026-07-30-dq.md", "placeholder")
+    bad_plan.write_bytes(b"\xff\xfe not valid utf-8")
+    PlanCheckStore(tmp_path / ".mothership").save(PlanCheckResult(
+        task_slug="dq", plan_hash="irrelevant",
+        assumptions_hash=assumptions_hash(rows), verdicts=[],
+        flags=[Flag(axis="repo topology", source="checker", reason="gap")],
+    ))
+
+    # "ok" is a perfectly healthy task with a fresh, readable plan.
+    ok_plan = _write_plan(tmp_path, "2026-07-30-ok.md", "# Plan\n\nBody.\n")
+    PlanCheckStore(tmp_path / ".mothership").save(PlanCheckResult(
+        task_slug="ok", plan_hash=plan_hash(ok_plan.read_text()),
+        assumptions_hash=assumptions_hash(rows), verdicts=[],
+        flags=[Flag(axis="repo topology", source="checker", reason="gap")],
+    ))
+
+    client = TestClient(_app_with(tmp_path, sm, log))
+    r = client.get("/plan-assumptions")
+    assert r.status_code == 200
+    body = r.json()
+    slugs = [row["task"] for row in body]
+    assert "dq" not in slugs
+    row = next(row for row in body if row["task"] == "ok")
+    assert row["pending"] == 1 and row["fresh"] is True
+
+
 def test_post_plan_assumptions_approve_unknown_axis_404(tmp_path):
     from mship.core.assumptions import AssumptionStore
     from mship.core.plan_check import (
