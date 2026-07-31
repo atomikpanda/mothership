@@ -224,6 +224,36 @@ def test_reconcile_now_falls_back_to_cache_on_fetcher_error(tmp_path: Path):
     assert decisions["a"].state == UpstreamState.merged
 
 
+def test_reconcile_now_fetch_error_fallback_does_not_serve_schema_stale_cache(tmp_path: Path):
+    """#461 follow-up P1 (cache.py:82, "Invalid cache survives fallback"):
+    the fetch-error fallback used to return `payload` straight from
+    `cache.read()` with no schema check at all, so on a live-fetch failure
+    after the #461 upgrade, a pre-v2 entry's spurious base_changed would be
+    served and block `finish`. A pre-v2 (schema-invalid) entry must be
+    dropped at the load boundary, so the fallback has nothing stale left to
+    serve — it degrades to `{}`, same as no cache at all. Must FAIL before
+    the fix (stale base_changed served) and PASS after.
+    """
+    import json
+    cache = ReconcileCache(tmp_path)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "reconcile.cache.json").write_text(json.dumps({
+        "fetched_at": time.time(),
+        "ttl_seconds": 300,
+        "results": {"a": {"state": "base_changed", "pr_url": "u", "pr_number": 1, "base": "dev"}},
+        "ignored": [],
+        # no "schema_version" key — pre-v2 entry, TTL-fresh but schema-stale
+    }))
+    state = WorkspaceState(tasks={"a": _task("a")})
+
+    def bad_fetcher(*_):
+        from mship.core.reconcile.fetch import FetchError
+        raise FetchError("offline")
+
+    decisions = reconcile_now(state, cache=cache, fetcher=bad_fetcher)
+    assert decisions == {}
+
+
 def test_reconcile_now_returns_unavailable_on_error_without_cache(tmp_path: Path):
     cache = ReconcileCache(tmp_path)
     state = WorkspaceState(tasks={"a": _task("a")})

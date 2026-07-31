@@ -175,9 +175,16 @@ def reconcile_now(
     config=None,
 ) -> dict[str, Decision]:
     """Cache-first; fetch on stale; fall back on error. Never raises."""
+    # `payload` is the raw on-disk entry (kept only to preserve its ignore
+    # list across the fresh-write below, which is orthogonal to results
+    # schema). `current_payload` is the load-boundary-gated version — every
+    # results-consuming branch below (the fresh-cache check AND the
+    # fetch-error fallback) reads from IT, never `payload` directly, so a
+    # schema-mismatched entry can't be served by either path (#461 follow-up).
     payload = cache.read()
-    if payload and cache.is_fresh(payload):
-        return _decisions_from_cache(state, payload)
+    current_payload = cache.current(payload)
+    if current_payload is not None and cache.is_fresh(current_payload):
+        return _decisions_from_cache(state, current_payload)
 
     branches = [t.branch for t in state.tasks.values()]
     worktrees_by_branch: dict[str, Path] = {}
@@ -188,8 +195,8 @@ def reconcile_now(
     try:
         pr_by_head, git_by_branch = fetcher(branches, worktrees_by_branch)
     except FetchError:
-        if payload is not None:
-            return _decisions_from_cache(state, payload)
+        if current_payload is not None:
+            return _decisions_from_cache(state, current_payload)
         return {}
 
     tasks_tuples = [

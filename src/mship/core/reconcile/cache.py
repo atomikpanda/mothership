@@ -82,6 +82,28 @@ class ReconcileCache:
             return False
         return (time.time() - payload.fetched_at) < payload.ttl_seconds
 
+    def current(self, payload: CachePayload | None) -> CachePayload | None:
+        """The single load-boundary schema gate: treat a schema-mismatched
+        entry as absent (a cache miss) for every results-consuming reader.
+
+        Callers must run a `read()` result through this once, immediately
+        after loading it, and branch on ITS return value from then on — not
+        re-inspect the raw payload. Without this, each results-consuming path
+        has to remember its own schema check; `reconcile_now`'s fetch-error
+        fallback forgot to (#461 follow-up, was P1 "Invalid cache survives
+        fallback", cache.py:82) and served a pre-v2 spurious base_changed on
+        a live-fetch failure. Gating once, at load, makes that class of bug
+        structurally impossible: a schema-invalid entry never reaches any
+        downstream reader to be forgotten about in the first place.
+
+        Deliberately schema-only, not TTL — the fetch-error fallback serves a
+        TTL-stale-but-schema-valid entry on purpose (better than nothing);
+        only `is_fresh()` enforces TTL for the normal path.
+        """
+        if payload is None or payload.schema_version != SCHEMA_VERSION:
+            return None
+        return payload
+
     # --- ignore list ---
 
     def read_ignores(self) -> list[str]:
