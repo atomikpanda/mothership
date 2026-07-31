@@ -151,7 +151,27 @@ def test_rejections_all_finds_deleted_spec(configured_app_with_task: Path, tmp_p
     assert data[0]["reason"] == "tighten scope"
 
 
-def test_rejections_all_is_time_sorted_across_specs(configured_app_with_task: Path, tmp_path):
+def test_rejections_all_is_time_sorted_across_specs(configured_app_with_task: Path, tmp_path, monkeypatch):
+    """`LogManager` stamps second-resolution timestamps, and `--all` visits
+    specs alphabetically (`dq` before `other`) — so without explicit sorting,
+    two `dq` records written either side of an `other` record in the same
+    wall-clock second would still land adjacent in the output, masking the
+    bug. Force strictly increasing timestamps so the assertion actually
+    exercises the sort rather than getting lucky on insertion order."""
+    import itertools
+    from datetime import datetime as real_datetime, timedelta
+
+    import mship.core.log as log_mod
+
+    counter = itertools.count()
+
+    class _FakeDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime(2026, 7, 31, tzinfo=timezone.utc) + timedelta(seconds=next(counter))
+
+    monkeypatch.setattr(log_mod, "datetime", _FakeDateTime)
+
     _apply(tmp_path, "dq")
     _reject("dq", "first")
     _apply(tmp_path, "other")
