@@ -736,7 +736,17 @@ def create_app(
             stored = pcstore.get(slug)
             if stored is None:
                 continue
-            out.append(_task_assumption_summary(slug, stored, rows, docs_dir, state))
+            try:
+                out.append(_task_assumption_summary(slug, stored, rows, docs_dir, state))
+            except (OSError, UnicodeDecodeError):
+                # This task's plan went missing/unreadable between the check
+                # being recorded and this read (e.g. pruned by `mship close`
+                # while the stored plan-check lingered). Skip just this task
+                # rather than 500-ing the whole fleet list (Greptile P1,
+                # Wave 3c) — the per-task GET/POST endpoints already 404/degrade
+                # this case for a single task; the list must not let one bad
+                # task blank the Queue cards for every other task.
+                continue
         return out
 
     @app.get("/plan-assumptions/{slug}")
