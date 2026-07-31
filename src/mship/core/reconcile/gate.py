@@ -81,8 +81,9 @@ def should_block(decision: Decision, *, command: Command, ignored: list[str]) ->
     return _MATRIX[decision.state.value][command]
 
 
-def _resolved_task_base(task: Task, config) -> str | None:
-    """The base finish/PR-creation would target for this task (#455).
+def _resolved_task_bases(task: Task, config) -> frozenset[str] | None:
+    """The set of bases finish/PR-creation could target for this task (#455,
+    extended per-repo in #461).
 
     `task.base_branch` is the spawn-time recorded default (usually the
     workspace default, e.g. "main") — NOT necessarily where `finish` opens
@@ -93,19 +94,30 @@ def _resolved_task_base(task: Task, config) -> str | None:
     here — same precedence, same resolver, no duplicated logic (mirrors
     `mship.core.context._effective_base_for_repo`).
 
-    Falls back to `task.base_branch` when there's no config or no repo to
+    A multi-repo task's repos can each have a DIFFERENT configured
+    `repos.<name>.base_branch`. `reconcile_now` matches PR snapshots by
+    branch name only — it has no way to tell which of the task's repos a
+    given PR came from — so instead of resolving a single base from one
+    arbitrarily chosen repo (which false-flags `base_changed` whenever the
+    matched PR actually belongs to a *different* affected repo), this
+    resolves a base PER repo and returns the whole set. A PR is in sync if
+    its base matches ANY of them.
+
+    Falls back to `{task.base_branch}` when there's no config or no repos to
     resolve against, preserving prior behavior for config-less workspaces.
     """
-    if config is None:
-        return task.base_branch
-    repo = task.active_repo or (task.affected_repos[0] if task.affected_repos else None)
-    if repo is None:
-        return task.base_branch
-    resolved = resolve_base(
-        repo, config.repos.get(repo), cli_base=None, base_map={},
-        known_repos=config.repos.keys(), task_base=task.base_override,
-    )
-    return resolved if resolved is not None else task.base_branch
+    if config is None or not task.affected_repos:
+        return frozenset({task.base_branch}) if task.base_branch is not None else None
+    bases: set[str] = set()
+    for repo in task.affected_repos:
+        resolved = resolve_base(
+            repo, config.repos.get(repo), cli_base=None, base_map={},
+            known_repos=config.repos.keys(), task_base=task.base_override,
+        )
+        effective = resolved if resolved is not None else task.base_branch
+        if effective is not None:
+            bases.add(effective)
+    return frozenset(bases) if bases else None
 
 
 Fetcher = Callable[[list[str], dict[str, Path]], tuple[dict[str, PRSnapshot], dict[str, GitSnapshot]]]
@@ -181,7 +193,7 @@ def reconcile_now(
         return {}
 
     tasks_tuples = [
-        (t.slug, t.branch, _resolved_task_base(t, config)) for t in state.tasks.values()
+        (t.slug, t.branch, _resolved_task_bases(t, config)) for t in state.tasks.values()
     ]
     detections = detect_many(tasks_tuples, pr_by_head, git_by_branch)
 

@@ -92,6 +92,43 @@ def test_reconcile_now_resolves_base_via_repo_config_not_raw_recorded_base(tmp_p
     assert decisions["a"].state == UpstreamState.in_sync
 
 
+def test_reconcile_now_resolves_base_per_repo_for_multi_repo_task(tmp_path: Path):
+    """#461 (follow-up to #455): a multi-repo task's repos can each have a
+    DIFFERENT configured base_branch. reconcile matches PRs by branch name
+    only (it can't tell which repo a fetched PR snapshot belongs to), so it
+    must accept a PR whose base matches ANY of the task's repos' resolved
+    bases — not just one repo (previously: task.active_repo or
+    affected_repos[0]) arbitrarily chosen for the whole task. Resolving
+    against only one repo's base falsely flags base_changed for a PR that's
+    actually correctly targeting a *different* affected repo's base.
+    """
+    class _RepoMain:
+        base_branch = "main"
+
+    class _RepoDev:
+        base_branch = "dev"
+
+    config = type("Config", (), {"repos": {"r1": _RepoMain(), "r2": _RepoDev()}})()
+    cache = ReconcileCache(tmp_path)
+    state = WorkspaceState(tasks={
+        "a": _task("a", base_branch="main", affected_repos=["r1", "r2"],
+                    worktrees={"r1": Path("/tmp/fake/a-r1"), "r2": Path("/tmp/fake/a-r2")}),
+    })
+
+    def _fetcher(branches, wts):
+        # Only one PR snapshot surfaces per branch (reconcile has no way to
+        # tell which repo it came from) — here it's r2's PR, open against r2's
+        # configured base ("dev"), not r1's ("main").
+        return (
+            {"feat/a": PRSnapshot(head_ref="feat/a", state="OPEN", base_ref="dev",
+                                   merge_commit=None, url="https://x/pr/2", updated_at="z")},
+            {"feat/a": GitSnapshot(has_upstream=True, behind=0, ahead=1)},
+        )
+
+    decisions = reconcile_now(state, cache=cache, fetcher=_fetcher, config=config)
+    assert decisions["a"].state == UpstreamState.in_sync
+
+
 def test_reconcile_now_refetches_when_stale(tmp_path: Path):
     cache = ReconcileCache(tmp_path)
     cache.write(CachePayload(
