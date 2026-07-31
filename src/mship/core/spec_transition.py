@@ -54,11 +54,22 @@ def record_rejection(
     and nulled by `approve_spec`), the journal is append-only, so this record
     survives later transitions — the durable, queryable rejection history.
 
+    Must be called BEFORE the status transition at every call site (CLI +
+    serve): if the append raises, the caller must propagate it (fail loud,
+    never swallow — CLAUDE.md) and must not have flipped the spec's status
+    yet, so a write failure leaves a consistent, retryable state instead of a
+    draft-without-record.
+
+    Raises `ValueError` for an empty/whitespace-only `reason` — every durable
+    record must carry real reason text.
+
     `now` is accepted for interface symmetry with the other transition
     helpers, but `LogManager.append` stamps its own timestamp, so it is not
     threaded through.
     """
     del now
+    if not reason or not reason.strip():
+        raise ValueError("reason must not be empty")
     log_manager.append(
         spec_id, json.dumps({"actor": actor, "reason": reason}), action="rejected"
     )

@@ -623,7 +623,7 @@ def register(parent: typer.Typer, get_container):
         """
         import os
 
-        from mship.core.spec import InvalidTransition
+        from mship.core.spec import InvalidTransition, validate_transition
         from mship.core.spec_transition import record_rejection, request_changes_spec
         output = Output()
         container = get_container()
@@ -633,16 +633,18 @@ def register(parent: typer.Typer, get_container):
             output.error(f"No spec with id {spec_id!r}.")
             raise typer.Exit(1)
         try:
-            request_changes_spec(spec, store, reason)
+            validate_transition(spec.status, "draft")
         except InvalidTransition as e:
             output.error(str(e))
             raise typer.Exit(1)
-        # MOS-215: the reason is persisted on the spec (surfaced by `spec
-        # show`/`review`) in addition to being journaled to the task log.
+        # #447 review: the durable rejection record must be written BEFORE the
+        # status transition, and a write failure must fail loud (not be
+        # swallowed) — otherwise a journal-append failure could leave the spec
+        # durably flipped to draft with no record of why it was rejected
+        # (CLAUDE.md: fail loud at the boundary; never swallow exceptions).
+        # This also supersedes the old decorative "spec request-changes: …"
+        # log line — the structured record below is the parsed source now.
         try:
-            container.log_manager().append(spec.id, f"spec request-changes: {reason}")
-            # #447: also record a durable, append-only `rejected` journal event
-            # (survives approve_spec nulling clarification_reason later).
             record_rejection(
                 container.log_manager(),
                 spec.id,
@@ -650,8 +652,13 @@ def register(parent: typer.Typer, get_container):
                 reason,
                 datetime.now(timezone.utc),
             )
-        except Exception:
-            pass
+        except ValueError as e:
+            output.error(str(e))
+            raise typer.Exit(1)
+        except Exception as e:
+            output.error(f"Could not record rejection: {e}")
+            raise typer.Exit(1)
+        request_changes_spec(spec, store, reason)
         if output.human_mode:
             output.success(f"Requested changes ({spec.status}): {reason}")
         else:
@@ -668,6 +675,13 @@ def register(parent: typer.Typer, get_container):
         on `spec request-changes`), whose text is `json.dumps({actor, reason})`.
         Malformed entries are skipped, not fatal — the journal is append-only
         and outlives any one writer's format.
+
+        `--all` scans every log file directly (`LogManager.list_slugs()`)
+        rather than `SpecStore.list()`, so a rejection whose spec was later
+        deleted is still found — the whole point of a durable, append-only
+        record. Filtering by `action == "rejected"` naturally excludes
+        non-spec (task) logs sharing the same directory. Results are sorted
+        chronologically across specs.
         """
         import json as _json
 
@@ -697,10 +711,10 @@ def register(parent: typer.Typer, get_container):
             return out
 
         if all_specs:
-            store = _spec_store()
             records: list[dict] = []
-            for spec in store.list():
-                records.extend(_spec_rejections(spec.id))
+            for sid in log_manager.list_slugs():
+                records.extend(_spec_rejections(sid))
+            records.sort(key=lambda r: r["timestamp"])
         else:
             records = _spec_rejections(spec_id)
 

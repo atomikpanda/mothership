@@ -645,6 +645,39 @@ def test_spec_request_changes_records_durable_rejection(configured_app_with_task
     assert payload["actor"]
 
 
+def test_spec_request_changes_fails_loud_when_journal_write_fails(
+    configured_app_with_task: Path, tmp_path, monkeypatch,
+):
+    """#447 review: a durable-write failure must FAIL LOUD (non-zero exit,
+    no success reported) and must NOT leave the spec flipped to draft —
+    the record-then-transition ordering means a failed append leaves the
+    spec's status untouched, so the operator can retry cleanly."""
+    import mship.core.spec_transition as st
+
+    _apply_dq(tmp_path)
+
+    def _boom(*a, **kw):
+        raise OSError("disk full")
+    monkeypatch.setattr(st, "record_rejection", _boom)
+
+    result = runner.invoke(app, ["spec", "request-changes", "dq", "--reason", "tighten scope"])
+    assert result.exit_code != 0
+    assert "success" not in result.output.lower()
+
+    spec = _store(configured_app_with_task).find_by_id("dq")
+    assert spec.status == "needs_review"
+    assert spec.clarification_reason is None
+
+
+def test_spec_request_changes_rejects_empty_reason(configured_app_with_task: Path, tmp_path):
+    _apply_dq(tmp_path)
+    result = runner.invoke(app, ["spec", "request-changes", "dq", "--reason", "   "])
+    assert result.exit_code != 0
+
+    spec = _store(configured_app_with_task).find_by_id("dq")
+    assert spec.status == "needs_review"
+
+
 def test_spec_apply_revising_clears_clarification_reason(configured_app_with_task: Path, tmp_path):
     """Applying a revised draft moves draft -> needs_review (MOS-240); the
     stale reason from the earlier request-changes must not linger."""

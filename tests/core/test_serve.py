@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 from fastapi.testclient import TestClient
 
 from mship.core.message_store import MessageStore
@@ -461,6 +463,35 @@ def test_post_request_changes_records_durable_rejection(tmp_path):
     assert len(rejected) == 1
     payload = json.loads(rejected[0].message)
     assert payload == {"actor": "operator", "reason": "tighten scope"}
+
+
+def test_post_request_changes_fails_loud_when_journal_write_fails(tmp_path, monkeypatch):
+    """#447 review: a durable-write failure must propagate (not be swallowed)
+    and must leave the spec's status untouched — record-then-transition
+    ordering means a failed append happens before the spec ever flips to
+    draft, so the operator sees a real error and can retry cleanly."""
+    import mship.core.serve as serve_mod
+
+    _seed_spec(tmp_path)
+    log = LogManager(tmp_path / ".mothership" / "logs")
+    client = TestClient(_app_with(tmp_path, StateManager(tmp_path / ".mothership"), log))
+
+    def _boom(*a, **kw):
+        raise OSError("disk full")
+    monkeypatch.setattr(serve_mod, "record_rejection", _boom)
+
+    with pytest.raises(OSError):
+        client.post("/specs/dq/request-changes", json={"reason": "tighten scope"})
+
+    assert SpecStore(tmp_path / "specs").find_by_id("dq").status == "needs_review"
+
+
+def test_post_request_changes_rejects_empty_reason(tmp_path):
+    _seed_spec(tmp_path)
+    client = TestClient(_app(tmp_path))
+    r = client.post("/specs/dq/request-changes", json={"reason": "   "})
+    assert r.status_code == 400
+    assert SpecStore(tmp_path / "specs").find_by_id("dq").status == "needs_review"
 
 
 def test_get_review_includes_clarification_reason(tmp_path):

@@ -130,3 +130,38 @@ def test_rejections_skips_malformed_entry(configured_app_with_task: Path, tmp_pa
 def test_rejections_no_id_and_no_all_errors(configured_app_with_task: Path):
     result = runner.invoke(app, ["spec", "rejections"])
     assert result.exit_code != 0
+
+
+def test_rejections_all_finds_deleted_spec(configured_app_with_task: Path, tmp_path):
+    """#447 review: rejections are durable/append-only and must survive their
+    spec being deleted — `--all` scans the log directory directly rather than
+    filtering through `SpecStore.list()`."""
+    _apply(tmp_path, "dq")
+    _reject("dq", "tighten scope")
+
+    # Delete the spec itself; the journal file (and its rejected entry) stays.
+    store = _store(tmp_path)
+    store.path_for(store.find_by_id("dq")).unlink()
+    assert store.find_by_id("dq") is None
+
+    result = runner.invoke(app, ["spec", "rejections", "--all"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert [r["spec_id"] for r in data] == ["dq"]
+    assert data[0]["reason"] == "tighten scope"
+
+
+def test_rejections_all_is_time_sorted_across_specs(configured_app_with_task: Path, tmp_path):
+    _apply(tmp_path, "dq")
+    _reject("dq", "first")
+    _apply(tmp_path, "other")
+    _reject("other", "second")
+    _apply(tmp_path, "dq")
+    _reject("dq", "third")
+
+    result = runner.invoke(app, ["spec", "rejections", "--all"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert [r["reason"] for r in data] == ["first", "second", "third"]
+    timestamps = [r["timestamp"] for r in data]
+    assert timestamps == sorted(timestamps)

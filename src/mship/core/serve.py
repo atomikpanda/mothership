@@ -976,25 +976,30 @@ def create_app(
     @app.post("/specs/{spec_id}/request-changes")
     def post_request_changes(spec_id: str, body: ReasonBody):
         spec = _load_or_404(spec_id)
+        # #447 review: every durable rejection record must carry real reason
+        # text — reject empty/whitespace before anything is written.
+        if not body.reason or not body.reason.strip():
+            raise HTTPException(status_code=400, detail="reason must not be empty")
         # MOS-240: request-changes sends the spec back to the editable `draft`
         # status carrying a non-null clarification_reason (the dropped
         # needs_clarification status is now expressed by that field alone).
         try:
-            request_changes_spec(spec, store, body.reason)
+            validate_transition(spec.status, "draft")
         except InvalidTransition as e:
             raise HTTPException(status_code=409, detail=str(e))
-        review = build_review(spec)
+        # #447 review: the durable rejection record must be written BEFORE the
+        # status transition, and a write failure must fail loud (propagate,
+        # not be swallowed) — otherwise a journal-append failure could leave
+        # the spec durably flipped to draft with no record of why (CLAUDE.md:
+        # fail loud at the boundary). This also supersedes the old decorative
+        # "spec request-changes (api): …" log line — the structured record
+        # below is the parsed source now.
         if log_manager is not None:
-            try:
-                log_manager.append(spec.id, f"spec request-changes (api): {body.reason}")
-                # #447: also record a durable, append-only `rejected` journal
-                # event (survives approve_spec nulling clarification_reason).
-                record_rejection(
-                    log_manager, spec.id, "operator", body.reason, datetime.now(timezone.utc)
-                )
-            except Exception:
-                pass
-        return review
+            record_rejection(
+                log_manager, spec.id, "operator", body.reason, datetime.now(timezone.utc)
+            )
+        request_changes_spec(spec, store, body.reason)
+        return build_review(spec)
 
     @app.post("/specs/{spec_id}/archive")
     def post_archive(spec_id: str):
