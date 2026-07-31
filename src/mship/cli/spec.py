@@ -5,6 +5,7 @@ task-optional, frontmatter-structured. See #145.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Optional
 
 import typer
@@ -620,6 +621,8 @@ def register(parent: typer.Typer, get_container):
         MOS-240: `needs_clarification` is gone; "needs clarification" is now the
         non-null `clarification_reason` carried by the editable `draft` status.
         """
+        import os
+
         from mship.core.spec import InvalidTransition
         from mship.core.spec_transition import request_changes_spec
         output = Output()
@@ -629,21 +632,98 @@ def register(parent: typer.Typer, get_container):
         if spec is None:
             output.error(f"No spec with id {spec_id!r}.")
             raise typer.Exit(1)
+        # #458 P1 class fix: the durable rejection record is now written
+        # inside `request_changes_spec` itself (record-then-transition,
+        # fail-loud on a write failure — CLAUDE.md: fail loud at the
+        # boundary), so every caller — CLI, serve, and the TUI views — gets
+        # it automatically instead of each remembering its own
+        # `record_rejection` call. This also supersedes the old decorative
+        # "spec request-changes: …" log line — the structured record is the
+        # parsed source now.
         try:
-            request_changes_spec(spec, store, reason)
+            request_changes_spec(
+                spec, store, reason,
+                log_manager=container.log_manager(),
+                actor=os.environ.get("USER") or "unknown",
+            )
+        except ValueError as e:
+            output.error(str(e))
+            raise typer.Exit(1)
         except InvalidTransition as e:
             output.error(str(e))
             raise typer.Exit(1)
-        # MOS-215: the reason is persisted on the spec (surfaced by `spec
-        # show`/`review`) in addition to being journaled to the task log.
-        try:
-            container.log_manager().append(spec.id, f"spec request-changes: {reason}")
-        except Exception:
-            pass
         if output.human_mode:
             output.success(f"Requested changes ({spec.status}): {reason}")
         else:
             output.json({"id": spec.id, "status": spec.status, "reason": reason})
+
+    @spec_app.command("rejections")
+    def rejections(
+        spec_id: Optional[str] = typer.Argument(None, help="Spec id to list rejections for."),
+        all_specs: bool = typer.Option(False, "--all", help="Aggregate rejections across every spec."),
+    ):
+        """List a spec's durable rejection history (#447), or --all to aggregate.
+
+        Reads `action="rejected"` journal entries (written by `record_rejection`
+        on `spec request-changes`), whose text is `json.dumps({actor, reason})`.
+        Malformed entries are skipped, not fatal — the journal is append-only
+        and outlives any one writer's format.
+
+        `--all` scans every log file directly (`LogManager.list_slugs()`)
+        rather than `SpecStore.list()`, so a rejection whose spec was later
+        deleted is still found — the whole point of a durable, append-only
+        record. Filtering by `action == "rejected"` naturally excludes
+        non-spec (task) logs sharing the same directory. Results are sorted
+        chronologically across specs.
+        """
+        import json as _json
+
+        output = Output()
+        if (spec_id is None) == (not all_specs):
+            output.error("Provide a spec id, or --all to aggregate across every spec.")
+            raise typer.Exit(1)
+
+        container = get_container()
+        log_manager = container.log_manager()
+
+        def _spec_rejections(sid: str) -> list[dict]:
+            out = []
+            for entry in log_manager.read(sid):
+                if entry.action != "rejected":
+                    continue
+                try:
+                    payload = _json.loads(entry.message)
+                except (ValueError, TypeError):
+                    continue
+                # P1 (#458): a valid-but-non-dict payload (`null`, a number, an
+                # array) passes json.loads but must not reach `.get()` — skip
+                # it the same as a not-json-at-all entry.
+                if not isinstance(payload, dict):
+                    continue
+                out.append({
+                    "spec_id": sid,
+                    "actor": payload.get("actor"),
+                    "reason": payload.get("reason"),
+                    "timestamp": entry.timestamp.isoformat(),
+                })
+            return out
+
+        if all_specs:
+            records: list[dict] = []
+            for sid in log_manager.list_slugs():
+                records.extend(_spec_rejections(sid))
+            records.sort(key=lambda r: r["timestamp"])
+        else:
+            records = _spec_rejections(spec_id)
+
+        if output.human_mode:
+            if not records:
+                output.print("[dim]No rejections recorded.[/dim]")
+            for r in records:
+                prefix = f"{r['spec_id']}: " if all_specs else ""
+                output.print(f"{prefix}{r['timestamp']} {r['actor']}: {r['reason']}")
+        else:
+            output.json(records)
 
     @spec_app.command("list")
     def list_specs():

@@ -27,7 +27,11 @@ from mship.core.gh_app import GhAppError, mint_installation_token, resolve_insta
 from mship.core.pr import PRManager
 from mship.core.pr_watcher import PrWatcher
 from mship.core.spec import SpecDraft
-from mship.core.spec_transition import ApprovalBlocked, approve_spec, request_changes_spec
+from mship.core.spec_transition import (
+    ApprovalBlocked,
+    approve_spec,
+    request_changes_spec,
+)
 from mship.core.view.thread_links import index_thread_work_items
 from mship.core.workitem import Phase
 from mship.util.shell import ShellRunner
@@ -971,20 +975,26 @@ def create_app(
     @app.post("/specs/{spec_id}/request-changes")
     def post_request_changes(spec_id: str, body: ReasonBody):
         spec = _load_or_404(spec_id)
+        # #447 review: every durable rejection record must carry real reason
+        # text — reject empty/whitespace before anything is written.
+        if not body.reason or not body.reason.strip():
+            raise HTTPException(status_code=400, detail="reason must not be empty")
         # MOS-240: request-changes sends the spec back to the editable `draft`
         # status carrying a non-null clarification_reason (the dropped
         # needs_clarification status is now expressed by that field alone).
         try:
-            request_changes_spec(spec, store, body.reason)
+            validate_transition(spec.status, "draft")
         except InvalidTransition as e:
             raise HTTPException(status_code=409, detail=str(e))
-        review = build_review(spec)
-        if log_manager is not None:
-            try:
-                log_manager.append(spec.id, f"spec request-changes (api): {body.reason}")
-            except Exception:
-                pass
-        return review
+        # #458 P1 class fix: the durable rejection record is now written
+        # inside `request_changes_spec` itself (record-then-transition,
+        # fail-loud on a write failure), so every caller — CLI, serve, and
+        # the TUI views — gets it automatically instead of each remembering
+        # its own `record_rejection` call. This also supersedes the old
+        # decorative "spec request-changes (api): …" log line — the
+        # structured record is the parsed source now.
+        request_changes_spec(spec, store, body.reason, log_manager=log_manager, actor="operator")
+        return build_review(spec)
 
     @app.post("/specs/{spec_id}/archive")
     def post_archive(spec_id: str):

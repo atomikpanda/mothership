@@ -82,6 +82,15 @@ class LogManager:
     def _log_path(self, task_slug: str) -> Path:
         return self._logs_dir / f"{task_slug}.md"
 
+    def list_slugs(self) -> list[str]:
+        """Every slug with an existing log file (tasks and specs share this
+        store, keyed by slug/id). Used to scan the whole journal — e.g. for
+        durable spec-rejection records (#447) that must survive their spec
+        being deleted from the SpecStore."""
+        if not self._logs_dir.exists():
+            return []
+        return sorted(p.stem for p in self._logs_dir.glob("*.md"))
+
     def create(self, task_slug: str) -> None:
         self._logs_dir.mkdir(parents=True, exist_ok=True)
         path = self._log_path(task_slug)
