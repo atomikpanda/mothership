@@ -657,6 +657,62 @@ def register(parent: typer.Typer, get_container):
         else:
             output.json({"id": spec.id, "status": spec.status, "reason": reason})
 
+    @spec_app.command("rejections")
+    def rejections(
+        spec_id: Optional[str] = typer.Argument(None, help="Spec id to list rejections for."),
+        all_specs: bool = typer.Option(False, "--all", help="Aggregate rejections across every spec."),
+    ):
+        """List a spec's durable rejection history (#447), or --all to aggregate.
+
+        Reads `action="rejected"` journal entries (written by `record_rejection`
+        on `spec request-changes`), whose text is `json.dumps({actor, reason})`.
+        Malformed entries are skipped, not fatal — the journal is append-only
+        and outlives any one writer's format.
+        """
+        import json as _json
+
+        output = Output()
+        if (spec_id is None) == (not all_specs):
+            output.error("Provide a spec id, or --all to aggregate across every spec.")
+            raise typer.Exit(1)
+
+        container = get_container()
+        log_manager = container.log_manager()
+
+        def _spec_rejections(sid: str) -> list[dict]:
+            out = []
+            for entry in log_manager.read(sid):
+                if entry.action != "rejected":
+                    continue
+                try:
+                    payload = _json.loads(entry.message)
+                except (ValueError, TypeError):
+                    continue
+                out.append({
+                    "spec_id": sid,
+                    "actor": payload.get("actor"),
+                    "reason": payload.get("reason"),
+                    "timestamp": entry.timestamp.isoformat(),
+                })
+            return out
+
+        if all_specs:
+            store = _spec_store()
+            records: list[dict] = []
+            for spec in store.list():
+                records.extend(_spec_rejections(spec.id))
+        else:
+            records = _spec_rejections(spec_id)
+
+        if output.human_mode:
+            if not records:
+                output.print("[dim]No rejections recorded.[/dim]")
+            for r in records:
+                prefix = f"{r['spec_id']}: " if all_specs else ""
+                output.print(f"{prefix}{r['timestamp']} {r['actor']}: {r['reason']}")
+        else:
+            output.json(records)
+
     @spec_app.command("list")
     def list_specs():
         """List all specs (TTY: table; non-TTY: JSON envelope)."""
