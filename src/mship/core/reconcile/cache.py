@@ -61,9 +61,17 @@ class ReconcileCache:
             "ttl_seconds": payload.ttl_seconds,
             "results": payload.results,
             "ignored": payload.ignored,
-            # Always stamp the current version: `write()` is only ever called with
-            # freshly-computed `results`, never with a re-serialized old payload.
-            "schema_version": SCHEMA_VERSION,
+            # Preserve the payload's own schema_version rather than always stamping
+            # the current constant. Freshly-computed results are built with a bare
+            # CachePayload(...), which defaults schema_version to the current
+            # SCHEMA_VERSION, so they still cache correctly. But the ignore-list
+            # mutators (add_ignore/remove_ignore/clear_ignores) do a
+            # read-modify-write that preserves an existing entry's old `results`
+            # and `fetched_at` — if that write stamped the current version anyway,
+            # a TTL-fresh pre-v2 entry (with a stale, spuriously-computed result)
+            # would be laundered into looking current-version-fresh, bypassing
+            # the schema_version staleness gate (#461 follow-up).
+            "schema_version": payload.schema_version,
         }
         tmp = self._path.with_suffix(".tmp")
         tmp.write_text(json.dumps(body, indent=2))
