@@ -42,6 +42,7 @@ def register(app: typer.Typer, get_container):
         output = Output()
         container = get_container()
         state = container.state_manager().load()
+        config = container.config()
         cache = ReconcileCache(container.state_dir())
 
         if clear_ignores:
@@ -76,7 +77,7 @@ def register(app: typer.Typer, get_container):
             )
 
         try:
-            decisions = reconcile_now(state, cache=cache, fetcher=_fetcher)
+            decisions = reconcile_now(state, cache=cache, fetcher=_fetcher, config=config)
         except Exception as e:  # noqa: BLE001 — never fail closed
             output.warning(f"reconcile unavailable: {e}")
             decisions = {}

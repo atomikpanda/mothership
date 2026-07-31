@@ -65,6 +65,127 @@ def test_reconcile_now_applies_dependency_stale_from_fresh_cache(tmp_path: Path)
     assert decisions["b"].state == UpstreamState.dependency_stale
 
 
+def test_reconcile_now_resolves_base_via_repo_config_not_raw_recorded_base(tmp_path: Path):
+    """#455 Part 1: task.base_branch records the spawn-time default ('main'),
+    but `finish` opens the PR against the RESOLVED base (repo_config.base_branch
+    when no --base override was pinned). If a repo's configured base is 'dev',
+    a PR opened against 'dev' is NOT drift — reconcile must compare against the
+    same resolved base finish uses, not the raw recorded task.base_branch.
+    """
+    from mship.core.reconcile.fetch import FetchError  # noqa: F401 (documents fetcher contract)
+
+    class _Repo:
+        base_branch = "dev"
+
+    config = type("Config", (), {"repos": {"r": _Repo()}})()
+    cache = ReconcileCache(tmp_path)
+    state = WorkspaceState(tasks={"a": _task("a", base_branch="main")})
+
+    def _fetcher(branches, wts):
+        return (
+            {"feat/a": PRSnapshot(head_ref="feat/a", state="OPEN", base_ref="dev",
+                                   merge_commit=None, url="https://x/pr/1", updated_at="z")},
+            {"feat/a": GitSnapshot(has_upstream=True, behind=0, ahead=1)},
+        )
+
+    decisions = reconcile_now(state, cache=cache, fetcher=_fetcher, config=config)
+    assert decisions["a"].state == UpstreamState.in_sync
+
+
+def test_reconcile_now_resolves_base_per_repo_for_multi_repo_task(tmp_path: Path):
+    """#461 (follow-up to #455): a multi-repo task's repos can each have a
+    DIFFERENT configured base_branch. reconcile matches PRs by branch name
+    only (it can't tell which repo a fetched PR snapshot belongs to), so it
+    must accept a PR whose base matches ANY of the task's repos' resolved
+    bases — not just one repo (previously: task.active_repo or
+    affected_repos[0]) arbitrarily chosen for the whole task. Resolving
+    against only one repo's base falsely flags base_changed for a PR that's
+    actually correctly targeting a *different* affected repo's base.
+    """
+    class _RepoMain:
+        base_branch = "main"
+
+    class _RepoDev:
+        base_branch = "dev"
+
+    config = type("Config", (), {"repos": {"r1": _RepoMain(), "r2": _RepoDev()}})()
+    cache = ReconcileCache(tmp_path)
+    state = WorkspaceState(tasks={
+        "a": _task("a", base_branch="main", affected_repos=["r1", "r2"],
+                    worktrees={"r1": Path("/tmp/fake/a-r1"), "r2": Path("/tmp/fake/a-r2")}),
+    })
+
+    def _fetcher(branches, wts):
+        # Only one PR snapshot surfaces per branch (reconcile has no way to
+        # tell which repo it came from) — here it's r2's PR, open against r2's
+        # configured base ("dev"), not r1's ("main").
+        return (
+            {"feat/a": PRSnapshot(head_ref="feat/a", state="OPEN", base_ref="dev",
+                                   merge_commit=None, url="https://x/pr/2", updated_at="z")},
+            {"feat/a": GitSnapshot(has_upstream=True, behind=0, ahead=1)},
+        )
+
+    decisions = reconcile_now(state, cache=cache, fetcher=_fetcher, config=config)
+    assert decisions["a"].state == UpstreamState.in_sync
+
+
+def test_reconcile_now_recomputes_when_cache_schema_is_stale(tmp_path: Path):
+    """#461 follow-up: a cache entry written under the OLD (pre-#461) single-repo
+    base-resolution logic can carry a spurious base_changed. Such an entry is
+    still within its 300s TTL when the #461 fix deploys, so a naive freshness
+    check would serve the stale verdict and shadow the fix until the TTL lapses
+    or a manual refresh. The cache payload must carry a schema version so a
+    pre-fix entry is treated as a miss (recomputed under the new per-repo
+    resolution) rather than served as-is.
+    """
+    class _RepoDev:
+        base_branch = "dev"
+
+    config = type("Config", (), {"repos": {"r": _RepoDev()}})()
+    cache = ReconcileCache(tmp_path)
+    # Hand-craft a fresh-by-TTL cache entry on disk as the OLD (pre-schema-version,
+    # pre-#461) logic would have written it: no "schema_version" key at all, and a
+    # spurious base_changed from comparing against the wrong base. `cache.write()`
+    # always stamps the CURRENT schema_version, so it can't produce this shape —
+    # write the raw file directly to simulate a cache from before this fix existed.
+    import json
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "reconcile.cache.json").write_text(json.dumps({
+        "fetched_at": time.time(),
+        "ttl_seconds": 300,
+        "results": {"a": {"state": "base_changed", "pr_url": "u", "pr_number": 1, "base": "dev"}},
+        "ignored": [],
+    }))
+    state = WorkspaceState(tasks={"a": _task("a", base_branch="main")})
+
+    def _fetcher(branches, wts):
+        return (
+            {"feat/a": PRSnapshot(head_ref="feat/a", state="OPEN", base_ref="dev",
+                                   merge_commit=None, url="https://x/pr/1", updated_at="z")},
+            {"feat/a": GitSnapshot(has_upstream=True, behind=0, ahead=1)},
+        )
+
+    decisions = reconcile_now(state, cache=cache, fetcher=_fetcher, config=config)
+    assert decisions["a"].state == UpstreamState.in_sync
+
+
+def test_reconcile_now_uses_fresh_cache_with_current_schema_version(tmp_path: Path):
+    """A cache entry written under the CURRENT schema version is still used as-is
+    (caching must not be broken by the version check)."""
+    cache = ReconcileCache(tmp_path)
+    cache.write(CachePayload(
+        fetched_at=time.time(), ttl_seconds=300,
+        results={"a": {"state": "merged", "pr_url": "u", "pr_number": 1, "base": "main"}},
+        ignored=[],
+    ))
+    state = WorkspaceState(tasks={"a": _task("a")})
+    decisions = reconcile_now(
+        state, cache=cache,
+        fetcher=lambda *_: (_ for _ in ()).throw(AssertionError("should not fetch")),
+    )
+    assert decisions["a"].state == UpstreamState.merged
+
+
 def test_reconcile_now_refetches_when_stale(tmp_path: Path):
     cache = ReconcileCache(tmp_path)
     cache.write(CachePayload(
@@ -101,6 +222,36 @@ def test_reconcile_now_falls_back_to_cache_on_fetcher_error(tmp_path: Path):
 
     decisions = reconcile_now(state, cache=cache, fetcher=bad_fetcher)
     assert decisions["a"].state == UpstreamState.merged
+
+
+def test_reconcile_now_fetch_error_fallback_does_not_serve_schema_stale_cache(tmp_path: Path):
+    """#461 follow-up P1 (cache.py:82, "Invalid cache survives fallback"):
+    the fetch-error fallback used to return `payload` straight from
+    `cache.read()` with no schema check at all, so on a live-fetch failure
+    after the #461 upgrade, a pre-v2 entry's spurious base_changed would be
+    served and block `finish`. A pre-v2 (schema-invalid) entry must be
+    dropped at the load boundary, so the fallback has nothing stale left to
+    serve — it degrades to `{}`, same as no cache at all. Must FAIL before
+    the fix (stale base_changed served) and PASS after.
+    """
+    import json
+    cache = ReconcileCache(tmp_path)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "reconcile.cache.json").write_text(json.dumps({
+        "fetched_at": time.time(),
+        "ttl_seconds": 300,
+        "results": {"a": {"state": "base_changed", "pr_url": "u", "pr_number": 1, "base": "dev"}},
+        "ignored": [],
+        # no "schema_version" key — pre-v2 entry, TTL-fresh but schema-stale
+    }))
+    state = WorkspaceState(tasks={"a": _task("a")})
+
+    def bad_fetcher(*_):
+        from mship.core.reconcile.fetch import FetchError
+        raise FetchError("offline")
+
+    decisions = reconcile_now(state, cache=cache, fetcher=bad_fetcher)
+    assert decisions == {}
 
 
 def test_reconcile_now_returns_unavailable_on_error_without_cache(tmp_path: Path):
