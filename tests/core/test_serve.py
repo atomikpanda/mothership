@@ -445,6 +445,24 @@ def test_post_request_changes_persists_reason(tmp_path):
     assert client.get("/specs/dq").json()["clarification_reason"] == "tighten scope"
 
 
+def test_post_request_changes_records_durable_rejection(tmp_path):
+    """#447: the serve request-changes handler must also append a durable,
+    append-only `rejected` journal event (actor="operator"), independent of
+    `clarification_reason` on the spec (which approve_spec later nulls)."""
+    import json
+
+    _seed_spec(tmp_path)
+    log = LogManager(tmp_path / ".mothership" / "logs")
+    client = TestClient(_app_with(tmp_path, StateManager(tmp_path / ".mothership"), log))
+    r = client.post("/specs/dq/request-changes", json={"reason": "tighten scope"})
+    assert r.status_code == 200
+
+    rejected = [e for e in log.read("dq") if e.action == "rejected"]
+    assert len(rejected) == 1
+    payload = json.loads(rejected[0].message)
+    assert payload == {"actor": "operator", "reason": "tighten scope"}
+
+
 def test_get_review_includes_clarification_reason(tmp_path):
     _seed_spec(tmp_path)
     client = TestClient(_app(tmp_path))

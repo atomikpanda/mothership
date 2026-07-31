@@ -27,7 +27,12 @@ from mship.core.gh_app import GhAppError, mint_installation_token, resolve_insta
 from mship.core.pr import PRManager
 from mship.core.pr_watcher import PrWatcher
 from mship.core.spec import SpecDraft
-from mship.core.spec_transition import ApprovalBlocked, approve_spec, request_changes_spec
+from mship.core.spec_transition import (
+    ApprovalBlocked,
+    approve_spec,
+    record_rejection,
+    request_changes_spec,
+)
 from mship.core.view.thread_links import index_thread_work_items
 from mship.core.workitem import Phase
 from mship.util.shell import ShellRunner
@@ -982,6 +987,11 @@ def create_app(
         if log_manager is not None:
             try:
                 log_manager.append(spec.id, f"spec request-changes (api): {body.reason}")
+                # #447: also record a durable, append-only `rejected` journal
+                # event (survives approve_spec nulling clarification_reason).
+                record_rejection(
+                    log_manager, spec.id, "operator", body.reason, datetime.now(timezone.utc)
+                )
             except Exception:
                 pass
         return review

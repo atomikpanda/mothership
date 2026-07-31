@@ -625,6 +625,26 @@ def test_spec_request_changes_persists_reason_and_logs(configured_app_with_task:
     assert any("tighten scope" in e.message for e in entries)
 
 
+def test_spec_request_changes_records_durable_rejection(configured_app_with_task: Path, tmp_path):
+    """#447: request-changes must also append a durable, append-only
+    `rejected` journal event carrying {actor, reason} as JSON — distinct
+    from `clarification_reason`, which a later approve_spec() nulls."""
+    import json
+
+    from mship.core.log import LogManager
+
+    _apply_dq(tmp_path)
+    result = runner.invoke(app, ["spec", "request-changes", "dq", "--reason", "tighten scope"])
+    assert result.exit_code == 0, result.output
+
+    log = LogManager(configured_app_with_task / ".mothership" / "logs")
+    rejected = [e for e in log.read("dq") if e.action == "rejected"]
+    assert len(rejected) == 1
+    payload = json.loads(rejected[0].message)
+    assert payload["reason"] == "tighten scope"
+    assert payload["actor"]
+
+
 def test_spec_apply_revising_clears_clarification_reason(configured_app_with_task: Path, tmp_path):
     """Applying a revised draft moves draft -> needs_review (MOS-240); the
     stale reason from the earlier request-changes must not linger."""

@@ -7,13 +7,21 @@ store write (SpecStore.save = tempfile + os.replace). Callers own only their own
 concerns (HTTP status mapping, CLI output, journal appends, view messaging)."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
+from mship.core.log import LogManager
 from mship.core.spec import InvalidTransition, Spec, validate_transition
 from mship.core.spec_approve import approval_blockers
 from mship.core.spec_store import SpecStore
 
-__all__ = ["ApprovalBlocked", "InvalidTransition", "approve_spec", "request_changes_spec"]
+__all__ = [
+    "ApprovalBlocked",
+    "InvalidTransition",
+    "approve_spec",
+    "record_rejection",
+    "request_changes_spec",
+]
 
 
 class ApprovalBlocked(Exception):
@@ -35,6 +43,25 @@ def approve_spec(spec: Spec, store: SpecStore, *, bypass_gate: bool = False) -> 
     spec.clarification_reason = None
     spec.updated_at = datetime.now(timezone.utc)
     store.save(spec)
+
+
+def record_rejection(
+    log_manager: LogManager, spec_id: str, actor: str, reason: str, now: datetime
+) -> None:
+    """Append a durable, append-only `rejected` journal event for `spec_id`.
+
+    Unlike `Spec.clarification_reason` (overwritten by the next request-changes
+    and nulled by `approve_spec`), the journal is append-only, so this record
+    survives later transitions — the durable, queryable rejection history.
+
+    `now` is accepted for interface symmetry with the other transition
+    helpers, but `LogManager.append` stamps its own timestamp, so it is not
+    threaded through.
+    """
+    del now
+    log_manager.append(
+        spec_id, json.dumps({"actor": actor, "reason": reason}), action="rejected"
+    )
 
 
 def request_changes_spec(spec: Spec, store: SpecStore, reason: str) -> None:

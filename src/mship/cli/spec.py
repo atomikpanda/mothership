@@ -5,6 +5,7 @@ task-optional, frontmatter-structured. See #145.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Optional
 
 import typer
@@ -620,8 +621,10 @@ def register(parent: typer.Typer, get_container):
         MOS-240: `needs_clarification` is gone; "needs clarification" is now the
         non-null `clarification_reason` carried by the editable `draft` status.
         """
+        import os
+
         from mship.core.spec import InvalidTransition
-        from mship.core.spec_transition import request_changes_spec
+        from mship.core.spec_transition import record_rejection, request_changes_spec
         output = Output()
         container = get_container()
         store = _spec_store()
@@ -638,6 +641,15 @@ def register(parent: typer.Typer, get_container):
         # show`/`review`) in addition to being journaled to the task log.
         try:
             container.log_manager().append(spec.id, f"spec request-changes: {reason}")
+            # #447: also record a durable, append-only `rejected` journal event
+            # (survives approve_spec nulling clarification_reason later).
+            record_rejection(
+                container.log_manager(),
+                spec.id,
+                os.environ.get("USER") or "unknown",
+                reason,
+                datetime.now(timezone.utc),
+            )
         except Exception:
             pass
         if output.human_mode:
