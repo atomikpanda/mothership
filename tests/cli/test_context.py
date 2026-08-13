@@ -314,3 +314,11 @@ def test_context_tty_renders_markdown_audience_block(tmp_path: Path, monkeypatch
     finally:
         reset_output_settings()
         _reset_container()
+
+
+def test_context_help_lists_every_supported_audience():
+    result = CliRunner().invoke(app, ["context", "--help"])
+
+    assert result.exit_code == 0, result.output
+    for audience in ("claude-code", "codex", "omp", "human", "reviewer"):
+        assert audience in result.output

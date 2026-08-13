@@ -18,7 +18,7 @@
 
 **Architecture:** Keep `core/agent_hooks.py` as the only owner of session-start context, guarded-edit decisions, inbox continuation, and bounded stop re-entry. Keep model strings opaque in Mothership core: all built-in modes resolve to the sentinel `inherit`, meaning the dispatching harness uses its default model; explicit operator values remain byte-for-byte values interpreted only by a harness adapter. Consolidate Codex capability parsing in `core/codex_hooks.py` so setup and doctor report the same activation state. Install OMP/Pi skills through OMP's documented cross-runtime `~/.agents/skills/` discovery path, reusing the existing foreign-content-safe symlink machinery. Test runtime adapters as translations around the shared policy, not as independent policy implementations.
 
-**Tech Stack:** Python 3.12, Typer, pytest, Markdown-based bundled skills, and Bun for generated OMP TypeScript smoke coverage.
+**Tech Stack:** Python 3.14, Typer, pytest, Markdown-based bundled skills, and Bun for generated OMP TypeScript smoke coverage.
 
 ## Global Constraints
 
