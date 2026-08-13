@@ -125,4 +125,5 @@
 6. Run `uv run pytest tests/core/test_codex_hooks.py tests/core/test_doctor.py tests/cli/test_drain.py -q`.
 7. Run `mship test`, commit and push the correction, reply to the four addressed threads, and resolve them.
 8. Reply to the OMP continuation thread with the official `stop_hook_active` contract and the extension's unchanged event pass-through; do not duplicate continuation state in the extension.
+9. Add a bounded timeout to Codex/OMP doctor runtime probes, convert timeout expiry into runtime warning rows, and cover both probes with regressions.
 <!-- /mship:task -->

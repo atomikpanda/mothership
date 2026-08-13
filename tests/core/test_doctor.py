@@ -800,7 +800,7 @@ def test_doctor_survives_a_topology_failure(workspace: Path, monkeypatch):
 def _agent_runtime_shell(*, codex_hooks: bool = True, omp_version: str = "17.2.0"):
     shell = MagicMock(spec=ShellRunner)
 
-    def run(command, cwd, env=None):
+    def run(command, cwd, env=None, timeout=None):
         if "task --list" in command:
             return ShellResult(returncode=0, stdout="test\nrun\nlint\nsetup\n", stderr="")
         if command == "codex features list":
@@ -1032,6 +1032,46 @@ def test_doctor_warns_on_disabled_codex_hooks_and_old_omp(workspace: Path, monke
     assert "disabled" in rows["agent-runtime/codex"].message
     assert rows["agent-runtime/omp"].status == "warn"
     assert "too old" in rows["agent-runtime/omp"].message
+
+
+@pytest.mark.parametrize(
+    ("command", "check_name"),
+    [
+        ("codex features list", "agent-runtime/codex"),
+        ("omp --version", "agent-runtime/omp"),
+    ],
+)
+def test_doctor_warns_when_agent_runtime_probe_times_out(
+    workspace: Path, monkeypatch, command: str, check_name: str
+):
+    import subprocess
+
+    shell = _agent_runtime_shell()
+    normal_run = shell.run.side_effect
+
+    def run(actual_command, cwd, env=None, timeout=None):
+        if actual_command == command:
+            raise subprocess.TimeoutExpired(actual_command, timeout or 0)
+        return normal_run(actual_command, cwd, env=env, timeout=timeout)
+
+    shell.run.side_effect = run
+    monkeypatch.setattr(
+        "mship.core.doctor.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name in {"task", "codex", "omp"} else None,
+    )
+
+    report = DoctorChecker(
+        ConfigLoader.load(workspace / "mothership.yaml"),
+        shell,
+        workspace_root=workspace,
+        probe_network=False,
+    ).run()
+    row = next(check for check in report.checks if check.name == check_name)
+    probe_call = next(call for call in shell.run.call_args_list if call.args[0] == command)
+
+    assert row.status == "warn"
+    assert "timed out" in row.message
+    assert probe_call.kwargs["timeout"] == 5
 
 
 def test_doctor_reports_stale_codex_owned_registration(workspace: Path, monkeypatch):

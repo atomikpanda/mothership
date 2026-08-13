@@ -2,6 +2,7 @@ import os
 import json
 import re
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -9,6 +10,8 @@ from typing import Callable
 from mship.core import skill_install as _si
 from mship.core.config import WorkspaceConfig, resolve_go_task_files, GO_TASK_FILENAMES, unique_git_roots
 from mship.util.shell import ShellRunner
+
+_AGENT_RUNTIME_PROBE_TIMEOUT_SECONDS = 5
 
 
 @dataclass
@@ -552,31 +555,43 @@ class DoctorChecker:
                 message="Codex is not installed; Claude and OMP integrations remain available",
             ))
         else:
-            capability = self._shell.run("codex features list", cwd=root)
-            features: dict[str, str] = {}
-            for line in capability.stdout.splitlines():
-                parts = line.split()
-                if parts and parts[0] in {"hooks", "codex_hooks"}:
-                    features[parts[0]] = parts[-1].lower()
-            feature = features.get("hooks", features.get("codex_hooks"))
-            if capability.returncode != 0 or feature is None:
+            try:
+                capability = self._shell.run(
+                    "codex features list",
+                    cwd=root,
+                    timeout=_AGENT_RUNTIME_PROBE_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired:
                 checks.append(CheckResult(
                     name="agent-runtime/codex",
                     status="warn",
-                    message="Codex hook capability is unavailable; this Codex version may be too old",
-                ))
-            elif feature != "true":
-                checks.append(CheckResult(
-                    name="agent-runtime/codex",
-                    status="warn",
-                    message="Codex hook capability is disabled; enable `[features].hooks = true` before use",
+                    message="Codex hook capability probe timed out",
                 ))
             else:
-                checks.append(CheckResult(
-                    name="agent-runtime/codex",
-                    status="pass",
-                    message=f"Codex hook capability available at {codex_binary}",
-                ))
+                features: dict[str, str] = {}
+                for line in capability.stdout.splitlines():
+                    parts = line.split()
+                    if parts and parts[0] in {"hooks", "codex_hooks"}:
+                        features[parts[0]] = parts[-1].lower()
+                feature = features.get("hooks", features.get("codex_hooks"))
+                if capability.returncode != 0 or feature is None:
+                    checks.append(CheckResult(
+                        name="agent-runtime/codex",
+                        status="warn",
+                        message="Codex hook capability is unavailable; this Codex version may be too old",
+                    ))
+                elif feature != "true":
+                    checks.append(CheckResult(
+                        name="agent-runtime/codex",
+                        status="warn",
+                        message="Codex hook capability is disabled; enable `[features].hooks = true` before use",
+                    ))
+                else:
+                    checks.append(CheckResult(
+                        name="agent-runtime/codex",
+                        status="pass",
+                        message=f"Codex hook capability available at {codex_binary}",
+                    ))
 
         if any(path.is_file() for path in codex_paths):
             checks.append(CheckResult(
@@ -593,31 +608,43 @@ class DoctorChecker:
                 message="OMP is not installed; Claude and Codex integrations remain available",
             ))
         else:
-            version_result = self._shell.run("omp --version", cwd=root)
-            match = re.search(r"(\d+)\.(\d+)\.(\d+)", version_result.stdout)
-            if version_result.returncode != 0 or match is None:
+            try:
+                version_result = self._shell.run(
+                    "omp --version",
+                    cwd=root,
+                    timeout=_AGENT_RUNTIME_PROBE_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired:
                 checks.append(CheckResult(
                     name="agent-runtime/omp",
                     status="warn",
-                    message="could not determine OMP version or extension compatibility",
+                    message="OMP version probe timed out",
                 ))
             else:
-                version = tuple(int(part) for part in match.groups())
-                if version < OMP_MIN_VERSION:
+                match = re.search(r"(\d+)\.(\d+)\.(\d+)", version_result.stdout)
+                if version_result.returncode != 0 or match is None:
                     checks.append(CheckResult(
                         name="agent-runtime/omp",
                         status="warn",
-                        message=(
-                            f"OMP {'.'.join(match.groups())} is too old for this extension; "
-                            f"requires {'.'.join(map(str, OMP_MIN_VERSION))} or newer"
-                        ),
+                        message="could not determine OMP version or extension compatibility",
                     ))
                 else:
-                    checks.append(CheckResult(
-                        name="agent-runtime/omp",
-                        status="pass",
-                        message=f"OMP {'.'.join(match.groups())} supports project extensions",
-                    ))
+                    version = tuple(int(part) for part in match.groups())
+                    if version < OMP_MIN_VERSION:
+                        checks.append(CheckResult(
+                            name="agent-runtime/omp",
+                            status="warn",
+                            message=(
+                                f"OMP {'.'.join(match.groups())} is too old for this extension; "
+                                f"requires {'.'.join(map(str, OMP_MIN_VERSION))} or newer"
+                            ),
+                        ))
+                    else:
+                        checks.append(CheckResult(
+                            name="agent-runtime/omp",
+                            status="pass",
+                            message=f"OMP {'.'.join(match.groups())} supports project extensions",
+                        ))
         return checks
 
     #: topology edge status -> doctor check status. `absent` means "not

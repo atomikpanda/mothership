@@ -17,7 +17,7 @@ def configured_doctor_app(workspace: Path):
     (workspace / ".mothership").mkdir(exist_ok=True)
 
     mock_shell = MagicMock(spec=ShellRunner)
-    mock_shell.run.side_effect = lambda cmd, cwd, env=None: (
+    mock_shell.run.side_effect = lambda cmd, cwd, env=None, timeout=None: (
         ShellResult(returncode=0, stdout="test\nrun\nlint\nsetup\n", stderr="") if "task --list" in cmd
         else ShellResult(returncode=0, stdout="Logged in", stderr="") if "gh auth" in cmd
         else ShellResult(returncode=0, stdout="", stderr="")
@@ -64,7 +64,7 @@ def test_doctor_loads_config_with_require_paths_false(workspace: Path):
     (workspace / ".mothership").mkdir(exist_ok=True)
 
     mock_shell = MagicMock(spec=ShellRunner)
-    mock_shell.run.side_effect = lambda cmd, cwd, env=None: (
+    mock_shell.run.side_effect = lambda cmd, cwd, env=None, timeout=None: (
         ShellResult(returncode=0, stdout="test\nrun\nlint\nsetup\n", stderr="") if "task --list" in cmd
         else ShellResult(returncode=0, stdout="Logged in", stderr="") if "gh auth" in cmd
         else ShellResult(returncode=0, stdout="", stderr="")
@@ -99,7 +99,7 @@ def test_doctor_json_includes_config_path_and_source(workspace, monkeypatch):
     container.state_dir.override(workspace / ".mothership")
     (workspace / ".mothership").mkdir(exist_ok=True)
     mock_shell = MagicMock(spec=ShellRunner)
-    mock_shell.run.side_effect = lambda cmd, cwd, env=None: (
+    mock_shell.run.side_effect = lambda cmd, cwd, env=None, timeout=None: (
         ShellResult(returncode=0, stdout="test\nrun\nlint\nsetup\n", stderr="") if "task --list" in cmd
         else ShellResult(returncode=0, stdout="Logged in", stderr="") if "gh auth" in cmd
         else ShellResult(returncode=0, stdout="", stderr="")
