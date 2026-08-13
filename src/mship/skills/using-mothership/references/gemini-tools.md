@@ -31,6 +31,20 @@ User-level skills live at **`~/.gemini/skills/`**, with **`~/.agents/skills/`** 
 
 Gemini CLI dispatches subagents through the `invoke_agent` tool, which takes `agent_name` and `prompt` parameters. The same dispatch is also surfaced as a chat-syntax shortcut: typing `@generalist <prompt>` is equivalent to calling `invoke_agent` with `agent_name: "generalist"`. Built-in agent names include `generalist`, `cli_help`, `codebase_investigator`, and (with browser tooling enabled) `browser_agent`.
 
+### Resolved model handling
+
+Read the stub's resolved model before dispatch:
+- `inherit`: omit the harness model selector; the harness default is intended.
+  Invoke `invoke_agent without a model selector`.
+- any other value: pass it unchanged through a supported model selector.
+- if the available subagent API has no model selector, do not dispatch with
+  an explicit value. Report: "mship resolved explicit model '<value>', but this subagent API cannot select a model; set this mode to inherit or use a selector-capable dispatch tool."
+Never translate one provider's model name into another.
+
+Gemini CLI's current `invoke_agent` API exposes only `agent_name` and `prompt`,
+not a model selector. It therefore accepts `inherit` by omitting a selector and
+must reject every explicit resolved model with the actionable message above.
+
 Skills dispatch with `Subagent (general-purpose):` and either reference a prompt-template file (e.g., `subagent-driven-development`'s `./implementer-prompt.md`) or supply an inline prompt. On Gemini CLI:
 
 | Skill dispatch form | Gemini CLI equivalent |

@@ -20,6 +20,7 @@ _MODEL_ADAPTER_FILES = (
     ("subagent-driven-development", "task-reviewer-prompt.md"),
     ("subagent-driven-development", "re-review-prompt.md"),
     ("using-mothership", "references/codex-tools.md"),
+    ("using-mothership", "references/gemini-tools.md"),
     ("using-mothership", "references/pi-tools.md"),
     ("working-with-mothership", "SKILL.md"),
 )
@@ -130,6 +131,15 @@ def test_codex_and_pi_references_apply_or_reject_explicit_models():
     assert "inspect its schema" in pi
     assert "when it exposes a model selector" in pi
     assert _UNSUPPORTED_SELECTOR_ERROR in pi
+
+
+def test_gemini_reference_omits_inherit_or_rejects_explicit_models():
+    gemini = _read("using-mothership", "references/gemini-tools.md")
+
+    assert "`inherit`" in gemini
+    assert "invoke_agent without a model selector" in gemini
+    assert _UNSUPPORTED_SELECTOR_ERROR in gemini
+    assert "Never translate" in gemini
 
 
 def test_pi_no_tool_fallback_only_applies_to_inherit():
