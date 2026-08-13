@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -797,14 +798,26 @@ def test_doctor_survives_a_topology_failure(workspace: Path, monkeypatch):
     assert any(c.name.endswith("/path") for c in report.checks)
 
 
-def _agent_runtime_shell(*, codex_hooks: bool = True, omp_version: str = "17.2.0"):
+def _agent_runtime_shell(
+    *,
+    codex_state: str = "enabled",
+    omp_version: str = "17.2.0",
+):
     shell = MagicMock(spec=ShellRunner)
 
     def run(command, cwd, env=None, timeout=None):
         if "task --list" in command:
             return ShellResult(returncode=0, stdout="test\nrun\nlint\nsetup\n", stderr="")
         if command == "codex features list":
-            enabled = "true" if codex_hooks else "false"
+            if codex_state == "timed-out":
+                raise subprocess.TimeoutExpired(command, timeout or 0)
+            if codex_state == "unavailable":
+                return ShellResult(
+                    returncode=0,
+                    stdout="multi_agent experimental true\n",
+                    stderr="",
+                )
+            enabled = "true" if codex_state == "enabled" else "false"
             return ShellResult(
                 returncode=0,
                 stdout=f"hooks  stable  {enabled}\n",
@@ -854,12 +867,12 @@ def test_doctor_reports_all_agent_integrations_healthy(workspace: Path, monkeypa
     rows = {check.name: check for check in report.checks}
 
     assert rows["agent-hooks/claude"].status == "pass"
-    assert rows["agent-hooks/codex"].status == "pass"
+    assert rows["agent-hooks/codex"].status == "warn"
     assert rows["agent-hooks/omp"].status == "pass"
     assert rows["agent-runtime/codex"].status == "pass"
     assert rows["agent-runtime/omp"].status == "pass"
-    assert rows["agent-hooks/codex-trust"].status == "warn"
-    assert "/hooks" in rows["agent-hooks/codex-trust"].message
+    assert "/hooks" in rows["agent-hooks/codex"].message
+    assert "fully active" not in " ".join(check.message for check in report.checks)
 
 
 
@@ -900,7 +913,7 @@ def test_doctor_checks_native_integrations_in_configured_repo_roots(
     ).run()
     rows = {check.name: check for check in report.checks}
 
-    assert rows["agent-hooks/codex"].status == "pass"
+    assert rows["agent-hooks/codex"].status == "warn"
     assert rows["agent-hooks/omp"].status == "pass"
 
 
@@ -940,6 +953,7 @@ def test_doctor_reports_malformed_codex_and_stale_omp_artifacts(workspace: Path,
 
     assert rows["agent-hooks/codex"].status == "warn"
     assert "valid JSON" in rows["agent-hooks/codex"].message
+    assert "`mship init --install-hooks`" in rows["agent-hooks/codex"].message
     assert rows["agent-hooks/omp"].status == "warn"
     assert "stale" in rows["agent-hooks/omp"].message
 
@@ -1022,7 +1036,7 @@ def test_doctor_warns_on_disabled_codex_hooks_and_old_omp(workspace: Path, monke
 
     report = DoctorChecker(
         ConfigLoader.load(workspace / "mothership.yaml"),
-        _agent_runtime_shell(codex_hooks=False, omp_version="16.1.19"),
+        _agent_runtime_shell(codex_state="disabled", omp_version="16.1.19"),
         workspace_root=workspace,
         probe_network=False,
     ).run()
@@ -1032,6 +1046,8 @@ def test_doctor_warns_on_disabled_codex_hooks_and_old_omp(workspace: Path, monke
     assert "disabled" in rows["agent-runtime/codex"].message
     assert rows["agent-runtime/omp"].status == "warn"
     assert "too old" in rows["agent-runtime/omp"].message
+    assert "`codex features enable codex_hooks`" in rows["agent-runtime/codex"].message
+    assert "/hooks" in rows["agent-hooks/codex"].message
 
 
 @pytest.mark.parametrize(
@@ -1097,6 +1113,7 @@ def test_doctor_reports_stale_codex_owned_registration(workspace: Path, monkeypa
 
     assert row.status == "warn"
     assert "stale" in row.message
+    assert "`mship init --install-hooks`" in row.message
 
 
 def test_doctor_reports_and_reinstaller_repairs_stale_claude_registration(
@@ -1136,3 +1153,86 @@ def test_doctor_reports_and_reinstaller_repairs_stale_claude_registration(
         check for check in repaired.checks if check.name == "agent-hooks/claude"
     )
     assert repaired_row.status == "pass"
+
+
+def _tree_bytes(root: Path) -> dict[Path, bytes]:
+    return {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
+@pytest.mark.parametrize(
+    ("state", "hook_summary", "runtime_status", "needs_enable"),
+    [
+        ("disabled", "configured but inactive", "warn", True),
+        ("unavailable", "configured but inactive", "warn", True),
+        (
+            "enabled",
+            "configured; capability enabled; trust still required",
+            "pass",
+            False,
+        ),
+        ("absent", "configured but not verified active", "warn", False),
+        ("timed-out", "configured but not verified active", "warn", False),
+    ],
+)
+def test_doctor_codex_capability_matrix_is_read_only_and_never_fully_active(
+    workspace: Path,
+    tmp_path: Path,
+    monkeypatch,
+    state: str,
+    hook_summary: str,
+    runtime_status: str,
+    needs_enable: bool,
+):
+    _install_all_agent_integrations(workspace)
+    home = tmp_path / "home"
+    user_config = home / ".codex" / "config.toml"
+    user_config.parent.mkdir(parents=True)
+    user_config.write_text('[features]\ncodex_hooks = false\n[projects."/workspace"]\ntrust_level = "untrusted"\n')
+    monkeypatch.setenv("HOME", str(home))
+    home_before = _tree_bytes(home)
+    workspace_before = _tree_bytes(workspace)
+    monkeypatch.setattr(
+        "mship.core.doctor.shutil.which",
+        lambda name: (
+            None
+            if name == "codex" and state == "absent"
+            else f"/usr/bin/{name}"
+            if name in {"task", "codex", "omp"}
+            else None
+        ),
+    )
+    shell = _agent_runtime_shell(codex_state=state)
+
+    report = DoctorChecker(
+        ConfigLoader.load(workspace / "mothership.yaml"),
+        shell,
+        workspace_root=workspace,
+        probe_network=False,
+    ).run()
+
+    rows = {check.name: check for check in report.checks}
+    codex_messages = " ".join(
+        check.message for check in report.checks if "codex" in check.name
+    )
+    assert rows["agent-runtime/codex"].status == runtime_status
+    assert rows["agent-hooks/codex"].status == "warn"
+    assert hook_summary in rows["agent-hooks/codex"].message
+    assert "open `/hooks` in Codex to review and trust the project hooks" in codex_messages
+    assert ("`codex features enable codex_hooks`" in codex_messages) is needs_enable
+    assert "fully active" not in codex_messages
+    if state == "absent":
+        assert "not installed" in codex_messages
+    if state == "timed-out":
+        assert "timed out" in codex_messages
+    capability_calls = [
+        call
+        for call in shell.run.call_args_list
+        if call.args[0] == "codex features list"
+    ]
+    assert len(capability_calls) == (0 if state == "absent" else 1)
+    assert _tree_bytes(home) == home_before
+    assert _tree_bytes(workspace) == workspace_before

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
+from types import SimpleNamespace
+from unittest.mock import Mock
 from pathlib import Path
 
 import pytest
@@ -10,6 +13,7 @@ from mship.core.codex_hooks import (
     extract_edit_targets,
     install_codex_hooks,
 )
+import mship.core.codex_hooks as codex_hooks
 
 
 def _event(tool_name: str, tool_input: dict) -> dict:
@@ -227,3 +231,79 @@ def test_atomic_write_failure_preserves_existing_file(tmp_path: Path, monkeypatc
     with pytest.raises(OSError, match="disk full"):
         install_codex_hooks(tmp_path)
     assert path.read_text() == original
+
+
+@pytest.mark.parametrize(
+    ("stdout", "returncode", "expected", "feature_name"),
+    [
+        (
+            "codex_hooks  under-development  false\n",
+            0,
+            "disabled",
+            "codex_hooks",
+        ),
+        ("hooks experimental true\n", 0, "enabled", "hooks"),
+        ("multi_agent experimental true\n", 0, "unavailable", None),
+        ("", 1, "unavailable", None),
+    ],
+)
+def test_probe_codex_hook_capability(
+    stdout: str,
+    returncode: int,
+    expected: str,
+    feature_name: str | None,
+):
+    shell = Mock()
+    shell.run.return_value = SimpleNamespace(
+        stdout=stdout,
+        stderr="",
+        returncode=returncode,
+    )
+
+    result = codex_hooks.probe_codex_hook_capability(
+        shell,
+        Path("/workspace"),
+        codex_binary="/usr/bin/codex",
+    )
+
+    assert result.state.value == expected
+    assert result.feature_name == feature_name
+    shell.run.assert_called_once_with(
+        "codex features list",
+        cwd=Path("/workspace"),
+        timeout=codex_hooks.CODEX_CAPABILITY_PROBE_TIMEOUT_SECONDS,
+    )
+
+
+def test_probe_codex_hook_capability_reports_absent_without_shell_call():
+    shell = Mock()
+
+    result = codex_hooks.probe_codex_hook_capability(
+        shell,
+        Path("/workspace"),
+        codex_binary=None,
+    )
+
+    assert result.state.value == "absent"
+    shell.run.assert_not_called()
+
+
+def test_probe_codex_hook_capability_reports_timeout_without_retry():
+    shell = Mock()
+    shell.run.side_effect = subprocess.TimeoutExpired(
+        cmd="codex features list",
+        timeout=codex_hooks.CODEX_CAPABILITY_PROBE_TIMEOUT_SECONDS,
+    )
+
+    result = codex_hooks.probe_codex_hook_capability(
+        shell,
+        Path("/workspace"),
+        codex_binary="/usr/bin/codex",
+    )
+
+    assert result.state.value == "timed-out"
+    shell.run.assert_called_once_with(
+        "codex features list",
+        cwd=Path("/workspace"),
+        timeout=codex_hooks.CODEX_CAPABILITY_PROBE_TIMEOUT_SECONDS,
+    )

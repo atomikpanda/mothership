@@ -471,7 +471,11 @@ class DoctorChecker:
         )
         from mship.core.codex_hooks import (
             CODEX_COMMANDS,
+            CODEX_FEATURE_ENABLE_COMMAND,
             CODEX_HOOKS_PATH,
+            CODEX_TRUST_ACTION,
+            CodexHookCapability,
+            probe_codex_hook_capability,
             registration_issues as codex_registration_issues,
         )
         from mship.core.omp_extension import (
@@ -486,6 +490,12 @@ class DoctorChecker:
             return []
         codex_paths = [project_root / CODEX_HOOKS_PATH for project_root in project_roots]
         omp_paths = [project_root / OMP_EXTENSION_PATH for project_root in project_roots]
+        codex_binary = shutil.which("codex")
+        codex_capability = probe_codex_hook_capability(
+            self._shell,
+            root,
+            codex_binary=codex_binary,
+        )
         checks = [
             self._json_hook_check(
                 name="agent-hooks/claude",
@@ -510,16 +520,45 @@ class DoctorChecker:
         ]
         codex_issues = [result.message for result in codex_results if result.status != "pass"]
         if codex_issues:
+            message = "; ".join(codex_issues)
+            reinstall_action = "run `mship init --install-hooks`"
+            if reinstall_action not in message:
+                message += f"; {reinstall_action}"
             checks.append(CheckResult(
                 name="agent-hooks/codex",
                 status="warn",
-                message="; ".join(codex_issues),
+                message=message,
+            ))
+        elif codex_capability.state in {
+            CodexHookCapability.DISABLED,
+            CodexHookCapability.UNAVAILABLE,
+        }:
+            checks.append(CheckResult(
+                name="agent-hooks/codex",
+                status="warn",
+                message=(
+                    "Codex hooks configured but inactive: "
+                    f"{codex_capability.detail}; "
+                    f"run `{CODEX_FEATURE_ENABLE_COMMAND}`; {CODEX_TRUST_ACTION}"
+                ),
+            ))
+        elif codex_capability.state is CodexHookCapability.ENABLED:
+            checks.append(CheckResult(
+                name="agent-hooks/codex",
+                status="warn",
+                message=(
+                    "Codex hooks configured; capability enabled; trust still required: "
+                    f"{CODEX_TRUST_ACTION}"
+                ),
             ))
         else:
             checks.append(CheckResult(
                 name="agent-hooks/codex",
-                status="pass",
-                message="Mothership hooks installed at " + ", ".join(map(str, codex_paths)),
+                status="warn",
+                message=(
+                    "Codex hooks configured but not verified active: "
+                    f"{codex_capability.detail}; {CODEX_TRUST_ACTION}"
+                ),
             ))
 
         omp_issues: list[str] = []
@@ -547,57 +586,29 @@ class DoctorChecker:
                 message="Mothership extension installed at " + ", ".join(map(str, omp_paths)),
             ))
 
-        codex_binary = shutil.which("codex")
-        if codex_binary is None:
+        if codex_capability.state is CodexHookCapability.ENABLED:
+            checks.append(CheckResult(
+                name="agent-runtime/codex",
+                status="pass",
+                message=f"Codex hook capability available at {codex_binary}",
+            ))
+        elif codex_capability.state in {
+            CodexHookCapability.DISABLED,
+            CodexHookCapability.UNAVAILABLE,
+        }:
             checks.append(CheckResult(
                 name="agent-runtime/codex",
                 status="warn",
-                message="Codex is not installed; Claude and OMP integrations remain available",
+                message=(
+                    f"{codex_capability.detail}; "
+                    f"run `{CODEX_FEATURE_ENABLE_COMMAND}`"
+                ),
             ))
         else:
-            try:
-                capability = self._shell.run(
-                    "codex features list",
-                    cwd=root,
-                    timeout=_AGENT_RUNTIME_PROBE_TIMEOUT_SECONDS,
-                )
-            except subprocess.TimeoutExpired:
-                checks.append(CheckResult(
-                    name="agent-runtime/codex",
-                    status="warn",
-                    message="Codex hook capability probe timed out",
-                ))
-            else:
-                features: dict[str, str] = {}
-                for line in capability.stdout.splitlines():
-                    parts = line.split()
-                    if parts and parts[0] in {"hooks", "codex_hooks"}:
-                        features[parts[0]] = parts[-1].lower()
-                feature = features.get("hooks", features.get("codex_hooks"))
-                if capability.returncode != 0 or feature is None:
-                    checks.append(CheckResult(
-                        name="agent-runtime/codex",
-                        status="warn",
-                        message="Codex hook capability is unavailable; this Codex version may be too old",
-                    ))
-                elif feature != "true":
-                    checks.append(CheckResult(
-                        name="agent-runtime/codex",
-                        status="warn",
-                        message="Codex hook capability is disabled; enable `[features].hooks = true` before use",
-                    ))
-                else:
-                    checks.append(CheckResult(
-                        name="agent-runtime/codex",
-                        status="pass",
-                        message=f"Codex hook capability available at {codex_binary}",
-                    ))
-
-        if any(path.is_file() for path in codex_paths):
             checks.append(CheckResult(
-                name="agent-hooks/codex-trust",
+                name="agent-runtime/codex",
                 status="warn",
-                message="Codex project hooks require explicit review/trust; open `/hooks` in Codex",
+                message=codex_capability.detail,
             ))
 
         omp_binary = shutil.which("omp")

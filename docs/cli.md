@@ -37,6 +37,17 @@ mship commit "message" [--task <slug>]              # commit staged changes acro
 mship depends add|remove|list                       # manage task-to-task dependency edges (#104)
 ```
 
+`mship init --install-hooks` writes the project-local Codex hook files, but it
+does not enable Codex features or trust the project. If setup reports the hook
+capability as disabled or unavailable, run `codex features enable codex_hooks`.
+Then open `/hooks` in Codex to review and trust the project hooks. Trust remains
+a manual action even when the capability is already enabled.
+
+`mship doctor` reports these boundaries separately: whether the project hook
+artifact is valid, whether the Codex hook feature capability is enabled, and
+whether manual project trust remains unresolved. A current registration is
+therefore configured but untrusted, not reported as fully active.
+
 > **Entry point — spawn vs. spec dispatch:** `mship spawn` starts an ad-hoc task directly, but for **spec-driven** work you don't call it first. `mship spec dispatch <id>` (see **Work items & specs** below) is the entry point: it binds an approved spec and **spawns its own task**. Running `spawn` and then `spec dispatch` against the same spec double-creates tasks (#296). Rule of thumb: have an approved spec → `spec dispatch`; ad-hoc chore/bug → `spawn`.
 
 ## Setup & admin

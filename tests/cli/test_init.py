@@ -1,3 +1,5 @@
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -5,6 +7,7 @@ import yaml
 from typer.testing import CliRunner
 
 from mship.cli import app, container
+from mship.util.shell import ShellRunner, ShellResult
 
 runner = CliRunner()
 
@@ -351,6 +354,138 @@ def test_install_hooks_refreshed_vs_up_to_date_labels(tmp_path: Path, monkeypatc
         container.state_dir.reset_override()
         container.config.reset()
         container.state_manager.reset()
+
+
+def _home_bytes(home: Path) -> dict[Path, bytes]:
+    return {
+        path.relative_to(home): path.read_bytes()
+        for path in home.rglob("*")
+        if path.is_file()
+    }
+
+
+@pytest.mark.parametrize(
+    ("state", "stdout", "returncode", "summary", "needs_enable"),
+    [
+        (
+            "disabled",
+            "codex_hooks under-development false\n",
+            0,
+            "configured but inactive",
+            True,
+        ),
+        (
+            "unavailable",
+            "multi_agent experimental true\n",
+            0,
+            "configured but inactive",
+            True,
+        ),
+        (
+            "enabled",
+            "hooks experimental true\n",
+            0,
+            "configured; capability enabled; trust still required",
+            False,
+        ),
+        (
+            "absent",
+            "",
+            0,
+            "configured but not verified active",
+            False,
+        ),
+        (
+            "timed-out",
+            "",
+            0,
+            "configured but not verified active",
+            False,
+        ),
+    ],
+)
+def test_install_hooks_reports_codex_activation_without_mutating_user_state(
+    tmp_path: Path,
+    monkeypatch,
+    state: str,
+    stdout: str,
+    returncode: int,
+    summary: str,
+    needs_enable: bool,
+):
+    monkeypatch.chdir(tmp_path)
+    home = tmp_path / "home"
+    user_config = home / ".codex" / "config.toml"
+    user_config.parent.mkdir(parents=True)
+    user_config.write_text('[features]\ncodex_hooks = false\n[projects."/workspace"]\ntrust_level = "untrusted"\n')
+    before = _home_bytes(home)
+    monkeypatch.setenv("HOME", str(home))
+
+    roots = [tmp_path / "service-a", tmp_path / "service-b"]
+    for root in roots:
+        (root / ".git" / "hooks").mkdir(parents=True)
+        (root / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  service-a:\n"
+        "    path: service-a\n"
+        "    type: service\n"
+        "  service-b:\n"
+        "    path: service-b\n"
+        "    type: service\n"
+    )
+
+    real_which = shutil.which
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name: (
+            None
+            if name == "codex" and state == "absent"
+            else "/usr/bin/codex"
+            if name == "codex"
+            else real_which(name)
+        ),
+    )
+    probe_calls: list[str] = []
+
+    def run_probe(self, command, cwd, env=None, timeout=None):
+        if command != "codex features list":
+            return ShellResult(returncode=0, stdout="", stderr="")
+        probe_calls.append(command)
+        if state == "timed-out":
+            raise subprocess.TimeoutExpired(command, timeout)
+        return ShellResult(returncode=returncode, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(ShellRunner, "run", run_probe)
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(cfg)
+    container.state_dir.override(tmp_path / ".mothership")
+    try:
+        result = runner.invoke(app, ["init", "--install-hooks"])
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+    assert result.exit_code == 0, result.output
+    assert summary in result.output
+    assert "open `/hooks` in Codex to review and trust the project hooks" in result.output
+    assert ("`codex features enable codex_hooks`" in result.output) is needs_enable
+    if state == "absent":
+        assert "not installed" in result.output
+        assert probe_calls == []
+    elif state == "timed-out":
+        assert "timed out" in result.output
+        assert probe_calls == ["codex features list"]
+    else:
+        assert probe_calls == ["codex features list"]
+    assert all((root / ".codex" / "hooks.json").is_file() for root in roots)
+    assert _home_bytes(home) == before
 
 
 def test_interactive_wizard_emits_git_root_for_single_git_monorepo(tmp_path: Path, monkeypatch):
