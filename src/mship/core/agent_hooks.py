@@ -95,13 +95,7 @@ def pre_tool_use(
 def _format_drain_reason(threads: list) -> str:
     """Render actionable inbox threads as a continuation instruction."""
     replies = [thread for thread in threads if thread.awaiting_reply]
-    events = [
-        thread for thread in threads
-        if thread.awaiting_agent_event and not thread.awaiting_reply
-    ]
-
-    def pending(thread) -> str:
-        return thread.messages[-1].text if thread.messages else ""
+    events = [thread for thread in threads if thread.awaiting_agent_event]
 
     lines: list[str] = []
     if replies:
@@ -113,7 +107,8 @@ def _format_drain_reason(threads: list) -> str:
             "",
         ]
         lines += [
-            f"- thread {thread.id} ({thread.subject}): {pending(thread)}"
+            f"- thread {thread.id} ({thread.subject}): "
+            f"{next((message.text for message in reversed(thread.messages) if message.role == 'human'), '')}"
             for thread in replies
         ]
     if events:
@@ -129,7 +124,8 @@ def _format_drain_reason(threads: list) -> str:
             "",
         ]
         lines += [
-            f"- thread {thread.id} ({thread.subject}): {pending(thread)}"
+            f"- thread {thread.id} ({thread.subject}): "
+            f"{next((message.text for message in reversed(thread.messages) if message.role == 'agent' and message.kind == 'event'), '')}"
             for thread in events
         ]
     return "\n".join(lines)

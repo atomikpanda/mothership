@@ -127,23 +127,22 @@ def test_blocks_on_trailing_event_after_human_interleave(tmp_path: Path):
         _reset()
 
 
-def test_both_reply_and_event_thread_surfaces_under_reply_group(tmp_path: Path):
-    # A thread that is BOTH (an unhandled event AND an unanswered human message)
-    # is prioritized as a reply — it appears under the human-reply group with the
-    # `mship reply` instruction.
+def test_both_reply_and_event_thread_surfaces_both_actions(tmp_path: Path):
     cfg, state_dir, store = _bootstrap(tmp_path)
     now = datetime.now(timezone.utc)
     t = store.create_thread("task-1", "seed", now)
     store.append(t.id, "agent", "dispatch handoff", now, kind="event")
-    store.append(t.id, "human", "please advise", now)  # unanswered human -> awaiting_reply
+    store.append(t.id, "human", "please advise", now)
     _override(cfg, state_dir)
     try:
         result = runner.invoke(app, ["_drain"], input=_event())
         assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
         assert payload["decision"] == "block"
-        assert "mship reply" in payload["reason"]  # reply is the priority action
+        assert "mship reply" in payload["reason"]
         assert "please advise" in payload["reason"]
+        assert "agent signal" in payload["reason"]
+        assert "dispatch handoff" in payload["reason"]
     finally:
         _reset()
 

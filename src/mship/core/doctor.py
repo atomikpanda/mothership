@@ -424,6 +424,12 @@ class DoctorChecker:
             )
         try:
             data = json.loads(path.read_text())
+        except (OSError, UnicodeDecodeError) as exc:
+            return CheckResult(
+                name=name,
+                status="warn",
+                message=f"could not read {path}: {exc}",
+            )
         except json.JSONDecodeError:
             return CheckResult(
                 name=name,
@@ -473,6 +479,8 @@ class DoctorChecker:
 
         root = Path(workspace_root)
         project_roots = unique_git_roots(self._config)
+        if not project_roots:
+            return []
         codex_paths = [project_root / CODEX_HOOKS_PATH for project_root in project_roots]
         omp_paths = [project_root / OMP_EXTENSION_PATH for project_root in project_roots]
         checks = [
@@ -515,8 +523,14 @@ class DoctorChecker:
         for path in omp_paths:
             if not path.is_file():
                 omp_issues.append(f"integration missing at {path}")
-            elif path.read_text() != OMP_EXTENSION_SOURCE:
-                omp_issues.append(f"stale Mothership extension at {path}")
+                continue
+            try:
+                source = path.read_text()
+            except (OSError, UnicodeDecodeError) as exc:
+                omp_issues.append(f"could not read {path}: {exc}")
+            else:
+                if source != OMP_EXTENSION_SOURCE:
+                    omp_issues.append(f"stale Mothership extension at {path}")
         if omp_issues:
             checks.append(CheckResult(
                 name="agent-hooks/omp",

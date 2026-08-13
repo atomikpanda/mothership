@@ -99,7 +99,7 @@ def test_stop_continues_with_pending_threads(monkeypatch):
         subject="Question",
         awaiting_reply=True,
         awaiting_agent_event=False,
-        messages=[SimpleNamespace(text="Please answer")],
+        messages=[SimpleNamespace(text="Please answer", role="human", kind="note")],
     )
     store = SimpleNamespace(list=lambda: [thread])
     stamped: list[list] = []

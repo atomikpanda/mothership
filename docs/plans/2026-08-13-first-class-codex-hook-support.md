@@ -101,3 +101,28 @@
 4. Run `mship doctor` in a fixture or current workspace and inspect exact runtime integration states.
 5. Review `git diff --check` and the task-scoped diff; confirm no generated caches, user config, runtime binaries, or unrelated files are present.
 <!-- /mship:task -->
+
+<!-- mship:task id=6 acs=ac4,ac15,ac16 -->
+## Task 6: Address verified Macroscope review findings
+
+**Files:**
+- Modify `src/mship/core/codex_hooks.py`
+- Modify `src/mship/core/doctor.py`
+- Modify `src/mship/core/agent_hooks.py`
+- Modify `tests/core/test_codex_hooks.py`
+- Modify `tests/core/test_doctor.py`
+- Modify `tests/cli/test_drain.py`
+
+**Interfaces:**
+- Consumes `install_codex_hooks(Path) -> CodexInstallResult`, `DoctorChecker._agent_integration_checks(Path) -> list[CheckResult]`, and `stop(...) -> AgentHookDecision`.
+- Preserves all runtime-facing decision envelopes and OMP's native `session_stop.stop_hook_active` ownership.
+
+1. Add failing tests proving empty or whitespace-only existing Codex configuration is preserved as malformed input.
+2. Add failing doctor tests proving zero configured Git roots produce no project-integration rows and unreadable/non-UTF-8 integration artifacts produce warnings instead of exceptions.
+3. Add a failing drain test proving a thread with both an unanswered human reply and an unhandled agent event renders both messages and both action instructions.
+4. Run the focused tests and confirm the new assertions fail for the reported reasons.
+5. Parse every existing Codex configuration file, return no project-integration rows for zero roots, catch `OSError`/`UnicodeDecodeError` during doctor reads, and render dual-state threads in both drain sections using the relevant message for each state.
+6. Run `uv run pytest tests/core/test_codex_hooks.py tests/core/test_doctor.py tests/cli/test_drain.py -q`.
+7. Run `mship test`, commit and push the correction, reply to the four addressed threads, and resolve them.
+8. Reply to the OMP continuation thread with the official `stop_hook_active` contract and the extension's unchanged event pass-through; do not duplicate continuation state in the extension.
+<!-- /mship:task -->

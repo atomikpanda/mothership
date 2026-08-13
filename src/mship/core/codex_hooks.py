@@ -221,17 +221,16 @@ def install_codex_hooks(workspace_root: Path) -> CodexInstallResult:
     data: dict[str, Any] = {}
     if path.is_file():
         raw = path.read_text()
-        if raw.strip():
-            try:
-                loaded = json.loads(raw)
-            except json.JSONDecodeError:
-                return CodexInstallResult(
-                    "skipped", path,
-                    "hooks.json is not valid JSON; fix it and re-run initialization",
-                )
-            if not isinstance(loaded, dict):
-                return CodexInstallResult("skipped", path, "hooks.json is not a JSON object")
-            data = loaded
+        try:
+            loaded = json.loads(raw)
+        except json.JSONDecodeError:
+            return CodexInstallResult(
+                "skipped", path,
+                "hooks.json is not valid JSON; fix it and re-run initialization",
+            )
+        if not isinstance(loaded, dict):
+            return CodexInstallResult("skipped", path, "hooks.json is not a JSON object")
+        data = loaded
 
     hooks = data.get("hooks")
     if hooks is None:

@@ -180,6 +180,19 @@ def test_malformed_json_is_preserved(tmp_path: Path):
     assert "valid JSON" in result.message
     assert path.read_text() == malformed
 
+
+@pytest.mark.parametrize("malformed", ["", " \n\t"])
+def test_empty_or_whitespace_json_is_preserved(tmp_path: Path, malformed: str):
+    path = tmp_path / ".codex" / "hooks.json"
+    path.parent.mkdir()
+    path.write_text(malformed)
+
+    result = install_codex_hooks(tmp_path)
+
+    assert result.status == "skipped"
+    assert "valid JSON" in result.message
+    assert path.read_text() == malformed
+
 @pytest.mark.parametrize(
     "data",
     [

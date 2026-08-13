@@ -944,6 +944,75 @@ def test_doctor_reports_malformed_codex_and_stale_omp_artifacts(workspace: Path,
     assert "stale" in rows["agent-hooks/omp"].message
 
 
+def test_doctor_omits_agent_checks_without_configured_roots(tmp_path: Path):
+    config_path = tmp_path / "mothership.yaml"
+    config_path.write_text("workspace: test\nrepos: {}\n")
+    checker = DoctorChecker(
+        ConfigLoader.load(config_path),
+        _agent_runtime_shell(),
+        workspace_root=tmp_path,
+        probe_network=False,
+    )
+
+    checks = checker._agent_integration_checks(tmp_path)
+
+    assert checks == []
+
+
+@pytest.mark.parametrize("artifact", ["codex", "omp"])
+@pytest.mark.parametrize(
+    "read_error",
+    [
+        OSError("permission denied"),
+        UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+    ],
+    ids=["os-error", "unicode-error"],
+)
+def test_doctor_warns_when_agent_artifact_cannot_be_read(
+    tmp_path: Path, monkeypatch, artifact: str, read_error: Exception
+):
+    repo = tmp_path / "service"
+    repo.mkdir()
+    (repo / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    config_path = tmp_path / "mothership.yaml"
+    config_path.write_text(
+        "workspace: test\n"
+        "repos:\n"
+        "  service:\n"
+        "    path: service\n"
+        "    type: service\n"
+    )
+    relative_path = (
+        Path(".codex/hooks.json")
+        if artifact == "codex"
+        else Path(".omp/extensions/mship.ts")
+    )
+    target = repo / relative_path
+    target.parent.mkdir(parents=True)
+    target.touch()
+    original_read_text = Path.read_text
+
+    def fail_target_read(path: Path, *args, **kwargs):
+        if path == target:
+            raise read_error
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_target_read)
+    monkeypatch.setattr("mship.core.doctor.shutil.which", lambda name: None)
+    checker = DoctorChecker(
+        ConfigLoader.load(config_path),
+        _agent_runtime_shell(),
+        workspace_root=tmp_path,
+        probe_network=False,
+    )
+
+    checks = checker._agent_integration_checks(tmp_path)
+    row = next(check for check in checks if check.name == f"agent-hooks/{artifact}")
+
+    assert row.status == "warn"
+    assert "could not read" in row.message
+
+
 def test_doctor_warns_on_disabled_codex_hooks_and_old_omp(workspace: Path, monkeypatch):
     _install_all_agent_integrations(workspace)
     monkeypatch.setattr(
