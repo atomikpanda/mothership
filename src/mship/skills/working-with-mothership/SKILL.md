@@ -206,7 +206,15 @@ Two mship-native primitives for handing work to subagents. Use them instead of h
 
   **Model resolution:** dispatch resolves the subagent's model (`--model` >
   `dispatch_models:` in mothership.yaml > built-in per-mode default) and stamps
-  it in the output — the worker never chooses its own model.
+  it in the output. Every built-in mode defaults to the portable `inherit`
+  sentinel; explicit CLI/config values are opaque operator choices.
+
+  Read the stub's resolved model before dispatch:
+  - `inherit`: omit the harness model selector; the harness default is intended.
+  - any other value: pass it unchanged through a supported model selector.
+  - if the available subagent API has no model selector, do not dispatch with
+    an explicit value. Report: "mship resolved explicit model '<value>', but this subagent API cannot select a model; set this mode to inherit or use a selector-capable dispatch tool."
+  Never translate one provider's model name into another.
 
   **Context isolation (SDD flow):** every dispatch (plan-task or ad-hoc `-i`)
   persists a metadata-only record under `.mothership/sdd/` and prints a **closed stub**

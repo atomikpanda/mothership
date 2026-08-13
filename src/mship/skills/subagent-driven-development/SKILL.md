@@ -185,46 +185,30 @@ conflicts that only emerge from implementation.
 
 ## Model Selection
 
-Use the least powerful model that can handle each role to conserve cost and increase speed.
+**In a Mothership workspace**, `mship dispatch` resolves the model:
+`--model` flag > `dispatch_models:` map in mothership.yaml > the portable
+built-in default. Every built-in mode defaults to `inherit`; explicit
+CLI/config values are opaque operator choices and must remain unchanged.
 
-**Mechanical implementation tasks** (isolated functions, clear specs, 1-2 files): use a fast, cheap model. Most implementation tasks are mechanical when the plan is well-specified.
+Read the stub's resolved model before dispatch:
+- `inherit`: omit the harness model selector; the harness default is intended.
+- any other value: pass it unchanged through a supported model selector.
+- if the available subagent API has no model selector, do not dispatch with
+  an explicit value. Report: "mship resolved explicit model '<value>', but this subagent API cannot select a model; set this mode to inherit or use a selector-capable dispatch tool."
+Never translate one provider's model name into another.
 
-**Integration and judgment tasks** (multi-file coordination, pattern matching, debugging): use a standard model.
+**Outside a Mothership workspace**, where the controller chooses a model
+itself, match capability to task complexity:
+- Mechanical implementation with a complete spec and a small isolated surface:
+  use a fast, economical model.
+- Multi-file integration, debugging, or review requiring judgment: use a
+  generally capable model.
+- Architecture, broad codebase reasoning, and the final whole-branch review:
+  use the most capable available model.
+- For a stuck fix loop, escalate to a more capable available model.
 
-**Architecture and design tasks**: use the most capable available model.
-The final whole-branch review is one of these — dispatch it on the most
-capable available model, not the session default.
-
-**Review tasks**: choose the model with the same judgment, scaled to the
-diff's size, complexity, and risk. A small mechanical diff does not need the
-most capable model; a subtle concurrency change does. Scoped re-reviews of
-small fix diffs take a cheap-to-mid tier.
-
-**Fix-loop escalation (rounds 4-5)**: use a model at least one tier above
-the implementer that got stuck.
-
-**The model is resolved by `mship dispatch`** — `--model` flag >
-`dispatch_models:` map in mothership.yaml > built-in per-mode default — and
-printed in the stub. Pass that resolved model to your platform's dispatch
-mechanism (the Task tool's model field or equivalent); never let the worker
-choose its own model, and never omit the model at dispatch time — an omitted
-model inherits your session's model, often the most capable and most
-expensive, which silently defeats this section. When this section's judgment
-says a task needs a different tier than the configured default, say so with
-`--model`.
-
-**Turn count beats token price.** Wall-clock and context cost scale with how
-many turns a subagent takes, and the cheapest models routinely take 2-3× the
-turns on multi-step work — costing more overall. Use a mid-tier model as the
-floor for reviewers and for implementers working from prose descriptions.
-When the task's plan text contains the complete code to write, the
-implementation is transcription plus testing: use the cheapest tier for
-that implementer. Single-file mechanical fixes also take the cheapest tier.
-
-**Task complexity signals (implementation tasks):**
-- Touches 1-2 files with a complete spec → cheap model
-- Touches multiple files with integration concerns → standard model
-- Requires design judgment or broad codebase understanding → most capable model
+Turn count matters alongside token price: choose a model likely to complete the
+task reliably rather than optimizing for the lowest per-token price alone.
 
 ## The Task Loop
 

@@ -19,10 +19,19 @@ Use this template when dispatching an implementer subagent.
      `worktrees`, …). Use that for step 2.
 2. Run `mship dispatch --task <slug> --plan-task <N>` and read the **stub** it
    prints: record path, resolved model, mode, worktree. The stub's `worktree`
-   is the subagent's cwd and the stub's `model` fills `[MODEL]` below — the
-   model was resolved by the CLI (`--model` > `dispatch_models` config >
-   per-mode default); never let the worker choose, and never substitute your
-   session's model.
+   is the subagent's cwd. The model was resolved by the CLI (`--model` >
+   `dispatch_models` config > per-mode default); never let the worker choose.
+
+Read the stub's resolved model before dispatch:
+- `inherit`: omit the harness model selector; the harness default is intended.
+- any other value: pass it unchanged through a supported model selector.
+- if the available subagent API has no model selector, do not dispatch with
+  an explicit value. Report: "mship resolved explicit model '<value>', but this subagent API cannot select a model; set this mode to inherit or use a selector-capable dispatch tool."
+Never translate one provider's model name into another.
+
+The Task-style template below shows `model: vendor/custom-tier` for an explicit
+resolved value. Replace it with that exact value. For `inherit`, omit the entire
+selector field; do not pass the literal string `inherit` to the provider.
 3. The subagent MUST work in the task's worktree, not the main checkout, and
    MUST commit on the task's feature branch. The mship pre-commit hook will
    refuse commits from the main checkout, but the prompt says this explicitly
@@ -35,8 +44,7 @@ worktree, pick the model per SKILL.md Model Selection, and replace the
 ```
 Subagent (general-purpose):
   description: "Implement Task N: [task name]"
-  model: [MODEL — from the dispatch stub's resolved model line; an omitted
-         model silently inherits the session's most expensive one]
+  model: vendor/custom-tier
   prompt: |
     You are implementing one plan task for the mship task [slug].
 
@@ -193,8 +201,9 @@ Subagent (general-purpose):
 ```
 
 **Placeholders:**
-- `[MODEL]` — the resolved model line from the dispatch stub (never your
-  session's model; outside mothership, choose per SKILL.md Model Selection)
+- `vendor/custom-tier` — an example explicit model value; replace it unchanged
+  with the resolved value, or omit the entire selector field for `inherit`
+  (outside Mothership, choose per SKILL.md Model Selection)
 - `[slug]` — the task slug from the stub
 - `[REPORT_FILE]` — the report path the controller names next to the
   dispatch record the stub printed (record `…/record.json` →
