@@ -1,0 +1,17 @@
+name: agentic-review
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    uses: atomikpanda/agentic-review/.github/workflows/agentic-review.yml@v1
+    secrets:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+    with:
+      central_ref: v1
