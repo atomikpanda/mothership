@@ -11,11 +11,42 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 SESSION_COMMAND = "mship _session-context"
 GUARD_COMMAND = "mship _guard-edit"
 GUARD_MATCHER = "Edit|Write|MultiEdit|NotebookEdit"
 DRAIN_COMMAND = "mship _drain"
+
+_EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+
+
+def extract_claude_edit_targets(event: dict[str, Any]) -> tuple[str, ...]:
+    """Extract every path represented by Claude Edit/Write/MultiEdit/NotebookEdit."""
+    if event.get("tool_name") not in _EDIT_TOOLS:
+        return ()
+    tool_input = event.get("tool_input")
+    if not isinstance(tool_input, dict):
+        raise ValueError("guarded edit did not contain a target path")
+
+    targets: list[str] = []
+    for key in ("file_path", "notebook_path"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value:
+            targets.append(value)
+    edits = tool_input.get("edits")
+    if isinstance(edits, list):
+        for edit in edits:
+            if not isinstance(edit, dict):
+                continue
+            value = edit.get("file_path") or edit.get("notebook_path")
+            if isinstance(value, str) and value:
+                targets.append(value)
+    if not targets:
+        raise ValueError("guarded edit did not contain a target path")
+    return tuple(dict.fromkeys(targets))
+
+
 CLAUDE_ENTRIES = {
     "SessionStart": {
         "hooks": [{"type": "command", "command": SESSION_COMMAND}],

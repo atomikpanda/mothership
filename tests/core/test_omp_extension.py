@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import subprocess
+
 from pathlib import Path
 
 import pytest
@@ -98,3 +103,123 @@ def test_atomic_write_failure_preserves_existing_extension(tmp_path: Path, monke
     with pytest.raises(OSError, match="disk full"):
         install_omp_extension(tmp_path)
     assert target.read_text() == "// existing\n"
+
+
+def test_generated_extension_executes_native_lifecycle_contract_under_bun(tmp_path: Path):
+    bun = shutil.which("bun")
+    if bun is None:
+        pytest.skip("bun is unavailable")
+
+    install_omp_extension(tmp_path)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_mship = fake_bin / "mship"
+    fake_mship.write_text(
+        """#!/bin/sh
+case "$2" in
+  session_start)
+    printf '%s\n' '{"kind":"context","message":"context"}'
+    ;;
+  tool_call)
+    if [ ! -e "$0.tool-called" ]; then
+      touch "$0.tool-called"
+      printf '%s\n' '{"kind":"deny","message":"denied"}'
+    else
+      printf '%s\n' 'not json'
+    fi
+    ;;
+  session_stop)
+    if [ ! -e "$0.stop-once" ]; then
+      touch "$0.stop-once"
+      printf '%s\n' '{"kind":"continue","message":"answer inbox"}'
+    elif [ ! -e "$0.stop-twice" ]; then
+      touch "$0.stop-twice"
+      printf '%s\n' '{"kind":"stop"}'
+    else
+      exit 7
+    fi
+    ;;
+esac
+"""
+    )
+    fake_mship.chmod(0o755)
+    harness = tmp_path / "harness.ts"
+    harness.write_text(
+        """import extension from \"./.omp/extensions/mship.ts\";
+
+const handlers = new Map<string, Function>();
+const registrations: string[] = [];
+const messages: unknown[] = [];
+const warnings: string[] = [];
+const pi = {
+  on(name: string, handler: Function) {
+    registrations.push(name);
+    handlers.set(name, handler);
+  },
+  sendMessage(...args: unknown[]) {
+    messages.push(args);
+  },
+  logger: {
+    warn(message: string) {
+      warnings.push(message);
+    },
+  },
+};
+extension(pi);
+const ctx = {cwd: process.cwd()};
+
+await handlers.get(\"session_start\")!({type: \"session_start\"}, ctx);
+const deny = await handlers.get(\"tool_call\")!(
+  {type: \"tool_call\", toolName: \"edit\", input: {path: \"src/a.py\"}},
+  ctx,
+);
+const continued = await handlers.get(\"session_stop\")!({type: \"session_stop\"}, ctx);
+const stopped = await handlers.get(\"session_stop\")!({type: \"session_stop\"}, ctx);
+const invalid = await handlers.get(\"tool_call\")!(
+  {type: \"tool_call\", toolName: \"write\", input: {path: \"src/b.py\"}},
+  ctx,
+);
+const nonzero = await handlers.get(\"session_stop\")!({type: \"session_stop\"}, ctx);
+
+console.log(JSON.stringify({
+  registrations,
+  messages,
+  warnings,
+  deny: deny ?? null,
+  continued: continued ?? null,
+  stopped: stopped ?? null,
+  invalid: invalid ?? null,
+  nonzero: nonzero ?? null,
+}));
+"""
+    )
+
+    result = subprocess.run(
+        [bun, str(harness)],
+        cwd=tmp_path,
+        env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"},
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["registrations"] == ["session_start", "tool_call", "session_stop"]
+    assert payload["messages"] == [[
+        {"customType": "mship-session-context", "content": "context", "display": False},
+        {"deliverAs": "nextTurn"},
+    ]]
+    assert payload["deny"] == {"block": True, "reason": "denied"}
+    assert payload["continued"] == {
+        "continue": True,
+        "additionalContext": "answer inbox",
+    }
+    assert payload["stopped"] is None
+    assert payload["invalid"] is None
+    assert payload["nonzero"] is None
+    assert payload["warnings"] == [
+        "Mothership tool_call hook failed open",
+        "Mothership session_stop hook failed open",
+    ]
