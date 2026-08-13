@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   review:
+    if: ${{ github.event.pull_request.user.login != 'dependabot[bot]' }}
     uses: atomikpanda/agentic-review/.github/workflows/agentic-review.yml@v1
     secrets:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
