@@ -605,9 +605,9 @@ def test_no_synthesized_fields_added(tmp_path: Path):
 
 
 def test_for_values_and_kind_values_are_the_documented_closed_set():
-    """q1: the closed set of --for values is claude-code/codex/human/reviewer;
+    """q1: the closed set of --for values includes every supported harness;
     --kind is spec/code-quality."""
-    assert set(FOR_VALUES) == {"claude-code", "codex", "human", "reviewer"}
+    assert set(FOR_VALUES) == {"claude-code", "codex", "omp", "human", "reviewer"}
     assert set(KIND_VALUES) == {"spec", "code-quality"}
 
 
@@ -616,7 +616,7 @@ def test_context_includes_dispatch_models(tmp_path: Path):
     out = _build(WorkspaceState(), _config(tmp_path), log_mgr, tmp_path)
     assert "dispatch_models" in out
     assert out["dispatch_models"]["implementer"] == "inherit"
-    assert out["dispatch_models"]["reviewer"] == "sonnet"
+    assert out["dispatch_models"]["reviewer"] == "inherit"
 
 
 def test_context_dispatch_models_reflects_configured_override(tmp_path: Path):

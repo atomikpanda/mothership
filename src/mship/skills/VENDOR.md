@@ -82,9 +82,11 @@ Upstream 6.2.0 restructured this skill around its file-passing scripts; re-woven
 
 ### using-mothership/references
 
-Vendored from upstream `using-superpowers/references/` (see structural exclusions). One file diverges:
+Vendored from upstream `using-superpowers/references/` (see structural exclusions). Three files diverge:
 
+- `using-mothership/references/codex-tools.md` — kind 3: dispatch-resolved `inherit` omits the model selector; explicit model values pass through verbatim or produce the exact unsupported-selector error.
 - `using-mothership/references/gemini-tools.md` — residual kind 1: two deliberate upstream skill-namespace (`superpowers`) prefix-drop lines in the dispatch-mapping examples (`subagent-driven-development`, `requesting-code-review`).
+- `using-mothership/references/pi-tools.md` — kind 3: dispatch-resolved `inherit` uses the harness default, while explicit models require a selector-capable subagent tool and otherwise produce the exact unsupported-selector error.
 
 ### verification-before-completion
 

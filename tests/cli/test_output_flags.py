@@ -27,9 +27,10 @@ class FakeStream(io.StringIO):
 
 @pytest.fixture(autouse=True)
 def _reset_settings(monkeypatch):
-    # Each test starts from a clean global + no inherited env.
+    # Each test starts from clean output state and a color-capable fake terminal.
     for var in ("MSHIP_JSON", "MSHIP_QUIET", "NO_COLOR"):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
     reset_output_settings()
     yield
     reset_output_settings()
