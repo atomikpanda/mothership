@@ -115,6 +115,18 @@ def _edit_event(runtime: str, *targets: Path, ignored_path: Path | None = None) 
             "toolName": "edit",
             "input": {"paths": [str(target) for target in targets]},
         }
+    elif runtime == "codex":
+        headers = ("Add", "Update", "Delete")
+        event = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "apply_patch",
+            "tool_input": {
+                "command": "\n".join(
+                    f"*** {headers[min(index, len(headers) - 1)]} File: {target}"
+                    for index, target in enumerate(targets)
+                ),
+            },
+        }
     else:
         event = {
             "hook_event_name": "PreToolUse",
@@ -238,15 +250,28 @@ def test_adapters_ignore_undocumented_event_fields(harness_workspace: HarnessWor
     assert set(outcomes.values()) == {Outcome("allow")}
 
 
+def test_codex_multi_target_fixture_uses_native_apply_patch_headers(tmp_path: Path):
+    targets = tuple(tmp_path / f"{name}.py" for name in ("added", "updated", "deleted"))
+
+    event = _edit_event("codex", *targets)
+
+    assert event["tool_name"] == "apply_patch"
+    patch = event["tool_input"]["command"]
+    assert f"*** Add File: {targets[0]}" in patch
+    assert f"*** Update File: {targets[1]}" in patch
+    assert f"*** Delete File: {targets[2]}" in patch
+
+
 def test_any_denied_target_denies_the_whole_native_multi_target_edit(
     harness_workspace: HarnessWorkspace,
 ):
-    allowed = harness_workspace.worktree / "src" / "a.py"
-    denied = harness_workspace.main / "src" / "b.py"
+    added = harness_workspace.worktree / "src" / "added.py"
+    denied = harness_workspace.main / "src" / "updated.py"
+    deleted = harness_workspace.worktree / "src" / "deleted.py"
 
     outcomes = _outcomes(
         "tool_call",
-        {runtime: _edit_event(runtime, allowed, denied) for runtime in ADAPTERS},
+        {runtime: _edit_event(runtime, added, denied, deleted) for runtime in ADAPTERS},
     )
 
     assert len(set(outcomes.values())) == 1

@@ -115,31 +115,41 @@ def test_generated_extension_executes_native_lifecycle_contract_under_bun(tmp_pa
     fake_bin.mkdir()
     fake_mship = fake_bin / "mship"
     fake_mship.write_text(
-        """#!/bin/sh
-case "$2" in
-  session_start)
-    printf '%s\n' '{"kind":"context","message":"context"}'
-    ;;
-  tool_call)
-    if [ ! -e "$0.tool-called" ]; then
-      touch "$0.tool-called"
-      printf '%s\n' '{"kind":"deny","message":"denied"}'
-    else
-      printf '%s\n' 'not json'
-    fi
-    ;;
-  session_stop)
-    if [ ! -e "$0.stop-once" ]; then
-      touch "$0.stop-once"
-      printf '%s\n' '{"kind":"continue","message":"answer inbox"}'
-    elif [ ! -e "$0.stop-twice" ]; then
-      touch "$0.stop-twice"
-      printf '%s\n' '{"kind":"stop"}'
-    else
-      exit 7
-    fi
-    ;;
-esac
+        """#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+event_name = sys.argv[2]
+event = json.load(sys.stdin)
+with Path("forwarded-events.jsonl").open("a") as stream:
+    stream.write(json.dumps(event, separators=(",", ":")) + "\\n")
+
+if event_name == "session_start":
+    assert event == {"type": "session_start", "source": "startup"}
+    print(json.dumps({"kind": "context", "message": "context"}))
+elif event_name == "tool_call":
+    assert event["type"] == "tool_call"
+    assert event["toolName"] in {"edit", "write"}
+    path = event["input"]["path"]
+    if path == "src/denied.py":
+        print(json.dumps({"kind": "deny", "message": "denied"}))
+    elif path == "src/allowed.py":
+        print(json.dumps({"kind": "allow"}))
+    elif path == "src/invalid-json.py":
+        print("not json")
+    elif path == "src/nonzero.py":
+        raise SystemExit(7)
+    else:
+        raise AssertionError(path)
+elif event_name == "session_stop":
+    assert event["type"] == "session_stop"
+    if event["stop_hook_active"]:
+        print(json.dumps({"kind": "stop"}))
+    else:
+        print(json.dumps({"kind": "continue", "message": "answer inbox"}))
+else:
+    raise AssertionError(event_name)
 """
     )
     fake_mship.chmod(0o755)
@@ -168,24 +178,38 @@ const pi = {
 extension(pi);
 const ctx = {cwd: process.cwd()};
 
-await handlers.get(\"session_start\")!({type: \"session_start\"}, ctx);
-const deny = await handlers.get(\"tool_call\")!(
-  {type: \"tool_call\", toolName: \"edit\", input: {path: \"src/a.py\"}},
+await handlers.get("session_start")!({type: "session_start", source: "startup"}, ctx);
+const deny = await handlers.get("tool_call")!(
+  {type: "tool_call", toolName: "edit", input: {path: "src/denied.py"}},
   ctx,
 );
-const continued = await handlers.get(\"session_stop\")!({type: \"session_stop\"}, ctx);
-const stopped = await handlers.get(\"session_stop\")!({type: \"session_stop\"}, ctx);
-const invalid = await handlers.get(\"tool_call\")!(
-  {type: \"tool_call\", toolName: \"write\", input: {path: \"src/b.py\"}},
+const allowed = await handlers.get("tool_call")!(
+  {type: "tool_call", toolName: "write", input: {path: "src/allowed.py"}},
   ctx,
 );
-const nonzero = await handlers.get(\"session_stop\")!({type: \"session_stop\"}, ctx);
+const continued = await handlers.get("session_stop")!(
+  {type: "session_stop", stop_hook_active: false},
+  ctx,
+);
+const stopped = await handlers.get("session_stop")!(
+  {type: "session_stop", stop_hook_active: true},
+  ctx,
+);
+const invalid = await handlers.get("tool_call")!(
+  {type: "tool_call", toolName: "write", input: {path: "src/invalid-json.py"}},
+  ctx,
+);
+const nonzero = await handlers.get("tool_call")!(
+  {type: "tool_call", toolName: "edit", input: {path: "src/nonzero.py"}},
+  ctx,
+);
 
 console.log(JSON.stringify({
   registrations,
   messages,
   warnings,
   deny: deny ?? null,
+  allowed: allowed ?? null,
   continued: continued ?? null,
   stopped: stopped ?? null,
   invalid: invalid ?? null,
@@ -203,15 +227,32 @@ console.log(JSON.stringify({
         check=False,
         timeout=20,
     )
-
     assert result.returncode == 0, result.stderr
+    forwarded = [
+        json.loads(line)
+        for line in (tmp_path / "forwarded-events.jsonl").read_text().splitlines()
+    ]
     payload = json.loads(result.stdout)
     assert payload["registrations"] == ["session_start", "tool_call", "session_stop"]
     assert payload["messages"] == [[
         {"customType": "mship-session-context", "content": "context", "display": False},
         {"deliverAs": "nextTurn"},
     ]]
+    assert forwarded == [
+        {"type": "session_start", "source": "startup"},
+        {"type": "tool_call", "toolName": "edit", "input": {"path": "src/denied.py"}},
+        {"type": "tool_call", "toolName": "write", "input": {"path": "src/allowed.py"}},
+        {"type": "session_stop", "stop_hook_active": False},
+        {"type": "session_stop", "stop_hook_active": True},
+        {
+            "type": "tool_call",
+            "toolName": "write",
+            "input": {"path": "src/invalid-json.py"},
+        },
+        {"type": "tool_call", "toolName": "edit", "input": {"path": "src/nonzero.py"}},
+    ]
     assert payload["deny"] == {"block": True, "reason": "denied"}
+    assert payload["allowed"] is None
     assert payload["continued"] == {
         "continue": True,
         "additionalContext": "answer inbox",
@@ -221,5 +262,5 @@ console.log(JSON.stringify({
     assert payload["nonzero"] is None
     assert payload["warnings"] == [
         "Mothership tool_call hook failed open",
-        "Mothership session_stop hook failed open",
+        "Mothership tool_call hook failed open",
     ]
