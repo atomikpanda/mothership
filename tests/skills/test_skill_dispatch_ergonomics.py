@@ -132,6 +132,21 @@ def test_codex_and_pi_references_apply_or_reject_explicit_models():
     assert _UNSUPPORTED_SELECTOR_ERROR in pi
 
 
+def test_pi_no_tool_fallback_only_applies_to_inherit():
+    pi = _read("using-mothership", "references/pi-tools.md")
+    normalized_pi = " ".join(pi.split())
+
+    assert (
+        "If no subagent tool is available and the resolved model is `inherit`"
+        in normalized_pi
+    )
+    assert (
+        "If the resolved model is explicit and no selector-capable subagent tool "
+        "is available"
+    ) in normalized_pi
+    assert _UNSUPPORTED_SELECTOR_ERROR in normalized_pi
+
+
 def test_configuration_docs_define_portable_dispatch_model_defaults():
     text = (_REPO_ROOT / "docs" / "configuration.md").read_text()
     assert "every built-in mode defaults to `inherit`" in text

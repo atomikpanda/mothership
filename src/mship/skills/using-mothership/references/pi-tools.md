@@ -9,7 +9,9 @@ Skills speak in actions ("dispatch a subagent", "create a todo", "read a file").
 
 ## Subagents
 
-Pi core does not ship a standard subagent tool. The `pi-subagents` package is a strong optional companion and provides a `subagent` tool with single-agent, chain, parallel, async, forked-context, and resume/status workflows. If no subagent tool is available, do not fabricate `Task` calls; execute sequentially in the current session or explain that the optional subagent capability is not installed.
+Pi core does not ship a standard subagent tool. The `pi-subagents` package is a
+strong optional companion and provides a `subagent` tool with single-agent,
+chain, parallel, async, forked-context, and resume/status workflows.
 
 ### Resolved model handling
 
@@ -21,9 +23,14 @@ model selector, then read the stub's resolved model:
   an explicit value. Report: "mship resolved explicit model '<value>', but this subagent API cannot select a model; set this mode to inherit or use a selector-capable dispatch tool."
 Never translate one provider's model name into another.
 
-Do not assume a particular `pi-subagents` version exposes a selector. Apply an
-explicit value only through a selector present in the installed schema;
-otherwise reject it with the actionable message above instead of substituting.
+Do not assume a particular `pi-subagents` version exposes a selector. If no
+subagent tool is available and the resolved model is `inherit`, do not fabricate
+`Task` calls; execute sequentially in the current session or explain that the
+optional subagent capability is not installed.
+
+If the resolved model is explicit and no selector-capable subagent tool is
+available, do not fall back to sequential execution because that would silently
+ignore the operator's model choice. Report: "mship resolved explicit model '<value>', but this subagent API cannot select a model; set this mode to inherit or use a selector-capable dispatch tool."
 
 ## Task lists
 
