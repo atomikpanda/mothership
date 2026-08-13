@@ -36,17 +36,20 @@ def _install_agent_hooks_with_output(
     except Exception as e:
         output.warning(f"Stop hook install skipped: {e}")
 
+    codex_registrations_current = True
     for project_root in project_roots:
         try:
             codex = install_codex_hooks(project_root)
             line = f"Codex hooks @ {codex.path}: {codex.status}"
             if codex.message:
                 line += f" ({codex.message})"
-            if codex.status == "skipped":
-                output.warning(line)
-            else:
+            if codex.status in {"installed", "updated", "up to date"}:
                 output.success(line)
+            else:
+                codex_registrations_current = False
+                output.warning(line)
         except Exception as e:
+            codex_registrations_current = False
             output.warning(f"Codex hooks install skipped at {project_root}: {e}")
 
         try:
@@ -61,7 +64,14 @@ def _install_agent_hooks_with_output(
             ws_root,
             codex_binary=shutil.which("codex"),
         )
-        if capability.state in {
+        if not codex_registrations_current:
+            output.warning(
+                "Codex hook installation incomplete: one or more project "
+                "registrations were skipped or failed; run "
+                "`mship init --install-hooks`; capability probe state: "
+                f"{capability.state.value}"
+            )
+        elif capability.state in {
             CodexHookCapability.DISABLED,
             CodexHookCapability.UNAVAILABLE,
         }:

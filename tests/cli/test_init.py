@@ -488,6 +488,81 @@ def test_install_hooks_reports_codex_activation_without_mutating_user_state(
     assert _home_bytes(home) == before
 
 
+@pytest.mark.parametrize("failure_mode", ["skipped", "raised"])
+def test_install_hooks_reports_incomplete_codex_registration_before_activation(
+    tmp_path: Path,
+    monkeypatch,
+    failure_mode: str,
+):
+    from mship.core.codex_hooks import install_codex_hooks as real_install_codex_hooks
+
+    monkeypatch.chdir(tmp_path)
+    roots = [tmp_path / "service-a", tmp_path / "service-b"]
+    for root in roots:
+        (root / ".git" / "hooks").mkdir(parents=True)
+        (root / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    real_install_codex_hooks(roots[0])
+    if failure_mode == "skipped":
+        skipped = roots[1] / ".codex" / "hooks.json"
+        skipped.parent.mkdir(parents=True)
+        skipped.write_text('{"hooks": ')
+    else:
+        def fail_one_root(root: Path):
+            if root == roots[1]:
+                raise OSError("read only")
+            return real_install_codex_hooks(root)
+
+        monkeypatch.setattr("mship.cli.init.install_codex_hooks", fail_one_root)
+
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  service-a:\n"
+        "    path: service-a\n"
+        "    type: service\n"
+        "  service-b:\n"
+        "    path: service-b\n"
+        "    type: service\n"
+    )
+    real_which = shutil.which
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name: "/usr/bin/codex" if name == "codex" else real_which(name),
+    )
+    probe_calls: list[str] = []
+
+    def run_probe(self, command, cwd, env=None, timeout=None):
+        if command == "codex features list":
+            probe_calls.append(command)
+            return ShellResult(
+                returncode=0,
+                stdout="codex_hooks under-development false\n",
+                stderr="",
+            )
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(ShellRunner, "run", run_probe)
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(cfg)
+    container.state_dir.override(tmp_path / ".mothership")
+    try:
+        result = runner.invoke(app, ["init", "--install-hooks"])
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+    assert result.exit_code == 0, result.output
+    assert "Codex hook installation incomplete" in result.output
+    assert "`mship init --install-hooks`" in result.output
+    assert "Codex hooks configured but" not in result.output
+    assert probe_calls == ["codex features list"]
+
+
 def test_interactive_wizard_emits_git_root_for_single_git_monorepo(tmp_path: Path, monkeypatch):
     """The interactive wizard (plain `mship init` in a TTY) emits the SAME
     relative-path + git_root monorepo config as `--detect` on a single-git
