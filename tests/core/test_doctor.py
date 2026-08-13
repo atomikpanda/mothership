@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -421,6 +422,61 @@ def test_skill_check_reports_missing_install(tmp_path, monkeypatch):
     assert by_name["skills/claude"].status == "warn"
     assert "0/1" in by_name["skills/claude"].message
     assert "mship skill install" in by_name["skills/claude"].message
+
+
+@pytest.mark.parametrize(
+    ("state", "status", "detail", "needs_force"),
+    [
+        ("current", "pass", "current", False),
+        ("missing", "warn", "0/2 installed", False),
+        ("dangling", "warn", "dangling", False),
+        ("stale", "warn", "stale", False),
+        ("foreign", "warn", "foreign", True),
+    ],
+)
+def test_omp_skill_check_classifies_shared_target_with_exact_repair(
+    tmp_path, monkeypatch, state, status, detail, needs_force
+):
+    from mship.core.doctor import check_skill_availability
+
+    fake_pkg = _seed_pkg_and_home(tmp_path, monkeypatch, ["a", "b"])
+    monkeypatch.setattr(
+        "mship.core.skill_install._detect_agents",
+        lambda: {"claude": False, "codex": False, "gemini": False, "omp": True},
+    )
+    target = (
+        Path(os.environ["HOME"])
+        / ".agents"
+        / "skills"
+        / "mothership"
+    )
+    if state != "missing":
+        target.parent.mkdir(parents=True)
+    if state == "current":
+        target.symlink_to(fake_pkg)
+    elif state == "dangling":
+        target.symlink_to(fake_pkg / "removed-layout")
+    elif state == "stale":
+        stale = fake_pkg / "stale-layout"
+        stale.mkdir()
+        target.symlink_to(stale)
+    elif state == "foreign":
+        target.mkdir()
+        (target / "SKILL.md").write_text("# foreign\n")
+
+    row = next(
+        result
+        for result in check_skill_availability()
+        if result.name == "skills/omp"
+    )
+
+    assert row.status == status
+    assert detail in row.message
+    if status == "warn":
+        repair = "mship skill install --only omp"
+        if needs_force:
+            repair += " --force"
+        assert f"`{repair}`" in row.message
 
 
 def test_doctor_go_task_pass_when_binary_present(workspace: Path, monkeypatch):
@@ -853,6 +909,9 @@ def _install_all_agent_integrations(workspace: Path) -> None:
 
 def test_doctor_reports_all_agent_integrations_healthy(workspace: Path, monkeypatch):
     _install_all_agent_integrations(workspace)
+    home = workspace / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(
         "mship.core.doctor.shutil.which",
         lambda name: f"/usr/bin/{name}" if name in {"task", "codex", "omp"} else None,
@@ -871,6 +930,8 @@ def test_doctor_reports_all_agent_integrations_healthy(workspace: Path, monkeypa
     assert rows["agent-hooks/omp"].status == "pass"
     assert rows["agent-runtime/codex"].status == "pass"
     assert rows["agent-runtime/omp"].status == "pass"
+    assert rows["skills/omp"].status == "warn"
+    assert "mship skill install --only omp" in rows["skills/omp"].message
     assert "/hooks" in rows["agent-hooks/codex"].message
     assert "fully active" not in " ".join(check.message for check in report.checks)
 

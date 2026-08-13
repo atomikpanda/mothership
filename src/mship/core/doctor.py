@@ -42,8 +42,8 @@ def _claude_target(skill_name: str) -> Path:
     return Path.home() / ".claude" / "skills" / skill_name
 
 
-def _codex_target() -> Path:
-    return Path.home() / ".agents" / "skills" / "mothership"
+def _shared_agent_skills_target() -> Path:
+    return _si.shared_agent_skills_target()
 
 
 def _intended_target(symlink: Path) -> Path:
@@ -54,8 +54,29 @@ def _intended_target(symlink: Path) -> Path:
     return raw
 
 
+def _classify_directory_skill_target(
+    target: Path, pkg_src: Path, total: int
+) -> tuple[int, int, int, int]:
+    """Return installed, dangling, stale, and foreign counts for a shared link."""
+    installed = dangling = stale = foreign = 0
+    if target.is_symlink():
+        intended = _intended_target(target)
+        if target.exists() and intended.resolve() == pkg_src.resolve():
+            installed = total
+        elif _si.is_owned_target(intended):
+            if target.exists():
+                stale = total
+            else:
+                dangling = total
+        else:
+            foreign = total
+    elif target.exists():
+        foreign = total
+    return installed, dangling, stale, foreign
+
+
 def check_skill_availability() -> list[CheckResult]:
-    """One CheckResult per detected agent reporting installed/dangling/foreign."""
+    """One CheckResult per detected agent reporting skill discovery health."""
     results: list[CheckResult] = []
     pkg_src = _si.pkg_skills_source()
     skill_dirs = _si._iter_skill_dirs(pkg_src)
@@ -63,7 +84,7 @@ def check_skill_availability() -> list[CheckResult]:
     detected = _si._detect_agents()
 
     if detected.get("claude"):
-        installed = dangling = foreign = 0
+        installed = dangling = stale = foreign = 0
         for d in skill_dirs:
             target = _claude_target(d.name)
             if not target.exists() and not target.is_symlink():
@@ -73,33 +94,45 @@ def check_skill_availability() -> list[CheckResult]:
                 if target.exists() and intended.resolve() == d.resolve():
                     installed += 1
                 elif _si.is_owned_target(intended):
-                    dangling += 1
+                    if target.exists():
+                        stale += 1
+                    else:
+                        dangling += 1
                 else:
                     foreign += 1
             else:
                 foreign += 1
-        results.append(_format_skill_check("claude", installed, dangling, foreign, total))
+        results.append(_format_skill_check(
+            "claude", installed, dangling, stale, foreign, total,
+            repair_command="mship skill install --only claude",
+        ))
 
-    if detected.get("codex"):
-        target = _codex_target()
-        installed = dangling = foreign = 0
-        if target.is_symlink():
-            intended = _intended_target(target)
-            if target.exists() and intended.resolve() == pkg_src.resolve():
-                installed = total
-            elif _si.is_owned_target(intended):
-                dangling = total
-            else:
-                foreign = total
-        elif target.exists():
-            foreign = total
-        results.append(_format_skill_check("codex", installed, dangling, foreign, total))
+    shared_target = _shared_agent_skills_target()
+    for agent in ("codex", "omp"):
+        if not detected.get(agent):
+            continue
+        installed, dangling, stale, foreign = _classify_directory_skill_target(
+            shared_target, pkg_src, total
+        )
+        results.append(_format_skill_check(
+            agent, installed, dangling, stale, foreign, total,
+            repair_command=f"mship skill install --only {agent}",
+        ))
 
     return results
 
 
-def _format_skill_check(agent: str, installed: int, dangling: int, foreign: int, total: int) -> CheckResult:
-    if installed == total and dangling == 0 and foreign == 0:
+def _format_skill_check(
+    agent: str,
+    installed: int,
+    dangling: int,
+    stale: int,
+    foreign: int,
+    total: int,
+    *,
+    repair_command: str,
+) -> CheckResult:
+    if installed == total and dangling == 0 and stale == 0 and foreign == 0:
         return CheckResult(
             name=f"skills/{agent}", status="pass",
             message=f"{installed}/{total} skills installed and current",
@@ -107,11 +140,12 @@ def _format_skill_check(agent: str, installed: int, dangling: int, foreign: int,
     parts = [f"{installed}/{total} installed"]
     if dangling:
         parts.append(f"{dangling} dangling")
+    if stale:
+        parts.append(f"{stale} stale")
     if foreign:
         parts.append(f"{foreign} foreign (skipped)")
-    msg = ", ".join(parts) + " — run `mship skill install`"
-    if foreign:
-        msg += " (use --force to overwrite foreign entries)"
+        repair_command += " --force"
+    msg = ", ".join(parts) + f" — run `{repair_command}`"
     return CheckResult(name=f"skills/{agent}", status="warn", message=msg)
 
 

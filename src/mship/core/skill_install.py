@@ -45,10 +45,17 @@ _RENAMED_SKILLS: dict[str, str] = {
     "using-superpowers": "using-mothership",
 }
 
+SHARED_AGENT_SKILLS_TARGET = Path(".agents") / "skills" / "mothership"
+
 
 def pkg_skills_source() -> Path:
     """Return the package-bundled skills directory."""
     return Path(mship.__file__).parent / "skills"
+
+
+def shared_agent_skills_target(home: Path | None = None) -> Path:
+    """Return the shared Codex and OMP/Pi discovery link."""
+    return (home or Path.home()) / SHARED_AGENT_SKILLS_TARGET
 
 
 def is_owned_target(target: Path) -> bool:
@@ -70,6 +77,7 @@ def is_owned_target(target: Path) -> bool:
 
 class RefreshOutcome(str, Enum):
     created = "created"
+    unchanged = "unchanged"
     replaced = "replaced"
     skipped = "skipped"
 
@@ -93,6 +101,8 @@ def refresh_symlink(src: Path, dst: Path, *, force: bool) -> RefreshOutcome:
         intended = Path(os.readlink(dst))
         if not intended.is_absolute():
             intended = (dst.parent / intended).resolve(strict=False)
+        if intended.resolve(strict=False) == src.resolve(strict=False):
+            return RefreshOutcome.unchanged
         if is_owned_target(intended) or force:
             dst.unlink()
             dst.symlink_to(src)
@@ -161,14 +171,27 @@ def install_for_claude(*, force: bool = False) -> AgentInstallResult:
 def install_for_codex(*, force: bool = False) -> AgentInstallResult:
     """One dir-level symlink at ~/.agents/skills/mothership → <pkg>/skills/."""
     src = pkg_skills_source()
-    dest = Path.home() / ".agents" / "skills"
-    target = dest / "mothership"
+    target = shared_agent_skills_target()
     outcome = refresh_symlink(src, target, force=force)
     skipped = ["mothership"] if outcome == RefreshOutcome.skipped else []
     replaced = ["mothership"] if outcome == RefreshOutcome.replaced else []
     return AgentInstallResult(
-        agent="codex", dest=dest, count=0 if skipped else 1,
+        agent="codex", dest=target.parent, count=0 if skipped else 1,
         skipped=skipped, replaced=replaced,
+    )
+
+
+def install_for_omp(*, force: bool = False) -> AgentInstallResult:
+    """Install the bundle at OMP/Pi's shared user-level discovery target."""
+    src = pkg_skills_source()
+    target = shared_agent_skills_target()
+    outcome = refresh_symlink(src, target, force=force)
+    return AgentInstallResult(
+        agent="omp",
+        dest=target.parent,
+        count=0 if outcome is RefreshOutcome.skipped else 1,
+        skipped=["mothership"] if outcome is RefreshOutcome.skipped else [],
+        replaced=["mothership"] if outcome is RefreshOutcome.replaced else [],
     )
 
 
@@ -179,4 +202,9 @@ def _detect_agents() -> dict[str, bool]:
         "claude": shutil.which("claude") is not None or (home / ".claude").exists(),
         "codex":  shutil.which("codex")  is not None or (home / ".codex").exists(),
         "gemini": shutil.which("gemini") is not None or (home / ".gemini").exists(),
+        "omp": (
+            shutil.which("omp") is not None
+            or shutil.which("pi") is not None
+            or (home / ".omp").exists()
+        ),
     }

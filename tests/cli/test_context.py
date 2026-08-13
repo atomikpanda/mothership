@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from mship.cli import app, container
 from mship.cli.output import reset_output_settings
+from mship.core.context import _IMPLEMENTER_INSTRUCTIONS
 from mship.core.state import StateManager, Task, WorkspaceState
 
 
@@ -129,10 +130,9 @@ def test_context_no_for_flag_omits_audience_key(tmp_path: Path):
         _reset_container()
 
 
-@pytest.mark.parametrize("for_value", ["claude-code", "codex"])
+@pytest.mark.parametrize("for_value", ["claude-code", "codex", "omp"])
 def test_context_for_implementer_emits_audience_block(tmp_path: Path, for_value: str):
-    """ac2: --for claude-code / codex emit the base payload plus an audience
-    block with the implementer framing."""
+    """Canonical implementer audiences emit identical instructions."""
     runner = CliRunner()
     cfg, state_dir = _bootstrap(tmp_path, [])
     container.config.reset()
@@ -147,7 +147,7 @@ def test_context_for_implementer_emits_audience_block(tmp_path: Path, for_value:
         assert data["schema_version"] == "1"  # base payload still present
         assert data["audience"]["for"] == for_value
         assert data["audience"]["kind"] is None
-        assert "mship commit" in data["audience"]["instructions"]
+        assert data["audience"]["instructions"] == _IMPLEMENTER_INSTRUCTIONS
     finally:
         _reset_container()
 
@@ -233,8 +233,11 @@ def test_context_kind_without_for_reviewer_is_rejected(tmp_path: Path):
         _reset_container()
 
 
-def test_context_kind_with_non_reviewer_for_is_rejected(tmp_path: Path):
-    """ac6: --kind with a non-reviewer --for is rejected."""
+@pytest.mark.parametrize("for_value", ["human", "omp"])
+def test_context_kind_with_non_reviewer_for_is_rejected(
+    tmp_path: Path, for_value: str
+):
+    """--kind with any non-reviewer --for is rejected."""
     runner = CliRunner()
     cfg, state_dir = _bootstrap(tmp_path, [])
     container.config.reset()
@@ -243,7 +246,7 @@ def test_context_kind_with_non_reviewer_for_is_rejected(tmp_path: Path):
     container.config_path.override(cfg)
     container.state_dir.override(state_dir)
     try:
-        result = runner.invoke(app, ["context", "--for", "human", "--kind", "spec"])
+        result = runner.invoke(app, ["context", "--for", for_value, "--kind", "spec"])
         assert result.exit_code != 0
         assert "reviewer" in result.output.lower()
     finally:
@@ -267,8 +270,11 @@ def test_context_reviewer_without_kind_is_rejected(tmp_path: Path):
         _reset_container()
 
 
-def test_context_unknown_for_value_is_rejected(tmp_path: Path):
-    """Unknown --for values are rejected with a clean CLI error."""
+@pytest.mark.parametrize("for_value", ["pi", "unknown"])
+def test_context_unknown_for_value_is_rejected(
+    tmp_path: Path, for_value: str
+):
+    """Unknown and alias-only --for values are rejected with a clean CLI error."""
     runner = CliRunner()
     cfg, state_dir = _bootstrap(tmp_path, [])
     container.config.reset()
@@ -277,7 +283,7 @@ def test_context_unknown_for_value_is_rejected(tmp_path: Path):
     container.config_path.override(cfg)
     container.state_dir.override(state_dir)
     try:
-        result = runner.invoke(app, ["context", "--for", "gemini"])
+        result = runner.invoke(app, ["context", "--for", for_value])
         assert result.exit_code != 0
     finally:
         _reset_container()

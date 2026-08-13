@@ -43,7 +43,7 @@ DirtyCheck = Callable[[Path], Optional[bool]]
 # code-quality-reviewer}-prompt.md` so a later migration of those templates
 # to consume this output is a drop-in swap rather than a rewrite.
 
-FOR_VALUES: tuple[str, ...] = ("claude-code", "codex", "human", "reviewer")
+FOR_VALUES: tuple[str, ...] = ("claude-code", "codex", "omp", "human", "reviewer")
 KIND_VALUES: tuple[str, ...] = ("spec", "code-quality")
 
 
@@ -97,6 +97,7 @@ _REVIEWER_CODE_QUALITY_INSTRUCTIONS = (
 _INSTRUCTIONS: dict[tuple[str, Optional[str]], str] = {
     ("claude-code", None): _IMPLEMENTER_INSTRUCTIONS,
     ("codex", None): _IMPLEMENTER_INSTRUCTIONS,
+    ("omp", None): _IMPLEMENTER_INSTRUCTIONS,
     ("human", None): _HUMAN_INSTRUCTIONS,
     ("reviewer", "spec"): _REVIEWER_SPEC_INSTRUCTIONS,
     ("reviewer", "code-quality"): _REVIEWER_CODE_QUALITY_INSTRUCTIONS,
@@ -107,8 +108,8 @@ def _validate_audience(for_: Optional[str], kind: Optional[str]) -> None:
     """Raise AudienceError for any invalid `--for`/`--kind` combination.
 
     Valid: `for_` is None (kind must also be None); `for_` is claude-code /
-    codex / human (kind must be None); `for_` is reviewer (kind must be spec
-    or code-quality).
+    codex / omp / human (kind must be None); `for_` is reviewer (kind must be
+    spec or code-quality).
     """
     if for_ is None:
         if kind is not None:

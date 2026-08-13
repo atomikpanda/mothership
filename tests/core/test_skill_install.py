@@ -1,9 +1,13 @@
 """Unit tests for src/mship/core/skill_install.py."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
+import pytest
+
 import mship
+import mship.core.skill_install as skill_install
 from mship.core.skill_install import (
     HISTORICAL_SOURCES,
     AgentInstallResult,
@@ -162,6 +166,113 @@ def test_install_for_codex_creates_one_dir_level_symlink(tmp_path: Path, monkeyp
     assert link.is_symlink()
     assert link.resolve() == fake_pkg.resolve()
     assert result.count == 1
+
+
+def _tree_bytes(root: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_install_for_omp_uses_shared_directory_link_idempotently(
+    tmp_path: Path, monkeypatch
+):
+    fake_pkg = _seed_fake_pkg_with_skills(
+        tmp_path, monkeypatch, ["alpha", "beta"]
+    )
+    home = tmp_path / "home"; home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    result = skill_install.install_for_omp(force=False)
+    link = result.dest / "mothership"
+    assert result.agent == "omp"
+    assert result.dest == home / ".agents" / "skills"
+    assert link.resolve() == fake_pkg.resolve()
+    assert {
+        path.name
+        for path in link.iterdir()
+        if (path / "SKILL.md").is_file()
+    } == {"alpha", "beta"}
+
+    link_text = os.readlink(link)
+    target_bytes = _tree_bytes(fake_pkg)
+    repeated = skill_install.install_for_omp(force=False)
+
+    assert repeated.agent == "omp"
+    assert repeated.replaced == []
+    assert os.readlink(link) == link_text
+    assert _tree_bytes(fake_pkg) == target_bytes
+
+
+def test_install_for_omp_repairs_owned_dangling_link(tmp_path: Path, monkeypatch):
+    fake_pkg = _seed_fake_pkg_with_skills(tmp_path, monkeypatch, ["alpha"])
+    home = tmp_path / "home"; home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    link = home / ".agents" / "skills" / "mothership"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(fake_pkg / "removed-layout")
+
+    result = skill_install.install_for_omp(force=False)
+
+    assert result.replaced == ["mothership"]
+    assert link.resolve() == fake_pkg.resolve()
+
+
+@pytest.mark.parametrize("entry_kind", ["symlink", "file", "directory"])
+def test_install_for_omp_safe_skips_foreign_content(
+    tmp_path: Path, monkeypatch, entry_kind: str
+):
+    _seed_fake_pkg_with_skills(tmp_path, monkeypatch, ["alpha"])
+    home = tmp_path / "home"; home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    target = home / ".agents" / "skills" / "mothership"
+    target.parent.mkdir(parents=True)
+    if entry_kind == "symlink":
+        foreign = tmp_path / "foreign"; foreign.mkdir()
+        target.symlink_to(foreign)
+    elif entry_kind == "file":
+        target.write_text("foreign")
+    else:
+        target.mkdir()
+        (target / "foreign").write_text("content")
+
+    result = skill_install.install_for_omp(force=False)
+
+    assert result.skipped == ["mothership"]
+    assert result.count == 0
+    if entry_kind == "symlink":
+        assert target.resolve() == foreign.resolve()
+    elif entry_kind == "file":
+        assert target.read_text() == "foreign"
+    else:
+        assert (target / "foreign").read_text() == "content"
+
+
+@pytest.mark.parametrize("entry_kind", ["symlink", "file", "directory"])
+def test_install_for_omp_force_replaces_foreign_content(
+    tmp_path: Path, monkeypatch, entry_kind: str
+):
+    fake_pkg = _seed_fake_pkg_with_skills(tmp_path, monkeypatch, ["alpha"])
+    home = tmp_path / "home"; home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    target = home / ".agents" / "skills" / "mothership"
+    target.parent.mkdir(parents=True)
+    if entry_kind == "symlink":
+        foreign = tmp_path / "foreign"; foreign.mkdir()
+        target.symlink_to(foreign)
+    elif entry_kind == "file":
+        target.write_text("foreign")
+    else:
+        target.mkdir()
+        (target / "foreign").write_text("content")
+
+    result = skill_install.install_for_omp(force=True)
+
+    assert result.replaced == ["mothership"]
+    assert target.is_symlink()
+    assert target.resolve() == fake_pkg.resolve()
 
 
 # --- Renamed-skills sweep (spec 2026-04-19) ---

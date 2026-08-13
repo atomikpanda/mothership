@@ -54,11 +54,18 @@ therefore configured but untrusted, not reported as fully active.
 
 ```bash
 mship bootstrap [--repos a,b] [--token TOK]         # clone missing workspace members (fresh clone -> full workspace)
-mship skill install|list [--only claude,codex,gemini] [--force] [-y]  # install/list mship-bundled agent skills
+mship skill install|list [--only claude,codex,gemini,omp,pi] [--force] [-y]  # pi is the canonical alias for omp
 mship gh preflight                                  # fail-fast check that GitHub auth covers the workspace repos
 mship bind refresh                                  # re-sync bind_files + symlink_dirs from source repos into worktrees
 mship layout init|launch                            # write / launch the mothership zellij layout
 ```
+
+Codex and OMP/Pi use the same user-level `.agents/skills/mothership` link to
+the bundled skills; installing both does not create a second copy. Install
+safe-skips foreign links, files, and directories unless `--force` is explicit.
+`mship doctor` reports OMP skill discovery independently from project lifecycle
+extension compatibility and recommends `mship skill install --only omp` (plus
+`--force` for foreign content) when repair is needed.
 
 `mship relay` manages the reverse-tunnel relay client keys (for `mship serve --relay`, see [`relay-hosting.md`](relay-hosting.md)):
 

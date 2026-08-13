@@ -18,12 +18,14 @@ from mship.core import skill_install as _si
 from mship.core.skill_install import AgentInstallResult
 
 
-SUPPORTED_AGENTS = ("claude", "codex", "gemini")
+SUPPORTED_AGENTS = ("claude", "codex", "gemini", "omp")
+AGENT_ALIASES = {"pi": "omp"}
 
 
 _INSTALLERS = {
     "claude": _si.install_for_claude,
     "codex":  _si.install_for_codex,
+    "omp": _si.install_for_omp,
     # gemini is not bundled — it has its own `gemini extensions install` flow,
     # which lives outside mship's symlink model. Print guidance instead.
 }
@@ -42,7 +44,14 @@ def register(app: typer.Typer, get_container):
     @app.command(name="skill", rich_help_panel="Setup")
     def skill_cmd(
         action: str = typer.Argument(help="Action: install | list"),
-        only: Optional[str] = typer.Option(None, "--only", help="Comma-separated agents (claude,codex,gemini)"),
+        only: Optional[str] = typer.Option(
+            None,
+            "--only",
+            help=(
+                "Comma-separated agents (claude,codex,gemini,omp); "
+                "pi is an alias for omp"
+            ),
+        ),
         force: bool = typer.Option(False, "--force", help="Override safe-skip on foreign content"),
         yes: bool = typer.Option(False, "--yes", "-y", help="Skip per-agent confirmation prompts"),
     ):
@@ -67,11 +76,11 @@ def _install(output: Output, *, only: Optional[str], force: bool, yes: bool) -> 
     detected = _si._detect_agents()
     if only:
         wanted = {a.strip() for a in only.split(",") if a.strip()}
-        unknown = wanted - set(SUPPORTED_AGENTS)
+        unknown = wanted - set(SUPPORTED_AGENTS) - set(AGENT_ALIASES)
         if unknown:
             output.error(f"Unknown agent(s): {', '.join(sorted(unknown))}")
             raise typer.Exit(code=1)
-        targets = sorted(wanted)
+        targets = sorted({AGENT_ALIASES.get(name, name) for name in wanted})
     else:
         targets = sorted(a for a, present in detected.items() if present)
 
