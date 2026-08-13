@@ -35,54 +35,6 @@ def _staged_source_paths(toplevel: str, container) -> list[str]:
         return []
 
 
-def _format_drain_reason(threads: list) -> str:
-    """Render awaiting threads as a Stop-hook block reason, split into two groups
-    with different calls-to-action:
-
-    - HUMAN-REPLY threads (`awaiting_reply` — the latest message is an unanswered
-      human message): answer each and clear it with `mship reply`.
-    - AGENT-EVENT threads (`awaiting_agent_event` and NOT `awaiting_reply` — an
-      unhandled agent `event`, i.e. a dispatched spec handoff or a PR
-      merged/closed, with no pending human reply): these are signals FOR THE
-      AGENT to act on. They are cleared by the agent taking action on the thread
-      (a human reply does not clear them), so they deliberately do NOT instruct
-      `mship reply`.
-
-    A thread that is BOTH (an unanswered human message AND an unhandled event)
-    lands in the human-reply group — replying is the priority action.
-    """
-    replies = [t for t in threads if t.awaiting_reply]
-    events = [t for t in threads if t.awaiting_agent_event and not t.awaiting_reply]
-
-    def _pending(t) -> str:
-        return t.messages[-1].text if t.messages else ""
-
-    lines: list[str] = []
-    if replies:
-        n = len(replies)
-        lines += [
-            f"{n} message{'s' if n != 1 else ''} waiting in your inbox. Answer each, "
-            f"then post your answer with `mship reply <thread-id> \"<text>\"` "
-            f"(replying clears the thread):",
-            "",
-        ]
-        for t in replies:
-            lines.append(f"- thread {t.id} ({t.subject}): {_pending(t)}")
-    if events:
-        if lines:
-            lines.append("")
-        n = len(events)
-        lines += [
-            f"{n} agent signal{'s' if n != 1 else ''} for you to act on "
-            f"(a dispatched spec handoff, or a PR merged/closed). These are FOR "
-            f"THE AGENT, not the operator — take the action each one calls for. "
-            f"The signal clears once you post a follow-up on the thread; a human "
-            f"reply does not clear it:",
-            "",
-        ]
-        for t in events:
-            lines.append(f"- thread {t.id} ({t.subject}): {_pending(t)}")
-    return "\n".join(lines)
 
 
 def register(app: typer.Typer, get_container):
@@ -372,101 +324,163 @@ def register(app: typer.Typer, get_container):
         raise typer.Exit(code=1)
 
     @app.command(name="_guard-edit", hidden=True)
-    def _guard_edit():
-        """PreToolUse guard: refuse edits to a repo's MAIN checkout while a task
-        is active, and refuse edits inside a task's OWN worktree when that task
-        fails the WorkItem gate (no WorkItem, or a feature WorkItem without an
-        approved spec — core/workitem_gate.py::check_task_gate). Reads the
-        Claude Code hook event JSON from stdin. Denies with exit code 2 (stderr
-        shown to the model); allows with exit 0. Fails OPEN on any error — never
-        block on uncertainty.
-
-        MSHIP_ALLOW_MAIN_EDIT=1 bypasses the main-checkout block entirely
-        (short-circuits below, unchanged). MSHIP_BYPASS_GATE is the hotfix
-        escape for the newer WorkItem gate only — it does not affect the
-        main-checkout block."""
-        from mship.core.edit_guard import evaluate_edit
+    def _guard_edit(
+        runtime: str = typer.Option("claude", "--runtime", help="Internal agent runtime."),
+    ):
+        """Evaluate an agent edit event through the shared Mothership guard."""
+        from mship.core.agent_hooks import DecisionKind, Runtime, pre_tool_use
         from mship.core.gate import resolve_bypass
 
         if os.environ.get("MSHIP_ALLOW_MAIN_EDIT") == "1":
             raise typer.Exit(code=0)
         try:
+            runtime_id = Runtime(runtime)
             raw = sys.stdin.read()
             event = json.loads(raw) if raw.strip() else {}
-            tool_input = event.get("tool_input") or {}
-            target = tool_input.get("file_path") or tool_input.get("notebook_path")
-            if not target:
-                raise typer.Exit(code=0)
+            if runtime_id is Runtime.CODEX:
+                from mship.core.codex_hooks import extract_edit_targets
+                targets = extract_edit_targets(event)
+            else:
+                tool_input = event.get("tool_input") or {}
+                target = tool_input.get("file_path") or tool_input.get("notebook_path")
+                if not target:
+                    raise typer.Exit(code=0)
+                targets = (target,)
             container = get_container(required=False)
             if container is None:
                 raise typer.Exit(code=0)
-            state = container.state_manager().load()
-            config = container.config()
-            workspace_root = Path(container.config_path()).parent
             bypassed, _reason = resolve_bypass()
-            decision = evaluate_edit(
-                target, state, config,
-                workspace_root=workspace_root,
+            decision = pre_tool_use(
+                runtime=runtime_id,
+                cwd=Path.cwd(),
+                targets=targets,
+                state=container.state_manager().load(),
+                config=container.config(),
+                workspace_root=Path(container.config_path()).parent,
+                bypass_main_edit=False,
                 bypass_workitem_gate=bypassed,
             )
         except typer.Exit:
             raise
         except Exception:
-            raise typer.Exit(code=0)  # fail open
-        if decision.allowed:
+            if runtime != Runtime.CLAUDE.value:
+                sys.stderr.write(f"mship: {runtime} PreToolUse adapter failed open\n")
             raise typer.Exit(code=0)
-        sys.stderr.write(decision.reason + "\n")
-        raise typer.Exit(code=2)
+        if decision.kind is DecisionKind.DENY:
+            sys.stderr.write(decision.message + "\n")
+            raise typer.Exit(code=2)
+        raise typer.Exit(code=0)
 
     @app.command(name="_drain", hidden=True)
-    def _drain():
-        """Stop hook: drain this workspace's message inbox at a turn boundary.
-        Reads the Claude Code Stop event JSON from stdin. If threads await an
-        agent reply, blocks the stop and injects them; otherwise allows the stop.
-        Also allows on stop_hook_active (loop safety) and on ANY error (fail
-        open) — a messaging glitch must never trap the agent."""
+    def _drain(
+        runtime: str = typer.Option("claude", "--runtime", help="Internal agent runtime."),
+    ):
+        """Evaluate an agent stop event through the shared inbox policy."""
+        from mship.core.agent_hooks import DecisionKind, Runtime, stop
         from mship.core.message_store import MessageStore
+
+        try:
+            runtime_id = Runtime(runtime)
+            raw = sys.stdin.read()
+            event = json.loads(raw) if raw.strip() else {}
+            container = get_container(required=False)
+            if container is None:
+                raise typer.Exit(code=0)
+            decision = stop(
+                runtime=runtime_id,
+                store=MessageStore(Path(container.state_dir()) / "messages"),
+                continuation_active=bool(event.get("stop_hook_active")),
+            )
+        except typer.Exit:
+            raise
+        except Exception:
+            if runtime != Runtime.CLAUDE.value:
+                sys.stderr.write(f"mship: {runtime} Stop adapter failed open\n")
+            raise typer.Exit(code=0)
+        if decision.kind is DecisionKind.CONTINUE:
+            print(json.dumps({"decision": "block", "reason": decision.message}))
+        raise typer.Exit(code=0)
+
+    @app.command(name="_session-context", hidden=True)
+    def session_context(
+        runtime: str = typer.Option("claude", "--runtime", help="Internal agent runtime."),
+    ):
+        """Print shared Mothership context for an agent SessionStart hook."""
+        from mship.core.agent_hooks import Runtime, session_start
+
+        try:
+            decision = session_start(Runtime(runtime), Path.cwd())
+        except Exception:
+            if runtime != Runtime.CLAUDE.value:
+                sys.stderr.write(f"mship: {runtime} SessionStart adapter failed open\n")
+            raise typer.Exit(code=0)
+        if decision.message:
+            sys.stdout.write(decision.message + "\n")
+        raise typer.Exit(code=0)
+
+    @app.command(name="_omp-hook", hidden=True)
+    def _omp_hook(
+        event_name: str = typer.Argument(..., help="OMP lifecycle event name."),
+    ):
+        """Translate one OMP event to the private Mothership decision envelope."""
+        from mship.core.agent_hooks import Runtime, pre_tool_use, session_start, stop
 
         try:
             raw = sys.stdin.read()
             event = json.loads(raw) if raw.strip() else {}
-            if event.get("stop_hook_active"):
-                raise typer.Exit(code=0)  # already a stop-hook continuation; don't loop
-            container = get_container(required=False)
-            if container is None:
-                raise typer.Exit(code=0)
-            store = MessageStore(Path(container.state_dir()) / "messages")
-            # Widened (MOS-232): surface agent-EVENT threads (dispatch handoffs +
-            # PR-merge notifications) at the turn boundary too, not just
-            # human-reply threads — mirrors `mship inbox wait`'s predicate.
-            awaiting = [t for t in store.list()
-                        if t.awaiting_reply or t.awaiting_agent_event]
-            # The agent is now seeing these human messages at the turn boundary — stamp the agent
-            # read cursor so Ground Control shows them as Read (#345). Best-effort; stamps only the
-            # awaiting_reply ones. Done before the empty-check so it runs whenever there's a human
-            # message to consume (a no-op on an empty list anyway).
-            from datetime import datetime as _dt, timezone as _tz
-            from mship.core.message_wait import stamp_agent_seen
-            stamp_agent_seen(store, awaiting, _dt.now(_tz.utc))
-            if not awaiting:
-                raise typer.Exit(code=0)
-            reason = _format_drain_reason(awaiting)
+            if not isinstance(event, dict):
+                raise ValueError("OMP event must be an object")
+
+            if event_name == "session_start":
+                decision = session_start(Runtime.OMP, Path.cwd())
+            elif event_name == "tool_call":
+                from mship.core.gate import resolve_bypass
+                from mship.core.omp_extension import extract_omp_edit_targets
+
+                targets = extract_omp_edit_targets(event)
+                if not targets:
+                    print(json.dumps({"kind": "allow"}))
+                    raise typer.Exit(code=0)
+                container = get_container(required=False)
+                if container is None:
+                    print(json.dumps({"kind": "allow"}))
+                    raise typer.Exit(code=0)
+                bypassed, _reason = resolve_bypass()
+                decision = pre_tool_use(
+                    runtime=Runtime.OMP,
+                    cwd=Path.cwd(),
+                    targets=targets,
+                    state=container.state_manager().load(),
+                    config=container.config(),
+                    workspace_root=Path(container.config_path()).parent,
+                    bypass_main_edit=os.environ.get("MSHIP_ALLOW_MAIN_EDIT") == "1",
+                    bypass_workitem_gate=bypassed,
+                )
+            elif event_name == "session_stop":
+                from mship.core.message_store import MessageStore
+
+                container = get_container(required=False)
+                if container is None:
+                    print(json.dumps({"kind": "stop"}))
+                    raise typer.Exit(code=0)
+                decision = stop(
+                    runtime=Runtime.OMP,
+                    store=MessageStore(Path(container.state_dir()) / "messages"),
+                    continuation_active=bool(event.get("stop_hook_active")),
+                )
+            else:
+                raise ValueError("unsupported OMP lifecycle event")
         except typer.Exit:
             raise
         except Exception:
-            raise typer.Exit(code=0)  # fail open
-        print(json.dumps({"decision": "block", "reason": reason}))
-        raise typer.Exit(code=0)
+            sys.stderr.write(f"mship: OMP {event_name} adapter failed open\n")
+            print(json.dumps({"kind": "error"}))
+            raise typer.Exit(code=0)
 
-    @app.command(name="_session-context", hidden=True)
-    def session_context():
-        """Print the no-active-task notice + messaging nudge for the SessionStart hook."""
-        import sys
-        from mship.core.gate import no_task_notice, messaging_notice
-        for fn in (no_task_notice, messaging_notice):
-            text = fn(Path.cwd())
-            if text:
-                sys.stdout.write(text + "\n")
+        payload = {"kind": decision.kind.value}
+        if decision.message:
+            payload["message"] = decision.message
+        print(json.dumps(payload))
         raise typer.Exit(code=0)
 
     @app.command(name="_post-checkout", hidden=True)

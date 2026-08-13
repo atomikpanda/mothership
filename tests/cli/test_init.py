@@ -215,6 +215,15 @@ def test_install_hooks_prepush_and_session_hook(tmp_path: Path, monkeypatch):
 
         # output must mention SessionStart
         assert "SessionStart" in result.output
+
+        # Codex and OMP receive project-local native lifecycle bindings too.
+        codex_path = tmp_path / ".codex" / "hooks.json"
+        assert codex_path.exists(), result.output
+        codex = json.loads(codex_path.read_text())
+        assert set(codex["hooks"]) >= {"SessionStart", "PreToolUse", "Stop"}
+        assert (tmp_path / ".omp" / "extensions" / "mship.ts").exists(), result.output
+        assert "Codex hooks" in result.output
+        assert "OMP extension" in result.output
         assert "installed" in result.output
 
         # Second run: must report 'up to date' for session hook
@@ -226,6 +235,83 @@ def test_install_hooks_prepush_and_session_hook(tmp_path: Path, monkeypatch):
         container.state_dir.reset_override()
         container.config.reset()
         container.state_manager.reset()
+
+
+
+
+def test_install_hooks_places_native_integrations_in_configured_repo_root(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    repo = tmp_path / "service"
+    (repo / ".git" / "hooks").mkdir(parents=True)
+    (repo / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  service:\n"
+        "    path: service\n"
+        "    type: service\n"
+    )
+
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(cfg)
+    container.state_dir.override(tmp_path / ".mothership")
+    try:
+        result = runner.invoke(app, ["init", "--install-hooks"])
+
+        assert result.exit_code == 0, result.output
+        assert (repo / ".codex" / "hooks.json").is_file()
+        assert (repo / ".omp" / "extensions" / "mship.ts").is_file()
+        assert not (tmp_path / ".codex").exists()
+        assert not (tmp_path / ".omp").exists()
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+
+def test_fresh_init_places_native_integrations_in_configured_repo_root(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    repo = tmp_path / "service"
+    (repo / ".git" / "hooks").mkdir(parents=True)
+    (repo / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+
+    result = runner.invoke(
+        app,
+        ["init", "--name", "t", "--repo", "./service:service"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (repo / ".codex" / "hooks.json").is_file()
+    assert (repo / ".omp" / "extensions" / "mship.ts").is_file()
+    assert not (tmp_path / ".codex").exists()
+    assert not (tmp_path / ".omp").exists()
+
+
+def test_detected_init_path_resolves_project_roots_from_workspace(
+    tmp_path: Path, monkeypatch
+):
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    workspace = tmp_path / "workspace"
+    (workspace / ".git" / "hooks").mkdir(parents=True)
+    (workspace / "pyproject.toml").write_text("[project]\nname = 'service'\nversion = '1'\n")
+    (workspace / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    monkeypatch.chdir(caller)
+
+    result = runner.invoke(app, ["init", str(workspace), "--name", "t", "--detect"])
+
+    assert result.exit_code == 0, result.output
+    assert (workspace / ".codex" / "hooks.json").is_file()
+    assert (workspace / ".omp" / "extensions" / "mship.ts").is_file()
+    assert not (caller / ".codex").exists()
+    assert not (caller / ".omp").exists()
 
 
 def test_install_hooks_refreshed_vs_up_to_date_labels(tmp_path: Path, monkeypatch):

@@ -1,10 +1,13 @@
 import os
+import json
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from mship.core import skill_install as _si
-from mship.core.config import WorkspaceConfig, resolve_go_task_files, GO_TASK_FILENAMES
+from mship.core.config import WorkspaceConfig, resolve_go_task_files, GO_TASK_FILENAMES, unique_git_roots
 from mship.util.shell import ShellRunner
 
 
@@ -361,6 +364,9 @@ class DoctorChecker:
         # Append skill-availability checks (workspace-independent)
         report.checks.extend(check_skill_availability())
 
+        if self._workspace_root is not None:
+            report.checks.extend(self._agent_integration_checks(self._workspace_root))
+
         # Workspace .gitignore check: warn if .worktrees not listed
         ws = self._workspace_root
         if ws is not None and (ws / ".git").exists():
@@ -386,6 +392,219 @@ class DoctorChecker:
         report.checks.extend(self._connectivity_checks())
 
         return report
+
+    @staticmethod
+    def _registered_commands(data: dict, event: str) -> list[str]:
+        hooks = data.get("hooks")
+        if not isinstance(hooks, dict):
+            return []
+        groups = hooks.get(event)
+        if not isinstance(groups, list):
+            return []
+        return [
+            handler["command"]
+            for group in groups if isinstance(group, dict)
+            for handler in (group.get("hooks") or []) if isinstance(handler, dict)
+            if isinstance(handler.get("command"), str)
+        ]
+
+    def _json_hook_check(
+        self,
+        *,
+        name: str,
+        path: Path,
+        commands: dict[str, str],
+        registration_issues: Callable[[dict], list[str]] | None = None,
+    ) -> CheckResult:
+        if not path.is_file():
+            return CheckResult(
+                name=name,
+                status="warn",
+                message=f"integration missing at {path}; run `mship init --install-hooks`",
+            )
+        try:
+            data = json.loads(path.read_text())
+        except json.JSONDecodeError:
+            return CheckResult(
+                name=name,
+                status="warn",
+                message=f"{path} is not valid JSON; fix it before reinstalling hooks",
+            )
+        if not isinstance(data, dict):
+            return CheckResult(name=name, status="warn", message=f"{path} is not a JSON object")
+
+        invalid = (
+            registration_issues(data)
+            if registration_issues is not None
+            else [
+                event
+                for event, command in commands.items()
+                if self._registered_commands(data, event).count(command) != 1
+            ]
+        )
+        if invalid:
+            return CheckResult(
+                name=name,
+                status="warn",
+                message=(
+                    f"missing or stale Mothership event registrations in {path}: "
+                    f"{', '.join(invalid)}; run `mship init --install-hooks`"
+                ),
+            )
+        return CheckResult(name=name, status="pass", message=f"Mothership hooks installed at {path}")
+
+    def _agent_integration_checks(self, workspace_root: Path) -> list[CheckResult]:
+        from mship.core.claude_settings import (
+            DRAIN_COMMAND,
+            GUARD_COMMAND,
+            SESSION_COMMAND,
+            registration_issues as claude_registration_issues,
+        )
+        from mship.core.codex_hooks import (
+            CODEX_COMMANDS,
+            CODEX_HOOKS_PATH,
+            registration_issues as codex_registration_issues,
+        )
+        from mship.core.omp_extension import (
+            OMP_EXTENSION_PATH,
+            OMP_EXTENSION_SOURCE,
+            OMP_MIN_VERSION,
+        )
+
+        root = Path(workspace_root)
+        project_roots = unique_git_roots(self._config)
+        codex_paths = [project_root / CODEX_HOOKS_PATH for project_root in project_roots]
+        omp_paths = [project_root / OMP_EXTENSION_PATH for project_root in project_roots]
+        checks = [
+            self._json_hook_check(
+                name="agent-hooks/claude",
+                path=root / ".claude" / "settings.json",
+                commands={
+                    "SessionStart": SESSION_COMMAND,
+                    "PreToolUse": GUARD_COMMAND,
+                    "Stop": DRAIN_COMMAND,
+                },
+                registration_issues=claude_registration_issues,
+            ),
+        ]
+
+        codex_results = [
+            self._json_hook_check(
+                name="agent-hooks/codex",
+                path=path,
+                commands=CODEX_COMMANDS,
+                registration_issues=codex_registration_issues,
+            )
+            for path in codex_paths
+        ]
+        codex_issues = [result.message for result in codex_results if result.status != "pass"]
+        if codex_issues:
+            checks.append(CheckResult(
+                name="agent-hooks/codex",
+                status="warn",
+                message="; ".join(codex_issues),
+            ))
+        else:
+            checks.append(CheckResult(
+                name="agent-hooks/codex",
+                status="pass",
+                message="Mothership hooks installed at " + ", ".join(map(str, codex_paths)),
+            ))
+
+        omp_issues: list[str] = []
+        for path in omp_paths:
+            if not path.is_file():
+                omp_issues.append(f"integration missing at {path}")
+            elif path.read_text() != OMP_EXTENSION_SOURCE:
+                omp_issues.append(f"stale Mothership extension at {path}")
+        if omp_issues:
+            checks.append(CheckResult(
+                name="agent-hooks/omp",
+                status="warn",
+                message="; ".join(omp_issues) + "; run `mship init --install-hooks`",
+            ))
+        else:
+            checks.append(CheckResult(
+                name="agent-hooks/omp",
+                status="pass",
+                message="Mothership extension installed at " + ", ".join(map(str, omp_paths)),
+            ))
+
+        codex_binary = shutil.which("codex")
+        if codex_binary is None:
+            checks.append(CheckResult(
+                name="agent-runtime/codex",
+                status="warn",
+                message="Codex is not installed; Claude and OMP integrations remain available",
+            ))
+        else:
+            capability = self._shell.run("codex features list", cwd=root)
+            features: dict[str, str] = {}
+            for line in capability.stdout.splitlines():
+                parts = line.split()
+                if parts and parts[0] in {"hooks", "codex_hooks"}:
+                    features[parts[0]] = parts[-1].lower()
+            feature = features.get("hooks", features.get("codex_hooks"))
+            if capability.returncode != 0 or feature is None:
+                checks.append(CheckResult(
+                    name="agent-runtime/codex",
+                    status="warn",
+                    message="Codex hook capability is unavailable; this Codex version may be too old",
+                ))
+            elif feature != "true":
+                checks.append(CheckResult(
+                    name="agent-runtime/codex",
+                    status="warn",
+                    message="Codex hook capability is disabled; enable `[features].hooks = true` before use",
+                ))
+            else:
+                checks.append(CheckResult(
+                    name="agent-runtime/codex",
+                    status="pass",
+                    message=f"Codex hook capability available at {codex_binary}",
+                ))
+
+        if any(path.is_file() for path in codex_paths):
+            checks.append(CheckResult(
+                name="agent-hooks/codex-trust",
+                status="warn",
+                message="Codex project hooks require explicit review/trust; open `/hooks` in Codex",
+            ))
+
+        omp_binary = shutil.which("omp")
+        if omp_binary is None:
+            checks.append(CheckResult(
+                name="agent-runtime/omp",
+                status="warn",
+                message="OMP is not installed; Claude and Codex integrations remain available",
+            ))
+        else:
+            version_result = self._shell.run("omp --version", cwd=root)
+            match = re.search(r"(\d+)\.(\d+)\.(\d+)", version_result.stdout)
+            if version_result.returncode != 0 or match is None:
+                checks.append(CheckResult(
+                    name="agent-runtime/omp",
+                    status="warn",
+                    message="could not determine OMP version or extension compatibility",
+                ))
+            else:
+                version = tuple(int(part) for part in match.groups())
+                if version < OMP_MIN_VERSION:
+                    checks.append(CheckResult(
+                        name="agent-runtime/omp",
+                        status="warn",
+                        message=(
+                            f"OMP {'.'.join(match.groups())} is too old for this extension; "
+                            f"requires {'.'.join(map(str, OMP_MIN_VERSION))} or newer"
+                        ),
+                    ))
+                else:
+                    checks.append(CheckResult(
+                        name="agent-runtime/omp",
+                        status="pass",
+                        message=f"OMP {'.'.join(match.groups())} supports project extensions",
+                    ))
+        return checks
 
     #: topology edge status -> doctor check status. `absent` means "not
     #: configured on this machine", which is not a problem to report.

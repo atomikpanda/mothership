@@ -198,3 +198,39 @@ def test_outside_workspace_fails_open(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["_drain"], input=_event())
     assert result.exit_code == 0
     assert '"decision"' not in result.output
+
+
+def test_codex_stop_uses_native_continuation_output(tmp_path: Path):
+    cfg, state_dir, store = _bootstrap(tmp_path)
+    store.create_thread("question", "answer this", datetime.now(timezone.utc))
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(
+            app,
+            ["_drain", "--runtime", "codex"],
+            input=_event(),
+        )
+        assert result.exit_code == 0
+        assert json.loads(result.stdout) == {
+            "decision": "block",
+            "reason": json.loads(result.stdout)["reason"],
+        }
+        assert "answer this" in json.loads(result.stdout)["reason"]
+    finally:
+        _reset()
+
+
+def test_codex_stop_reentry_is_bounded(tmp_path: Path):
+    cfg, state_dir, store = _bootstrap(tmp_path)
+    store.create_thread("question", "still pending", datetime.now(timezone.utc))
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(
+            app,
+            ["_drain", "--runtime", "codex"],
+            input=_event(stop_hook_active=True),
+        )
+        assert result.exit_code == 0
+        assert result.stdout == ""
+    finally:
+        _reset()

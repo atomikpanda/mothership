@@ -795,3 +795,235 @@ def test_doctor_survives_a_topology_failure(workspace: Path, monkeypatch):
     assert "probe exploded" in conn[0].message
     # the other checks still ran
     assert any(c.name.endswith("/path") for c in report.checks)
+
+
+def _agent_runtime_shell(*, codex_hooks: bool = True, omp_version: str = "17.2.0"):
+    shell = MagicMock(spec=ShellRunner)
+
+    def run(command, cwd, env=None):
+        if "task --list" in command:
+            return ShellResult(returncode=0, stdout="test\nrun\nlint\nsetup\n", stderr="")
+        if command == "codex features list":
+            enabled = "true" if codex_hooks else "false"
+            return ShellResult(
+                returncode=0,
+                stdout=f"hooks  stable  {enabled}\n",
+                stderr="",
+            )
+        if command == "omp --version":
+            return ShellResult(returncode=0, stdout=f"omp v{omp_version}\n", stderr="")
+        return ShellResult(returncode=0, stdout="", stderr="")
+
+    shell.run.side_effect = run
+    return shell
+
+
+def _install_all_agent_integrations(workspace: Path) -> None:
+    from mship.core.claude_settings import (
+        install_pretooluse_guard_hook,
+        install_session_hook,
+        install_stop_hook,
+    )
+    from mship.core.codex_hooks import install_codex_hooks
+    from mship.core.omp_extension import install_omp_extension
+
+    install_session_hook(workspace)
+    install_pretooluse_guard_hook(workspace)
+    install_stop_hook(workspace)
+    from mship.core.config import unique_git_roots
+
+    config = ConfigLoader.load(workspace / "mothership.yaml")
+    for project_root in unique_git_roots(config):
+        install_codex_hooks(project_root)
+        install_omp_extension(project_root)
+
+
+def test_doctor_reports_all_agent_integrations_healthy(workspace: Path, monkeypatch):
+    _install_all_agent_integrations(workspace)
+    monkeypatch.setattr(
+        "mship.core.doctor.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name in {"task", "codex", "omp"} else None,
+    )
+
+    report = DoctorChecker(
+        ConfigLoader.load(workspace / "mothership.yaml"),
+        _agent_runtime_shell(),
+        workspace_root=workspace,
+        probe_network=False,
+    ).run()
+    rows = {check.name: check for check in report.checks}
+
+    assert rows["agent-hooks/claude"].status == "pass"
+    assert rows["agent-hooks/codex"].status == "pass"
+    assert rows["agent-hooks/omp"].status == "pass"
+    assert rows["agent-runtime/codex"].status == "pass"
+    assert rows["agent-runtime/omp"].status == "pass"
+    assert rows["agent-hooks/codex-trust"].status == "warn"
+    assert "/hooks" in rows["agent-hooks/codex-trust"].message
+
+
+
+
+def test_doctor_checks_native_integrations_in_configured_repo_roots(
+    workspace: Path, monkeypatch
+):
+    from mship.core.claude_settings import (
+        install_pretooluse_guard_hook,
+        install_session_hook,
+        install_stop_hook,
+    )
+    from mship.core.codex_hooks import install_codex_hooks
+    from mship.core.omp_extension import install_omp_extension
+
+    repo = workspace / "service"
+    repo.mkdir()
+    (repo / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    (workspace / "mothership.yaml").write_text(
+        "workspace: test\n"
+        "repos:\n"
+        "  service:\n"
+        "    path: service\n"
+        "    type: service\n"
+    )
+    install_session_hook(workspace)
+    install_pretooluse_guard_hook(workspace)
+    install_stop_hook(workspace)
+    install_codex_hooks(repo)
+    install_omp_extension(repo)
+    monkeypatch.setattr("mship.core.doctor.shutil.which", lambda name: None)
+
+    report = DoctorChecker(
+        ConfigLoader.load(workspace / "mothership.yaml"),
+        _agent_runtime_shell(),
+        workspace_root=workspace,
+        probe_network=False,
+    ).run()
+    rows = {check.name: check for check in report.checks}
+
+    assert rows["agent-hooks/codex"].status == "pass"
+    assert rows["agent-hooks/omp"].status == "pass"
+
+
+def test_doctor_warns_when_agent_integrations_are_missing(workspace: Path, monkeypatch):
+    monkeypatch.setattr("mship.core.doctor.shutil.which", lambda name: None)
+
+    report = DoctorChecker(
+        ConfigLoader.load(workspace / "mothership.yaml"),
+        _agent_runtime_shell(),
+        workspace_root=workspace,
+        probe_network=False,
+    ).run()
+    rows = {check.name: check for check in report.checks}
+
+    assert rows["agent-hooks/claude"].status == "warn"
+    assert rows["agent-hooks/codex"].status == "warn"
+    assert rows["agent-hooks/omp"].status == "warn"
+    assert rows["agent-runtime/codex"].status == "warn"
+    assert rows["agent-runtime/omp"].status == "warn"
+
+
+def test_doctor_reports_malformed_codex_and_stale_omp_artifacts(workspace: Path, monkeypatch):
+    _install_all_agent_integrations(workspace)
+    codex = workspace / "shared" / ".codex" / "hooks.json"
+    codex.write_text('{"hooks": ')
+    omp = workspace / "shared" / ".omp" / "extensions" / "mship.ts"
+    omp.write_text("// mship-extension-version: 0\n")
+    monkeypatch.setattr("mship.core.doctor.shutil.which", lambda name: None)
+
+    report = DoctorChecker(
+        ConfigLoader.load(workspace / "mothership.yaml"),
+        _agent_runtime_shell(),
+        workspace_root=workspace,
+        probe_network=False,
+    ).run()
+    rows = {check.name: check for check in report.checks}
+
+    assert rows["agent-hooks/codex"].status == "warn"
+    assert "valid JSON" in rows["agent-hooks/codex"].message
+    assert rows["agent-hooks/omp"].status == "warn"
+    assert "stale" in rows["agent-hooks/omp"].message
+
+
+def test_doctor_warns_on_disabled_codex_hooks_and_old_omp(workspace: Path, monkeypatch):
+    _install_all_agent_integrations(workspace)
+    monkeypatch.setattr(
+        "mship.core.doctor.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name in {"task", "codex", "omp"} else None,
+    )
+
+    report = DoctorChecker(
+        ConfigLoader.load(workspace / "mothership.yaml"),
+        _agent_runtime_shell(codex_hooks=False, omp_version="16.1.19"),
+        workspace_root=workspace,
+        probe_network=False,
+    ).run()
+    rows = {check.name: check for check in report.checks}
+
+    assert rows["agent-runtime/codex"].status == "warn"
+    assert "disabled" in rows["agent-runtime/codex"].message
+    assert rows["agent-runtime/omp"].status == "warn"
+    assert "too old" in rows["agent-runtime/omp"].message
+
+
+def test_doctor_reports_stale_codex_owned_registration(workspace: Path, monkeypatch):
+    import json
+
+    _install_all_agent_integrations(workspace)
+    path = workspace / "shared" / ".codex" / "hooks.json"
+    data = json.loads(path.read_text())
+    data["hooks"]["PreToolUse"][0]["hooks"].append({
+        "type": "command",
+        "command": "mship _guard-edit --runtime codex --legacy",
+    })
+    path.write_text(json.dumps(data))
+    monkeypatch.setattr("mship.core.doctor.shutil.which", lambda name: None)
+
+    report = DoctorChecker(
+        ConfigLoader.load(workspace / "mothership.yaml"),
+        _agent_runtime_shell(),
+        workspace_root=workspace,
+        probe_network=False,
+    ).run()
+    row = next(check for check in report.checks if check.name == "agent-hooks/codex")
+
+    assert row.status == "warn"
+    assert "stale" in row.message
+
+
+def test_doctor_reports_and_reinstaller_repairs_stale_claude_registration(
+    workspace: Path, monkeypatch
+):
+    import json
+
+    from mship.core.claude_settings import install_pretooluse_guard_hook
+
+    _install_all_agent_integrations(workspace)
+    path = workspace / ".claude" / "settings.json"
+    data = json.loads(path.read_text())
+    data["hooks"]["PreToolUse"][0]["matcher"] = "Read"
+    path.write_text(json.dumps(data))
+    monkeypatch.setattr("mship.core.doctor.shutil.which", lambda name: None)
+    config = ConfigLoader.load(workspace / "mothership.yaml")
+
+    stale = DoctorChecker(
+        config,
+        _agent_runtime_shell(),
+        workspace_root=workspace,
+        probe_network=False,
+    ).run()
+    stale_row = next(check for check in stale.checks if check.name == "agent-hooks/claude")
+
+    assert stale_row.status == "warn"
+    assert "stale" in stale_row.message
+    assert install_pretooluse_guard_hook(workspace) == "updated"
+
+    repaired = DoctorChecker(
+        config,
+        _agent_runtime_shell(),
+        workspace_root=workspace,
+        probe_network=False,
+    ).run()
+    repaired_row = next(
+        check for check in repaired.checks if check.name == "agent-hooks/claude"
+    )
+    assert repaired_row.status == "pass"

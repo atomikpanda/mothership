@@ -4,12 +4,16 @@ from typing import Optional
 import typer
 
 from mship.cli.output import Output
-from mship.core.config import unique_git_roots, resolve_go_task_files
+from mship.core.config import ConfigLoader, unique_git_roots, resolve_go_task_files
 from mship.core.init import WorkspaceInitializer, DetectedRepo
 from mship.core.claude_settings import install_session_hook, install_pretooluse_guard_hook, install_stop_hook
+from mship.core.codex_hooks import install_codex_hooks
+from mship.core.omp_extension import install_omp_extension
 
 
-def _install_agent_hooks_with_output(ws_root: Path, output: Output) -> None:
+def _install_agent_hooks_with_output(
+    ws_root: Path, project_roots: list[Path], output: Output
+) -> None:
     settings = f"{ws_root}/.claude/settings.json"
     try:
         output.success(f"SessionStart hook @ {settings}: {install_session_hook(ws_root)}")
@@ -24,6 +28,25 @@ def _install_agent_hooks_with_output(ws_root: Path, output: Output) -> None:
     except Exception as e:
         output.warning(f"Stop hook install skipped: {e}")
 
+    for project_root in project_roots:
+        try:
+            codex = install_codex_hooks(project_root)
+            line = f"Codex hooks @ {codex.path}: {codex.status}"
+            if codex.message:
+                line += f" ({codex.message})"
+            if codex.status == "skipped":
+                output.warning(line)
+            else:
+                output.success(line)
+        except Exception as e:
+            output.warning(f"Codex hooks install skipped at {project_root}: {e}")
+
+        try:
+            omp = install_omp_extension(project_root)
+            output.success(f"OMP extension @ {omp.path}: {omp.status}")
+        except Exception as e:
+            output.warning(f"OMP extension install skipped at {project_root}: {e}")
+
 
 def register(app: typer.Typer, get_container):
     @app.command(rich_help_panel="Setup")
@@ -37,7 +60,7 @@ def register(app: typer.Typer, get_container):
         force: bool = typer.Option(False, "--force", help="Overwrite existing mothership.yaml"),
         install_hooks_only: bool = typer.Option(
             False, "--install-hooks",
-            help="Only install git hooks on every known git root (skip the rest of init).",
+            help="Only install Git and agent runtime hooks (skip the rest of init).",
         ),
     ):
         """Initialize a new mothership workspace."""
@@ -46,14 +69,15 @@ def register(app: typer.Typer, get_container):
         config_path = cwd / "mothership.yaml"
         initializer = WorkspaceInitializer()
 
-        # --install-hooks: short-circuit — just install hooks on each known git root
+        # --install-hooks: short-circuit — refresh Git and agent runtime hooks only
         if install_hooks_only:
             from mship.core.hooks import install_hook, InstallOutcome
             container = get_container()
             config = container.config()
+            project_roots = unique_git_roots(config)
             installed_results: list[tuple[Path, dict[str, InstallOutcome]]] = []
             failed: list[tuple[Path, str]] = []
-            for root in unique_git_roots(config):
+            for root in project_roots:
                 try:
                     outcomes = install_hook(root)
                     installed_results.append((root, outcomes))
@@ -74,7 +98,9 @@ def register(app: typer.Typer, get_container):
                         output.print(line)
             for r, err in failed:
                 output.error(f"hook install failed: {r}: {err}")
-            _install_agent_hooks_with_output(Path(container.config_path()).parent, output)
+            _install_agent_hooks_with_output(
+                Path(container.config_path()).parent, project_roots, output
+            )
             raise typer.Exit(code=1 if failed else 0)
 
         # Check for existing config
@@ -122,6 +148,7 @@ def register(app: typer.Typer, get_container):
 
         initializer.write_config(config_path, config)
 
+        config = ConfigLoader.load(config_path, require_paths=False)
         # Scaffold Taskfiles
         created_taskfiles: list[str] = []
         rename_notes: list[tuple[str, Path]] = []
@@ -136,13 +163,14 @@ def register(app: typer.Typer, get_container):
 
         # Install pre-commit hooks on each effective git root
         from mship.core.hooks import install_hook
-        for root in unique_git_roots(config):
+        project_roots = unique_git_roots(config)
+        for root in project_roots:
             try:
                 install_hook(root)
             except Exception as e:
                 output.print(f"[yellow]warning: could not install hook at {root}: {e}[/yellow]")
 
-        _install_agent_hooks_with_output(cwd, output)
+        _install_agent_hooks_with_output(cwd, project_roots, output)
 
         if output.human_mode:
             output.success(f"Created: {config_path}")
@@ -329,16 +357,18 @@ def _run_interactive(
         raise typer.Exit(code=1)
 
     initializer.write_config(config_path, config)
+    config = ConfigLoader.load(config_path, require_paths=False)
 
     # Install pre-commit hooks on each effective git root
     from mship.core.hooks import install_hook
-    for root in unique_git_roots(config):
+    project_roots = unique_git_roots(config)
+    for root in project_roots:
         try:
             install_hook(root)
         except Exception as e:
             output.print(f"[yellow]warning: could not install hook at {root}: {e}[/yellow]")
 
-    _install_agent_hooks_with_output(cwd, output)
+    _install_agent_hooks_with_output(cwd, project_roots, output)
 
     output.print("")
     output.success(f"Created: {config_path}")
