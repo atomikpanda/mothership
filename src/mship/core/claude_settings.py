@@ -16,12 +16,60 @@ SESSION_COMMAND = "mship _session-context"
 GUARD_COMMAND = "mship _guard-edit"
 GUARD_MATCHER = "Edit|Write|MultiEdit|NotebookEdit"
 DRAIN_COMMAND = "mship _drain"
+CLAUDE_ENTRIES = {
+    "SessionStart": {
+        "hooks": [{"type": "command", "command": SESSION_COMMAND}],
+    },
+    "PreToolUse": {
+        "matcher": GUARD_MATCHER,
+        "hooks": [{"type": "command", "command": GUARD_COMMAND}],
+    },
+    "Stop": {
+        "hooks": [{"type": "command", "command": DRAIN_COMMAND}],
+    },
+}
+
+
+def _is_owned_handler(handler: object, command: str) -> bool:
+    return isinstance(handler, dict) and handler.get("command") == command
+
+
+def _owned_handler_count(groups: list, command: str) -> int:
+    count = 0
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        handlers = group.get("hooks")
+        if not isinstance(handlers, list):
+            continue
+        count += sum(
+            1 for handler in handlers if _is_owned_handler(handler, command)
+        )
+    return count
+
+
+def registration_issues(data: dict) -> list[str]:
+    """Return Claude events whose Mothership registration is missing or stale."""
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return list(CLAUDE_ENTRIES)
+    issues: list[str] = []
+    for event, desired in CLAUDE_ENTRIES.items():
+        groups = hooks.get(event)
+        if not isinstance(groups, list):
+            issues.append(event)
+            continue
+        command = desired["hooks"][0]["command"]
+        owned_count = _owned_handler_count(groups, command)
+        if owned_count != 1 or not any(group == desired for group in groups):
+            issues.append(event)
+    return issues
+
+
 
 
 def _install_hook_entry(workspace_root: Path, event_key: str, entry: dict, command: str) -> str:
-    """Idempotently merge `entry` into hooks.<event_key> of
-    <workspace_root>/.claude/settings.json, deduped by `command`. Preserves all
-    existing keys/hooks; tolerates a missing/malformed file."""
+    """Reconcile one Mothership-owned Claude hook while preserving foreign config."""
     cdir = Path(workspace_root) / ".claude"
     cdir.mkdir(parents=True, exist_ok=True)
     settings_path = cdir / "settings.json"
@@ -41,21 +89,39 @@ def _install_hook_entry(workspace_root: Path, event_key: str, entry: dict, comma
     hooks = data.setdefault("hooks", {})
     if not isinstance(hooks, dict):
         hooks = data["hooks"] = {}
-    lst = hooks.setdefault(event_key, [])
-    if not isinstance(lst, list):
-        lst = hooks[event_key] = []
+    groups = hooks.setdefault(event_key, [])
+    if not isinstance(groups, list):
+        groups = hooks[event_key] = []
 
-    already = any(
-        h.get("command") == command
-        for e in lst if isinstance(e, dict)
-        for h in (e.get("hooks") or []) if isinstance(h, dict)
-    )
-    if already:
+    owned_count = _owned_handler_count(groups, command)
+    if owned_count == 1 and any(group == entry for group in groups):
         return "up to date"
 
-    lst.append(entry)
+    reconciled: list = []
+    for group in groups:
+        if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+            reconciled.append(group)
+            continue
+        handlers = group["hooks"]
+        retained = [
+            handler for handler in handlers
+            if not _is_owned_handler(handler, command)
+        ]
+        if retained:
+            updated = dict(group)
+            updated["hooks"] = retained
+            reconciled.append(updated)
+        elif not any(_is_owned_handler(handler, command) for handler in handlers):
+            reconciled.append(group)
+        elif set(group) - {"matcher", "hooks"}:
+            updated = dict(group)
+            updated["hooks"] = []
+            reconciled.append(updated)
+
+    reconciled.append(entry)
+    hooks[event_key] = reconciled
     settings_path.write_text(json.dumps(data, indent=2) + "\n")
-    return "installed"
+    return "updated" if owned_count else "installed"
 
 
 def install_session_hook(workspace_root: Path) -> str:
@@ -63,18 +129,14 @@ def install_session_hook(workspace_root: Path) -> str:
     <workspace_root>/.claude/settings.json. Returns 'installed' or 'up to date'.
     Preserves all existing keys and hooks; tolerates a missing/malformed file."""
     return _install_hook_entry(
-        workspace_root, "SessionStart",
-        {"hooks": [{"type": "command", "command": SESSION_COMMAND}]},
-        SESSION_COMMAND,
+        workspace_root, "SessionStart", CLAUDE_ENTRIES["SessionStart"], SESSION_COMMAND
     )
 
 
 def install_pretooluse_guard_hook(workspace_root: Path) -> str:
     """Idempotently add a PreToolUse guard hook running `mship _guard-edit`."""
     return _install_hook_entry(
-        workspace_root, "PreToolUse",
-        {"matcher": GUARD_MATCHER, "hooks": [{"type": "command", "command": GUARD_COMMAND}]},
-        GUARD_COMMAND,
+        workspace_root, "PreToolUse", CLAUDE_ENTRIES["PreToolUse"], GUARD_COMMAND
     )
 
 
@@ -82,7 +144,5 @@ def install_stop_hook(workspace_root: Path) -> str:
     """Idempotently add a Stop hook running `mship _drain` (drains the message
     inbox at each turn boundary). Stop hooks carry no matcher."""
     return _install_hook_entry(
-        workspace_root, "Stop",
-        {"hooks": [{"type": "command", "command": DRAIN_COMMAND}]},
-        DRAIN_COMMAND,
+        workspace_root, "Stop", CLAUDE_ENTRIES["Stop"], DRAIN_COMMAND
     )

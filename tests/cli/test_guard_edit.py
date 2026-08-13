@@ -172,3 +172,66 @@ def test_bypass_gate_does_not_lift_main_checkout_block(tmp_path: Path, monkeypat
         assert "MAIN checkout" in result.stderr
     finally:
         _reset()
+
+
+def _codex_patch_event(*paths: Path) -> str:
+    headers = "\n".join(f"*** Update File: {path}" for path in paths)
+    return json.dumps({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "apply_patch",
+        "tool_input": {"command": f"*** Begin Patch\n{headers}\n*** End Patch\n"},
+    })
+
+
+def test_codex_blocks_entire_multi_target_patch_when_one_target_is_denied(tmp_path: Path):
+    cfg, state_dir, main = _bootstrap(tmp_path)
+    allowed = tmp_path / "outside.py"
+    denied = main / "src" / "blocked.py"
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(
+            app,
+            ["_guard-edit", "--runtime", "codex"],
+            input=_codex_patch_event(allowed, denied),
+        )
+        assert result.exit_code == 2
+        assert "MAIN checkout" in result.stderr
+    finally:
+        _reset()
+
+
+def test_codex_allows_multi_target_patch_in_task_worktree(tmp_path: Path):
+    cfg, state_dir, _ = _bootstrap(tmp_path)
+    worktree = tmp_path / ".worktrees" / "t" / "repo"
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(
+            app,
+            ["_guard-edit", "--runtime", "codex"],
+            input=_codex_patch_event(
+                worktree / "src" / "a.py",
+                worktree / "src" / "b.py",
+            ),
+        )
+        assert result.exit_code == 0
+    finally:
+        _reset()
+
+
+def test_codex_malformed_patch_warns_and_fails_open(tmp_path: Path):
+    cfg, state_dir, _ = _bootstrap(tmp_path)
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(
+            app,
+            ["_guard-edit", "--runtime", "codex"],
+            input=json.dumps({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "apply_patch",
+                "tool_input": {"command": "*** Begin Patch\n*** End Patch\n"},
+            }),
+        )
+        assert result.exit_code == 0
+        assert "failed open" in result.stderr
+    finally:
+        _reset()

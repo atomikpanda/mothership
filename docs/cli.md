@@ -14,11 +14,13 @@ With 0 active tasks the command errors with "no active task". With exactly 1 act
 
 ```bash
 mship init [--detect | --name N --repo PATH:TYPE]   # scaffold mothership.yaml
-mship init --install-hooks                          # (re)install pre-commit guard on every git root
-                                                    # also installs a Claude Code PreToolUse guard
-                                                    # (mship _guard-edit) that blocks edits to a repo's
-                                                    # main checkout while it has an active task.
-                                                    # Bypass: MSHIP_ALLOW_MAIN_EDIT=1.
+mship init --install-hooks                          # (re)install Git hooks plus lifecycle integrations:
+                                                    # Claude at workspace .claude/settings.json;
+                                                    # Codex and OMP in every configured Git root:
+                                                    # .codex/hooks.json (review via Codex /hooks)
+                                                    # .omp/extensions/mship.ts
+                                                    # Commit project artifacts so worktrees inherit them.
+                                                    # Main-edit bypass: MSHIP_ALLOW_MAIN_EDIT=1.
 mship spawn "description" (--work-item <id> | --hotfix) [--repos a,b] [--skip-setup] [--bypass-reconcile]
                                                     # --work-item <id> required (create via `mship item new`);
                                                     # bypass the gate with --hotfix. Also: --depends-on, --base, --slug.

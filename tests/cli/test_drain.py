@@ -127,23 +127,22 @@ def test_blocks_on_trailing_event_after_human_interleave(tmp_path: Path):
         _reset()
 
 
-def test_both_reply_and_event_thread_surfaces_under_reply_group(tmp_path: Path):
-    # A thread that is BOTH (an unhandled event AND an unanswered human message)
-    # is prioritized as a reply — it appears under the human-reply group with the
-    # `mship reply` instruction.
+def test_both_reply_and_event_thread_surfaces_both_actions(tmp_path: Path):
     cfg, state_dir, store = _bootstrap(tmp_path)
     now = datetime.now(timezone.utc)
     t = store.create_thread("task-1", "seed", now)
     store.append(t.id, "agent", "dispatch handoff", now, kind="event")
-    store.append(t.id, "human", "please advise", now)  # unanswered human -> awaiting_reply
+    store.append(t.id, "human", "please advise", now)
     _override(cfg, state_dir)
     try:
         result = runner.invoke(app, ["_drain"], input=_event())
         assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
         assert payload["decision"] == "block"
-        assert "mship reply" in payload["reason"]  # reply is the priority action
+        assert "mship reply" in payload["reason"]
         assert "please advise" in payload["reason"]
+        assert "agent signal" in payload["reason"]
+        assert "dispatch handoff" in payload["reason"]
     finally:
         _reset()
 
@@ -198,3 +197,39 @@ def test_outside_workspace_fails_open(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["_drain"], input=_event())
     assert result.exit_code == 0
     assert '"decision"' not in result.output
+
+
+def test_codex_stop_uses_native_continuation_output(tmp_path: Path):
+    cfg, state_dir, store = _bootstrap(tmp_path)
+    store.create_thread("question", "answer this", datetime.now(timezone.utc))
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(
+            app,
+            ["_drain", "--runtime", "codex"],
+            input=_event(),
+        )
+        assert result.exit_code == 0
+        assert json.loads(result.stdout) == {
+            "decision": "block",
+            "reason": json.loads(result.stdout)["reason"],
+        }
+        assert "answer this" in json.loads(result.stdout)["reason"]
+    finally:
+        _reset()
+
+
+def test_codex_stop_reentry_is_bounded(tmp_path: Path):
+    cfg, state_dir, store = _bootstrap(tmp_path)
+    store.create_thread("question", "still pending", datetime.now(timezone.utc))
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(
+            app,
+            ["_drain", "--runtime", "codex"],
+            input=_event(stop_hook_active=True),
+        )
+        assert result.exit_code == 0
+        assert result.stdout == ""
+    finally:
+        _reset()

@@ -291,6 +291,17 @@ def test_session_context_prints_notice_when_no_task(tmp_path, monkeypatch):
         _reset()
 
 
+def test_codex_session_context_uses_plain_text_native_output(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    try:
+        result = runner.invoke(app, ["_session-context", "--runtime", "codex"])
+        assert result.exit_code == 0
+        assert "no active task" in result.stdout.lower()
+        assert not result.stdout.lstrip().startswith("{")
+    finally:
+        _reset()
+
+
 def test_session_context_silent_with_task(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch, tasks_yaml=_TASK_YAML)
     try:

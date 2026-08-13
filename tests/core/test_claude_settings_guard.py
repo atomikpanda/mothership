@@ -39,3 +39,44 @@ def test_guard_tolerates_malformed_settings(tmp_path: Path):
     cdir = tmp_path / ".claude"; cdir.mkdir()
     (cdir / "settings.json").write_text("{not json")
     assert "skipped" in install_pretooluse_guard_hook(tmp_path)
+
+
+def test_guard_replaces_stale_and_duplicate_owned_handlers(tmp_path: Path):
+    cdir = tmp_path / ".claude"
+    cdir.mkdir()
+    (cdir / "settings.json").write_text(json.dumps({
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Read",
+                    "hooks": [
+                        {"type": "command", "command": "echo user"},
+                        {"type": "command", "command": GUARD_COMMAND},
+                    ],
+                },
+                {
+                    "matcher": GUARD_MATCHER,
+                    "hooks": [{"type": "command", "command": GUARD_COMMAND}],
+                },
+            ],
+        },
+    }))
+
+    assert install_pretooluse_guard_hook(tmp_path) == "updated"
+    groups = _settings(tmp_path)["hooks"]["PreToolUse"]
+    owned = [
+        (group.get("matcher"), handler)
+        for group in groups
+        for handler in group.get("hooks", [])
+        if handler.get("command") == GUARD_COMMAND
+    ]
+
+    assert owned == [(
+        GUARD_MATCHER,
+        {"type": "command", "command": GUARD_COMMAND},
+    )]
+    assert any(
+        handler.get("command") == "echo user"
+        for group in groups
+        for handler in group.get("hooks", [])
+    )
