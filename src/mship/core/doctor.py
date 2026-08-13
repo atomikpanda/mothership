@@ -558,6 +558,12 @@ class DoctorChecker:
             reinstall_action = "run `mship init --install-hooks`"
             if reinstall_action not in message:
                 message += f"; {reinstall_action}"
+            if codex_capability.state in {
+                CodexHookCapability.DISABLED,
+                CodexHookCapability.UNAVAILABLE,
+            }:
+                message += f"; run `{CODEX_FEATURE_ENABLE_COMMAND}`"
+            message += f"; {CODEX_TRUST_ACTION}"
             checks.append(CheckResult(
                 name="agent-hooks/codex",
                 status="warn",
@@ -645,17 +651,22 @@ class DoctorChecker:
                 message=codex_capability.detail,
             ))
 
-        omp_binary = shutil.which("omp")
+        omp_command = "omp"
+        omp_binary = shutil.which(omp_command)
+        if omp_binary is None:
+            omp_command = "pi"
+            omp_binary = shutil.which(omp_command)
+        runtime_name = "OMP" if omp_command == "omp" else "Pi"
         if omp_binary is None:
             checks.append(CheckResult(
                 name="agent-runtime/omp",
                 status="warn",
-                message="OMP is not installed; Claude and Codex integrations remain available",
+                message="OMP/Pi is not installed; Claude and Codex integrations remain available",
             ))
         else:
             try:
                 version_result = self._shell.run(
-                    "omp --version",
+                    f"{omp_command} --version",
                     cwd=root,
                     timeout=_AGENT_RUNTIME_PROBE_TIMEOUT_SECONDS,
                 )
@@ -663,7 +674,7 @@ class DoctorChecker:
                 checks.append(CheckResult(
                     name="agent-runtime/omp",
                     status="warn",
-                    message="OMP version probe timed out",
+                    message=f"{runtime_name} version probe timed out",
                 ))
             else:
                 match = re.search(r"(\d+)\.(\d+)\.(\d+)", version_result.stdout)
@@ -671,7 +682,7 @@ class DoctorChecker:
                     checks.append(CheckResult(
                         name="agent-runtime/omp",
                         status="warn",
-                        message="could not determine OMP version or extension compatibility",
+                        message=f"could not determine {runtime_name} version or extension compatibility",
                     ))
                 else:
                     version = tuple(int(part) for part in match.groups())
@@ -680,7 +691,7 @@ class DoctorChecker:
                             name="agent-runtime/omp",
                             status="warn",
                             message=(
-                                f"OMP {'.'.join(match.groups())} is too old for this extension; "
+                                f"{runtime_name} {'.'.join(match.groups())} is too old for this extension; "
                                 f"requires {'.'.join(map(str, OMP_MIN_VERSION))} or newer"
                             ),
                         ))
@@ -688,7 +699,7 @@ class DoctorChecker:
                         checks.append(CheckResult(
                             name="agent-runtime/omp",
                             status="pass",
-                            message=f"OMP {'.'.join(match.groups())} supports project extensions",
+                            message=f"{runtime_name} {'.'.join(match.groups())} supports project extensions",
                         ))
         return checks
 

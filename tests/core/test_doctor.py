@@ -938,6 +938,34 @@ def test_doctor_reports_all_agent_integrations_healthy(workspace: Path, monkeypa
 
 
 
+def test_doctor_probes_pi_alias_when_omp_binary_is_absent(workspace: Path, monkeypatch):
+    _install_all_agent_integrations(workspace)
+    monkeypatch.setattr(
+        "mship.core.doctor.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name in {"task", "codex", "pi"} else None,
+    )
+    shell = _agent_runtime_shell()
+    normal_run = shell.run.side_effect
+
+    def run(command, cwd, env=None, timeout=None):
+        if command == "pi --version":
+            return ShellResult(returncode=0, stdout="pi v17.2.0\n", stderr="")
+        return normal_run(command, cwd, env=env, timeout=timeout)
+
+    shell.run.side_effect = run
+    report = DoctorChecker(
+        ConfigLoader.load(workspace / "mothership.yaml"),
+        shell,
+        workspace_root=workspace,
+        probe_network=False,
+    ).run()
+    row = next(check for check in report.checks if check.name == "agent-runtime/omp")
+
+    assert row.status == "pass"
+    assert "Pi 17.2.0 supports project extensions" == row.message
+    assert any(call.args[0] == "pi --version" for call in shell.run.call_args_list)
+
+
 def test_doctor_checks_native_integrations_in_configured_repo_roots(
     workspace: Path, monkeypatch
 ):
@@ -1162,11 +1190,14 @@ def test_doctor_reports_stale_codex_owned_registration(workspace: Path, monkeypa
         "command": "mship _guard-edit --runtime codex --legacy",
     })
     path.write_text(json.dumps(data))
-    monkeypatch.setattr("mship.core.doctor.shutil.which", lambda name: None)
+    monkeypatch.setattr(
+        "mship.core.doctor.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name in {"task", "codex"} else None,
+    )
 
     report = DoctorChecker(
         ConfigLoader.load(workspace / "mothership.yaml"),
-        _agent_runtime_shell(),
+        _agent_runtime_shell(codex_state="disabled"),
         workspace_root=workspace,
         probe_network=False,
     ).run()
@@ -1175,6 +1206,8 @@ def test_doctor_reports_stale_codex_owned_registration(workspace: Path, monkeypa
     assert row.status == "warn"
     assert "stale" in row.message
     assert "`mship init --install-hooks`" in row.message
+    assert "`codex features enable codex_hooks`" in row.message
+    assert "open `/hooks` in Codex to review and trust the project hooks" in row.message
 
 
 def test_doctor_reports_and_reinstaller_repairs_stale_claude_registration(

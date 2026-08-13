@@ -65,10 +65,18 @@ def _install_agent_hooks_with_output(
             codex_binary=shutil.which("codex"),
         )
         if not codex_registrations_current:
-            output.warning(
+            message = (
                 "Codex hook installation incomplete: one or more project "
                 "registrations were skipped or failed; run "
-                "`mship init --install-hooks`; capability probe state: "
+                "`mship init --install-hooks`"
+            )
+            if capability.state in {
+                CodexHookCapability.DISABLED,
+                CodexHookCapability.UNAVAILABLE,
+            }:
+                message += f"; run `{CODEX_FEATURE_ENABLE_COMMAND}`"
+            output.warning(
+                f"{message}; {CODEX_TRUST_ACTION}; capability probe state: "
                 f"{capability.state.value}"
             )
         elif capability.state in {

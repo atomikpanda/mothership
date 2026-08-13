@@ -560,6 +560,8 @@ def test_install_hooks_reports_incomplete_codex_registration_before_activation(
     assert "Codex hook installation incomplete" in result.output
     assert "`mship init --install-hooks`" in result.output
     assert "Codex hooks configured but" not in result.output
+    assert "`codex features enable codex_hooks`" in result.output
+    assert "open `/hooks` in Codex to review and trust the project hooks" in result.output
     assert probe_calls == ["codex features list"]
 
 
