@@ -7,6 +7,7 @@ from typing import Optional
 import typer
 
 from mship.cli.output import Output
+from mship.core.config import ConfigLoader
 from mship.core.reconcile.cache import ReconcileCache
 from mship.core.reconcile.detect import UpstreamState
 from mship.core.reconcile.fetch import (
@@ -63,7 +64,7 @@ def register(app: typer.Typer, get_container):
                 output.json({"ignored": ignore})
             return
 
-        config = container.config()
+        config = ConfigLoader.load(container.config_path(), require_paths=False)
 
         if refresh:
             payload = cache.read()
