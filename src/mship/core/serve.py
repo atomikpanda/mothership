@@ -1542,19 +1542,16 @@ def create_app(
     # A fresh `ShellRunner` per request (like `gh_token_shell` above) rather than
     # reaching into pr_manager's — same class, its own lifetime.
 
-    import re
     import secrets
 
     from mship.core import remote_exec
+    from mship.core.run_ref import is_run_ref_segment
     from fastapi.responses import StreamingResponse
     from starlette.concurrency import iterate_in_threadpool
 
-    # A task name is interpolated into `branch_pattern` and then into git
-    # `fetch`/`checkout`/`reset`/`worktree add` run with `shell=True` on the
-    # remote — so validate it here, BEFORE any StreamingResponse is built, and
-    # reject anything outside this safe charset (fail fast, never reaching the
-    # shell). Mirrors the slug charset the rest of mship uses for task names.
-    _TASK_NAME_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+    # A task name becomes both a `.worktrees` path segment and shell-backed
+    # git/task input. Validate it against the shared run-ref segment contract
+    # before any remote work or streaming response begins.
 
     @app.post("/exec/{verb}")
     async def post_exec(verb: str, body: ExecBody):
@@ -1573,9 +1570,7 @@ def create_app(
                     "restart `mship serve --relay`"
                 ),
             )
-        if not _TASK_NAME_RE.match(body.task):
-            # Never reaches the shell — a shell-metacharacter task name (e.g.
-            # "x; rm -rf ~ #") is refused up front, not streamed as data.
+        if not is_run_ref_segment(body.task):
             raise HTTPException(status_code=400, detail="invalid task name")
         deps = remote_exec.RemoteExecDeps(
             config=config, shell=ShellRunner(), workspace_root=workspace_root,

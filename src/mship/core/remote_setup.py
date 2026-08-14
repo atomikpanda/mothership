@@ -36,9 +36,9 @@ FIRST_MATERIALIZATION_KEY = "first-materialization"
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9_-]")
 
-# How much of each name the filename carries for a human to read. `_TASK_NAME_RE`
-# bounds the charset of a task arriving over the wire but NOT its length, and a
-# name can be short enough for `.worktrees/<task>` yet overflow NAME_MAX (255)
+# How much of each name the filename carries for a human to read. The shared
+# run-ref segment predicate bounds a task's charset but NOT its length. A name
+# can be short enough for `.worktrees/<task>` yet overflow NAME_MAX (255)
 # once the repo and digest land beside it. Two of these plus the separators and
 # the digest come to 224 bytes, and `_safe` leaves only single-byte characters,
 # so the count is the byte count. Truncating costs nothing but legibility
@@ -49,9 +49,8 @@ _READABLE_MAX = 100
 def _safe(name: str) -> str:
     """A filename component that cannot escape its directory.
 
-    The task name arrives over the wire, where `core/serve.py`'s `_TASK_NAME_RE`
-    permits `.` and `/` — so `../..` would otherwise be a legal path component
-    here.
+    Direct callers may bypass serve's validation, so sanitize again here as
+    defense in depth.
     """
     return (_UNSAFE.sub("-", name) or "unnamed")[:_READABLE_MAX]
 
