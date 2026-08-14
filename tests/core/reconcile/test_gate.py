@@ -27,6 +27,7 @@ def test_reconcile_now_uses_fresh_cache(tmp_path: Path):
         fetched_at=time.time(), ttl_seconds=300,
         results={"a": {"state": "merged", "pr_url": "u", "pr_number": 1, "base": "main"}},
         ignored=[],
+        base_context={"a": ["main"]},
     ))
     state = WorkspaceState(tasks={"a": _task("a")})
     decisions = reconcile_now(state, cache=cache, fetcher=lambda *_: (_ for _ in ()).throw(AssertionError("should not fetch")))
@@ -51,6 +52,7 @@ def test_reconcile_now_applies_dependency_stale_from_fresh_cache(tmp_path: Path)
             "b": {"state": "in_sync"},
         },
         ignored=[],
+        base_context={"a": ["main"], "b": ["main"]},
     ))
     state = WorkspaceState(tasks={
         "a": _task("a", created_at=t0, finished_at=t0),
@@ -129,6 +131,36 @@ def test_reconcile_now_resolves_base_per_repo_for_multi_repo_task(tmp_path: Path
     assert decisions["a"].state == UpstreamState.in_sync
 
 
+def test_reconcile_now_refetches_after_resolved_base_config_changes(tmp_path: Path):
+    """A TTL-fresh result is incompatible with a newly resolved task base."""
+    class _Repo:
+        def __init__(self, base_branch: str) -> None:
+            self.base_branch = base_branch
+
+    cache = ReconcileCache(tmp_path)
+    state = WorkspaceState(tasks={"a": _task("a")})
+    calls = 0
+
+    def _fetcher(branches, wts):
+        nonlocal calls
+        calls += 1
+        return (
+            {"feat/a": PRSnapshot(head_ref="feat/a", state="OPEN", base_ref="release",
+                                   merge_commit=None, url="https://x/pr/1", updated_at="z")},
+            {"feat/a": GitSnapshot(has_upstream=True, behind=0, ahead=1)},
+        )
+
+    initial_config = type("Config", (), {"repos": {"r": _Repo("main")}})()
+    changed_config = type("Config", (), {"repos": {"r": _Repo("release")}})()
+
+    first = reconcile_now(state, cache=cache, fetcher=_fetcher, config=initial_config)
+    second = reconcile_now(state, cache=cache, fetcher=_fetcher, config=changed_config)
+
+    assert first["a"].state == UpstreamState.base_changed
+    assert second["a"].state == UpstreamState.in_sync
+    assert calls == 2
+
+
 def test_reconcile_now_recomputes_when_cache_schema_is_stale(tmp_path: Path):
     """#461 follow-up: a cache entry written under the OLD (pre-#461) single-repo
     base-resolution logic can carry a spurious base_changed. Such an entry is
@@ -177,6 +209,7 @@ def test_reconcile_now_uses_fresh_cache_with_current_schema_version(tmp_path: Pa
         fetched_at=time.time(), ttl_seconds=300,
         results={"a": {"state": "merged", "pr_url": "u", "pr_number": 1, "base": "main"}},
         ignored=[],
+        base_context={"a": ["main"]},
     ))
     state = WorkspaceState(tasks={"a": _task("a")})
     decisions = reconcile_now(
@@ -213,6 +246,7 @@ def test_reconcile_now_falls_back_to_cache_on_fetcher_error(tmp_path: Path):
         fetched_at=time.time() - 9999, ttl_seconds=300,
         results={"a": {"state": "merged", "pr_url": "u", "pr_number": 1, "base": "main"}},
         ignored=[],
+        base_context={"a": ["main"]},
     ))
     state = WorkspaceState(tasks={"a": _task("a")})
 
@@ -323,6 +357,7 @@ def test_decision_finished_at_populated_from_cache_hit(tmp_path: Path):
         fetched_at=time.time(), ttl_seconds=300,
         results={"a": {"state": "merged", "pr_url": "u", "pr_number": 1, "base": "main"}},
         ignored=[],
+        base_context={"a": ["main"]},
     ))
     state = WorkspaceState(tasks={"a": _task("a", finished_at=finished)})
 

@@ -30,6 +30,8 @@ def _run_gate(
     bypass: bool,
     output,
     only_slug: str | None = None,
+    cli_base: str | None = None,
+    base_map: dict[str, str] | None = None,
 ) -> None:
     """Run the upstream reconciler; exit(1) on block, print warnings on warn.
 
@@ -57,7 +59,18 @@ def _run_gate(
         )
 
     try:
-        decisions = reconcile_now(state, cache=cache, fetcher=_fetcher, config=config)
+        base_inputs = (
+            {only_slug: (cli_base, base_map or {})}
+            if only_slug is not None
+            else None
+        )
+        decisions = reconcile_now(
+            state,
+            cache=cache,
+            fetcher=_fetcher,
+            config=config,
+            base_inputs_by_slug=base_inputs,
+        )
     except Exception as e:  # noqa: BLE001 — never fail closed
         output.warning(f"reconcile unavailable: {e}; proceeding")
         return
@@ -1260,6 +1273,18 @@ def register(app: typer.Typer, get_container):
             output.error(str(e))
             raise typer.Exit(code=1)
 
+        from mship.core.base_resolver import (
+            InvalidBaseMapError,
+            UnknownRepoInBaseMapError,
+            parse_base_map,
+            resolve_base,
+        )
+        try:
+            parsed_map = parse_base_map(base_map or "")
+        except InvalidBaseMapError as e:
+            output.error(str(e))
+            raise typer.Exit(code=1)
+
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
@@ -1271,7 +1296,7 @@ def register(app: typer.Typer, get_container):
         # block this one's finish (#455 Part 2).
         _run_gate(
             get_container, command="finish", bypass=bypass_reconcile, output=output,
-            only_slug=t.slug,
+            only_slug=t.slug, cli_base=base, base_map=parsed_map,
         )
 
         # --- WorkItem gate: every task must be linked to a WorkItem, and a
@@ -1517,18 +1542,6 @@ def register(app: typer.Typer, get_container):
         # else: a token is present; the httpx PR path covers gh absence.
 
         # --- Resolve + verify PR base branches up front ---
-        from mship.core.base_resolver import (
-            parse_base_map,
-            resolve_base,
-            InvalidBaseMapError,
-            UnknownRepoInBaseMapError,
-        )
-
-        try:
-            parsed_map = parse_base_map(base_map or "")
-        except InvalidBaseMapError as e:
-            output.error(str(e))
-            raise typer.Exit(code=1)
 
         try:
             effective_bases = {

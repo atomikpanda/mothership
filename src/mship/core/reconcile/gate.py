@@ -81,38 +81,33 @@ def should_block(decision: Decision, *, command: Command, ignored: list[str]) ->
     return _MATRIX[decision.state.value][command]
 
 
-def _resolved_task_bases(task: Task, config) -> frozenset[str] | None:
-    """The set of bases finish/PR-creation could target for this task (#455,
-    extended per-repo in #461).
+def _resolved_task_bases(
+    task: Task,
+    config,
+    *,
+    cli_base: str | None = None,
+    base_map: dict[str, str] | None = None,
+) -> frozenset[str] | None:
+    """Resolve every effective PR base for a task through the shared resolver.
 
-    `task.base_branch` is the spawn-time recorded default (usually the
-    workspace default, e.g. "main") — NOT necessarily where `finish` opens
-    the PR. `finish` resolves the real target via
-    `mship.core.base_resolver.resolve_base` (base_map > cli_base >
-    base_override > repo_config.base_branch); reconcile has no CLI overrides
-    in play, so only `base_override` and the repo's configured base apply
-    here — same precedence, same resolver, no duplicated logic (mirrors
-    `mship.core.context._effective_base_for_repo`).
-
-    A multi-repo task's repos can each have a DIFFERENT configured
-    `repos.<name>.base_branch`. `reconcile_now` matches PR snapshots by
-    branch name only — it has no way to tell which of the task's repos a
-    given PR came from — so instead of resolving a single base from one
-    arbitrarily chosen repo (which false-flags `base_changed` whenever the
-    matched PR actually belongs to a *different* affected repo), this
-    resolves a base PER repo and returns the whole set. A PR is in sync if
-    its base matches ANY of them.
-
-    Falls back to `{task.base_branch}` when there's no config or no repos to
-    resolve against, preserving prior behavior for config-less workspaces.
+    Reconcile cannot attribute a fetched PR to a repository (#462), so a
+    multi-repo task remains in sync when its PR base matches ANY affected
+    repo's effective base. Finish-specific CLI inputs apply only to the task
+    being finished.
     """
-    if config is None or not task.affected_repos:
+    if not task.affected_repos:
         return frozenset({task.base_branch}) if task.base_branch is not None else None
+    repo_configs = config.repos if config is not None else {}
+    known_repos = repo_configs.keys() if config is not None else task.affected_repos
     bases: set[str] = set()
     for repo in task.affected_repos:
         resolved = resolve_base(
-            repo, config.repos.get(repo), cli_base=None, base_map={},
-            known_repos=config.repos.keys(), task_base=task.base_override,
+            repo,
+            repo_configs.get(repo),
+            cli_base=cli_base,
+            base_map=base_map or {},
+            known_repos=known_repos,
+            task_base=task.base_override,
         )
         effective = resolved if resolved is not None else task.base_branch
         if effective is not None:
@@ -173,16 +168,27 @@ def reconcile_now(
     fetcher: Fetcher,
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
     config=None,
+    base_inputs_by_slug: dict[
+        str, tuple[str | None, dict[str, str]]
+    ] | None = None,
 ) -> dict[str, Decision]:
     """Cache-first; fetch on stale; fall back on error. Never raises."""
-    # `payload` is the raw on-disk entry (kept only to preserve its ignore
-    # list across the fresh-write below, which is orthogonal to results
-    # schema). `current_payload` is the load-boundary-gated version — every
-    # results-consuming branch below (the fresh-cache check AND the
-    # fetch-error fallback) reads from IT, never `payload` directly, so a
-    # schema-mismatched entry can't be served by either path (#461 follow-up).
+    base_inputs_by_slug = base_inputs_by_slug or {}
+    resolved_bases: dict[str, frozenset[str] | None] = {}
+    for task in state.tasks.values():
+        cli_base, base_map = base_inputs_by_slug.get(task.slug, (None, {}))
+        resolved_bases[task.slug] = _resolved_task_bases(
+            task, config, cli_base=cli_base, base_map=base_map,
+        )
+    base_context = {
+        slug: sorted(bases) if bases is not None else None
+        for slug, bases in resolved_bases.items()
+    }
+
+    # Keep the raw payload only to preserve its ignore list on a fresh write.
+    # Every results-consuming path uses the schema/context-compatible payload.
     payload = cache.read()
-    current_payload = cache.current(payload)
+    current_payload = cache.current(payload, base_context=base_context)
     if current_payload is not None and cache.is_fresh(current_payload):
         return _decisions_from_cache(state, current_payload)
 
@@ -200,7 +206,7 @@ def reconcile_now(
         return {}
 
     tasks_tuples = [
-        (t.slug, t.branch, _resolved_task_bases(t, config)) for t in state.tasks.values()
+        (t.slug, t.branch, resolved_bases[t.slug]) for t in state.tasks.values()
     ]
     detections = detect_many(tasks_tuples, pr_by_head, git_by_branch)
 
@@ -218,6 +224,7 @@ def reconcile_now(
         ttl_seconds=ttl_seconds,
         results=results,
         ignored=(payload.ignored if payload else []),
+        base_context=base_context,
     ))
     decisions = {slug: _decision_from_detection(slug, d, state) for slug, d in detections.items()}
     return apply_dependency_stale(state, decisions)

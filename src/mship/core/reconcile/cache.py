@@ -24,6 +24,7 @@ class CachePayload:
     results: dict[str, dict]
     ignored: list[str] = field(default_factory=list)
     schema_version: int = SCHEMA_VERSION
+    base_context: dict[str, list[str] | None] | None = None
 
 
 class ReconcileCache:
@@ -40,12 +41,31 @@ class ReconcileCache:
             data = json.loads(self._path.read_text())
         except (OSError, json.JSONDecodeError):
             return None
+        if not isinstance(data, dict):
+            return None
+        base_context = data.get("base_context")
+        if base_context is not None and (
+            not isinstance(base_context, dict)
+            or not all(
+                isinstance(slug, str)
+                and (
+                    bases is None
+                    or (
+                        isinstance(bases, list)
+                        and all(isinstance(base, str) for base in bases)
+                    )
+                )
+                for slug, bases in base_context.items()
+            )
+        ):
+            return None
         try:
             return CachePayload(
                 fetched_at=float(data["fetched_at"]),
                 ttl_seconds=int(data.get("ttl_seconds", DEFAULT_TTL_SECONDS)),
                 results=dict(data.get("results", {})),
                 ignored=list(data.get("ignored", [])),
+                base_context=base_context,
                 # Entries written before this field existed have no "schema_version"
                 # key; default to 0 so they never collide with a real SCHEMA_VERSION
                 # and are correctly treated as stale by is_fresh().
@@ -61,6 +81,7 @@ class ReconcileCache:
             "ttl_seconds": payload.ttl_seconds,
             "results": payload.results,
             "ignored": payload.ignored,
+            "base_context": payload.base_context,
             # Preserve the payload's own schema_version rather than always stamping
             # the current constant. Freshly-computed results are built with a bare
             # CachePayload(...), which defaults schema_version to the current
@@ -82,25 +103,22 @@ class ReconcileCache:
             return False
         return (time.time() - payload.fetched_at) < payload.ttl_seconds
 
-    def current(self, payload: CachePayload | None) -> CachePayload | None:
-        """The single load-boundary schema gate: treat a schema-mismatched
-        entry as absent (a cache miss) for every results-consuming reader.
+    def current(
+        self,
+        payload: CachePayload | None,
+        *,
+        base_context: dict[str, list[str] | None],
+    ) -> CachePayload | None:
+        """Drop results produced under another schema or resolved-base context.
 
-        Callers must run a `read()` result through this once, immediately
-        after loading it, and branch on ITS return value from then on — not
-        re-inspect the raw payload. Without this, each results-consuming path
-        has to remember its own schema check; `reconcile_now`'s fetch-error
-        fallback forgot to (#461 follow-up, was P1 "Invalid cache survives
-        fallback", cache.py:82) and served a pre-v2 spurious base_changed on
-        a live-fetch failure. Gating once, at load, makes that class of bug
-        structurally impossible: a schema-invalid entry never reaches any
-        downstream reader to be forgotten about in the first place.
-
-        Deliberately schema-only, not TTL — the fetch-error fallback serves a
-        TTL-stale-but-schema-valid entry on purpose (better than nothing);
-        only `is_fresh()` enforces TTL for the normal path.
+        This is deliberately not a TTL gate: fetch failures may fall back to a
+        TTL-stale entry, but only when its schema and base context are compatible.
         """
-        if payload is None or payload.schema_version != SCHEMA_VERSION:
+        if (
+            payload is None
+            or payload.schema_version != SCHEMA_VERSION
+            or payload.base_context != base_context
+        ):
             return None
         return payload
 
