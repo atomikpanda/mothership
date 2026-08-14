@@ -42,7 +42,6 @@ def register(app: typer.Typer, get_container):
         output = Output()
         container = get_container()
         state = container.state_manager().load()
-        config = container.config()
         cache = ReconcileCache(container.state_dir())
 
         if clear_ignores:
@@ -63,6 +62,8 @@ def register(app: typer.Typer, get_container):
             else:
                 output.json({"ignored": ignore})
             return
+
+        config = container.config()
 
         if refresh:
             payload = cache.read()

@@ -295,3 +295,47 @@ def test_reconcile_clear_ignores(tmp_path: Path):
         assert cache.read_ignores() == []
     finally:
         _reset_container()
+
+
+@pytest.mark.parametrize(
+    ("args", "initial_ignores", "expected_ignores"),
+    [
+        (["--ignore", "gamma"], [], ["gamma"]),
+        (["--clear-ignores"], ["gamma"], []),
+    ],
+)
+def test_reconcile_cache_mutations_do_not_require_valid_repo_paths(
+    tmp_path: Path,
+    args: list[str],
+    initial_ignores: list[str],
+    expected_ignores: list[str],
+):
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  mothership:\n"
+        "    path: ./missing\n"
+        "    type: library\n"
+    )
+    StateManager(state_dir).save(WorkspaceState(tasks={"gamma": _task("gamma")}))
+    cache = ReconcileCache(state_dir)
+    cache.write(CachePayload(
+        fetched_at=time.time(),
+        ttl_seconds=DEFAULT_TTL_SECONDS,
+        results={},
+        ignored=initial_ignores,
+    ))
+
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(cfg)
+    container.state_dir.override(state_dir)
+    try:
+        result = CliRunner().invoke(app, ["reconcile", *args])
+        assert result.exit_code == 0, result.output
+        assert cache.read_ignores() == expected_ignores
+    finally:
+        _reset_container()
