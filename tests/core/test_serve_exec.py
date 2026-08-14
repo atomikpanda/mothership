@@ -495,24 +495,46 @@ def test_exec_without_config_is_503(tmp_path, monkeypatch):
     assert r.status_code == 503
 
 
-def test_exec_rejects_shell_metachar_task_name_before_any_command(tmp_path, monkeypatch):
-    """FIX 3 (injection): `task` is interpolated into `branch_pattern` and then
-    into git commands run with shell=True on the remote. A task name with shell
-    metacharacters must be rejected with a 400 BEFORE the StreamingResponse is
-    built — never reaching the shell, and running NOTHING."""
-    fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["pwned\n"], returncode=0))
+def test_exec_rejects_unsafe_task_name_before_any_command(tmp_path, monkeypatch):
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["pwned\n"], returncode=0)
+    )
     _patch_shell(monkeypatch, fake)
     client = TestClient(_app(tmp_path))
 
-    r = client.post(
-        "/exec/run",
-        json={"task": "x; touch /tmp/pwned; #", "repos": ["api"]},
-    )
-    assert r.status_code == 400
-    assert "invalid task name" in r.json()["detail"]
-    # Nothing ran: no git plumbing, no task.
+    for task in (
+        "../escape",
+        "a/b",
+        ".",
+        "..",
+        "",
+        "api\n",
+        "x; touch /tmp/pwned; #",
+    ):
+        response = client.post(
+            "/exec/run",
+            json={"task": task, "repos": ["api"]},
+        )
+        assert response.status_code == 400, task
+        assert response.json()["detail"] == "invalid task name"
+
     assert not fake.run_calls
     assert not fake.streaming_calls
+
+
+def test_exec_accepts_safe_segment_task_name(tmp_path, monkeypatch):
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["ok\n"], returncode=0)
+    )
+    _patch_shell(monkeypatch, fake)
+
+    response = TestClient(_app(tmp_path)).post(
+        "/exec/run",
+        json={"task": "release.v2_build-1", "repos": ["api"]},
+    )
+
+    assert response.status_code == 200
+    assert fake.streaming_calls
 
 
 def test_exec_run_materializes_new_worktree_and_streams_output(tmp_path, monkeypatch):
@@ -1016,11 +1038,11 @@ def test_a_git_root_child_is_materialized_from_its_parents_scratch_ref(tmp_path)
 
 
 def test_a_task_name_that_cannot_form_a_ref_fails_cleanly(tmp_path):
-    """The ref reaches a shell here, so a name that cannot form one is refused
-    BEFORE anything runs — as stream DATA (an error line + a non-zero exit
-    sentinel), never a raised exception mid-generator, matching how the
-    unknown-repo guard already behaves. `/exec` accepts `/` in a task name;
-    `run_ref` does not."""
+    """This direct `remote_exec` unit path deliberately bypasses `/exec` and
+    still rejects an invalid ref before commands run. The failure is stream data
+    (an error line plus a non-zero exit sentinel), not a raised exception
+    mid-generator, matching the unknown-repo guard.
+    """
     fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["ok\n"]))
     deps = remote_exec.RemoteExecDeps(
         config=_config(tmp_path), shell=fake, workspace_root=tmp_path,

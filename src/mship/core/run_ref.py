@@ -27,17 +27,21 @@ import re
 
 RUN_REF_PREFIX = "refs/mship/run/"
 
-# One path segment of the ref. Deliberately NARROWER than the task-name charset
-# `core/serve.py` accepts for `/exec` (`^[A-Za-z0-9._/-]+$`, which allows `/` and
-# a bare `.`): this string is interpolated into `git push` / `git reset --hard`
-# run through a shell, and `core/remote_setup.py` derives a filename from the
-# same values. `.` and `..` are excluded outright so no traversal segment can
-# exist.
+# One safe task/repository segment, shared with the remote exec boundary in
+# `core/serve.py`. This string is interpolated into `git push` /
+# `git reset --hard` run through a shell, and `core/remote_setup.py` derives a
+# filename from the same values. `.` and `..` are excluded outright so no
+# traversal segment can exist.
 #
 # Anchored `\Z`, not `$`: Python's `$` also matches BEFORE a trailing newline,
 # so `$` accepts `api\n` — and a trailing newline TERMINATES a shell command,
 # which is the one character this charset exists to keep out.
 _SEGMENT_RE = re.compile(r"\A(?!\.{1,2}\Z)[A-Za-z0-9._-]+\Z")
+
+
+def is_run_ref_segment(value: str) -> bool:
+    """Whether `value` is one safe task/repository run-ref segment."""
+    return bool(_SEGMENT_RE.match(value or ""))
 
 
 class RunRefNameError(ValueError):
@@ -48,7 +52,7 @@ def run_ref(task: str, repo: str) -> str:
     """`refs/mship/run/<task>/<repo>` — per task AND per git repo, so two tasks
     or two repos running remotely at once cannot overwrite each other's refs."""
     for label, value in (("task", task), ("repo", repo)):
-        if not _SEGMENT_RE.match(value or ""):
+        if not is_run_ref_segment(value):
             raise RunRefNameError(
                 f"{label} name {value!r} cannot be used in a run ref; it must "
                 f"match [A-Za-z0-9._-]+ and not be '.' or '..'"
@@ -65,4 +69,4 @@ def is_run_ref(name: str) -> bool:
     if not name.startswith(RUN_REF_PREFIX):
         return False
     segments = name[len(RUN_REF_PREFIX):].split("/")
-    return len(segments) == 2 and all(_SEGMENT_RE.match(s) for s in segments)
+    return len(segments) == 2 and all(is_run_ref_segment(s) for s in segments)

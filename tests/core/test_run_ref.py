@@ -2,7 +2,26 @@
 its shape is decided."""
 import pytest
 
-from mship.core.run_ref import RUN_REF_PREFIX, RunRefNameError, is_run_ref, run_ref
+from mship.core.run_ref import (
+    RUN_REF_PREFIX,
+    RunRefNameError,
+    is_run_ref,
+    is_run_ref_segment,
+    run_ref,
+)
+
+
+@pytest.mark.parametrize("value", ["t1", "release.v2_build-1"])
+def test_run_ref_segment_accepts_safe_values(value):
+    assert is_run_ref_segment(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", ".", "..", "../escape", "a/b", "with space", "semi;colon", "api\n"],
+)
+def test_run_ref_segment_rejects_unsafe_values(value):
+    assert not is_run_ref_segment(value)
 
 
 def test_ref_is_per_task_and_per_repo():
