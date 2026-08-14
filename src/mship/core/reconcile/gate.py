@@ -100,7 +100,6 @@ def _resolved_task_bases(
     repo_configs = config.repos if config is not None else {}
     known_repos = repo_configs.keys() if config is not None else task.affected_repos
     bases: set[str] = set()
-    has_remote_default = False
     for repo in task.affected_repos:
         resolved = resolve_base(
             repo,
@@ -110,19 +109,9 @@ def _resolved_task_bases(
             known_repos=known_repos,
             task_base=task.base_override,
         )
-        if resolved is None and repo in repo_configs:
-            has_remote_default = True
-        # A configured repo resolving to None intentionally delegates to its
-        # GitHub remote default; only config-absent repos need the legacy fallback.
-        effective = (
-            task.base_branch
-            if resolved is None and repo not in repo_configs
-            else resolved
-        )
+        effective = resolved if resolved is not None else task.base_branch
         if effective is not None:
             bases.add(effective)
-    if has_remote_default:
-        return None
     return frozenset(bases) if bases else None
 
 

@@ -94,30 +94,6 @@ def test_reconcile_now_resolves_base_via_repo_config_not_raw_recorded_base(tmp_p
     assert decisions["a"].state == UpstreamState.in_sync
 
 
-def test_reconcile_now_preserves_configured_repo_remote_default_base(tmp_path: Path):
-    """A configured repo with no base delegates to its remote default, not task.base_branch."""
-    class _Repo:
-        base_branch = None
-
-    config = type("Config", (), {"repos": {"r": _Repo()}})()
-    cache = ReconcileCache(tmp_path)
-    state = WorkspaceState(tasks={"a": _task("a", base_branch="main")})
-
-    def _fetcher(branches, wts):
-        return (
-            {"feat/a": PRSnapshot(head_ref="feat/a", state="OPEN", base_ref="develop",
-                                   merge_commit=None, url="https://x/pr/1", updated_at="z")},
-            {"feat/a": GitSnapshot(has_upstream=True, behind=0, ahead=1)},
-        )
-
-    decisions = reconcile_now(state, cache=cache, fetcher=_fetcher, config=config)
-
-    assert decisions["a"].state == UpstreamState.in_sync
-    payload = cache.read()
-    assert payload is not None
-    assert payload.base_context == {"a": None}
-
-
 def test_reconcile_now_resolves_base_per_repo_for_multi_repo_task(tmp_path: Path):
     """#461 (follow-up to #455): a multi-repo task's repos can each have a
     DIFFERENT configured base_branch. reconcile matches PRs by branch name
@@ -153,42 +129,6 @@ def test_reconcile_now_resolves_base_per_repo_for_multi_repo_task(tmp_path: Path
 
     decisions = reconcile_now(state, cache=cache, fetcher=_fetcher, config=config)
     assert decisions["a"].state == UpstreamState.in_sync
-
-
-def test_reconcile_now_preserves_remote_default_wildcard_across_repo_bases(tmp_path: Path):
-    """One unresolved configured repo makes the task base wildcard under match-ANY."""
-    class _RepoDefault:
-        base_branch = None
-
-    class _RepoDev:
-        base_branch = "dev"
-
-    config = type(
-        "Config", (), {"repos": {"r1": _RepoDefault(), "r2": _RepoDev()}},
-    )()
-    cache = ReconcileCache(tmp_path)
-    state = WorkspaceState(tasks={
-        "a": _task(
-            "a",
-            base_branch="main",
-            affected_repos=["r1", "r2"],
-            worktrees={"r1": Path("/tmp/fake/a-r1"), "r2": Path("/tmp/fake/a-r2")},
-        ),
-    })
-
-    def _fetcher(branches, wts):
-        return (
-            {"feat/a": PRSnapshot(head_ref="feat/a", state="OPEN", base_ref="main",
-                                   merge_commit=None, url="https://x/pr/1", updated_at="z")},
-            {"feat/a": GitSnapshot(has_upstream=True, behind=0, ahead=1)},
-        )
-
-    decisions = reconcile_now(state, cache=cache, fetcher=_fetcher, config=config)
-
-    assert decisions["a"].state == UpstreamState.in_sync
-    payload = cache.read()
-    assert payload is not None
-    assert payload.base_context == {"a": None}
 
 
 def test_reconcile_now_refetches_after_resolved_base_config_changes(tmp_path: Path):
