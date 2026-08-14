@@ -50,6 +50,7 @@ Wire contract (Task 5's client parses this):
 """
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import io
@@ -124,12 +125,14 @@ class RemoteExecDeps:
     double duty for git commands and the streamed task run (see
     `ShellLike`). `workspace_root` anchors where remote worktrees live:
     `<workspace_root>/.worktrees/<task>/<repo>`, mirroring the local
-    `WorktreeManager` hub layout.
+    `WorktreeManager` hub layout. `cancel_event` lets the HTTP response stop a
+    quiet subprocess promptly when its client disconnects.
     """
 
     config: WorkspaceConfig
     shell: ShellLike
     workspace_root: Path
+    cancel_event: threading.Event | None = None
 
 
 def _hub_dir(workspace_root: Path, task: str) -> Path:
@@ -146,6 +149,11 @@ def _acquire_task_execution_lock(
     lock_file = (lock_dir / f"{digest}.lock").open("a+")
     try:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        lock_file.close()
+        if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
+            raise BlockingIOError(exc.errno, exc.strerror) from exc
+        raise
     except BaseException:
         lock_file.close()
         raise
@@ -302,14 +310,20 @@ def _drain_to_queue(proc, q: "queue.Queue[str]") -> list[threading.Thread]:
     return threads
 
 
-def _stream_proc_lines(proc) -> Iterator[bytes]:
+def _stream_proc_lines(
+    proc,
+    cancel_event: threading.Event | None = None,
+) -> Iterator[bytes]:
     """Yield each stdout/stderr line from `proc` as UTF-8 bytes AS IT'S
     PRODUCED (not buffered until the process exits) — this is what makes
     `run_verb_stream` a live stream rather than a final blob. Returns once
-    both drain threads have hit EOF and the queue is empty."""
+    both drain threads have hit EOF and the queue is empty, or returns False
+    when the response reports that its client disconnected."""
     q: "queue.Queue[str]" = queue.Queue()
     threads = _drain_to_queue(proc, q)
     while any(t.is_alive() for t in threads) or not q.empty():
+        if cancel_event is not None and cancel_event.is_set():
+            return False
         try:
             line = q.get(timeout=0.05)
         except queue.Empty:
@@ -317,6 +331,7 @@ def _stream_proc_lines(proc) -> Iterator[bytes]:
         yield line.encode("utf-8", errors="replace")
     for t in threads:
         t.join(timeout=1.0)
+    return True
 
 
 def _terminate_proc(proc) -> None:
@@ -604,7 +619,8 @@ def _run_verb_stream_unlocked(
         proc = None
         try:
             proc = shell.run_streaming(command, cwd=worktree_path, env=None)
-            yield from _stream_proc_lines(proc)
+            if not (yield from _stream_proc_lines(proc, deps.cancel_event)):
+                return False
             setup_code = proc.wait()
         finally:
             _terminate_proc(proc)
@@ -672,7 +688,8 @@ def _run_verb_stream_unlocked(
 
             command = shell.build_command(f"task {actual_task_name}", env_runner)
             proc = shell.run_streaming(command, cwd=worktree_path, env=env)
-            yield from _stream_proc_lines(proc)
+            if not (yield from _stream_proc_lines(proc, deps.cancel_event)):
+                return
             exit_code = proc.wait()
 
             if verb == "capture":

@@ -1543,11 +1543,45 @@ def create_app(
     # reaching into pr_manager's — same class, its own lifetime.
 
     import secrets
+    from functools import partial
 
     from mship.core import remote_exec
     from mship.core.run_ref import is_run_ref_segment
     from fastapi.responses import StreamingResponse
-    from starlette.concurrency import iterate_in_threadpool
+    from starlette._utils import create_collapsing_task_group
+
+    class _RemoteExecStreamingResponse(StreamingResponse):
+        """Own the sync generator until HTTP streaming has fully stopped."""
+
+        def __init__(self, content, *, cancel_event, **kwargs):
+            self._sync_iterator = content
+            self._cancel_event = cancel_event
+            super().__init__(content, **kwargs)
+
+        async def listen_for_disconnect(self, receive):
+            try:
+                await super().listen_for_disconnect(receive)
+            finally:
+                self._cancel_event.set()
+
+        async def __call__(self, scope, receive, send):
+            try:
+                async with create_collapsing_task_group() as task_group:
+                    async def wrap(func):
+                        await func()
+                        task_group.cancel_scope.cancel()
+
+                    task_group.start_soon(
+                        wrap,
+                        partial(self.stream_response, send),
+                    )
+                    await wrap(partial(self.listen_for_disconnect, receive))
+            finally:
+                self._cancel_event.set()
+                self._sync_iterator.close()
+
+            if self.background is not None:
+                await self.background()
 
     # A task name becomes both a `.worktrees` path segment and shell-backed
     # git/task input. Validate it against the shared run-ref segment contract
@@ -1572,8 +1606,12 @@ def create_app(
             )
         if not is_run_ref_segment(body.task):
             raise HTTPException(status_code=400, detail="invalid task name")
+        cancel_event = threading.Event()
         deps = remote_exec.RemoteExecDeps(
-            config=config, shell=ShellRunner(), workspace_root=workspace_root,
+            config=config,
+            shell=ShellRunner(),
+            workspace_root=workspace_root,
+            cancel_event=cancel_event,
         )
         # Per-request anti-spoof nonce (FIX 2): the task can't predict it, and
         # it's returned as a response HEADER (sent before the streamed body, so
@@ -1582,16 +1620,16 @@ def create_app(
         # to print a bare `__MSHIP_EXIT__ 0` is therefore just output, never a
         # forged exit code.
         nonce = secrets.token_hex(8)
-        # `run_verb_stream` is a plain sync generator doing blocking subprocess
-        # + git I/O; `iterate_in_threadpool` pulls each chunk in the threadpool
-        # so it never blocks the event loop (see the module docstring).
+        # The response owns the sync generator and signals its subprocess drain
+        # before waiting for AnyIO's in-flight threadpool `next()` to return.
         gen = remote_exec.run_verb_stream(
             verb, body.task, body.repos, body.platform,
             kind=body.kind, deps=deps, nonce=nonce,
             run_ref_repos=body.run_ref_repos,
         )
-        return StreamingResponse(
-            iterate_in_threadpool(gen),
+        return _RemoteExecStreamingResponse(
+            gen,
+            cancel_event=cancel_event,
             media_type="application/octet-stream",
             headers={"X-Mship-Exec-Nonce": nonce},
         )

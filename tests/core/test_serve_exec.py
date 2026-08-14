@@ -13,6 +13,8 @@ Two layers are covered:
 """
 from __future__ import annotations
 
+import asyncio
+import errno
 import fcntl
 import hashlib
 import io
@@ -326,6 +328,110 @@ def test_run_verb_stream_client_disconnect_cleans_up_tempdir_and_proc(tmp_path):
     assert not capture_dir.exists(), "the capture temp dir must be removed on disconnect"
 
 
+def test_exec_http_disconnect_terminates_quiet_proc_and_releases_task_lock(
+    tmp_path,
+    monkeypatch,
+):
+    started = threading.Event()
+    terminated = threading.Event()
+    unblock = threading.Event()
+
+    class _BlockingStream:
+        def readline(self):
+            unblock.wait(timeout=5)
+            return ""
+
+        def close(self):
+            pass
+
+    class _QuietProc:
+        pid = None
+        stdout = _BlockingStream()
+        stderr = _BlockingStream()
+
+        def wait(self):
+            unblock.wait(timeout=5)
+            return 0
+
+        def poll(self):
+            return 0 if unblock.is_set() else None
+
+        def terminate(self):
+            terminated.set()
+            unblock.set()
+
+    class _SignalingShellRunner(_FakeShellRunner):
+        def run_streaming(self, command, cwd, env=None):
+            proc = super().run_streaming(command, cwd, env=env)
+            started.set()
+            return proc
+
+    fake = _SignalingShellRunner(streaming_proc=_QuietProc())
+    _patch_shell(monkeypatch, fake)
+    app = _app(tmp_path)
+    response_messages = []
+    request_sent = False
+
+    async def receive():
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {
+                "type": "http.request",
+                "body": b'{"task":"t1","repos":["api"]}',
+                "more_body": False,
+            }
+        assert await asyncio.to_thread(started.wait, 10)
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        response_messages.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/exec/run",
+        "raw_path": b"/exec/run",
+        "query_string": b"",
+        "headers": [(b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 12345),
+        "server": ("testserver", 80),
+        "root_path": "",
+    }
+
+    async def disconnect_request() -> bool:
+        app_task = asyncio.create_task(app(scope, receive, send))
+        stopped = False
+        try:
+            assert await asyncio.to_thread(started.wait, 10)
+            stopped = await asyncio.to_thread(terminated.wait, 1)
+        finally:
+            if not stopped:
+                unblock.set()
+            await asyncio.wait_for(app_task, timeout=10)
+        return stopped
+
+    assert asyncio.run(disconnect_request())
+    assert response_messages[0]["type"] == "http.response.start"
+
+    replacement_fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["replacement\n"]),
+    )
+    replacement_deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=replacement_fake, workspace_root=tmp_path,
+    )
+    assert list(remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None,
+        deps=replacement_deps, nonce="replacementnonce",
+    ))[-2:] == [
+        b"replacement\n",
+        b"__MSHIP_EXIT__:replacementnonce 0\n",
+    ]
+
+
 def test_concurrent_same_task_is_refused_while_different_task_runs(tmp_path):
     gate = threading.Event()
     first_fake = _FakeShellRunner(streaming_proc=_FakeProc(
@@ -505,6 +611,27 @@ def test_task_lock_failure_to_flock_fails_closed(tmp_path, monkeypatch):
         streaming_proc=_FakeProc(stdout_lines=["must not run\n"]),
     )
     _assert_task_lock_failure(tmp_path, fake, "flocknonce")
+
+
+def test_task_lock_eacces_from_flock_is_contention(tmp_path, monkeypatch):
+    def deny_flock(_fd, _operation):
+        raise PermissionError(errno.EACCES, "injected contention")
+
+    monkeypatch.setattr(fcntl, "flock", deny_flock)
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["must not run\n"]),
+    )
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=fake, workspace_root=tmp_path,
+    )
+    assert list(remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None, deps=deps, nonce="eaccesnonce",
+    )) == [
+        b"error: remote task 't1' is already running; try again after it finishes\n",
+        b"__MSHIP_EXIT__:eaccesnonce 2\n",
+    ]
+    assert not fake.run_calls
+    assert not fake.streaming_calls
 
 
 def test_run_verb_stream_unknown_verb_raises(tmp_path):
