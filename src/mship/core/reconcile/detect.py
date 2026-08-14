@@ -55,7 +55,7 @@ def _pr_number(url: str | None) -> int | None:
 
 def detect_one(
     task_branch: str,
-    task_base: str | None,
+    task_base: str | frozenset[str] | None,
     pr: PRSnapshot | None,
     git: GitSnapshot,
 ) -> Detection:
@@ -77,7 +77,11 @@ def detect_one(
             pr_url=pr.url, pr_number=_pr_number(pr.url), base=pr.base_ref,
             merge_commit=None, updated_at=pr.updated_at,
         )
-    if task_base is not None and pr.base_ref != task_base:
+    valid_bases = (
+        task_base if isinstance(task_base, frozenset)
+        else {task_base} if task_base is not None else None
+    )
+    if valid_bases is not None and pr.base_ref not in valid_bases:
         return Detection(
             state=UpstreamState.base_changed,
             pr_url=pr.url, pr_number=_pr_number(pr.url), base=pr.base_ref,
@@ -97,7 +101,7 @@ def detect_one(
 
 
 def detect_many(
-    tasks: Sequence[tuple[str, str, str | None]],   # (slug, branch, base)
+    tasks: Sequence[tuple[str, str, str | frozenset[str] | None]],   # (slug, branch, base)
     pr_by_head: dict[str, PRSnapshot],
     git_by_branch: dict[str, GitSnapshot],
 ) -> dict[str, Detection]:

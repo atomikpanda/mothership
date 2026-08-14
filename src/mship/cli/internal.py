@@ -179,7 +179,9 @@ def register(app: typer.Typer, get_container):
                         collect_git_snapshots(worktrees_by_branch),
                     )
 
-                decisions = reconcile_now(state, cache=cache, fetcher=_fetcher)
+                decisions = reconcile_now(
+                    state, cache=cache, fetcher=_fetcher, config=container.config()
+                )
             except Exception:
                 raise typer.Exit(code=0)
 

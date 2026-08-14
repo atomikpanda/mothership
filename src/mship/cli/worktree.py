@@ -29,8 +29,16 @@ def _run_gate(
     command: str,  # "spawn" | "finish" | "close" | "precommit"
     bypass: bool,
     output,
+    only_slug: str | None = None,
+    cli_base: str | None = None,
+    base_map: dict[str, str] | None = None,
 ) -> None:
-    """Run the upstream reconciler; exit(1) on block, print warnings on warn."""
+    """Run the upstream reconciler; exit(1) on block, print warnings on warn.
+
+    `only_slug`, when given, scopes the gate to that single task — drift on
+    an unrelated task must not block this one (#455 Part 2; mirrors the
+    per-task scoping the precommit gate in cli/internal.py already does).
+    """
     if bypass:
         return
     from mship.core.reconcile.cache import ReconcileCache
@@ -41,6 +49,7 @@ def _run_gate(
 
     container = get_container()
     state = container.state_manager().load()
+    config = container.config()
     cache = ReconcileCache(container.state_dir())
 
     def _fetcher(branches, worktrees_by_branch):
@@ -50,10 +59,24 @@ def _run_gate(
         )
 
     try:
-        decisions = reconcile_now(state, cache=cache, fetcher=_fetcher)
+        base_inputs = (
+            {only_slug: (cli_base, base_map or {})}
+            if only_slug is not None
+            else None
+        )
+        decisions = reconcile_now(
+            state,
+            cache=cache,
+            fetcher=_fetcher,
+            config=config,
+            base_inputs_by_slug=base_inputs,
+        )
     except Exception as e:  # noqa: BLE001 — never fail closed
         output.warning(f"reconcile unavailable: {e}; proceeding")
         return
+
+    if only_slug is not None:
+        decisions = {slug: d for slug, d in decisions.items() if slug == only_slug}
 
     ignored = cache.read_ignores()
     blockers: list[str] = []
@@ -96,7 +119,9 @@ def _dependency_decisions(state):
         def _fetcher(branches, worktrees_by_branch):
             return (fetch_pr_snapshots(branches), collect_git_snapshots(worktrees_by_branch))
 
-        return reconcile_now(state, cache=cache, fetcher=_fetcher)
+        return reconcile_now(
+            state, cache=cache, fetcher=_fetcher, config=_container_singleton.config()
+        )
     except Exception:
         return {}
 
@@ -1176,7 +1201,6 @@ def register(app: typer.Typer, get_container):
 
         container = get_container()
         output = Output()
-        _run_gate(get_container, command="finish", bypass=bypass_reconcile, output=output)
 
         if require_tests:
             output.warning(
@@ -1249,12 +1273,31 @@ def register(app: typer.Typer, get_container):
             output.error(str(e))
             raise typer.Exit(code=1)
 
+        from mship.core.base_resolver import (
+            InvalidBaseMapError,
+            UnknownRepoInBaseMapError,
+            parse_base_map,
+            resolve_base,
+        )
+        try:
+            parsed_map = parse_base_map(base_map or "")
+        except InvalidBaseMapError as e:
+            output.error(str(e))
+            raise typer.Exit(code=1)
+
         state_mgr = container.state_manager()
         state = state_mgr.load()
 
         resolved_finish = resolve_for_command("finish", state, task, output)
         t = resolved_finish.task
         task = t
+
+        # Scoped to this task only — drift on another, unrelated task must not
+        # block this one's finish (#455 Part 2).
+        _run_gate(
+            get_container, command="finish", bypass=bypass_reconcile, output=output,
+            only_slug=t.slug, cli_base=base, base_map=parsed_map,
+        )
 
         # --- WorkItem gate: every task must be linked to a WorkItem, and a
         # feature-kind WorkItem additionally needs an approved spec AND a valid
@@ -1499,18 +1542,6 @@ def register(app: typer.Typer, get_container):
         # else: a token is present; the httpx PR path covers gh absence.
 
         # --- Resolve + verify PR base branches up front ---
-        from mship.core.base_resolver import (
-            parse_base_map,
-            resolve_base,
-            InvalidBaseMapError,
-            UnknownRepoInBaseMapError,
-        )
-
-        try:
-            parsed_map = parse_base_map(base_map or "")
-        except InvalidBaseMapError as e:
-            output.error(str(e))
-            raise typer.Exit(code=1)
 
         try:
             effective_bases = {

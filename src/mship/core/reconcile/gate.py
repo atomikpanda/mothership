@@ -11,7 +11,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Literal
 
-from mship.core.state import WorkspaceState
+from mship.core.state import WorkspaceState, Task
+from mship.core.base_resolver import resolve_base
 from mship.core.reconcile.cache import ReconcileCache, CachePayload, DEFAULT_TTL_SECONDS
 from mship.core.reconcile.detect import (
     Detection, GitSnapshot, PRSnapshot, UpstreamState, detect_many,
@@ -80,6 +81,59 @@ def should_block(decision: Decision, *, command: Command, ignored: list[str]) ->
     return _MATRIX[decision.state.value][command]
 
 
+def _resolved_task_bases(
+    task: Task,
+    config,
+    *,
+    cli_base: str | None = None,
+    base_map: dict[str, str] | None = None,
+) -> frozenset[str] | None:
+    """Resolve every effective PR base for a task through the shared resolver.
+
+    Reconcile cannot attribute a fetched PR to a repository (#462), so a
+    multi-repo task remains in sync when its PR base matches ANY affected
+    repo's effective base. Finish-specific CLI inputs apply only to the task
+    being finished.
+    """
+    if not task.affected_repos:
+        return frozenset({task.base_branch}) if task.base_branch is not None else None
+    repo_configs = config.repos if config is not None else {}
+    known_repos = repo_configs.keys() if config is not None else task.affected_repos
+    bases: set[str] = set()
+    for repo in task.affected_repos:
+        resolved = resolve_base(
+            repo,
+            repo_configs.get(repo),
+            cli_base=cli_base,
+            base_map=base_map or {},
+            known_repos=known_repos,
+            task_base=task.base_override,
+        )
+        effective = resolved if resolved is not None else task.base_branch
+        if effective is not None:
+            bases.add(effective)
+    return frozenset(bases) if bases else None
+
+
+def resolve_task_bases(
+    state: WorkspaceState,
+    config,
+    *,
+    base_inputs_by_slug: dict[
+        str, tuple[str | None, dict[str, str]]
+    ] | None = None,
+) -> dict[str, frozenset[str] | None]:
+    """Resolve the effective base set for every task in workspace state."""
+    base_inputs_by_slug = base_inputs_by_slug or {}
+    resolved: dict[str, frozenset[str] | None] = {}
+    for task in state.tasks.values():
+        cli_base, base_map = base_inputs_by_slug.get(task.slug, (None, {}))
+        resolved[task.slug] = _resolved_task_bases(
+            task, config, cli_base=cli_base, base_map=base_map,
+        )
+    return resolved
+
+
 Fetcher = Callable[[list[str], dict[str, Path]], tuple[dict[str, PRSnapshot], dict[str, GitSnapshot]]]
 
 
@@ -132,11 +186,26 @@ def reconcile_now(
     cache: ReconcileCache,
     fetcher: Fetcher,
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
+    config=None,
+    base_inputs_by_slug: dict[
+        str, tuple[str | None, dict[str, str]]
+    ] | None = None,
 ) -> dict[str, Decision]:
     """Cache-first; fetch on stale; fall back on error. Never raises."""
+    resolved_bases = resolve_task_bases(
+        state, config, base_inputs_by_slug=base_inputs_by_slug,
+    )
+    base_context = {
+        slug: sorted(bases) if bases is not None else None
+        for slug, bases in resolved_bases.items()
+    }
+
+    # Keep the raw payload only to preserve its ignore list on a fresh write.
+    # Every results-consuming path uses the schema/context-compatible payload.
     payload = cache.read()
-    if payload and cache.is_fresh(payload):
-        return _decisions_from_cache(state, payload)
+    current_payload = cache.current(payload, base_context=base_context)
+    if current_payload is not None and cache.is_fresh(current_payload):
+        return _decisions_from_cache(state, current_payload)
 
     branches = [t.branch for t in state.tasks.values()]
     worktrees_by_branch: dict[str, Path] = {}
@@ -147,11 +216,13 @@ def reconcile_now(
     try:
         pr_by_head, git_by_branch = fetcher(branches, worktrees_by_branch)
     except FetchError:
-        if payload is not None:
-            return _decisions_from_cache(state, payload)
+        if current_payload is not None:
+            return _decisions_from_cache(state, current_payload)
         return {}
 
-    tasks_tuples = [(t.slug, t.branch, t.base_branch) for t in state.tasks.values()]
+    tasks_tuples = [
+        (t.slug, t.branch, resolved_bases[t.slug]) for t in state.tasks.values()
+    ]
     detections = detect_many(tasks_tuples, pr_by_head, git_by_branch)
 
     results = {
@@ -168,6 +239,7 @@ def reconcile_now(
         ttl_seconds=ttl_seconds,
         results=results,
         ignored=(payload.ignored if payload else []),
+        base_context=base_context,
     ))
     decisions = {slug: _decision_from_detection(slug, d, state) for slug, d in detections.items()}
     return apply_dependency_stale(state, decisions)

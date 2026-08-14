@@ -7,6 +7,7 @@ from typing import Optional
 import typer
 
 from mship.cli.output import Output
+from mship.core.config import ConfigLoader
 from mship.core.reconcile.cache import ReconcileCache
 from mship.core.reconcile.detect import UpstreamState
 from mship.core.reconcile.fetch import (
@@ -63,6 +64,8 @@ def register(app: typer.Typer, get_container):
                 output.json({"ignored": ignore})
             return
 
+        config = ConfigLoader.load(container.config_path(), require_paths=False)
+
         if refresh:
             payload = cache.read()
             if payload is not None:
@@ -76,7 +79,7 @@ def register(app: typer.Typer, get_container):
             )
 
         try:
-            decisions = reconcile_now(state, cache=cache, fetcher=_fetcher)
+            decisions = reconcile_now(state, cache=cache, fetcher=_fetcher, config=config)
         except Exception as e:  # noqa: BLE001 — never fail closed
             output.warning(f"reconcile unavailable: {e}")
             decisions = {}

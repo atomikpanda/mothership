@@ -1,3 +1,4 @@
+import json
 import time
 from pathlib import Path
 
@@ -71,3 +72,63 @@ def test_corrupt_cache_returns_none(tmp_path: Path):
     (state_dir / "reconcile.cache.json").write_text("not json")
     c = ReconcileCache(state_dir)
     assert c.read() is None
+
+
+def test_add_ignore_does_not_launder_a_pre_v2_entrys_schema_version(tmp_path: Path):
+    # A TTL-fresh entry written before schema_version existed (spurious
+    # base_changed baked in by the pre-#461 logic). It must stay stale after
+    # an ignore mutation's read-modify-write, not get promoted to the current
+    # schema_version — else the next reconcile would serve the stale result
+    # (#461 follow-up).
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    cache_path = state_dir / "reconcile.cache.json"
+    cache_path.write_text(json.dumps({
+        "fetched_at": time.time(),
+        "ttl_seconds": 300,
+        "results": {"a": {"state": "base_changed"}},
+        "ignored": [],
+        # no "schema_version" key — pre-v2 entry
+    }))
+
+    c = ReconcileCache(state_dir)
+    c.add_ignore("a")
+
+    payload = c.read()
+    assert payload is not None
+    assert payload.results == {"a": {"state": "base_changed"}}
+    assert c.is_fresh(payload) is False
+
+
+def test_clear_ignores_does_not_launder_a_pre_v2_entrys_schema_version(tmp_path: Path):
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    cache_path = state_dir / "reconcile.cache.json"
+    cache_path.write_text(json.dumps({
+        "fetched_at": time.time(),
+        "ttl_seconds": 300,
+        "results": {"a": {"state": "base_changed"}},
+        "ignored": ["a"],
+        # no "schema_version" key — pre-v2 entry
+    }))
+
+    c = ReconcileCache(state_dir)
+    c.clear_ignores()
+
+    payload = c.read()
+    assert payload is not None
+    assert c.is_fresh(payload) is False
+
+
+def test_write_stamps_current_schema_version_for_freshly_computed_results(tmp_path: Path):
+    c = ReconcileCache(tmp_path / ".mothership")
+    payload = CachePayload(
+        fetched_at=time.time(),
+        ttl_seconds=300,
+        results={"a": {"state": "in_sync"}},
+        ignored=[],
+    )
+    c.write(payload)
+    got = c.read()
+    assert got is not None
+    assert c.is_fresh(got) is True
