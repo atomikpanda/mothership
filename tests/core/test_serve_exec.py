@@ -13,11 +13,15 @@ Two layers are covered:
 """
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import io
+import multiprocessing
 import tarfile
 import threading
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from mship.core import remote_exec
@@ -190,6 +194,52 @@ def _exit_line(nonce: str, code: int) -> str:
     return f"{remote_exec.EXIT_MARKER}:{nonce} {code}"
 
 
+def _hold_remote_exec_stream(
+    workspace_root: str,
+    ready,
+    release,
+) -> None:
+    root = Path(workspace_root)
+    fake = _FakeShellRunner()
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(root), shell=fake, workspace_root=root,
+    )
+    stream = remote_exec.run_verb_stream(
+        "run", "t1", ["unknown"], None, deps=deps, nonce="processholder",
+    )
+    try:
+        first = next(stream)
+        if b"unknown repo" not in first:
+            raise AssertionError(first)
+        ready.set()
+        if not release.wait(timeout=10):
+            raise TimeoutError("parent did not release the held remote execution stream")
+    finally:
+        stream.close()
+
+
+def _task_lock_path(workspace_root: Path, task: str) -> Path:
+    digest = hashlib.sha256(task.encode("utf-8")).hexdigest()
+    return workspace_root / ".mothership" / "remote-exec-locks" / f"{digest}.lock"
+
+
+def _assert_task_lock_failure(
+    workspace_root: Path,
+    fake: _FakeShellRunner,
+    nonce: str,
+) -> None:
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(workspace_root), shell=fake, workspace_root=workspace_root,
+    )
+    lines = list(remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None, deps=deps, nonce=nonce,
+    ))
+    assert b"remote-task locking" in lines[0]
+    assert lines[-1] == f"{remote_exec.EXIT_MARKER}:{nonce} 1\n".encode()
+    assert not fake.run_calls
+    assert not fake.streaming_calls
+
+
 def _parse_exec_stream(content: bytes, nonce: str):
     """Mirror the client-side parse of the `/exec/{verb}` wire framing: text
     lines, optionally one `__MSHIP_ARTIFACTS__:<nonce> <n>` marker followed by
@@ -274,6 +324,187 @@ def test_run_verb_stream_client_disconnect_cleans_up_tempdir_and_proc(tmp_path):
 
     assert proc.terminated, "the running task subprocess must be terminated on disconnect"
     assert not capture_dir.exists(), "the capture temp dir must be removed on disconnect"
+
+
+def test_concurrent_same_task_is_refused_while_different_task_runs(tmp_path):
+    gate = threading.Event()
+    first_fake = _FakeShellRunner(streaming_proc=_FakeProc(
+        stdout_lines=["first\n", "second\n"], gate=gate, gate_before=1,
+    ))
+    first_deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=first_fake, workspace_root=tmp_path,
+    )
+    first = remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None, deps=first_deps, nonce="firstnonce",
+    )
+    assert next(first) == b"first\n"
+
+    different_fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["different\n"]),
+    )
+    different_deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=different_fake, workspace_root=tmp_path,
+    )
+    assert list(remote_exec.run_verb_stream(
+        "run", "t2", ["api"], None, deps=different_deps, nonce="differentnonce",
+    )) == [
+        b"different\n",
+        b"__MSHIP_EXIT__:differentnonce 0\n",
+    ]
+
+    contender_fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["must not run\n"]),
+    )
+    contender_deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=contender_fake, workspace_root=tmp_path,
+    )
+    contender = list(remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None,
+        deps=contender_deps, nonce="contendernonce",
+    ))
+    assert contender == [
+        b"error: remote task 't1' is already running; try again after it finishes\n",
+        b"__MSHIP_EXIT__:contendernonce 2\n",
+    ]
+    assert not contender_fake.run_calls
+    assert not contender_fake.streaming_calls
+
+    first.close()
+    assert _task_lock_path(tmp_path, "t1").is_file()
+
+    replacement_fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["replacement\n"]),
+    )
+    replacement_deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=replacement_fake, workspace_root=tmp_path,
+    )
+    assert list(remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None,
+        deps=replacement_deps, nonce="replacementnonce",
+    ))[-2:] == [
+        b"replacement\n",
+        b"__MSHIP_EXIT__:replacementnonce 0\n",
+    ]
+
+
+@pytest.mark.parametrize("returncode", [0, 7])
+def test_task_lock_releases_after_stream_exhaustion(tmp_path, returncode):
+    first_fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["finished\n"], returncode=returncode),
+    )
+    first_deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=first_fake, workspace_root=tmp_path,
+    )
+    assert list(remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None, deps=first_deps, nonce="firstnonce",
+    ))[-1] == f"__MSHIP_EXIT__:firstnonce {returncode}\n".encode()
+    assert _task_lock_path(tmp_path, "t1").is_file()
+
+    next_fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["next\n"]),
+    )
+    next_deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=next_fake, workspace_root=tmp_path,
+    )
+    assert list(remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None, deps=next_deps, nonce="nextnonce",
+    ))[-2:] == [
+        b"next\n",
+        b"__MSHIP_EXIT__:nextnonce 0\n",
+    ]
+
+
+def test_task_lock_releases_when_execution_raises(tmp_path):
+    class _RaisingShellRunner(_FakeShellRunner):
+        def run_streaming(self, command, cwd, env=None):
+            self.streaming_calls.append(
+                {"command": command, "cwd": Path(cwd), "env": env},
+            )
+            raise RuntimeError("streaming exploded")
+
+    failing_deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path),
+        shell=_RaisingShellRunner(),
+        workspace_root=tmp_path,
+    )
+    with pytest.raises(RuntimeError, match="streaming exploded"):
+        list(remote_exec.run_verb_stream(
+            "run", "t1", ["api"], None, deps=failing_deps, nonce="failingnonce",
+        ))
+    assert _task_lock_path(tmp_path, "t1").is_file()
+
+    next_fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["recovered\n"]),
+    )
+    next_deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=next_fake, workspace_root=tmp_path,
+    )
+    assert list(remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None, deps=next_deps, nonce="nextnonce",
+    ))[-2:] == [
+        b"recovered\n",
+        b"__MSHIP_EXIT__:nextnonce 0\n",
+    ]
+
+
+def test_concurrent_process_contends_for_same_task_lock(tmp_path):
+    ctx = multiprocessing.get_context("spawn")
+    ready = ctx.Event()
+    release = ctx.Event()
+    proc = ctx.Process(
+        target=_hold_remote_exec_stream,
+        args=(str(tmp_path), ready, release),
+    )
+    proc.start()
+    try:
+        assert ready.wait(timeout=10)
+        fake = _FakeShellRunner()
+        deps = remote_exec.RemoteExecDeps(
+            config=_config(tmp_path), shell=fake, workspace_root=tmp_path,
+        )
+        contender = list(remote_exec.run_verb_stream(
+            "run", "t1", ["unknown"], None,
+            deps=deps, nonce="processcontender",
+        ))
+        assert contender == [
+            b"error: remote task 't1' is already running; try again after it finishes\n",
+            b"__MSHIP_EXIT__:processcontender 2\n",
+        ]
+    finally:
+        release.set()
+        proc.join(timeout=10)
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=10)
+    assert proc.exitcode == 0
+
+
+def test_task_lock_failure_to_create_directory_fails_closed(tmp_path):
+    (tmp_path / ".mothership").write_text("not a directory")
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["must not run\n"]),
+    )
+    _assert_task_lock_failure(tmp_path, fake, "mkdirnonce")
+
+
+def test_task_lock_failure_to_open_file_fails_closed(tmp_path):
+    lock_file = _task_lock_path(tmp_path, "t1")
+    lock_file.mkdir(parents=True)
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["must not run\n"]),
+    )
+    _assert_task_lock_failure(tmp_path, fake, "opennonce")
+
+
+def test_task_lock_failure_to_flock_fails_closed(tmp_path, monkeypatch):
+    def fail_flock(_fd, _operation):
+        raise OSError("injected lock failure")
+
+    monkeypatch.setattr(fcntl, "flock", fail_flock)
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["must not run\n"]),
+    )
+    _assert_task_lock_failure(tmp_path, fake, "flocknonce")
 
 
 def test_run_verb_stream_unknown_verb_raises(tmp_path):

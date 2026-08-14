@@ -50,6 +50,8 @@ Wire contract (Task 5's client parses this):
 """
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import io
 import queue
 import shutil
@@ -132,6 +134,22 @@ class RemoteExecDeps:
 
 def _hub_dir(workspace_root: Path, task: str) -> Path:
     return workspace_root / ".worktrees" / task
+
+
+def _acquire_task_execution_lock(
+    workspace_root: Path,
+    task: str,
+) -> io.TextIOWrapper:
+    lock_dir = workspace_root / ".mothership" / "remote-exec-locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(task.encode("utf-8")).hexdigest()
+    lock_file = (lock_dir / f"{digest}.lock").open("a+")
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BaseException:
+        lock_file.close()
+        raise
+    return lock_file
 
 
 def _git_rev(shell: ShellLike, cwd: Path, ref: str) -> str | None:
@@ -355,6 +373,50 @@ def _build_artifact_tar(artifacts: list[_cap.Artifact]) -> bytes:
 
 
 def run_verb_stream(
+    verb: str,
+    task: str,
+    repos: list[str],
+    platform: str | None,
+    *,
+    deps: RemoteExecDeps,
+    kind: str = "all",
+    nonce: str,
+    run_ref_repos: list[str] | None = None,
+) -> Iterator[bytes]:
+    """Run one remote execution stream while owning its per-task process lock."""
+    try:
+        lock_file = _acquire_task_execution_lock(deps.workspace_root, task)
+    except BlockingIOError:
+        yield (
+            f"error: remote task {task!r} is already running; "
+            "try again after it finishes\n"
+        ).encode("utf-8")
+        yield f"{EXIT_MARKER}:{nonce} 2\n".encode("utf-8")
+        return
+    except (OSError, UnicodeError):
+        yield b"error: remote-task locking failed; execution was not started\n"
+        yield f"{EXIT_MARKER}:{nonce} 1\n".encode("utf-8")
+        return
+
+    try:
+        yield from _run_verb_stream_unlocked(
+            verb,
+            task,
+            repos,
+            platform,
+            deps=deps,
+            kind=kind,
+            nonce=nonce,
+            run_ref_repos=run_ref_repos,
+        )
+    finally:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock_file.close()
+
+
+def _run_verb_stream_unlocked(
     verb: str,
     task: str,
     repos: list[str],
