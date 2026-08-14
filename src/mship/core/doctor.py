@@ -42,8 +42,8 @@ def _claude_target(skill_name: str) -> Path:
     return Path.home() / ".claude" / "skills" / skill_name
 
 
-def _codex_target() -> Path:
-    return Path.home() / ".agents" / "skills" / "mothership"
+def _shared_agent_skills_target() -> Path:
+    return _si.shared_agent_skills_target()
 
 
 def _intended_target(symlink: Path) -> Path:
@@ -54,8 +54,29 @@ def _intended_target(symlink: Path) -> Path:
     return raw
 
 
+def _classify_directory_skill_target(
+    target: Path, pkg_src: Path, total: int
+) -> tuple[int, int, int, int]:
+    """Return installed, dangling, stale, and foreign counts for a shared link."""
+    installed = dangling = stale = foreign = 0
+    if target.is_symlink():
+        intended = _intended_target(target)
+        if target.exists() and intended.resolve() == pkg_src.resolve():
+            installed = total
+        elif _si.is_owned_target(intended):
+            if target.exists():
+                stale = total
+            else:
+                dangling = total
+        else:
+            foreign = total
+    elif target.exists():
+        foreign = total
+    return installed, dangling, stale, foreign
+
+
 def check_skill_availability() -> list[CheckResult]:
-    """One CheckResult per detected agent reporting installed/dangling/foreign."""
+    """One CheckResult per detected agent reporting skill discovery health."""
     results: list[CheckResult] = []
     pkg_src = _si.pkg_skills_source()
     skill_dirs = _si._iter_skill_dirs(pkg_src)
@@ -63,7 +84,7 @@ def check_skill_availability() -> list[CheckResult]:
     detected = _si._detect_agents()
 
     if detected.get("claude"):
-        installed = dangling = foreign = 0
+        installed = dangling = stale = foreign = 0
         for d in skill_dirs:
             target = _claude_target(d.name)
             if not target.exists() and not target.is_symlink():
@@ -73,33 +94,45 @@ def check_skill_availability() -> list[CheckResult]:
                 if target.exists() and intended.resolve() == d.resolve():
                     installed += 1
                 elif _si.is_owned_target(intended):
-                    dangling += 1
+                    if target.exists():
+                        stale += 1
+                    else:
+                        dangling += 1
                 else:
                     foreign += 1
             else:
                 foreign += 1
-        results.append(_format_skill_check("claude", installed, dangling, foreign, total))
+        results.append(_format_skill_check(
+            "claude", installed, dangling, stale, foreign, total,
+            repair_command="mship skill install --only claude",
+        ))
 
-    if detected.get("codex"):
-        target = _codex_target()
-        installed = dangling = foreign = 0
-        if target.is_symlink():
-            intended = _intended_target(target)
-            if target.exists() and intended.resolve() == pkg_src.resolve():
-                installed = total
-            elif _si.is_owned_target(intended):
-                dangling = total
-            else:
-                foreign = total
-        elif target.exists():
-            foreign = total
-        results.append(_format_skill_check("codex", installed, dangling, foreign, total))
+    shared_target = _shared_agent_skills_target()
+    for agent in ("codex", "omp"):
+        if not detected.get(agent):
+            continue
+        installed, dangling, stale, foreign = _classify_directory_skill_target(
+            shared_target, pkg_src, total
+        )
+        results.append(_format_skill_check(
+            agent, installed, dangling, stale, foreign, total,
+            repair_command=f"mship skill install --only {agent}",
+        ))
 
     return results
 
 
-def _format_skill_check(agent: str, installed: int, dangling: int, foreign: int, total: int) -> CheckResult:
-    if installed == total and dangling == 0 and foreign == 0:
+def _format_skill_check(
+    agent: str,
+    installed: int,
+    dangling: int,
+    stale: int,
+    foreign: int,
+    total: int,
+    *,
+    repair_command: str,
+) -> CheckResult:
+    if installed == total and dangling == 0 and stale == 0 and foreign == 0:
         return CheckResult(
             name=f"skills/{agent}", status="pass",
             message=f"{installed}/{total} skills installed and current",
@@ -107,11 +140,12 @@ def _format_skill_check(agent: str, installed: int, dangling: int, foreign: int,
     parts = [f"{installed}/{total} installed"]
     if dangling:
         parts.append(f"{dangling} dangling")
+    if stale:
+        parts.append(f"{stale} stale")
     if foreign:
         parts.append(f"{foreign} foreign (skipped)")
-    msg = ", ".join(parts) + " — run `mship skill install`"
-    if foreign:
-        msg += " (use --force to overwrite foreign entries)"
+        repair_command += " --force"
+    msg = ", ".join(parts) + f" — run `{repair_command}`"
     return CheckResult(name=f"skills/{agent}", status="warn", message=msg)
 
 
@@ -471,7 +505,11 @@ class DoctorChecker:
         )
         from mship.core.codex_hooks import (
             CODEX_COMMANDS,
+            CODEX_FEATURE_ENABLE_COMMAND,
             CODEX_HOOKS_PATH,
+            CODEX_TRUST_ACTION,
+            CodexHookCapability,
+            probe_codex_hook_capability,
             registration_issues as codex_registration_issues,
         )
         from mship.core.omp_extension import (
@@ -486,6 +524,12 @@ class DoctorChecker:
             return []
         codex_paths = [project_root / CODEX_HOOKS_PATH for project_root in project_roots]
         omp_paths = [project_root / OMP_EXTENSION_PATH for project_root in project_roots]
+        codex_binary = shutil.which("codex")
+        codex_capability = probe_codex_hook_capability(
+            self._shell,
+            root,
+            codex_binary=codex_binary,
+        )
         checks = [
             self._json_hook_check(
                 name="agent-hooks/claude",
@@ -510,16 +554,51 @@ class DoctorChecker:
         ]
         codex_issues = [result.message for result in codex_results if result.status != "pass"]
         if codex_issues:
+            message = "; ".join(codex_issues)
+            reinstall_action = "run `mship init --install-hooks`"
+            if reinstall_action not in message:
+                message += f"; {reinstall_action}"
+            if codex_capability.state in {
+                CodexHookCapability.DISABLED,
+                CodexHookCapability.UNAVAILABLE,
+            }:
+                message += f"; run `{CODEX_FEATURE_ENABLE_COMMAND}`"
+            message += f"; {CODEX_TRUST_ACTION}"
             checks.append(CheckResult(
                 name="agent-hooks/codex",
                 status="warn",
-                message="; ".join(codex_issues),
+                message=message,
+            ))
+        elif codex_capability.state in {
+            CodexHookCapability.DISABLED,
+            CodexHookCapability.UNAVAILABLE,
+        }:
+            checks.append(CheckResult(
+                name="agent-hooks/codex",
+                status="warn",
+                message=(
+                    "Codex hooks configured but inactive: "
+                    f"{codex_capability.detail}; "
+                    f"run `{CODEX_FEATURE_ENABLE_COMMAND}`; {CODEX_TRUST_ACTION}"
+                ),
+            ))
+        elif codex_capability.state is CodexHookCapability.ENABLED:
+            checks.append(CheckResult(
+                name="agent-hooks/codex",
+                status="warn",
+                message=(
+                    "Codex hooks configured; capability enabled; trust still required: "
+                    f"{CODEX_TRUST_ACTION}"
+                ),
             ))
         else:
             checks.append(CheckResult(
                 name="agent-hooks/codex",
-                status="pass",
-                message="Mothership hooks installed at " + ", ".join(map(str, codex_paths)),
+                status="warn",
+                message=(
+                    "Codex hooks configured but not verified active: "
+                    f"{codex_capability.detail}; {CODEX_TRUST_ACTION}"
+                ),
             ))
 
         omp_issues: list[str] = []
@@ -547,70 +626,47 @@ class DoctorChecker:
                 message="Mothership extension installed at " + ", ".join(map(str, omp_paths)),
             ))
 
-        codex_binary = shutil.which("codex")
-        if codex_binary is None:
+        if codex_capability.state is CodexHookCapability.ENABLED:
+            checks.append(CheckResult(
+                name="agent-runtime/codex",
+                status="pass",
+                message=f"Codex hook capability available at {codex_binary}",
+            ))
+        elif codex_capability.state in {
+            CodexHookCapability.DISABLED,
+            CodexHookCapability.UNAVAILABLE,
+        }:
             checks.append(CheckResult(
                 name="agent-runtime/codex",
                 status="warn",
-                message="Codex is not installed; Claude and OMP integrations remain available",
+                message=(
+                    f"{codex_capability.detail}; "
+                    f"run `{CODEX_FEATURE_ENABLE_COMMAND}`"
+                ),
             ))
         else:
-            try:
-                capability = self._shell.run(
-                    "codex features list",
-                    cwd=root,
-                    timeout=_AGENT_RUNTIME_PROBE_TIMEOUT_SECONDS,
-                )
-            except subprocess.TimeoutExpired:
-                checks.append(CheckResult(
-                    name="agent-runtime/codex",
-                    status="warn",
-                    message="Codex hook capability probe timed out",
-                ))
-            else:
-                features: dict[str, str] = {}
-                for line in capability.stdout.splitlines():
-                    parts = line.split()
-                    if parts and parts[0] in {"hooks", "codex_hooks"}:
-                        features[parts[0]] = parts[-1].lower()
-                feature = features.get("hooks", features.get("codex_hooks"))
-                if capability.returncode != 0 or feature is None:
-                    checks.append(CheckResult(
-                        name="agent-runtime/codex",
-                        status="warn",
-                        message="Codex hook capability is unavailable; this Codex version may be too old",
-                    ))
-                elif feature != "true":
-                    checks.append(CheckResult(
-                        name="agent-runtime/codex",
-                        status="warn",
-                        message="Codex hook capability is disabled; enable `[features].hooks = true` before use",
-                    ))
-                else:
-                    checks.append(CheckResult(
-                        name="agent-runtime/codex",
-                        status="pass",
-                        message=f"Codex hook capability available at {codex_binary}",
-                    ))
-
-        if any(path.is_file() for path in codex_paths):
             checks.append(CheckResult(
-                name="agent-hooks/codex-trust",
+                name="agent-runtime/codex",
                 status="warn",
-                message="Codex project hooks require explicit review/trust; open `/hooks` in Codex",
+                message=codex_capability.detail,
             ))
 
-        omp_binary = shutil.which("omp")
+        omp_command = "omp"
+        omp_binary = shutil.which(omp_command)
+        if omp_binary is None:
+            omp_command = "pi"
+            omp_binary = shutil.which(omp_command)
+        runtime_name = "OMP" if omp_command == "omp" else "Pi"
         if omp_binary is None:
             checks.append(CheckResult(
                 name="agent-runtime/omp",
                 status="warn",
-                message="OMP is not installed; Claude and Codex integrations remain available",
+                message="OMP/Pi is not installed; Claude and Codex integrations remain available",
             ))
         else:
             try:
                 version_result = self._shell.run(
-                    "omp --version",
+                    f"{omp_command} --version",
                     cwd=root,
                     timeout=_AGENT_RUNTIME_PROBE_TIMEOUT_SECONDS,
                 )
@@ -618,7 +674,7 @@ class DoctorChecker:
                 checks.append(CheckResult(
                     name="agent-runtime/omp",
                     status="warn",
-                    message="OMP version probe timed out",
+                    message=f"{runtime_name} version probe timed out",
                 ))
             else:
                 match = re.search(r"(\d+)\.(\d+)\.(\d+)", version_result.stdout)
@@ -626,7 +682,7 @@ class DoctorChecker:
                     checks.append(CheckResult(
                         name="agent-runtime/omp",
                         status="warn",
-                        message="could not determine OMP version or extension compatibility",
+                        message=f"could not determine {runtime_name} version or extension compatibility",
                     ))
                 else:
                     version = tuple(int(part) for part in match.groups())
@@ -635,7 +691,7 @@ class DoctorChecker:
                             name="agent-runtime/omp",
                             status="warn",
                             message=(
-                                f"OMP {'.'.join(match.groups())} is too old for this extension; "
+                                f"{runtime_name} {'.'.join(match.groups())} is too old for this extension; "
                                 f"requires {'.'.join(map(str, OMP_MIN_VERSION))} or newer"
                             ),
                         ))
@@ -643,7 +699,7 @@ class DoctorChecker:
                         checks.append(CheckResult(
                             name="agent-runtime/omp",
                             status="pass",
-                            message=f"OMP {'.'.join(match.groups())} supports project extensions",
+                            message=f"{runtime_name} {'.'.join(match.groups())} supports project extensions",
                         ))
         return checks
 

@@ -214,7 +214,7 @@ Top-level keys on `mothership.yaml` (alongside `workspace`, `env_runner`, `branc
 | `redact` | Extra `mship export --redacted` regex patterns, unioned with the built-in set. (MOS-102) |
 | `lifecycle_hooks` | Declarative reactions to task / WorkItem / PR lifecycle transitions. Named `lifecycle_hooks` (not `hooks`) to disambiguate from the git commit/push hooks. (MOS-220) |
 | `lifecycle_hooks_default_timeout` | Fallback per-hook timeout in seconds when a `lifecycle_hooks:` entry omits `timeout`. Default: `30`. |
-| `dispatch_models` | Per-mode model map for `mship dispatch` (`implementer` / `reviewer` / `standalone`). Values pass through verbatim to the dispatching harness. Precedence: `--model` flag > this map > built-in defaults (reviewer defaults to a cheaper tier). |
+| `dispatch_models` | Per-mode model map for `mship dispatch` (`implementer` / `reviewer` / `standalone`). Precedence: `--model` flag > this map > built-in defaults; every built-in mode defaults to `inherit`. The sentinel means harness default behavior: the adapter omits its model selector. Explicit configured values are emitted verbatim and require a selector-capable harness adapter; an adapter without a selector rejects them rather than substituting another model. |
 
 ```yaml
 workspace: my-platform

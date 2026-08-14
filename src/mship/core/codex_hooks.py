@@ -6,12 +6,19 @@ import os
 import re
 import shlex
 import tempfile
+import subprocess
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from mship.util.shell import ShellRunner
+
 
 CODEX_HOOKS_PATH = Path(".codex/hooks.json")
+CODEX_FEATURE_ENABLE_COMMAND = "codex features enable codex_hooks"
+CODEX_TRUST_ACTION = "open `/hooks` in Codex to review and trust the project hooks"
+CODEX_CAPABILITY_PROBE_TIMEOUT_SECONDS = 5
 CODEX_COMMANDS = {
     "SessionStart": "mship _session-context --runtime codex",
     "PreToolUse": "mship _guard-edit --runtime codex",
@@ -51,6 +58,75 @@ class CodexInstallResult:
     status: str
     path: Path
     message: str = ""
+
+
+class CodexHookCapability(str, Enum):
+    ABSENT = "absent"
+    UNAVAILABLE = "unavailable"
+    DISABLED = "disabled"
+    ENABLED = "enabled"
+    TIMED_OUT = "timed-out"
+
+
+@dataclass(frozen=True)
+class CodexHookCapabilityResult:
+    state: CodexHookCapability
+    feature_name: str | None = None
+    detail: str = ""
+
+
+def probe_codex_hook_capability(
+    shell: ShellRunner,
+    cwd: Path,
+    *,
+    codex_binary: str | None,
+) -> CodexHookCapabilityResult:
+    """Run and parse `codex features list` without mutating Codex config/trust."""
+    if codex_binary is None:
+        return CodexHookCapabilityResult(
+            CodexHookCapability.ABSENT,
+            detail="Codex is not installed",
+        )
+
+    try:
+        result = shell.run(
+            "codex features list",
+            cwd=cwd,
+            timeout=CODEX_CAPABILITY_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return CodexHookCapabilityResult(
+            CodexHookCapability.TIMED_OUT,
+            detail="Codex hook capability probe timed out",
+        )
+
+    if result.returncode != 0:
+        return CodexHookCapabilityResult(
+            CodexHookCapability.UNAVAILABLE,
+            detail="Codex hook capability is unavailable",
+        )
+
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if not parts or parts[0] not in {"codex_hooks", "hooks"}:
+            continue
+        enabled = parts[-1].lower()
+        if enabled == "true":
+            return CodexHookCapabilityResult(
+                CodexHookCapability.ENABLED,
+                feature_name=parts[0],
+            )
+        if enabled == "false":
+            return CodexHookCapabilityResult(
+                CodexHookCapability.DISABLED,
+                feature_name=parts[0],
+                detail="Codex hook capability is disabled",
+            )
+
+    return CodexHookCapabilityResult(
+        CodexHookCapability.UNAVAILABLE,
+        detail="Codex hook capability is unavailable",
+    )
 
 
 def _deduplicate(values: list[str]) -> tuple[str, ...]:

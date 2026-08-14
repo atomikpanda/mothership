@@ -11,14 +11,23 @@ that the fix itself broke nothing.
 The rebuilt package diffs to the new HEAD, so it contains the whole task's
 diff including the fix commits; this template scopes the re-reviewer to the
 fix range `[FIX_BASE_SHA]..[HEAD_SHA]` within it. The stub's `worktree` is
-the re-reviewer's cwd and the stub's `model` fills `[MODEL]`.
+the re-reviewer's cwd.
+
+Read the stub's resolved model before dispatch:
+- `inherit`: omit the harness model selector; the harness default is intended.
+- any other value: pass it unchanged through a supported model selector.
+- if the available subagent API has no model selector, do not dispatch with
+  an explicit value. Report: "mship resolved explicit model '<value>', but this subagent API cannot select a model; set this mode to inherit or use a selector-capable dispatch tool."
+Never translate one provider's model name into another.
+
+The Task-style template below shows `model: vendor/custom-tier` for an explicit
+resolved value. Replace it with that exact value. For `inherit`, omit the entire
+selector field; do not pass the literal string `inherit` to the provider.
 
 ```
 Subagent (general-purpose):
   description: "Re-review Task N fix round R"
-  model: [MODEL — from the reviewer stub's resolved model line; scoped
-         re-reviews of small fix diffs take a cheap-to-mid tier — say so
-         with --model on the dispatch if the configured default is higher]
+  model: vendor/custom-tier
   prompt: |
     You are re-reviewing one task's fix round. A previous review produced
     findings; an implementer has attempted to fix them. Your job is to
@@ -105,8 +114,8 @@ Subagent (general-purpose):
 ```
 
 **Placeholders:**
-- `[MODEL]` — the resolved model line from the reviewer stub; scoped
-  re-reviews of small fix diffs take a cheap-to-mid tier
+- `vendor/custom-tier` — an example explicit model value; replace it unchanged
+  with the resolved value, or omit the entire selector field for `inherit`
 - `[FINDINGS]` — the Critical/Important findings and spec gaps from the
   previous review, copied verbatim, one per bullet
 - `[REPORT_FILE]` — the implementer's report file (fix reports appended)

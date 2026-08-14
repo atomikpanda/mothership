@@ -11,17 +11,26 @@ more, nothing less) and is well-built (clean, tested, maintainable)
 It builds the review package (one raw diff file per affected repo +
 `manifest.json`, diffed from the prior dispatch's recorded base to live HEAD)
 under the dispatch record's `review/` directory and prints a closed stub.
-The stub's `worktree` is the reviewer's cwd and the stub's `model` fills
-`[MODEL]` below. The reviewer's own `mship dispatch --emit` prints the
-diff-file paths, the manifest path, the live acceptance criteria, the
-skipped-repo disclosure (if any), and the read-only dual-verdict contract —
-this template adds only what the CLI cannot know.
+The stub's `worktree` is the reviewer's cwd. The reviewer's own
+`mship dispatch --emit` prints the diff-file paths, the manifest path, the live
+acceptance criteria, the skipped-repo disclosure (if any), and the read-only
+dual-verdict contract — this template adds only what the CLI cannot know.
+
+Read the stub's resolved model before dispatch:
+- `inherit`: omit the harness model selector; the harness default is intended.
+- any other value: pass it unchanged through a supported model selector.
+- if the available subagent API has no model selector, do not dispatch with
+  an explicit value. Report: "mship resolved explicit model '<value>', but this subagent API cannot select a model; set this mode to inherit or use a selector-capable dispatch tool."
+Never translate one provider's model name into another.
+
+The Task-style template below shows `model: vendor/custom-tier` for an explicit
+resolved value. Replace it with that exact value. For `inherit`, omit the entire
+selector field; do not pass the literal string `inherit` to the provider.
 
 ```
 Subagent (general-purpose):
   description: "Review Task N (spec + quality)"
-  model: [MODEL — from the reviewer stub's resolved model line; an omitted
-         model silently inherits the session's most expensive one]
+  model: vendor/custom-tier
   prompt: |
     You are reviewing one task's implementation: first whether it matches its
     requirements, then whether it is well-built. This is a task-scoped gate,
@@ -189,9 +198,8 @@ Subagent (general-purpose):
 ```
 
 **Placeholders:**
-- `[MODEL]` — the resolved model line from the reviewer stub (`mship dispatch
-  --mode reviewer` resolves it: `--model` > `dispatch_models` config >
-  per-mode default)
+- `vendor/custom-tier` — an example explicit model value; replace it unchanged
+  with the resolved value, or omit the entire selector field for `inherit`
 - `[PLAN_FILE]` — the plan file path; the reviewer reads only Task N's
   anchored block (the same text the implementer's emit delivered)
 - `[GLOBAL_CONSTRAINTS]` — the binding requirements copied verbatim from

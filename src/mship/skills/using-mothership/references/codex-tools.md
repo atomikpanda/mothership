@@ -9,6 +9,20 @@ multi_agent = true
 
 This enables `spawn_agent`, `wait_agent`, and `close_agent` for skills like `dispatching-parallel-agents` and `subagent-driven-development`. When using subagent-driven-development, close reviewer subagents when their review returns. Keep each implementer subagent open until its task's review passes — the fix loop resumes the implementer — then close it. If your harness cannot send another message to a spawned agent, dispatch each fix round as a fresh implementer carrying the brief, the report file, and the findings.
 
+### Resolved model handling
+
+Read the stub's resolved model before dispatch:
+- `inherit`: omit the harness model selector; the harness default is intended.
+  Invoke `spawn_agent without a model selector`.
+- any other value: pass it unchanged through a supported model selector.
+- if the available subagent API has no model selector, do not dispatch with
+  an explicit value. Report: "mship resolved explicit model '<value>', but this subagent API cannot select a model; set this mode to inherit or use a selector-capable dispatch tool."
+Never translate one provider's model name into another.
+
+Current Codex multi-agent APIs expose no model selector, so they must reject an
+explicit resolved value with that actionable message. If a later API exposes a
+supported selector, supply the explicit value through it unchanged.
+
 ## Environment Detection
 
 Skills that create worktrees or finish branches should detect their

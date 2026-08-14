@@ -1,6 +1,6 @@
 import pytest
 
-from mship.core.dispatch_models import resolve_model, BUILTIN_MODEL_DEFAULTS
+from mship.core.dispatch_models import resolve_model
 
 
 def test_flag_wins():
@@ -11,9 +11,14 @@ def test_config_beats_builtin():
     assert resolve_model("reviewer", flag=None, configured={"reviewer": "haiku"}) == "haiku"
 
 
-def test_builtin_default_per_mode():
-    assert resolve_model("implementer", flag=None, configured=None) == BUILTIN_MODEL_DEFAULTS["implementer"]
-    assert resolve_model("reviewer", flag=None, configured=None) == BUILTIN_MODEL_DEFAULTS["reviewer"]
+@pytest.mark.parametrize("mode", ["implementer", "standalone", "reviewer"])
+def test_builtin_defaults_inherit_harness_model(mode):
+    assert resolve_model(mode, flag=None, configured=None) == "inherit"
+
+
+def test_operator_model_value_is_opaque_and_verbatim():
+    value = "vendor/custom-tier:2026-08"
+    assert resolve_model("reviewer", flag=None, configured={"reviewer": value}) == value
 
 
 def test_unknown_mode_raises():

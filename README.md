@@ -63,6 +63,9 @@ mship spawn "downstream" --work-item <id> --depends-on a,b  # declare at spawn (
 mship depends add/remove/list               # manage task-to-task dependency edges
 mship finish --bypass-deps                 # ship a downstream even if upstream isn't ready
 
+# Agent setup
+mship skill install --only claude,codex,omp  # install bundled skills; pi is an alias for omp
+
 # Inspection
 mship status                            # active task, phase, branch, drift
 mship journal                           # task log with context
@@ -77,6 +80,13 @@ mship reply <thread> "text"             # answer a mailbox thread
 ```
 
 For details, see `mship spawn --help`, [`docs/cli.md`](docs/cli.md), and the `working-with-mothership` skill.
+
+Codex and OMP/Pi discover the same bundle through the user-level
+`.agents/skills/mothership` link, so there is no second skill copy. Existing
+foreign files, directories, and links are skipped unless `--force` is explicit.
+`mship doctor` reports OMP skill discovery separately from the project-local OMP
+lifecycle extension and gives the matching `mship skill install --only omp`
+repair command.
 
 ## What mship gives agents
 

@@ -43,7 +43,7 @@ def register(app: typer.Typer, get_container):
         task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
         for_: Optional[str] = typer.Option(
             None, "--for",
-            help="Shape the output for a specific audience: claude-code | codex | human | reviewer.",
+            help="Shape the output for a specific audience: claude-code | codex | omp | human | reviewer.",
         ),
         kind: Optional[str] = typer.Option(
             None, "--kind",

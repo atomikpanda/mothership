@@ -337,7 +337,10 @@ def register(app: typer.Typer, get_container):
             runtime_id = Runtime(runtime)
             raw = sys.stdin.read()
             event = json.loads(raw) if raw.strip() else {}
-            if runtime_id is Runtime.CODEX:
+            if runtime_id is Runtime.CLAUDE:
+                from mship.core.claude_settings import extract_claude_edit_targets
+                targets = extract_claude_edit_targets(event)
+            elif runtime_id is Runtime.CODEX:
                 from mship.core.codex_hooks import extract_edit_targets
                 targets = extract_edit_targets(event)
             else:
@@ -363,8 +366,7 @@ def register(app: typer.Typer, get_container):
         except typer.Exit:
             raise
         except Exception:
-            if runtime != Runtime.CLAUDE.value:
-                sys.stderr.write(f"mship: {runtime} PreToolUse adapter failed open\n")
+            sys.stderr.write(f"mship: {runtime} PreToolUse adapter failed open\n")
             raise typer.Exit(code=0)
         if decision.kind is DecisionKind.DENY:
             sys.stderr.write(decision.message + "\n")
@@ -394,8 +396,7 @@ def register(app: typer.Typer, get_container):
         except typer.Exit:
             raise
         except Exception:
-            if runtime != Runtime.CLAUDE.value:
-                sys.stderr.write(f"mship: {runtime} Stop adapter failed open\n")
+            sys.stderr.write(f"mship: {runtime} Stop adapter failed open\n")
             raise typer.Exit(code=0)
         if decision.kind is DecisionKind.CONTINUE:
             print(json.dumps({"decision": "block", "reason": decision.message}))
@@ -411,8 +412,7 @@ def register(app: typer.Typer, get_container):
         try:
             decision = session_start(Runtime(runtime), Path.cwd())
         except Exception:
-            if runtime != Runtime.CLAUDE.value:
-                sys.stderr.write(f"mship: {runtime} SessionStart adapter failed open\n")
+            sys.stderr.write(f"mship: {runtime} SessionStart adapter failed open\n")
             raise typer.Exit(code=0)
         if decision.message:
             sys.stdout.write(decision.message + "\n")

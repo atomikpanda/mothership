@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -7,8 +8,15 @@ from mship.cli.output import Output
 from mship.core.config import ConfigLoader, unique_git_roots, resolve_go_task_files
 from mship.core.init import WorkspaceInitializer, DetectedRepo
 from mship.core.claude_settings import install_session_hook, install_pretooluse_guard_hook, install_stop_hook
-from mship.core.codex_hooks import install_codex_hooks
+from mship.core.codex_hooks import (
+    CODEX_FEATURE_ENABLE_COMMAND,
+    CODEX_TRUST_ACTION,
+    CodexHookCapability,
+    install_codex_hooks,
+    probe_codex_hook_capability,
+)
 from mship.core.omp_extension import install_omp_extension
+from mship.util.shell import ShellRunner
 
 
 def _install_agent_hooks_with_output(
@@ -28,17 +36,20 @@ def _install_agent_hooks_with_output(
     except Exception as e:
         output.warning(f"Stop hook install skipped: {e}")
 
+    codex_registrations_current = True
     for project_root in project_roots:
         try:
             codex = install_codex_hooks(project_root)
             line = f"Codex hooks @ {codex.path}: {codex.status}"
             if codex.message:
                 line += f" ({codex.message})"
-            if codex.status == "skipped":
-                output.warning(line)
-            else:
+            if codex.status in {"installed", "updated", "up to date"}:
                 output.success(line)
+            else:
+                codex_registrations_current = False
+                output.warning(line)
         except Exception as e:
+            codex_registrations_current = False
             output.warning(f"Codex hooks install skipped at {project_root}: {e}")
 
         try:
@@ -46,6 +57,47 @@ def _install_agent_hooks_with_output(
             output.success(f"OMP extension @ {omp.path}: {omp.status}")
         except Exception as e:
             output.warning(f"OMP extension install skipped at {project_root}: {e}")
+
+    if project_roots:
+        capability = probe_codex_hook_capability(
+            ShellRunner(),
+            ws_root,
+            codex_binary=shutil.which("codex"),
+        )
+        if not codex_registrations_current:
+            message = (
+                "Codex hook installation incomplete: one or more project "
+                "registrations were skipped or failed; run "
+                "`mship init --install-hooks`"
+            )
+            if capability.state in {
+                CodexHookCapability.DISABLED,
+                CodexHookCapability.UNAVAILABLE,
+            }:
+                message += f"; run `{CODEX_FEATURE_ENABLE_COMMAND}`"
+            output.warning(
+                f"{message}; {CODEX_TRUST_ACTION}; capability probe state: "
+                f"{capability.state.value}"
+            )
+        elif capability.state in {
+            CodexHookCapability.DISABLED,
+            CodexHookCapability.UNAVAILABLE,
+        }:
+            output.warning(
+                "Codex hooks configured but inactive: "
+                f"{capability.detail}; run `{CODEX_FEATURE_ENABLE_COMMAND}`; "
+                f"{CODEX_TRUST_ACTION}"
+            )
+        elif capability.state is CodexHookCapability.ENABLED:
+            output.warning(
+                "Codex hooks configured; capability enabled; trust still required: "
+                f"{CODEX_TRUST_ACTION}"
+            )
+        else:
+            output.warning(
+                "Codex hooks configured but not verified active: "
+                f"{capability.detail}; {CODEX_TRUST_ACTION}"
+            )
 
 
 def register(app: typer.Typer, get_container):

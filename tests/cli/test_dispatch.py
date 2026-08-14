@@ -571,6 +571,23 @@ def test_stub_flag_is_a_deprecated_noop(tmp_path: Path):
         _reset()
 
 
+def test_implementer_and_standalone_dispatch_default_to_inherit(tmp_path: Path):
+    wt = tmp_path / "wt"; wt.mkdir()
+    cfg, state_dir = _bootstrap(tmp_path, {"only": wt})
+    _override(cfg, state_dir)
+    try:
+        for mode in ("implementer", "standalone"):
+            result = runner.invoke(
+                app,
+                ["dispatch", "--task", "t", "-i", "do the thing", "--mode", mode],
+            )
+            assert result.exit_code == 0, result.output
+            assert "model: inherit" in result.output
+            assert "model=inherit" in result.output
+    finally:
+        _reset()
+
+
 def test_dispatch_model_flag_recorded(tmp_path: Path):
     from mship.core.sdd_store import SddStore
 
@@ -993,9 +1010,11 @@ def test_reviewer_record_write_preserves_review_dir(tmp_path: Path):
         assert result.exit_code == 0, result.output
         result = runner.invoke(app, ["dispatch", "--task", "t", "--mode", "reviewer"])
         assert result.exit_code == 0, result.output
+        assert "model: inherit" in result.output
+        assert "model=inherit" in result.output
         rec = SddStore(state_dir).find_for_slug("t")
         assert rec is not None and rec.mode == "reviewer"
-        assert rec.model == "sonnet"                       # reviewer builtin default
+        assert rec.model == "inherit"                      # portable builtin default
         assert rec.plan_task_id == "1" and rec.acs == ["ac2"]  # pointer fields kept
         review_dir = state_dir / "sdd" / "no-item" / "t" / "review"
         assert (review_dir / "manifest.json").is_file()    # survived the write
