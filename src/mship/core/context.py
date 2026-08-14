@@ -20,7 +20,8 @@ from mship.core.base_resolver import resolve_base
 from mship.core.config import WorkspaceConfig
 from mship.core.dispatch_models import BUILTIN_MODEL_DEFAULTS, resolve_model
 from mship.core.log import LogManager
-from mship.core.reconcile.cache import ReconcileCache
+from mship.core.reconcile.cache import CachePayload, ReconcileCache
+from mship.core.reconcile.gate import resolve_task_bases
 from mship.core.state import Task, WorkspaceState
 from mship.core.workspace_meta import read_last_sync_at
 
@@ -257,10 +258,7 @@ def _binary_matches_editable_install() -> Optional[bool]:
         return False
 
 
-def _drift_for_task(slug: str, cache: Optional[ReconcileCache]) -> str:
-    if cache is None:
-        return "unknown"
-    payload = cache.read()
+def _drift_for_task(slug: str, payload: Optional[CachePayload]) -> str:
     if payload is None:
         return "unknown"
     raw = payload.results.get(slug)
@@ -321,7 +319,7 @@ def _task_payload(
     task: Task,
     log_manager: LogManager,
     git_count: GitCounter,
-    cache: Optional[ReconcileCache],
+    drift_payload: Optional[CachePayload],
     config: WorkspaceConfig,
 ) -> dict[str, Any]:
     last_test_state, last_test_iteration = _last_test_summary(task)
@@ -367,7 +365,7 @@ def _task_payload(
         "last_test_state": last_test_state,
         "last_test_iteration": last_test_iteration,
         "last_log_entry_at": _last_log_at(log_manager, task.slug),
-        "drift": _drift_for_task(task.slug, cache),
+        "drift": _drift_for_task(task.slug, drift_payload),
     }
 
 
@@ -400,8 +398,17 @@ def build_context(
     """
     audience = build_audience_block(for_, kind)
 
+    drift_payload: Optional[CachePayload] = None
+    if cache is not None:
+        resolved_bases = resolve_task_bases(state, config)
+        base_context = {
+            slug: sorted(bases) if bases is not None else None
+            for slug, bases in resolved_bases.items()
+        }
+        drift_payload = cache.current(cache.read(), base_context=base_context)
+
     active_tasks = [
-        _task_payload(task, log_manager, git_count, cache, config)
+        _task_payload(task, log_manager, git_count, drift_payload, config)
         for task in state.tasks.values()
         if task.finished_at is None
     ]

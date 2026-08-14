@@ -356,6 +356,7 @@ def test_drift_read_from_cache(tmp_path: Path):
             # 'b' deliberately absent -> "unknown"
         },
         ignored=[],
+        base_context={"a": ["main"], "b": ["main"]},
     ))
 
     out = _build(state, _config(tmp_path), log_mgr, tmp_path,
@@ -375,11 +376,55 @@ def test_drift_unknown_when_cache_entry_malformed(tmp_path: Path):
         fetched_at=time.time(), ttl_seconds=300,
         results={"x": {"not_a_state_field": "junk"}},
         ignored=[],
+        base_context={"x": ["main"]},
     ))
 
     out = _build(state, _config(tmp_path), log_mgr, tmp_path,
                  state_dir=tmp_path, cache=cache)
     assert out["active_tasks"][0]["drift"] == "unknown"
+
+
+def test_drift_unknown_when_cache_schema_is_stale(tmp_path: Path):
+    log_mgr = LogManager(tmp_path / "logs")
+    state = WorkspaceState(tasks={"x": _task("x")})
+    cache = ReconcileCache(tmp_path)
+    cache.write(CachePayload(
+        fetched_at=time.time(),
+        ttl_seconds=300,
+        results={"x": {"state": "merged"}},
+        ignored=[],
+        schema_version=0,
+        base_context={"x": ["main"]},
+    ))
+
+    out = _build(
+        state, _config(tmp_path), log_mgr, tmp_path,
+        state_dir=tmp_path, cache=cache,
+    )
+
+    assert out["active_tasks"][0]["drift"] == "unknown"
+    assert out["last_drift_check_at"] is not None
+
+
+def test_drift_unknown_when_cache_base_context_changed(tmp_path: Path):
+    log_mgr = LogManager(tmp_path / "logs")
+    state = WorkspaceState(tasks={"x": _task("x")})
+    cache = ReconcileCache(tmp_path)
+    cache.write(CachePayload(
+        fetched_at=time.time(),
+        ttl_seconds=300,
+        results={"x": {"state": "merged"}},
+        ignored=[],
+        base_context={"x": ["release"]},
+    ))
+
+    out = _build(
+        state, _config(tmp_path), log_mgr, tmp_path,
+        state_dir=tmp_path, cache=cache,
+    )
+
+    assert out["active_tasks"][0]["drift"] == "unknown"
+    assert out["last_drift_check_at"] is not None
 
 
 def test_main_checkout_clean_dispatches_per_repo(tmp_path: Path):

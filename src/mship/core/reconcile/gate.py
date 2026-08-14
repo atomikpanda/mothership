@@ -115,6 +115,25 @@ def _resolved_task_bases(
     return frozenset(bases) if bases else None
 
 
+def resolve_task_bases(
+    state: WorkspaceState,
+    config,
+    *,
+    base_inputs_by_slug: dict[
+        str, tuple[str | None, dict[str, str]]
+    ] | None = None,
+) -> dict[str, frozenset[str] | None]:
+    """Resolve the effective base set for every task in workspace state."""
+    base_inputs_by_slug = base_inputs_by_slug or {}
+    resolved: dict[str, frozenset[str] | None] = {}
+    for task in state.tasks.values():
+        cli_base, base_map = base_inputs_by_slug.get(task.slug, (None, {}))
+        resolved[task.slug] = _resolved_task_bases(
+            task, config, cli_base=cli_base, base_map=base_map,
+        )
+    return resolved
+
+
 Fetcher = Callable[[list[str], dict[str, Path]], tuple[dict[str, PRSnapshot], dict[str, GitSnapshot]]]
 
 
@@ -173,13 +192,9 @@ def reconcile_now(
     ] | None = None,
 ) -> dict[str, Decision]:
     """Cache-first; fetch on stale; fall back on error. Never raises."""
-    base_inputs_by_slug = base_inputs_by_slug or {}
-    resolved_bases: dict[str, frozenset[str] | None] = {}
-    for task in state.tasks.values():
-        cli_base, base_map = base_inputs_by_slug.get(task.slug, (None, {}))
-        resolved_bases[task.slug] = _resolved_task_bases(
-            task, config, cli_base=cli_base, base_map=base_map,
-        )
+    resolved_bases = resolve_task_bases(
+        state, config, base_inputs_by_slug=base_inputs_by_slug,
+    )
     base_context = {
         slug: sorted(bases) if bases is not None else None
         for slug, bases in resolved_bases.items()
