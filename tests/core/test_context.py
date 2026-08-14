@@ -356,7 +356,7 @@ def test_drift_read_from_cache(tmp_path: Path):
             # 'b' deliberately absent -> "unknown"
         },
         ignored=[],
-        base_context={"a": ["main"], "b": ["main"]},
+        base_context={"a": None, "b": None},
     ))
 
     out = _build(state, _config(tmp_path), log_mgr, tmp_path,
@@ -376,7 +376,7 @@ def test_drift_unknown_when_cache_entry_malformed(tmp_path: Path):
         fetched_at=time.time(), ttl_seconds=300,
         results={"x": {"not_a_state_field": "junk"}},
         ignored=[],
-        base_context={"x": ["main"]},
+        base_context={"x": None},
     ))
 
     out = _build(state, _config(tmp_path), log_mgr, tmp_path,
@@ -394,7 +394,7 @@ def test_drift_unknown_when_cache_schema_is_stale(tmp_path: Path):
         results={"x": {"state": "merged"}},
         ignored=[],
         schema_version=0,
-        base_context={"x": ["main"]},
+        base_context={"x": None},
     ))
 
     out = _build(
