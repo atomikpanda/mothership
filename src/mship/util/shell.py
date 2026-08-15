@@ -19,20 +19,56 @@ class ShellCancelled(Exception):
 
 
 _CANCELLATION_CHECK_INTERVAL = 0.05
+_TERMINATION_GRACE_SECONDS = 1.0
+
+
+def _has_owned_process_group(proc: subprocess.Popen) -> bool:
+    pid = getattr(proc, "pid", None)
+    if os.name == "nt" or not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
 
 
 def _signal_owned_process(proc: subprocess.Popen, *, force: bool = False) -> None:
+    pid = getattr(proc, "pid", None)
     try:
-        if os.name == "nt":
-            if proc.poll() is not None:
-                return
-            proc.kill() if force else proc.terminate()
-        else:
-            # Signal the group even if its leader has already exited: children
-            # may still hold the captured pipes open and must be stopped too.
-            os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
+        if os.name != "nt" and isinstance(pid, int) and pid > 0:
+            # The group can outlive and be reaped after its leader. Abnormal
+            # cleanup still owns that group, so signal it by the original pgid.
+            os.killpg(pid, signal.SIGKILL if force else signal.SIGTERM)
+            return
+        if proc.poll() is not None:
+            return
+        proc.kill() if force else proc.terminate()
     except ProcessLookupError:
         pass
+
+
+def _terminate_owned_process_group(
+    proc: subprocess.Popen,
+    *,
+    force: bool = False,
+) -> None:
+    """Stop an abnormal command tree, including descendants of a dead leader."""
+    _signal_owned_process(proc, force=force)
+    if os.name == "nt" or not _has_owned_process_group(proc):
+        return
+
+    deadline = time.monotonic() + (0 if force else _TERMINATION_GRACE_SECONDS)
+    while _has_owned_process_group(proc):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            if not force:
+                _signal_owned_process(proc, force=True)
+            return
+        time.sleep(min(_CANCELLATION_CHECK_INTERVAL, remaining))
 
 
 def _stop_and_reap(
@@ -40,9 +76,10 @@ def _stop_and_reap(
     *,
     force: bool = False,
 ) -> tuple[str, str]:
-    _signal_owned_process(proc, force=force)
+    """Stop an owned command tree and reap its leader before returning."""
+    _terminate_owned_process_group(proc, force=force)
     try:
-        return proc.communicate(timeout=1)
+        return proc.communicate(timeout=_TERMINATION_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
         _signal_owned_process(proc, force=True)
         return proc.communicate()

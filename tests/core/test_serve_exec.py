@@ -19,9 +19,13 @@ import fcntl
 import hashlib
 import io
 import multiprocessing
+import os
+import select
+import signal
 import sys
 import tarfile
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -289,7 +293,7 @@ def _disconnect_exec_request(app, started, stopped, cleanup) -> list[dict]:
         stopped_by_disconnect = False
         try:
             assert await asyncio.to_thread(started.wait, 10)
-            stopped_by_disconnect = await asyncio.to_thread(stopped.wait, 1)
+            stopped_by_disconnect = await asyncio.to_thread(stopped.wait, 5)
         finally:
             if not stopped_by_disconnect:
                 cleanup()
@@ -566,6 +570,164 @@ def test_exec_http_disconnect_terminates_proc_after_pipe_eof(
     _disconnect_exec_request(app, started, terminated, unblock.set)
     assert reaped.is_set()
     _assert_same_task_replacement(tmp_path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+def test_cancelled_stream_kills_descendant_before_task_lock_release(
+    tmp_path,
+    monkeypatch,
+):
+    ready_path = tmp_path / "stream-descendant-ready"
+    child_code = """
+import os
+import signal
+import sys
+from pathlib import Path
+
+read_fd, write_fd = os.pipe()
+child_pid = os.fork()
+if child_pid == 0:
+    os.close(read_fd)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    os.close(1)
+    os.close(2)
+    os.write(write_fd, b"ready")
+    os.close(write_fd)
+    while True:
+        signal.pause()
+
+os.close(write_fd)
+os.read(read_fd, 5)
+os.close(read_fd)
+Path(sys.argv[1]).write_text(str(child_pid))
+while True:
+    signal.pause()
+"""
+    processes = []
+
+    class _ProcessTreeShellRunner(_FakeShellRunner):
+        def run_streaming(self, command, cwd, env=None):
+            proc = shell_module.subprocess.Popen(
+                [sys.executable, "-c", child_code, str(ready_path)],
+                cwd=tmp_path,
+                stdout=shell_module.subprocess.PIPE,
+                stderr=shell_module.subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            processes.append(proc)
+            return proc
+    signals: list[tuple[int, int]] = []
+    real_killpg = os.killpg
+
+    def observed_killpg(process_group, signum):
+        signals.append((process_group, signum))
+        return real_killpg(process_group, signum)
+
+    monkeypatch.setattr(shell_module.os, "killpg", observed_killpg)
+
+    cancel_event = threading.Event()
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path),
+        shell=_ProcessTreeShellRunner(),
+        workspace_root=tmp_path,
+        cancel_event=cancel_event,
+    )
+    errors: list[BaseException] = []
+
+    def consume_stream() -> None:
+        try:
+            list(remote_exec.run_verb_stream(
+                "run",
+                "t1",
+                ["api"],
+                None,
+                deps=deps,
+                nonce="descendantnonce",
+            ))
+        except BaseException as exc:
+            errors.append(exc)
+
+    stream_thread = threading.Thread(target=consume_stream, daemon=True)
+    stream_thread.start()
+    deadline = time.monotonic() + 5
+    while not ready_path.exists() and time.monotonic() < deadline:
+        threading.Event().wait(0.01)
+    assert ready_path.exists(), "descendant did not report readiness"
+
+    descendant_pid = int(ready_path.read_text())
+    process_group = os.getpgid(descendant_pid)
+    pid_fd = os.pidfd_open(descendant_pid) if hasattr(os, "pidfd_open") else None
+    assert process_group == processes[0].pid
+    try:
+        cancel_event.set()
+        stream_thread.join(timeout=5)
+        assert not stream_thread.is_alive(), "cancelled stream did not return"
+        assert not errors
+        assert (process_group, signal.SIGKILL) in signals
+
+        if pid_fd is not None:
+            readable, _, _ = select.select([pid_fd], [], [], 2)
+            assert readable, "descendant survived public task-lock release"
+        else:
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                proc_stat = Path(f"/proc/{descendant_pid}/stat")
+                try:
+                    if proc_stat.exists() and proc_stat.read_text().split()[2] == "Z":
+                        break
+                    os.kill(descendant_pid, 0)
+                except ProcessLookupError:
+                    break
+                threading.Event().wait(0.01)
+            else:
+                pytest.fail("descendant survived public task-lock release")
+
+        _assert_same_task_replacement(tmp_path)
+    finally:
+        if pid_fd is not None:
+            os.close(pid_fd)
+        try:
+            os.killpg(process_group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def test_normal_stream_does_not_signal_reaped_process_group(
+    tmp_path,
+    monkeypatch,
+):
+    signals = []
+
+    def record_killpg(process_group, signum):
+        signals.append((process_group, signum))
+
+    monkeypatch.setattr(shell_module.os, "killpg", record_killpg)
+
+    class _CompletedProc(_FakeProc):
+        pid = 424242
+
+        def poll(self):
+            return 0
+
+    fake = _FakeShellRunner(
+        streaming_proc=_CompletedProc(stdout_lines=["done\n"]),
+    )
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path),
+        shell=fake,
+        workspace_root=tmp_path,
+    )
+
+    assert list(remote_exec.run_verb_stream(
+        "run",
+        "t1",
+        ["api"],
+        None,
+        deps=deps,
+        nonce="normalnonce",
+    ))[-1] == b"__MSHIP_EXIT__:normalnonce 0\n"
+    assert not signals
 
 
 def test_concurrent_same_task_is_refused_while_different_task_runs(tmp_path):

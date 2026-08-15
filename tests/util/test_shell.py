@@ -1,10 +1,17 @@
+import os
+import select
+import shlex
+import signal
 import subprocess
+import sys
+import threading
+import time
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 
 import pytest
 
-from mship.util.shell import ShellRunner, ShellResult
+from mship.util.shell import ShellCancelled, ShellRunner, ShellResult
 
 
 def test_run_streaming_uses_start_new_session_on_unix():
@@ -114,3 +121,94 @@ def test_run_raises_timeout_expired_when_command_exceeds_timeout():
     runner = ShellRunner()
     with pytest.raises(subprocess.TimeoutExpired):
         runner.run("sleep 2", cwd=Path("."), timeout=0.1)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+def test_cancelled_run_kills_descendant_after_leader_exits(tmp_path):
+    ready_path = tmp_path / "descendant-ready"
+    child_code = """
+import os
+import signal
+import sys
+from pathlib import Path
+
+read_fd, write_fd = os.pipe()
+child_pid = os.fork()
+if child_pid == 0:
+    os.close(read_fd)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    os.close(1)
+    os.close(2)
+    os.write(write_fd, b"ready")
+    os.close(write_fd)
+    while True:
+        signal.pause()
+
+os.close(write_fd)
+os.read(read_fd, 5)
+os.close(read_fd)
+Path(sys.argv[1]).write_text(str(child_pid))
+while True:
+    signal.pause()
+"""
+    command = " ".join(
+        (
+            shlex.quote(sys.executable),
+            "-c",
+            shlex.quote(child_code),
+            shlex.quote(str(ready_path)),
+        )
+    )
+    cancel_event = threading.Event()
+    errors: list[BaseException] = []
+
+    def run_command() -> None:
+        try:
+            ShellRunner().run(
+                command,
+                cwd=tmp_path,
+                cancel_event=cancel_event,
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    runner_thread = threading.Thread(target=run_command, daemon=True)
+    runner_thread.start()
+    deadline = time.monotonic() + 5
+    while not ready_path.exists() and time.monotonic() < deadline:
+        threading.Event().wait(0.01)
+    assert ready_path.exists(), "descendant did not report readiness"
+
+    descendant_pid = int(ready_path.read_text())
+    process_group = os.getpgid(descendant_pid)
+    pid_fd = os.pidfd_open(descendant_pid) if hasattr(os, "pidfd_open") else None
+    try:
+        cancel_event.set()
+        runner_thread.join(timeout=5)
+        assert not runner_thread.is_alive(), "cancelled runner did not return"
+        assert len(errors) == 1
+        assert isinstance(errors[0], ShellCancelled)
+
+        if pid_fd is not None:
+            readable, _, _ = select.select([pid_fd], [], [], 2)
+            assert readable, "SIGTERM-ignoring descendant survived runner cleanup"
+        else:
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                proc_stat = Path(f"/proc/{descendant_pid}/stat")
+                try:
+                    if proc_stat.exists() and proc_stat.read_text().split()[2] == "Z":
+                        break
+                    os.kill(descendant_pid, 0)
+                except ProcessLookupError:
+                    break
+                threading.Event().wait(0.01)
+            else:
+                pytest.fail("SIGTERM-ignoring descendant survived runner cleanup")
+    finally:
+        if pid_fd is not None:
+            os.close(pid_fd)
+        try:
+            os.killpg(process_group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass

@@ -56,7 +56,6 @@ import hashlib
 import io
 import queue
 import shutil
-import subprocess
 import tarfile
 import tempfile
 import threading
@@ -69,7 +68,7 @@ from mship.core import remote_setup
 from mship.core.config import WorkspaceConfig
 from mship.core.run_ref import RunRefNameError
 from mship.core.run_ref import run_ref as build_run_ref
-from mship.util.shell import ShellCancelled
+from mship.util.shell import ShellCancelled, _terminate_owned_process_group
 from mship.util.taskfile import taskfile_has_target
 
 VERBS: tuple[str, ...] = ("run", "capture", "build")
@@ -456,81 +455,28 @@ def _stream_proc_lines(
     return True
 
 
-def _terminate_proc(proc) -> None:
-    """Best-effort stop and reap a possibly-still-running task subprocess.
-
-    Called from `run_verb_stream`'s per-repo `finally` so a client disconnect
-    does not orphan the go-task process or release its task lock while the
-    process is still alive.
-    """
-    if proc is None:
+def _terminate_proc(proc, *, completed: bool) -> None:
+    """Stop abnormal task trees; leave normally reaped groups untouched."""
+    if proc is None or completed:
         return
-    poll = getattr(proc, "poll", None)
+
     try:
-        if callable(poll) and poll() is not None:
-            return
+        _terminate_owned_process_group(proc)
     except Exception:
-        pass
-
-    import os as _os
-    import signal as _signal
-
-    stopped = False
-    pid = getattr(proc, "pid", None)
-    if (
-        _os.name != "nt"
-        and isinstance(pid, int)
-        and pid > 0
-        and hasattr(_os, "killpg")
-    ):
-        try:
-            _os.killpg(pid, _signal.SIGTERM)
-            stopped = True
-        except (ProcessLookupError, OSError):
-            pass
-    if not stopped:
+        # Preserve cleanup for lightweight Popen-shaped fakes that do not expose
+        # the full process-group surface.
         terminate = getattr(proc, "terminate", None)
-        if callable(terminate):
-            try:
-                terminate()
-                stopped = True
-            except Exception:
-                pass
-    if not stopped:
-        return
-
+        if not callable(terminate):
+            return
+        try:
+            terminate()
+        except Exception:
+            return
     wait = getattr(proc, "wait", None)
     if not callable(wait):
         return
     try:
-        wait(timeout=1)
-        return
-    except TypeError:
-        # Lightweight test doubles commonly expose wait() without Popen's
-        # timeout parameter; termination above makes that call nonblocking.
-        try:
-            wait()
-        except Exception:
-            pass
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    except Exception:
-        return
-
-    try:
-        if (
-            _os.name != "nt"
-            and isinstance(pid, int)
-            and pid > 0
-            and hasattr(_os, "killpg")
-        ):
-            _os.killpg(pid, _signal.SIGKILL)
-        else:
-            kill = getattr(proc, "kill", None)
-            if callable(kill):
-                kill()
-        wait(timeout=1)
+        wait()
     except Exception:
         pass
 
@@ -788,14 +734,16 @@ def _run_verb_stream_unlocked(
         yield f"setup: {repo_name} (task {actual_setup})\n".encode("utf-8")
         env_runner = repo_config.env_runner or config.env_runner
         command = shell.build_command(f"task {actual_setup}", env_runner)
+        completed = False
         proc = None
         try:
             proc = shell.run_streaming(command, cwd=worktree_path, env=None)
             if not (yield from _stream_proc_lines(proc, deps.cancel_event)):
                 return False
             setup_code = proc.wait()
+            completed = True
         finally:
-            _terminate_proc(proc)
+            _terminate_proc(proc, completed=completed)
 
         if setup_code != 0:
             # Surface setup's OWN failure rather than letting the verb run
@@ -847,6 +795,7 @@ def _run_verb_stream_unlocked(
         # and while the task subprocess is still running (FIX 8).
         out_dir: Path | None = None
         proc = None
+        completed = False
         try:
             env: dict[str, str] | None = None
             if verb == "capture":
@@ -863,6 +812,7 @@ def _run_verb_stream_unlocked(
             if not (yield from _stream_proc_lines(proc, deps.cancel_event)):
                 return
             exit_code = proc.wait()
+            completed = True
 
             if verb == "capture":
                 artifacts = _cap.discover_artifacts(out_dir, kinds or []) if exit_code == 0 else []
@@ -880,7 +830,7 @@ def _run_verb_stream_unlocked(
                     ).encode("utf-8")
                     exit_code = 1
         finally:
-            _terminate_proc(proc)
+            _terminate_proc(proc, completed=completed)
             if out_dir is not None:
                 shutil.rmtree(out_dir, ignore_errors=True)
 
