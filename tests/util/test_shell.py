@@ -1,5 +1,4 @@
 import os
-import select
 import shlex
 import signal
 import subprocess
@@ -123,7 +122,10 @@ def test_run_raises_timeout_expired_when_command_exceeds_timeout():
         runner.run("sleep 2", cwd=Path("."), timeout=0.1)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="Linux /proc process-state contract",
+)
 def test_cancelled_run_kills_descendant_after_leader_exits(tmp_path):
     ready_path = tmp_path / "descendant-ready"
     child_code = """
@@ -181,7 +183,7 @@ while True:
 
     descendant_pid = int(ready_path.read_text())
     process_group = os.getpgid(descendant_pid)
-    pid_fd = os.pidfd_open(descendant_pid) if hasattr(os, "pidfd_open") else None
+    proc_stat = Path(f"/proc/{descendant_pid}/stat")
     try:
         cancel_event.set()
         runner_thread.join(timeout=5)
@@ -189,25 +191,15 @@ while True:
         assert len(errors) == 1
         assert isinstance(errors[0], ShellCancelled)
 
-        if pid_fd is not None:
-            readable, _, _ = select.select([pid_fd], [], [], 2)
-            assert readable, "SIGTERM-ignoring descendant survived runner cleanup"
-        else:
-            deadline = time.monotonic() + 2
-            while time.monotonic() < deadline:
-                proc_stat = Path(f"/proc/{descendant_pid}/stat")
-                try:
-                    if proc_stat.exists() and proc_stat.read_text().split()[2] == "Z":
-                        break
-                    os.kill(descendant_pid, 0)
-                except ProcessLookupError:
-                    break
-                threading.Event().wait(0.01)
-            else:
-                pytest.fail("SIGTERM-ignoring descendant survived runner cleanup")
+        try:
+            descendant_state = proc_stat.read_text().split()[2]
+        except FileNotFoundError:
+            descendant_state = None
+        assert descendant_state in {None, "X", "Z"}, (
+            "SIGTERM-ignoring descendant was executable when runner cleanup returned: "
+            f"{descendant_state}"
+        )
     finally:
-        if pid_fd is not None:
-            os.close(pid_fd)
         try:
             os.killpg(process_group, signal.SIGKILL)
         except ProcessLookupError:

@@ -20,7 +20,6 @@ import hashlib
 import io
 import multiprocessing
 import os
-import select
 import signal
 import sys
 import tarfile
@@ -572,7 +571,10 @@ def test_exec_http_disconnect_terminates_proc_after_pipe_eof(
     _assert_same_task_replacement(tmp_path)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="Linux /proc process-state contract",
+)
 def test_cancelled_stream_kills_descendant_before_task_lock_release(
     tmp_path,
     monkeypatch,
@@ -657,7 +659,7 @@ while True:
 
     descendant_pid = int(ready_path.read_text())
     process_group = os.getpgid(descendant_pid)
-    pid_fd = os.pidfd_open(descendant_pid) if hasattr(os, "pidfd_open") else None
+    proc_stat = Path(f"/proc/{descendant_pid}/stat")
     assert process_group == processes[0].pid
     try:
         cancel_event.set()
@@ -666,27 +668,16 @@ while True:
         assert not errors
         assert (process_group, signal.SIGKILL) in signals
 
-        if pid_fd is not None:
-            readable, _, _ = select.select([pid_fd], [], [], 2)
-            assert readable, "descendant survived public task-lock release"
-        else:
-            deadline = time.monotonic() + 2
-            while time.monotonic() < deadline:
-                proc_stat = Path(f"/proc/{descendant_pid}/stat")
-                try:
-                    if proc_stat.exists() and proc_stat.read_text().split()[2] == "Z":
-                        break
-                    os.kill(descendant_pid, 0)
-                except ProcessLookupError:
-                    break
-                threading.Event().wait(0.01)
-            else:
-                pytest.fail("descendant survived public task-lock release")
-
+        try:
+            descendant_state = proc_stat.read_text().split()[2]
+        except FileNotFoundError:
+            descendant_state = None
+        assert descendant_state in {None, "X", "Z"}, (
+            "descendant was executable when the public task lock was released: "
+            f"{descendant_state}"
+        )
         _assert_same_task_replacement(tmp_path)
     finally:
-        if pid_fd is not None:
-            os.close(pid_fd)
         try:
             os.killpg(process_group, signal.SIGKILL)
         except ProcessLookupError:

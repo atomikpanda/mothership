@@ -1,6 +1,7 @@
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -26,14 +27,44 @@ def _has_owned_process_group(proc: subprocess.Popen) -> bool:
     pid = getattr(proc, "pid", None)
     if os.name == "nt" or not isinstance(pid, int) or pid <= 0:
         return False
+    return _has_owned_process_group_id(pid)
+
+
+def _linux_group_has_executable_member(process_group: int) -> bool:
+    unreadable = False
     try:
-        os.killpg(pid, 0)
+        entries = os.scandir("/proc")
+    except OSError:
+        return _has_owned_process_group_id(process_group)
+
+    with entries:
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat = (Path(entry.path) / "stat").read_text()
+                fields = stat[stat.rfind(")") + 2 :].split()
+                state = fields[0]
+                member_group = int(fields[2])
+            except FileNotFoundError:
+                continue
+            except (OSError, IndexError, ValueError):
+                unreadable = True
+                continue
+            if member_group == process_group and state not in {"X", "Z", "x"}:
+                return True
+
+    return unreadable and _has_owned_process_group_id(process_group)
+
+
+def _has_owned_process_group_id(process_group: int) -> bool:
+    try:
+        os.killpg(process_group, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
     return True
-
 
 
 def _signal_owned_process(proc: subprocess.Popen, *, force: bool = False) -> None:
@@ -51,22 +82,40 @@ def _signal_owned_process(proc: subprocess.Popen, *, force: bool = False) -> Non
         pass
 
 
+def _wait_for_owned_process_group_quiescence(proc: subprocess.Popen) -> None:
+    pid = getattr(proc, "pid", None)
+    if os.name == "nt" or not isinstance(pid, int) or pid <= 0:
+        return
+
+    if sys.platform.startswith("linux"):
+        while _linux_group_has_executable_member(pid):
+            time.sleep(_CANCELLATION_CHECK_INTERVAL)
+        return
+
+    while _has_owned_process_group_id(pid):
+        time.sleep(_CANCELLATION_CHECK_INTERVAL)
+
+
 def _terminate_owned_process_group(
     proc: subprocess.Popen,
     *,
     force: bool = False,
 ) -> None:
-    """Stop an abnormal command tree, including descendants of a dead leader."""
+    """Stop an abnormal command tree and wait until no member can execute."""
     _signal_owned_process(proc, force=force)
     if os.name == "nt" or not _has_owned_process_group(proc):
         return
 
-    deadline = time.monotonic() + (0 if force else _TERMINATION_GRACE_SECONDS)
+    if force:
+        _wait_for_owned_process_group_quiescence(proc)
+        return
+
+    deadline = time.monotonic() + _TERMINATION_GRACE_SECONDS
     while _has_owned_process_group(proc):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            if not force:
-                _signal_owned_process(proc, force=True)
+            _signal_owned_process(proc, force=True)
+            _wait_for_owned_process_group_quiescence(proc)
             return
         time.sleep(min(_CANCELLATION_CHECK_INTERVAL, remaining))
 
