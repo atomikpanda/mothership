@@ -70,7 +70,12 @@ from mship.core import remote_setup
 from mship.core.config import WorkspaceConfig
 from mship.core.run_ref import RunRefNameError
 from mship.core.run_ref import run_ref as build_run_ref
-from mship.util.shell import ShellCancelled, _terminate_owned_process_group
+from mship.util.shell import (
+    ShellCancellationUnsupported,
+    ShellCancelled,
+    _terminate_owned_process_group,
+    ensure_cancellable_shell_supported,
+)
 from mship.util.taskfile import taskfile_has_target
 
 VERBS: tuple[str, ...] = ("run", "capture", "build")
@@ -135,8 +140,9 @@ class RemoteExecDeps:
     double duty for git commands and the streamed task run (see
     `ShellLike`). `workspace_root` anchors where remote worktrees live:
     `<workspace_root>/.worktrees/<task>/<repo>`, mirroring the local
-    `WorktreeManager` hub layout. `cancel_event` lets the HTTP response stop a
-    quiet subprocess promptly when its client disconnects.
+    `WorktreeManager` hub layout. `cancel_event` requests contained POSIX
+    process-group cleanup when the client disconnects; the public runner
+    rejects hosts that cannot provide that guarantee before taking the lock.
     """
 
     config: WorkspaceConfig
@@ -524,7 +530,19 @@ def run_verb_stream(
     nonce: str,
     run_ref_repos: list[str] | None = None,
 ) -> Iterator[bytes]:
-    """Run one remote execution stream while owning its per-task process lock."""
+    """Run one remote execution stream while owning its per-task process lock.
+
+    Cancellable streams fail with framed infrastructure data before locking or
+    execution when this host cannot safely observe process-group cleanup.
+    """
+    if deps.cancel_event is not None:
+        try:
+            ensure_cancellable_shell_supported()
+        except ShellCancellationUnsupported as exc:
+            yield f"error: remote execution unavailable: {exc}\n".encode("utf-8")
+            yield f"{EXIT_MARKER}:{nonce} 1\n".encode("utf-8")
+            return
+
     try:
         lock_file = _acquire_task_execution_lock(deps.workspace_root, task)
     except BlockingIOError:

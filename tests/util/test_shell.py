@@ -141,6 +141,91 @@ def test_run_argv_passes_shell_metacharacters_literally(tmp_path):
     assert not side_effect.exists()
 
 
+def _successful_popen():
+    popen = MagicMock()
+    popen.return_value.communicate.return_value = ("ok\n", "")
+    popen.return_value.returncode = 0
+    return popen
+
+
+def test_cancellable_run_argv_rejects_windows_before_spawn(monkeypatch):
+    cwd = Path(".")
+    popen = _successful_popen()
+    monkeypatch.setattr(
+        shell_module.subprocess,
+        "CREATE_NEW_PROCESS_GROUP",
+        0x00000200,
+        raising=False,
+    )
+    monkeypatch.setattr(shell_module.os, "name", "nt")
+    monkeypatch.setattr(shell_module.subprocess, "Popen", popen)
+
+    with pytest.raises(RuntimeError, match="Windows") as exc_info:
+        ShellRunner().run_argv(
+            ["command"],
+            cwd=cwd,
+            cancel_event=threading.Event(),
+        )
+
+    assert exc_info.type.__name__ == "ShellCancellationUnsupported"
+    popen.assert_not_called()
+
+
+def test_cancellable_run_argv_rejects_unreadable_linux_proc_before_spawn(
+    tmp_path,
+    monkeypatch,
+):
+    popen = _successful_popen()
+    monkeypatch.setattr(shell_module.os, "name", "posix")
+    monkeypatch.setattr(shell_module.sys, "platform", "linux")
+    monkeypatch.setattr(
+        shell_module,
+        "_PROC_ROOT",
+        tmp_path / "unavailable-proc",
+        raising=False,
+    )
+    monkeypatch.setattr(shell_module.subprocess, "Popen", popen)
+
+    with pytest.raises(RuntimeError, match="process-status") as exc_info:
+        ShellRunner().run_argv(
+            ["command"],
+            cwd=tmp_path,
+            cancel_event=threading.Event(),
+        )
+
+    assert exc_info.type.__name__ == "ShellCancellationUnsupported"
+    popen.assert_not_called()
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_cancellable_run_argv_accepts_supported_posix_hosts(
+    tmp_path,
+    monkeypatch,
+    platform,
+):
+    proc_root = tmp_path / "proc"
+    if platform == "linux":
+        process_dir = proc_root / "123"
+        process_dir.mkdir(parents=True)
+        (process_dir / "stat").write_bytes(
+            b"123 (python) S 1 123 0 0 0 0 0\n"
+        )
+    popen = _successful_popen()
+    monkeypatch.setattr(shell_module.os, "name", "posix")
+    monkeypatch.setattr(shell_module.sys, "platform", platform)
+    monkeypatch.setattr(shell_module, "_PROC_ROOT", proc_root, raising=False)
+    monkeypatch.setattr(shell_module.subprocess, "Popen", popen)
+
+    result = ShellRunner().run_argv(
+        ["command"],
+        cwd=tmp_path,
+        cancel_event=threading.Event(),
+    )
+
+    assert result.returncode == 0
+    popen.assert_called_once()
+
+
 @pytest.mark.skipif(
     not sys.platform.startswith("linux"),
     reason="Linux /proc process-state contract",

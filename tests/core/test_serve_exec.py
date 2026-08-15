@@ -954,6 +954,105 @@ def test_concurrent_process_contends_for_same_task_lock(tmp_path):
     assert proc.exitcode == 0
 
 
+
+def _make_linux_proc_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setattr(shell_module.os, "name", "posix")
+    monkeypatch.setattr(shell_module.sys, "platform", "linux")
+    monkeypatch.setattr(
+        shell_module,
+        "_PROC_ROOT",
+        tmp_path / "unavailable-proc",
+        raising=False,
+    )
+
+
+def test_cancellable_remote_preflight_fails_before_lock_or_shell_work(
+    tmp_path,
+    monkeypatch,
+):
+    _make_linux_proc_unavailable(tmp_path, monkeypatch)
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["must not run\n"]),
+    )
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path),
+        shell=fake,
+        workspace_root=tmp_path,
+        cancel_event=threading.Event(),
+    )
+
+    lines = list(remote_exec.run_verb_stream(
+        "run",
+        "t1",
+        ["api"],
+        None,
+        deps=deps,
+        nonce="unsupportednonce",
+    ))
+
+    assert b"remote execution unavailable" in lines[0]
+    assert b"process-status" in lines[0]
+    assert lines[-1] == b"__MSHIP_EXIT__:unsupportednonce 1\n"
+    assert not (tmp_path / ".mothership" / "remote-exec-locks").exists()
+    assert not fake.run_calls
+    assert not fake.streaming_calls
+
+
+def test_exec_cancellable_preflight_failure_is_framed_before_work(
+    tmp_path,
+    monkeypatch,
+):
+    _make_linux_proc_unavailable(tmp_path, monkeypatch)
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["must not run\n"]),
+    )
+    _patch_shell(monkeypatch, fake)
+
+    response = TestClient(_app(tmp_path)).post(
+        "/exec/run",
+        json={"task": "t1", "repos": ["api"]},
+    )
+
+    nonce = _nonce_of(response)
+    lines = response.content.splitlines()
+    assert response.status_code == 200
+    assert b"remote execution unavailable" in lines[0]
+    assert b"process-status" in lines[0]
+    assert lines[-1] == _exit_line(nonce, 1).encode()
+    assert not (tmp_path / ".mothership" / "remote-exec-locks").exists()
+    assert not fake.run_calls
+    assert not fake.streaming_calls
+
+
+def test_direct_remote_without_cancellation_does_not_require_linux_proc(
+    tmp_path,
+    monkeypatch,
+):
+    _make_linux_proc_unavailable(tmp_path, monkeypatch)
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["ran\n"]),
+    )
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path),
+        shell=fake,
+        workspace_root=tmp_path,
+    )
+
+    lines = list(remote_exec.run_verb_stream(
+        "run",
+        "t1",
+        ["api"],
+        None,
+        deps=deps,
+        nonce="directnonce",
+    ))
+
+    assert lines[-2:] == [
+        b"ran\n",
+        b"__MSHIP_EXIT__:directnonce 0\n",
+    ]
+    assert fake.streaming_calls
+
 def test_task_lock_failure_to_create_directory_fails_closed(tmp_path):
     (tmp_path / ".mothership").write_text("not a directory")
     fake = _FakeShellRunner(

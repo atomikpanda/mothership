@@ -20,8 +20,13 @@ class ShellCancelled(Exception):
     """A cancellable shell command was stopped before it completed."""
 
 
+class ShellCancellationUnsupported(RuntimeError):
+    """This host cannot safely contain and observe a cancellable command."""
+
+
 _CANCELLATION_CHECK_INTERVAL = 0.05
 _TERMINATION_GRACE_SECONDS = 1.0
+_PROC_ROOT = "/proc"
 
 
 def _has_owned_process_group(proc: subprocess.Popen) -> bool:
@@ -31,10 +36,58 @@ def _has_owned_process_group(proc: subprocess.Popen) -> bool:
     return _has_owned_process_group_id(pid)
 
 
+def _read_linux_process_status(process_dir: Path) -> tuple[bytes, int]:
+    stat = (process_dir / "stat").read_bytes()
+    closing_paren = stat.rfind(b")")
+    if closing_paren < 0:
+        raise ValueError("process stat has no command boundary")
+    fields = stat[closing_paren + 2 :].split()
+    return fields[0], int(fields[2])
+
+
+def ensure_cancellable_shell_supported() -> None:
+    """Fail before spawn unless cancellable process trees are observable."""
+    if os.name != "posix":
+        platform = "Windows" if os.name == "nt" else os.name
+        raise ShellCancellationUnsupported(
+            "cancellable shell execution requires POSIX process groups; "
+            f"{platform} is unsupported"
+        )
+    if not sys.platform.startswith("linux"):
+        return
+
+    try:
+        entries = os.scandir(_PROC_ROOT)
+    except OSError as exc:
+        raise ShellCancellationUnsupported(
+            "cancellable shell execution requires a readable Linux "
+            f"process-status filesystem at {_PROC_ROOT}"
+        ) from exc
+
+    last_error: Exception | None = None
+    with entries:
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                _read_linux_process_status(Path(entry.path))
+            except FileNotFoundError:
+                continue
+            except (OSError, IndexError, ValueError) as exc:
+                last_error = exc
+                continue
+            return
+
+    raise ShellCancellationUnsupported(
+        "cancellable shell execution requires readable, parseable numeric "
+        f"process status entries at {_PROC_ROOT}"
+    ) from last_error
+
+
 def _linux_group_has_executable_member(process_group: int) -> bool:
     found_member = False
     try:
-        entries = os.scandir("/proc")
+        entries = os.scandir(_PROC_ROOT)
     except OSError:
         return _has_owned_process_group_id(process_group)
 
@@ -43,10 +96,9 @@ def _linux_group_has_executable_member(process_group: int) -> bool:
             if not entry.name.isdigit():
                 continue
             try:
-                stat = (Path(entry.path) / "stat").read_bytes()
-                fields = stat[stat.rfind(b")") + 2 :].split()
-                state = fields[0]
-                member_group = int(fields[2])
+                state, member_group = _read_linux_process_status(
+                    Path(entry.path)
+                )
             except FileNotFoundError:
                 continue
             except (OSError, IndexError, ValueError):
@@ -199,7 +251,14 @@ class ShellRunner:
         timeout: float | None = None,
         cancel_event: threading.Event | None = None,
     ) -> ShellResult:
-        """Run structured arguments without a shell, with optional cancellation."""
+        """Run structured arguments without a shell.
+
+        Cancellation requires POSIX process groups. Linux additionally requires
+        readable process status so cleanup can distinguish executable members
+        from zombies before returning.
+        """
+        if cancel_event is not None:
+            ensure_cancellable_shell_supported()
         run_env = None
         if env:
             run_env = {**os.environ, **env}
@@ -224,11 +283,8 @@ class ShellRunner:
             "stderr": subprocess.PIPE,
             "text": True,
             "env": run_env,
+            "start_new_session": True,
         }
-        if os.name == "nt":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-        else:
-            kwargs["start_new_session"] = True
         proc = subprocess.Popen(args, **kwargs)
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
