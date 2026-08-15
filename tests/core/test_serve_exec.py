@@ -30,6 +30,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import ClientDisconnect
 
 from mship.core import remote_exec
 from mship.core.config import RepoConfig, WorkspaceConfig
@@ -486,6 +487,78 @@ def test_exec_http_disconnect_terminates_quiet_proc_and_releases_task_lock(
     _patch_shell(monkeypatch, fake)
     app = _app(tmp_path)
     _disconnect_exec_request(app, started, terminated, unblock.set)
+    _assert_same_task_replacement(tmp_path)
+
+
+def test_exec_asgi24_send_disconnect_reaps_proc_and_releases_task_lock(
+    tmp_path,
+    monkeypatch,
+):
+    started = threading.Event()
+    terminated = threading.Event()
+    reaped = threading.Event()
+    unblock = threading.Event()
+
+    class _OneLineAliveProc:
+        pid = None
+        stdout = _GatedStdout(
+            ["owned\n", ""],
+            gate=unblock,
+            gate_before=1,
+        )
+        stderr = io.StringIO("")
+
+        def wait(self):
+            unblock.wait(timeout=5)
+            reaped.set()
+            return 0
+
+        def poll(self):
+            return 0 if unblock.is_set() else None
+
+        def terminate(self):
+            terminated.set()
+            unblock.set()
+
+    class _SignalingShellRunner(_FakeShellRunner):
+        def run_streaming(self, command, cwd, env=None):
+            proc = super().run_streaming(command, cwd, env=env)
+            started.set()
+            return proc
+
+    fake = _SignalingShellRunner(streaming_proc=_OneLineAliveProc())
+    _patch_shell(monkeypatch, fake)
+    app = _app(tmp_path)
+    scope = _exec_asgi_scope()
+    scope["asgi"] = {"version": "3.0", "spec_version": "2.4"}
+    receive_calls = 0
+
+    async def receive():
+        nonlocal receive_calls
+        receive_calls += 1
+        if receive_calls == 1:
+            return {
+                "type": "http.request",
+                "body": b'{"task":"t1","repos":["api"]}',
+                "more_body": False,
+            }
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message["body"]:
+            assert started.is_set()
+            raise OSError("client disconnected")
+
+    try:
+        with pytest.raises(ClientDisconnect):
+            asyncio.run(app(scope, receive, send))
+    finally:
+        unblock.set()
+
+    assert terminated.is_set()
+    assert reaped.is_set()
+    assert receive_calls == 1
     _assert_same_task_replacement(tmp_path)
 
 

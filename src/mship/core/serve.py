@@ -1547,6 +1547,7 @@ def create_app(
 
     import anyio
     from fastapi.responses import StreamingResponse
+    from starlette.requests import ClientDisconnect
 
     from mship.core import remote_exec
     from mship.core.run_ref import RunRefNameError, canonical_run_ref_segment
@@ -1566,28 +1567,40 @@ def create_app(
                 self._cancel_event.set()
 
         async def __call__(self, scope, receive, send):
+            # Older Starlette versions in our supported FastAPI range do not
+            # implement the ASGI 2.4 send-error disconnect contract.
+            spec_version = tuple(map(
+                int,
+                scope.get("asgi", {}).get("spec_version", "2.0").split("."),
+            ))
             try:
-                try:
-                    async with anyio.create_task_group() as task_group:
-                        async def wrap(func):
-                            await func()
-                            task_group.cancel_scope.cancel()
+                if spec_version >= (2, 4):
+                    try:
+                        await self.stream_response(send)
+                    except OSError:
+                        raise ClientDisconnect()
+                else:
+                    try:
+                        async with anyio.create_task_group() as task_group:
+                            async def wrap(func):
+                                await func()
+                                task_group.cancel_scope.cancel()
 
-                        task_group.start_soon(
-                            wrap,
-                            partial(self.stream_response, send),
+                            task_group.start_soon(
+                                wrap,
+                                partial(self.stream_response, send),
+                            )
+                            await wrap(partial(self.listen_for_disconnect, receive))
+                    except BaseExceptionGroup as exceptions:
+                        if len(exceptions.exceptions) != 1:
+                            raise
+                        exception = exceptions.exceptions[0]
+                        context = (
+                            None
+                            if exception.__suppress_context__
+                            else exception.__context__
                         )
-                        await wrap(partial(self.listen_for_disconnect, receive))
-                except BaseExceptionGroup as exceptions:
-                    if len(exceptions.exceptions) != 1:
-                        raise
-                    exception = exceptions.exceptions[0]
-                    context = (
-                        None
-                        if exception.__suppress_context__
-                        else exception.__context__
-                    )
-                    raise exception from exception.__cause__ or context
+                        raise exception from exception.__cause__ or context
             finally:
                 self._cancel_event.set()
                 self._sync_iterator.close()
