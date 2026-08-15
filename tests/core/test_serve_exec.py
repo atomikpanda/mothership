@@ -274,7 +274,14 @@ def _exec_asgi_scope() -> dict:
     }
 
 
-def _disconnect_exec_request(app, started, stopped, cleanup) -> list[dict]:
+def _disconnect_exec_request(
+    app,
+    started,
+    stopped,
+    cleanup,
+    *,
+    spec_version: str = "2.3",
+) -> list[dict]:
     response_messages: list[dict] = []
     request_sent = False
 
@@ -288,15 +295,18 @@ def _disconnect_exec_request(app, started, stopped, cleanup) -> list[dict]:
                 "more_body": False,
             }
         assert await asyncio.to_thread(started.wait, 10)
+        assert [message["type"] for message in response_messages] == [
+            "http.response.start",
+        ]
         return {"type": "http.disconnect"}
 
     async def send(message):
         response_messages.append(message)
 
     async def disconnect_request() -> bool:
-        app_task = asyncio.create_task(
-            app(_exec_asgi_scope(), receive, send),
-        )
+        scope = _exec_asgi_scope()
+        scope["asgi"]["spec_version"] = spec_version
+        app_task = asyncio.create_task(app(scope, receive, send))
         stopped_by_disconnect = False
         try:
             assert await asyncio.to_thread(started.wait, 10)
@@ -490,6 +500,67 @@ def test_exec_http_disconnect_terminates_quiet_proc_and_releases_task_lock(
     _assert_same_task_replacement(tmp_path)
 
 
+def test_exec_asgi24_idle_disconnect_reaps_proc_and_releases_task_lock(
+    tmp_path,
+    monkeypatch,
+):
+    started = threading.Event()
+    terminated = threading.Event()
+    reaped = threading.Event()
+    unblock = threading.Event()
+
+    class _BlockingStream:
+        def readline(self):
+            unblock.wait(timeout=5)
+            return ""
+
+        def close(self):
+            pass
+
+    class _QuietProc:
+        pid = None
+        stdout = _BlockingStream()
+        stderr = _BlockingStream()
+
+        def wait(self):
+            unblock.wait(timeout=5)
+            reaped.set()
+            return 0
+
+        def poll(self):
+            return 0 if unblock.is_set() else None
+
+        def terminate(self):
+            terminated.set()
+            unblock.set()
+
+    class _SignalingShellRunner(_FakeShellRunner):
+        def run_streaming(self, command, cwd, env=None):
+            proc = super().run_streaming(command, cwd, env=env)
+            started.set()
+            return proc
+
+    fake = _SignalingShellRunner(streaming_proc=_QuietProc())
+    _patch_shell(monkeypatch, fake)
+    app = _app(tmp_path)
+
+    messages = _disconnect_exec_request(
+        app,
+        started,
+        terminated,
+        unblock.set,
+        spec_version="2.4",
+    )
+
+    assert reaped.is_set()
+    assert all(
+        not message.get("body")
+        for message in messages
+        if message["type"] == "http.response.body"
+    )
+    _assert_same_task_replacement(tmp_path)
+
+
 def test_exec_asgi24_send_disconnect_reaps_proc_and_releases_task_lock(
     tmp_path,
     monkeypatch,
@@ -558,7 +629,7 @@ def test_exec_asgi24_send_disconnect_reaps_proc_and_releases_task_lock(
 
     assert terminated.is_set()
     assert reaped.is_set()
-    assert receive_calls == 1
+    assert receive_calls == 2
     _assert_same_task_replacement(tmp_path)
 
 
