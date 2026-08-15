@@ -1549,7 +1549,7 @@ def create_app(
     from fastapi.responses import StreamingResponse
 
     from mship.core import remote_exec
-    from mship.core.run_ref import is_run_ref_segment
+    from mship.core.run_ref import RunRefNameError, canonical_run_ref_segment
 
     class _RemoteExecStreamingResponse(StreamingResponse):
         """Own the sync generator until HTTP streaming has fully stopped."""
@@ -1595,9 +1595,9 @@ def create_app(
             if self.background is not None:
                 await self.background()
 
-    # A task name becomes both a `.worktrees` path segment and shell-backed
-    # git/task input. Validate it against the shared run-ref segment contract
-    # before any remote work or streaming response begins.
+    # A task name becomes both a `.worktrees` path segment and git/task input.
+    # Canonicalize it at the authenticated endpoint before any remote work or
+    # streaming response begins.
 
     @app.post("/exec/{verb}")
     async def post_exec(verb: str, body: ExecBody):
@@ -1616,7 +1616,9 @@ def create_app(
                     "restart `mship serve --relay`"
                 ),
             )
-        if not is_run_ref_segment(body.task):
+        try:
+            task = canonical_run_ref_segment(body.task)
+        except RunRefNameError:
             raise HTTPException(status_code=400, detail="invalid task name")
         cancel_event = threading.Event()
         deps = remote_exec.RemoteExecDeps(
@@ -1635,7 +1637,7 @@ def create_app(
         # The response owns the sync generator and signals its subprocess drain
         # before waiting for AnyIO's in-flight threadpool `next()` to return.
         gen = remote_exec.run_verb_stream(
-            verb, body.task, body.repos, body.platform,
+            verb, task, body.repos, body.platform,
             kind=body.kind, deps=deps, nonce=nonce,
             run_ref_repos=body.run_ref_repos,
         )

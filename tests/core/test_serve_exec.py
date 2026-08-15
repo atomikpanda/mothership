@@ -972,6 +972,76 @@ def test_run_verb_stream_unknown_repo_among_known_ones_rejects_before_any_task_r
     assert not fake.streaming_calls
 
 
+def test_generator_selects_server_owned_repo_names_preserving_request_order(
+    tmp_path,
+    monkeypatch,
+):
+    config = _config(tmp_path)
+    server_api = next(iter(config.repos))
+    server_web = "".join(["w", "eb"])
+    web_path = tmp_path / "web"
+    web_path.mkdir()
+    config.repos[server_web] = RepoConfig(path=web_path, type="service")
+
+    external_api = (" " + server_api)[1:]
+    external_web = (" " + server_web)[1:]
+    assert external_api == server_api and external_api is not server_api
+    assert external_web == server_web and external_web is not server_web
+
+    materialized_names = []
+    run_ref_names = []
+
+    def observe_materialize(
+        shell,
+        repo_path,
+        worktree_path,
+        branch,
+        *,
+        repo_name,
+        run_ref=None,
+        cancel_event=None,
+    ):
+        materialized_names.append(repo_name)
+
+    def observe_run_ref(task, repo):
+        run_ref_names.append(repo)
+        return f"refs/mship/run/{task}/{repo}"
+
+    monkeypatch.setattr(remote_exec, "materialize_worktree", observe_materialize)
+    monkeypatch.setattr(remote_exec, "build_run_ref", observe_run_ref)
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["ok\n"]),
+    )
+    deps = remote_exec.RemoteExecDeps(
+        config=config,
+        shell=fake,
+        workspace_root=tmp_path,
+    )
+
+    lines = list(remote_exec.run_verb_stream(
+        "run",
+        "t1",
+        [external_web, external_api, external_web],
+        None,
+        deps=deps,
+        nonce="canonicalrepos",
+        run_ref_repos=[external_web, external_api, external_web],
+    ))
+
+    assert lines[-1] == b"__MSHIP_EXIT__:canonicalrepos 0\n"
+    assert len(materialized_names) == 2
+    assert materialized_names[0] is server_web
+    assert materialized_names[1] is server_api
+    assert len(run_ref_names) == 2
+    assert any(name is server_api for name in run_ref_names)
+    assert any(name is server_web for name in run_ref_names)
+    assert [call["cwd"].name for call in fake.streaming_calls] == [
+        server_web,
+        server_api,
+        server_web,
+    ]
+
+
 def test_exec_unknown_repo_in_request_fails_cleanly_not_500(tmp_path, monkeypatch):
     """Through the HTTP layer: an unknown repo name is conveyed as DATA (200
     + an error line + non-zero exit sentinel), exactly like a failing task —
@@ -1189,6 +1259,36 @@ def test_exec_accepts_safe_segment_task_name(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     assert fake.streaming_calls
+
+
+def test_exec_passes_canonical_task_to_execution(tmp_path, monkeypatch):
+    from mship.core import run_ref as run_ref_module
+
+    received_tasks = []
+
+    def canonicalize(task):
+        assert task == "external-task"
+        return "canonical-task"
+
+    def observe_stream(verb, task, repos, platform, *, nonce, **kwargs):
+        received_tasks.append(task)
+        yield f"{remote_exec.EXIT_MARKER}:{nonce} 0\n".encode()
+
+    monkeypatch.setattr(
+        run_ref_module,
+        "canonical_run_ref_segment",
+        canonicalize,
+        raising=False,
+    )
+    monkeypatch.setattr(remote_exec, "run_verb_stream", observe_stream)
+
+    response = TestClient(_app(tmp_path)).post(
+        "/exec/run",
+        json={"task": "external-task", "repos": ["api"]},
+    )
+
+    assert response.status_code == 200
+    assert received_tasks == ["canonical-task"]
 
 
 def test_exec_run_materializes_new_worktree_and_streams_output(tmp_path, monkeypatch):

@@ -23,41 +23,66 @@ this module only refuses to build a name it cannot make safe.
 """
 from __future__ import annotations
 
-import re
 
 RUN_REF_PREFIX = "refs/mship/run/"
+_RUN_REF_SEGMENT_CHARACTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
 
 # One safe task/repository segment, shared with the remote exec boundary in
-# `core/serve.py`. This string is interpolated into `git push` /
-# `git reset --hard` run through a shell, and `core/remote_setup.py` derives a
-# filename from the same values. `.` and `..` are excluded outright so no
-# traversal segment can exist.
-#
-# Anchored `\Z`, not `$`: Python's `$` also matches BEFORE a trailing newline,
-# so `$` accepts `api\n` — and a trailing newline TERMINATES a shell command,
-# which is the one character this charset exists to keep out.
-_SEGMENT_RE = re.compile(r"\A(?!\.{1,2}\Z)[A-Za-z0-9._-]+\Z")
-
-
-def is_run_ref_segment(value: str) -> bool:
-    """Whether `value` is one safe task/repository run-ref segment."""
-    return bool(_SEGMENT_RE.match(value or ""))
+# `core/serve.py`. `.` and `..` are excluded outright so no traversal segment
+# can exist.
 
 
 class RunRefNameError(ValueError):
     """A task or repo name that cannot appear in a run ref."""
 
 
+def canonical_run_ref_segment(value: str) -> str:
+    """Validate and rebuild one safe task/repository run-ref segment."""
+    if not value or value in {".", ".."}:
+        raise RunRefNameError(
+            f"name {value!r} cannot be used in a run ref; it must match "
+            "[A-Za-z0-9._-]+ and not be '.' or '..'"
+        )
+
+    safe_characters = []
+    for character in value:
+        safe_index = _RUN_REF_SEGMENT_CHARACTERS.find(character)
+        if safe_index < 0:
+            raise RunRefNameError(
+                f"name {value!r} cannot be used in a run ref; it must match "
+                "[A-Za-z0-9._-]+ and not be '.' or '..'"
+            )
+        safe_characters.append(_RUN_REF_SEGMENT_CHARACTERS[safe_index])
+    return "".join(safe_characters)
+
+
+def is_run_ref_segment(value: str) -> bool:
+    """Whether `value` is one safe task/repository run-ref segment."""
+    try:
+        canonical_run_ref_segment(value)
+    except RunRefNameError:
+        return False
+    return True
+
+
 def run_ref(task: str, repo: str) -> str:
     """`refs/mship/run/<task>/<repo>` — per task AND per git repo, so two tasks
     or two repos running remotely at once cannot overwrite each other's refs."""
-    for label, value in (("task", task), ("repo", repo)):
-        if not is_run_ref_segment(value):
-            raise RunRefNameError(
-                f"{label} name {value!r} cannot be used in a run ref; it must "
-                f"match [A-Za-z0-9._-]+ and not be '.' or '..'"
-            )
-    return f"{RUN_REF_PREFIX}{task}/{repo}"
+    try:
+        canonical_task = canonical_run_ref_segment(task)
+    except RunRefNameError:
+        raise RunRefNameError(
+            f"task name {task!r} cannot be used in a run ref; it must match "
+            "[A-Za-z0-9._-]+ and not be '.' or '..'"
+        ) from None
+    try:
+        canonical_repo = canonical_run_ref_segment(repo)
+    except RunRefNameError:
+        raise RunRefNameError(
+            f"repo name {repo!r} cannot be used in a run ref; it must match "
+            "[A-Za-z0-9._-]+ and not be '.' or '..'"
+        ) from None
+    return f"{RUN_REF_PREFIX}{canonical_task}/{canonical_repo}"
 
 
 def is_run_ref(name: str) -> bool:

@@ -641,7 +641,14 @@ def _run_verb_stream_unlocked(
     hub = _hub_dir(deps.workspace_root, task)
     branch = config.branch_pattern.replace("{slug}", task)
 
-    unknown_repos = [r for r in repos if r not in config.repos]
+    # Select names through the trusted server configuration. These values are
+    # subsequently used in worktree paths, git refs/arguments, task names, and
+    # command working directories. Preserve the client's order and duplicates
+    # for execution while rebuilding each selected value from the server-owned
+    # key objects.
+    configured_names = {name: name for name in config.repos}
+    requested_names = [*repos, *(run_ref_repos or [])]
+    unknown_repos = [name for name in requested_names if name not in configured_names]
     if unknown_repos:
         yield (
             f"error: unknown repo(s) {', '.join(unknown_repos)}; known "
@@ -650,16 +657,18 @@ def _run_verb_stream_unlocked(
         yield f"{EXIT_MARKER}:{nonce} 2\n".encode("utf-8")
         return
 
-    scratch_repos = sorted(set(run_ref_repos or []))
+    repos = [configured_names[name] for name in repos]
+    scratch_repos = sorted({
+        configured_names[name] for name in (run_ref_repos or [])
+    })
     run_refs: dict[str, str] = {}
     for scratch_repo in scratch_repos:
         try:
             run_refs[scratch_repo] = build_run_ref(task, scratch_repo)
         except RunRefNameError as exc:
-            # The ref is interpolated into git commands run with shell=True, so
-            # a name that cannot form one is refused before anything runs — as
-            # stream DATA, never a raised exception mid-generator, matching the
-            # unknown-repo guard above.
+            # A name that cannot form a ref is refused before anything runs —
+            # as stream DATA, never a raised exception mid-generator, matching
+            # the unknown-repo guard above.
             yield f"error: cannot build a run ref for this request: {exc}\n".encode("utf-8")
             yield f"{EXIT_MARKER}:{nonce} 2\n".encode("utf-8")
             return
