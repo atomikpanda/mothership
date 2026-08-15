@@ -1,5 +1,10 @@
 import os
+import signal
 import subprocess
+import sys
+import threading
+import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,6 +14,202 @@ class ShellResult:
     returncode: int
     stdout: str
     stderr: str
+
+
+class ShellCancelled(Exception):
+    """A cancellable shell command was stopped before it completed."""
+
+
+class ShellCancellationUnsupported(RuntimeError):
+    """This host cannot safely create and observe a cancellation process group."""
+
+
+_CANCELLATION_CHECK_INTERVAL = 0.05
+_TERMINATION_GRACE_SECONDS = 1.0
+_PROC_ROOT = "/proc"
+
+
+def _has_owned_process_group(proc: subprocess.Popen) -> bool:
+    pid = getattr(proc, "pid", None)
+    if os.name == "nt" or not isinstance(pid, int) or pid <= 0:
+        return False
+    return _has_owned_process_group_id(pid)
+
+
+def _read_linux_process_status(process_dir: Path) -> tuple[bytes, int]:
+    stat = (process_dir / "stat").read_bytes()
+    closing_paren = stat.rfind(b")")
+    if closing_paren < 0:
+        raise ValueError("process stat has no command boundary")
+    fields = stat[closing_paren + 2 :].split()
+    return fields[0], int(fields[2])
+
+
+def ensure_cancellable_shell_supported() -> None:
+    """Fail before spawn unless an owned cancellation group is observable."""
+    if os.name != "posix":
+        platform = "Windows" if os.name == "nt" else os.name
+        raise ShellCancellationUnsupported(
+            "cancellable shell execution requires POSIX process groups; "
+            f"{platform} is unsupported"
+        )
+    if not sys.platform.startswith("linux"):
+        return
+
+    try:
+        entries = os.scandir(_PROC_ROOT)
+    except OSError as exc:
+        raise ShellCancellationUnsupported(
+            "cancellable shell execution requires a readable Linux "
+            f"process-status filesystem at {_PROC_ROOT}"
+        ) from exc
+
+    last_error: Exception | None = None
+    with entries:
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                _read_linux_process_status(Path(entry.path))
+            except FileNotFoundError:
+                continue
+            except (OSError, IndexError, ValueError) as exc:
+                last_error = exc
+                continue
+            return
+
+    raise ShellCancellationUnsupported(
+        "cancellable shell execution requires readable, parseable numeric "
+        f"process status entries at {_PROC_ROOT}"
+    ) from last_error
+
+
+def _linux_group_has_executable_member(process_group: int) -> bool:
+    found_member = False
+    try:
+        entries = os.scandir(_PROC_ROOT)
+    except OSError:
+        return _has_owned_process_group_id(process_group)
+
+    with entries:
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                state, member_group = _read_linux_process_status(
+                    Path(entry.path)
+                )
+            except FileNotFoundError:
+                continue
+            except (OSError, IndexError, ValueError):
+                try:
+                    member_group = os.getpgid(int(entry.name))
+                except ProcessLookupError:
+                    continue
+                except OSError:
+                    return _has_owned_process_group_id(process_group)
+                if member_group == process_group:
+                    return True
+                continue
+            if member_group == process_group:
+                found_member = True
+                if state not in {b"X", b"Z", b"x"}:
+                    return True
+
+    return not found_member and _has_owned_process_group_id(process_group)
+
+
+def _has_owned_process_group_id(process_group: int) -> bool:
+    try:
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _signal_owned_process(proc: subprocess.Popen, *, force: bool = False) -> None:
+    pid = getattr(proc, "pid", None)
+    try:
+        if os.name != "nt" and isinstance(pid, int) and pid > 0:
+            # The group can outlive and be reaped after its leader. Abnormal
+            # cleanup still owns that group, so signal it by the original pgid.
+            os.killpg(pid, signal.SIGKILL if force else signal.SIGTERM)
+            return
+        if proc.poll() is not None:
+            return
+        proc.kill() if force else proc.terminate()
+    except ProcessLookupError:
+        pass
+
+
+def _reap_owned_process_leader(proc: subprocess.Popen) -> None:
+    wait = getattr(proc, "wait", None)
+    if not callable(wait):
+        return
+    try:
+        wait()
+    except Exception:
+        pass
+
+
+def _wait_for_owned_process_group_quiescence(proc: subprocess.Popen) -> None:
+    pid = getattr(proc, "pid", None)
+    if os.name == "nt" or not isinstance(pid, int) or pid <= 0:
+        return
+
+    if sys.platform.startswith("linux"):
+        while _linux_group_has_executable_member(pid):
+            time.sleep(_CANCELLATION_CHECK_INTERVAL)
+        return
+
+    while _has_owned_process_group_id(pid):
+        time.sleep(_CANCELLATION_CHECK_INTERVAL)
+
+
+def _terminate_owned_process_group(
+    proc: subprocess.Popen,
+    *,
+    force: bool = False,
+) -> None:
+    """Stop members that remain in the spawned process group.
+
+    Descendants that create another session or process group are outside this
+    selected process-group cancellation contract.
+    """
+    _signal_owned_process(proc, force=force)
+    if os.name == "nt" or not _has_owned_process_group(proc):
+        return
+
+    if force:
+        _reap_owned_process_leader(proc)
+        _wait_for_owned_process_group_quiescence(proc)
+        return
+
+    deadline = time.monotonic() + _TERMINATION_GRACE_SECONDS
+    while _has_owned_process_group(proc):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _signal_owned_process(proc, force=True)
+            _reap_owned_process_leader(proc)
+            _wait_for_owned_process_group_quiescence(proc)
+            return
+        time.sleep(min(_CANCELLATION_CHECK_INTERVAL, remaining))
+
+
+def _stop_and_reap(
+    proc: subprocess.Popen,
+    *,
+    force: bool = False,
+) -> tuple[str, str]:
+    """Stop the owned process group and reap its original leader."""
+    _terminate_owned_process_group(proc, force=force)
+    try:
+        return proc.communicate(timeout=_TERMINATION_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        _signal_owned_process(proc, force=True)
+        return proc.communicate()
 
 
 class ShellRunner:
@@ -46,6 +247,77 @@ class ShellRunner:
             stderr=result.stderr,
         )
 
+    def run_argv(
+        self,
+        args: Sequence[str],
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> ShellResult:
+        """Run structured arguments without a shell.
+
+        Cancellation requires POSIX process groups. Linux additionally requires
+        readable process status so cleanup can distinguish executable members
+        from zombies before returning.
+        """
+        if cancel_event is not None:
+            ensure_cancellable_shell_supported()
+        run_env = None
+        if env:
+            run_env = {**os.environ, **env}
+        if cancel_event is None:
+            result = subprocess.run(
+                args,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                env=run_env,
+                timeout=timeout,
+            )
+            return ShellResult(
+                returncode=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
+
+        kwargs = {
+            "cwd": cwd,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "env": run_env,
+            "start_new_session": True,
+        }
+        proc = subprocess.Popen(args, **kwargs)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if cancel_event.is_set():
+                _stop_and_reap(proc)
+                raise ShellCancelled(f"shell command cancelled: {args!r}")
+
+            wait_timeout = _CANCELLATION_CHECK_INTERVAL
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    stdout, stderr = _stop_and_reap(proc, force=True)
+                    raise subprocess.TimeoutExpired(
+                        args,
+                        timeout,
+                        output=stdout,
+                        stderr=stderr,
+                    )
+                wait_timeout = min(wait_timeout, remaining)
+            try:
+                stdout, stderr = proc.communicate(timeout=wait_timeout)
+            except subprocess.TimeoutExpired:
+                continue
+            return ShellResult(
+                returncode=proc.returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
     def run_task(
         self,
         task_name: str,
@@ -65,8 +337,9 @@ class ShellRunner:
     ) -> subprocess.Popen:
         """Run a command with stdout/stderr streaming (for logs, run).
 
-        Launches the subprocess in its own process group so signal delivery
-        can reach the whole tree (including grandchildren) on termination.
+        Launches the subprocess in its own process group. Cancellation can
+        signal processes that remain in that spawned PGID; descendants that
+        create another session or process group are outside this contract.
         """
         run_env = None
         if env:

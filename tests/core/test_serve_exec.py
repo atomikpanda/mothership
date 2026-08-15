@@ -13,17 +13,30 @@ Two layers are covered:
 """
 from __future__ import annotations
 
+import asyncio
+import errno
+import fcntl
+import hashlib
 import io
+import multiprocessing
+import os
+import signal
+import shlex
+import sys
 import tarfile
 import threading
+import time
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import ClientDisconnect
 
 from mship.core import remote_exec
 from mship.core.config import RepoConfig, WorkspaceConfig
 from mship.core.serve import ExecBody, create_app
 from mship.core.state import StateManager
+from mship.util import shell as shell_module
 from mship.util.shell import ShellResult
 
 
@@ -69,18 +82,18 @@ class _FakeProc:
 
 
 class _FakeShellRunner:
-    """Stands in for `mship.util.shell.ShellRunner`. `.run()` records every
-    git command issued (command, cwd) and returns a canned `ShellResult`
-    looked up by exact command string (`rev_responses` supports a list per
-    command so successive calls to the SAME command — e.g. a base-freshness
-    probe before and after a fetch — can return different results, modeling
-    origin having moved). `.run_streaming()` returns the canned `_FakeProc`
-    and records what it was invoked with."""
+    """Stands in for `mship.util.shell.ShellRunner`. `.run_argv()` records
+    each git command as display text plus cwd and returns a canned
+    `ShellResult` looked up by that text (`rev_responses` supports successive
+    responses for repeated commands). `.run_streaming()` returns the canned
+    `_FakeProc` and records what it was invoked with."""
 
     def __init__(self, *, streaming_proc=None, rev_responses=None):
         self.run_calls: list[tuple[str, Path]] = []
         self.streaming_calls: list[dict] = []
-        self._rev_responses = {k: list(v) for k, v in (rev_responses or {}).items()}
+        self._rev_responses = {
+            k: list(v) for k, v in (rev_responses or {}).items()
+        }
         self._streaming_proc = streaming_proc
 
     def build_command(self, command, env_runner=None):
@@ -88,12 +101,20 @@ class _FakeShellRunner:
             return f"{env_runner} {command}"
         return command
 
-    def run(self, command, cwd, env=None):
+    def run(self, command, cwd, env=None, cancel_event=None):
         self.run_calls.append((command, Path(cwd)))
         seq = self._rev_responses.get(command)
         if seq:
             return seq.pop(0) if len(seq) > 1 else seq[0]
         return ShellResult(returncode=0, stdout="", stderr="")
+
+    def run_argv(self, args, cwd, env=None, cancel_event=None):
+        return self.run(
+            shlex.join(args),
+            cwd,
+            env=env,
+            cancel_event=cancel_event,
+        )
 
     def run_streaming(self, command, cwd, env=None):
         self.streaming_calls.append({"command": command, "cwd": Path(cwd), "env": env})
@@ -190,6 +211,135 @@ def _exit_line(nonce: str, code: int) -> str:
     return f"{remote_exec.EXIT_MARKER}:{nonce} {code}"
 
 
+def _hold_remote_exec_stream(
+    workspace_root: str,
+    ready,
+    release,
+) -> None:
+    root = Path(workspace_root)
+    fake = _FakeShellRunner()
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(root), shell=fake, workspace_root=root,
+    )
+    stream = remote_exec.run_verb_stream(
+        "run", "t1", ["unknown"], None, deps=deps, nonce="processholder",
+    )
+    try:
+        first = next(stream)
+        if b"unknown repo" not in first:
+            raise AssertionError(first)
+        ready.set()
+        if not release.wait(timeout=10):
+            raise TimeoutError("parent did not release the held remote execution stream")
+    finally:
+        stream.close()
+
+
+def _task_lock_path(workspace_root: Path, task: str) -> Path:
+    digest = hashlib.sha256(task.encode("utf-8")).hexdigest()
+    return workspace_root / ".mothership" / "remote-exec-locks" / f"{digest}.lock"
+
+
+def _assert_task_lock_failure(
+    workspace_root: Path,
+    fake: _FakeShellRunner,
+    nonce: str,
+) -> None:
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(workspace_root), shell=fake, workspace_root=workspace_root,
+    )
+    lines = list(remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None, deps=deps, nonce=nonce,
+    ))
+    assert b"remote-task locking" in lines[0]
+    assert lines[-1] == f"{remote_exec.EXIT_MARKER}:{nonce} 1\n".encode()
+    assert not fake.run_calls
+    assert not fake.streaming_calls
+
+
+def _exec_asgi_scope() -> dict:
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/exec/run",
+        "raw_path": b"/exec/run",
+        "query_string": b"",
+        "headers": [(b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 12345),
+        "server": ("testserver", 80),
+        "root_path": "",
+    }
+
+
+def _disconnect_exec_request(
+    app,
+    started,
+    stopped,
+    cleanup,
+    *,
+    spec_version: str = "2.3",
+) -> list[dict]:
+    response_messages: list[dict] = []
+    request_sent = False
+
+    async def receive():
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {
+                "type": "http.request",
+                "body": b'{"task":"t1","repos":["api"]}',
+                "more_body": False,
+            }
+        assert await asyncio.to_thread(started.wait, 10)
+        assert [message["type"] for message in response_messages] == [
+            "http.response.start",
+        ]
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        response_messages.append(message)
+
+    async def disconnect_request() -> bool:
+        scope = _exec_asgi_scope()
+        scope["asgi"]["spec_version"] = spec_version
+        app_task = asyncio.create_task(app(scope, receive, send))
+        stopped_by_disconnect = False
+        try:
+            assert await asyncio.to_thread(started.wait, 10)
+            stopped_by_disconnect = await asyncio.to_thread(stopped.wait, 5)
+        finally:
+            if not stopped_by_disconnect:
+                cleanup()
+            await asyncio.wait_for(app_task, timeout=10)
+        return stopped_by_disconnect
+
+    assert asyncio.run(disconnect_request())
+    assert response_messages[0]["type"] == "http.response.start"
+    return response_messages
+
+
+def _assert_same_task_replacement(workspace_root: Path) -> None:
+    replacement_fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["replacement\n"]),
+    )
+    replacement_deps = remote_exec.RemoteExecDeps(
+        config=_config(workspace_root),
+        shell=replacement_fake,
+        workspace_root=workspace_root,
+    )
+    assert list(remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None,
+        deps=replacement_deps, nonce="replacementnonce",
+    ))[-2:] == [
+        b"replacement\n",
+        b"__MSHIP_EXIT__:replacementnonce 0\n",
+    ]
+
+
 def _parse_exec_stream(content: bytes, nonce: str):
     """Mirror the client-side parse of the `/exec/{verb}` wire framing: text
     lines, optionally one `__MSHIP_ARTIFACTS__:<nonce> <n>` marker followed by
@@ -276,6 +426,876 @@ def test_run_verb_stream_client_disconnect_cleans_up_tempdir_and_proc(tmp_path):
     assert not capture_dir.exists(), "the capture temp dir must be removed on disconnect"
 
 
+def test_exec_response_does_not_require_create_collapsing_task_group(
+    tmp_path,
+    monkeypatch,
+):
+    from starlette import _utils as starlette_utils
+
+    monkeypatch.delattr(
+        starlette_utils,
+        "create_collapsing_task_group",
+        raising=False,
+    )
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["ok\n"]),
+    )
+    _patch_shell(monkeypatch, fake)
+
+    response = TestClient(_app(tmp_path)).post(
+        "/exec/run",
+        json={"task": "t1", "repos": ["api"]},
+    )
+
+    assert response.status_code == 200
+    nonce = _nonce_of(response)
+    lines, artifacts, exit_line = _parse_exec_stream(response.content, nonce)
+    assert lines == ["ok"]
+    assert artifacts is None
+    assert exit_line == _exit_line(nonce, 0)
+
+
+def test_exec_http_disconnect_terminates_quiet_proc_and_releases_task_lock(
+    tmp_path,
+    monkeypatch,
+):
+    started = threading.Event()
+    terminated = threading.Event()
+    unblock = threading.Event()
+
+    class _BlockingStream:
+        def readline(self):
+            unblock.wait(timeout=5)
+            return ""
+
+        def close(self):
+            pass
+
+    class _QuietProc:
+        pid = None
+        stdout = _BlockingStream()
+        stderr = _BlockingStream()
+
+        def wait(self):
+            unblock.wait(timeout=5)
+            return 0
+
+        def poll(self):
+            return 0 if unblock.is_set() else None
+
+        def terminate(self):
+            terminated.set()
+            unblock.set()
+
+    class _SignalingShellRunner(_FakeShellRunner):
+        def run_streaming(self, command, cwd, env=None):
+            proc = super().run_streaming(command, cwd, env=env)
+            started.set()
+            return proc
+
+    fake = _SignalingShellRunner(streaming_proc=_QuietProc())
+    _patch_shell(monkeypatch, fake)
+    app = _app(tmp_path)
+    _disconnect_exec_request(app, started, terminated, unblock.set)
+    _assert_same_task_replacement(tmp_path)
+
+
+def test_exec_asgi24_idle_disconnect_reaps_proc_and_releases_task_lock(
+    tmp_path,
+    monkeypatch,
+):
+    started = threading.Event()
+    terminated = threading.Event()
+    reaped = threading.Event()
+    unblock = threading.Event()
+
+    class _BlockingStream:
+        def readline(self):
+            unblock.wait(timeout=5)
+            return ""
+
+        def close(self):
+            pass
+
+    class _QuietProc:
+        pid = None
+        stdout = _BlockingStream()
+        stderr = _BlockingStream()
+
+        def wait(self):
+            unblock.wait(timeout=5)
+            reaped.set()
+            return 0
+
+        def poll(self):
+            return 0 if unblock.is_set() else None
+
+        def terminate(self):
+            terminated.set()
+            unblock.set()
+
+    class _SignalingShellRunner(_FakeShellRunner):
+        def run_streaming(self, command, cwd, env=None):
+            proc = super().run_streaming(command, cwd, env=env)
+            started.set()
+            return proc
+
+    fake = _SignalingShellRunner(streaming_proc=_QuietProc())
+    _patch_shell(monkeypatch, fake)
+    app = _app(tmp_path)
+
+    messages = _disconnect_exec_request(
+        app,
+        started,
+        terminated,
+        unblock.set,
+        spec_version="2.4",
+    )
+
+    assert reaped.is_set()
+    assert all(
+        not message.get("body")
+        for message in messages
+        if message["type"] == "http.response.body"
+    )
+    _assert_same_task_replacement(tmp_path)
+
+
+def test_exec_asgi24_send_disconnect_reaps_proc_and_releases_task_lock(
+    tmp_path,
+    monkeypatch,
+):
+    started = threading.Event()
+    terminated = threading.Event()
+    reaped = threading.Event()
+    unblock = threading.Event()
+
+    class _OneLineAliveProc:
+        pid = None
+        stdout = _GatedStdout(
+            ["owned\n", ""],
+            gate=unblock,
+            gate_before=1,
+        )
+        stderr = io.StringIO("")
+
+        def wait(self):
+            unblock.wait(timeout=5)
+            reaped.set()
+            return 0
+
+        def poll(self):
+            return 0 if unblock.is_set() else None
+
+        def terminate(self):
+            terminated.set()
+            unblock.set()
+
+    class _SignalingShellRunner(_FakeShellRunner):
+        def run_streaming(self, command, cwd, env=None):
+            proc = super().run_streaming(command, cwd, env=env)
+            started.set()
+            return proc
+
+    fake = _SignalingShellRunner(streaming_proc=_OneLineAliveProc())
+    _patch_shell(monkeypatch, fake)
+    app = _app(tmp_path)
+    scope = _exec_asgi_scope()
+    scope["asgi"] = {"version": "3.0", "spec_version": "2.4"}
+    receive_calls = 0
+
+    async def receive():
+        nonlocal receive_calls
+        receive_calls += 1
+        if receive_calls == 1:
+            return {
+                "type": "http.request",
+                "body": b'{"task":"t1","repos":["api"]}',
+                "more_body": False,
+            }
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message["body"]:
+            assert started.is_set()
+            raise OSError("client disconnected")
+
+    try:
+        with pytest.raises(ClientDisconnect):
+            asyncio.run(app(scope, receive, send))
+    finally:
+        unblock.set()
+
+    assert terminated.is_set()
+    assert reaped.is_set()
+    assert receive_calls == 2
+    _assert_same_task_replacement(tmp_path)
+
+
+def test_exec_http_disconnect_cancels_blocked_materialization(
+    tmp_path,
+    monkeypatch,
+):
+    started = threading.Event()
+    operation_finished = threading.Event()
+    processes = []
+    real_popen = shell_module.subprocess.Popen
+
+    def blocking_popen(_command, **kwargs):
+        proc = real_popen(
+            [sys.executable, "-c", "import signal; signal.pause()"],
+            cwd=kwargs.get("cwd"),
+            stdout=kwargs.get("stdout"),
+            stderr=kwargs.get("stderr"),
+            text=kwargs.get("text"),
+            env=kwargs.get("env"),
+            start_new_session=True,
+        )
+        processes.append(proc)
+        started.set()
+        return proc
+
+    class _ObservedShellRunner(shell_module.ShellRunner):
+        def run_argv(self, *args, **kwargs):
+            try:
+                return super().run_argv(*args, **kwargs)
+            finally:
+                operation_finished.set()
+
+    monkeypatch.setattr(shell_module.subprocess, "Popen", blocking_popen)
+    monkeypatch.setattr(
+        "mship.core.serve.ShellRunner",
+        lambda: _ObservedShellRunner(),
+    )
+    app = _app(tmp_path)
+
+    _disconnect_exec_request(
+        app,
+        started,
+        operation_finished,
+        lambda: processes[0].terminate(),
+    )
+
+    assert processes[0].returncode is not None
+    _assert_same_task_replacement(tmp_path)
+
+
+def test_exec_http_disconnect_terminates_proc_after_pipe_eof(
+    tmp_path,
+    monkeypatch,
+):
+    started = threading.Event()
+    terminated = threading.Event()
+    reaped = threading.Event()
+    unblock = threading.Event()
+
+    class _EofAliveProc:
+        pid = None
+        stdout = io.StringIO("")
+        stderr = io.StringIO("")
+
+        def wait(self):
+            unblock.wait(timeout=5)
+            reaped.set()
+            return 0
+
+        def poll(self):
+            return 0 if unblock.is_set() else None
+
+        def terminate(self):
+            terminated.set()
+            unblock.set()
+
+    class _SignalingShellRunner(_FakeShellRunner):
+        def run_streaming(self, command, cwd, env=None):
+            proc = super().run_streaming(command, cwd, env=env)
+            started.set()
+            return proc
+
+    fake = _SignalingShellRunner(streaming_proc=_EofAliveProc())
+    _patch_shell(monkeypatch, fake)
+    app = _app(tmp_path)
+
+    _disconnect_exec_request(app, started, terminated, unblock.set)
+    assert reaped.is_set()
+    _assert_same_task_replacement(tmp_path)
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="Linux /proc process-state contract",
+)
+def test_cancelled_stream_kills_descendant_before_task_lock_release(
+    tmp_path,
+    monkeypatch,
+):
+    ready_path = tmp_path / "stream-descendant-ready"
+    child_code = """
+import os
+import signal
+import sys
+from pathlib import Path
+
+read_fd, write_fd = os.pipe()
+child_pid = os.fork()
+if child_pid == 0:
+    os.close(read_fd)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    os.close(1)
+    os.close(2)
+    os.write(write_fd, b"ready")
+    os.close(write_fd)
+    while True:
+        signal.pause()
+
+os.close(write_fd)
+os.read(read_fd, 5)
+os.close(read_fd)
+Path(sys.argv[1]).write_text(str(child_pid))
+while True:
+    signal.pause()
+"""
+    processes = []
+
+    class _ProcessTreeShellRunner(_FakeShellRunner):
+        def run_streaming(self, command, cwd, env=None):
+            proc = shell_module.subprocess.Popen(
+                [sys.executable, "-c", child_code, str(ready_path)],
+                cwd=tmp_path,
+                stdout=shell_module.subprocess.PIPE,
+                stderr=shell_module.subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            processes.append(proc)
+            return proc
+    signals: list[tuple[int, int]] = []
+    real_killpg = os.killpg
+
+    def observed_killpg(process_group, signum):
+        signals.append((process_group, signum))
+        return real_killpg(process_group, signum)
+
+    monkeypatch.setattr(shell_module.os, "killpg", observed_killpg)
+
+    cancel_event = threading.Event()
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path),
+        shell=_ProcessTreeShellRunner(),
+        workspace_root=tmp_path,
+        cancel_event=cancel_event,
+    )
+    errors: list[BaseException] = []
+
+    def consume_stream() -> None:
+        try:
+            list(remote_exec.run_verb_stream(
+                "run",
+                "t1",
+                ["api"],
+                None,
+                deps=deps,
+                nonce="descendantnonce",
+            ))
+        except BaseException as exc:
+            errors.append(exc)
+
+    stream_thread = threading.Thread(target=consume_stream, daemon=True)
+    stream_thread.start()
+    deadline = time.monotonic() + 5
+    while not ready_path.exists() and time.monotonic() < deadline:
+        threading.Event().wait(0.01)
+    assert ready_path.exists(), "descendant did not report readiness"
+
+    descendant_pid = int(ready_path.read_text())
+    process_group = os.getpgid(descendant_pid)
+    proc_stat = Path(f"/proc/{descendant_pid}/stat")
+    assert process_group == processes[0].pid
+    try:
+        cancel_event.set()
+        stream_thread.join(timeout=5)
+        assert not stream_thread.is_alive(), "cancelled stream did not return"
+        assert not errors
+        assert (process_group, signal.SIGKILL) in signals
+
+        try:
+            descendant_state = proc_stat.read_text().split()[2]
+        except FileNotFoundError:
+            descendant_state = None
+        assert descendant_state in {None, "X", "Z"}, (
+            "descendant was executable when the public task lock was released: "
+            f"{descendant_state}"
+        )
+        _assert_same_task_replacement(tmp_path)
+    finally:
+        try:
+            os.killpg(process_group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def test_normal_stream_does_not_signal_reaped_process_group(
+    tmp_path,
+    monkeypatch,
+):
+    signals = []
+
+    def record_killpg(process_group, signum):
+        signals.append((process_group, signum))
+
+    monkeypatch.setattr(shell_module.os, "killpg", record_killpg)
+
+    class _CompletedProc(_FakeProc):
+        pid = 424242
+
+        def poll(self):
+            return 0
+
+    fake = _FakeShellRunner(
+        streaming_proc=_CompletedProc(stdout_lines=["done\n"]),
+    )
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path),
+        shell=fake,
+        workspace_root=tmp_path,
+    )
+
+    assert list(remote_exec.run_verb_stream(
+        "run",
+        "t1",
+        ["api"],
+        None,
+        deps=deps,
+        nonce="normalnonce",
+    ))[-1] == b"__MSHIP_EXIT__:normalnonce 0\n"
+    assert not signals
+
+
+def test_concurrent_same_task_is_refused_while_different_task_runs(tmp_path):
+    gate = threading.Event()
+    first_fake = _FakeShellRunner(streaming_proc=_FakeProc(
+        stdout_lines=["first\n", "second\n"], gate=gate, gate_before=1,
+    ))
+    first_deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=first_fake, workspace_root=tmp_path,
+    )
+    first = remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None, deps=first_deps, nonce="firstnonce",
+    )
+    assert next(first) == b"first\n"
+
+    different_fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["different\n"]),
+    )
+    different_deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=different_fake, workspace_root=tmp_path,
+    )
+    assert list(remote_exec.run_verb_stream(
+        "run", "t2", ["api"], None, deps=different_deps, nonce="differentnonce",
+    )) == [
+        b"different\n",
+        b"__MSHIP_EXIT__:differentnonce 0\n",
+    ]
+
+    contender_fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["must not run\n"]),
+    )
+    contender_deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=contender_fake, workspace_root=tmp_path,
+    )
+    contender = list(remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None,
+        deps=contender_deps, nonce="contendernonce",
+    ))
+    assert contender == [
+        b"error: remote task 't1' is already running; try again after it finishes\n",
+        b"__MSHIP_EXIT__:contendernonce 2\n",
+    ]
+    assert not contender_fake.run_calls
+    assert not contender_fake.streaming_calls
+
+    first.close()
+    assert _task_lock_path(tmp_path, "t1").is_file()
+
+    replacement_fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["replacement\n"]),
+    )
+    replacement_deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=replacement_fake, workspace_root=tmp_path,
+    )
+    assert list(remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None,
+        deps=replacement_deps, nonce="replacementnonce",
+    ))[-2:] == [
+        b"replacement\n",
+        b"__MSHIP_EXIT__:replacementnonce 0\n",
+    ]
+
+
+@pytest.mark.parametrize("returncode", [0, 7])
+def test_task_lock_releases_after_stream_exhaustion(tmp_path, returncode):
+    first_fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["finished\n"], returncode=returncode),
+    )
+    first_deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=first_fake, workspace_root=tmp_path,
+    )
+    assert list(remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None, deps=first_deps, nonce="firstnonce",
+    ))[-1] == f"__MSHIP_EXIT__:firstnonce {returncode}\n".encode()
+    assert _task_lock_path(tmp_path, "t1").is_file()
+
+    next_fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["next\n"]),
+    )
+    next_deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=next_fake, workspace_root=tmp_path,
+    )
+    assert list(remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None, deps=next_deps, nonce="nextnonce",
+    ))[-2:] == [
+        b"next\n",
+        b"__MSHIP_EXIT__:nextnonce 0\n",
+    ]
+
+
+def test_task_lock_releases_when_execution_raises(tmp_path):
+    class _RaisingShellRunner(_FakeShellRunner):
+        def run_streaming(self, command, cwd, env=None):
+            self.streaming_calls.append(
+                {"command": command, "cwd": Path(cwd), "env": env},
+            )
+            raise RuntimeError("streaming exploded")
+
+    failing_deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path),
+        shell=_RaisingShellRunner(),
+        workspace_root=tmp_path,
+    )
+    with pytest.raises(RuntimeError, match="streaming exploded"):
+        list(remote_exec.run_verb_stream(
+            "run", "t1", ["api"], None, deps=failing_deps, nonce="failingnonce",
+        ))
+    assert _task_lock_path(tmp_path, "t1").is_file()
+
+    next_fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["recovered\n"]),
+    )
+    next_deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=next_fake, workspace_root=tmp_path,
+    )
+    assert list(remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None, deps=next_deps, nonce="nextnonce",
+    ))[-2:] == [
+        b"recovered\n",
+        b"__MSHIP_EXIT__:nextnonce 0\n",
+    ]
+
+
+def test_concurrent_process_contends_for_same_task_lock(tmp_path):
+    ctx = multiprocessing.get_context("spawn")
+    ready = ctx.Event()
+    release = ctx.Event()
+    proc = ctx.Process(
+        target=_hold_remote_exec_stream,
+        args=(str(tmp_path), ready, release),
+    )
+    proc.start()
+    try:
+        assert ready.wait(timeout=10)
+        fake = _FakeShellRunner()
+        deps = remote_exec.RemoteExecDeps(
+            config=_config(tmp_path), shell=fake, workspace_root=tmp_path,
+        )
+        contender = list(remote_exec.run_verb_stream(
+            "run", "t1", ["unknown"], None,
+            deps=deps, nonce="processcontender",
+        ))
+        assert contender == [
+            b"error: remote task 't1' is already running; try again after it finishes\n",
+            b"__MSHIP_EXIT__:processcontender 2\n",
+        ]
+    finally:
+        release.set()
+        proc.join(timeout=10)
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=10)
+    assert proc.exitcode == 0
+
+
+
+def _make_linux_proc_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setattr(shell_module.os, "name", "posix")
+    monkeypatch.setattr(shell_module.sys, "platform", "linux")
+    monkeypatch.setattr(
+        shell_module,
+        "_PROC_ROOT",
+        tmp_path / "unavailable-proc",
+        raising=False,
+    )
+
+
+def test_cancellable_remote_preflight_fails_before_lock_or_shell_work(
+    tmp_path,
+    monkeypatch,
+):
+    _make_linux_proc_unavailable(tmp_path, monkeypatch)
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["must not run\n"]),
+    )
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path),
+        shell=fake,
+        workspace_root=tmp_path,
+        cancel_event=threading.Event(),
+    )
+
+    lines = list(remote_exec.run_verb_stream(
+        "run",
+        "t1",
+        ["api"],
+        None,
+        deps=deps,
+        nonce="unsupportednonce",
+    ))
+
+    assert lines[0] == (
+        b"error: remote execution unavailable; execution was not started\n"
+    )
+    assert b"unavailable-proc" not in b"".join(lines)
+    assert lines[-1] == b"__MSHIP_EXIT__:unsupportednonce 1\n"
+    assert not (tmp_path / ".mothership" / "remote-exec-locks").exists()
+    assert not fake.run_calls
+    assert not fake.streaming_calls
+
+
+def test_exec_cancellable_preflight_failure_is_framed_before_work(
+    tmp_path,
+    monkeypatch,
+):
+    _make_linux_proc_unavailable(tmp_path, monkeypatch)
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["must not run\n"]),
+    )
+    _patch_shell(monkeypatch, fake)
+
+    response = TestClient(_app(tmp_path)).post(
+        "/exec/run",
+        json={"task": "t1", "repos": ["api"]},
+    )
+
+    nonce = _nonce_of(response)
+    lines = response.content.splitlines()
+    assert response.status_code == 200
+    assert lines[0] == (
+        b"error: remote execution unavailable; execution was not started"
+    )
+    assert b"unavailable-proc" not in response.content
+    assert lines[-1] == _exit_line(nonce, 1).encode()
+    assert not (tmp_path / ".mothership" / "remote-exec-locks").exists()
+    assert not fake.run_calls
+    assert not fake.streaming_calls
+
+
+def test_cancellation_infrastructure_detail_is_redacted_from_direct_and_http(
+    tmp_path,
+    monkeypatch,
+):
+    sensitive = "/secret/process-status/unique-marker"
+
+    def reject_cancellation():
+        raise remote_exec.ShellCancellationUnsupported(sensitive)
+
+    monkeypatch.setattr(
+        remote_exec,
+        "ensure_cancellable_shell_supported",
+        reject_cancellation,
+    )
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["must not run\n"]),
+    )
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path),
+        shell=fake,
+        workspace_root=tmp_path,
+        cancel_event=threading.Event(),
+    )
+    expected_error = (
+        b"error: remote execution unavailable; execution was not started\n"
+    )
+
+    direct = list(remote_exec.run_verb_stream(
+        "run",
+        "t1",
+        ["api"],
+        None,
+        deps=deps,
+        nonce="redactednonce",
+    ))
+
+    assert direct == [
+        expected_error,
+        b"__MSHIP_EXIT__:redactednonce 1\n",
+    ]
+    assert sensitive.encode() not in b"".join(direct)
+
+    _patch_shell(monkeypatch, fake)
+    response = TestClient(_app(tmp_path)).post(
+        "/exec/run",
+        json={"task": "t1", "repos": ["api"]},
+    )
+    nonce = _nonce_of(response)
+
+    assert response.status_code == 200
+    assert response.content.splitlines() == [
+        expected_error.rstrip(b"\n"),
+        _exit_line(nonce, 1).encode(),
+    ]
+    assert sensitive.encode() not in response.content
+    assert not (tmp_path / ".mothership" / "remote-exec-locks").exists()
+    assert not fake.run_calls
+    assert not fake.streaming_calls
+
+
+def test_direct_remote_without_cancellation_does_not_require_linux_proc(
+    tmp_path,
+    monkeypatch,
+):
+    _make_linux_proc_unavailable(tmp_path, monkeypatch)
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["ran\n"]),
+    )
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path),
+        shell=fake,
+        workspace_root=tmp_path,
+    )
+
+    lines = list(remote_exec.run_verb_stream(
+        "run",
+        "t1",
+        ["api"],
+        None,
+        deps=deps,
+        nonce="directnonce",
+    ))
+
+    assert lines[-2:] == [
+        b"ran\n",
+        b"__MSHIP_EXIT__:directnonce 0\n",
+    ]
+    assert fake.streaming_calls
+
+
+def test_remote_modules_import_when_fcntl_is_unavailable():
+    script = """
+import builtins
+
+real_import = builtins.__import__
+
+def import_without_fcntl(name, *args, **kwargs):
+    if name == "fcntl":
+        raise ModuleNotFoundError("fcntl unavailable")
+    return real_import(name, *args, **kwargs)
+
+builtins.__import__ = import_without_fcntl
+from mship.core import remote_client, remote_exec
+print(remote_client.EXIT_MARKER, remote_client.ARTIFACT_MARKER)
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "__MSHIP_EXIT__ __MSHIP_ARTIFACTS__"
+
+
+def test_remote_without_fcntl_fails_locking_before_shell_work(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(remote_exec, "fcntl", None)
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["must not run\n"]),
+    )
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path),
+        shell=fake,
+        workspace_root=tmp_path,
+    )
+
+    lines = list(remote_exec.run_verb_stream(
+        "run",
+        "t1",
+        ["api"],
+        None,
+        deps=deps,
+        nonce="nofcntlnonce",
+    ))
+
+    assert lines == [
+        b"error: remote-task locking failed; execution was not started\n",
+        b"__MSHIP_EXIT__:nofcntlnonce 1\n",
+    ]
+    assert not (tmp_path / ".mothership" / "remote-exec-locks").exists()
+    assert not fake.run_calls
+    assert not fake.streaming_calls
+
+def test_task_lock_failure_to_create_directory_fails_closed(tmp_path):
+    (tmp_path / ".mothership").write_text("not a directory")
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["must not run\n"]),
+    )
+    _assert_task_lock_failure(tmp_path, fake, "mkdirnonce")
+
+
+def test_task_lock_failure_to_open_file_fails_closed(tmp_path):
+    lock_file = _task_lock_path(tmp_path, "t1")
+    lock_file.mkdir(parents=True)
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["must not run\n"]),
+    )
+    _assert_task_lock_failure(tmp_path, fake, "opennonce")
+
+
+def test_task_lock_failure_to_flock_fails_closed(tmp_path, monkeypatch):
+    def fail_flock(_fd, _operation):
+        raise OSError("injected lock failure")
+
+    monkeypatch.setattr(fcntl, "flock", fail_flock)
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["must not run\n"]),
+    )
+    _assert_task_lock_failure(tmp_path, fake, "flocknonce")
+
+
+def test_task_lock_eacces_from_flock_is_contention(tmp_path, monkeypatch):
+    def deny_flock(_fd, _operation):
+        raise PermissionError(errno.EACCES, "injected contention")
+
+    monkeypatch.setattr(fcntl, "flock", deny_flock)
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["must not run\n"]),
+    )
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path), shell=fake, workspace_root=tmp_path,
+    )
+    assert list(remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None, deps=deps, nonce="eaccesnonce",
+    )) == [
+        b"error: remote task 't1' is already running; try again after it finishes\n",
+        b"__MSHIP_EXIT__:eaccesnonce 2\n",
+    ]
+    assert not fake.run_calls
+    assert not fake.streaming_calls
+
+
 def test_run_verb_stream_unknown_verb_raises(tmp_path):
     deps = remote_exec.RemoteExecDeps(config=_config(tmp_path), shell=_FakeShellRunner(), workspace_root=tmp_path)
     try:
@@ -318,6 +1338,76 @@ def test_run_verb_stream_unknown_repo_among_known_ones_rejects_before_any_task_r
     assert not fake.streaming_calls
 
 
+def test_generator_selects_server_owned_repo_names_preserving_request_order(
+    tmp_path,
+    monkeypatch,
+):
+    config = _config(tmp_path)
+    server_api = next(iter(config.repos))
+    server_web = "".join(["w", "eb"])
+    web_path = tmp_path / "web"
+    web_path.mkdir()
+    config.repos[server_web] = RepoConfig(path=web_path, type="service")
+
+    external_api = (" " + server_api)[1:]
+    external_web = (" " + server_web)[1:]
+    assert external_api == server_api and external_api is not server_api
+    assert external_web == server_web and external_web is not server_web
+
+    materialized_names = []
+    run_ref_names = []
+
+    def observe_materialize(
+        shell,
+        repo_path,
+        worktree_path,
+        branch,
+        *,
+        repo_name,
+        run_ref=None,
+        cancel_event=None,
+    ):
+        materialized_names.append(repo_name)
+
+    def observe_run_ref(task, repo):
+        run_ref_names.append(repo)
+        return f"refs/mship/run/{task}/{repo}"
+
+    monkeypatch.setattr(remote_exec, "materialize_worktree", observe_materialize)
+    monkeypatch.setattr(remote_exec, "build_run_ref", observe_run_ref)
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["ok\n"]),
+    )
+    deps = remote_exec.RemoteExecDeps(
+        config=config,
+        shell=fake,
+        workspace_root=tmp_path,
+    )
+
+    lines = list(remote_exec.run_verb_stream(
+        "run",
+        "t1",
+        [external_web, external_api, external_web],
+        None,
+        deps=deps,
+        nonce="canonicalrepos",
+        run_ref_repos=[external_web, external_api, external_web],
+    ))
+
+    assert lines[-1] == b"__MSHIP_EXIT__:canonicalrepos 0\n"
+    assert len(materialized_names) == 2
+    assert materialized_names[0] is server_web
+    assert materialized_names[1] is server_api
+    assert len(run_ref_names) == 2
+    assert any(name is server_api for name in run_ref_names)
+    assert any(name is server_web for name in run_ref_names)
+    assert [call["cwd"].name for call in fake.streaming_calls] == [
+        server_web,
+        server_api,
+        server_web,
+    ]
+
+
 def test_exec_unknown_repo_in_request_fails_cleanly_not_500(tmp_path, monkeypatch):
     """Through the HTTP layer: an unknown repo name is conveyed as DATA (200
     + an error line + non-zero exit sentinel), exactly like a failing task —
@@ -346,7 +1436,7 @@ def test_run_verb_stream_materialize_failure_surfaces_repo_and_stops(tmp_path, m
     the repo, via the same data-conveyed error-line + non-zero-exit pattern."""
     fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["should not run\n"], returncode=0))
 
-    def _failing_run(command, cwd, env=None):
+    def _failing_run(command, cwd, env=None, cancel_event=None):
         fake.run_calls.append((command, Path(cwd)))
         if command.startswith("git worktree add"):
             return ShellResult(returncode=128, stdout="", stderr="fatal: could not create worktree")
@@ -446,7 +1536,7 @@ def test_run_verb_stream_git_root_child_parent_materialize_failure_stops_cleanly
     task runs."""
     fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["should not run\n"], returncode=0))
 
-    def _failing_run(command, cwd, env=None):
+    def _failing_run(command, cwd, env=None, cancel_event=None):
         fake.run_calls.append((command, Path(cwd)))
         if command.startswith("git worktree add"):
             return ShellResult(returncode=128, stdout="", stderr="fatal: could not create worktree")
@@ -535,6 +1625,36 @@ def test_exec_accepts_safe_segment_task_name(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     assert fake.streaming_calls
+
+
+def test_exec_passes_canonical_task_to_execution(tmp_path, monkeypatch):
+    from mship.core import run_ref as run_ref_module
+
+    received_tasks = []
+
+    def canonicalize(task):
+        assert task == "external-task"
+        return "canonical-task"
+
+    def observe_stream(verb, task, repos, platform, *, nonce, **kwargs):
+        received_tasks.append(task)
+        yield f"{remote_exec.EXIT_MARKER}:{nonce} 0\n".encode()
+
+    monkeypatch.setattr(
+        run_ref_module,
+        "canonical_run_ref_segment",
+        canonicalize,
+        raising=False,
+    )
+    monkeypatch.setattr(remote_exec, "run_verb_stream", observe_stream)
+
+    response = TestClient(_app(tmp_path)).post(
+        "/exec/run",
+        json={"task": "external-task", "repos": ["api"]},
+    )
+
+    assert response.status_code == 200
+    assert received_tasks == ["canonical-task"]
 
 
 def test_exec_run_materializes_new_worktree_and_streams_output(tmp_path, monkeypatch):
@@ -840,6 +1960,42 @@ def _host_repo_with_run_ref(tmp_path: Path) -> tuple[Path, str, str]:
     _real_git("reset", "-q", "--hard", tip, cwd=repo)
     assert _real_git("remote", cwd=repo) == ""      # nothing to fetch from
     return repo, tip, scratch
+
+
+def test_materialization_passes_dynamic_values_as_single_argv_elements(tmp_path):
+    class _ArgvOnlyShell:
+        def __init__(self):
+            self.calls = []
+
+        def run(self, *args, **kwargs):
+            pytest.fail("materialization used the string shell boundary")
+
+        def run_argv(self, args, cwd, env=None, cancel_event=None):
+            self.calls.append((list(args), Path(cwd), cancel_event))
+            return ShellResult(returncode=0, stdout="", stderr="")
+
+    shell = _ArgvOnlyShell()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    worktree = tmp_path / "worktree;literal"
+    run_ref = "refs/mship/run/task;literal/api"
+
+    remote_exec.materialize_worktree(
+        shell,
+        repo,
+        worktree,
+        "feat/task",
+        repo_name="api",
+        run_ref=run_ref,
+    )
+
+    assert shell.calls == [
+        (
+            ["git", "worktree", "add", "--detach", str(worktree), run_ref],
+            repo,
+            None,
+        ),
+    ]
 
 
 def test_materialize_from_a_run_ref_creates_a_detached_worktree(tmp_path):
@@ -1336,8 +2492,13 @@ class _MaterializingShellRunner(_FakeShellRunner):
     way to pin that ordering.
     """
 
-    def run(self, command, cwd, env=None):
-        result = super().run(command, cwd, env=env)
+    def run(self, command, cwd, env=None, cancel_event=None):
+        result = super().run(
+            command,
+            cwd,
+            env=env,
+            cancel_event=cancel_event,
+        )
         if command.startswith("git worktree add"):
             # `git worktree add -B <branch> <worktree_path> origin/<branch>`
             worktree_path = Path(command.split()[5])

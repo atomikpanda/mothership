@@ -1,6 +1,7 @@
 """`refs/mship/run/<task>/<repo>` — the throwaway namespace, and the only place
 its shape is decided."""
 import pytest
+from mship.core import run_ref as run_ref_module
 
 from mship.core.run_ref import (
     RUN_REF_PREFIX,
@@ -14,6 +15,34 @@ from mship.core.run_ref import (
 @pytest.mark.parametrize("value", ["t1", "release.v2_build-1"])
 def test_run_ref_segment_accepts_safe_values(value):
     assert is_run_ref_segment(value)
+
+
+def test_canonical_segment_returns_rebuilt_safe_value():
+    value = "".join(["release", ".", "v2", "_build", "-1"])
+
+    canonical = run_ref_module.canonical_run_ref_segment(value)
+
+    assert canonical == value
+    assert canonical is not value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        ".",
+        "..",
+        "../escape",
+        "a/b",
+        "with space",
+        "semi;colon",
+        "dollar$",
+        "api\n",
+    ],
+)
+def test_canonical_segment_rejects_every_unsafe_value(value):
+    with pytest.raises(RunRefNameError):
+        run_ref_module.canonical_run_ref_segment(value)
 
 
 @pytest.mark.parametrize(
