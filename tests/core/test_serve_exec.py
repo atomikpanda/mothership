@@ -1053,6 +1053,65 @@ def test_direct_remote_without_cancellation_does_not_require_linux_proc(
     ]
     assert fake.streaming_calls
 
+
+def test_remote_modules_import_when_fcntl_is_unavailable():
+    script = """
+import builtins
+
+real_import = builtins.__import__
+
+def import_without_fcntl(name, *args, **kwargs):
+    if name == "fcntl":
+        raise ModuleNotFoundError("fcntl unavailable")
+    return real_import(name, *args, **kwargs)
+
+builtins.__import__ = import_without_fcntl
+from mship.core import remote_client, remote_exec
+print(remote_client.EXIT_MARKER, remote_client.ARTIFACT_MARKER)
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "__MSHIP_EXIT__ __MSHIP_ARTIFACTS__"
+
+
+def test_remote_without_fcntl_fails_locking_before_shell_work(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(remote_exec, "fcntl", None)
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["must not run\n"]),
+    )
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path),
+        shell=fake,
+        workspace_root=tmp_path,
+    )
+
+    lines = list(remote_exec.run_verb_stream(
+        "run",
+        "t1",
+        ["api"],
+        None,
+        deps=deps,
+        nonce="nofcntlnonce",
+    ))
+
+    assert lines == [
+        b"error: remote-task locking failed; execution was not started\n",
+        b"__MSHIP_EXIT__:nofcntlnonce 1\n",
+    ]
+    assert not (tmp_path / ".mothership" / "remote-exec-locks").exists()
+    assert not fake.run_calls
+    assert not fake.streaming_calls
+
 def test_task_lock_failure_to_create_directory_fails_closed(tmp_path):
     (tmp_path / ".mothership").write_text("not a directory")
     fake = _FakeShellRunner(

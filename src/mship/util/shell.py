@@ -21,7 +21,7 @@ class ShellCancelled(Exception):
 
 
 class ShellCancellationUnsupported(RuntimeError):
-    """This host cannot safely contain and observe a cancellable command."""
+    """This host cannot safely create and observe a cancellation process group."""
 
 
 _CANCELLATION_CHECK_INTERVAL = 0.05
@@ -46,7 +46,7 @@ def _read_linux_process_status(process_dir: Path) -> tuple[bytes, int]:
 
 
 def ensure_cancellable_shell_supported() -> None:
-    """Fail before spawn unless cancellable process trees are observable."""
+    """Fail before spawn unless an owned cancellation group is observable."""
     if os.name != "posix":
         platform = "Windows" if os.name == "nt" else os.name
         raise ShellCancellationUnsupported(
@@ -173,7 +173,11 @@ def _terminate_owned_process_group(
     *,
     force: bool = False,
 ) -> None:
-    """Stop an abnormal command tree and wait until no member can execute."""
+    """Stop members that remain in the spawned process group.
+
+    Descendants that create another session or process group are outside this
+    selected process-group cancellation contract.
+    """
     _signal_owned_process(proc, force=force)
     if os.name == "nt" or not _has_owned_process_group(proc):
         return
@@ -199,7 +203,7 @@ def _stop_and_reap(
     *,
     force: bool = False,
 ) -> tuple[str, str]:
-    """Stop an owned command tree and reap its leader before returning."""
+    """Stop the owned process group and reap its original leader."""
     _terminate_owned_process_group(proc, force=force)
     try:
         return proc.communicate(timeout=_TERMINATION_GRACE_SECONDS)
@@ -333,8 +337,9 @@ class ShellRunner:
     ) -> subprocess.Popen:
         """Run a command with stdout/stderr streaming (for logs, run).
 
-        Launches the subprocess in its own process group so signal delivery
-        can reach the whole tree (including grandchildren) on termination.
+        Launches the subprocess in its own process group. Cancellation can
+        signal processes that remain in that spawned PGID; descendants that
+        create another session or process group are outside this contract.
         """
         run_env = None
         if env:

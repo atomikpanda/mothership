@@ -51,7 +51,6 @@ Wire contract (Task 5's client parses this):
 from __future__ import annotations
 
 import errno
-import fcntl
 import hashlib
 import io
 import queue
@@ -64,6 +63,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Protocol
+
+try:
+    import fcntl
+except ModuleNotFoundError:
+    fcntl = None
 
 from mship.core import capture as _cap
 from mship.core import remote_setup
@@ -140,9 +144,10 @@ class RemoteExecDeps:
     double duty for git commands and the streamed task run (see
     `ShellLike`). `workspace_root` anchors where remote worktrees live:
     `<workspace_root>/.worktrees/<task>/<repo>`, mirroring the local
-    `WorktreeManager` hub layout. `cancel_event` requests contained POSIX
-    process-group cleanup when the client disconnects; the public runner
-    rejects hosts that cannot provide that guarantee before taking the lock.
+    `WorktreeManager` hub layout. `cancel_event` requests cleanup of processes
+    that remain in the spawned POSIX process group when the client disconnects;
+    the public runner rejects hosts that cannot provide that guarantee before
+    taking the lock.
     """
 
     config: WorkspaceConfig
@@ -159,6 +164,9 @@ def _acquire_task_execution_lock(
     workspace_root: Path,
     task: str,
 ) -> io.TextIOWrapper:
+    if fcntl is None:
+        raise OSError("POSIX file locking is unavailable")
+
     lock_dir = workspace_root / ".mothership" / "remote-exec-locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256(task.encode("utf-8")).hexdigest()
