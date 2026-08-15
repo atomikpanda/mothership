@@ -4,6 +4,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -164,25 +165,47 @@ class ShellRunner:
         return command
 
     def run(
+        self, command: str, cwd: Path, env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> ShellResult:
+        """Run `command` and capture output. `timeout` (seconds) raises
+        `subprocess.TimeoutExpired` if the command hasn't finished by then —
+        used by lifecycle hooks (core/lifecycle_hooks.py) to bound a hook's
+        runtime; other callers simply don't pass it (no timeout, unchanged
+        behavior)."""
+        run_env = None
+        if env:
+            run_env = {**os.environ, **env}
+        result = subprocess.run(
+            command,
+            shell=True,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            env=run_env,
+            timeout=timeout,
+        )
+        return ShellResult(
+            returncode=result.returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
+
+    def run_argv(
         self,
-        command: str,
+        args: Sequence[str],
         cwd: Path,
         env: dict[str, str] | None = None,
         timeout: float | None = None,
         cancel_event: threading.Event | None = None,
     ) -> ShellResult:
-        """Run `command` and capture output. `timeout` (seconds) raises
-        `subprocess.TimeoutExpired` if the command hasn't finished by then.
-        When `cancel_event` is supplied, the command owns a process group that
-        is terminated and reaped before `ShellCancelled` is raised. The default
-        path remains `subprocess.run` for all existing callers."""
+        """Run structured arguments without a shell, with optional cancellation."""
         run_env = None
         if env:
             run_env = {**os.environ, **env}
         if cancel_event is None:
             result = subprocess.run(
-                command,
-                shell=True,
+                args,
                 cwd=cwd,
                 capture_output=True,
                 text=True,
@@ -196,7 +219,6 @@ class ShellRunner:
             )
 
         kwargs = {
-            "shell": True,
             "cwd": cwd,
             "stdout": subprocess.PIPE,
             "stderr": subprocess.PIPE,
@@ -207,12 +229,12 @@ class ShellRunner:
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         else:
             kwargs["start_new_session"] = True
-        proc = subprocess.Popen(command, **kwargs)
+        proc = subprocess.Popen(args, **kwargs)
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             if cancel_event.is_set():
                 _stop_and_reap(proc)
-                raise ShellCancelled(f"shell command cancelled: {command}")
+                raise ShellCancelled(f"shell command cancelled: {args!r}")
 
             wait_timeout = _CANCELLATION_CHECK_INTERVAL
             if deadline is not None:
@@ -220,7 +242,7 @@ class ShellRunner:
                 if remaining <= 0:
                     stdout, stderr = _stop_and_reap(proc, force=True)
                     raise subprocess.TimeoutExpired(
-                        command,
+                        args,
                         timeout,
                         output=stdout,
                         stderr=stderr,

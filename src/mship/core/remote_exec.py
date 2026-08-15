@@ -55,10 +55,12 @@ import fcntl
 import hashlib
 import io
 import queue
+import shlex
 import shutil
 import tarfile
 import tempfile
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Protocol
@@ -103,14 +105,14 @@ class MaterializeError(Exception):
 
 class ShellLike(Protocol):
     """The subset of `mship.util.shell.ShellRunner` this module needs.
-    `.run` issues git plumbing (fetch/worktree add/reset, base-freshness
+    `.run_argv` issues git plumbing (fetch/worktree add/reset, base-freshness
     probes); `.run_streaming` launches the go-task target itself so its
     output can be drained incrementally. Same shapes as the real
     `ShellRunner` — tests inject a fake implementing just this surface."""
 
-    def run(
+    def run_argv(
         self,
-        command: str,
+        args: Sequence[str],
         cwd: Path,
         env: dict[str, str] | None = None,
         *,
@@ -170,14 +172,16 @@ def _acquire_task_execution_lock(
 
 def _run_shell(
     shell: ShellLike,
-    command: str,
+    args: Sequence[str],
     cwd: Path,
     *,
     cancel_event: threading.Event | None,
 ):
-    if cancel_event is None:
-        return shell.run(command, cwd=cwd)
-    return shell.run(command, cwd=cwd, cancel_event=cancel_event)
+    return shell.run_argv(
+        args,
+        cwd=cwd,
+        cancel_event=cancel_event,
+    )
 
 
 def _git_rev(
@@ -189,7 +193,7 @@ def _git_rev(
 ) -> str | None:
     result = _run_shell(
         shell,
-        f"git rev-parse {ref}",
+        ["git", "rev-parse", ref],
         cwd,
         cancel_event=cancel_event,
     )
@@ -225,7 +229,7 @@ def check_base_freshness(
     )
     _run_shell(
         shell,
-        f"git fetch origin {base_branch}",
+        ["git", "fetch", "origin", base_branch],
         repo_path,
         cancel_event=cancel_event,
     )
@@ -245,7 +249,7 @@ def check_base_freshness(
 
 def _run_checked(
     shell: ShellLike,
-    command: str,
+    args: Sequence[str],
     cwd: Path,
     *,
     repo_name: str,
@@ -259,13 +263,14 @@ def _run_checked(
     call site ignored `ShellResult.returncode` entirely)."""
     result = _run_shell(
         shell,
-        command,
+        args,
         cwd,
         cancel_event=cancel_event,
     )
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()
         detail = f": {stderr}" if stderr else f" (exit {result.returncode})"
+        command = shlex.join(args)
         raise MaterializeError(
             f"branch-materialize failed for repo {repo_name!r}: `{command}`{detail}"
         )
@@ -315,21 +320,21 @@ def materialize_worktree(
             # a branch.
             _run_checked(
                 shell,
-                "git checkout --detach",
+                ["git", "checkout", "--detach"],
                 worktree_path,
                 repo_name=repo_name,
                 cancel_event=cancel_event,
             )
             _run_checked(
                 shell,
-                f"git reset --hard {run_ref}",
+                ["git", "reset", "--hard", run_ref],
                 worktree_path,
                 repo_name=repo_name,
                 cancel_event=cancel_event,
             )
             _run_checked(
                 shell,
-                "git clean -fd",
+                ["git", "clean", "-fd"],
                 worktree_path,
                 repo_name=repo_name,
                 cancel_event=cancel_event,
@@ -338,7 +343,14 @@ def materialize_worktree(
             worktree_path.parent.mkdir(parents=True, exist_ok=True)
             _run_checked(
                 shell,
-                f"git worktree add --detach {worktree_path} {run_ref}",
+                [
+                    "git",
+                    "worktree",
+                    "add",
+                    "--detach",
+                    str(worktree_path),
+                    run_ref,
+                ],
                 repo_path,
                 repo_name=repo_name,
                 cancel_event=cancel_event,
@@ -347,7 +359,7 @@ def materialize_worktree(
 
     _run_checked(
         shell,
-        f"git fetch origin {branch}",
+        ["git", "fetch", "origin", branch],
         repo_path,
         repo_name=repo_name,
         cancel_event=cancel_event,
@@ -355,21 +367,21 @@ def materialize_worktree(
     if (worktree_path / ".git").exists():
         _run_checked(
             shell,
-            f"git fetch origin {branch}",
+            ["git", "fetch", "origin", branch],
             worktree_path,
             repo_name=repo_name,
             cancel_event=cancel_event,
         )
         _run_checked(
             shell,
-            f"git checkout {branch}",
+            ["git", "checkout", branch],
             worktree_path,
             repo_name=repo_name,
             cancel_event=cancel_event,
         )
         _run_checked(
             shell,
-            f"git reset --hard origin/{branch}",
+            ["git", "reset", "--hard", f"origin/{branch}"],
             worktree_path,
             repo_name=repo_name,
             cancel_event=cancel_event,
@@ -378,7 +390,15 @@ def materialize_worktree(
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
         _run_checked(
             shell,
-            f"git worktree add -B {branch} {worktree_path} origin/{branch}",
+            [
+                "git",
+                "worktree",
+                "add",
+                "-B",
+                branch,
+                str(worktree_path),
+                f"origin/{branch}",
+            ],
             repo_path,
             repo_name=repo_name,
             cancel_event=cancel_event,

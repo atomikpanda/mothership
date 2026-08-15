@@ -1,5 +1,4 @@
 import os
-import shlex
 import signal
 import subprocess
 import sys
@@ -122,6 +121,26 @@ def test_run_raises_timeout_expired_when_command_exceeds_timeout():
         runner.run("sleep 2", cwd=Path("."), timeout=0.1)
 
 
+def test_run_argv_passes_shell_metacharacters_literally(tmp_path):
+    side_effect = tmp_path / "must-not-exist"
+    literal = f"value; touch {side_effect}"
+
+    result = ShellRunner().run_argv(
+        [
+            sys.executable,
+            "-c",
+            "import sys; print(sys.argv[1])",
+            literal,
+        ],
+        cwd=tmp_path,
+        cancel_event=threading.Event(),
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == literal
+    assert not side_effect.exists()
+
+
 @pytest.mark.skipif(
     not sys.platform.startswith("linux"),
     reason="Linux /proc process-state contract",
@@ -153,20 +172,18 @@ Path(sys.argv[1]).write_text(str(child_pid))
 while True:
     signal.pause()
 """
-    command = " ".join(
-        (
-            shlex.quote(sys.executable),
-            "-c",
-            shlex.quote(child_code),
-            shlex.quote(str(ready_path)),
-        )
-    )
+    command = [
+        sys.executable,
+        "-c",
+        child_code,
+        str(ready_path),
+    ]
     cancel_event = threading.Event()
     errors: list[BaseException] = []
 
     def run_command() -> None:
         try:
-            ShellRunner().run(
+            ShellRunner().run_argv(
                 command,
                 cwd=tmp_path,
                 cancel_event=cancel_event,

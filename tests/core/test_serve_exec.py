@@ -21,6 +21,7 @@ import io
 import multiprocessing
 import os
 import signal
+import shlex
 import sys
 import tarfile
 import threading
@@ -80,13 +81,11 @@ class _FakeProc:
 
 
 class _FakeShellRunner:
-    """Stands in for `mship.util.shell.ShellRunner`. `.run()` records every
-    git command issued (command, cwd) and returns a canned `ShellResult`
-    looked up by exact command string (`rev_responses` supports a list per
-    command so successive calls to the SAME command — e.g. a base-freshness
-    probe before and after a fetch — can return different results, modeling
-    origin having moved). `.run_streaming()` returns the canned `_FakeProc`
-    and records what it was invoked with."""
+    """Stands in for `mship.util.shell.ShellRunner`. `.run_argv()` records
+    each git command as display text plus cwd and returns a canned
+    `ShellResult` looked up by that text (`rev_responses` supports successive
+    responses for repeated commands). `.run_streaming()` returns the canned
+    `_FakeProc` and records what it was invoked with."""
 
     def __init__(self, *, streaming_proc=None, rev_responses=None):
         self.run_calls: list[tuple[str, Path]] = []
@@ -107,6 +106,14 @@ class _FakeShellRunner:
         if seq:
             return seq.pop(0) if len(seq) > 1 else seq[0]
         return ShellResult(returncode=0, stdout="", stderr="")
+
+    def run_argv(self, args, cwd, env=None, cancel_event=None):
+        return self.run(
+            shlex.join(args),
+            cwd,
+            env=env,
+            cancel_event=cancel_event,
+        )
 
     def run_streaming(self, command, cwd, env=None):
         self.streaming_calls.append({"command": command, "cwd": Path(cwd), "env": env})
@@ -506,9 +513,9 @@ def test_exec_http_disconnect_cancels_blocked_materialization(
         return proc
 
     class _ObservedShellRunner(shell_module.ShellRunner):
-        def run(self, *args, **kwargs):
+        def run_argv(self, *args, **kwargs):
             try:
-                return super().run(*args, **kwargs)
+                return super().run_argv(*args, **kwargs)
             finally:
                 operation_finished.set()
 
@@ -1487,6 +1494,42 @@ def _host_repo_with_run_ref(tmp_path: Path) -> tuple[Path, str, str]:
     _real_git("reset", "-q", "--hard", tip, cwd=repo)
     assert _real_git("remote", cwd=repo) == ""      # nothing to fetch from
     return repo, tip, scratch
+
+
+def test_materialization_passes_dynamic_values_as_single_argv_elements(tmp_path):
+    class _ArgvOnlyShell:
+        def __init__(self):
+            self.calls = []
+
+        def run(self, *args, **kwargs):
+            pytest.fail("materialization used the string shell boundary")
+
+        def run_argv(self, args, cwd, env=None, cancel_event=None):
+            self.calls.append((list(args), Path(cwd), cancel_event))
+            return ShellResult(returncode=0, stdout="", stderr="")
+
+    shell = _ArgvOnlyShell()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    worktree = tmp_path / "worktree;literal"
+    run_ref = "refs/mship/run/task;literal/api"
+
+    remote_exec.materialize_worktree(
+        shell,
+        repo,
+        worktree,
+        "feat/task",
+        repo_name="api",
+        run_ref=run_ref,
+    )
+
+    assert shell.calls == [
+        (
+            ["git", "worktree", "add", "--detach", str(worktree), run_ref],
+            repo,
+            None,
+        ),
+    ]
 
 
 def test_materialize_from_a_run_ref_creates_a_detached_worktree(tmp_path):
