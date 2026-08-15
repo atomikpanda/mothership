@@ -337,6 +337,7 @@ def test_exec_response_does_not_require_create_collapsing_task_group(
     monkeypatch.delattr(
         starlette_utils,
         "create_collapsing_task_group",
+        raising=False,
     )
     fake = _FakeShellRunner(
         streaming_proc=_FakeProc(stdout_lines=["ok\n"]),
