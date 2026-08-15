@@ -56,6 +56,7 @@ import hashlib
 import io
 import queue
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import threading
@@ -68,6 +69,7 @@ from mship.core import remote_setup
 from mship.core.config import WorkspaceConfig
 from mship.core.run_ref import RunRefNameError
 from mship.core.run_ref import run_ref as build_run_ref
+from mship.util.shell import ShellCancelled
 from mship.util.taskfile import taskfile_has_target
 
 VERBS: tuple[str, ...] = ("run", "capture", "build")
@@ -107,7 +109,14 @@ class ShellLike(Protocol):
     output can be drained incrementally. Same shapes as the real
     `ShellRunner` — tests inject a fake implementing just this surface."""
 
-    def run(self, command: str, cwd: Path, env: dict[str, str] | None = None): ...
+    def run(
+        self,
+        command: str,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        *,
+        cancel_event: threading.Event | None = None,
+    ): ...
 
     def run_streaming(self, command: str, cwd: Path, env: dict[str, str] | None = None): ...
 
@@ -160,15 +169,42 @@ def _acquire_task_execution_lock(
     return lock_file
 
 
-def _git_rev(shell: ShellLike, cwd: Path, ref: str) -> str | None:
-    result = shell.run(f"git rev-parse {ref}", cwd=cwd)
+def _run_shell(
+    shell: ShellLike,
+    command: str,
+    cwd: Path,
+    *,
+    cancel_event: threading.Event | None,
+):
+    if cancel_event is None:
+        return shell.run(command, cwd=cwd)
+    return shell.run(command, cwd=cwd, cancel_event=cancel_event)
+
+
+def _git_rev(
+    shell: ShellLike,
+    cwd: Path,
+    ref: str,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> str | None:
+    result = _run_shell(
+        shell,
+        f"git rev-parse {ref}",
+        cwd,
+        cancel_event=cancel_event,
+    )
     if result.returncode != 0:
         return None
     return result.stdout.strip()
 
 
 def check_base_freshness(
-    shell: ShellLike, repo_path: Path, base_branch: str | None
+    shell: ShellLike,
+    repo_path: Path,
+    base_branch: str | None,
+    *,
+    cancel_event: threading.Event | None = None,
 ) -> str | None:
     """MOS-203: before materializing, make sure this repo's knowledge of the
     task's base branch is current — auto-fetch it and, if origin had moved,
@@ -182,9 +218,24 @@ def check_base_freshness(
     """
     if not base_branch:
         return None
-    before = _git_rev(shell, repo_path, f"origin/{base_branch}")
-    shell.run(f"git fetch origin {base_branch}", cwd=repo_path)
-    after = _git_rev(shell, repo_path, f"origin/{base_branch}")
+    before = _git_rev(
+        shell,
+        repo_path,
+        f"origin/{base_branch}",
+        cancel_event=cancel_event,
+    )
+    _run_shell(
+        shell,
+        f"git fetch origin {base_branch}",
+        repo_path,
+        cancel_event=cancel_event,
+    )
+    after = _git_rev(
+        shell,
+        repo_path,
+        f"origin/{base_branch}",
+        cancel_event=cancel_event,
+    )
     if before is not None and after is not None and before != after:
         return (
             f"warning: base '{base_branch}' was behind origin "
@@ -193,14 +244,26 @@ def check_base_freshness(
     return None
 
 
-def _run_checked(shell: ShellLike, command: str, cwd: Path, *, repo_name: str) -> None:
+def _run_checked(
+    shell: ShellLike,
+    command: str,
+    cwd: Path,
+    *,
+    repo_name: str,
+    cancel_event: threading.Event | None = None,
+) -> None:
     """Run a git plumbing command that MUST succeed for the branch worktree
     to be usable. Raises `MaterializeError` (naming the repo, the failing
     command, and its stderr) on a non-zero exit rather than letting
     `run_verb_stream` continue on to run the task against a missing/stale
     worktree (Task 6 hardening — previously every `materialize_worktree`
     call site ignored `ShellResult.returncode` entirely)."""
-    result = shell.run(command, cwd=cwd)
+    result = _run_shell(
+        shell,
+        command,
+        cwd,
+        cancel_event=cancel_event,
+    )
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()
         detail = f": {stderr}" if stderr else f" (exit {result.returncode})"
@@ -217,6 +280,7 @@ def materialize_worktree(
     *,
     repo_name: str,
     run_ref: str | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     """Ensure `worktree_path` is a git worktree of `repo_path` holding the
     revision this run is supposed to execute.
@@ -250,9 +314,27 @@ def materialize_worktree(
             # succeeds even when the worktree is dirty from the last run
             # (verified); the reset then moves detached HEAD without ever moving
             # a branch.
-            _run_checked(shell, "git checkout --detach", worktree_path, repo_name=repo_name)
-            _run_checked(shell, f"git reset --hard {run_ref}", worktree_path, repo_name=repo_name)
-            _run_checked(shell, "git clean -fd", worktree_path, repo_name=repo_name)
+            _run_checked(
+                shell,
+                "git checkout --detach",
+                worktree_path,
+                repo_name=repo_name,
+                cancel_event=cancel_event,
+            )
+            _run_checked(
+                shell,
+                f"git reset --hard {run_ref}",
+                worktree_path,
+                repo_name=repo_name,
+                cancel_event=cancel_event,
+            )
+            _run_checked(
+                shell,
+                "git clean -fd",
+                worktree_path,
+                repo_name=repo_name,
+                cancel_event=cancel_event,
+            )
         else:
             worktree_path.parent.mkdir(parents=True, exist_ok=True)
             _run_checked(
@@ -260,14 +342,39 @@ def materialize_worktree(
                 f"git worktree add --detach {worktree_path} {run_ref}",
                 repo_path,
                 repo_name=repo_name,
+                cancel_event=cancel_event,
             )
         return
 
-    _run_checked(shell, f"git fetch origin {branch}", repo_path, repo_name=repo_name)
+    _run_checked(
+        shell,
+        f"git fetch origin {branch}",
+        repo_path,
+        repo_name=repo_name,
+        cancel_event=cancel_event,
+    )
     if (worktree_path / ".git").exists():
-        _run_checked(shell, f"git fetch origin {branch}", worktree_path, repo_name=repo_name)
-        _run_checked(shell, f"git checkout {branch}", worktree_path, repo_name=repo_name)
-        _run_checked(shell, f"git reset --hard origin/{branch}", worktree_path, repo_name=repo_name)
+        _run_checked(
+            shell,
+            f"git fetch origin {branch}",
+            worktree_path,
+            repo_name=repo_name,
+            cancel_event=cancel_event,
+        )
+        _run_checked(
+            shell,
+            f"git checkout {branch}",
+            worktree_path,
+            repo_name=repo_name,
+            cancel_event=cancel_event,
+        )
+        _run_checked(
+            shell,
+            f"git reset --hard origin/{branch}",
+            worktree_path,
+            repo_name=repo_name,
+            cancel_event=cancel_event,
+        )
     else:
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
         _run_checked(
@@ -275,6 +382,7 @@ def materialize_worktree(
             f"git worktree add -B {branch} {worktree_path} origin/{branch}",
             repo_path,
             repo_name=repo_name,
+            cancel_event=cancel_event,
         )
 
 
@@ -317,11 +425,25 @@ def _stream_proc_lines(
     """Yield each stdout/stderr line from `proc` as UTF-8 bytes AS IT'S
     PRODUCED (not buffered until the process exits) — this is what makes
     `run_verb_stream` a live stream rather than a final blob. Returns once
-    both drain threads have hit EOF and the queue is empty, or returns False
-    when the response reports that its client disconnected."""
+    both pipes are drained and the process has exited, or returns False when
+    the response reports that its client disconnected."""
     q: "queue.Queue[str]" = queue.Queue()
     threads = _drain_to_queue(proc, q)
-    while any(t.is_alive() for t in threads) or not q.empty():
+    poll = getattr(proc, "poll", None)
+
+    def process_is_running() -> bool:
+        if not callable(poll):
+            return False
+        try:
+            return poll() is None
+        except Exception:
+            return False
+
+    while (
+        any(t.is_alive() for t in threads)
+        or not q.empty()
+        or process_is_running()
+    ):
         if cancel_event is not None and cancel_event.is_set():
             return False
         try:
@@ -335,44 +457,82 @@ def _stream_proc_lines(
 
 
 def _terminate_proc(proc) -> None:
-    """Best-effort stop a possibly-still-running task subprocess.
+    """Best-effort stop and reap a possibly-still-running task subprocess.
 
     Called from `run_verb_stream`'s per-repo `finally` so a client disconnect
-    (a GeneratorExit raised at a `yield` while the task is mid-run) doesn't
-    orphan the go-task process. A process that already exited (the normal path,
-    after `proc.wait()`) short-circuits via `poll()` and is a no-op.
-
-    `ShellRunner.run_streaming` launches the task in its own session
-    (`start_new_session=True` on POSIX), so the process is its own group leader
-    — signal the whole group (`killpg`) to also catch grandchildren. Falls back
-    to `proc.terminate()` on Windows, when there's no real OS pid (a test fake),
-    or when the group is already gone.
+    does not orphan the go-task process or release its task lock while the
+    process is still alive.
     """
     if proc is None:
         return
     poll = getattr(proc, "poll", None)
     try:
         if callable(poll) and poll() is not None:
-            return  # already exited — nothing to signal
+            return
     except Exception:
         pass
 
     import os as _os
     import signal as _signal
 
+    stopped = False
     pid = getattr(proc, "pid", None)
-    if _os.name != "nt" and isinstance(pid, int) and pid > 0 and hasattr(_os, "killpg"):
+    if (
+        _os.name != "nt"
+        and isinstance(pid, int)
+        and pid > 0
+        and hasattr(_os, "killpg")
+    ):
         try:
             _os.killpg(pid, _signal.SIGTERM)
-            return
+            stopped = True
         except (ProcessLookupError, OSError):
             pass
-    terminate = getattr(proc, "terminate", None)
-    if callable(terminate):
+    if not stopped:
+        terminate = getattr(proc, "terminate", None)
+        if callable(terminate):
+            try:
+                terminate()
+                stopped = True
+            except Exception:
+                pass
+    if not stopped:
+        return
+
+    wait = getattr(proc, "wait", None)
+    if not callable(wait):
+        return
+    try:
+        wait(timeout=1)
+        return
+    except TypeError:
+        # Lightweight test doubles commonly expose wait() without Popen's
+        # timeout parameter; termination above makes that call nonblocking.
         try:
-            terminate()
+            wait()
         except Exception:
             pass
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception:
+        return
+
+    try:
+        if (
+            _os.name != "nt"
+            and isinstance(pid, int)
+            and pid > 0
+            and hasattr(_os, "killpg")
+        ):
+            _os.killpg(pid, _signal.SIGKILL)
+        else:
+            kill = getattr(proc, "kill", None)
+            if callable(kill):
+                kill()
+        wait(timeout=1)
+    except Exception:
+        pass
 
 
 def _build_artifact_tar(artifacts: list[_cap.Artifact]) -> bytes:
@@ -544,11 +704,11 @@ def _run_verb_stream_unlocked(
     def _ensure_materialized(top_repo: str) -> Iterator[bytes]:
         """Materialize a TOP-LEVEL repo's task-branch worktree at
         `<hub>/<repo>`, recording it in `materialized`. A generator so it can
-        yield the base-freshness warning (see `check_base_freshness`) and, on
-        failure, the error line + trailing exit sentinel straight into the
-        stream. Its `yield from` value (PEP 380) is True on success, False if
-        the materialize failed — in which case the exit sentinel has ALREADY
-        been emitted and the caller MUST `return` to abort the whole request.
+        yield the base-freshness warning or a clean materialization error through
+        the stream. Its `yield from` value (PEP 380) is True on success, False
+        if materialization fails or the client disconnects. A materialization
+        failure has already emitted its exit sentinel; cancellation simply
+        unwinds so the response can close.
 
         Idempotent: a repo already in `materialized` (e.g. a parent brought in
         while resolving an earlier `git_root` child, then reached again in the
@@ -561,20 +721,32 @@ def _run_verb_stream_unlocked(
         worktree_path = hub / top_repo
         ref = run_refs.get(top_repo)
 
-        if ref is None:
-            # Origin is the source of truth for this repo, so make sure this
-            # host's view of its base is current first (MOS-203). Skipped
-            # entirely on the scratch-ref path: nothing there comes from origin,
-            # and a fetch would be pure latency.
-            warning = check_base_freshness(shell, repo_path, rc.base_branch)
-            if warning is not None:
-                yield f"{warning}\n".encode("utf-8")
-
         try:
+            if ref is None:
+                # Origin is the source of truth for this repo, so make sure this
+                # host's view of its base is current first (MOS-203). Skipped
+                # entirely on the scratch-ref path: nothing there comes from
+                # origin, and a fetch would be pure latency.
+                warning = check_base_freshness(
+                    shell,
+                    repo_path,
+                    rc.base_branch,
+                    cancel_event=deps.cancel_event,
+                )
+                if warning is not None:
+                    yield f"{warning}\n".encode("utf-8")
+
             materialize_worktree(
-                shell, repo_path, worktree_path, branch,
-                repo_name=top_repo, run_ref=ref,
+                shell,
+                repo_path,
+                worktree_path,
+                branch,
+                repo_name=top_repo,
+                run_ref=ref,
+                cancel_event=deps.cancel_event,
             )
+        except ShellCancelled:
+            return False
         except MaterializeError as exc:
             yield f"error: {exc}\n".encode("utf-8")
             yield f"{EXIT_MARKER}:{nonce} 1\n".encode("utf-8")

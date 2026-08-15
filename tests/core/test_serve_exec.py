@@ -19,6 +19,7 @@ import fcntl
 import hashlib
 import io
 import multiprocessing
+import sys
 import tarfile
 import threading
 from pathlib import Path
@@ -30,6 +31,7 @@ from mship.core import remote_exec
 from mship.core.config import RepoConfig, WorkspaceConfig
 from mship.core.serve import ExecBody, create_app
 from mship.core.state import StateManager
+from mship.util import shell as shell_module
 from mship.util.shell import ShellResult
 
 
@@ -86,7 +88,9 @@ class _FakeShellRunner:
     def __init__(self, *, streaming_proc=None, rev_responses=None):
         self.run_calls: list[tuple[str, Path]] = []
         self.streaming_calls: list[dict] = []
-        self._rev_responses = {k: list(v) for k, v in (rev_responses or {}).items()}
+        self._rev_responses = {
+            k: list(v) for k, v in (rev_responses or {}).items()
+        }
         self._streaming_proc = streaming_proc
 
     def build_command(self, command, env_runner=None):
@@ -94,7 +98,7 @@ class _FakeShellRunner:
             return f"{env_runner} {command}"
         return command
 
-    def run(self, command, cwd, env=None):
+    def run(self, command, cwd, env=None, cancel_event=None):
         self.run_calls.append((command, Path(cwd)))
         seq = self._rev_responses.get(command)
         if seq:
@@ -240,6 +244,79 @@ def _assert_task_lock_failure(
     assert lines[-1] == f"{remote_exec.EXIT_MARKER}:{nonce} 1\n".encode()
     assert not fake.run_calls
     assert not fake.streaming_calls
+
+
+def _exec_asgi_scope() -> dict:
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/exec/run",
+        "raw_path": b"/exec/run",
+        "query_string": b"",
+        "headers": [(b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 12345),
+        "server": ("testserver", 80),
+        "root_path": "",
+    }
+
+
+def _disconnect_exec_request(app, started, stopped, cleanup) -> list[dict]:
+    response_messages: list[dict] = []
+    request_sent = False
+
+    async def receive():
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {
+                "type": "http.request",
+                "body": b'{"task":"t1","repos":["api"]}',
+                "more_body": False,
+            }
+        assert await asyncio.to_thread(started.wait, 10)
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        response_messages.append(message)
+
+    async def disconnect_request() -> bool:
+        app_task = asyncio.create_task(
+            app(_exec_asgi_scope(), receive, send),
+        )
+        stopped_by_disconnect = False
+        try:
+            assert await asyncio.to_thread(started.wait, 10)
+            stopped_by_disconnect = await asyncio.to_thread(stopped.wait, 1)
+        finally:
+            if not stopped_by_disconnect:
+                cleanup()
+            await asyncio.wait_for(app_task, timeout=10)
+        return stopped_by_disconnect
+
+    assert asyncio.run(disconnect_request())
+    assert response_messages[0]["type"] == "http.response.start"
+    return response_messages
+
+
+def _assert_same_task_replacement(workspace_root: Path) -> None:
+    replacement_fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["replacement\n"]),
+    )
+    replacement_deps = remote_exec.RemoteExecDeps(
+        config=_config(workspace_root),
+        shell=replacement_fake,
+        workspace_root=workspace_root,
+    )
+    assert list(remote_exec.run_verb_stream(
+        "run", "t1", ["api"], None,
+        deps=replacement_deps, nonce="replacementnonce",
+    ))[-2:] == [
+        b"replacement\n",
+        b"__MSHIP_EXIT__:replacementnonce 0\n",
+    ]
 
 
 def _parse_exec_stream(content: bytes, nonce: str):
@@ -398,67 +475,97 @@ def test_exec_http_disconnect_terminates_quiet_proc_and_releases_task_lock(
     fake = _SignalingShellRunner(streaming_proc=_QuietProc())
     _patch_shell(monkeypatch, fake)
     app = _app(tmp_path)
-    response_messages = []
-    request_sent = False
+    _disconnect_exec_request(app, started, terminated, unblock.set)
+    _assert_same_task_replacement(tmp_path)
 
-    async def receive():
-        nonlocal request_sent
-        if not request_sent:
-            request_sent = True
-            return {
-                "type": "http.request",
-                "body": b'{"task":"t1","repos":["api"]}',
-                "more_body": False,
-            }
-        assert await asyncio.to_thread(started.wait, 10)
-        return {"type": "http.disconnect"}
 
-    async def send(message):
-        response_messages.append(message)
+def test_exec_http_disconnect_cancels_blocked_materialization(
+    tmp_path,
+    monkeypatch,
+):
+    started = threading.Event()
+    operation_finished = threading.Event()
+    processes = []
+    real_popen = shell_module.subprocess.Popen
 
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.3"},
-        "http_version": "1.1",
-        "method": "POST",
-        "scheme": "http",
-        "path": "/exec/run",
-        "raw_path": b"/exec/run",
-        "query_string": b"",
-        "headers": [(b"content-type", b"application/json")],
-        "client": ("127.0.0.1", 12345),
-        "server": ("testserver", 80),
-        "root_path": "",
-    }
+    def blocking_popen(_command, **kwargs):
+        proc = real_popen(
+            [sys.executable, "-c", "import signal; signal.pause()"],
+            cwd=kwargs.get("cwd"),
+            stdout=kwargs.get("stdout"),
+            stderr=kwargs.get("stderr"),
+            text=kwargs.get("text"),
+            env=kwargs.get("env"),
+            start_new_session=True,
+        )
+        processes.append(proc)
+        started.set()
+        return proc
 
-    async def disconnect_request() -> bool:
-        app_task = asyncio.create_task(app(scope, receive, send))
-        stopped = False
-        try:
-            assert await asyncio.to_thread(started.wait, 10)
-            stopped = await asyncio.to_thread(terminated.wait, 1)
-        finally:
-            if not stopped:
-                unblock.set()
-            await asyncio.wait_for(app_task, timeout=10)
-        return stopped
+    class _ObservedShellRunner(shell_module.ShellRunner):
+        def run(self, *args, **kwargs):
+            try:
+                return super().run(*args, **kwargs)
+            finally:
+                operation_finished.set()
 
-    assert asyncio.run(disconnect_request())
-    assert response_messages[0]["type"] == "http.response.start"
-
-    replacement_fake = _FakeShellRunner(
-        streaming_proc=_FakeProc(stdout_lines=["replacement\n"]),
+    monkeypatch.setattr(shell_module.subprocess, "Popen", blocking_popen)
+    monkeypatch.setattr(
+        "mship.core.serve.ShellRunner",
+        lambda: _ObservedShellRunner(),
     )
-    replacement_deps = remote_exec.RemoteExecDeps(
-        config=_config(tmp_path), shell=replacement_fake, workspace_root=tmp_path,
+    app = _app(tmp_path)
+
+    _disconnect_exec_request(
+        app,
+        started,
+        operation_finished,
+        lambda: processes[0].terminate(),
     )
-    assert list(remote_exec.run_verb_stream(
-        "run", "t1", ["api"], None,
-        deps=replacement_deps, nonce="replacementnonce",
-    ))[-2:] == [
-        b"replacement\n",
-        b"__MSHIP_EXIT__:replacementnonce 0\n",
-    ]
+
+    assert processes[0].returncode is not None
+    _assert_same_task_replacement(tmp_path)
+
+
+def test_exec_http_disconnect_terminates_proc_after_pipe_eof(
+    tmp_path,
+    monkeypatch,
+):
+    started = threading.Event()
+    terminated = threading.Event()
+    reaped = threading.Event()
+    unblock = threading.Event()
+
+    class _EofAliveProc:
+        pid = None
+        stdout = io.StringIO("")
+        stderr = io.StringIO("")
+
+        def wait(self):
+            unblock.wait(timeout=5)
+            reaped.set()
+            return 0
+
+        def poll(self):
+            return 0 if unblock.is_set() else None
+
+        def terminate(self):
+            terminated.set()
+            unblock.set()
+
+    class _SignalingShellRunner(_FakeShellRunner):
+        def run_streaming(self, command, cwd, env=None):
+            proc = super().run_streaming(command, cwd, env=env)
+            started.set()
+            return proc
+
+    fake = _SignalingShellRunner(streaming_proc=_EofAliveProc())
+    _patch_shell(monkeypatch, fake)
+    app = _app(tmp_path)
+
+    _disconnect_exec_request(app, started, terminated, unblock.set)
+    assert reaped.is_set()
+    _assert_same_task_replacement(tmp_path)
 
 
 def test_concurrent_same_task_is_refused_while_different_task_runs(tmp_path):
@@ -733,7 +840,7 @@ def test_run_verb_stream_materialize_failure_surfaces_repo_and_stops(tmp_path, m
     the repo, via the same data-conveyed error-line + non-zero-exit pattern."""
     fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["should not run\n"], returncode=0))
 
-    def _failing_run(command, cwd, env=None):
+    def _failing_run(command, cwd, env=None, cancel_event=None):
         fake.run_calls.append((command, Path(cwd)))
         if command.startswith("git worktree add"):
             return ShellResult(returncode=128, stdout="", stderr="fatal: could not create worktree")
@@ -833,7 +940,7 @@ def test_run_verb_stream_git_root_child_parent_materialize_failure_stops_cleanly
     task runs."""
     fake = _FakeShellRunner(streaming_proc=_FakeProc(stdout_lines=["should not run\n"], returncode=0))
 
-    def _failing_run(command, cwd, env=None):
+    def _failing_run(command, cwd, env=None, cancel_event=None):
         fake.run_calls.append((command, Path(cwd)))
         if command.startswith("git worktree add"):
             return ShellResult(returncode=128, stdout="", stderr="fatal: could not create worktree")
@@ -1723,8 +1830,13 @@ class _MaterializingShellRunner(_FakeShellRunner):
     way to pin that ordering.
     """
 
-    def run(self, command, cwd, env=None):
-        result = super().run(command, cwd, env=env)
+    def run(self, command, cwd, env=None, cancel_event=None):
+        result = super().run(
+            command,
+            cwd,
+            env=env,
+            cancel_event=cancel_event,
+        )
         if command.startswith("git worktree add"):
             # `git worktree add -B <branch> <worktree_path> origin/<branch>`
             worktree_path = Path(command.split()[5])
