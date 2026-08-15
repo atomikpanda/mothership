@@ -546,8 +546,8 @@ def run_verb_stream(
     if deps.cancel_event is not None:
         try:
             ensure_cancellable_shell_supported()
-        except ShellCancellationUnsupported as exc:
-            yield f"error: remote execution unavailable: {exc}\n".encode("utf-8")
+        except ShellCancellationUnsupported:
+            yield b"error: remote execution unavailable; execution was not started\n"
             yield f"{EXIT_MARKER}:{nonce} 1\n".encode("utf-8")
             return
 

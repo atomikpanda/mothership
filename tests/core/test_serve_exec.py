@@ -990,8 +990,10 @@ def test_cancellable_remote_preflight_fails_before_lock_or_shell_work(
         nonce="unsupportednonce",
     ))
 
-    assert b"remote execution unavailable" in lines[0]
-    assert b"process-status" in lines[0]
+    assert lines[0] == (
+        b"error: remote execution unavailable; execution was not started\n"
+    )
+    assert b"unavailable-proc" not in b"".join(lines)
     assert lines[-1] == b"__MSHIP_EXIT__:unsupportednonce 1\n"
     assert not (tmp_path / ".mothership" / "remote-exec-locks").exists()
     assert not fake.run_calls
@@ -1016,9 +1018,71 @@ def test_exec_cancellable_preflight_failure_is_framed_before_work(
     nonce = _nonce_of(response)
     lines = response.content.splitlines()
     assert response.status_code == 200
-    assert b"remote execution unavailable" in lines[0]
-    assert b"process-status" in lines[0]
+    assert lines[0] == (
+        b"error: remote execution unavailable; execution was not started"
+    )
+    assert b"unavailable-proc" not in response.content
     assert lines[-1] == _exit_line(nonce, 1).encode()
+    assert not (tmp_path / ".mothership" / "remote-exec-locks").exists()
+    assert not fake.run_calls
+    assert not fake.streaming_calls
+
+
+def test_cancellation_infrastructure_detail_is_redacted_from_direct_and_http(
+    tmp_path,
+    monkeypatch,
+):
+    sensitive = "/secret/process-status/unique-marker"
+
+    def reject_cancellation():
+        raise remote_exec.ShellCancellationUnsupported(sensitive)
+
+    monkeypatch.setattr(
+        remote_exec,
+        "ensure_cancellable_shell_supported",
+        reject_cancellation,
+    )
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["must not run\n"]),
+    )
+    deps = remote_exec.RemoteExecDeps(
+        config=_config(tmp_path),
+        shell=fake,
+        workspace_root=tmp_path,
+        cancel_event=threading.Event(),
+    )
+    expected_error = (
+        b"error: remote execution unavailable; execution was not started\n"
+    )
+
+    direct = list(remote_exec.run_verb_stream(
+        "run",
+        "t1",
+        ["api"],
+        None,
+        deps=deps,
+        nonce="redactednonce",
+    ))
+
+    assert direct == [
+        expected_error,
+        b"__MSHIP_EXIT__:redactednonce 1\n",
+    ]
+    assert sensitive.encode() not in b"".join(direct)
+
+    _patch_shell(monkeypatch, fake)
+    response = TestClient(_app(tmp_path)).post(
+        "/exec/run",
+        json={"task": "t1", "repos": ["api"]},
+    )
+    nonce = _nonce_of(response)
+
+    assert response.status_code == 200
+    assert response.content.splitlines() == [
+        expected_error.rstrip(b"\n"),
+        _exit_line(nonce, 1).encode(),
+    ]
+    assert sensitive.encode() not in response.content
     assert not (tmp_path / ".mothership" / "remote-exec-locks").exists()
     assert not fake.run_calls
     assert not fake.streaming_calls
