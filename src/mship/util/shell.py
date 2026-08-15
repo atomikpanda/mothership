@@ -31,7 +31,7 @@ def _has_owned_process_group(proc: subprocess.Popen) -> bool:
 
 
 def _linux_group_has_executable_member(process_group: int) -> bool:
-    unreadable = False
+    found_member = False
     try:
         entries = os.scandir("/proc")
     except OSError:
@@ -42,19 +42,28 @@ def _linux_group_has_executable_member(process_group: int) -> bool:
             if not entry.name.isdigit():
                 continue
             try:
-                stat = (Path(entry.path) / "stat").read_text()
-                fields = stat[stat.rfind(")") + 2 :].split()
+                stat = (Path(entry.path) / "stat").read_bytes()
+                fields = stat[stat.rfind(b")") + 2 :].split()
                 state = fields[0]
                 member_group = int(fields[2])
             except FileNotFoundError:
                 continue
             except (OSError, IndexError, ValueError):
-                unreadable = True
+                try:
+                    member_group = os.getpgid(int(entry.name))
+                except ProcessLookupError:
+                    continue
+                except OSError:
+                    return _has_owned_process_group_id(process_group)
+                if member_group == process_group:
+                    return True
                 continue
-            if member_group == process_group and state not in {"X", "Z", "x"}:
-                return True
+            if member_group == process_group:
+                found_member = True
+                if state not in {b"X", b"Z", b"x"}:
+                    return True
 
-    return unreadable and _has_owned_process_group_id(process_group)
+    return not found_member and _has_owned_process_group_id(process_group)
 
 
 def _has_owned_process_group_id(process_group: int) -> bool:
@@ -79,6 +88,16 @@ def _signal_owned_process(proc: subprocess.Popen, *, force: bool = False) -> Non
             return
         proc.kill() if force else proc.terminate()
     except ProcessLookupError:
+        pass
+
+
+def _reap_owned_process_leader(proc: subprocess.Popen) -> None:
+    wait = getattr(proc, "wait", None)
+    if not callable(wait):
+        return
+    try:
+        wait()
+    except Exception:
         pass
 
 
@@ -107,6 +126,7 @@ def _terminate_owned_process_group(
         return
 
     if force:
+        _reap_owned_process_leader(proc)
         _wait_for_owned_process_group_quiescence(proc)
         return
 
@@ -115,6 +135,7 @@ def _terminate_owned_process_group(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             _signal_owned_process(proc, force=True)
+            _reap_owned_process_leader(proc)
             _wait_for_owned_process_group_quiescence(proc)
             return
         time.sleep(min(_CANCELLATION_CHECK_INTERVAL, remaining))

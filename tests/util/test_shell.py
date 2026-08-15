@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 from pathlib import Path
 
 import pytest
-
+from mship.util import shell as shell_module
 from mship.util.shell import ShellCancelled, ShellRunner, ShellResult
 
 
@@ -204,3 +204,109 @@ while True:
             os.killpg(process_group, signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_forced_group_cleanup_reaps_leader_before_absence_wait(
+    monkeypatch,
+    platform,
+):
+    killed = threading.Event()
+    reaped = threading.Event()
+    descendant_absent = threading.Event()
+    cleanup_done = threading.Event()
+    events: list[str] = []
+
+    class _KilledLeader:
+        pid = 424242
+
+        def poll(self):
+            return None
+
+        def wait(self):
+            events.append("reap")
+            reaped.set()
+            return -signal.SIGKILL
+
+    proc = _KilledLeader()
+
+    def fake_killpg(process_group, signum):
+        assert process_group == proc.pid
+        if signum == signal.SIGKILL:
+            events.append("kill")
+            killed.set()
+            return
+        if signum == 0:
+            events.append("probe")
+            if reaped.is_set() and descendant_absent.is_set():
+                raise ProcessLookupError
+
+    monkeypatch.setattr(shell_module.sys, "platform", platform)
+    monkeypatch.setattr(shell_module.os, "killpg", fake_killpg)
+    if platform == "linux":
+        monkeypatch.setattr(
+            shell_module,
+            "_linux_group_has_executable_member",
+            lambda process_group: shell_module._has_owned_process_group_id(
+                process_group
+            ),
+        )
+
+    def cleanup() -> None:
+        shell_module._terminate_owned_process_group(proc)
+        cleanup_done.set()
+
+    cleanup_thread = threading.Thread(target=cleanup, daemon=True)
+    cleanup_thread.start()
+    try:
+        assert killed.wait(timeout=2), "cleanup did not escalate to SIGKILL"
+        assert reaped.wait(timeout=1), "leader was not reaped after SIGKILL"
+        assert not cleanup_done.is_set(), "cleanup ignored the surviving descendant"
+        descendant_absent.set()
+        assert cleanup_done.wait(timeout=1), "cleanup did not observe group absence"
+        assert events.index("reap") > events.index("kill")
+    finally:
+        reaped.set()
+        descendant_absent.set()
+        cleanup_thread.join(timeout=2)
+
+
+def test_linux_group_scan_accepts_non_utf8_process_name(tmp_path, monkeypatch):
+    process_dir = tmp_path / "123"
+    process_dir.mkdir()
+    (process_dir / "stat").write_bytes(
+        b"123 (\xff process) S 1 424242 0 0 0 0 0\n"
+    )
+    real_scandir = os.scandir
+
+    def scan_test_proc(path):
+        assert path == "/proc"
+        return real_scandir(tmp_path)
+
+    monkeypatch.setattr(shell_module.os, "scandir", scan_test_proc)
+
+    assert shell_module._linux_group_has_executable_member(424242)
+
+
+def test_linux_group_scan_accepts_zombie_with_unreadable_unrelated_stat(
+    tmp_path,
+    monkeypatch,
+):
+    zombie_dir = tmp_path / "123"
+    zombie_dir.mkdir()
+    (zombie_dir / "stat").write_bytes(
+        b"123 (zombie) Z 1 424242 0 0 0 0 0\n"
+    )
+    unreadable_dir = tmp_path / "456"
+    unreadable_dir.mkdir()
+    (unreadable_dir / "stat").write_bytes(b"malformed")
+    real_scandir = os.scandir
+
+    monkeypatch.setattr(
+        shell_module.os,
+        "scandir",
+        lambda path: real_scandir(tmp_path),
+    )
+    monkeypatch.setattr(shell_module.os, "killpg", lambda group, signum: None)
+
+    assert not shell_module._linux_group_has_executable_member(424242)
