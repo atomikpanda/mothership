@@ -328,6 +328,34 @@ def test_run_verb_stream_client_disconnect_cleans_up_tempdir_and_proc(tmp_path):
     assert not capture_dir.exists(), "the capture temp dir must be removed on disconnect"
 
 
+def test_exec_response_does_not_require_create_collapsing_task_group(
+    tmp_path,
+    monkeypatch,
+):
+    from starlette import _utils as starlette_utils
+
+    monkeypatch.delattr(
+        starlette_utils,
+        "create_collapsing_task_group",
+    )
+    fake = _FakeShellRunner(
+        streaming_proc=_FakeProc(stdout_lines=["ok\n"]),
+    )
+    _patch_shell(monkeypatch, fake)
+
+    response = TestClient(_app(tmp_path)).post(
+        "/exec/run",
+        json={"task": "t1", "repos": ["api"]},
+    )
+
+    assert response.status_code == 200
+    nonce = _nonce_of(response)
+    lines, artifacts, exit_line = _parse_exec_stream(response.content, nonce)
+    assert lines == ["ok"]
+    assert artifacts is None
+    assert exit_line == _exit_line(nonce, 0)
+
+
 def test_exec_http_disconnect_terminates_quiet_proc_and_releases_task_lock(
     tmp_path,
     monkeypatch,

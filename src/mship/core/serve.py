@@ -1545,10 +1545,11 @@ def create_app(
     import secrets
     from functools import partial
 
+    import anyio
+    from fastapi.responses import StreamingResponse
+
     from mship.core import remote_exec
     from mship.core.run_ref import is_run_ref_segment
-    from fastapi.responses import StreamingResponse
-    from starlette._utils import create_collapsing_task_group
 
     class _RemoteExecStreamingResponse(StreamingResponse):
         """Own the sync generator until HTTP streaming has fully stopped."""
@@ -1566,16 +1567,27 @@ def create_app(
 
         async def __call__(self, scope, receive, send):
             try:
-                async with create_collapsing_task_group() as task_group:
-                    async def wrap(func):
-                        await func()
-                        task_group.cancel_scope.cancel()
+                try:
+                    async with anyio.create_task_group() as task_group:
+                        async def wrap(func):
+                            await func()
+                            task_group.cancel_scope.cancel()
 
-                    task_group.start_soon(
-                        wrap,
-                        partial(self.stream_response, send),
+                        task_group.start_soon(
+                            wrap,
+                            partial(self.stream_response, send),
+                        )
+                        await wrap(partial(self.listen_for_disconnect, receive))
+                except BaseExceptionGroup as exceptions:
+                    if len(exceptions.exceptions) != 1:
+                        raise
+                    exception = exceptions.exceptions[0]
+                    context = (
+                        None
+                        if exception.__suppress_context__
+                        else exception.__context__
                     )
-                    await wrap(partial(self.listen_for_disconnect, receive))
+                    raise exception from exception.__cause__ or context
             finally:
                 self._cancel_event.set()
                 self._sync_iterator.close()
