@@ -116,6 +116,7 @@ from mship.cli import bootstrap as _bootstrap_mod
 from mship.cli import block as _block_mod
 from mship.cli import commit as _commit_mod
 from mship.cli import context as _context_mod
+from mship.cli import daemon as _daemon_mod
 from mship.cli import debug as _debug_mod
 from mship.cli import depends as _depends_mod
 from mship.cli import dispatch as _dispatch_mod
@@ -183,6 +184,7 @@ _bootstrap_mod.register(app, get_container)
 _block_mod.register(app, get_container)
 _commit_mod.register(app, get_container)
 _context_mod.register(app, get_container)
+_daemon_mod.register(app, get_container)
 _debug_mod.register(app, get_container)
 _depends_mod.register(app, get_container)
 _dispatch_mod.register(app, get_container)

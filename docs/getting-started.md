@@ -13,6 +13,9 @@ Requires Python 3.14+ and [uv](https://docs.astral.sh/uv/). Optional but
 recommended: [go-task](https://taskfile.dev) (task execution) and
 [gh](https://cli.github.com) (`mship finish` uses it to open PRs).
 
+The install also provides `mshipd`, the always-on host daemon — managed via
+`mship daemon ...` ([docs/daemon.md](daemon.md)), never invoked directly.
+
 ## Create a workspace
 
 From the directory that contains your repo(s) — one repo, several, or a

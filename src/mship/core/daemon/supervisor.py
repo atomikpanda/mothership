@@ -1,0 +1,240 @@
+"""OS-supervisor adapters: the single injectable boundary for every
+systemctl/launchctl/loginctl invocation in the daemon feature.
+
+Linux availability probes the USER MANAGER, not the binary: many containers and
+minimal hosts ship `systemctl` with no user manager running (`docker exec`,
+no-pam_systemd SSH), where any `--user` call dies with a bus error. macOS uses
+the `user/<uid>` launchd domain, not `gui/<uid>` — gui-domain operations fail
+over SSH with no GUI session ("Bootstrap failed: 5: Input/output error"),
+which is exactly the headless provisioning scenario #469/#470 describe.
+
+Crash-loop DETECTION is `history.py`'s job (OS-agnostic); `query()` only maps
+raw supervisor state.
+"""
+from __future__ import annotations
+
+import getpass
+import os
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Literal
+
+from mship.core.daemon.paths import daemon_log_dir
+from mship.core.daemon.units import (
+    LAUNCHD_LABEL,
+    SYSTEMD_UNIT_NAME,
+    launchd_plist_path,
+    render_launchd_plist,
+    render_systemd_unit,
+    systemd_unit_path,
+)
+
+_RUN_FALLBACK = "no supervisor is reachable — use `mship daemon run` for a foreground daemon"
+
+
+class DaemonSupervisorError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class SupervisorState:
+    state: Literal["active", "failed", "absent", "unreachable"]
+    detail: str = ""
+
+
+def _default_run(argv: list[str], **kw) -> subprocess.CompletedProcess:
+    return subprocess.run(argv, capture_output=True, text=True, **kw)
+
+
+class _BaseSupervisor:
+    def __init__(self, *, home: Path, run_cmd: Callable = _default_run) -> None:
+        self._home = home
+        self._run = run_cmd
+
+    def logs_tail(self, n: int) -> list[str]:
+        """Last N lines across daemon.log + rotated siblings — pure Python, no
+        journalctl (the phone-only-client case needs OS-independent logs)."""
+        log_dir = daemon_log_dir(self._home)
+        files = sorted(
+            log_dir.glob("daemon.log*"),
+            key=lambda p: int(p.suffix[1:]) if p.suffix[1:].isdigit() else 0,
+            reverse=True,  # highest numeric suffix = oldest first
+        )
+        lines: list[str] = []
+        for f in files:
+            try:
+                lines.extend(f.read_text().splitlines())
+            except OSError:
+                continue
+        return lines[-n:]
+
+
+class SystemdUserSupervisor(_BaseSupervisor):
+    def __init__(
+        self, *, home: Path, user: str | None = None, run_cmd: Callable = _default_run
+    ) -> None:
+        super().__init__(home=home, run_cmd=run_cmd)
+        self._user = user or getpass.getuser()
+
+    def _systemctl(self, *args: str) -> subprocess.CompletedProcess:
+        return self._run(["systemctl", "--user", *args])
+
+    def _checked(self, *args: str) -> subprocess.CompletedProcess:
+        try:
+            r = self._systemctl(*args)
+        except OSError as e:
+            raise DaemonSupervisorError(f"systemctl --user {' '.join(args)} failed: {e}; {_RUN_FALLBACK}") from e
+        if r.returncode != 0:
+            raise DaemonSupervisorError(
+                f"systemctl --user {' '.join(args)} failed: {r.stderr.strip() or r.stdout.strip()}; {_RUN_FALLBACK}"
+            )
+        return r
+
+    def available(self) -> bool:
+        """Any manager reply — even `degraded` (nonzero) — proves reachability;
+        a bus/connection error (or no systemctl at all) means unavailable."""
+        try:
+            r = self._systemctl("is-system-running")
+        except (OSError, Exception):
+            return False
+        reply = (r.stdout or "").strip()
+        if reply and "connect to bus" not in (r.stderr or ""):
+            return True
+        return False
+
+    def install(self, argv: list[str]) -> None:
+        unit_path = systemd_unit_path(self._home)
+        unit_path.parent.mkdir(parents=True, exist_ok=True)
+        unit_path.write_text(render_systemd_unit(argv))
+        self._checked("daemon-reload")
+        self._checked("enable", SYSTEMD_UNIT_NAME.removesuffix(".service"))
+        # Linger is mandatory: without it the user unit is torn down when the
+        # last SSH session ends — precisely the moment the daemon is needed.
+        try:
+            r = self._run(["loginctl", "enable-linger", self._user])
+        except OSError as e:
+            raise DaemonSupervisorError(f"loginctl enable-linger failed: {e}") from e
+        if r.returncode != 0:
+            raise DaemonSupervisorError(f"loginctl enable-linger failed: {r.stderr.strip()}")
+        if self.linger_state() != "yes":
+            raise DaemonSupervisorError(
+                "loginctl enable-linger did not stick (Linger!=yes) — without linger the "
+                "daemon dies when your last SSH session ends. Check `loginctl show-user`."
+            )
+
+    def start(self) -> None:
+        self._checked("start", SYSTEMD_UNIT_NAME.removesuffix(".service"))
+
+    def stop(self) -> None:
+        self._checked("stop", SYSTEMD_UNIT_NAME.removesuffix(".service"))
+
+    def restart(self) -> None:
+        self._checked("restart", SYSTEMD_UNIT_NAME.removesuffix(".service"))
+
+    def query(self) -> SupervisorState:
+        try:
+            r = self._systemctl(
+                "show", SYSTEMD_UNIT_NAME.removesuffix(".service"), "--property=ActiveState,SubState"
+            )
+        except OSError as e:
+            return SupervisorState("unreachable", str(e))
+        if r.returncode != 0:
+            return SupervisorState("unreachable", r.stderr.strip())
+        props = dict(
+            line.split("=", 1) for line in r.stdout.splitlines() if "=" in line
+        )
+        active = props.get("ActiveState")
+        if active is None:
+            return SupervisorState("absent", "unparseable systemctl show output")
+        if active == "active":
+            return SupervisorState("active", props.get("SubState", ""))
+        if active == "failed":
+            return SupervisorState("failed", props.get("SubState", ""))
+        return SupervisorState("absent", f"{active}/{props.get('SubState', '')}")
+
+    def linger_state(self) -> Literal["yes", "no", "unknown"]:
+        try:
+            r = self._run(["loginctl", "show-user", self._user, "--property=Linger"])
+        except OSError:
+            return "unknown"
+        if r.returncode != 0:
+            return "unknown"
+        value = r.stdout.strip().removeprefix("Linger=")
+        return value if value in ("yes", "no") else "unknown"
+
+
+class LaunchdSupervisor(_BaseSupervisor):
+    def __init__(self, *, home: Path, uid: int | None = None, run_cmd: Callable = _default_run) -> None:
+        super().__init__(home=home, run_cmd=run_cmd)
+        self._uid = uid if uid is not None else os.getuid()
+
+    @property
+    def _target(self) -> str:
+        return f"user/{self._uid}/{LAUNCHD_LABEL}"
+
+    def _launchctl(self, *args: str) -> subprocess.CompletedProcess:
+        return self._run(["launchctl", *args])
+
+    def _checked(self, *args: str) -> subprocess.CompletedProcess:
+        try:
+            r = self._launchctl(*args)
+        except OSError as e:
+            raise DaemonSupervisorError(f"launchctl {' '.join(args)} failed: {e}; {_RUN_FALLBACK}") from e
+        if r.returncode != 0:
+            raise DaemonSupervisorError(
+                f"launchctl {' '.join(args)} failed: {r.stderr.strip() or r.stdout.strip()}; {_RUN_FALLBACK}"
+            )
+        return r
+
+    def available(self) -> bool:
+        try:
+            r = self._launchctl("print", f"user/{self._uid}")
+        except (OSError, Exception):
+            return False
+        return r.returncode == 0
+
+    def install(self, argv: list[str]) -> None:
+        plist_path = launchd_plist_path(self._home)
+        plist_path.parent.mkdir(parents=True, exist_ok=True)
+        plist_path.write_text(render_launchd_plist(argv, daemon_log_dir(self._home)))
+        # user/<uid>, never gui/<uid>: bootstrap must work over SSH with no GUI
+        # session (the headless provisioning path).
+        self._checked("bootstrap", f"user/{self._uid}", str(plist_path))
+
+    def start(self) -> None:
+        self._checked("kickstart", self._target)
+
+    def stop(self) -> None:
+        self._checked("bootout", self._target)
+
+    def restart(self) -> None:
+        self._checked("kickstart", "-k", self._target)
+
+    def query(self) -> SupervisorState:
+        try:
+            r = self._launchctl("print", self._target)
+        except OSError as e:
+            return SupervisorState("unreachable", str(e))
+        if r.returncode != 0:
+            err = (r.stderr or "") + (r.stdout or "")
+            if "Could not find service" in err:
+                return SupervisorState("absent", err.strip())
+            return SupervisorState("unreachable", err.strip())
+        if "state = running" in r.stdout:
+            return SupervisorState("active")
+        return SupervisorState("absent", "loaded but not running")
+
+    def linger_state(self) -> Literal["yes", "no", "unknown"]:
+        return "unknown"  # not applicable on macOS
+
+    def linger_supported(self) -> bool:
+        return False
+
+
+def pick_supervisor(*, home: Path | None = None, platform: str = sys.platform):
+    home = home if home is not None else Path.home()
+    if platform == "darwin":
+        return LaunchdSupervisor(home=home)
+    return SystemdUserSupervisor(home=home)
