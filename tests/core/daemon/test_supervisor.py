@@ -360,3 +360,29 @@ def sup_module_path() -> str:
     import mship.core.daemon.supervisor as sup_mod
 
     return sup_mod.__file__
+
+
+def test_logs_tail_reads_only_the_tail_of_a_huge_file(tmp_path):
+    """A crash-looping macOS daemon can leave a huge launchd capture; printing
+    N lines must not pull the whole file into memory. Proven by content: the
+    early megabytes are simply never returned, and the read is bounded by
+    _TAIL_READ_BYTES (not monkeypatching builtins.open — pytest uses it too)."""
+    import mship.core.daemon.supervisor as sup_mod
+
+    log_dir = tmp_path / ".mothership" / "daemon" / "logs"
+    log_dir.mkdir(parents=True)
+    big = log_dir / "daemon.log"
+    filler = "OLD-" + "x" * 96 + "\n"
+    with open(big, "w") as fh:
+        fh.write(filler * ((sup_mod._TAIL_READ_BYTES // len(filler)) + 500))
+        fh.write("NEW-1\nNEW-2\nNEW-3\n")
+    assert big.stat().st_size > sup_mod._TAIL_READ_BYTES
+
+    sup, _ = _linux(tmp_path)
+    assert sup.logs_tail(3) == ["NEW-1", "NEW-2", "NEW-3"]
+
+    # the bound itself: a full-file read would yield far more than this
+    lines = sup_mod._tail_lines(big, 10**9)
+    assert len("\n".join(lines).encode()) <= sup_mod._TAIL_READ_BYTES
+    # the partial first line is dropped: every returned line is a WHOLE line
+    assert all(len(l) == len(filler) - 1 for l in lines if l.startswith("OLD-"))

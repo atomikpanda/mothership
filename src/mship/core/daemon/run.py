@@ -51,9 +51,32 @@ def _import_server_stack():
     return uvicorn, create_control_app
 
 
+# launchd has no log rotation: with KeepAlive.SuccessfulExit=false a
+# crash-looping daemon is relaunched every ThrottleInterval and appends to the
+# SAME StandardErrorPath forever. Nothing else prunes it, so the daemon caps it
+# on each start. Truncate in place rather than rename: launchd holds the fd
+# open across relaunches, so a renamed file would keep growing invisibly.
+_LAUNCHD_CAPTURE_MAX_BYTES = 5 * 1024 * 1024
+
+
+def _trim_launchd_captures(log_dir: Path) -> list[str]:
+    trimmed: list[str] = []
+    for path in sorted(log_dir.glob("launchd.*.log")):
+        try:
+            if path.stat().st_size <= _LAUNCHD_CAPTURE_MAX_BYTES:
+                continue
+            with open(path, "r+b") as fh:
+                fh.truncate(0)
+            trimmed.append(path.name)
+        except OSError:
+            continue
+    return trimmed
+
+
 def _configure_logging(home: Path) -> None:
     log_dir = paths.daemon_log_dir(home)
     log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    trimmed = _trim_launchd_captures(log_dir)
     handler = RotatingFileHandler(
         log_dir / "daemon.log", maxBytes=_LOG_MAX_BYTES, backupCount=_LOG_BACKUPS
     )
@@ -67,6 +90,9 @@ def _configure_logging(home: Path) -> None:
         lg = logging.getLogger(name)
         lg.addHandler(handler)
         lg.setLevel(logging.INFO)
+    for name in trimmed:
+        # Recorded in the rotated log so a truncation is never silent.
+        log.warning("truncated oversized launchd capture %s (>%d bytes)", name, _LAUNCHD_CAPTURE_MAX_BYTES)
 
 
 def main(home: Path | None = None, env: Mapping[str, str] | None = None) -> int:

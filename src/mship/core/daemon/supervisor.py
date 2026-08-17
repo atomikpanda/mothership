@@ -43,6 +43,24 @@ class SupervisorState:
     detail: str = ""
 
 
+# Read at most this much from the END of each log file: `logs_tail` must not
+# pull a multi-megabyte launchd capture into memory to print 100 lines.
+_TAIL_READ_BYTES = 256 * 1024
+
+
+def _tail_lines(path: Path, n: int) -> list[str]:
+    """Last-ish `n` lines without reading the whole file."""
+    with open(path, "rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        fh.seek(max(0, size - _TAIL_READ_BYTES))
+        chunk = fh.read()
+    text = chunk.decode("utf-8", errors="replace")
+    if size > _TAIL_READ_BYTES:
+        text = text.split("\n", 1)[-1]  # drop the partial first line
+    return text.splitlines()[-n:]
+
+
 def _uid_username() -> str | None:
     """This UID's passwd name, or None.
 
@@ -104,7 +122,7 @@ class _BaseSupervisor:
         lines: list[str] = []
         for f in files:
             try:
-                lines.extend(f.read_text().splitlines())
+                lines.extend(_tail_lines(f, n))
             except OSError:
                 continue
         return lines[-n:]
