@@ -260,9 +260,11 @@ def test_linux_user_defaults_to_uid_not_env(tmp_path, monkeypatch):
     assert sup._user != "someone-else"
 
 
-def test_logs_tail_includes_launchd_pre_exec_captures(tmp_path):
-    """A pre-exec failure (missing executable) only lands in launchd.err.log —
-    `daemon logs` must surface it, not return nothing on a failed start."""
+def test_logs_tail_includes_launchd_stderr_captures(tmp_path):
+    """Early-exit stderr (process spawned, died before Python logging) lands
+    only in launchd.err.log — `daemon logs` must surface it. (A posix_spawn
+    failure produces no child and lands only in the unified log/journald —
+    documented, not capturable here.)"""
     log_dir = tmp_path / ".mothership" / "daemon" / "logs"
     log_dir.mkdir(parents=True)
     (log_dir / "daemon.log").write_text("app-line\n")

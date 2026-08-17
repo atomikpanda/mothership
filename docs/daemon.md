@@ -15,7 +15,7 @@ mship daemon start
 mship daemon stop
 mship daemon restart   # consults restart blockers first (the #473 recovery seam)
 mship daemon status
-mship daemon logs      # tails rotated logs + launchd pre-exec captures
+mship daemon logs      # tails rotated logs + launchd stderr captures
 mship daemon run       # foreground/debug, no supervisor
 ```
 
@@ -26,12 +26,14 @@ commands never require the daemon.
 
 - State: `~/.mothership/daemon/` (per OS user — the daemon is workspace-agnostic)
 - Lease: `~/.mothership/daemon/daemon.lease` (flock held for the daemon's lifetime)
-- Logs: `~/.mothership/daemon/logs/daemon.log` (rotated, 5MB x 3). Pre-exec
-  failures (missing executable, broken interpreter) never reach Python logging:
-  launchd captures them in `launchd.*.log` in the same dir (included in
-  `mship daemon logs`); on Linux they land in the user journal — check
-  `journalctl --user -u mship-daemon` if `daemon logs` is empty after a failed
-  start.
+- Logs: `~/.mothership/daemon/logs/daemon.log` (rotated, 5MB x 3). Early-exit
+  stderr (interpreter starts but dies before Python logging is configured) is
+  captured by launchd into `launchd.*.log` in the same dir and included in
+  `mship daemon logs`. A true pre-exec failure (missing executable) produces no
+  child process at all, so NOTHING reaches these files: diagnose with
+  `journalctl --user -u mship-daemon` on Linux or
+  `launchctl print user/<uid>/com.mothership.daemon` / the unified log
+  (`log show`) on macOS.
 - Start history: `~/.mothership/daemon/start-history.json` (crash-loop visibility)
 - Control socket: `$XDG_RUNTIME_DIR/mship/daemon.sock`, else
   `~/.mothership/daemon/run/daemon.sock`. Status probes prefer the socket path

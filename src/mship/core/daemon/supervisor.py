@@ -62,10 +62,13 @@ class _BaseSupervisor:
             key=lambda p: int(p.suffix[1:]) if p.suffix[1:].isdigit() else 0,
             reverse=True,  # highest numeric suffix = oldest first
         )
-        # Pre-exec failures (missing executable, broken interpreter) never
-        # reach Python logging: launchd captures them in launchd.*.log (wired
-        # in the plist); on Linux they land in journald only. Include the
-        # launchd captures so `daemon logs` still explains a failed start.
+        # Early-exit output that never reaches Python logging (interpreter
+        # starts but dies before _configure_logging) goes to stderr, which the
+        # plist wires into launchd.*.log — include those captures. NOTE: a true
+        # pre-exec failure (missing executable → posix_spawn error) produces NO
+        # child process and lands only in launchd's unified log / journald;
+        # `launchctl print` and `journalctl --user -u mship-daemon` are the
+        # diagnostics there (docs/daemon.md).
         files.extend(sorted(log_dir.glob("launchd.*.log")))
         lines: list[str] = []
         for f in files:
