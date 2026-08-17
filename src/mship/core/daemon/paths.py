@@ -30,6 +30,10 @@ def daemon_config_path(home: Path) -> Path:
     return daemon_state_dir(home) / "config.yaml"
 
 
+def host_identity_path(home: Path) -> Path:
+    return daemon_state_dir(home) / "host-identity.json"
+
+
 def registry_path(home: Path) -> Path:
     return daemon_state_dir(home) / "workspaces.json"
 

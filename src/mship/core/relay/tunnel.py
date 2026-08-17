@@ -226,3 +226,10 @@ class TunnelSupervisor:
 
     def _spawn(self) -> None:
         self._proc = self._proc_factory(self._argv)
+
+
+def host_subdomain(host_id: str, dev_id: str, secret: bytes) -> str:
+    """Per-HOST relay subdomain (#471), same shape as `device_subdomain` with
+    the host id in the workspace slot — so it satisfies the existing
+    `tls_ask_allowed` pattern and needs no TLS/Caddy cert change."""
+    return device_subdomain(host_id, dev_id, secret)
