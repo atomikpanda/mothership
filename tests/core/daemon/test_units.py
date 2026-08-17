@@ -160,3 +160,28 @@ def test_launchd_plist_escapes_xml_special_chars(tmp_path: Path):
     plist = plistlib.loads(render_launchd_plist(argv, log_dir).encode())
     assert plist["ProgramArguments"] == argv
     assert plist["StandardOutPath"] == str(log_dir / "launchd.out.log")
+
+
+def test_dev_tree_detector_parses_toml_not_substrings(tmp_path, monkeypatch):
+    """`name='mothership'` (single quotes / spacing variants) is still a
+    checkout: a substring match would miss it and bake the checkout's mshipd
+    into the unit, so upgrades would deploy nothing."""
+    import mship as mship_pkg
+
+    prefix = tmp_path / "checkout" / ".venv"
+    (prefix / "lib" / "mship").mkdir(parents=True)
+    fake = prefix / "lib" / "mship" / "__init__.py"
+    fake.touch()
+    monkeypatch.setattr(sys, "prefix", str(prefix))
+    monkeypatch.setattr(mship_pkg, "__file__", str(fake))
+
+    for spelling in ("name = \"mothership\"", "name='mothership'", "name   =    'mothership'"):
+        (tmp_path / "checkout" / "pyproject.toml").write_text(f"[project]\n{spelling}\nversion = '1'\n")
+        assert units_mod._running_from_dev_tree() is not None, spelling
+
+    # a DIFFERENT project's checkout is not ours → not a dev-tree refusal
+    (tmp_path / "checkout" / "pyproject.toml").write_text("[project]\nname = 'something-else'\n")
+    assert units_mod._running_from_dev_tree() is None
+    # malformed TOML must not raise
+    (tmp_path / "checkout" / "pyproject.toml").write_text("[project\nname=")
+    assert units_mod._running_from_dev_tree() is None

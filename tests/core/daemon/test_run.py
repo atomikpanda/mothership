@@ -188,7 +188,7 @@ def test_oversized_launchd_capture_is_truncated_on_start(env_home, monkeypatch):
     log_dir = daemon_log_dir(home)
     log_dir.mkdir(parents=True, exist_ok=True)
     big = log_dir / "launchd.err.log"
-    big.write_bytes(b"x" * (run_mod._LAUNCHD_CAPTURE_MAX_BYTES + 1024))
+    big.write_bytes(b"x" * (run_mod.LAUNCHD_CAPTURE_MAX_BYTES + 1024))
     small = log_dir / "launchd.out.log"
     small.write_text("keep me\n")
 
@@ -197,3 +197,17 @@ def test_oversized_launchd_capture_is_truncated_on_start(env_home, monkeypatch):
     assert big.stat().st_size == 0            # capped
     assert small.read_text() == "keep me\n"   # under the cap: untouched
     assert "truncated oversized launchd capture" in (log_dir / "daemon.log").read_text()
+
+
+def test_capture_trimmed_before_logging_setup(env_home, monkeypatch):
+    """A crash loop is often a BROKEN IMPORT that dies before logging is
+    configured; trimming must happen first, not inside _configure_logging."""
+    home, env = env_home
+    order: list[str] = []
+    monkeypatch.setattr(run_mod, "trim_launchd_captures",
+                        lambda d: order.append("trim") or [])
+    monkeypatch.setattr(run_mod, "_configure_logging",
+                        lambda h: order.append("logging"))
+    monkeypatch.setattr(run_mod, "_run", lambda h, e: order.append("run") or 0)
+    assert run_mod.main(home=home, env=env) == 0
+    assert order[0] == "trim", order

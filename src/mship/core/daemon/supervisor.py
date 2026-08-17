@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Callable, Literal
 
 from mship.core.daemon.paths import daemon_log_dir
+from mship.core.daemon.log_capture import trim_launchd_captures
 from mship.core.daemon.units import (
     LAUNCHD_LABEL,
     SYSTEMD_UNIT_NAME,
@@ -54,7 +55,9 @@ def _tail_lines(path: Path, n: int) -> list[str]:
         fh.seek(0, os.SEEK_END)
         size = fh.tell()
         fh.seek(max(0, size - _TAIL_READ_BYTES))
-        chunk = fh.read()
+        # Bound the READ too, not just the seek: a concurrent append between
+        # tell() and read() would otherwise hand back the enlarged file.
+        chunk = fh.read(_TAIL_READ_BYTES)
     text = chunk.decode("utf-8", errors="replace")
     if size > _TAIL_READ_BYTES:
         text = text.split("\n", 1)[-1]  # drop the partial first line
@@ -95,6 +98,9 @@ class _BaseSupervisor:
         """Last N lines across daemon.log + rotated siblings — pure Python, no
         journalctl (the phone-only-client case needs OS-independent logs)."""
         log_dir = daemon_log_dir(self._home)
+        # A daemon that dies before main() cannot trim its own capture, so the
+        # operator-facing path trims too (#475 review).
+        trim_launchd_captures(log_dir)
         files = sorted(
             log_dir.glob("daemon.log*"),
             key=lambda p: int(p.suffix[1:]) if p.suffix[1:].isdigit() else 0,

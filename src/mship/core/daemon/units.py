@@ -51,9 +51,16 @@ def _running_from_dev_tree() -> str | None:
         return f"mship is imported from {pkg.parent} (editable checkout), not the running venv"
     project = prefix.parent / "pyproject.toml"
     try:
-        if project.is_file() and 'name = "mothership"' in project.read_text():
-            return f"the running venv sits inside a mothership checkout ({prefix.parent})"
-    except OSError:
+        if project.is_file():
+            import tomllib
+
+            data = tomllib.loads(project.read_text(encoding="utf-8"))
+            # Parsed, not substring-matched: `name='mothership'`, extra spaces,
+            # or any other valid TOML spelling must be detected too, or a
+            # checkout venv gets baked into the unit and upgrades deploy nothing.
+            if (data.get("project") or {}).get("name") == "mothership":
+                return f"the running venv sits inside a mothership checkout ({prefix.parent})"
+    except (OSError, ValueError):
         pass
     return None
 

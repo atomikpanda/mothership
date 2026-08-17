@@ -386,3 +386,66 @@ def test_logs_tail_reads_only_the_tail_of_a_huge_file(tmp_path):
     assert len("\n".join(lines).encode()) <= sup_mod._TAIL_READ_BYTES
     # the partial first line is dropped: every returned line is a WHOLE line
     assert all(len(l) == len(filler) - 1 for l in lines if l.startswith("OLD-"))
+
+
+def test_logs_tail_read_is_bounded_not_just_the_seek(tmp_path):
+    """Concurrent appends between tell() and read() must not enlarge the read:
+    the bound is on read(), not only on the seek offset."""
+    import mship.core.daemon.supervisor as sup_mod
+
+    log_dir = tmp_path / ".mothership" / "daemon" / "logs"
+    log_dir.mkdir(parents=True)
+    f = log_dir / "daemon.log"
+    f.write_text("seed\n")
+
+    real_open = open
+    grown = {"done": False}
+
+    class GrowingFile:
+        """Appends a megabyte between tell() and read(), like a live writer."""
+
+        def __init__(self, fh):
+            self._fh = fh
+
+        def seek(self, *a):
+            return self._fh.seek(*a)
+
+        def tell(self):
+            return self._fh.tell()
+
+        def read(self, *a):
+            if not grown["done"]:
+                grown["done"] = True
+                with real_open(f, "ab") as w:
+                    w.write(b"z" * (2 * sup_mod._TAIL_READ_BYTES))
+            return self._fh.read(*a)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self._fh.close()
+
+    monkeyed = sup_mod.open if hasattr(sup_mod, "open") else None
+    assert monkeyed is None  # uses builtins; wrap via the module namespace
+    sup_mod.open = lambda p, mode="r", *a, **kw: GrowingFile(real_open(p, mode, *a, **kw))
+    try:
+        lines = sup_mod._tail_lines(f, 10)
+    finally:
+        del sup_mod.open
+    assert len("\n".join(lines).encode()) <= sup_mod._TAIL_READ_BYTES
+
+
+def test_logs_tail_trims_oversized_capture(tmp_path):
+    """A daemon that never reaches main() can't trim its own capture, so the
+    operator-facing path does it."""
+    from mship.core.daemon.log_capture import LAUNCHD_CAPTURE_MAX_BYTES
+
+    log_dir = tmp_path / ".mothership" / "daemon" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "daemon.log").write_text("app\n")
+    huge = log_dir / "launchd.err.log"
+    huge.write_bytes(b"y" * (LAUNCHD_CAPTURE_MAX_BYTES + 2048))
+    sup, _ = _linux(tmp_path)
+    sup.logs_tail(5)
+    assert huge.stat().st_size == 0
