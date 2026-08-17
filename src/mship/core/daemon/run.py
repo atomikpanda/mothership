@@ -67,7 +67,17 @@ def _build_registry(home: Path):
         return store, lambda: None, None
 
     def rescan():
-        reconcile(store, scan_roots(cfg), datetime.now(timezone.utc))
+        # Re-READ the config every time: `mship workspace refresh` exists
+        # precisely so an edited config.yaml takes effect without a restart, so
+        # closing over the startup snapshot would scan the old roots forever.
+        # (A changed `serve:` bind still needs a restart — that's a process
+        # boundary, and status reports the running bind.)
+        try:
+            current = load_daemon_config(home)
+        except ValueError as e:
+            log.error("daemon config invalid on refresh: %s — keeping previous roots", e)
+            current = cfg
+        reconcile(store, scan_roots(current), datetime.now(timezone.utc))
 
     try:
         rescan()

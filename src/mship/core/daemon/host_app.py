@@ -25,9 +25,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
 from mship.core.daemon.registry import RegistryStore, WorkspaceEntry
+from mship.core.workspace_context import ContextError
 
 
 def ensure_host_token(home: Path) -> str:
@@ -49,11 +51,18 @@ def ensure_host_token(home: Path) -> str:
     return token
 
 
+def _fingerprint(entry: WorkspaceEntry) -> tuple:
+    """What a cached sub-app was built FROM. Any change here means the cached
+    app holds a stale workspace root / state dir / config and must be rebuilt."""
+    return (entry.path, entry.config_path, entry.state)
+
+
 class _SubApp:
     """A built per-workspace serve app plus its running lifespan."""
 
-    def __init__(self, app) -> None:
+    def __init__(self, app, fingerprint: tuple) -> None:
         self.app = app
+        self.fingerprint = fingerprint
         self._cm = None
 
     async def start(self) -> None:
@@ -125,10 +134,21 @@ def create_host_app(
         return store.load().entries
 
     async def _get_subapp(entry: WorkspaceEntry) -> _SubApp:
+        fp = _fingerprint(entry)
         async with lock:
             sub = subapps.get(entry.id)
+            if sub is not None and sub.fingerprint != fp:
+                # Same id, different path/config (moved workspace, edited yaml):
+                # the cached app still points at the OLD root and state dir.
+                # Checked per request, so a rescan through ANY path — the host
+                # refresh route or the control socket's — takes effect.
+                await subapps.pop(entry.id).stop()
+                sub = None
             if sub is None:
-                sub = _SubApp(build_subapp(entry, auth_token=auth_token, pr_watch_interval=pr_watch_interval))
+                sub = _SubApp(
+                    build_subapp(entry, auth_token=auth_token, pr_watch_interval=pr_watch_interval),
+                    fp,
+                )
                 await sub.start()
                 subapps[entry.id] = sub
             return sub
@@ -187,7 +207,13 @@ def create_host_app(
                 status_code=503,
                 detail=f"workspace {entry.name!r} is {entry.state}: {entry.detail or 'unavailable'}",
             )
-        sub = await _get_subapp(entry)
+        try:
+            sub = await _get_subapp(entry)
+        except ContextError as e:
+            # The registry advertised it, but the workspace won't build now
+            # (deleted/edited between scan and request) — 503 with the reason,
+            # never an opaque 500.
+            raise HTTPException(status_code=503, detail=f"workspace {entry.name!r} unavailable: {e}")
 
         # ASGI forward with the prefix stripped, so create_app's routes see /specs etc.
         scope = dict(request.scope)
@@ -195,21 +221,58 @@ def create_host_app(
         scope["raw_path"] = ("/" + path).encode()
         scope["root_path"] = ""
 
-        status_headers: dict = {}
-        body_chunks: list[bytes] = []
+        # STREAMED, not buffered: `POST /exec/{verb}` is consumed with
+        # iter_raw() to render task output live, and a client disconnect must
+        # reach the serve-side cancellation event. Buffering the whole response
+        # would stall output until the task exits and keep runaway tasks alive
+        # after the caller hung up.
+        start: asyncio.Queue = asyncio.Queue(maxsize=1)
+        # BOUNDED for backpressure: an unbounded queue lets the workspace app
+        # race ahead of a slow client and buffer a whole `exec` stream in
+        # daemon memory — the unbounded-buffer OOM class #469 calls out. With a
+        # bound, the sub-app blocks until the client consumes.
+        chunks: asyncio.Queue = asyncio.Queue(maxsize=8)
 
         async def send(message):
             if message["type"] == "http.response.start":
-                status_headers["status"] = message["status"]
-                status_headers["headers"] = message.get("headers", [])
+                await start.put(message)
             elif message["type"] == "http.response.body":
-                body_chunks.append(message.get("body", b""))
+                await chunks.put(message.get("body", b""))
+                if not message.get("more_body", False):
+                    await chunks.put(None)
 
-        await sub.app(scope, request.receive, send)
-        return Response(
-            content=b"".join(body_chunks),
-            status_code=status_headers.get("status", 500),
-            headers={k.decode(): v.decode() for k, v in status_headers.get("headers", [])},
+        async def run_subapp():
+            try:
+                await sub.app(scope, request.receive, send)
+            except Exception:
+                if start.empty():
+                    await start.put({"type": "http.response.start", "status": 500, "headers": []})
+                await chunks.put(None)
+                raise
+            finally:
+                if start.empty():  # sub-app returned without starting a response
+                    await start.put({"type": "http.response.start", "status": 500, "headers": []})
+                    await chunks.put(None)
+
+        task = asyncio.create_task(run_subapp())
+        started = await start.get()
+
+        async def body_stream():
+            try:
+                while True:
+                    chunk = await chunks.get()
+                    if chunk is None:
+                        break
+                    if chunk:
+                        yield chunk
+            finally:
+                if not task.done():
+                    task.cancel()  # client hung up → propagate to the serve app
+
+        return StreamingResponse(
+            body_stream(),
+            status_code=started.get("status", 500),
+            headers={k.decode(): v.decode() for k, v in started.get("headers", [])},
         )
 
     return app

@@ -228,6 +228,19 @@ def reconcile(store: RegistryStore, candidates: list, now: datetime) -> Registry
                 other_alive = Path(existing.path).exists() and _read_id_file(Path(existing.path)) == existing.id
                 if other_alive:
                     # COPY: keep the entry's current path; this path degrades.
+                    # Reuse the existing degraded entry for this path when one
+                    # exists — the copy's id file still holds the ORIGINAL id,
+                    # so every rescan re-resolves here and would otherwise
+                    # append another entry, growing workspaces.json forever.
+                    dup = next((e for e in state.entries if e.path == path_str), None)
+                    if dup is not None:
+                        dup.state = "degraded"
+                        dup.detail = (
+                            f"duplicate-identity: id file matches {existing.path} ({existing.id}); "
+                            "`mship workspace add` this copy to mint a fresh id"
+                        )
+                        dup.last_seen = now
+                        continue
                     state.entries.append(WorkspaceEntry(
                         id=mint_workspace_id(now), name=cand.name or cand.path.name,
                         path=path_str, config_path=str(cand.config_path),

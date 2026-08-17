@@ -88,3 +88,30 @@ def test_install_scan_serve_end_to_end(tmp_path, monkeypatch):
     with TestClient(captured["control"]) as client:
         caps = client.get("/health").json()["capabilities"]
         assert caps["registry"] is True and caps["serve"] is True
+
+
+def test_refresh_rereads_daemon_config(tmp_path, monkeypatch):
+    """Regression (#476 P1): rescan closed over the STARTUP config, so editing
+    config.yaml and running `mship workspace refresh` scanned the old roots
+    forever — defeating the documented edit-then-refresh workflow."""
+    from mship.core.daemon.registry import DaemonConfig, save_daemon_config
+
+    home = tmp_path / "home"
+    home.mkdir()
+    root_a, root_b = tmp_path / "a", tmp_path / "b"
+    _mk_ws(root_a, "first")
+    _mk_ws(root_b, "second")
+    save_daemon_config(home, DaemonConfig(scan_roots=[str(root_a)]))
+
+    captured = {}
+    monkeypatch.setattr(
+        run_mod, "_serve_forever",
+        lambda control_app, socket_path, host_app, serve_cfg: captured.update(rescan=True),
+    )
+    store, rescan, _serve = run_mod._build_registry(home)
+    assert sorted(e.name for e in store.load().entries) == ["first"]
+
+    # operator edits the config, then refreshes (no daemon restart)
+    save_daemon_config(home, DaemonConfig(scan_roots=[str(root_a), str(root_b)]))
+    rescan()
+    assert sorted(e.name for e in store.load().entries) == ["first", "second"]

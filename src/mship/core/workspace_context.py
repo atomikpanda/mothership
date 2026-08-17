@@ -74,7 +74,11 @@ def build_workspace_context(config_path: Path) -> WorkspaceContext:
     if not config_path.is_file():
         raise ContextError(f"no mothership.yaml at {config_path}")
     try:
-        config = ConfigLoader.load(config_path)
+        # require_paths=False mirrors discovery (discovery.py::_materialize):
+        # a workspace with one materialized repo and one not-yet-cloned repo is
+        # HEALTHY there, so loading strictly here would 500 the first request
+        # to a workspace the registry advertises as serveable.
+        config = ConfigLoader.load(config_path, require_paths=False)
     except Exception as e:
         raise ContextError(f"invalid workspace config {config_path}: {e}") from e
 

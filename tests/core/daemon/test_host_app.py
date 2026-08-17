@@ -169,3 +169,138 @@ def test_ensure_host_token_stable(tmp_path):
     t1 = ensure_host_token(tmp_path)
     t2 = ensure_host_token(tmp_path)
     assert t1 == t2 and len(t1) > 20
+
+
+class StreamingSubApp:
+    """ASGI app that emits body chunks with gaps — proves the proxy streams
+    rather than buffering to completion (the `/exec` iter_raw contract)."""
+
+    def __init__(self):
+        self.cancelled = False
+        self.sent = 0
+
+    async def __call__(self, scope, receive, send):
+        import asyncio
+
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"content-type", b"text/plain")]})
+        try:
+            for i in range(3):
+                await send({"type": "http.response.body", "body": f"chunk-{i}\n".encode(),
+                            "more_body": True})
+                self.sent += 1
+                await asyncio.sleep(0.05)
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+    @property
+    def router(self):
+        from contextlib import asynccontextmanager
+
+        class _R:
+            def lifespan_context(self, app):
+                @asynccontextmanager
+                async def cm():
+                    yield
+                return cm()
+
+        return _R()
+
+
+def test_forward_streams_chunks_incrementally(tmp_path):
+    """Regression (#476 P2): a buffered proxy delivered nothing until the task
+    exited, breaking live `mship ... --remote` output.
+
+    Driven at the ASGI layer, not through TestClient: TestClient collects the
+    whole body before `iter_raw()` yields, so it cannot distinguish streaming
+    from buffering — it would pass against the buffered implementation too.
+    """
+    import asyncio
+
+    home = tmp_path / "home"
+    store = _seed(home, [_entry("ws-s", "streamer", tmp_path / "s")])
+    sub = StreamingSubApp()
+    app = create_host_app(store, auth_token=None, build_subapp=lambda e, **kw: sub)
+
+    async def drive():
+        received: list[bytes] = []
+        first_chunk_seen_at_sent: list[int] = []
+        done = asyncio.Event()
+
+        first = {"sent": False}
+
+        async def receive():
+            # Starlette's StreamingResponse runs a disconnect listener that
+            # loops on receive(); without an eventual http.disconnect the task
+            # group never exits and app() never returns.
+            if not first["sent"]:
+                first["sent"] = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await done.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            if message["type"] == "http.response.body":
+                body = message.get("body", b"")
+                if body:
+                    received.append(body)
+                    if len(received) == 1:
+                        first_chunk_seen_at_sent.append(sub.sent)
+                if not message.get("more_body", False):
+                    done.set()
+
+        scope = {
+            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+            "method": "POST", "path": "/workspaces/ws-s/exec/run", "raw_path": b"/workspaces/ws-s/exec/run",
+            "root_path": "", "scheme": "http", "query_string": b"", "headers": [],
+            "client": ("test", 1), "server": ("test", 80),
+        }
+        async with app.router.lifespan_context(app):
+            await asyncio.wait_for(app(scope, receive, send), timeout=15)
+        return received, first_chunk_seen_at_sent
+
+    received, first_at = asyncio.run(drive())
+    assert b"".join(received) == b"chunk-0\nchunk-1\nchunk-2\n"
+    # the client had chunk 0 in hand before the sub-app had emitted all three
+    assert first_at and first_at[0] < 3, f"response was buffered until completion (sent={first_at})"
+
+
+def test_moved_workspace_rebuilds_subapp(tmp_path):
+    """Regression (#476 P2): same id, new path — the cached sub-app pointed at
+    the OLD workspace root/state dir until the daemon restarted."""
+    home = tmp_path / "home"
+    store = _seed(home, [_entry("ws-m", "mover", tmp_path / "before")])
+    built: list[str] = []
+
+    def build(entry, **kw):
+        built.append(entry.path)
+        return FakeSubApp(entry.name)
+
+    app = create_host_app(store, auth_token=None, build_subapp=build)
+    with TestClient(app) as client:
+        client.get("/workspaces/ws-m/specs")
+        assert built == [str(tmp_path / "before")]
+        # reconciliation moved it (same id, new path)
+        store.mutate(lambda s: setattr(s.entries[0], "path", str(tmp_path / "after")))
+        client.get("/workspaces/ws-m/specs")
+        assert built == [str(tmp_path / "before"), str(tmp_path / "after")]
+
+
+def test_unbuildable_workspace_is_503_not_500(tmp_path):
+    """A workspace the registry advertises but that won't build now must
+    degrade with a reason, never surface an opaque 500."""
+    from mship.core.workspace_context import ContextError
+
+    home = tmp_path / "home"
+    store = _seed(home, [_entry("ws-x", "gone", tmp_path / "gone")])
+
+    def build(entry, **kw):
+        raise ContextError("no mothership.yaml at /gone/mothership.yaml")
+
+    app = create_host_app(store, auth_token=None, build_subapp=build)
+    with TestClient(app) as client:
+        r = client.get("/workspaces/ws-x/specs")
+        assert r.status_code == 503
+        assert "no mothership.yaml" in r.json()["detail"]

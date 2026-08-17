@@ -164,3 +164,23 @@ def test_degraded_candidate_updates_existing_entry(tmp_path: Path):
     assert len(s2.entries) == 1
     assert s2.entries[0].state == "degraded"
     assert "invalid" in s2.entries[0].detail
+
+
+def test_duplicate_copy_does_not_accumulate_entries(tmp_path: Path):
+    """Regression (#476 P2): the copy's id file still holds the ORIGINAL id, so
+    every rescan re-resolved here and appended another degraded entry —
+    workspaces.json grew without bound."""
+    import shutil
+
+    home, root = tmp_path / "home", tmp_path / "root"
+    ws = _mk_ws(root, "a")
+    store = _store(home)
+    reconcile(store, _scan(root), NOW)
+    shutil.copytree(ws, root / "a-copy")
+
+    for _ in range(4):  # repeated daemon rescans
+        state = reconcile(store, _scan(root), LATER)
+
+    dups = [e for e in state.entries if "duplicate-identity" in e.detail]
+    assert len(dups) == 1, [e.detail for e in state.entries]
+    assert len(state.entries) == 2  # original + one degraded copy, stable
