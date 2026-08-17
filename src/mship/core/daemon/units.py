@@ -29,7 +29,42 @@ class DaemonExecResolutionError(RuntimeError):
     pass
 
 
+def _running_from_dev_tree() -> str | None:
+    """A checkout's own venv must never be persisted into a supervisor unit —
+    upgrades (`uv tool install --force` + restart) would silently deploy
+    nothing, or break when the worktree is removed. Two signals, either
+    refuses:
+
+    - the imported mship package resolves OUTSIDE sys.prefix (editable
+      install — exactly what `uv run mship` from a checkout produces);
+    - the venv sits beside a pyproject.toml declaring this same project
+      (a non-editable `.venv` inside the checkout).
+    """
+    import mship
+
+    prefix = Path(sys.prefix).resolve()
+    try:
+        pkg = Path(mship.__file__).resolve()
+    except (TypeError, OSError):
+        return None
+    if not pkg.is_relative_to(prefix):
+        return f"mship is imported from {pkg.parent} (editable checkout), not the running venv"
+    project = prefix.parent / "pyproject.toml"
+    try:
+        if project.is_file() and 'name = "mothership"' in project.read_text():
+            return f"the running venv sits inside a mothership checkout ({prefix.parent})"
+    except OSError:
+        pass
+    return None
+
+
 def resolve_mshipd_argv(which: Callable[[str], str | None] = shutil.which) -> list[str]:
+    dev_reason = _running_from_dev_tree()
+    if dev_reason is not None:
+        raise DaemonExecResolutionError(
+            f"{dev_reason} — you are running mship from a dev tree; install the tool "
+            "first (uv tool install --force <path>) and re-run mship daemon install."
+        )
     exe = Path(sys.executable)
     sibling = exe.parent / "mshipd"
     if sibling.exists():

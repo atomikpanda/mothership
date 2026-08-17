@@ -244,3 +244,30 @@ def test_macos_reinstall_unloads_first(tmp_path):
     sup2, rec2 = _mac(tmp_path, {"launchctl bootout": _fail(stderr="Boot-out failed: 3: No such process")})
     sup2.install(["/venv/bin/mshipd"])
     assert any("bootstrap" in " ".join(c) for c in rec2.calls)
+
+
+def test_linux_user_defaults_to_uid_not_env(tmp_path, monkeypatch):
+    """getpass.getuser() trusts LOGNAME/USER; a spoofed env must not make
+    enable-linger target another account while systemctl targets this uid."""
+    import os
+    import pwd
+
+    monkeypatch.setenv("LOGNAME", "someone-else")
+    monkeypatch.setenv("USER", "someone-else")
+    rec = Recorder({"show-user": _ok("Linger=yes\n")})
+    sup = SystemdUserSupervisor(home=tmp_path, run_cmd=rec)
+    assert sup._user == pwd.getpwuid(os.getuid()).pw_name
+    assert sup._user != "someone-else"
+
+
+def test_logs_tail_includes_launchd_pre_exec_captures(tmp_path):
+    """A pre-exec failure (missing executable) only lands in launchd.err.log —
+    `daemon logs` must surface it, not return nothing on a failed start."""
+    log_dir = tmp_path / ".mothership" / "daemon" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "daemon.log").write_text("app-line\n")
+    (log_dir / "launchd.err.log").write_text("posix_spawn: No such file or directory\n")
+    sup, _ = _linux(tmp_path)
+    lines = sup.logs_tail(10)
+    assert "app-line" in lines
+    assert "posix_spawn: No such file or directory" in lines

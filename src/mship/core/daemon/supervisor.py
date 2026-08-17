@@ -13,8 +13,8 @@ raw supervisor state.
 """
 from __future__ import annotations
 
-import getpass
 import os
+import pwd
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -62,6 +62,11 @@ class _BaseSupervisor:
             key=lambda p: int(p.suffix[1:]) if p.suffix[1:].isdigit() else 0,
             reverse=True,  # highest numeric suffix = oldest first
         )
+        # Pre-exec failures (missing executable, broken interpreter) never
+        # reach Python logging: launchd captures them in launchd.*.log (wired
+        # in the plist); on Linux they land in journald only. Include the
+        # launchd captures so `daemon logs` still explains a failed start.
+        files.extend(sorted(log_dir.glob("launchd.*.log")))
         lines: list[str] = []
         for f in files:
             try:
@@ -76,7 +81,11 @@ class SystemdUserSupervisor(_BaseSupervisor):
         self, *, home: Path, user: str | None = None, run_cmd: Callable = _default_run
     ) -> None:
         super().__init__(home=home, run_cmd=run_cmd)
-        self._user = user or getpass.getuser()
+        # pwd, not getpass.getuser(): getuser trusts LOGNAME/USER env vars, so a
+        # stale/spoofed env would enable-linger for ANOTHER account while
+        # systemctl --user still targets this uid — reported success, daemon
+        # still dies on logout.
+        self._user = user or pwd.getpwuid(os.getuid()).pw_name
 
     def _systemctl(self, *args: str) -> subprocess.CompletedProcess:
         return self._run(["systemctl", "--user", *args])

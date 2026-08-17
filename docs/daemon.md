@@ -15,7 +15,7 @@ mship daemon start
 mship daemon stop
 mship daemon restart   # consults restart blockers first (the #473 recovery seam)
 mship daemon status
-mship daemon logs      # tails rotated logs, no journald needed
+mship daemon logs      # tails rotated logs + launchd pre-exec captures
 mship daemon run       # foreground/debug, no supervisor
 ```
 
@@ -26,7 +26,12 @@ commands never require the daemon.
 
 - State: `~/.mothership/daemon/` (per OS user — the daemon is workspace-agnostic)
 - Lease: `~/.mothership/daemon/daemon.lease` (flock held for the daemon's lifetime)
-- Logs: `~/.mothership/daemon/logs/daemon.log` (rotated, 5MB x 3)
+- Logs: `~/.mothership/daemon/logs/daemon.log` (rotated, 5MB x 3). Pre-exec
+  failures (missing executable, broken interpreter) never reach Python logging:
+  launchd captures them in `launchd.*.log` in the same dir (included in
+  `mship daemon logs`); on Linux they land in the user journal — check
+  `journalctl --user -u mship-daemon` if `daemon logs` is empty after a failed
+  start.
 - Start history: `~/.mothership/daemon/start-history.json` (crash-loop visibility)
 - Control socket: `$XDG_RUNTIME_DIR/mship/daemon.sock`, else
   `~/.mothership/daemon/run/daemon.sock`. Status probes prefer the socket path
