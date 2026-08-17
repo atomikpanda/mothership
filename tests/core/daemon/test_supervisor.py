@@ -188,3 +188,42 @@ def test_logs_tail_spans_rotated_siblings(tmp_path):
 def test_pick_supervisor():
     assert isinstance(pick_supervisor(platform="linux"), SystemdUserSupervisor)
     assert isinstance(pick_supervisor(platform="darwin"), LaunchdSupervisor)
+
+
+def test_macos_install_creates_log_dir(tmp_path):
+    """launchd opens StandardOutPath itself before exec — a missing log dir
+    means the RunAtLoad job silently never starts on a fresh account."""
+    from mship.core.daemon.paths import daemon_log_dir
+
+    sup, _ = _mac(tmp_path)
+    sup.install(["/venv/bin/mshipd"])
+    assert daemon_log_dir(tmp_path).is_dir()
+
+
+def test_macos_start_rebootstraps_after_stop(tmp_path):
+    """stop() boots the service out of the domain; start()/restart() must
+    re-bootstrap an absent service before kickstarting it."""
+    sup, rec = _mac(tmp_path, {"print": _fail(stderr="Could not find service")})
+    sup.start()
+    cmds = [" ".join(c) for c in rec.calls]
+    assert any("bootstrap user/501" in c for c in cmds)
+    assert any("kickstart user/501" in c for c in cmds)
+
+    sup2, rec2 = _mac(tmp_path, {"print": _fail(stderr="Could not find service")})
+    sup2.restart()
+    cmds2 = [" ".join(c) for c in rec2.calls]
+    assert any("bootstrap user/501" in c for c in cmds2)
+
+
+def test_macos_start_skips_bootstrap_when_loaded(tmp_path):
+    sup, rec = _mac(tmp_path, {"print": _ok("state = running\npid = 1\n")})
+    sup.start()
+    cmds = [" ".join(c) for c in rec.calls]
+    assert not any("bootstrap" in c for c in cmds)
+
+
+def test_linux_query_unit_not_found_is_absent(tmp_path):
+    """A reachable manager answering 'not found' for an uninstalled unit is
+    absent, not unreachable (the pre-install `daemon status` case)."""
+    sup, _ = _linux(tmp_path, {"show mship-daemon": _fail(stderr="Unit mship-daemon.service could not be found.")})
+    assert sup.query().state == "absent"

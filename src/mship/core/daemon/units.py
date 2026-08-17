@@ -73,34 +73,22 @@ WantedBy=default.target
 
 
 def render_launchd_plist(argv: list[str], log_dir: Path) -> str:
-    program_args = "\n".join(f"        <string>{a}</string>" for a in argv)
-    return f"""\
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>{LAUNCHD_LABEL}</string>
-    <key>ProgramArguments</key>
-    <array>
-{program_args}
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
-    <key>ThrottleInterval</key>
-    <integer>5</integer>
-    <key>StandardOutPath</key>
-    <string>{log_dir / "launchd.out.log"}</string>
-    <key>StandardErrorPath</key>
-    <string>{log_dir / "launchd.err.log"}</string>
-</dict>
-</plist>
-"""
+    # plistlib, not string templating: argv/log paths land in XML, and a path
+    # containing &, <, > would otherwise render a plist launchctl rejects.
+    import plistlib
+
+    return plistlib.dumps(
+        {
+            "Label": LAUNCHD_LABEL,
+            "ProgramArguments": list(argv),
+            "RunAtLoad": True,
+            "KeepAlive": {"SuccessfulExit": False},
+            "ThrottleInterval": 5,
+            "StandardOutPath": str(log_dir / "launchd.out.log"),
+            "StandardErrorPath": str(log_dir / "launchd.err.log"),
+        },
+        sort_keys=False,
+    ).decode()
 
 
 def systemd_unit_path(home: Path) -> Path:

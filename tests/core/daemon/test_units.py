@@ -113,3 +113,12 @@ def test_module_fallback_when_nothing_resolvable(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "prefix", str(prefix))
     argv = resolve_mshipd_argv(which=lambda name: None)
     assert argv == [str(exe), "-m", "mship.core.daemon"]
+
+
+def test_launchd_plist_escapes_xml_special_chars(tmp_path: Path):
+    """A path containing &, <, > must render a plist launchctl can parse."""
+    log_dir = tmp_path / "logs & <special>"
+    argv = [str(tmp_path / "venv & tools" / "bin" / "mshipd")]
+    plist = plistlib.loads(render_launchd_plist(argv, log_dir).encode())
+    assert plist["ProgramArguments"] == argv
+    assert plist["StandardOutPath"] == str(log_dir / "launchd.out.log")

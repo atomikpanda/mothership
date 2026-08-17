@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Literal, Mapping
 
 from mship.core.daemon.control import probe_control_socket
-from mship.core.daemon.history import HistoryEntry, unclean_start_count
+from mship.core.daemon.history import HistoryEntry, is_crash_looping, unclean_start_count
 from mship.core.daemon.lease import LeaseInfo, read_lease_record
 from mship.core.daemon.paths import daemon_socket_path, lease_path
 from mship.core.daemon.supervisor import SupervisorState
@@ -95,8 +95,12 @@ def build_status(
     lines.append(f"supervisor: {supervisor_state.state}" + (f" ({supervisor_state.detail})" if supervisor_state.detail else ""))
     if not compatible:
         lines.append(f"restart required: daemon v{daemon_version}, CLI v{cli_version}")
-    if unclean:
+    if is_crash_looping(history_entries, now, window_s=_LOOP_WINDOW_S):
         lines.append(f"crash loop: {unclean} unclean starts in last 10m")
+    elif unclean:
+        # Below the loop threshold: informational, not an alarm — one kill -9
+        # or startup failure is not a crash loop.
+        lines.append(f"unclean starts: {unclean} in last 10m")
     if linger == "no":
         lines.append("warning: linger is OFF — the daemon dies when your last SSH session ends; run `loginctl enable-linger`")
     elif linger == "unknown":

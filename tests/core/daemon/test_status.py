@@ -142,3 +142,13 @@ def test_status_never_touches_the_lease_flock(tmp_path, monkeypatch):
 
 def test_restart_blockers_empty_in_v1():
     assert restart_blockers() == []
+
+
+def test_single_unclean_start_is_not_labeled_crash_loop():
+    """One kill -9 is informational, not an alarm: the crash-loop label is
+    gated on history.is_crash_looping's threshold."""
+    entries = [HistoryEntry("start", NOW.replace(minute=58))]
+    s = _status(history_entries=entries)
+    rendered = s.render()
+    assert "crash loop" not in rendered
+    assert "unclean starts: 1 in last 10m" in rendered

@@ -141,7 +141,12 @@ class SystemdUserSupervisor(_BaseSupervisor):
         except OSError as e:
             return SupervisorState("unreachable", str(e))
         if r.returncode != 0:
-            return SupervisorState("unreachable", r.stderr.strip())
+            # A reachable manager answers "not found" for an uninstalled unit —
+            # that is absent, not unreachable (pre-install `daemon status`).
+            error = (r.stderr or r.stdout or "").strip()
+            if "not found" in error.lower() or "could not be found" in error.lower():
+                return SupervisorState("absent", error)
+            return SupervisorState("unreachable", error)
         props = dict(
             line.split("=", 1) for line in r.stdout.splitlines() if "=" in line
         )
@@ -198,18 +203,29 @@ class LaunchdSupervisor(_BaseSupervisor):
     def install(self, argv: list[str]) -> None:
         plist_path = launchd_plist_path(self._home)
         plist_path.parent.mkdir(parents=True, exist_ok=True)
-        plist_path.write_text(render_launchd_plist(argv, daemon_log_dir(self._home)))
+        # launchd opens StandardOutPath/StandardErrorPath itself before exec —
+        # on a fresh account the job silently never starts if this dir is missing.
+        log_dir = daemon_log_dir(self._home)
+        log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        plist_path.write_text(render_launchd_plist(argv, log_dir))
         # user/<uid>, never gui/<uid>: bootstrap must work over SSH with no GUI
         # session (the headless provisioning path).
         self._checked("bootstrap", f"user/{self._uid}", str(plist_path))
 
     def start(self) -> None:
+        # stop() boots the service OUT of the domain (the only true stop under
+        # KeepAlive — a signal-killed job would just be relaunched), so start
+        # must re-bootstrap when the service is no longer loaded.
+        if self.query().state == "absent":
+            self._checked("bootstrap", f"user/{self._uid}", str(launchd_plist_path(self._home)))
         self._checked("kickstart", self._target)
 
     def stop(self) -> None:
         self._checked("bootout", self._target)
 
     def restart(self) -> None:
+        if self.query().state == "absent":  # same unloaded-target class as start()
+            self._checked("bootstrap", f"user/{self._uid}", str(launchd_plist_path(self._home)))
         self._checked("kickstart", "-k", self._target)
 
     def query(self) -> SupervisorState:
