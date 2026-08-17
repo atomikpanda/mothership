@@ -128,6 +128,7 @@ To edit `mothership.yaml` or a per-repo `Taskfile`, edit it directly in the main
 - [`docs/cli.md`](docs/cli.md) — full command surface.
 - [`docs/configuration.md`](docs/configuration.md) — `mothership.yaml`, healthchecks, service start modes, monorepo rules, task aliasing, drift policy.
 - [`docs/cloud-agent-auth.md`](docs/cloud-agent-auth.md) — GitHub auth for cloud/unattended agent sessions (token broker setup, GitHub App, `mship gh preflight`).
+- [`docs/daemon.md`](docs/daemon.md) — the always-on host daemon (`mship daemon ...`): supervision, logs, and the discovered-workspace registry (`mship workspace ...`).
 - [`docs/relay-hosting.md`](docs/relay-hosting.md) — self-hosting the `mship serve --relay` tunnel relay.
 - `mship skill install` — installs the agent-side skill bundle (including `working-with-mothership`), which is the canonical guide for agents operating inside an mship workspace.
 

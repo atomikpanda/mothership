@@ -97,3 +97,77 @@ real VM pass:
 7. **Concurrent cold start:** run `mship daemon start` while `mship daemon run`
    is already active in a shell → exactly one daemon survives; the loser logs
    the holder pid and exits 0.
+
+## Workspaces (#472)
+
+The daemon discovers workspaces instead of being told about them: at startup
+(and on explicit refresh) it scans the configured **scan roots** for
+`mothership.yaml` and serves every healthy one.
+
+```bash
+mship daemon install --scan-root ~/src --scan-root ~/work --serve 127.0.0.1:47190
+```
+
+- Scan roots and the optional TCP bind live in `~/.mothership/daemon/config.yaml`;
+  edit that file and run `mship workspace refresh` to pick changes up. With no
+  roots configured the daemon scans **nothing** (never the whole filesystem).
+- Derived registry state is `~/.mothership/daemon/workspaces.json`.
+- Without `--serve` the daemon is control-socket only: local `mship daemon ...`
+  works, but the phone cannot reach it. Address-less reachability is #471; until
+  then bind a tailnet/LAN address here.
+
+### Addressing
+
+Every workspace operation names its workspace by **id**:
+
+```
+GET  /workspaces                      # list: id, name, path, state, repos, runtime
+POST /workspaces/refresh              # rescan + reconcile
+GET  /workspaces/<id>/specs           # ... and every other serve route
+```
+
+Ids are minted (`ws-<ts>-<rand>`) and persisted to
+`<workspace>/.mothership/workspace-id`, never derived from the directory name —
+two workspaces may share a basename *and* a display name. Moving a workspace
+keeps its id (the id file travels with it); deleting one leaves a visible
+`missing` entry rather than a phantom. A **copy** (`cp -r`, cloned VM image)
+carries the same id file: the original keeps the id and the copy appears as a
+`degraded` duplicate-identity entry — run `mship workspace add <copy>` to mint
+it a fresh id.
+
+`mship workspace list|add|remove|ignore|refresh` are override/inspection
+controls, not the onboarding path: `add` is for a workspace discovery can't
+reach (outside every scan root) or to promote a duplicate copy.
+
+### What is never a workspace
+
+`.worktrees/` and `.mothership/` are mandatory scan exclusions, and a directory
+whose `.git` is a *file* (a linked worktree's gitdir pointer) or that sits under
+a `.mship-workspace` marker is a task worktree, not a workspace — `mship spawn`
+materializes a full tracked `mothership.yaml` inside each worktree, so without
+these rules every spawned task would register as a phantom workspace. Nested
+markers resolve to the outermost workspace, so a repo inside a metarepo never
+registers separately.
+
+### Degraded entries
+
+A broken/unreadable `mothership.yaml` — or a valid one whose repo paths don't
+exist (a template like `examples/mothership.yaml`) — becomes a visible
+`degraded` entry carrying the reason. Siblings still discover, the scan never
+aborts, and requests to a degraded id return 503 with that reason rather than
+failing obscurely at dispatch time.
+
+### Ground Control
+
+Pair a **host** once (its base URL + host token from
+`~/.mothership/daemon/serve-token`), then "Discover workspaces on host" lists
+what that host found; picking one stores a connection pointed at
+`{host}/workspaces/{id}`. If you previously paired that same workspace by hand
+(old per-workspace URL), you'll see two cards until you remove the manual one —
+migration lands with #471.
+
+### Multiple hosts
+
+The registry is **per host**. The same workspace discovered on two hosts is two
+independent entries, and nothing in the registry claims exclusive ownership:
+which host actually runs a WorkItem is decided by the claim protocol (#473).
