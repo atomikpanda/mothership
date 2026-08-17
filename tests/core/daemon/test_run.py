@@ -118,7 +118,7 @@ def test_lost_race_with_dead_holder_exits_nonzero(env_home, foreign_holder, monk
 def test_stale_socket_file_is_removed_before_bind(env_home, monkeypatch):
     home, env = env_home
     _capture_uvicorn(monkeypatch)
-    sock = daemon_socket_path(env, home)
+    sock = daemon_socket_path(env, home, create=True)
     sock.touch()  # leftover from kill -9
     assert run_mod.main(home=home, env=env) == 0
     assert not sock.exists()

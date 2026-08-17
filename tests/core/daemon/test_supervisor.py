@@ -227,3 +227,20 @@ def test_linux_query_unit_not_found_is_absent(tmp_path):
     absent, not unreachable (the pre-install `daemon status` case)."""
     sup, _ = _linux(tmp_path, {"show mship-daemon": _fail(stderr="Unit mship-daemon.service could not be found.")})
     assert sup.query().state == "absent"
+
+
+def test_macos_reinstall_unloads_first(tmp_path):
+    """launchd rejects a duplicate bootstrap of a loaded label and the running
+    job would keep the OLD plist — install boots the label out first
+    (tolerated when not loaded), then bootstraps the fresh plist."""
+    sup, rec = _mac(tmp_path)
+    sup.install(["/venv/bin/mshipd"])
+    cmds = [" ".join(c) for c in rec.calls]
+    bootout_i = next(i for i, c in enumerate(cmds) if "bootout" in c)
+    bootstrap_i = next(i for i, c in enumerate(cmds) if "bootstrap" in c)
+    assert bootout_i < bootstrap_i
+
+    # bootout failing (label not loaded — the FIRST install) must not block.
+    sup2, rec2 = _mac(tmp_path, {"launchctl bootout": _fail(stderr="Boot-out failed: 3: No such process")})
+    sup2.install(["/venv/bin/mshipd"])
+    assert any("bootstrap" in " ".join(c) for c in rec2.calls)

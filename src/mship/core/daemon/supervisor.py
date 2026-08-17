@@ -208,6 +208,13 @@ class LaunchdSupervisor(_BaseSupervisor):
         log_dir = daemon_log_dir(self._home)
         log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         plist_path.write_text(render_launchd_plist(argv, log_dir))
+        # Re-install: launchd rejects a duplicate bootstrap of a loaded label,
+        # and the running job would keep the OLD plist. Boot the label out
+        # first (tolerated when not loaded), then bootstrap the new plist.
+        try:
+            self._launchctl("bootout", self._target)
+        except OSError:
+            pass
         # user/<uid>, never gui/<uid>: bootstrap must work over SSH with no GUI
         # session (the headless provisioning path).
         self._checked("bootstrap", f"user/{self._uid}", str(plist_path))

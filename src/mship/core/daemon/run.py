@@ -86,7 +86,7 @@ def _run(home: Path, env: Mapping[str, str]) -> int:
     import mship
 
     version = mship.__version__  # captured once at process start (the version boundary)
-    socket_path = paths.daemon_socket_path(env, home)
+    socket_path = paths.daemon_socket_path(env, home, create=True)
 
     daemon_lease = lease_mod.DaemonLease(paths.lease_path(home))
     holder = daemon_lease.try_acquire(version=version, socket_path=str(socket_path))

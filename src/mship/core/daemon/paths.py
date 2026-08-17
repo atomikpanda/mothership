@@ -26,7 +26,7 @@ def start_history_path(home: Path) -> Path:
     return daemon_state_dir(home) / "start-history.json"
 
 
-def daemon_socket_path(env: Mapping[str, str], home: Path) -> Path:
+def daemon_socket_path(env: Mapping[str, str], home: Path, *, create: bool = False) -> Path:
     """Control-socket path: `$XDG_RUNTIME_DIR/mship/daemon.sock`, else a 0700
     dir under the state dir (macOS, some containers). NOTE: the daemon and a
     probing CLI can legitimately compute different paths when their
@@ -38,6 +38,10 @@ def daemon_socket_path(env: Mapping[str, str], home: Path) -> Path:
         sock_dir = Path(runtime) / "mship"
     else:
         sock_dir = daemon_state_dir(home) / "run"
-    sock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    sock_dir.chmod(0o700)
+    if create:
+        # Only the daemon itself creates the dir; probe/status paths must stay
+        # pure — a stale/unwritable XDG_RUNTIME_DIR in an SSH env would
+        # otherwise crash `mship daemon status` with PermissionError.
+        sock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        sock_dir.chmod(0o700)
     return sock_dir / "daemon.sock"

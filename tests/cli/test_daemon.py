@@ -153,3 +153,24 @@ def test_daemon_status_outside_workspace(tmp_path, monkeypatch):
     res = runner.invoke(real_app, ["daemon", "status"])
     assert res.exit_code == 0, res.output
     assert "not running" in res.output
+
+
+def test_status_json_mode_emits_json(cli, monkeypatch):
+    """`mship --json daemon status` / piped stdout must yield parseable JSON
+    (agentic review P2), not the rendered text block."""
+    import json as _json
+
+    from mship.cli.output import configure_output, reset_output_settings
+
+    app, fake = cli
+    monkeypatch.setattr(daemon_mod, "probe_daemon", lambda **kw: None)
+    configure_output(json=True)
+    try:
+        res = runner.invoke(app, ["daemon", "status"])
+    finally:
+        reset_output_settings()
+    assert res.exit_code == 0, res.output
+    payload = _json.loads(res.output)
+    assert payload["running"] is False
+    assert payload["cli_version"] == mship.__version__
+    assert isinstance(payload["lines"], list)

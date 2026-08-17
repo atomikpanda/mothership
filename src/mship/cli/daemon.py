@@ -106,7 +106,25 @@ def register(parent: typer.Typer, get_container):
             history_entries=read_history(start_history_path(home)),
             now=datetime.now(timezone.utc),
         )
-        out.print(st.render())
+        if out.json_mode:
+            out.json(
+                {
+                    "running": st.running,
+                    "supervised": st.supervised,
+                    "compatible": st.compatible,
+                    "pid": st.pid,
+                    "daemon_version": st.daemon_version,
+                    "cli_version": st.cli_version,
+                    "uptime_s": st.uptime_s,
+                    "socket": st.socket,
+                    "supervisor": {"state": st.supervisor.state, "detail": st.supervisor.detail},
+                    "linger": st.linger,
+                    "unclean_starts": st.unclean_starts,
+                    "lines": st.lines,
+                }
+            )
+        else:
+            out.print(st.render())
 
     @daemon_app.command("logs")
     def logs(n: int = typer.Option(100, "-n", "--lines", help="Lines to show.")):
