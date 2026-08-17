@@ -83,12 +83,17 @@ def _is_graphql_rate_limit(stderr: str) -> bool:
 class PRManager:
     """Create and manage PRs via the gh CLI."""
 
-    def __init__(self, shell: ShellRunner) -> None:
+    def __init__(self, shell: ShellRunner, cwd: Path | None = None) -> None:
         self._shell = shell
+        # Explicit working dir for every gh/git invocation (#472): a daemon
+        # hosts many workspaces, so "." would be whatever dir the daemon was
+        # born in — never a workspace. CLI callers omit it (cwd == invocation
+        # dir, today's behavior); the daemon passes each workspace's root.
+        self._cwd = cwd if cwd is not None else Path(".")
         self._gh_usable_cache: bool | None = None
 
     def check_gh_available(self) -> None:
-        result = self._shell.run("gh auth status", cwd=Path("."))
+        result = self._shell.run("gh auth status", cwd=self._cwd)
         if result.returncode == 127:
             raise RuntimeError(
                 "gh CLI not found. Install it: https://cli.github.com"
@@ -106,7 +111,7 @@ class PRManager:
         gh availability does not change within a single mship invocation."""
         if self._gh_usable_cache is None:
             self._gh_usable_cache = (
-                self._shell.run("gh auth status", cwd=Path(".")).returncode == 0
+                self._shell.run("gh auth status", cwd=self._cwd).returncode == 0
             )
         return self._gh_usable_cache
 
@@ -324,7 +329,7 @@ class PRManager:
         """
         result = self._shell.run(
             f"gh pr view {shlex.quote(pr_url)} --json mergeCommit -q .mergeCommit.oid",
-            cwd=Path("."),
+            cwd=self._cwd,
         )
         if result.returncode != 0:
             return None
@@ -366,7 +371,7 @@ class PRManager:
         """
         result = self._shell.run(
             f"gh pr view {shlex.quote(pr_url)} --json state -q .state",
-            cwd=Path("."),
+            cwd=self._cwd,
         )
         raw = result.stdout.strip().upper()
         mapping = {"MERGED": "merged", "CLOSED": "closed", "OPEN": "open"}
@@ -383,7 +388,7 @@ class PRManager:
         """'open' | 'closed' | 'unknown' for GitHub issue `slug#number` (#386)."""
         result = self._shell.run(
             f"gh issue view {number} -R {shlex.quote(slug)} --json state -q .state",
-            cwd=Path("."),
+            cwd=self._cwd,
         )
         raw = result.stdout.strip().upper()
         if result.returncode == 0 and raw in ("OPEN", "CLOSED"):
@@ -395,7 +400,7 @@ class PRManager:
         on failure (callers treat that as warn-and-continue, #386)."""
         result = self._shell.run(
             f"gh issue close {number} -R {shlex.quote(slug)} --comment {shlex.quote(comment)}",
-            cwd=Path("."),
+            cwd=self._cwd,
         )
         if result.returncode != 0:
             raise RuntimeError(
@@ -405,7 +410,7 @@ class PRManager:
     def get_pr_body(self, pr_url: str) -> str:
         result = self._shell.run(
             f"gh pr view {shlex.quote(pr_url)} --json body -q .body",
-            cwd=Path("."),
+            cwd=self._cwd,
         )
         return result.stdout.strip()
 
@@ -413,7 +418,7 @@ class PRManager:
         safe_body = shlex.quote(body)
         self._shell.run(
             f"gh pr edit {shlex.quote(pr_url)} --body {safe_body}",
-            cwd=Path("."),
+            cwd=self._cwd,
         )
 
     def build_coordination_block(

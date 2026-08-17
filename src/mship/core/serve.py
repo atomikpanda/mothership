@@ -286,6 +286,7 @@ def create_app(
     gh_app_id: str | None = None,
     gh_app_key: str | None = None,
     pair_link: str | None = None,
+    pr_watch_interval: float | None = None,
 ):
     """Build the mship serve FastAPI app (read + review/approve write endpoints).
     Sync handlers call the core directly; FastAPI serializes the returns.
@@ -327,7 +328,7 @@ def create_app(
     _spec_mode = getattr(config, "spec_storage", "committed") if config is not None else "committed"
     _spec_storage = SpecStorage(specs_dir, mode=_spec_mode, workspace_root=workspace_root)
     store = SpecStore(specs_dir, storage=_spec_storage)
-    pr_manager = PRManager(ShellRunner())
+    pr_manager = PRManager(ShellRunner(), cwd=workspace_root)
     # Separate ShellRunner instance for GET /gh-token (Broker A) rather than
     # reaching into pr_manager's private `_shell` — same class, own lifetime,
     # kept simple to construct/replace independently of PRManager.
@@ -349,7 +350,7 @@ def create_app(
     async def _lifespan(_app):
         """Runs a `PrWatcher` sweep on an interval for the app's lifetime,
         started on ASGI startup and cancelled cleanly on shutdown."""
-        interval = float(os.environ.get("MSHIP_PR_WATCH_INTERVAL", PR_WATCH_INTERVAL_SECONDS))
+        interval = float(pr_watch_interval if pr_watch_interval is not None else PR_WATCH_INTERVAL_SECONDS)
         if interval <= 0:
             yield
             return

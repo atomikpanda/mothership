@@ -16,11 +16,6 @@ class Cfg:
     spec_storage = "committed"
 
 
-@pytest.fixture(autouse=True)
-def _no_pr_watch(monkeypatch):
-    monkeypatch.setenv("MSHIP_PR_WATCH_INTERVAL", "0")
-
-
 @pytest.fixture
 def app_factory(tmp_path):
     def build(*, config=None, token="tok"):
@@ -35,6 +30,7 @@ def app_factory(tmp_path):
                 return S()
 
         return create_app(
+            pr_watch_interval=0,
             specs_dir=specs, state_manager=_State(), log_manager=None,
             workspace_root=tmp_path, workspace_name="ws", auth_token=token,
             config=config if config is not None else Cfg(),
@@ -117,6 +113,7 @@ def test_no_console_without_a_workspace_config(tmp_path):
             return S()
 
     app = create_app(
+        pr_watch_interval=0,
         specs_dir=specs, state_manager=_State(), log_manager=None,
         workspace_root=tmp_path, workspace_name="ws", auth_token="tok",
         config=None,

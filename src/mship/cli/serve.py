@@ -119,7 +119,9 @@ def register(app: typer.Typer, get_container):
         from mship.core.serve_pair import serve_pair_link
         pair = serve_pair_link(host, port, token, config.workspace)
 
+        import os as _os
         api = create_app(
+            pr_watch_interval=float(_os.environ.get("MSHIP_PR_WATCH_INTERVAL")) if _os.environ.get("MSHIP_PR_WATCH_INTERVAL") else None,
             specs_dir=workspace_root / SPECS_DIRNAME,
             state_manager=container.state_manager(),
             log_manager=container.log_manager(),
@@ -226,7 +228,9 @@ def _serve_with_relay(
         home=Path.home(),
     )
 
+    import os as _os
     api = create_app(
+        pr_watch_interval=float(_os.environ.get("MSHIP_PR_WATCH_INTERVAL")) if _os.environ.get("MSHIP_PR_WATCH_INTERVAL") else None,
         specs_dir=workspace_root / SPECS_DIRNAME,
         state_manager=container.state_manager(),
         log_manager=container.log_manager(),

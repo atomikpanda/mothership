@@ -12,12 +12,6 @@ class Cfg:
     spec_storage = "committed"
 
 
-@pytest.fixture(autouse=True)
-def _no_pr_watch(monkeypatch):
-    # The lifespan starts a PrWatcher loop; 0 disables it for these tests.
-    monkeypatch.setenv("MSHIP_PR_WATCH_INTERVAL", "0")
-
-
 @pytest.fixture
 def app_factory(tmp_path):
     def build(*, config, token="tok"):
@@ -32,6 +26,7 @@ def app_factory(tmp_path):
                 return S()
 
         return create_app(
+            pr_watch_interval=0,
             specs_dir=specs, state_manager=_State(), log_manager=None,
             workspace_root=tmp_path, workspace_name="ws", auth_token=token,
             config=config,

@@ -20,8 +20,9 @@ from mship.core.serve import PR_WATCH_INTERVAL_SECONDS, _pr_watch_loop, create_a
 from mship.core.state import StateManager
 
 
-def _app(tmp_path: Path):
+def _app(tmp_path: Path, interval: float | None = None):
     return create_app(
+        pr_watch_interval=interval,
         specs_dir=tmp_path / "specs",
         state_manager=StateManager(tmp_path / ".mothership"),
         log_manager=None,
@@ -37,8 +38,7 @@ def test_lifespan_starts_and_stops_cleanly_with_watcher_enabled(tmp_path, monkey
     # Tiny interval so the loop ticks at least once during the `with` block,
     # but no tasks with pr_urls exist, so check_once() is a cheap no-op sweep
     # (never reaches check_state, so no `gh` subprocess runs).
-    monkeypatch.setenv("MSHIP_PR_WATCH_INTERVAL", "0.01")
-    app = _app(tmp_path)
+    app = _app(tmp_path, interval=0.01)
     with TestClient(app) as client:
         r = client.get("/health")
         assert r.status_code == 200
@@ -47,16 +47,14 @@ def test_lifespan_starts_and_stops_cleanly_with_watcher_enabled(tmp_path, monkey
 
 
 def test_lifespan_interval_le_zero_disables_watcher(tmp_path, monkeypatch):
-    monkeypatch.setenv("MSHIP_PR_WATCH_INTERVAL", "0")
-    app = _app(tmp_path)
+    app = _app(tmp_path, interval=0)
     with TestClient(app) as client:
         r = client.get("/health")
         assert r.status_code == 200
 
 
 def test_lifespan_negative_interval_disables_watcher(tmp_path, monkeypatch):
-    monkeypatch.setenv("MSHIP_PR_WATCH_INTERVAL", "-5")
-    app = _app(tmp_path)
+    app = _app(tmp_path, interval=-5)
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200
 
@@ -133,10 +131,10 @@ def test_create_app_wires_worktree_manager_into_watcher(tmp_path, monkeypatch):
             pass
 
     monkeypatch.setattr("mship.core.serve.PrWatcher", _StubWatcher)
-    monkeypatch.setenv("MSHIP_PR_WATCH_INTERVAL", "0.01")
 
     sentinel = object()
     app = create_app(
+        pr_watch_interval=0.01,
         specs_dir=tmp_path / "specs",
         state_manager=StateManager(tmp_path / ".mothership"),
         log_manager=None,

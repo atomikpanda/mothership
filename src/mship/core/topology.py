@@ -595,7 +595,7 @@ def _gh_auth_edge(*, env) -> Edge:
     )
 
 
-def _egress_edge(*, shell) -> Edge:
+def _egress_edge(*, shell, cwd) -> Edge:
     """Is this machine's git routed through a relay egress proxy?
 
     Detected by reading git's global `insteadOf` rewrites — the ones
@@ -609,7 +609,9 @@ def _egress_edge(*, shell) -> Edge:
 
     cmd = 'git config --global --get-regexp "^url\\..*\\.insteadof$"'
     try:
-        result = shell.run(cmd, cwd=Path("."))
+        # cwd is explicit (#472): the probe reads --global git config, so any
+        # existing dir works — the caller passes the workspace root, never ".".
+        result = shell.run(cmd, cwd=Path(cwd))
     except Exception as exc:
         return Edge(
             kind="egress", name="egress", status="warn", code=EGRESS_UNKNOWN,
@@ -695,7 +697,7 @@ def probe_topology(
         skip_network=skip_network, timeout=timeout,
     ))
     edges.append(_gh_auth_edge(env=env))
-    edges.append(_egress_edge(shell=shell))
+    edges.append(_egress_edge(shell=shell, cwd=Path(workspace_root)))
     return Topology(
         version=SCHEMA_VERSION,
         workspace=getattr(config, "workspace", "") or "",
