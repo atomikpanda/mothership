@@ -278,11 +278,9 @@ def test_logs_tail_includes_launchd_stderr_captures(tmp_path):
 def test_uid_without_passwd_entry_does_not_crash_commands(tmp_path, monkeypatch):
     """Arbitrary container UIDs have no NSS entry; the supervisor is built for
     EVERY daemon command, so status/logs must keep working."""
-    import pwd as pwd_mod
+    import pwd
 
-    import mship.core.daemon.supervisor as sup_mod
-
-    monkeypatch.setattr(sup_mod.pwd, "getpwuid", lambda uid: (_ for _ in ()).throw(KeyError(uid)))
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: (_ for _ in ()).throw(KeyError(uid)))
     rec = Recorder({"show mship-daemon": _ok("ActiveState=active\nSubState=running\n")})
     sup = SystemdUserSupervisor(home=tmp_path, run_cmd=rec)
     assert sup._user is None
@@ -294,12 +292,17 @@ def test_uid_without_passwd_entry_does_not_crash_commands(tmp_path, monkeypatch)
 def test_install_fails_loudly_without_passwd_entry(tmp_path, monkeypatch):
     """Linger is mandatory, so an uninstallable environment must say so, not silently
     install a unit that dies on logout."""
-    import mship.core.daemon.supervisor as sup_mod
+    import pwd
 
-    monkeypatch.setattr(sup_mod.pwd, "getpwuid", lambda uid: (_ for _ in ()).throw(KeyError(uid)))
-    sup = SystemdUserSupervisor(home=tmp_path, run_cmd=Recorder())
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: (_ for _ in ()).throw(KeyError(uid)))
+    rec = Recorder()
+    sup = SystemdUserSupervisor(home=tmp_path, run_cmd=rec)
     with pytest.raises(DaemonSupervisorError, match="passwd entry"):
         sup.install(["/venv/bin/mshipd"])
+    # Nothing was mutated: no unit written, no daemon-reload, no enable — an
+    # enabled unit without linger would start and die on every login.
+    assert not (tmp_path / ".config" / "systemd" / "user" / "mship-daemon.service").exists()
+    assert rec.calls == []
 
 
 def test_stale_launchd_capture_does_not_hide_fresh_daemon_log(tmp_path):
@@ -320,3 +323,40 @@ def test_stale_launchd_capture_does_not_hide_fresh_daemon_log(tmp_path):
     sup, _ = _linux(tmp_path)
     tail = sup.logs_tail(2)
     assert tail == ["fresh-1", "fresh-2"], tail
+
+
+def test_uid_username_is_none_without_pwd_module(monkeypatch):
+    """Windows has no `pwd`; mship.cli imports this module for EVERY command, so
+    the import must be lazy and failure-tolerant."""
+    import builtins
+
+    import mship.core.daemon.supervisor as sup_mod
+
+    real_import = builtins.__import__
+
+    def no_pwd(name, *a, **kw):
+        if name == "pwd":
+            raise ModuleNotFoundError("No module named 'pwd'")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", no_pwd)
+    assert sup_mod._uid_username() is None
+
+
+def test_supervisor_module_has_no_toplevel_pwd_import():
+    """Static guard for the same class: a top-level `import pwd` would break
+    the whole CLI on Windows at import time, before Typer dispatch."""
+    import ast
+    from pathlib import Path as _P
+
+    src = _P(sup_module_path()).read_text()
+    tree = ast.parse(src)
+    toplevel = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+    names = {a.name for n in toplevel if isinstance(n, ast.Import) for a in n.names}
+    assert "pwd" not in names
+
+
+def sup_module_path() -> str:
+    import mship.core.daemon.supervisor as sup_mod
+
+    return sup_mod.__file__

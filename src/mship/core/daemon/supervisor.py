@@ -14,7 +14,6 @@ raw supervisor state.
 from __future__ import annotations
 
 import os
-import pwd
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -56,8 +55,12 @@ def _uid_username() -> str | None:
     degrade to "unknown"/loud install failure) instead of crashing the CLI.
     """
     try:
+        import pwd  # Unix-only: imported lazily so `mship <anything>` still runs on Windows
+    except ModuleNotFoundError:
+        return None
+    try:
         return pwd.getpwuid(os.getuid()).pw_name
-    except KeyError:
+    except (KeyError, AttributeError):  # no passwd entry / no getuid on this platform
         return None
 
 
@@ -141,6 +144,15 @@ class SystemdUserSupervisor(_BaseSupervisor):
         return False
 
     def install(self, argv: list[str]) -> None:
+        # Validate BEFORE any unit mutation: linger is mandatory, so if we can
+        # never enable it, writing+enabling a unit first would leave an enabled
+        # unit that starts and dies without linger (worse than not installing).
+        if self._user is None:
+            raise DaemonSupervisorError(
+                f"uid {os.getuid()} has no passwd entry, so `loginctl enable-linger` has no "
+                "user to target — linger is mandatory (without it the daemon dies when your "
+                "last session ends). Run as a real user, or use `mship daemon run`."
+            )
         unit_path = systemd_unit_path(self._home)
         unit_path.parent.mkdir(parents=True, exist_ok=True)
         unit_path.write_text(render_systemd_unit(argv))
@@ -148,12 +160,6 @@ class SystemdUserSupervisor(_BaseSupervisor):
         self._checked("enable", SYSTEMD_UNIT_NAME.removesuffix(".service"))
         # Linger is mandatory: without it the user unit is torn down when the
         # last SSH session ends — precisely the moment the daemon is needed.
-        if self._user is None:
-            raise DaemonSupervisorError(
-                f"uid {os.getuid()} has no passwd entry, so `loginctl enable-linger` has no "
-                "user to target — linger is mandatory (without it the daemon dies when your "
-                f"last session ends). Run as a real user, or use `mship daemon run`."
-            )
         try:
             r = self._run(["loginctl", "enable-linger", self._user])
         except OSError as e:
