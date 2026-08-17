@@ -273,3 +273,50 @@ def test_logs_tail_includes_launchd_stderr_captures(tmp_path):
     lines = sup.logs_tail(10)
     assert "app-line" in lines
     assert "posix_spawn: No such file or directory" in lines
+
+
+def test_uid_without_passwd_entry_does_not_crash_commands(tmp_path, monkeypatch):
+    """Arbitrary container UIDs have no NSS entry; the supervisor is built for
+    EVERY daemon command, so status/logs must keep working."""
+    import pwd as pwd_mod
+
+    import mship.core.daemon.supervisor as sup_mod
+
+    monkeypatch.setattr(sup_mod.pwd, "getpwuid", lambda uid: (_ for _ in ()).throw(KeyError(uid)))
+    rec = Recorder({"show mship-daemon": _ok("ActiveState=active\nSubState=running\n")})
+    sup = SystemdUserSupervisor(home=tmp_path, run_cmd=rec)
+    assert sup._user is None
+    assert sup.query().state == "active"      # status still works
+    assert sup.linger_state() == "unknown"    # nothing to query, no crash
+    assert sup.logs_tail(5) == []
+
+
+def test_install_fails_loudly_without_passwd_entry(tmp_path, monkeypatch):
+    """Linger is mandatory, so an uninstallable environment must say so, not silently
+    install a unit that dies on logout."""
+    import mship.core.daemon.supervisor as sup_mod
+
+    monkeypatch.setattr(sup_mod.pwd, "getpwuid", lambda uid: (_ for _ in ()).throw(KeyError(uid)))
+    sup = SystemdUserSupervisor(home=tmp_path, run_cmd=Recorder())
+    with pytest.raises(DaemonSupervisorError, match="passwd entry"):
+        sup.install(["/venv/bin/mshipd"])
+
+
+def test_stale_launchd_capture_does_not_hide_fresh_daemon_log(tmp_path):
+    """A big stale launchd.err.log must not crowd the current daemon.log out of
+    the -n tail (ordering is by mtime, not 'launchd always last')."""
+    import os
+    import time
+
+    log_dir = tmp_path / ".mothership" / "daemon" / "logs"
+    log_dir.mkdir(parents=True)
+    stale = log_dir / "launchd.err.log"
+    stale.write_text("\n".join(f"stale-{i}" for i in range(10)) + "\n")
+    fresh = log_dir / "daemon.log"
+    fresh.write_text("fresh-1\nfresh-2\n")
+    old = time.time() - 3600
+    os.utime(stale, (old, old))  # stale capture is genuinely older
+
+    sup, _ = _linux(tmp_path)
+    tail = sup.logs_tail(2)
+    assert tail == ["fresh-1", "fresh-2"], tail
