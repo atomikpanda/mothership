@@ -124,6 +124,7 @@ from mship.cli import ui as _ui_mod
 from mship.cli import serve as _serve_mod
 from mship.cli import sync as _sync_mod
 from mship.cli import view as _view_mod
+from mship.cli import workspace as _workspace_mod
 from mship.cli import worktree as _worktree_mod
 from mship.cli import workitem as _workitem_mod
 
@@ -192,5 +193,6 @@ _switch_mod.register(app, get_container)
 _serve_mod.register(app, get_container)
 _sync_mod.register(app, get_container)
 _view_mod.register(app, get_container)
+_workspace_mod.register(app, get_container)
 _worktree_mod.register(app, get_container)
 _workitem_mod.register(app, get_container)

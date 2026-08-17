@@ -1,0 +1,215 @@
+"""Workspace-addressed host app (#472): one HTTP surface serving N workspaces.
+
+`create_host_app` exposes host routes (`GET /health`, `GET /workspaces`,
+`POST /workspaces/refresh`) plus a catch-all `/workspaces/{id}/{path}` that
+resolves the id against the registry and forwards via ASGI to a cached,
+lazily built `core/serve.py::create_app` sub-app — one per healthy entry.
+
+NOT `app.mount`: Starlette neither supports mutating a mount table safely on
+refresh nor runs mounted sub-apps' lifespan events at all — the PrWatcher in
+`create_app`'s lifespan would silently never start. Instead each sub-app's
+lifespan is entered explicitly on first build and exited when a refresh
+removes/degrades its entry, under a per-host `AsyncExitStack`-style supervisor
+guarded by a lock.
+
+Addressing is by ID only — name-in-URL would reintroduce the same-name
+ambiguity the id exists to kill. Degraded/missing ids → 503 with the stored
+reason (matches #471's "workspace unavailable" ladder); unknown ids → 404.
+One host-level token gates everything (the #471 short-lived-token seam).
+"""
+from __future__ import annotations
+
+import asyncio
+import secrets
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable
+
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
+
+from mship.core.daemon.registry import RegistryStore, WorkspaceEntry
+
+
+def ensure_host_token(home: Path) -> str:
+    """Host-level bearer token (env>file>generate shape of relay/token.py's
+    ensure_serve_token, but per OS user, not per workspace)."""
+    from mship.core.daemon.paths import daemon_state_dir
+
+    path = daemon_state_dir(home) / "serve-token"
+    try:
+        existing = path.read_text().strip()
+        if existing:
+            return existing
+    except OSError:
+        pass
+    token = secrets.token_urlsafe(32)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.write_text(token + "\n")
+    path.chmod(0o600)
+    return token
+
+
+class _SubApp:
+    """A built per-workspace serve app plus its running lifespan."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+        self._cm = None
+
+    async def start(self) -> None:
+        # Enter the sub-app's lifespan explicitly (mounted apps never get it).
+        self._cm = self.app.router.lifespan_context(self.app)
+        await self._cm.__aenter__()
+
+    async def stop(self) -> None:
+        if self._cm is not None:
+            await self._cm.__aexit__(None, None, None)
+            self._cm = None
+
+
+def _default_build_subapp(entry: WorkspaceEntry, *, auth_token: str | None, pr_watch_interval: float | None):
+    from mship.core.serve import create_app
+    from mship.core.spec_store import SPECS_DIRNAME
+    from mship.core.workspace_context import build_workspace_context
+
+    ctx = build_workspace_context(Path(entry.config_path))
+    return create_app(
+        specs_dir=ctx.workspace_root / SPECS_DIRNAME,
+        state_manager=ctx.state_manager,
+        log_manager=ctx.log_manager,
+        workspace_root=ctx.workspace_root,
+        workspace_name=ctx.config.workspace,
+        auth_token=auth_token,
+        worktree_manager=ctx.worktree_manager,
+        config=ctx.config,
+        pr_watch_interval=pr_watch_interval,
+    )
+
+
+def create_host_app(
+    store: RegistryStore,
+    *,
+    auth_token: str | None,
+    build_subapp: Callable = _default_build_subapp,
+    rescan: Callable | None = None,
+    pr_watch_interval: float | None = None,
+):
+    """Build the host FastAPI app over a registry store.
+
+    `rescan()` (optional) re-runs discovery+reconcile and returns nothing; the
+    refresh route calls it before diffing the registry. `build_subapp` is the
+    injectable seam for tests.
+    """
+    from contextlib import asynccontextmanager
+
+    from mship.core.serve import _make_auth_dependency
+
+    subapps: dict[str, _SubApp] = {}
+    lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def _lifespan(_app):
+        try:
+            yield
+        finally:
+            async with lock:
+                for sub in subapps.values():
+                    await sub.stop()
+                subapps.clear()
+
+    dependencies = [Depends(_make_auth_dependency(auth_token))] if auth_token else []
+    app = FastAPI(title="mship host", docs_url=None, redoc_url=None,
+                  dependencies=dependencies, lifespan=_lifespan)
+
+    def _entries() -> list[WorkspaceEntry]:
+        return store.load().entries
+
+    async def _get_subapp(entry: WorkspaceEntry) -> _SubApp:
+        async with lock:
+            sub = subapps.get(entry.id)
+            if sub is None:
+                sub = _SubApp(build_subapp(entry, auth_token=auth_token, pr_watch_interval=pr_watch_interval))
+                await sub.start()
+                subapps[entry.id] = sub
+            return sub
+
+    async def _drop_stale(healthy_ids: set[str]) -> None:
+        async with lock:
+            for wid in list(subapps):
+                if wid not in healthy_ids:
+                    await subapps.pop(wid).stop()
+
+    @app.get("/health")
+    def health():
+        entries = _entries()
+        return {
+            "status": "ok",
+            "workspaces": len([e for e in entries if not e.ignored]),
+            "degraded": len([e for e in entries if e.state != "healthy" and not e.ignored]),
+        }
+
+    @app.get("/workspaces")
+    def list_workspaces():
+        return {
+            "workspaces": [
+                {
+                    "id": e.id,
+                    "name": e.name,
+                    "path": e.path,
+                    "state": e.state,
+                    "detail": e.detail,
+                    "repos": [r.model_dump() for r in e.repos],
+                    "runtime": e.runtime.model_dump(),
+                }
+                for e in _entries()
+                if not e.ignored
+            ]
+        }
+
+    @app.post("/workspaces/refresh")
+    async def refresh():
+        if rescan is not None:
+            await asyncio.get_running_loop().run_in_executor(None, rescan)
+        entries = _entries()
+        await _drop_stale({e.id for e in entries if e.state == "healthy" and not e.ignored})
+        return {"workspaces": len(entries)}
+
+    @app.api_route(
+        "/workspaces/{workspace_id}/{path:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    )
+    async def forward(workspace_id: str, path: str, request: Request):
+        entry = next((e for e in _entries() if e.id == workspace_id and not e.ignored), None)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"unknown workspace id {workspace_id!r}")
+        if entry.state != "healthy":
+            raise HTTPException(
+                status_code=503,
+                detail=f"workspace {entry.name!r} is {entry.state}: {entry.detail or 'unavailable'}",
+            )
+        sub = await _get_subapp(entry)
+
+        # ASGI forward with the prefix stripped, so create_app's routes see /specs etc.
+        scope = dict(request.scope)
+        scope["path"] = "/" + path
+        scope["raw_path"] = ("/" + path).encode()
+        scope["root_path"] = ""
+
+        status_headers: dict = {}
+        body_chunks: list[bytes] = []
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                status_headers["status"] = message["status"]
+                status_headers["headers"] = message.get("headers", [])
+            elif message["type"] == "http.response.body":
+                body_chunks.append(message.get("body", b""))
+
+        await sub.app(scope, request.receive, send)
+        return Response(
+            content=b"".join(body_chunks),
+            status_code=status_headers.get("status", 500),
+            headers={k.decode(): v.decode() for k, v in status_headers.get("headers", [])},
+        )
+
+    return app

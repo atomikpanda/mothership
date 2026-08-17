@@ -131,7 +131,12 @@ def register(parent: typer.Typer, get_container):
         out = Output()
         home = Path.home()
         sup = _supervisor()
+        from mship.core.daemon.paths import registry_path
+        from mship.core.daemon.registry import RegistryStore
+
+        entries = [e for e in RegistryStore(registry_path(home)).load().entries if not e.ignored]
         st = build_status(
+            workspaces=(len(entries), len([e for e in entries if e.state != "healthy"])),
             supervisor_state=sup.query(),
             linger=sup.linger_state(),
             lease_info=read_lease_record(lease_path(home)),

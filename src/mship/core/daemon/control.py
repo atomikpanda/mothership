@@ -16,13 +16,26 @@ from pathlib import Path
 from typing import Callable
 
 # CLI<->daemon control-protocol version; bump on breaking payload changes.
-PROTOCOL = 1
+# 2: capabilities.registry/serve became real + /workspaces endpoints (#472).
+PROTOCOL = 2
 
 _PROBE_TIMEOUT_S = 3.0
 
 
-def create_control_app(*, started_at: datetime, version: str, socket_path: str):
-    """Tiny closure app factory (the `core/serve.py::create_app` style)."""
+def create_control_app(
+    *,
+    started_at: datetime,
+    version: str,
+    socket_path: str,
+    store=None,
+    rescan=None,
+    serve_bound: bool = False,
+):
+    """Tiny closure app factory (the `core/serve.py::create_app` style).
+
+    `store` (a RegistryStore) enables the registry capability + /workspaces
+    endpoints over the control socket; `rescan()` re-runs discovery+reconcile.
+    `serve_bound` reports whether the TCP host app is up (#472)."""
     from fastapi import FastAPI
 
     app = FastAPI(title="mshipd control", docs_url=None, redoc_url=None)
@@ -39,12 +52,29 @@ def create_control_app(*, started_at: datetime, version: str, socket_path: str):
             "uptime_s": (now - started_at).total_seconds(),
             "socket": socket_path,
             "capabilities": {
-                "serve": False,  # #472: serve becomes a daemon capability with the registry
+                "serve": serve_bound,  # #472: TCP host app bound (config-dependent)
                 "tunnel": False,  # #471: relay tunnel registration
-                "registry": False,  # #472: workspace discovery/registry
+                "registry": store is not None,  # #472: workspace discovery/registry
                 "runner": False,  # #473: unattended worker supervision
             },
         }
+
+    if store is not None:
+        @app.get("/workspaces")
+        def workspaces():
+            return {
+                "workspaces": [
+                    {"id": e.id, "name": e.name, "path": e.path, "state": e.state, "detail": e.detail}
+                    for e in store.load().entries
+                    if not e.ignored
+                ]
+            }
+
+        @app.post("/workspaces/refresh")
+        def refresh():
+            if rescan is not None:
+                rescan()
+            return {"workspaces": len(store.load().entries)}
 
     return app
 

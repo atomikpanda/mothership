@@ -1,0 +1,90 @@
+"""AC-1 end-to-end (#472): install-seeded config → daemon startup scan →
+registry → workspace-addressed serving, as ONE path. No `mship workspace add`
+anywhere. Real sockets are the manual checklist's job; here uvicorn is
+captured at the seam and the built apps are exercised directly, which pins
+every hop the daemon owns (config → scan → reconcile → host app → per-id
+forward) plus the TCP-bind wiring parameters."""
+import typer
+from fastapi.testclient import TestClient
+from pathlib import Path
+from typer.testing import CliRunner
+
+import mship.cli.daemon as daemon_mod
+import mship.core.daemon.run as run_mod
+from mship.core.daemon.paths import registry_path
+from mship.core.daemon.registry import RegistryStore
+
+runner = CliRunner()
+
+
+def _mk_ws(root: Path, name: str) -> Path:
+    ws = root / name
+    repo = ws / "app"
+    repo.mkdir(parents=True)
+    (repo / "Taskfile.yml").write_text("version: '3'\n")
+    (ws / "mothership.yaml").write_text(
+        f"workspace: {name}\nrepos:\n  app:\n    path: app\n    type: service\n"
+    )
+    (ws / "specs").mkdir()
+    return ws
+
+
+def test_install_scan_serve_end_to_end(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "src"
+    _mk_ws(root, "ws-one")
+    _mk_ws(root, "ws-two")
+
+    # 1) `mship daemon install --scan-root ... --serve ...` seeds the config.
+    class _FakeSup:
+        def available(self):
+            return True
+
+        def install(self, argv):
+            pass
+
+    monkeypatch.setattr(daemon_mod, "pick_supervisor", lambda **kw: _FakeSup())
+    monkeypatch.setattr(daemon_mod, "resolve_mshipd_argv", lambda: ["/venv/bin/mshipd"])
+    monkeypatch.setattr(daemon_mod.Path, "home", classmethod(lambda cls: home))
+    app = typer.Typer()
+    daemon_mod.register(app, lambda required=True: None)
+    res = runner.invoke(app, [
+        "daemon", "install", "--scan-root", str(root), "--serve", "127.0.0.1:47199",
+    ])
+    assert res.exit_code == 0, res.output
+
+    # 2) daemon startup: capture what _serve_forever would bind, keep the apps.
+    captured = {}
+    monkeypatch.setattr(
+        run_mod, "_serve_forever",
+        lambda control_app, socket_path, host_app, serve_cfg: captured.update(
+            control=control_app, host=host_app, serve=serve_cfg,
+        ),
+    )
+    assert run_mod.main(home=home, env={}) == 0
+
+    # startup scan discovered and registered both — no `mship workspace add`.
+    entries = RegistryStore(registry_path(home)).load().entries
+    assert sorted(e.name for e in entries) == ["ws-one", "ws-two"]
+    assert all(e.state == "healthy" for e in entries)
+    assert captured["serve"] == {"host": "127.0.0.1", "port": 47199}
+    assert captured["host"] is not None
+
+    # 3) the TCP host app serves BOTH workspaces, addressed by id.
+    from mship.core.daemon.host_app import ensure_host_token
+
+    token = ensure_host_token(home)
+    with TestClient(captured["host"]) as client:
+        hdrs = {"Authorization": f"Bearer {token}"}
+        ws = client.get("/workspaces", headers=hdrs).json()["workspaces"]
+        assert sorted(w["name"] for w in ws) == ["ws-one", "ws-two"]
+        for w in ws:
+            r = client.get(f"/workspaces/{w['id']}/health", headers=hdrs)
+            assert r.status_code == 200
+            assert r.json()["workspace"] == w["name"]
+
+    # 4) control app reports the flipped capabilities.
+    with TestClient(captured["control"]) as client:
+        caps = client.get("/health").json()["capabilities"]
+        assert caps["registry"] is True and caps["serve"] is True
