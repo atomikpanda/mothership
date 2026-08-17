@@ -174,3 +174,38 @@ def test_status_json_mode_emits_json(cli, monkeypatch):
     assert payload["running"] is False
     assert payload["cli_version"] == mship.__version__
     assert isinstance(payload["lines"], list)
+
+
+def test_install_seeds_scan_roots_and_serve(cli, tmp_path):
+    from mship.core.daemon.registry import load_daemon_config
+
+    app, fake = cli
+    res = runner.invoke(app, ["daemon", "install", "--scan-root", "/src", "--scan-root", "/work", "--serve", "127.0.0.1:47190"])
+    assert res.exit_code == 0, res.output
+    cfg = load_daemon_config(tmp_path)
+    assert cfg.scan_roots == ["/src", "/work"]
+    assert cfg.serve == {"host": "127.0.0.1", "port": 47190}
+
+
+def test_install_without_serve_leaves_null_bind(cli, tmp_path):
+    from mship.core.daemon.registry import load_daemon_config
+
+    app, fake = cli
+    res = runner.invoke(app, ["daemon", "install", "--scan-root", "/src"])
+    assert res.exit_code == 0, res.output
+    assert load_daemon_config(tmp_path).serve is None
+
+
+def test_install_rejects_malformed_serve(cli):
+    app, fake = cli
+    res = runner.invoke(app, ["daemon", "install", "--serve", "nonsense"])
+    assert res.exit_code == 1
+    assert "HOST:PORT" in res.output
+    assert not any(c.startswith("install:") for c in fake.calls)
+
+
+def test_install_rejects_relative_scan_root(cli):
+    app, fake = cli
+    res = runner.invoke(app, ["daemon", "install", "--scan-root", "relative/path"])
+    assert res.exit_code == 1
+    assert "absolute" in res.output

@@ -40,9 +40,30 @@ def register(parent: typer.Typer, get_container):
         return pick_supervisor()
 
     @daemon_app.command("install")
-    def install():
+    def install(
+        scan_root: list[str] = typer.Option(
+            None, "--scan-root",
+            help="Absolute directory to scan for mothership.yaml workspaces (repeatable). Seeds the daemon config.",
+        ),
+        serve: str = typer.Option(
+            None, "--serve", metavar="HOST:PORT",
+            help="Also bind the workspace-addressed HTTP API on HOST:PORT (pre-#471 phone reachability). Without it the daemon is control-socket only.",
+        ),
+    ):
         """Install + enable the OS-user supervisor unit (systemd --user / launchd)."""
         out = Output()
+        serve_cfg = None
+        if serve is not None:
+            host, sep, port_s = serve.rpartition(":")
+            if not sep or not host or not port_s.isdigit():
+                out.error(f"--serve expects HOST:PORT, got {serve!r}")
+                raise typer.Exit(1)
+            serve_cfg = {"host": host, "port": int(port_s)}
+        roots = list(scan_root or [])
+        bad = [r for r in roots if not Path(r).is_absolute()]
+        if bad:
+            out.error(f"--scan-root must be absolute: {bad}")
+            raise typer.Exit(1)
         sup = _supervisor()
         if not sup.available():
             out.error(
@@ -56,6 +77,19 @@ def register(parent: typer.Typer, get_container):
         except (DaemonExecResolutionError, DaemonSupervisorError) as e:
             out.error(str(e))
             raise typer.Exit(1)
+        if roots or serve_cfg is not None:
+            from mship.core.daemon.registry import DaemonConfig, load_daemon_config, save_daemon_config
+
+            home = Path.home()
+            cfg = load_daemon_config(home)
+            merged = DaemonConfig(
+                scan_roots=sorted(set(cfg.scan_roots) | set(roots)),
+                ignore_globs=cfg.ignore_globs,
+                max_depth=cfg.max_depth,
+                serve=serve_cfg if serve_cfg is not None else cfg.serve,
+            )
+            save_daemon_config(home, merged)
+            out.print(f"daemon config seeded: {len(merged.scan_roots)} scan root(s)" + (", serve bind set" if merged.serve else ""))
         out.print("daemon installed and enabled — start it with `mship daemon start`")
 
     @daemon_app.command("start")
