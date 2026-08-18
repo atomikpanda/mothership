@@ -112,7 +112,10 @@ mship daemon install --scan-root ~/src --scan-root ~/work --serve 127.0.0.1:4719
 - Scan roots and the optional TCP bind live in `~/.mothership/daemon/config.yaml`;
   edit scan roots and run `mship workspace refresh` to pick them up. Changes to
   the `serve:` bind require `mship daemon restart`. With no roots configured the
-  daemon scans **nothing** (never the whole filesystem).
+  daemon scans **nothing** (never the whole filesystem). A configured root must
+  be an accessible directory: install/start/refresh fail with that path rather
+  than treating it as an empty scan, and an operational scan failure leaves the
+  last registry state unchanged. A symlink supplied as a root is never traversed.
 - Derived registry state is `~/.mothership/daemon/workspaces.json`.
 - Without `--serve` the daemon is control-socket only: local `mship daemon ...`
   works, but the phone cannot reach it. Address-less reachability is #471; until

@@ -162,6 +162,14 @@ def register(parent: typer.Typer, get_container):
                 max_depth=previous_cfg.max_depth,
                 serve=serve_cfg if serve_cfg is not None else previous_cfg.serve,
             )
+            from mship.core.daemon.discovery import ScanRootError, scan_roots
+
+            try:
+                scan_roots(merged)
+            except ScanRootError as exc:
+                out.error(str(exc))
+                raise typer.Exit(1)
+
             # Launchd's bootstrap starts a RunAtLoad job immediately. Persist
             # validated config first so that first process sees the requested
             # roots/bind rather than the old snapshot.

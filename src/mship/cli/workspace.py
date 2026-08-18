@@ -195,8 +195,7 @@ def register(parent: typer.Typer, get_container):
         """Rescan scan roots. Pokes the live daemon when one holds the lease
         (so its serve cache refreshes too); otherwise reconciles the store
         directly (safe against a later daemon by flock)."""
-        from mship.core.daemon.control import probe_control_socket
-        from mship.core.daemon.discovery import scan_roots
+        from mship.core.daemon.discovery import ScanRootError, scan_roots
 
         out = Output()
         home = Path.home()
@@ -207,7 +206,12 @@ def register(parent: typer.Typer, get_container):
                 out.print(f"daemon rescanned: {payload.get('workspaces')} workspace(s)")
                 return
         cfg = load_daemon_config(home)
-        state = reconcile(_store(home), scan_roots(cfg), datetime.now(timezone.utc))
+        try:
+            candidates = scan_roots(cfg)
+        except ScanRootError as exc:
+            out.error(str(exc))
+            raise typer.Exit(1)
+        state = reconcile(_store(home), candidates, datetime.now(timezone.utc))
         out.print(f"rescanned directly: {len(state.entries)} workspace(s)")
 
     parent.add_typer(ws_app, rich_help_panel="Runtime")

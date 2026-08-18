@@ -4,9 +4,12 @@ anywhere. Real sockets are the manual checklist's job; here uvicorn is
 captured at the seam and the built apps are exercised directly, which pins
 every hop the daemon owns (config → scan → reconcile → host app → per-id
 forward) plus the TCP-bind wiring parameters."""
+import shutil
+from pathlib import Path
+
+import pytest
 import typer
 from fastapi.testclient import TestClient
-from pathlib import Path
 from typer.testing import CliRunner
 
 import mship.cli.daemon as daemon_mod
@@ -132,3 +135,23 @@ def test_invalid_daemon_config_clears_previously_healthy_registry(tmp_path):
     failed_store, _rescan, _serve = run_mod._build_registry(home)
 
     assert failed_store.load().entries == []
+
+
+def test_missing_scan_root_fails_without_mutating_healthy_registry(tmp_path):
+    from mship.core.daemon.discovery import ScanRootError
+    from mship.core.daemon.registry import DaemonConfig, save_daemon_config
+
+    home = tmp_path / "home"
+    root = tmp_path / "root"
+    _mk_ws(root, "existing")
+    save_daemon_config(home, DaemonConfig(scan_roots=[str(root)]))
+    store, rescan, _serve = run_mod._build_registry(home)
+    workspace_id = store.load().entries[0].id
+
+    shutil.rmtree(root)
+    for scan in (rescan, lambda: run_mod._build_registry(home)):
+        with pytest.raises(ScanRootError, match=str(root)):
+            scan()
+        entry = store.load().entries[0]
+        assert entry.id == workspace_id
+        assert entry.state == "healthy"

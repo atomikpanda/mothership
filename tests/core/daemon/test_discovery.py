@@ -5,6 +5,8 @@ monorepo (git_root children), metarepo (sibling repos)."""
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from mship.core.daemon.discovery import scan_roots
 from mship.core.daemon.registry import DaemonConfig
 
@@ -199,6 +201,13 @@ def test_symlinked_scan_root_not_followed(tmp_path: Path):
     linked_root.symlink_to(real, target_is_directory=True)
 
     assert scan_roots(_cfg(linked_root)) == []
+
+
+def test_missing_configured_scan_root_fails_with_path(tmp_path: Path):
+    missing = tmp_path / "unmounted"
+
+    with pytest.raises(ValueError, match=str(missing)):
+        scan_roots(_cfg(missing))
 
 
 def test_max_depth_respected(tmp_path: Path):

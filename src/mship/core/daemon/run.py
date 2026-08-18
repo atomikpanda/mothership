@@ -52,14 +52,18 @@ def _import_server_stack():
 
 
 def _build_registry(home: Path):
-    """Startup discovery (#472): load daemon config, scan, reconcile. Returns
-    (store, rescan, serve_cfg). Never raises — a scan failure leaves an empty
-    registry and gets logged (a bad candidate must not kill the daemon)."""
-    from mship.core.daemon.discovery import scan_roots
+    """Startup discovery (#472): load daemon config, scan, reconcile.
+
+    Invalid config clears the registry. An unavailable configured root raises
+    without mutation so startup fails closed and the supervisor can retry.
+    Per-candidate failures degrade entries rather than aborting the scan.
+    """
+    from mship.core.daemon.discovery import ScanRootError, scan_roots
     from mship.core.daemon.paths import registry_path
     from mship.core.daemon.registry import RegistryStore, load_daemon_config, reconcile
 
     store = RegistryStore(registry_path(home))
+
     def clear_registry() -> None:
         store.mutate(lambda state: state.entries.clear())
 
@@ -89,6 +93,12 @@ def _build_registry(home: Path):
 
     try:
         rescan()
+    except ScanRootError:
+        log.exception(
+            "configured scan root unavailable — registry unchanged; "
+            "refusing daemon startup"
+        )
+        raise
     except Exception:
         log.exception("workspace scan failed — serving current registry state")
     return store, rescan, cfg.serve

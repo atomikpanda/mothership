@@ -217,10 +217,18 @@ def test_install_seeds_scan_roots_and_serve(cli, tmp_path):
     from mship.core.daemon.registry import load_daemon_config
 
     app, fake = cli
-    res = runner.invoke(app, ["daemon", "install", "--scan-root", "/src", "--scan-root", "/work", "--serve", "127.0.0.1:47190"])
+    src, work = tmp_path / "src", tmp_path / "work"
+    src.mkdir()
+    work.mkdir()
+    res = runner.invoke(app, [
+        "daemon", "install",
+        "--scan-root", str(src),
+        "--scan-root", str(work),
+        "--serve", "127.0.0.1:47190",
+    ])
     assert res.exit_code == 0, res.output
     cfg = load_daemon_config(tmp_path)
-    assert cfg.scan_roots == ["/src", "/work"]
+    assert cfg.scan_roots == sorted([str(src), str(work)])
     assert cfg.serve == {"host": "127.0.0.1", "port": 47190}
 
 
@@ -229,17 +237,20 @@ def test_install_persists_config_before_supervisor_bootstrap(cli, tmp_path):
 
     app, fake = cli
     observed = {}
+    src = tmp_path / "src"
+    src.mkdir()
 
     def install(_argv):
         observed["config"] = load_daemon_config(tmp_path)
 
     fake.install = install
     res = runner.invoke(app, [
-        "daemon", "install", "--scan-root", "/src", "--serve", "127.0.0.1:47190",
+        "daemon", "install", "--scan-root", str(src),
+        "--serve", "127.0.0.1:47190",
     ])
 
     assert res.exit_code == 0, res.output
-    assert observed["config"].scan_roots == ["/src"]
+    assert observed["config"].scan_roots == [str(src)]
     assert observed["config"].serve == {"host": "127.0.0.1", "port": 47190}
 
 
@@ -382,14 +393,18 @@ def test_install_failure_restores_previous_config(cli, tmp_path):
     )
 
     app, fake = cli
-    previous = DaemonConfig(scan_roots=["/existing"], max_depth=4)
+    existing = tmp_path / "existing"
+    new = tmp_path / "new"
+    existing.mkdir()
+    new.mkdir()
+    previous = DaemonConfig(scan_roots=[str(existing)], max_depth=4)
     save_daemon_config(tmp_path, previous)
 
     def fail_install(_argv):
         raise DaemonSupervisorError("bootstrap failed")
 
     fake.install = fail_install
-    res = runner.invoke(app, ["daemon", "install", "--scan-root", "/new"])
+    res = runner.invoke(app, ["daemon", "install", "--scan-root", str(new)])
 
     assert res.exit_code == 1
     assert load_daemon_config(tmp_path) == previous
@@ -403,14 +418,18 @@ def test_install_filesystem_failure_restores_previous_config(cli, tmp_path):
     )
 
     app, fake = cli
-    previous = DaemonConfig(scan_roots=["/existing"], max_depth=4)
+    existing = tmp_path / "existing"
+    new = tmp_path / "new"
+    existing.mkdir(exist_ok=True)
+    new.mkdir(exist_ok=True)
+    previous = DaemonConfig(scan_roots=[str(existing)], max_depth=4)
     save_daemon_config(tmp_path, previous)
 
     def fail_install(_argv):
         raise OSError("unit write failed")
 
     fake.install = fail_install
-    res = runner.invoke(app, ["daemon", "install", "--scan-root", "/new"])
+    res = runner.invoke(app, ["daemon", "install", "--scan-root", str(new)])
 
     assert res.exit_code == 1
     assert load_daemon_config(tmp_path) == previous
@@ -420,7 +439,9 @@ def test_install_without_serve_leaves_null_bind(cli, tmp_path):
     from mship.core.daemon.registry import load_daemon_config
 
     app, fake = cli
-    res = runner.invoke(app, ["daemon", "install", "--scan-root", "/src"])
+    src = tmp_path / "src"
+    src.mkdir()
+    res = runner.invoke(app, ["daemon", "install", "--scan-root", str(src)])
     assert res.exit_code == 0, res.output
     assert load_daemon_config(tmp_path).serve is None
 
@@ -439,3 +460,16 @@ def test_install_rejects_relative_scan_root(cli):
     res = runner.invoke(app, ["daemon", "install", "--scan-root", "relative/path"])
     assert res.exit_code == 1
     assert "absolute" in res.output
+
+
+def test_install_rejects_missing_scan_root(cli, tmp_path):
+    app, fake = cli
+    missing = tmp_path / "unmounted"
+
+    res = runner.invoke(
+        app, ["daemon", "install", "--scan-root", str(missing)]
+    )
+
+    assert res.exit_code == 1
+    assert str(missing) in res.output
+    assert not any(call.startswith("install:") for call in fake.calls)

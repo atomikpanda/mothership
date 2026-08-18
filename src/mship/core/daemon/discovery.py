@@ -39,6 +39,10 @@ MARKER = "mothership.yaml"
 MANDATORY_EXCLUDES = {".worktrees", ".mothership", ".git"}
 
 
+class ScanRootError(ValueError):
+    """A configured discovery boundary is unavailable; never an empty scan."""
+
+
 @dataclass
 class Candidate:
     path: Path  # workspace root (resolved)
@@ -79,7 +83,17 @@ def _find_marker_dirs(root: Path, cfg: DaemonConfig) -> list[Path]:
     if enclosing is not None:
         return [enclosing]
     root_depth = len(root.parts)
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+
+    def fail_walk(error: OSError) -> None:
+        failed_path = error.filename or str(root)
+        raise ScanRootError(
+            f"configured scan root {root} is inaccessible at {failed_path}: "
+            f"{error.strerror or error}"
+        ) from error
+
+    for dirpath, dirnames, filenames in os.walk(
+        root, followlinks=False, onerror=fail_walk
+    ):
         cur = Path(dirpath)
         if MARKER in filenames:
             found.append(cur)
@@ -150,8 +164,12 @@ def scan_roots(cfg: DaemonConfig) -> list[Candidate]:
     marker_dirs: list[Path] = []
     for root_str in cfg.scan_roots:
         root = Path(root_str)
-        if root.is_symlink() or not root.is_dir():
+        if root.is_symlink():
             continue
+        if not root.is_dir():
+            raise ScanRootError(
+                f"configured scan root is missing or inaccessible: {root}"
+            )
         marker_dirs.extend(_find_marker_dirs(root, cfg))
 
     # Resolved-path dedupe.
