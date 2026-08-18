@@ -264,6 +264,25 @@ def test_add_duplicate_identity_copy_mints_fresh_id(cli):
     assert (copy / ".mothership" / "workspace-id").read_text().strip() == copy_entry.id
 
 
+def test_offline_refresh_reports_malformed_config_without_mutation(cli):
+    from mship.core.daemon.paths import daemon_config_path
+
+    app, home, tmp = cli
+    root = tmp / "root"
+    _mk_ws(root, "existing")
+    state = _seed_scan(home, root)
+    workspace_id = state.entries[0].id
+    daemon_config_path(home).write_text("scan_roots: [broken\n")
+
+    result = runner.invoke(app, ["workspace", "refresh"])
+    entry = RegistryStore(registry_path(home)).load().entries[0]
+
+    assert result.exit_code == 1
+    assert "invalid daemon config" in result.output
+    assert entry.id == workspace_id
+    assert entry.state == "healthy"
+
+
 def test_add_refuses_task_worktree(cli):
     from mship.core.workspace_marker import write_marker
 

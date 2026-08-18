@@ -475,7 +475,10 @@ def test_install_rejects_missing_scan_root(cli, tmp_path):
     assert not any(call.startswith("install:") for call in fake.calls)
 
 
-def test_start_rejects_unavailable_configured_scan_root(cli, tmp_path):
+@pytest.mark.parametrize("command", ["start", "restart"])
+def test_starting_command_rejects_unavailable_configured_scan_root(
+    command, cli, tmp_path
+):
     from mship.core.daemon.registry import DaemonConfig, save_daemon_config
 
     app, fake = cli
@@ -484,11 +487,11 @@ def test_start_rejects_unavailable_configured_scan_root(cli, tmp_path):
         tmp_path, DaemonConfig(scan_roots=[str(missing)])
     )
 
-    res = runner.invoke(app, ["daemon", "start"])
+    res = runner.invoke(app, ["daemon", command])
 
     assert res.exit_code == 1
     assert str(missing) in res.output
-    assert "start" not in fake.calls
+    assert command not in fake.calls
 
 
 @pytest.mark.parametrize("command", ["install", "start", "restart"])

@@ -107,6 +107,17 @@ def _validate_scan_roots(cfg, output: Output) -> None:
         raise typer.Exit(1)
 
 
+def _validate_daemon_config(home: Path, output: Output) -> None:
+    from mship.core.daemon.registry import load_daemon_config
+
+    try:
+        cfg = load_daemon_config(home)
+    except ValueError as exc:
+        output.error(str(exc))
+        raise typer.Exit(1)
+    _validate_scan_roots(cfg, output)
+
+
 def register(parent: typer.Typer, get_container):
     daemon_app = typer.Typer(
         name="daemon",
@@ -197,14 +208,7 @@ def register(parent: typer.Typer, get_container):
     @daemon_app.command("start")
     def start():
         out = Output()
-        from mship.core.daemon.registry import load_daemon_config
-
-        try:
-            cfg = load_daemon_config(Path.home())
-        except ValueError as exc:
-            out.error(str(exc))
-            raise typer.Exit(1)
-        _validate_scan_roots(cfg, out)
+        _validate_daemon_config(Path.home(), out)
         credential_snapshots = None
         try:
             credential_snapshots = _persist_daemon_credential_overrides(
@@ -234,6 +238,7 @@ def register(parent: typer.Typer, get_container):
         if blockers:
             out.error("restart refused:\n" + "\n".join(f"  - {b}" for b in blockers))
             raise typer.Exit(1)
+        _validate_daemon_config(Path.home(), out)
         credential_snapshots = None
         try:
             credential_snapshots = _persist_daemon_credential_overrides(
