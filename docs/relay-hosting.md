@@ -325,7 +325,8 @@ Notes on each:
 - DNS — the existing wildcard `*.relay.example.com` record already covers both
   `enroll.<relay>` and every per-host subdomain.
 - Firewall/ports — still 2222/80/443; `:47180` stays loopback-only.
-- `tls_ask.py` — a host subdomain is the same `<opaque-slug>-<6hex>` label shape
+- `src/mship/core/relay/tls_ask.py` (in the mship package, not `docker/relay/`)
+  — a host subdomain is the same `<opaque-slug>-<6hex>` label shape
   a serve subdomain already has, so the on-demand-TLS allowlist needs no edit.
 
 The `Caddyfile` is deliberately **not** on that list: it is the one file that

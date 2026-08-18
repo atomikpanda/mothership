@@ -132,14 +132,16 @@ the host lands back in the enrollment queue and needs one more
 ### Tokens
 
 The phone's credential chain has two tiers, both self-issued by the host and
-verified by that same host — nothing is proxied and no shared secret is
-distributed:
+verified by that same host — the exchange is never proxied, and no operator ever
+copies a secret between machines:
 
 - a **refresh credential** per `(host_id, client)`, *derived* (HMAC over the
   host root secret and a per-record nonce) rather than stored, so a
-  reconnect/re-registration re-publishes the identical string and writes
-  nothing at all. TTL 30 days; only `revoke` and a first mint touch the file.
-  It is the field the directory entry carries.
+  reconnect/re-registration re-publishes the identical string and, in steady
+  state, writes nothing at all (a re-issue that finds expired sibling records
+  does pay them off). TTL 30 days. It is the field the host's directory entry
+  carries — so whoever can read the directory can read it: see
+  [Fleet-token exposure](relay-hosting.md#fleet-token-exposure).
 - a **short-lived bearer**, `<token_id>.<secret>`, minted by
   `POST /host/token` in exchange for that refresh credential and good for
   `HOST_TOKEN_TTL_S` (300s). Only its sha256 is stored; verification is a pure
@@ -154,6 +156,12 @@ floor taken in a previous boot from being compared against this boot's
 `time.monotonic()`. Because the monotonic bound fires first for any ordinary
 token, the skew grace only ever applies where the anchor cannot vouch for
 elapsed time — a check after a restart, or a caller with no anchor.
+
+Earliest-wins cuts both ways, deliberately: a *forwards* step past
+`expires_at + 120s` retires the bearers minted before it. That is cheap and
+invisible — the phone re-mints from its refresh credential, which the same step
+cannot expire — whereas the reverse mistake (a backwards step silently
+extending live bearers) is a security hole.
 
 Clock skew is *reported*, never gating: the link samples the enroll server's
 `Date` header on every call and publishes `clock_skew_seconds`, which

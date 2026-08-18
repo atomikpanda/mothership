@@ -19,8 +19,9 @@ Run this pass on a real host + the live relay before calling #471 done.
   would generate a *different* sish host key, so bringing the stack up from a
   worktree breaks every existing tunnel. Always `docker compose -f
   <main checkout>/docker/relay/docker-compose.yml …`.
-- **There is no passwordless sudo here.** Where a step below wants a wedged
-  peer, simulate it with `kill -STOP <pid of the ssh -R>` (and `kill -CONT` to
+- **There is no passwordLESS sudo here** (interactive `sudo` at a terminal is
+  fine — item 8 uses it; what is missing is unattended/scripted sudo). Where a
+  step below wants a wedged peer, simulate it with `kill -STOP <pid of the ssh -R>` (and `kill -CONT` to
   release) rather than iptables/nft rules.
 - Useful throughout: `mship daemon status` (and `mship --json daemon status`) on
   the host, `mship relay hosts --store-dir <relay-dir>/pending-store` on the
@@ -80,12 +81,23 @@ Run this pass on a real host + the live relay before calling #471 done.
    not log in → the daemon is running and its tunnel is `online` again, verified
    from another machine.
 
-8. **Wall-clock step (AC10).** `sudo timedatectl set-time '+1 hour'` (or step
-   the VM's clock) while a phone is paired → already-issued host bearers keep
-   working until their real elapsed TTL, the phone does not have to re-pair, and
-   `mship --json daemon status` reports a non-zero `clock_skew_seconds`
-   (sampled from the enroll server's `Date`, so it is measured against the
-   relay, not against itself). Put the clock back afterwards.
+8. **Wall-clock step (AC10).** `sudo timedatectl set-time '+1 hour'` (interactive
+   sudo is fine here — it is passwordLESS sudo this box does not have), or step
+   the VM's clock, while a phone is paired.
+
+   A *forwards* step past `expires_at + 120s` **rejects** the bearers minted
+   before it — that is the intended behaviour, not a failure: the wall bound and
+   the monotonic bound are ANDed as "earliest wins", and the monotonic floor
+   exists to stop a *backwards* step silently extending a live token, not to
+   keep a stale one alive. What must not happen is the phone falling out of
+   pairing over it.
+
+   **PASS =** the phone keeps working with no re-pairing — it silently re-mints
+   a bearer via `POST /host/token` from its 30-day refresh credential, which a
+   one-hour step cannot expire — **and** `mship --json daemon status` reports a
+   non-zero `clock_skew_seconds` (sampled from the enroll server's `Date`, so it
+   is measured against the relay, not against itself). Put the clock back
+   afterwards.
 
 9. **Worker survives a tunnel outage (AC7).** Start a long-running task on the
    host, then take the tunnel away for ~10 minutes — `kill -STOP` the `ssh -R`
