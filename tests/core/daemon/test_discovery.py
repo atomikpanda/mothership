@@ -194,13 +194,14 @@ def test_symlinked_dir_not_followed(tmp_path: Path):
     assert scan_roots(_cfg(scanned)) == []
 
 
-def test_symlinked_scan_root_not_followed(tmp_path: Path):
+def test_symlinked_scan_root_is_rejected(tmp_path: Path):
     real = tmp_path / "outside"
     _mk_single(real, "hidden")
     linked_root = tmp_path / "linked-root"
     linked_root.symlink_to(real, target_is_directory=True)
 
-    assert scan_roots(_cfg(linked_root)) == []
+    with pytest.raises(ValueError, match=str(linked_root)):
+        scan_roots(_cfg(linked_root))
 
 
 def test_missing_configured_scan_root_fails_with_path(tmp_path: Path):
@@ -245,6 +246,41 @@ def test_scan_root_below_symlinked_ancestor_never_walks_target(
         match=rf"{linked}.*{configured}",
     ):
         scan_roots(_cfg(configured))
+
+
+def test_unreadable_descendant_skips_only_that_subtree(
+    tmp_path: Path, monkeypatch
+):
+    root = tmp_path / "root"
+    healthy = _mk_single(root, "healthy")
+    blocked = root / "blocked"
+    blocked.mkdir()
+
+    def walk(_root, *, followlinks, onerror):
+        assert followlinks is False
+        onerror(PermissionError(13, "permission denied", str(blocked)))
+        yield str(healthy), [], ["mothership.yaml"]
+
+    monkeypatch.setattr("mship.core.daemon.discovery.os.walk", walk)
+
+    assert [candidate.name for candidate in scan_roots(_cfg(root))] == [
+        "healthy"
+    ]
+
+
+def test_unreadable_scan_root_fails_loudly(tmp_path: Path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+
+    def walk(_root, *, followlinks, onerror):
+        assert followlinks is False
+        onerror(PermissionError(13, "permission denied", str(root)))
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("mship.core.daemon.discovery.os.walk", walk)
+
+    with pytest.raises(ValueError, match=rf"{root}.*permission denied"):
+        scan_roots(_cfg(root))
 
 
 def test_max_depth_respected(tmp_path: Path):

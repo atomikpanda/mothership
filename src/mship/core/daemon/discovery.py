@@ -82,15 +82,16 @@ def _find_marker_dirs(root: Path, cfg: DaemonConfig) -> list[Path]:
         return [enclosing]
     root_depth = len(root.parts)
 
-    def fail_walk(error: OSError) -> None:
-        failed_path = error.filename or str(root)
-        raise ScanRootError(
-            f"configured scan root {root} is inaccessible at {failed_path}: "
-            f"{error.strerror or error}"
-        ) from error
+    def handle_walk_error(error: OSError) -> None:
+        failed_path = Path(error.filename or root)
+        if failed_path == root:
+            raise ScanRootError(
+                f"configured scan root {root} is inaccessible at "
+                f"{failed_path}: {error.strerror or error}"
+            ) from error
 
     for dirpath, dirnames, filenames in os.walk(
-        root, followlinks=False, onerror=fail_walk
+        root, followlinks=False, onerror=handle_walk_error
     ):
         cur = Path(dirpath)
         if MARKER in filenames:
@@ -165,21 +166,19 @@ def scan_roots(cfg: DaemonConfig) -> list[Candidate]:
     marker_dirs: list[Path] = []
     for root_str in cfg.scan_roots:
         root = Path(root_str)
-        symlinked_ancestor = next(
-            (parent for parent in root.parents if parent.is_symlink()),
+        symlinked_component = next(
+            (
+                component
+                for component in (root, *root.parents)
+                if component.is_symlink()
+            ),
             None,
         )
-        if symlinked_ancestor is not None:
+        if symlinked_component is not None:
             raise ScanRootError(
-                "configured scan root crosses symlinked path component "
-                f"{symlinked_ancestor}: {root}"
+                "configured scan root contains symlinked path component "
+                f"{symlinked_component}: {root}"
             )
-        if root.is_symlink():
-            if not root.exists() or not root.is_dir():
-                raise ScanRootError(
-                    f"configured scan root is missing or inaccessible: {root}"
-                )
-            continue
         if not root.is_dir():
             raise ScanRootError(
                 f"configured scan root is missing or inaccessible: {root}"

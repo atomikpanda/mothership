@@ -17,6 +17,7 @@ import mship
 from mship.core.daemon.history import read_history
 from mship.core.daemon.lease import read_lease_record
 from mship.core.daemon.paths import lease_path, start_history_path
+from mship.core.daemon.registry import DaemonConfig
 from mship.core.daemon.status import build_status, probe_daemon, restart_blockers
 from mship.core.daemon.supervisor import DaemonSupervisorError, pick_supervisor
 from mship.core.daemon.units import DaemonExecResolutionError, resolve_mshipd_argv
@@ -142,9 +143,12 @@ def _resolve_effective_daemon_credentials(
 
 def _preflight_daemon_start(
     home: Path, output: Output
-) -> tuple[str | None, str | None, str | None]:
-    _validate_daemon_config(home, output)
-    return _resolve_effective_daemon_credentials(home, output)
+) -> tuple[
+    DaemonConfig,
+    tuple[str | None, str | None, str | None],
+]:
+    cfg = _validate_daemon_config(home, output)
+    return cfg, _resolve_effective_daemon_credentials(home, output)
 
 
 def register(parent: typer.Typer, get_container):
@@ -198,8 +202,9 @@ def register(parent: typer.Typer, get_container):
         except DaemonExecResolutionError as e:
             out.error(str(e))
             raise typer.Exit(1)
-        resolved_credentials = _resolve_effective_daemon_credentials(
-            Path.home(), out
+        home = Path.home()
+        previous_cfg, resolved_credentials = _preflight_daemon_start(
+            home, out
         )
         if any(resolved_credentials) and sup.query().state == "active":
             out.error(
@@ -207,11 +212,9 @@ def register(parent: typer.Typer, get_container):
                 "persisted — use `mship daemon restart` to apply them"
             )
             raise typer.Exit(1)
-        home = Path.home()
-        previous_cfg = _validate_daemon_config(home, out)
         merged = None
         if roots or serve_cfg is not None:
-            from mship.core.daemon.registry import DaemonConfig, save_daemon_config
+            from mship.core.daemon.registry import save_daemon_config
 
             merged = DaemonConfig(
                 scan_roots=sorted(set(previous_cfg.scan_roots) | set(roots)),
@@ -244,7 +247,7 @@ def register(parent: typer.Typer, get_container):
     @daemon_app.command("start")
     def start():
         out = Output()
-        resolved_credentials = _preflight_daemon_start(Path.home(), out)
+        _, resolved_credentials = _preflight_daemon_start(Path.home(), out)
         sup = _supervisor()
         if any(resolved_credentials) and sup.query().state == "active":
             out.error(
@@ -281,7 +284,7 @@ def register(parent: typer.Typer, get_container):
         if blockers:
             out.error("restart refused:\n" + "\n".join(f"  - {b}" for b in blockers))
             raise typer.Exit(1)
-        resolved_credentials = _preflight_daemon_start(Path.home(), out)
+        _, resolved_credentials = _preflight_daemon_start(Path.home(), out)
         credential_snapshots = None
         try:
             credential_snapshots = _persist_daemon_credential_overrides(
@@ -300,11 +303,23 @@ def register(parent: typer.Typer, get_container):
         home = Path.home()
         sup = _supervisor()
         from mship.core.daemon.paths import registry_path
-        from mship.core.daemon.registry import RegistryStore
+        from mship.core.daemon.registry import RegistryReadError, RegistryStore
 
-        entries = [e for e in RegistryStore(registry_path(home)).load().entries if not e.ignored]
+        try:
+            entries = [
+                e
+                for e in RegistryStore(registry_path(home)).load().entries
+                if not e.ignored
+            ]
+        except RegistryReadError:
+            workspaces = None
+        else:
+            workspaces = (
+                len(entries),
+                len([e for e in entries if e.state == "degraded"]),
+            )
         st = build_status(
-            workspaces=(len(entries), len([e for e in entries if e.state == "degraded"])),
+            workspaces=workspaces,
             supervisor_state=sup.query(),
             linger=sup.linger_state(),
             lease_info=read_lease_record(lease_path(home)),

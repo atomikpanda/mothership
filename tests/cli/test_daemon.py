@@ -193,6 +193,31 @@ def test_status_counts_missing_as_discovered_not_degraded(cli, tmp_path):
     assert "workspaces: 3 discovered (1 degraded)" in res.output
 
 
+def test_status_reports_registry_read_error_without_hiding_daemon_state(
+    cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.paths import registry_path
+
+    app, _ = cli
+    path = registry_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text('{"entries": []}')
+    real_read_text = Path.read_text
+
+    def fail_registry_read(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError("permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_registry_read)
+    res = runner.invoke(app, ["daemon", "status"])
+
+    assert res.exit_code == 0, res.output
+    assert "daemon: not running" in res.output
+    assert "supervisor: active" in res.output
+    assert "workspaces: registry not loaded" in res.output
+
+
 def test_logs_prints_tail(cli):
     app, fake = cli
     res = runner.invoke(app, ["daemon", "logs"])
@@ -585,8 +610,28 @@ def test_install_rejects_missing_scan_root(cli, tmp_path):
     )
 
     assert res.exit_code == 1
+
+
     assert str(missing) in res.output
     assert not any(call.startswith("install:") for call in fake.calls)
+
+@pytest.mark.parametrize("command", ["install", "start", "restart"])
+def test_daemon_lifecycle_rejects_malformed_config_before_supervisor(
+    command, cli, tmp_path
+):
+    from mship.core.daemon.paths import daemon_config_path
+
+    app, fake = cli
+    path = daemon_config_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text("scan_roots: [unterminated")
+
+    res = runner.invoke(app, ["daemon", command])
+
+    assert res.exit_code == 1
+    assert "invalid daemon config" in res.output
+    assert str(path) in res.output
+    assert not any(call.startswith(command) for call in fake.calls)
 
 
 @pytest.mark.parametrize("command", ["install", "start", "restart"])
@@ -609,8 +654,9 @@ def test_starting_command_rejects_unavailable_configured_scan_root(
 
 
 @pytest.mark.parametrize("command", ["install", "start"])
-def test_daemon_rejects_scan_root_below_symlinked_ancestor(
-    command, cli, tmp_path
+@pytest.mark.parametrize("symlink_position", ["final", "ancestor"])
+def test_daemon_rejects_symlinked_scan_root_component(
+    command, symlink_position, cli, tmp_path
 ):
     from mship.core.daemon.registry import DaemonConfig, save_daemon_config
 
@@ -622,7 +668,9 @@ def test_daemon_rejects_scan_root_below_symlinked_ancestor(
     trusted.mkdir()
     linked = trusted / "link"
     linked.symlink_to(outside, target_is_directory=True)
-    configured = linked / "nested"
+    configured = (
+        linked if symlink_position == "final" else linked / "nested"
+    )
 
     args = ["daemon", command]
     if command == "install":
