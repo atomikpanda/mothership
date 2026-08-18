@@ -53,6 +53,21 @@ def _disable_git_signing_for_tests():
                 os.environ[k] = v
 
 
+@pytest.fixture(autouse=True)
+def _isolate_runtime_dir(monkeypatch, tmp_path: Path):
+    """No test may reach the real user's daemon control socket.
+
+    `daemon_socket_path` resolves `$XDG_RUNTIME_DIR/mship/daemon.sock`, and
+    `probe_daemon` falls back to that computed path whenever the (tmp) home has
+    no lease. On a box where a real `mship daemon` is running, that probe
+    answers from the LIVE daemon — so a test asserting "daemon: not running"
+    fails for reasons that have nothing to do with the code under test.
+    Pointing the variable at a per-test dir isolates the probe; production
+    socket resolution is untouched (it reads whatever env it is given).
+    """
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "xdg-runtime"))
+
+
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
     """Create a minimal workspace with repos that have Taskfile.yml files."""

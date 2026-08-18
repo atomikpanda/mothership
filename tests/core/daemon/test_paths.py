@@ -1,4 +1,5 @@
 """Daemon path derivation is pure: explicit `home` + `env`, no ambient reads."""
+import os
 from pathlib import Path
 
 from mship.core.daemon.paths import (
@@ -17,6 +18,15 @@ def test_state_dir_and_derivatives(tmp_path: Path):
     assert daemon_log_dir(home) == state / "logs"
     assert lease_path(home) == state / "daemon.lease"
     assert start_history_path(home) == state / "start-history.json"
+
+
+def test_the_suite_cannot_reach_the_real_daemon_socket(tmp_path: Path):
+    """Guard for the autouse `_isolate_runtime_dir` fixture (tests/conftest.py):
+    without it, any test that computes the socket path from the ambient env
+    probes the operator's LIVE daemon on a box where one is running, and
+    'daemon: not running' assertions fail for unrelated reasons."""
+    assert str(tmp_path) in os.environ["XDG_RUNTIME_DIR"]
+    assert not daemon_socket_path(os.environ, tmp_path).exists()
 
 
 def test_socket_prefers_xdg_runtime_dir(tmp_path: Path):
