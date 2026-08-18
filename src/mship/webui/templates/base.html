@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}mship{% endblock %}</title>
     {# A full reload, not a JS fetch: /net/topology is header-only and this
-       page's cookie is scoped to /ui, so a fetch would 401. #}
+       page's cookie is scoped to this UI root, so a fetch would 401. #}
     {% if refresh_seconds %}<meta http-equiv="refresh" content="{{ refresh_seconds }}">{% endif %}
     <!-- Local stylesheet only: the console must work with no internet. -->
-    <link rel="stylesheet" href="/ui/static/app.css">
+    <link rel="stylesheet" href="{{ ui_root }}/static/app.css">
   </head>
   <body class="bg-white text-slate-900 dark:bg-slate-950 dark:text-slate-100">
     <main class="mx-auto max-w-4xl p-6">
@@ -18,12 +18,12 @@
       <!-- A server-rendered page is a snapshot; say when, and by which build. -->
       mship {{ mship_version }} &middot;
       probed {{ probed_at }} <span id="age" data-probed-at="{{ probed_at }}"></span> &middot;
-      <a class="underline" href="/ui/">topology</a> &middot;
-      <a class="underline" href="/ui/doctor">health</a> &middot;
-      <a class="underline" href="/ui/pair">pair a phone</a> &middot;
+      <a class="underline" href="{{ ui_root }}/">topology</a> &middot;
+      <a class="underline" href="{{ ui_root }}/doctor">health</a> &middot;
+      <a class="underline" href="{{ ui_root }}/pair">pair a phone</a> &middot;
       <a class="underline" href="{{ request.url.path }}">refresh now</a>
     </footer>
-    <script src="/ui/static/copy.js"></script>
-    <script src="/ui/static/age.js"></script>
+    <script src="{{ ui_root }}/static/copy.js"></script>
+    <script src="{{ ui_root }}/static/age.js"></script>
   </body>
 </html>

@@ -333,7 +333,7 @@ class DoctorChecker:
                     ))
 
         # gh CLI
-        gh_result = self._shell.run("gh auth status", cwd=Path("."))
+        gh_result = self._shell.run("gh auth status", cwd=self._workspace_root or Path("."))
         if gh_result.returncode == 0:
             report.checks.append(CheckResult(name="gh", status="pass", message="authenticated"))
         elif gh_result.returncode == 127:
@@ -392,7 +392,7 @@ class DoctorChecker:
         env_runner = self._config.env_runner
         if env_runner:
             binary = env_runner.split()[0]
-            which_result = self._shell.run(f"which {binary}", cwd=Path("."))
+            which_result = self._shell.run(f"which {binary}", cwd=self._workspace_root or Path("."))
             if which_result.returncode == 0:
                 report.checks.append(CheckResult(name="env_runner", status="pass", message=f"{env_runner} — found"))
             else:

@@ -12,15 +12,9 @@ class Cfg:
     spec_storage = "committed"
 
 
-@pytest.fixture(autouse=True)
-def _no_pr_watch(monkeypatch):
-    # The lifespan starts a PrWatcher loop; 0 disables it for these tests.
-    monkeypatch.setenv("MSHIP_PR_WATCH_INTERVAL", "0")
-
-
 @pytest.fixture
 def app_factory(tmp_path):
-    def build(*, config, token="tok"):
+    def build(*, config, token="tok", **kwargs):
         specs = tmp_path / "specs"
         specs.mkdir(exist_ok=True)
         (tmp_path / ".mothership").mkdir(exist_ok=True)
@@ -32,9 +26,10 @@ def app_factory(tmp_path):
                 return S()
 
         return create_app(
+            pr_watch_interval=0,
             specs_dir=specs, state_manager=_State(), log_manager=None,
             workspace_root=tmp_path, workspace_name="ws", auth_token=token,
-            config=config,
+            config=config, **kwargs,
         )
     return build
 
@@ -86,3 +81,28 @@ def test_never_500s_on_a_broken_environment(app_factory):
     assert r.status_code == 200
     codes = {e["code"] for e in r.json()["edges"]}
     assert "run_host_unmapped" in codes
+
+
+def test_loaded_github_app_capability_overrides_absent_environment(
+    app_factory, monkeypatch
+):
+    monkeypatch.delenv("MSHIP_GH_APP_ID", raising=False)
+    monkeypatch.delenv("MSHIP_GH_APP_KEY", raising=False)
+    app = app_factory(
+        config=Cfg(),
+        gh_app_id="persisted-app",
+        gh_app_key="PRIVATE KEY",
+    )
+
+    with TestClient(app) as client:
+        payload = client.get(
+            "/net/topology",
+            headers={"Authorization": "Bearer tok"},
+        ).json()
+
+    edge = next(edge for edge in payload["edges"] if edge["kind"] == "gh_auth")
+    assert edge["facts"]["serves_app_backed_tokens"] is True
+    assert edge["facts"]["app_id_configured"] is True
+    assert edge["facts"]["app_key_readable"] is True
+    assert "persisted-app" not in str(edge["facts"])
+    assert "PRIVATE KEY" not in str(edge["facts"])

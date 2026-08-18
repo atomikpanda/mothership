@@ -522,7 +522,7 @@ _GH_AUTH_CODES = {
 }
 
 
-def _gh_auth_edge(*, env) -> Edge:
+def _gh_auth_edge(*, env, gh_app_credentials_loaded: bool | None = None) -> Edge:
     """How THIS machine authenticates to GitHub, plus whether it also serves
     App-backed tokens to others.
 
@@ -536,14 +536,19 @@ def _gh_auth_edge(*, env) -> Edge:
     Reports presence/readability, never a credential — and never the App id,
     which identifies a specific private key.
     """
-    from pathlib import Path
-
     from mship.core.gh_auth import classify_gh_auth
 
-    app_id = env.get("MSHIP_GH_APP_ID") or None
-    app_key_path = env.get("MSHIP_GH_APP_KEY") or None
-    app_key_readable = bool(app_key_path) and Path(app_key_path).is_file()
-    serves_app_tokens = bool(app_id and app_key_readable)
+    if gh_app_credentials_loaded is None:
+        from pathlib import Path
+
+        app_id = env.get("MSHIP_GH_APP_ID") or None
+        app_key_path = env.get("MSHIP_GH_APP_KEY") or None
+        app_key_readable = bool(app_key_path) and Path(app_key_path).is_file()
+        serves_app_tokens = bool(app_id and app_key_readable)
+    else:
+        serves_app_tokens = gh_app_credentials_loaded
+        app_id = "configured" if serves_app_tokens else None
+        app_key_readable = serves_app_tokens
     broker_url = env.get("MSHIP_GH_BROKER_URL") or None
     relay_url = env.get("MSHIP_RELAY_URL") or None
     run_token = env.get("MSHIP_RUN_TOKEN") or None
@@ -595,7 +600,7 @@ def _gh_auth_edge(*, env) -> Edge:
     )
 
 
-def _egress_edge(*, shell) -> Edge:
+def _egress_edge(*, shell, cwd) -> Edge:
     """Is this machine's git routed through a relay egress proxy?
 
     Detected by reading git's global `insteadOf` rewrites — the ones
@@ -609,7 +614,9 @@ def _egress_edge(*, shell) -> Edge:
 
     cmd = 'git config --global --get-regexp "^url\\..*\\.insteadof$"'
     try:
-        result = shell.run(cmd, cwd=Path("."))
+        # cwd is explicit (#472): the probe reads --global git config, so any
+        # existing dir works — the caller passes the workspace root, never ".".
+        result = shell.run(cmd, cwd=Path(cwd))
     except Exception as exc:
         return Edge(
             kind="egress", name="egress", status="warn", code=EGRESS_UNKNOWN,
@@ -656,6 +663,7 @@ def probe_topology(
     now=None,
     skip_network: bool = False,
     timeout: float = PROBE_TIMEOUT_SECONDS,
+    gh_app_credentials_loaded: bool | None = None,
 ) -> Topology:
     """This machine's connectivity topology. Read-only; never raises.
 
@@ -694,8 +702,11 @@ def probe_topology(
         config=config, state_dir=Path(state_dir), env=env, probe=probe,
         skip_network=skip_network, timeout=timeout,
     ))
-    edges.append(_gh_auth_edge(env=env))
-    edges.append(_egress_edge(shell=shell))
+    edges.append(_gh_auth_edge(
+        env=env,
+        gh_app_credentials_loaded=gh_app_credentials_loaded,
+    ))
+    edges.append(_egress_edge(shell=shell, cwd=Path(workspace_root)))
     return Topology(
         version=SCHEMA_VERSION,
         workspace=getattr(config, "workspace", "") or "",

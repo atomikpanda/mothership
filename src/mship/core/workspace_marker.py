@@ -34,6 +34,21 @@ def write_marker(worktree_path: Path, workspace_root: Path) -> None:
     (worktree_path / MARKER_NAME).write_text(str(Path(workspace_root).resolve()) + "\n")
 
 
+def find_marker_owner(start: Path) -> Path | None:
+    """Return the nearest directory owning a marker, without resolving it."""
+    try:
+        current = Path(start).resolve()
+    except OSError:
+        return None
+    while True:
+        if (current / MARKER_NAME).is_file():
+            return current
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
+
+
 def read_marker_from_ancestor(start: Path) -> Path | None:
     """Walk up from `start` looking for `.mship-workspace`.
 
@@ -41,23 +56,16 @@ def read_marker_from_ancestor(start: Path) -> Path | None:
     `mothership.yaml`, return the resolved directory. Otherwise return None
     (stale marker; caller should fall through to another discovery step).
     """
+    owner = find_marker_owner(start)
+    if owner is None:
+        return None
+    marker = owner / MARKER_NAME
     try:
-        current = Path(start).resolve()
+        target = Path(marker.read_text().strip())
     except OSError:
         return None
-    while True:
-        marker = current / MARKER_NAME
-        if marker.is_file():
-            try:
-                target = Path(marker.read_text().strip())
-            except OSError:
-                return None
-            if target.is_dir() and (target / "mothership.yaml").is_file():
-                return target.resolve()
-            return None  # stale
-        parent = current.parent
-        if parent == current:
-            return None
-        current = parent
+    if target.is_dir() and (target / "mothership.yaml").is_file():
+        return target.resolve()
+    return None  # stale
 
 

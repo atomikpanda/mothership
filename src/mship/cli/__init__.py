@@ -51,32 +51,9 @@ def _global_options(
     )
 
 
-def _resolve_state_dir(config_path):
-    """Get the workspace state dir, anchored to main repo if in a git worktree."""
-    import os
-    import subprocess
-    from pathlib import Path
-
-    config_path = Path(config_path)
-    try:
-        # Strip GIT_DIR / GIT_COMMON_DIR so git re-discovers from cwd rather than
-        # inheriting a worktree-specific git dir set by a parent git hook process.
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE")}
-        result = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir"],
-            cwd=config_path.parent,
-            capture_output=True,
-            text=True,
-            check=True,
-            env=env,
-        )
-        git_common_dir = Path(result.stdout.strip())
-        if not git_common_dir.is_absolute():
-            git_common_dir = (config_path.parent / git_common_dir).resolve()
-        return git_common_dir.parent / ".mothership"
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return config_path.parent / ".mothership"
+# Moved to core/workspace_context.py (#472); re-exported so existing importers
+# (and tests/cli/test_state_dir_resolution.py) stand unchanged.
+from mship.core.workspace_context import _resolve_state_dir  # noqa: E402
 
 
 def get_container(required: bool = True) -> "Container | None":
@@ -147,6 +124,7 @@ from mship.cli import ui as _ui_mod
 from mship.cli import serve as _serve_mod
 from mship.cli import sync as _sync_mod
 from mship.cli import view as _view_mod
+from mship.cli import workspace as _workspace_mod
 from mship.cli import worktree as _worktree_mod
 from mship.cli import workitem as _workitem_mod
 
@@ -215,5 +193,6 @@ _switch_mod.register(app, get_container)
 _serve_mod.register(app, get_container)
 _sync_mod.register(app, get_container)
 _view_mod.register(app, get_container)
+_workspace_mod.register(app, get_container)
 _worktree_mod.register(app, get_container)
 _workitem_mod.register(app, get_container)

@@ -34,6 +34,7 @@ def _status(**kw):
         cli_version="0.5.52",
         history_entries=[],
         now=NOW,
+        workspaces=(2, 1),
     )
     defaults.update(kw)
     return build_status(**defaults)
@@ -48,7 +49,7 @@ def test_healthy_rendering():
     assert s.supervised is True
     rendered = s.render()
     assert "tunnel: not configured (#471)" in rendered
-    assert "workspaces: registry pending (#472)" in rendered
+    assert "workspaces: 2 discovered (1 degraded)" in rendered
     assert "runner: not configured (#473)" in rendered
 
 

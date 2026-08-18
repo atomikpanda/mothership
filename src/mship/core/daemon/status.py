@@ -70,6 +70,7 @@ def build_status(
     cli_version: str,
     history_entries: list[HistoryEntry],
     now: datetime,
+    workspaces: tuple[int, int] | None = None,
 ) -> DaemonStatus:
     running = health is not None
     supervised = supervisor_state.state == "active"
@@ -106,7 +107,11 @@ def build_status(
     elif linger == "unknown":
         lines.append("linger: unknown")
     lines.append("tunnel: not configured (#471)")
-    lines.append("workspaces: registry pending (#472)")
+    if workspaces is None:
+        lines.append("workspaces: registry not loaded")
+    else:
+        discovered, degraded = workspaces
+        lines.append(f"workspaces: {discovered} discovered ({degraded} degraded)")
     lines.append("runner: not configured (#473)")
 
     return DaemonStatus(

@@ -26,6 +26,14 @@ def start_history_path(home: Path) -> Path:
     return daemon_state_dir(home) / "start-history.json"
 
 
+def daemon_config_path(home: Path) -> Path:
+    return daemon_state_dir(home) / "config.yaml"
+
+
+def registry_path(home: Path) -> Path:
+    return daemon_state_dir(home) / "workspaces.json"
+
+
 def daemon_socket_path(env: Mapping[str, str], home: Path, *, create: bool = False) -> Path:
     """Control-socket path: `$XDG_RUNTIME_DIR/mship/daemon.sock`, else a 0700
     dir under the state dir (macOS, some containers). NOTE: the daemon and a

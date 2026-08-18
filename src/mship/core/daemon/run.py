@@ -55,6 +55,140 @@ def _import_server_stack():
     return uvicorn, create_control_app
 
 
+def _build_registry(home: Path):
+    """Startup discovery (#472): load daemon config, scan, reconcile.
+
+    Invalid config clears the registry. An unavailable configured root raises
+    without mutation so startup fails closed and the supervisor can retry.
+    Per-candidate failures degrade entries rather than aborting the scan.
+    """
+    from mship.core.daemon.discovery import ScanRootError, scan_roots
+    from mship.core.daemon.paths import registry_path
+    from mship.core.daemon.registry import (
+        DaemonConfigReadError,
+        RegistryStore,
+        load_daemon_config,
+        reconcile,
+    )
+
+    store = RegistryStore(registry_path(home))
+
+    def clear_registry() -> None:
+        store.mutate(lambda state: state.entries.clear())
+
+    try:
+        cfg = load_daemon_config(home)
+    except DaemonConfigReadError:
+        log.exception("daemon config unreadable — registry unchanged")
+        raise
+    except ValueError as e:
+        log.error("daemon config invalid: %s — serving empty registry", e)
+        clear_registry()
+        cfg = None
+
+    def rescan():
+        # Re-READ the config every time: `mship workspace refresh` exists
+        # precisely so an edited config.yaml takes effect without a restart, so
+        # closing over the startup snapshot would scan the old roots forever.
+        # (A changed `serve:` bind still needs a restart — that's a process
+        # boundary, and status reports the running bind.)
+        try:
+            current = load_daemon_config(home)
+        except DaemonConfigReadError:
+            log.exception(
+                "daemon config unreadable on refresh — registry unchanged"
+            )
+            raise
+        except ValueError:
+            log.exception(
+                "daemon config invalid on refresh — registry unchanged"
+            )
+            raise
+        reconcile(store, scan_roots(current), datetime.now(timezone.utc))
+
+    if cfg is None:
+        # Keep the real callback: fixing config.yaml + control refresh must
+        # recover discovery without requiring a process restart.
+        return store, rescan, None
+
+    try:
+        rescan()
+    except ScanRootError:
+        log.exception(
+            "configured scan root unavailable — registry unchanged; "
+            "refusing daemon startup"
+        )
+        raise
+    except Exception:
+        log.exception("workspace scan failed — serving current registry state")
+    return store, rescan, cfg.serve
+
+
+def _serve_forever(control_app, socket_path, host_app, serve_cfg) -> None:
+    """Control app on the unix socket; when a TCP bind is configured, the
+    workspace-addressed host app runs beside it under one asyncio loop."""
+    import uvicorn
+
+    if host_app is None or serve_cfg is None:
+        uvicorn.run(control_app, uds=str(socket_path), log_config=None)
+        return
+
+    import asyncio
+
+    async def _both():
+        control = uvicorn.Server(uvicorn.Config(control_app, uds=str(socket_path), log_config=None))
+        host = uvicorn.Server(uvicorn.Config(
+            host_app, host=serve_cfg["host"], port=int(serve_cfg["port"]), log_config=None,
+        ))
+        control_app.state.set_serve_bound(False)
+        control_task = asyncio.create_task(control.serve())
+        host_task = asyncio.create_task(host.serve())
+        try:
+            while not host.started:
+                if host_task.done():
+                    control.should_exit = True
+                    await asyncio.gather(control_task, return_exceptions=True)
+                    failure = host_task.exception()
+                    if failure is not None:
+                        raise RuntimeError("TCP server failed to bind") from failure
+                    raise RuntimeError("TCP server failed to bind")
+                if control_task.done():
+                    host.should_exit = True
+                    await asyncio.gather(host_task, return_exceptions=True)
+                    failure = control_task.exception()
+                    if failure is not None:
+                        raise RuntimeError("control server stopped before TCP bind") from failure
+                    raise RuntimeError("control server stopped before TCP bind")
+                await asyncio.sleep(0)
+
+            control_app.state.set_serve_bound(True)
+            done, _pending = await asyncio.wait(
+                {control_task, host_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            unexpected = (
+                control_task in done and not control.should_exit
+            ) or (
+                host_task in done and not host.should_exit
+            )
+            control.should_exit = True
+            host.should_exit = True
+            results = await asyncio.gather(
+                control_task, host_task, return_exceptions=True
+            )
+            failure = next(
+                (result for result in results if isinstance(result, BaseException)),
+                None,
+            )
+            if failure is not None:
+                raise RuntimeError("daemon server failed") from failure
+            if unexpected:
+                raise RuntimeError("daemon server stopped unexpectedly")
+        finally:
+            control_app.state.set_serve_bound(False)
+
+    asyncio.run(_both())
+
+
 def _configure_logging(home: Path) -> None:
     log_dir = paths.daemon_log_dir(home)
     log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -133,9 +267,36 @@ def _run(home: Path, env: Mapping[str, str]) -> int:
     except FileNotFoundError:
         pass
 
-    log.info("mshipd %s starting on %s (pid %s)", version, socket_path, os.getpid())
-    app = create_control_app(started_at=started_at, version=version, socket_path=str(socket_path))
-    uvicorn.run(app, uds=str(socket_path), log_config=None)
+    store, rescan, serve_cfg = _build_registry(home)
+    entries = store.load().entries
+    log.info(
+        "mshipd %s starting on %s (pid %s) — %d workspace(s) discovered",
+        version, socket_path, os.getpid(), len(entries),
+    )
+    host_app = None
+    if serve_cfg is not None:
+        from mship.core.daemon.host_app import (
+            create_host_app,
+            ensure_host_token,
+            load_gh_app_credentials,
+        )
+
+        gh_app_id, gh_app_key = load_gh_app_credentials(home, env=env)
+        host_app = create_host_app(
+            store,
+            auth_token=ensure_host_token(home, env=env),
+            rescan=rescan,
+            gh_app_id=gh_app_id,
+            gh_app_key=gh_app_key,
+        )
+    app = create_control_app(
+        started_at=started_at, version=version, socket_path=str(socket_path),
+        store=store, rescan=rescan, serve_bound=host_app is not None,
+        after_rescan=(
+            host_app.state.drop_stale_subapps if host_app is not None else None
+        ),
+    )
+    _serve_forever(app, socket_path, host_app, serve_cfg)
     history.append_clean_stop(paths.start_history_path(home), datetime.now(timezone.utc))
     log.info("mshipd stopped cleanly")
     return 0

@@ -103,6 +103,43 @@ def test_restart_proceeds_when_unblocked(cli):
     assert "restart" in fake.calls
 
 
+def test_restart_persists_shell_host_token_before_supervisor_restart(
+    cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.paths import daemon_state_dir
+
+    app, fake = cli
+    observed = {}
+    monkeypatch.setenv("MSHIP_SERVE_TOKEN", "shell-token")
+
+    def restart():
+        observed["token"] = (daemon_state_dir(tmp_path) / "serve-token").read_text().strip()
+
+    fake.restart = restart
+    res = runner.invoke(app, ["daemon", "restart"])
+
+    assert res.exit_code == 0, res.output
+    assert observed["token"] == "shell-token"
+
+
+def test_restart_failure_restores_previous_host_token(cli, tmp_path, monkeypatch):
+    from mship.core.daemon.host_app import persist_host_token
+    from mship.core.daemon.paths import daemon_state_dir
+
+    app, fake = cli
+    persist_host_token(tmp_path, "previous-token")
+    monkeypatch.setenv("MSHIP_SERVE_TOKEN", "new-token")
+
+    def fail_restart():
+        raise DaemonSupervisorError("restart failed")
+
+    fake.restart = fail_restart
+    res = runner.invoke(app, ["daemon", "restart"])
+
+    assert res.exit_code == 1
+    assert (daemon_state_dir(tmp_path) / "serve-token").read_text().strip() == "previous-token"
+
+
 def test_status_renders_skew_and_warnings(cli, monkeypatch):
     app, fake = cli
     fake._state = "absent"
@@ -125,6 +162,60 @@ def test_status_renders_skew_and_warnings(cli, monkeypatch):
     assert "outside the supervisor" in res.output
 
 
+def test_status_counts_missing_as_discovered_not_degraded(cli, tmp_path):
+    from datetime import datetime, timezone
+
+    from mship.core.daemon.paths import registry_path
+    from mship.core.daemon.registry import RegistryStore, WorkspaceEntry
+
+    app, _ = cli
+    now = datetime.now(timezone.utc)
+    store = RegistryStore(registry_path(tmp_path))
+
+    def seed(state):
+        state.entries = [
+            WorkspaceEntry(
+                id=f"ws-{entry_state}",
+                name=entry_state,
+                path=str(tmp_path / entry_state),
+                config_path=str(tmp_path / entry_state / "mothership.yaml"),
+                state=entry_state,
+                first_seen=now,
+                last_seen=now,
+            )
+            for entry_state in ("healthy", "degraded", "missing")
+        ]
+
+    store.mutate(seed)
+    res = runner.invoke(app, ["daemon", "status"])
+
+    assert res.exit_code == 0, res.output
+    assert "workspaces: 3 discovered (1 degraded)" in res.output
+
+
+def test_status_reports_registry_read_error_without_hiding_daemon_state(
+    cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.paths import registry_path
+
+    app, _ = cli
+    path = registry_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text('{"entries": []}')
+    real_read_text = Path.read_text
+
+    def fail_registry_read(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError("permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_registry_read)
+    res = runner.invoke(app, ["daemon", "status"])
+
+    assert res.exit_code == 0, res.output
+    assert "daemon: not running" in res.output
+    assert "supervisor: active" in res.output
+    assert "workspaces: registry not loaded" in res.output
 def test_status_rotates_oversized_launchd_capture(cli, tmp_path):
     """Status must bound a pre-main crash loop even when logs is never called."""
     from mship.core.daemon.log_capture import LAUNCHD_CAPTURE_MAX_BYTES
@@ -202,3 +293,520 @@ def test_status_json_mode_emits_json(cli, monkeypatch):
     assert payload["running"] is False
     assert payload["cli_version"] == mship.__version__
     assert isinstance(payload["lines"], list)
+
+
+def test_install_seeds_scan_roots_and_serve(cli, tmp_path):
+    from mship.core.daemon.registry import load_daemon_config
+
+    app, fake = cli
+    src, work = tmp_path / "src", tmp_path / "work"
+    src.mkdir()
+    work.mkdir()
+    res = runner.invoke(app, [
+        "daemon", "install",
+        "--scan-root", str(src),
+        "--scan-root", str(work),
+        "--serve", "127.0.0.1:47190",
+    ])
+    assert res.exit_code == 0, res.output
+    cfg = load_daemon_config(tmp_path)
+    assert cfg.scan_roots == sorted([str(src), str(work)])
+    assert cfg.serve == {"host": "127.0.0.1", "port": 47190}
+
+
+def test_install_persists_config_before_supervisor_bootstrap(cli, tmp_path):
+    from mship.core.daemon.registry import load_daemon_config
+
+    app, fake = cli
+    observed = {}
+    src = tmp_path / "src"
+    src.mkdir()
+
+    def install(_argv):
+        observed["config"] = load_daemon_config(tmp_path)
+
+    fake.install = install
+    res = runner.invoke(app, [
+        "daemon", "install", "--scan-root", str(src),
+        "--serve", "127.0.0.1:47190",
+    ])
+
+    assert res.exit_code == 0, res.output
+    assert observed["config"].scan_roots == [str(src)]
+    assert observed["config"].serve == {"host": "127.0.0.1", "port": 47190}
+
+
+def test_install_persists_shell_host_token_before_supervisor_bootstrap(
+    cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.paths import daemon_state_dir
+
+    app, fake = cli
+    fake._state = "absent"
+    observed = {}
+    monkeypatch.setenv("MSHIP_SERVE_TOKEN", "shell-token")
+
+    def install(_argv):
+        observed["token"] = (daemon_state_dir(tmp_path) / "serve-token").read_text().strip()
+
+    fake.install = install
+    res = runner.invoke(app, ["daemon", "install"])
+
+    assert res.exit_code == 0, res.output
+    assert observed["token"] == "shell-token"
+
+
+def test_start_persists_shell_host_token_before_supervisor_start(
+    cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.paths import daemon_state_dir
+
+    app, fake = cli
+    fake._state = "absent"
+    observed = {}
+    monkeypatch.setenv("MSHIP_SERVE_TOKEN", "  shell-token \n")
+
+    def start():
+        observed["token"] = (daemon_state_dir(tmp_path) / "serve-token").read_bytes()
+
+    fake.start = start
+    res = runner.invoke(app, ["daemon", "start"])
+
+    assert res.exit_code == 0, res.output
+    assert observed["token"] == b"shell-token\n"
+
+
+def test_start_persists_github_app_credentials_before_supervisor_start(
+    cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.host_app import load_gh_app_credentials
+
+    app, fake = cli
+    fake._state = "absent"
+    key_path = tmp_path / "app.pem"
+    key_path.write_text("PRIVATE KEY")
+    monkeypatch.setenv("MSHIP_GH_APP_ID", "123")
+    monkeypatch.setenv("MSHIP_GH_APP_KEY", str(key_path))
+    observed = {}
+
+    def start():
+        observed["credentials"] = load_gh_app_credentials(tmp_path, env={})
+
+    fake.start = start
+    res = runner.invoke(app, ["daemon", "start"])
+
+    assert res.exit_code == 0, res.output
+    assert observed["credentials"] == ("123", "PRIVATE KEY")
+
+
+def test_start_failure_restores_previous_github_app_credentials(
+    cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.host_app import (
+        load_gh_app_credentials,
+        persist_gh_app_credentials,
+    )
+
+    app, fake = cli
+    fake._state = "absent"
+    persist_gh_app_credentials(tmp_path, "old-id", "OLD KEY")
+    key_path = tmp_path / "new.pem"
+    key_path.write_text("NEW KEY")
+    monkeypatch.setenv("MSHIP_GH_APP_ID", "new-id")
+    monkeypatch.setenv("MSHIP_GH_APP_KEY", str(key_path))
+
+    def fail_start():
+        raise DaemonSupervisorError("start failed")
+
+    fake.start = fail_start
+    res = runner.invoke(app, ["daemon", "start"])
+
+    assert res.exit_code == 1
+    assert load_gh_app_credentials(tmp_path, env={}) == ("old-id", "OLD KEY")
+
+
+@pytest.mark.parametrize("override", ["host-token", "github-app"])
+def test_active_install_rejects_credential_override_without_persisting(
+    override, cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.host_app import (
+        ensure_host_token,
+        load_gh_app_credentials,
+        persist_gh_app_credentials,
+        persist_host_token,
+    )
+
+    app, fake = cli
+    persist_host_token(tmp_path, "old-token")
+    persist_gh_app_credentials(tmp_path, "old-id", "OLD KEY")
+    if override == "host-token":
+        monkeypatch.setenv("MSHIP_SERVE_TOKEN", "new-token")
+    else:
+        key_path = tmp_path / "new.pem"
+        key_path.write_text("NEW KEY")
+        monkeypatch.setenv("MSHIP_GH_APP_ID", "new-id")
+        monkeypatch.setenv("MSHIP_GH_APP_KEY", str(key_path))
+
+    res = runner.invoke(app, ["daemon", "install"])
+
+    assert res.exit_code == 1
+    assert "already active" in res.output
+    assert "restart" in res.output
+    assert ensure_host_token(tmp_path, env={}) == "old-token"
+    assert load_gh_app_credentials(tmp_path, env={}) == ("old-id", "OLD KEY")
+    assert not any(call.startswith("install") for call in fake.calls)
+
+
+def test_active_start_rejects_host_token_override_without_persisting(
+    cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.host_app import persist_host_token
+    from mship.core.daemon.paths import daemon_state_dir
+
+    app, fake = cli
+    persist_host_token(tmp_path, "old-token")
+    monkeypatch.setenv("MSHIP_SERVE_TOKEN", "new-token")
+
+    res = runner.invoke(app, ["daemon", "start"])
+
+    assert res.exit_code == 1
+    assert "already active" in res.output
+    assert "restart" in res.output
+    assert (daemon_state_dir(tmp_path) / "serve-token").read_text().strip() == "old-token"
+    assert "start" not in fake.calls
+
+
+def test_active_start_rejects_github_app_override_without_persisting(
+    cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.host_app import (
+        load_gh_app_credentials,
+        persist_gh_app_credentials,
+    )
+
+    app, fake = cli
+    persist_gh_app_credentials(tmp_path, "old-id", "OLD KEY")
+    key_path = tmp_path / "new.pem"
+    key_path.write_text("NEW KEY")
+    monkeypatch.setenv("MSHIP_GH_APP_ID", "new-id")
+    monkeypatch.setenv("MSHIP_GH_APP_KEY", str(key_path))
+
+    res = runner.invoke(app, ["daemon", "start"])
+
+    assert res.exit_code == 1
+    assert "already active" in res.output
+    assert "restart" in res.output
+    assert load_gh_app_credentials(tmp_path, env={}) == ("old-id", "OLD KEY")
+    assert "start" not in fake.calls
+
+
+@pytest.mark.parametrize("command", ["install", "start", "restart"])
+def test_partial_github_app_override_fails_before_supervisor(
+    command, cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.host_app import (
+        load_gh_app_credentials,
+        persist_gh_app_credentials,
+    )
+
+    app, fake = cli
+    persist_gh_app_credentials(tmp_path, "old-id", "OLD KEY")
+    monkeypatch.setenv("MSHIP_GH_APP_ID", "new-id")
+    monkeypatch.delenv("MSHIP_GH_APP_KEY", raising=False)
+
+    res = runner.invoke(app, ["daemon", command])
+
+    assert res.exit_code == 1
+    assert "must be set together" in res.output
+    assert (
+        "unset both MSHIP_GH_APP_ID and MSHIP_GH_APP_KEY"
+        in res.output
+    )
+    assert not any(call.startswith(command) for call in fake.calls)
+    assert load_gh_app_credentials(tmp_path, env={}) == ("old-id", "OLD KEY")
+
+
+def test_install_invalid_github_app_key_does_not_mutate_config(
+    cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.registry import (
+        DaemonConfig,
+        load_daemon_config,
+        save_daemon_config,
+    )
+
+    app, fake = cli
+    previous = DaemonConfig(scan_roots=["/existing"], max_depth=4)
+    save_daemon_config(tmp_path, previous)
+    monkeypatch.setenv("MSHIP_GH_APP_ID", "new-id")
+    monkeypatch.setenv("MSHIP_GH_APP_KEY", str(tmp_path / "missing.pem"))
+
+    res = runner.invoke(
+        app, ["daemon", "install", "--scan-root", str(tmp_path / "new")]
+    )
+
+    assert res.exit_code == 1
+    assert load_daemon_config(tmp_path) == previous
+    assert not any(call.startswith("install:") for call in fake.calls)
+
+
+def test_install_failure_restores_previous_config(cli, tmp_path):
+    from mship.core.daemon.registry import (
+        DaemonConfig,
+        load_daemon_config,
+        save_daemon_config,
+    )
+
+    app, fake = cli
+    existing = tmp_path / "existing"
+    new = tmp_path / "new"
+    existing.mkdir()
+    new.mkdir()
+    previous = DaemonConfig(scan_roots=[str(existing)], max_depth=4)
+    save_daemon_config(tmp_path, previous)
+
+    def fail_install(_argv):
+        raise DaemonSupervisorError("bootstrap failed")
+
+    fake.install = fail_install
+    res = runner.invoke(app, ["daemon", "install", "--scan-root", str(new)])
+
+    assert res.exit_code == 1
+    assert load_daemon_config(tmp_path) == previous
+
+
+def test_install_filesystem_failure_restores_previous_config(cli, tmp_path):
+    from mship.core.daemon.registry import (
+        DaemonConfig,
+        load_daemon_config,
+        save_daemon_config,
+    )
+
+    app, fake = cli
+    existing = tmp_path / "existing"
+    new = tmp_path / "new"
+    existing.mkdir(exist_ok=True)
+    new.mkdir(exist_ok=True)
+    previous = DaemonConfig(scan_roots=[str(existing)], max_depth=4)
+    save_daemon_config(tmp_path, previous)
+
+    def fail_install(_argv):
+        raise OSError("unit write failed")
+
+    fake.install = fail_install
+    res = runner.invoke(app, ["daemon", "install", "--scan-root", str(new)])
+
+    assert res.exit_code == 1
+    assert load_daemon_config(tmp_path) == previous
+
+
+def test_install_without_serve_leaves_null_bind(cli, tmp_path):
+    from mship.core.daemon.registry import load_daemon_config
+
+    app, fake = cli
+    src = tmp_path / "src"
+    src.mkdir()
+    res = runner.invoke(app, ["daemon", "install", "--scan-root", str(src)])
+    assert res.exit_code == 0, res.output
+    assert load_daemon_config(tmp_path).serve is None
+
+
+@pytest.mark.parametrize("serve", ["nonsense", "127.0.0.1:0", "127.0.0.1:65536"])
+def test_install_rejects_malformed_serve(cli, serve):
+    app, fake = cli
+    res = runner.invoke(app, ["daemon", "install", "--serve", serve])
+    assert res.exit_code == 1
+    assert "HOST:PORT" in res.output
+    assert not any(c.startswith("install:") for c in fake.calls)
+
+
+def test_install_rejects_relative_scan_root(cli):
+    app, fake = cli
+    res = runner.invoke(app, ["daemon", "install", "--scan-root", "relative/path"])
+    assert res.exit_code == 1
+    assert "absolute" in res.output
+
+
+def test_install_rejects_missing_scan_root(cli, tmp_path):
+    app, fake = cli
+    missing = tmp_path / "unmounted"
+
+    res = runner.invoke(
+        app, ["daemon", "install", "--scan-root", str(missing)]
+    )
+
+    assert res.exit_code == 1
+
+
+    assert str(missing) in res.output
+    assert not any(call.startswith("install:") for call in fake.calls)
+
+@pytest.mark.parametrize("command", ["install", "start", "restart"])
+def test_daemon_lifecycle_rejects_malformed_config_before_supervisor(
+    command, cli, tmp_path
+):
+    from mship.core.daemon.paths import daemon_config_path
+
+    app, fake = cli
+    path = daemon_config_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text("scan_roots: [unterminated")
+
+    res = runner.invoke(app, ["daemon", command])
+
+    assert res.exit_code == 1
+    assert "invalid daemon config" in res.output
+    assert str(path) in res.output
+    assert not any(call.startswith(command) for call in fake.calls)
+
+
+@pytest.mark.parametrize("command", ["install", "start", "restart"])
+def test_starting_command_rejects_unavailable_configured_scan_root(
+    command, cli, tmp_path
+):
+    from mship.core.daemon.registry import DaemonConfig, save_daemon_config
+
+    app, fake = cli
+    missing = tmp_path / "unmounted"
+    save_daemon_config(
+        tmp_path, DaemonConfig(scan_roots=[str(missing)])
+    )
+
+    res = runner.invoke(app, ["daemon", command])
+
+    assert res.exit_code == 1
+    assert str(missing) in res.output
+    assert not any(call.startswith(command) for call in fake.calls)
+
+
+@pytest.mark.parametrize("command", ["install", "start"])
+@pytest.mark.parametrize("symlink_position", ["final", "ancestor"])
+def test_daemon_rejects_symlinked_scan_root_component(
+    command, symlink_position, cli, tmp_path
+):
+    from mship.core.daemon.registry import DaemonConfig, save_daemon_config
+
+    app, fake = cli
+    outside = tmp_path / "outside"
+    nested = outside / "nested"
+    nested.mkdir(parents=True)
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    linked = trusted / "link"
+    linked.symlink_to(outside, target_is_directory=True)
+    configured = (
+        linked if symlink_position == "final" else linked / "nested"
+    )
+
+    args = ["daemon", command]
+    if command == "install":
+        args.extend(["--scan-root", str(configured)])
+    else:
+        save_daemon_config(
+            tmp_path,
+            DaemonConfig(scan_roots=[str(configured)]),
+        )
+
+    res = runner.invoke(app, args)
+
+    assert res.exit_code == 1
+    assert str(linked) in res.output
+    assert str(configured) in res.output
+    assert not any(call.startswith(command) for call in fake.calls)
+
+
+@pytest.mark.parametrize("command", ["install", "start", "restart"])
+def test_blank_host_token_override_fails_before_supervisor(
+    command, cli, monkeypatch
+):
+    app, fake = cli
+    monkeypatch.setenv("MSHIP_SERVE_TOKEN", " \t\n")
+
+    res = runner.invoke(app, ["daemon", command])
+
+    assert res.exit_code == 1
+    assert "MSHIP_SERVE_TOKEN must not be blank" in res.output
+    assert not any(call.startswith(command) for call in fake.calls)
+
+
+@pytest.mark.parametrize("command", ["install", "start", "restart"])
+def test_blank_github_app_key_fails_before_supervisor(
+    command, cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.host_app import (
+        load_gh_app_credentials,
+        persist_gh_app_credentials,
+    )
+
+    app, fake = cli
+    persist_gh_app_credentials(tmp_path, "old-id", "OLD KEY")
+    key_path = tmp_path / "blank.pem"
+    key_path.write_text("  \n")
+    monkeypatch.setenv("MSHIP_GH_APP_ID", "new-id")
+    monkeypatch.setenv("MSHIP_GH_APP_KEY", str(key_path))
+
+    res = runner.invoke(app, ["daemon", command])
+
+    assert res.exit_code == 1
+    assert str(key_path) in res.output
+    assert not any(call.startswith(command) for call in fake.calls)
+    assert load_gh_app_credentials(tmp_path, env={}) == ("old-id", "OLD KEY")
+
+
+@pytest.mark.parametrize("command", ["install", "start", "restart"])
+def test_daemon_command_rejects_incomplete_persisted_github_app(
+    command, cli, tmp_path
+):
+    from mship.core.daemon.host_app import _credential_paths
+    from mship.core.daemon.registry import (
+        DaemonConfig,
+        load_daemon_config,
+        save_daemon_config,
+    )
+
+    app, fake = cli
+    previous_config = DaemonConfig()
+    save_daemon_config(tmp_path, previous_config)
+    _token_path, app_id_path, app_key_path = _credential_paths(tmp_path)
+    app_id_path.parent.mkdir(parents=True, exist_ok=True)
+    app_id_path.write_text("123\n")
+
+    args = ["daemon", command]
+    if command == "install":
+        new_root = tmp_path / "new-root"
+        new_root.mkdir()
+        args.extend(["--scan-root", str(new_root)])
+
+    res = runner.invoke(app, args)
+
+    assert res.exit_code == 1
+    assert str(app_key_path) in res.output
+    assert not any(call.startswith(command) for call in fake.calls)
+    assert load_daemon_config(tmp_path) == previous_config
+
+
+@pytest.mark.parametrize("command", ["install", "start", "restart"])
+def test_daemon_command_reports_persisted_github_app_read_error(
+    command, cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.host_app import (
+        _credential_paths,
+        persist_gh_app_credentials,
+    )
+
+    app, fake = cli
+    persist_gh_app_credentials(tmp_path, "123", "PRIVATE KEY")
+    _token_path, _app_id_path, app_key_path = _credential_paths(tmp_path)
+    real_read_text = Path.read_text
+
+    def fail_key_read(self, *args, **kwargs):
+        if self == app_key_path:
+            raise PermissionError("permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_key_read)
+    res = runner.invoke(app, ["daemon", command])
+
+    assert res.exit_code == 1
+    assert str(app_key_path) in res.output
+    assert not any(call.startswith(command) for call in fake.calls)

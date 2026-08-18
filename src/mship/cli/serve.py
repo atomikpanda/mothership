@@ -19,8 +19,8 @@ def _read_gh_app_creds(output: Output) -> tuple[Optional[str], Optional[str]]:
       downgrading to `gh auth token` would push as a different identity than the
       App you configured.
 
-    Returns `(gh_app_id, gh_app_key)`; either/both may be None, in which case
-    `GET /gh-token` falls back to Broker A (`gh auth token`).
+    Returns `(gh_app_id, gh_app_key)`. Both absent selects Broker A; a partial
+    App override is a hard error rather than a silent identity fallback.
 
     `MSHIP_GH_APP_INSTALLATION` is accepted-but-ignored — the installation is
     now auto-resolved per repo (see `mship.core.gh_app.resolve_installation`).
@@ -28,20 +28,18 @@ def _read_gh_app_creds(output: Output) -> tuple[Optional[str], Optional[str]]:
     """
     import os
 
-    gh_app_id = os.environ.get("MSHIP_GH_APP_ID") or None
-    gh_app_key = None
-    key_path = os.environ.get("MSHIP_GH_APP_KEY")
-    if key_path:
-        p = Path(key_path)
-        if not p.is_file():
-            output.error(
-                f"MSHIP_GH_APP_KEY is set but not a readable file ({key_path!r}). "
-                "Refusing to start: with an App configured, silently falling back to "
-                "`gh auth token` would push as a different identity. Fix the path, or "
-                "unset MSHIP_GH_APP_KEY to use the gh-auth-token fallback deliberately."
-            )
-            raise typer.Exit(1)
-        gh_app_key = p.read_text()
+    from mship.core.daemon.host_app import load_gh_app_credentials
+
+    try:
+        gh_app_id, gh_app_key = load_gh_app_credentials(env=os.environ)
+    except ValueError as exc:
+        output.error(
+            f"{exc}. Refusing to start: with an App configured, silently falling "
+            "back to `gh auth token` would push as a different identity. Fix the "
+            "path, or unset both MSHIP_GH_APP_ID and MSHIP_GH_APP_KEY to use "
+            "the gh-auth-token fallback deliberately."
+        )
+        raise typer.Exit(1)
     if os.environ.get("MSHIP_GH_APP_INSTALLATION"):
         output.warning(
             "MSHIP_GH_APP_INSTALLATION is ignored — the installation is now "
@@ -119,7 +117,9 @@ def register(app: typer.Typer, get_container):
         from mship.core.serve_pair import serve_pair_link
         pair = serve_pair_link(host, port, token, config.workspace)
 
+        import os as _os
         api = create_app(
+            pr_watch_interval=float(_os.environ.get("MSHIP_PR_WATCH_INTERVAL")) if _os.environ.get("MSHIP_PR_WATCH_INTERVAL") else None,
             specs_dir=workspace_root / SPECS_DIRNAME,
             state_manager=container.state_manager(),
             log_manager=container.log_manager(),
@@ -226,7 +226,9 @@ def _serve_with_relay(
         home=Path.home(),
     )
 
+    import os as _os
     api = create_app(
+        pr_watch_interval=float(_os.environ.get("MSHIP_PR_WATCH_INTERVAL")) if _os.environ.get("MSHIP_PR_WATCH_INTERVAL") else None,
         specs_dir=workspace_root / SPECS_DIRNAME,
         state_manager=container.state_manager(),
         log_manager=container.log_manager(),
