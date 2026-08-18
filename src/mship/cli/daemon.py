@@ -107,7 +107,7 @@ def _validate_scan_roots(cfg, output: Output) -> None:
         raise typer.Exit(1)
 
 
-def _validate_daemon_config(home: Path, output: Output) -> None:
+def _validate_daemon_config(home: Path, output: Output):
     from mship.core.daemon.registry import load_daemon_config
 
     try:
@@ -116,6 +116,7 @@ def _validate_daemon_config(home: Path, output: Output) -> None:
         output.error(str(exc))
         raise typer.Exit(1)
     _validate_scan_roots(cfg, output)
+    return cfg
 
 
 def _resolve_effective_daemon_credentials(
@@ -194,13 +195,12 @@ def register(parent: typer.Typer, get_container):
         resolved_credentials = _resolve_effective_daemon_credentials(
             Path.home(), out
         )
-        previous_cfg = None
+        home = Path.home()
+        previous_cfg = _validate_daemon_config(home, out)
         merged = None
         if roots or serve_cfg is not None:
-            from mship.core.daemon.registry import DaemonConfig, load_daemon_config, save_daemon_config
+            from mship.core.daemon.registry import DaemonConfig, save_daemon_config
 
-            home = Path.home()
-            previous_cfg = load_daemon_config(home)
             merged = DaemonConfig(
                 scan_roots=sorted(set(previous_cfg.scan_roots) | set(roots)),
                 ignore_globs=previous_cfg.ignore_globs,
@@ -220,7 +220,7 @@ def register(parent: typer.Typer, get_container):
             )
             sup.install(argv)
         except (DaemonSupervisorError, OSError) as e:
-            if previous_cfg is not None:
+            if merged is not None:
                 save_daemon_config(home, previous_cfg)
             _restore_daemon_credentials(credential_snapshots)
             out.error(str(e))

@@ -475,7 +475,7 @@ def test_install_rejects_missing_scan_root(cli, tmp_path):
     assert not any(call.startswith("install:") for call in fake.calls)
 
 
-@pytest.mark.parametrize("command", ["start", "restart"])
+@pytest.mark.parametrize("command", ["install", "start", "restart"])
 def test_starting_command_rejects_unavailable_configured_scan_root(
     command, cli, tmp_path
 ):
@@ -491,7 +491,7 @@ def test_starting_command_rejects_unavailable_configured_scan_root(
 
     assert res.exit_code == 1
     assert str(missing) in res.output
-    assert command not in fake.calls
+    assert not any(call.startswith(command) for call in fake.calls)
 
 
 @pytest.mark.parametrize("command", ["install", "start", "restart"])
@@ -548,3 +548,30 @@ def test_daemon_command_rejects_incomplete_persisted_github_app(
     assert str(app_key_path) in res.output
     assert not any(call.startswith(command) for call in fake.calls)
     assert load_daemon_config(tmp_path) == previous_config
+
+
+@pytest.mark.parametrize("command", ["install", "start", "restart"])
+def test_daemon_command_reports_persisted_github_app_read_error(
+    command, cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.host_app import (
+        _credential_paths,
+        persist_gh_app_credentials,
+    )
+
+    app, fake = cli
+    persist_gh_app_credentials(tmp_path, "123", "PRIVATE KEY")
+    _token_path, _app_id_path, app_key_path = _credential_paths(tmp_path)
+    real_read_text = Path.read_text
+
+    def fail_key_read(self, *args, **kwargs):
+        if self == app_key_path:
+            raise PermissionError("permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_key_read)
+    res = runner.invoke(app, ["daemon", command])
+
+    assert res.exit_code == 1
+    assert str(app_key_path) in res.output
+    assert not any(call.startswith(command) for call in fake.calls)

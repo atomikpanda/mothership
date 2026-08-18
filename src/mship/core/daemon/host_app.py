@@ -111,7 +111,6 @@ def load_gh_app_credentials(
     _token_path, app_id_path, app_key_path = _credential_paths(home)
     try:
         persisted_id = app_id_path.read_text().strip()
-        persisted_key = app_key_path.read_text()
     except FileNotFoundError:
         if not app_id_path.exists() and not app_key_path.exists():
             return None, None
@@ -119,6 +118,21 @@ def load_gh_app_credentials(
             "persisted GitHub App credentials are incomplete: expected both "
             f"{app_id_path} and {app_key_path}"
         )
+    except OSError as exc:
+        raise ValueError(
+            f"cannot read persisted GitHub App id {app_id_path}: {exc}"
+        ) from exc
+    try:
+        persisted_key = app_key_path.read_text()
+    except FileNotFoundError:
+        raise ValueError(
+            "persisted GitHub App credentials are incomplete: expected both "
+            f"{app_id_path} and {app_key_path}"
+        )
+    except OSError as exc:
+        raise ValueError(
+            f"cannot read persisted GitHub App key {app_key_path}: {exc}"
+        ) from exc
     if not persisted_id:
         raise ValueError(f"persisted GitHub App id is blank: {app_id_path}")
     if not persisted_key.strip():

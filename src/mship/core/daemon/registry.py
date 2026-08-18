@@ -91,6 +91,10 @@ def _locked(lock_path: Path, mode: int):
             fcntl.flock(lf, fcntl.LOCK_UN)
 
 
+class RegistryReadError(RuntimeError):
+    """An existing registry could not be read from durable storage."""
+
+
 class RegistryStore:
     """Flock'd RMW over one JSON doc; `mutate` spans the whole read-modify-write."""
 
@@ -104,8 +108,16 @@ class RegistryStore:
 
     def _load_nolock(self) -> RegistryState:
         try:
-            return RegistryState.model_validate(json.loads(self._path.read_text()))
-        except (OSError, ValueError):
+            raw = self._path.read_text()
+        except FileNotFoundError:
+            return RegistryState()
+        except OSError as exc:
+            raise RegistryReadError(
+                f"cannot read workspace registry {self._path}: {exc}"
+            ) from exc
+        try:
+            return RegistryState.model_validate(json.loads(raw))
+        except ValueError:
             return RegistryState()
 
     def _save_nolock(self, state: RegistryState) -> None:

@@ -185,3 +185,39 @@ def test_corrupt_registry_loads_empty(tmp_path: Path):
     p.parent.mkdir(parents=True)
     p.write_text("{broken")
     assert RegistryStore(p).load() == RegistryState()
+
+
+def test_registry_read_error_fails_load_mutate_and_reconcile_without_overwrite(
+    tmp_path, monkeypatch
+):
+    from mship.core.daemon.registry import RegistryReadError, reconcile
+
+    path = registry_path(tmp_path)
+    store = RegistryStore(path)
+    store.mutate(lambda state: state.entries.append(_entry(id="preserved")))
+    previous = path.read_bytes()
+    real_read_text = Path.read_text
+    mutation_calls = 0
+
+    def fail_registry_read(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError("permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    def mutation(state):
+        nonlocal mutation_calls
+        mutation_calls += 1
+        state.entries.clear()
+
+    monkeypatch.setattr(Path, "read_text", fail_registry_read)
+    operations = (
+        store.load,
+        lambda: store.mutate(mutation),
+        lambda: reconcile(store, [], NOW),
+    )
+    for operation in operations:
+        with pytest.raises(RegistryReadError, match=str(path)):
+            operation()
+
+    assert mutation_calls == 0
+    assert path.read_bytes() == previous

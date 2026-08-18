@@ -248,6 +248,30 @@ def test_ensure_host_token_read_error_does_not_rotate_token(
     assert path.read_bytes() == b"previous\n"
 
 
+def test_persisted_github_app_read_error_names_owner_without_mutation(
+    tmp_path, monkeypatch
+):
+    import mship.core.daemon.host_app as host_mod
+
+    host_mod.persist_gh_app_credentials(tmp_path, "123", "PRIVATE KEY")
+    _token_path, _app_id_path, app_key_path = host_mod._credential_paths(
+        tmp_path
+    )
+    previous = app_key_path.read_bytes()
+    real_read_text = Path.read_text
+
+    def fail_key_read(self, *args, **kwargs):
+        if self == app_key_path:
+            raise PermissionError("permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_key_read)
+    with pytest.raises(ValueError, match=str(app_key_path)):
+        host_mod.load_gh_app_credentials(tmp_path, env={})
+
+    assert app_key_path.read_bytes() == previous
+
+
 def test_github_app_loader_rejects_blank_private_key(tmp_path):
     from mship.core.daemon.host_app import load_gh_app_credentials
 
