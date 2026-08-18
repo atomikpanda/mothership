@@ -1,6 +1,7 @@
 import json
 import logging
 
+import pytest
 from fastapi.testclient import TestClient
 from mship.core.relay import host_contract
 from mship.core.relay.enroll import RequestStore
@@ -262,19 +263,55 @@ def test_duplicate_identity_is_409_naming_the_recovery_command(tmp_path):
     assert "mship daemon reidentify" in r.json()["detail"]
 
 
-def test_register_bounds_every_body_field(tmp_path):
+def _signed_body(h, **payload_over):
+    """A body that would REGISTER (fresh nonce, matching signature) — so a case
+    below can 422 for exactly one reason: the bound it oversizes."""
+    payload = _payload(**payload_over)
+    nonce = h.client.get(host_contract.CHALLENGE_PATH).json()["nonce"]
+    return {"nonce": nonce, "signature": _sign(nonce, payload), "payload": payload}
+
+
+def _oversized_nonce(h):
+    body = _signed_body(h)
+    body["nonce"] = "n" * 200
+    return body
+
+
+def _oversized_signature(h):
+    body = _signed_body(h)
+    body["signature"] = "A" * 9_000
+    return body
+
+
+_BOUNDED_BODIES = {
+    "nonce": _oversized_nonce,
+    "signature": _oversized_signature,
+    "payload-value": lambda h: _signed_body(h, label="w" * 1_000),
+    "payload-key": lambda h: _signed_body(h, **{"k" * 300: "v"}),
+    "payload-field-count": lambda h: _signed_body(h, **{f"x{i}": "v" for i in range(80)}),
+    "nested-key": lambda h: _signed_body(h, capabilities={"k" * 300: True}),
+    "nested-value": lambda h: _signed_body(h, capabilities={"tunnel": "w" * 1_000}),
+    "nested-field-count": lambda h: _signed_body(
+        h, capabilities={f"c{i}": True for i in range(40)}
+    ),
+}
+
+
+def test_the_bounds_control_body_is_otherwise_accepted(tmp_path):
+    # Without this, every case below could be 422ing for an unrelated reason and
+    # the bounds could be deleted with the suite still green.
     h = _harness(tmp_path)
-    oversized = "A" * 100_000
-    for body in (
-        {"nonce": oversized, "signature": "s", "payload": _payload()},
-        {"nonce": "n", "signature": oversized, "payload": _payload()},
-        {"nonce": "n", "signature": "s", "payload": _payload(label=oversized)},
-        {"nonce": "n", "signature": "s", "payload": {f"k{i}": "v" for i in range(500)}},
-        {"nonce": "n", "signature": "s", "payload": _payload(capabilities={
-            f"k{i}": True for i in range(500)})},
-    ):
-        r = h.client.post(host_contract.REGISTER_PATH, json=body)
-        assert 400 <= r.status_code < 500, (body.keys(), r.status_code)
+    assert h.client.post(host_contract.REGISTER_PATH, json=_signed_body(h)).status_code == 200
+
+
+@pytest.mark.parametrize("case", sorted(_BOUNDED_BODIES))
+def test_register_bounds_every_body_field(tmp_path, case):
+    # 422 exactly: pydantic validation is the ONLY thing that may reject these.
+    # Drop the bound and the request is accepted (200) or refused by route logic
+    # (401) — either way this fails, which is what makes the assertion real.
+    h = _harness(tmp_path)
+    r = h.client.post(host_contract.REGISTER_PATH, json=_BOUNDED_BODIES[case](h))
+    assert r.status_code == 422, (case, r.status_code, r.text[:200])
 
 
 # ---------------------------------------------------------------------------

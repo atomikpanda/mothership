@@ -33,19 +33,21 @@ class _EnrollBody(BaseModel):
 # would fail. `capabilities`/`runner` are the one nested level the contract
 # defines, so a value is a scalar or a flat map of scalars.
 _MAX_STR = 512
+_MAX_KEY = 128
 _MAX_PAYLOAD_FIELDS = 64
 _MAX_NESTED_FIELDS = 32
 
+_Key = Annotated[str, Field(max_length=_MAX_KEY)]
 _Scalar = Union[Annotated[str, Field(max_length=_MAX_STR)], bool, int, float, None]
 _PayloadValue = Union[
-    _Scalar, Annotated[dict[str, _Scalar], Field(max_length=_MAX_NESTED_FIELDS)]
+    _Scalar, Annotated[dict[_Key, _Scalar], Field(max_length=_MAX_NESTED_FIELDS)]
 ]
 
 
 class _RegisterBody(BaseModel):
     nonce: str = Field(max_length=128)
     signature: str = Field(max_length=8192)      # an armored SSHSIG, ~600B for ed25519
-    payload: dict[str, _PayloadValue] = Field(max_length=_MAX_PAYLOAD_FIELDS)
+    payload: dict[_Key, _PayloadValue] = Field(max_length=_MAX_PAYLOAD_FIELDS)
 
 
 # The directory is a PUBLISHED surface: a field added to a stored entry must not

@@ -1,11 +1,13 @@
 from __future__ import annotations
 import base64
+import fcntl
 import hashlib
 import json
 import os
 import re
 import secrets
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
 
@@ -63,6 +65,23 @@ def sanitize_label(hostname: str) -> str:
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _locked(lock_path: Path):
+    """Exclusive advisory flock (the `host_auth`/`registry` house pattern).
+
+    flock is per open-file-description, so it serializes threads within the
+    enroll server's request threadpool as well as separate processes.
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.touch(exist_ok=True, mode=0o600)
+    with open(lock_path, "r+") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 class PendingCapReached(Exception):
@@ -146,31 +165,39 @@ class RequestStore:
         # be smuggled in here and later written into the pubkeys allowlist on approve.
         if not validate_pubkey(pubkey):
             raise ValueError("invalid pubkey")
-        pending = self.list_pending()          # sweeps expired records first
-        # Idempotent per key: the daemon re-posts its request on a schedule while
-        # it waits for approval, so without dedupe one unapproved host would fill
-        # the pending cap by itself and 429 enrollment for the whole fleet. A
-        # re-post is a pure read — `created_at` is NOT refreshed, or an
-        # unapproved request would never expire and the TTL would stop bounding
-        # the store.
-        fp = fingerprint(pubkey)
-        for rec in pending:
-            if rec.get("fingerprint") == fp:
-                return rec["id"]
-        if len(pending) >= self._max_pending:
-            raise PendingCapReached()
-        rid = secrets.token_hex(16)
-        self._write_atomic(
-            self._pending / f"{rid}.json",
-            {
-                "id": rid,
-                "pubkey": pubkey.strip(),
-                "hostname": hostname,
-                "fingerprint": fingerprint(pubkey),
-                "created_at": self._clock(),
-                "status": "pending",
-            },
-        )
+        # Scan-then-write under an exclusive flock (the `host_auth`/`registry`
+        # house pattern). The dedupe below and the cap check are both read-then-
+        # write, and the enroll app serves sync endpoints on a threadpool, so two
+        # re-posts of one key can interleave in a single process — the same class
+        # `_consume_nonce` is hardened against. The lock is the linearization
+        # point; every other method is unaffected because only `create` adds a
+        # pending record.
+        with _locked(self._pending.parent / "create.lock"):
+            pending = self.list_pending()      # sweeps expired records first
+            # Idempotent per key: the daemon re-posts its request on a schedule
+            # while it waits for approval, so without dedupe one unapproved host
+            # would fill the pending cap by itself and 429 enrollment for the
+            # whole fleet. A re-post is a pure read — `created_at` is NOT
+            # refreshed, or an unapproved request would never expire and the TTL
+            # would stop bounding the store.
+            fp = fingerprint(pubkey)
+            for rec in pending:
+                if rec.get("fingerprint") == fp:
+                    return rec["id"]
+            if len(pending) >= self._max_pending:
+                raise PendingCapReached()
+            rid = secrets.token_hex(16)
+            self._write_atomic(
+                self._pending / f"{rid}.json",
+                {
+                    "id": rid,
+                    "pubkey": pubkey.strip(),
+                    "hostname": hostname,
+                    "fingerprint": fp,
+                    "created_at": self._clock(),
+                    "status": "pending",
+                },
+            )
         return rid
 
     def list_pending(self) -> list[dict]:

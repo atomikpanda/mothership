@@ -89,9 +89,13 @@ def test_host_facing_sites_reverse_proxy_so_the_edge_stamps_x_forwarded(site):
 @pytest.mark.parametrize("site", [_ENROLL_SITE, _WILDCARD_SITE])
 def test_no_directive_strips_the_x_forwarded_headers(site):
     # AC9 reads these headers to refuse the standing token on relay-borne
-    # traffic. Deleting or blanking one at the edge fails open, silently.
+    # traffic. Deleting or blanking one at the edge fails open, silently — so
+    # catch every spelling Caddy accepts for touching a header: `header`,
+    # `header_up`, `header_down` and `request_header`, with or without the `-`
+    # delete prefix, and the set-to-empty form.
     body = _site(site).lower()
+    directive = r"(?:request_header|header_up|header_down|header)"
     for header in _EDGE_HEADERS:
-        assert f"header_up -{header}" not in body
-        assert f'header_up {header} ""' not in body
-        assert f"header_down -{header}" not in body
+        name = re.escape(header)
+        assert not re.search(rf"{directive}\s+-\s*{name}\b", body), (site, header)
+        assert not re.search(rf'{directive}\s+{name}\s+""', body), (site, header)

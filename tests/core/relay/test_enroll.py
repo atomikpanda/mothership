@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from mship.core.relay.enroll import validate_pubkey, fingerprint, sanitize_label
@@ -230,3 +232,40 @@ def test_a_resolved_request_does_not_block_a_new_one(tmp_path):
     rid = store.create(_PUB, "vm-alpha")
     store.deny(rid)
     assert store.create(_PUB, "vm-alpha") != rid
+
+
+def _post_same_key(base_dir: str, barrier):
+    """Subprocess body: one daemon re-posting its enroll request. The barrier
+    puts every writer inside the scan-then-write window at once — without it
+    process startup staggers them and the race never reproduces."""
+    store = RequestStore(Path(base_dir))
+    barrier.wait(timeout=30)
+    store.create(_PUB, "vm-alpha")
+
+
+def test_concurrent_re_posts_of_one_key_leave_exactly_one_record(tmp_path):
+    # The dedupe scan and the write must be one atomic step: the enroll app
+    # serves sync endpoints on a threadpool, so two re-posts of one key really
+    # do interleave. Driven with processes (the `test_state_lock.py` pattern),
+    # which flock serializes exactly as it does threads.
+    import multiprocessing
+
+    store = RequestStore(tmp_path)
+    # Unrelated pending records widen the scan the writers must complete before
+    # they write, so the interleave is reliable rather than a coin flip.
+    for i in range(20):
+        store.create(_key(f"o{i}"), f"other-{i}")
+    writers = 12
+    barrier = multiprocessing.Barrier(writers)
+    procs = [
+        multiprocessing.Process(target=_post_same_key, args=(str(tmp_path), barrier))
+        for _ in range(writers)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=30)
+        assert p.exitcode == 0
+
+    assert len(store.list_pending()) == 21
+    assert len(list((tmp_path / "pending").glob("*.json"))) == 21
