@@ -13,7 +13,6 @@ raw supervisor state.
 """
 from __future__ import annotations
 
-import getpass
 import os
 import subprocess
 import sys
@@ -22,6 +21,7 @@ from pathlib import Path
 from typing import Callable, Literal
 
 from mship.core.daemon.paths import daemon_log_dir
+from mship.core.daemon.log_capture import rotate_launchd_captures
 from mship.core.daemon.units import (
     LAUNCHD_LABEL,
     SYSTEMD_UNIT_NAME,
@@ -44,6 +44,47 @@ class SupervisorState:
     detail: str = ""
 
 
+# Read at most this much from the END of each log file: `logs_tail` must not
+# pull a multi-megabyte launchd capture into memory to print 100 lines.
+_TAIL_READ_BYTES = 256 * 1024
+
+
+def _tail_lines(path: Path, n: int) -> list[str]:
+    """Last-ish `n` lines without reading the whole file."""
+    with open(path, "rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        fh.seek(max(0, size - _TAIL_READ_BYTES))
+        # Bound the READ too, not just the seek: a concurrent append between
+        # tell() and read() would otherwise hand back the enlarged file.
+        chunk = fh.read(_TAIL_READ_BYTES)
+    text = chunk.decode("utf-8", errors="replace")
+    if size > _TAIL_READ_BYTES:
+        text = text.split("\n", 1)[-1]  # drop the partial first line
+    return text.splitlines()[-n:]
+
+
+def _uid_username() -> str | None:
+    """This UID's passwd name, or None.
+
+    pwd first, NOT getpass.getuser(): getuser trusts LOGNAME/USER, so a
+    stale/spoofed env would enable-linger for ANOTHER account while
+    `systemctl --user` still targets this uid — reported success, daemon still
+    dies on logout. But an arbitrary UID with no NSS/passwd entry is normal in
+    containers, and `SystemdUserSupervisor` is constructed for EVERY daemon
+    command: returning None there keeps `status`/`logs` working (linger checks
+    degrade to "unknown"/loud install failure) instead of crashing the CLI.
+    """
+    try:
+        import pwd  # Unix-only: imported lazily so `mship <anything>` still runs on Windows
+    except ModuleNotFoundError:
+        return None
+    try:
+        return pwd.getpwuid(os.getuid()).pw_name
+    except (KeyError, AttributeError):  # no passwd entry / no getuid on this platform
+        return None
+
+
 def _default_run(argv: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(argv, capture_output=True, text=True, **kw)
 
@@ -57,15 +98,37 @@ class _BaseSupervisor:
         """Last N lines across daemon.log + rotated siblings — pure Python, no
         journalctl (the phone-only-client case needs OS-independent logs)."""
         log_dir = daemon_log_dir(self._home)
+        # A daemon that dies before main() cannot roll over its own capture, so
+        # the operator-facing path does too (#475 review).
+        rotate_launchd_captures(log_dir)
         files = sorted(
             log_dir.glob("daemon.log*"),
             key=lambda p: int(p.suffix[1:]) if p.suffix[1:].isdigit() else 0,
             reverse=True,  # highest numeric suffix = oldest first
         )
+        # Early-exit output that never reaches Python logging (interpreter
+        # starts but dies before _configure_logging) goes to stderr, which the
+        # plist wires into launchd.*.log — include those captures. NOTE: a true
+        # pre-exec failure (missing executable → posix_spawn error) produces NO
+        # child process and lands only in launchd's unified log / journald;
+        # `launchctl print` and `journalctl --user -u mship-daemon` are the
+        # diagnostics there (docs/daemon.md).
+        # Ordered by MTIME against the daemon logs rather than appended last:
+        # a stale launchd.err.log with >= n lines would otherwise crowd the
+        # current daemon.log out of the `-n` tail.
+        launchd = sorted(log_dir.glob("launchd.*.log*"))
+        if launchd:
+            def _mtime(p: Path) -> float:
+                try:
+                    return p.stat().st_mtime
+                except OSError:
+                    return 0.0
+
+            files = sorted(files + launchd, key=_mtime)
         lines: list[str] = []
         for f in files:
             try:
-                lines.extend(f.read_text().splitlines())
+                lines.extend(_tail_lines(f, n))
             except OSError:
                 continue
         return lines[-n:]
@@ -76,7 +139,7 @@ class SystemdUserSupervisor(_BaseSupervisor):
         self, *, home: Path, user: str | None = None, run_cmd: Callable = _default_run
     ) -> None:
         super().__init__(home=home, run_cmd=run_cmd)
-        self._user = user or getpass.getuser()
+        self._user = user or _uid_username()
 
     def _systemctl(self, *args: str) -> subprocess.CompletedProcess:
         return self._run(["systemctl", "--user", *args])
@@ -105,13 +168,14 @@ class SystemdUserSupervisor(_BaseSupervisor):
         return False
 
     def install(self, argv: list[str]) -> None:
-        unit_path = systemd_unit_path(self._home)
-        unit_path.parent.mkdir(parents=True, exist_ok=True)
-        unit_path.write_text(render_systemd_unit(argv))
-        self._checked("daemon-reload")
-        self._checked("enable", SYSTEMD_UNIT_NAME.removesuffix(".service"))
-        # Linger is mandatory: without it the user unit is torn down when the
-        # last SSH session ends — precisely the moment the daemon is needed.
+        # Validate linger BEFORE any unit mutation: it is mandatory, so a setup
+        # failure must not leave an enabled unit that starts and dies on logout.
+        if self._user is None:
+            raise DaemonSupervisorError(
+                f"uid {os.getuid()} has no passwd entry, so `loginctl enable-linger` has no "
+                "user to target — linger is mandatory (without it the daemon dies when your "
+                "last session ends). Run as a real user, or use `mship daemon run`."
+            )
         try:
             r = self._run(["loginctl", "enable-linger", self._user])
         except OSError as e:
@@ -123,6 +187,12 @@ class SystemdUserSupervisor(_BaseSupervisor):
                 "loginctl enable-linger did not stick (Linger!=yes) — without linger the "
                 "daemon dies when your last SSH session ends. Check `loginctl show-user`."
             )
+
+        unit_path = systemd_unit_path(self._home)
+        unit_path.parent.mkdir(parents=True, exist_ok=True)
+        unit_path.write_text(render_systemd_unit(argv))
+        self._checked("daemon-reload")
+        self._checked("enable", SYSTEMD_UNIT_NAME.removesuffix(".service"))
 
     def start(self) -> None:
         self._checked("start", SYSTEMD_UNIT_NAME.removesuffix(".service"))
@@ -160,6 +230,8 @@ class SystemdUserSupervisor(_BaseSupervisor):
         return SupervisorState("absent", f"{active}/{props.get('SubState', '')}")
 
     def linger_state(self) -> Literal["yes", "no", "unknown"]:
+        if self._user is None:
+            return "unknown"  # no passwd entry (container UID) — nothing to query
         try:
             r = self._run(["loginctl", "show-user", self._user, "--property=Linger"])
         except OSError:

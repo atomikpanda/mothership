@@ -178,3 +178,41 @@ def test_entrypoint_registered():
         pyproject = tomllib.load(f)
     assert pyproject["project"]["scripts"]["mshipd"] == "mship.core.daemon.run:main"
     assert callable(run_mod.main)
+
+
+def test_oversized_launchd_capture_preserves_latest_evidence_on_start(
+    env_home, monkeypatch
+):
+    """Atomic rollover caps the active capture without losing crash evidence."""
+    home, env = env_home
+    _capture_uvicorn(monkeypatch)
+    log_dir = daemon_log_dir(home)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    capture = log_dir / "launchd.err.log"
+    latest = b"latest startup traceback\n"
+    capture.write_bytes(b"x" * (run_mod.LAUNCHD_CAPTURE_MAX_BYTES + 1024) + latest)
+    small = log_dir / "launchd.out.log"
+    small.write_text("keep me\n")
+
+    assert run_mod.main(home=home, env=env) == 0
+
+    assert not capture.exists()
+    assert (log_dir / "launchd.err.log.1").read_bytes().endswith(latest)
+    assert small.read_text() == "keep me\n"
+    assert "rolled over oversized launchd capture" in (
+        log_dir / "daemon.log"
+    ).read_text()
+
+
+def test_capture_rotated_before_logging_setup(env_home, monkeypatch):
+    """A crash loop is often a BROKEN IMPORT that dies before logging is
+    configured; rollover must happen first, not inside _configure_logging."""
+    home, env = env_home
+    order: list[str] = []
+    monkeypatch.setattr(run_mod, "rotate_launchd_captures",
+                        lambda d: order.append("rotate") or [])
+    monkeypatch.setattr(run_mod, "_configure_logging",
+                        lambda h: order.append("logging"))
+    monkeypatch.setattr(run_mod, "_run", lambda h, e: order.append("run") or 0)
+    assert run_mod.main(home=home, env=env) == 0
+    assert order[0] == "rotate", order

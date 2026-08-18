@@ -45,7 +45,7 @@ def _linux(tmp_path, responses=None):
     return sup, rec
 
 
-def test_linux_install_order_and_linger_verify(tmp_path):
+def test_linux_install_linger_precedes_unit_mutation(tmp_path):
     sup, rec = _linux(
         tmp_path, {"show-user": _ok("Linger=yes\n"), "is-system-running": _ok("running\n")}
     )
@@ -57,13 +57,32 @@ def test_linux_install_order_and_linger_verify(tmp_path):
     enable_i = next(i for i, c in enumerate(cmds) if " enable " in f" {c} ")
     linger_i = next(i for i, c in enumerate(cmds) if "enable-linger" in c)
     verify_i = next(i for i, c in enumerate(cmds) if "show-user" in c)
-    assert reload_i < enable_i < linger_i < verify_i
+    assert linger_i < verify_i < reload_i < enable_i
 
 
-def test_linux_install_fails_loudly_when_linger_does_not_stick(tmp_path):
-    sup, _ = _linux(tmp_path, {"show-user": _ok("Linger=no\n")})
+def test_linux_install_fails_before_unit_mutation_when_linger_does_not_stick(tmp_path):
+    sup, rec = _linux(tmp_path, {"show-user": _ok("Linger=no\n")})
     with pytest.raises(DaemonSupervisorError, match="[Ll]inger"):
         sup.install(["/venv/bin/mshipd"])
+    unit = tmp_path / ".config" / "systemd" / "user" / "mship-daemon.service"
+    assert not unit.exists()
+    assert all(call[0] == "loginctl" for call in rec.calls)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [_fail(stderr="permission denied"), OSError("loginctl missing")],
+    ids=["nonzero", "os-error"],
+)
+def test_linux_install_fails_before_unit_mutation_when_enable_linger_fails(
+    tmp_path, response
+):
+    sup, rec = _linux(tmp_path, {"enable-linger": response})
+    with pytest.raises(DaemonSupervisorError, match="loginctl enable-linger failed"):
+        sup.install(["/venv/bin/mshipd"])
+    unit = tmp_path / ".config" / "systemd" / "user" / "mship-daemon.service"
+    assert not unit.exists()
+    assert all(call[0] == "loginctl" for call in rec.calls)
 
 
 def test_linux_lifecycle_commands(tmp_path):
@@ -244,3 +263,259 @@ def test_macos_reinstall_unloads_first(tmp_path):
     sup2, rec2 = _mac(tmp_path, {"launchctl bootout": _fail(stderr="Boot-out failed: 3: No such process")})
     sup2.install(["/venv/bin/mshipd"])
     assert any("bootstrap" in " ".join(c) for c in rec2.calls)
+
+
+def test_linux_user_defaults_to_uid_not_env(tmp_path, monkeypatch):
+    """getpass.getuser() trusts LOGNAME/USER; a spoofed env must not make
+    enable-linger target another account while systemctl targets this uid."""
+    import os
+    import pwd
+
+    monkeypatch.setenv("LOGNAME", "someone-else")
+    monkeypatch.setenv("USER", "someone-else")
+    rec = Recorder({"show-user": _ok("Linger=yes\n")})
+    sup = SystemdUserSupervisor(home=tmp_path, run_cmd=rec)
+    assert sup._user == pwd.getpwuid(os.getuid()).pw_name
+    assert sup._user != "someone-else"
+
+
+def test_logs_tail_includes_launchd_stderr_captures(tmp_path):
+    """Early-exit stderr (process spawned, died before Python logging) lands
+    only in launchd.err.log — `daemon logs` must surface it. (A posix_spawn
+    failure produces no child and lands only in the unified log/journald —
+    documented, not capturable here.)"""
+    log_dir = tmp_path / ".mothership" / "daemon" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "daemon.log").write_text("app-line\n")
+    (log_dir / "launchd.err.log").write_text("posix_spawn: No such file or directory\n")
+    sup, _ = _linux(tmp_path)
+    lines = sup.logs_tail(10)
+    assert "app-line" in lines
+    assert "posix_spawn: No such file or directory" in lines
+
+
+def test_uid_without_passwd_entry_does_not_crash_commands(tmp_path, monkeypatch):
+    """Arbitrary container UIDs have no NSS entry; the supervisor is built for
+    EVERY daemon command, so status/logs must keep working."""
+    import pwd
+
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: (_ for _ in ()).throw(KeyError(uid)))
+    rec = Recorder({"show mship-daemon": _ok("ActiveState=active\nSubState=running\n")})
+    sup = SystemdUserSupervisor(home=tmp_path, run_cmd=rec)
+    assert sup._user is None
+    assert sup.query().state == "active"      # status still works
+    assert sup.linger_state() == "unknown"    # nothing to query, no crash
+    assert sup.logs_tail(5) == []
+
+
+def test_install_fails_loudly_without_passwd_entry(tmp_path, monkeypatch):
+    """Linger is mandatory, so an uninstallable environment must say so, not silently
+    install a unit that dies on logout."""
+    import pwd
+
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: (_ for _ in ()).throw(KeyError(uid)))
+    rec = Recorder()
+    sup = SystemdUserSupervisor(home=tmp_path, run_cmd=rec)
+    with pytest.raises(DaemonSupervisorError, match="passwd entry"):
+        sup.install(["/venv/bin/mshipd"])
+    # Nothing was mutated: no unit written, no daemon-reload, no enable — an
+    # enabled unit without linger would start and die on every login.
+    assert not (tmp_path / ".config" / "systemd" / "user" / "mship-daemon.service").exists()
+    assert rec.calls == []
+
+
+def test_stale_launchd_capture_does_not_hide_fresh_daemon_log(tmp_path):
+    """A big stale launchd.err.log must not crowd the current daemon.log out of
+    the -n tail (ordering is by mtime, not 'launchd always last')."""
+    import os
+    import time
+
+    log_dir = tmp_path / ".mothership" / "daemon" / "logs"
+    log_dir.mkdir(parents=True)
+    stale = log_dir / "launchd.err.log"
+    stale.write_text("\n".join(f"stale-{i}" for i in range(10)) + "\n")
+    fresh = log_dir / "daemon.log"
+    fresh.write_text("fresh-1\nfresh-2\n")
+    old = time.time() - 3600
+    os.utime(stale, (old, old))  # stale capture is genuinely older
+
+    sup, _ = _linux(tmp_path)
+    tail = sup.logs_tail(2)
+    assert tail == ["fresh-1", "fresh-2"], tail
+
+
+def test_rotating_oversized_stale_capture_preserves_log_order(tmp_path):
+    """Rollover must not make an old launchd capture look newer than daemon.log."""
+    import os
+    import time
+
+    from mship.core.daemon.log_capture import LAUNCHD_CAPTURE_MAX_BYTES
+
+    log_dir = tmp_path / ".mothership" / "daemon" / "logs"
+    log_dir.mkdir(parents=True)
+    stale = log_dir / "launchd.err.log"
+    stale.write_bytes(
+        b"x" * LAUNCHD_CAPTURE_MAX_BYTES + b"\nstale-1\nstale-2\n"
+    )
+    fresh = log_dir / "daemon.log"
+    fresh.write_text("fresh-1\nfresh-2\n")
+    old = time.time() - 3600
+    os.utime(stale, (old, old))
+
+    sup, _ = _linux(tmp_path)
+    assert sup.logs_tail(2) == ["fresh-1", "fresh-2"]
+
+
+def test_uid_username_is_none_without_pwd_module(monkeypatch):
+    """Windows has no `pwd`; mship.cli imports this module for EVERY command, so
+    the import must be lazy and failure-tolerant."""
+    import builtins
+
+    import mship.core.daemon.supervisor as sup_mod
+
+    real_import = builtins.__import__
+
+    def no_pwd(name, *a, **kw):
+        if name == "pwd":
+            raise ModuleNotFoundError("No module named 'pwd'")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", no_pwd)
+    assert sup_mod._uid_username() is None
+
+
+def test_supervisor_module_has_no_toplevel_pwd_import():
+    """Static guard for the same class: a top-level `import pwd` would break
+    the whole CLI on Windows at import time, before Typer dispatch."""
+    import ast
+    from pathlib import Path as _P
+
+    src = _P(sup_module_path()).read_text()
+    tree = ast.parse(src)
+    toplevel = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+    names = {a.name for n in toplevel if isinstance(n, ast.Import) for a in n.names}
+    assert "pwd" not in names
+
+
+def sup_module_path() -> str:
+    import mship.core.daemon.supervisor as sup_mod
+
+    return sup_mod.__file__
+
+
+def test_logs_tail_reads_only_the_tail_of_a_huge_file(tmp_path):
+    """A crash-looping macOS daemon can leave a huge launchd capture; printing
+    N lines must not pull the whole file into memory. Proven by content: the
+    early megabytes are simply never returned, and the read is bounded by
+    _TAIL_READ_BYTES (not monkeypatching builtins.open — pytest uses it too)."""
+    import mship.core.daemon.supervisor as sup_mod
+
+    log_dir = tmp_path / ".mothership" / "daemon" / "logs"
+    log_dir.mkdir(parents=True)
+    big = log_dir / "daemon.log"
+    filler = "OLD-" + "x" * 96 + "\n"
+    with open(big, "w") as fh:
+        fh.write(filler * ((sup_mod._TAIL_READ_BYTES // len(filler)) + 500))
+        fh.write("NEW-1\nNEW-2\nNEW-3\n")
+    assert big.stat().st_size > sup_mod._TAIL_READ_BYTES
+
+    sup, _ = _linux(tmp_path)
+    assert sup.logs_tail(3) == ["NEW-1", "NEW-2", "NEW-3"]
+
+    # the bound itself: a full-file read would yield far more than this
+    lines = sup_mod._tail_lines(big, 10**9)
+    assert len("\n".join(lines).encode()) <= sup_mod._TAIL_READ_BYTES
+    # the partial first line is dropped: every returned line is a WHOLE line
+    assert all(len(l) == len(filler) - 1 for l in lines if l.startswith("OLD-"))
+
+
+def test_logs_tail_read_is_bounded_not_just_the_seek(tmp_path):
+    """Concurrent appends between tell() and read() must not enlarge the read:
+    the bound is on read(), not only on the seek offset."""
+    import mship.core.daemon.supervisor as sup_mod
+
+    log_dir = tmp_path / ".mothership" / "daemon" / "logs"
+    log_dir.mkdir(parents=True)
+    f = log_dir / "daemon.log"
+    f.write_text("seed\n")
+
+    real_open = open
+    grown = {"done": False}
+
+    class GrowingFile:
+        """Appends a megabyte between tell() and read(), like a live writer."""
+
+        def __init__(self, fh):
+            self._fh = fh
+
+        def seek(self, *a):
+            return self._fh.seek(*a)
+
+        def tell(self):
+            return self._fh.tell()
+
+        def read(self, *a):
+            if not grown["done"]:
+                grown["done"] = True
+                with real_open(f, "ab") as w:
+                    w.write(b"z" * (2 * sup_mod._TAIL_READ_BYTES))
+            return self._fh.read(*a)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self._fh.close()
+
+    monkeyed = sup_mod.open if hasattr(sup_mod, "open") else None
+    assert monkeyed is None  # uses builtins; wrap via the module namespace
+    sup_mod.open = lambda p, mode="r", *a, **kw: GrowingFile(real_open(p, mode, *a, **kw))
+    try:
+        lines = sup_mod._tail_lines(f, 10)
+    finally:
+        del sup_mod.open
+    assert len("\n".join(lines).encode()) <= sup_mod._TAIL_READ_BYTES
+
+
+def test_logs_tail_preserves_latest_evidence_when_rotating_oversized_capture(tmp_path):
+    """The operator-facing rollover must retain the newest crash evidence."""
+    from mship.core.daemon.log_capture import LAUNCHD_CAPTURE_MAX_BYTES
+
+    log_dir = tmp_path / ".mothership" / "daemon" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "daemon.log").write_text("app\n")
+    capture = log_dir / "launchd.err.log"
+    latest = b"latest startup traceback\n"
+    capture.write_bytes(b"y" * (LAUNCHD_CAPTURE_MAX_BYTES + 2048) + b"\n" + latest)
+    sup, _ = _linux(tmp_path)
+    assert sup.logs_tail(5)[-1] == latest.decode().strip()
+    assert not capture.exists()
+    assert (log_dir / "launchd.err.log.1").read_bytes().endswith(latest)
+
+
+def test_capture_rollover_does_not_discard_open_writer_appends(tmp_path, monkeypatch):
+    """An O_APPEND fd follows the atomic rename, so writes survive rollover."""
+    import os
+
+    import mship.core.daemon.log_capture as capture_mod
+
+    log_dir = tmp_path / ".mothership" / "daemon" / "logs"
+    log_dir.mkdir(parents=True)
+    capture = log_dir / "launchd.err.log"
+    capture.write_bytes(b"x" * (capture_mod.LAUNCHD_CAPTURE_MAX_BYTES + 1))
+    marker = b"concurrent launchd append\n"
+    writer = open(capture, "ab", buffering=0)
+    real_replace = os.replace
+
+    def replace_and_append(src, dst):
+        real_replace(src, dst)
+        writer.write(marker)
+
+    monkeypatch.setattr(capture_mod.os, "replace", replace_and_append)
+    try:
+        capture_mod.rotate_launchd_captures(log_dir)
+    finally:
+        writer.close()
+
+    retired = log_dir / "launchd.err.log.1"
+    assert retired.read_bytes().endswith(marker)

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import mship.core.daemon.units as units_mod
 from mship.core.daemon.units import (
     LAUNCHD_LABEL,
     DaemonExecResolutionError,
@@ -65,7 +66,44 @@ def test_launchd_plist_shape(tmp_path: Path):
     assert plist["StandardErrorPath"] == str(log_dir / "launchd.err.log")
 
 
-def test_execstart_resolves_sibling_first(tmp_path, monkeypatch):
+@pytest.fixture
+def not_dev_tree(monkeypatch):
+    """Resolution-rule tests simulate an installed tool: neutralize the
+    dev-tree refusal (itself covered by test_dev_tree_refuses_install)."""
+    monkeypatch.setattr(units_mod, "_running_from_dev_tree", lambda: None)
+
+
+def test_dev_tree_refuses_install(monkeypatch):
+    """Running from a checkout (editable mship / venv-in-checkout) must refuse
+    BEFORE the sibling shortcut: the checkout venv has its own mshipd sibling,
+    which would otherwise be persisted into the unit and defeat upgrades."""
+    monkeypatch.setattr(units_mod, "_running_from_dev_tree", lambda: "editable checkout at /x")
+    with pytest.raises(DaemonExecResolutionError, match="dev tree"):
+        resolve_mshipd_argv(which=lambda name: None)
+
+
+def test_dev_tree_detector_flags_editable_package(tmp_path, monkeypatch):
+    """The real detector: package resolving outside sys.prefix = editable
+    checkout (`uv run mship`)."""
+    import mship as mship_pkg
+
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "venv"))
+    assert units_mod._running_from_dev_tree() is not None  # real pkg is outside tmp venv
+
+    # Package inside the prefix and no adjacent checkout: not a dev tree.
+    pkg_dir = tmp_path / "venv" / "lib" / "mship"
+    pkg_dir.mkdir(parents=True)
+    fake_file = pkg_dir / "__init__.py"
+    fake_file.touch()
+    monkeypatch.setattr(mship_pkg, "__file__", str(fake_file))
+    assert units_mod._running_from_dev_tree() is None
+
+    # Adjacent pyproject declaring mothership: venv-in-checkout, refuse.
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "mothership"\n')
+    assert units_mod._running_from_dev_tree() is not None
+
+
+def test_execstart_resolves_sibling_first(tmp_path, monkeypatch, not_dev_tree):
     """Same venv bin dir ⇒ provably same dist (the uv-tool-install layout);
     sibling wins even when PATH has a different mshipd."""
     bin_dir = tmp_path / "venv" / "bin"
@@ -79,7 +117,7 @@ def test_execstart_resolves_sibling_first(tmp_path, monkeypatch):
     assert argv == [str(sibling)]
 
 
-def test_which_fallback_verified_against_sys_prefix(tmp_path, monkeypatch):
+def test_which_fallback_verified_against_sys_prefix(tmp_path, monkeypatch, not_dev_tree):
     prefix = tmp_path / "venv"
     bin_dir = prefix / "bin"
     bin_dir.mkdir(parents=True)
@@ -103,7 +141,7 @@ def test_which_fallback_verified_against_sys_prefix(tmp_path, monkeypatch):
         resolve_mshipd_argv(which=lambda name: str(outside))
 
 
-def test_module_fallback_when_nothing_resolvable(tmp_path, monkeypatch):
+def test_module_fallback_when_nothing_resolvable(tmp_path, monkeypatch, not_dev_tree):
     prefix = tmp_path / "venv"
     bin_dir = prefix / "bin"
     bin_dir.mkdir(parents=True)
@@ -122,3 +160,28 @@ def test_launchd_plist_escapes_xml_special_chars(tmp_path: Path):
     plist = plistlib.loads(render_launchd_plist(argv, log_dir).encode())
     assert plist["ProgramArguments"] == argv
     assert plist["StandardOutPath"] == str(log_dir / "launchd.out.log")
+
+
+def test_dev_tree_detector_parses_toml_not_substrings(tmp_path, monkeypatch):
+    """`name='mothership'` (single quotes / spacing variants) is still a
+    checkout: a substring match would miss it and bake the checkout's mshipd
+    into the unit, so upgrades would deploy nothing."""
+    import mship as mship_pkg
+
+    prefix = tmp_path / "checkout" / ".venv"
+    (prefix / "lib" / "mship").mkdir(parents=True)
+    fake = prefix / "lib" / "mship" / "__init__.py"
+    fake.touch()
+    monkeypatch.setattr(sys, "prefix", str(prefix))
+    monkeypatch.setattr(mship_pkg, "__file__", str(fake))
+
+    for spelling in ("name = \"mothership\"", "name='mothership'", "name   =    'mothership'"):
+        (tmp_path / "checkout" / "pyproject.toml").write_text(f"[project]\n{spelling}\nversion = '1'\n")
+        assert units_mod._running_from_dev_tree() is not None, spelling
+
+    # a DIFFERENT project's checkout is not ours → not a dev-tree refusal
+    (tmp_path / "checkout" / "pyproject.toml").write_text("[project]\nname = 'something-else'\n")
+    assert units_mod._running_from_dev_tree() is None
+    # malformed TOML must not raise
+    (tmp_path / "checkout" / "pyproject.toml").write_text("[project\nname=")
+    assert units_mod._running_from_dev_tree() is None
