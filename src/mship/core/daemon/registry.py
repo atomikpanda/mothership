@@ -334,11 +334,13 @@ def reconcile(store: RegistryStore, candidates: list, now: datetime) -> Registry
                 e.detail = "workspace no longer under configured scan roots"
 
         # State-dir collision backstop: two entries, one resolved state dir.
+        from mship.core.workspace_context import _resolve_state_dir
+
         state_dirs: dict[str, str] = {}
         for e in state.entries:
             if e.state != "healthy":
                 continue
-            sd = str(Path(e.path) / ".mothership")
+            sd = str(_resolve_state_dir(Path(e.config_path)))
             if sd in state_dirs:
                 e.state = "degraded"
                 e.detail = f"state-dir collision with {state_dirs[sd]}"

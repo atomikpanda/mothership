@@ -88,6 +88,27 @@ def test_worktree_config_resolves_shared_state_dir(tmp_path: Path):
     assert _resolve_state_dir(main / "mothership.yaml") == main / ".mothership"
 
 
+def test_sibling_workspaces_in_one_git_repo_use_isolated_state_dirs(tmp_path: Path):
+    enclosing = tmp_path / "enclosing"
+    enclosing.mkdir()
+    subprocess.run(
+        ["git", "init", "-b", "main"],
+        cwd=enclosing,
+        check=True,
+        capture_output=True,
+        env=_GIT_ENV,
+    )
+    first = _mk_ws(enclosing, "first")
+    second = _mk_ws(enclosing, "second")
+
+    first_ctx = build_workspace_context(first / "mothership.yaml")
+    second_ctx = build_workspace_context(second / "mothership.yaml")
+
+    assert first_ctx.state_dir == first / ".mothership"
+    assert second_ctx.state_dir == second / ".mothership"
+    assert first_ctx.state_dir != second_ctx.state_dir
+
+
 def test_missing_config_raises_typed(tmp_path: Path):
     with pytest.raises(ContextError, match="no mothership.yaml"):
         build_workspace_context(tmp_path / "absent" / "mothership.yaml")

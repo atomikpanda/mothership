@@ -117,6 +117,8 @@ def test_control_workspaces_endpoints(tmp_path):
     client = TestClient(app)
     ws = client.get("/workspaces").json()["workspaces"]
     assert [w["id"] for w in ws] == ["ws-1"]
+    assert ws[0]["repos"] == []
+    assert ws[0]["runtime"] == {"interpreter": None, "venv_path": None}
     r = client.post("/workspaces/refresh")
     assert r.status_code == 200 and calls == [1]
 

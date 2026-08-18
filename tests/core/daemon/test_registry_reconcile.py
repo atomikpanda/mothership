@@ -279,3 +279,20 @@ def test_recovered_registry_only_workspace_adopts_unknown_id_file(tmp_path: Path
     assert recovered.id == "ws-from-other-host"
     assert recovered.identity_source == "idfile"
     assert id_file.read_text().strip() == "ws-from-other-host"
+
+
+def test_state_dir_collision_uses_effective_resolver(tmp_path: Path, monkeypatch):
+    import mship.core.workspace_context as context_mod
+
+    home, root = tmp_path / "home", tmp_path / "root"
+    _mk_ws(root, "a")
+    _mk_ws(root, "b")
+    shared = tmp_path / "effective-state"
+    monkeypatch.setattr(context_mod, "_resolve_state_dir", lambda _path: shared)
+
+    state = reconcile(_store(home), _scan(root), NOW)
+
+    healthy = [e for e in state.entries if e.state == "healthy"]
+    collisions = [e for e in state.entries if "state-dir collision" in e.detail]
+    assert len(healthy) == 1
+    assert len(collisions) == 1

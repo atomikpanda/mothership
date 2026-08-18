@@ -70,7 +70,15 @@ def create_control_app(
         def workspaces():
             return {
                 "workspaces": [
-                    {"id": e.id, "name": e.name, "path": e.path, "state": e.state, "detail": e.detail}
+                    {
+                        "id": e.id,
+                        "name": e.name,
+                        "path": e.path,
+                        "state": e.state,
+                        "detail": e.detail,
+                        "repos": [r.model_dump() for r in e.repos],
+                        "runtime": e.runtime.model_dump(),
+                    }
                     for e in store.load().entries
                     if not e.ignored
                 ]

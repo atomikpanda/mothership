@@ -24,7 +24,12 @@ class ContextError(Exception):
 
 
 def _resolve_state_dir(config_path):
-    """Get the workspace state dir, anchored to main repo if in a git worktree."""
+    """Resolve the effective state owner.
+
+    A config at a checkout root shares the main checkout's state across linked
+    worktrees. A nested workspace config owns its local `.mothership`, even
+    when an enclosing repository contains multiple sibling workspaces.
+    """
     config_path = Path(config_path)
     try:
         # Strip GIT_DIR / GIT_COMMON_DIR so git re-discovers from the workspace
@@ -33,18 +38,24 @@ def _resolve_state_dir(config_path):
         env = {k: v for k, v in os.environ.items()
                if k not in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE")}
         result = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir"],
+            ["git", "rev-parse", "--show-toplevel", "--git-common-dir"],
             cwd=config_path.parent,
             capture_output=True,
             text=True,
             check=True,
             env=env,
         )
-        git_common_dir = Path(result.stdout.strip())
+        lines = result.stdout.splitlines()
+        if len(lines) != 2:
+            raise ValueError("unexpected git rev-parse output")
+        checkout_root = Path(lines[0]).resolve()
+        if config_path.parent.resolve() != checkout_root:
+            return config_path.parent / ".mothership"
+        git_common_dir = Path(lines[1])
         if not git_common_dir.is_absolute():
             git_common_dir = (config_path.parent / git_common_dir).resolve()
         return git_common_dir.parent / ".mothership"
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError, ValueError):
         return config_path.parent / ".mothership"
 
 

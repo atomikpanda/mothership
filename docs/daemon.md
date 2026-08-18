@@ -2,10 +2,11 @@
 
 One supervised daemon process per OS user per host, shipped from the same
 package as the CLI. The daemon makes a host reachable/operable without a
-terminal (#469); v1 (#470) is the lifecycle substrate: provisioning,
-supervision, singleton-ness, logs, and status. It serves no workspaces (#472),
-opens no tunnel (#471), and supervises no workers (#473) yet — those arrive as
-sibling capabilities behind the seams reported by `mship daemon status`.
+terminal (#469); v1 (#470) provides provisioning, supervision, singleton-ness,
+logs, and status, while the workspace registry (#472) discovers and serves
+every healthy workspace under configured scan roots. It opens no tunnel (#471)
+and supervises no workers (#473) yet; those remain sibling capabilities behind
+the seams reported by `mship daemon status`.
 
 ## Lifecycle
 
