@@ -29,12 +29,16 @@ PUBKEY = "ssh-ed25519 " + base64.b64encode(b"k" * 51).decode() + " mship-relay\n
 
 
 class _Resp:
-    def __init__(self, status: int, body: dict | None = None, headers: dict | None = None):
+    def __init__(self, status: int, body: dict | None = None, headers: dict | None = None,
+                 html: str | None = None):
         self.status_code = status
         self._body = {} if body is None else body
+        self._html = html
         self.headers = headers or {}
 
     def json(self):
+        if self._html is not None:      # what httpx does with a proxy error page
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
         return self._body
 
 
@@ -66,12 +70,15 @@ class _Relay:
         self.nonce = "nonce-1"
         self.date_header: str | None = None
         self.transport_error: str | None = None
+        self.challenge_html: str | None = None
 
     def get(self, url, **kw):
         self.calls.append(("GET", url, None))
         if self.transport_error:
             raise RuntimeError(self.transport_error)
         headers = {"Date": self.date_header} if self.date_header else {}
+        if self.challenge_html is not None:
+            return _Resp(200, headers=headers, html=self.challenge_html)
         return _Resp(200, {"nonce": self.nonce, "expires_at": 0}, headers)
 
     def post(self, url, json=None, **kw):
@@ -161,7 +168,7 @@ def test_payload_survives_a_canonical_round_trip(tmp_path: Path):
 @pytest.mark.parametrize(
     "status, detail, kind",
     [
-        (401, "registration is not signed by an approved key", "unapproved"),
+        (401, host_contract.UNAPPROVED_KEY_DETAIL, "unapproved"),
         (409, "another host holds this subdomain", "duplicate-identity"),
         (429, "too many outstanding challenges; try later", "refused"),
     ],
@@ -202,6 +209,29 @@ def test_unparseable_date_header_leaves_skew_unknown(tmp_path: Path):
     assert link.clock_skew_seconds is None
 
 
+def test_a_200_that_is_not_json_is_typed_not_raised(tmp_path: Path):
+    """A captive portal, a misrouted vhost and a proxy error page all answer 200
+    with HTML; `register_once` must not raise on `.json()`."""
+    relay = _Relay()
+    relay.challenge_html = "<html>Sign in to continue</html>"
+    outcome = _link(tmp_path, relay, _Clock()).register_once()
+    assert outcome.ok is False and outcome.kind == "refused"
+    assert "nonce" in outcome.detail
+    assert relay.posts_to(host_contract.REGISTER_PATH) == []   # nothing signed blind
+
+
+def test_a_stale_challenge_401_is_transient_not_unapproved(tmp_path: Path):
+    """The relay 401s a lost nonce race the same way it 401s an unapproved key
+    (CHALLENGE_TTL_S is 120s). An approved host on a slow link must not report
+    awaiting-enrollment or re-post /enroll for a key already in `pubkeys/`."""
+    for detail in host_contract.CHALLENGE_REFUSAL_DETAILS:
+        relay = _Relay(register=(401, detail))
+        link = _link(tmp_path / detail.replace(" ", "-"), relay, _Clock())
+        link.tick()
+        assert link.state != "awaiting-enrollment"
+        assert relay.posts_to(host_contract.ENROLL_PATH) == []
+
+
 # --- tick(): jittered, capped, ceiling-free backoff (AC2/AC3) --------------
 
 def _fail(relay: _Relay, why: str = "boom") -> None:
@@ -211,7 +241,7 @@ def _fail(relay: _Relay, why: str = "boom") -> None:
 def test_tick_backs_off_and_a_success_resets_the_delay(tmp_path: Path):
     relay = _Relay()
     clock = _Clock()
-    link = _link(tmp_path, relay, clock, rng=lambda: 0.5)   # no jitter offset
+    link = _link(tmp_path, relay, clock, rng=lambda: 0.0)   # no jitter subtracted
 
     _fail(relay)
     assert link.tick() is not None                          # first tick is due
@@ -234,7 +264,7 @@ def test_backoff_has_no_ceiling_past_1024_failures(tmp_path: Path):
     daemon is immortal, so that count is reachable — the delay must clamp."""
     relay = _Relay()
     clock = _Clock()
-    link = _link(tmp_path, relay, clock)
+    link = _link(tmp_path, relay, clock, rng=lambda: 0.0)
     _fail(relay)
     for _ in range(1100):
         link.tick()
@@ -243,29 +273,44 @@ def test_backoff_has_no_ceiling_past_1024_failures(tmp_path: Path):
     assert link.next_attempt_delay() == pytest.approx(host_contract.MAX_BACKOFF_S)
 
 
+def test_jitter_never_schedules_past_the_cap(tmp_path: Path):
+    """DIRECTORY_STALE_S is derived from MAX_BACKOFF_S, so a delay jittered
+    ABOVE the cap would let a healthy reconnecting host read as stale."""
+    for value in (0.0, 0.5, 1.0):
+        relay = _Relay()
+        clock = _Clock()
+        link = _link(tmp_path / str(value), relay, clock, rng=lambda v=value: v)
+        _fail(relay)
+        for _ in range(12):
+            link.tick()
+            _advance_past(clock, link)
+        assert 0 < link.next_attempt_delay() <= host_contract.MAX_BACKOFF_S
+        assert link.next_attempt_delay() >= host_contract.MAX_BACKOFF_S * (1 - 0.2)
+
+
 def test_two_links_do_not_retry_on_the_same_tick(tmp_path: Path):
     """A fleet reconnecting after a relay redeploy must not stampede (AC3)."""
-    early, late = _Relay(), _Relay()
+    unlucky, lucky = _Relay(), _Relay()
     clock = _Clock()
-    a = _link(tmp_path / "a", early, clock, rng=lambda: 0.0)
-    b = _link(tmp_path / "b", late, clock, rng=lambda: 1.0)
-    _fail(early)
-    _fail(late)
-    a.tick()
-    b.tick()
-    assert a.next_attempt_delay() != b.next_attempt_delay()
+    slow = _link(tmp_path / "a", unlucky, clock, rng=lambda: 0.0)   # full delay
+    fast = _link(tmp_path / "b", lucky, clock, rng=lambda: 1.0)     # 20% off it
+    _fail(unlucky)
+    _fail(lucky)
+    slow.tick()
+    fast.tick()
+    assert fast.next_attempt_delay() < slow.next_attempt_delay()
 
-    _advance_past(clock, a)
-    before = (len(early.calls), len(late.calls))
-    a.tick()
-    b.tick()
-    assert len(early.calls) > before[0] and len(late.calls) == before[1]
+    _advance_past(clock, fast)
+    before = (len(unlucky.calls), len(lucky.calls))
+    slow.tick()
+    fast.tick()
+    assert len(lucky.calls) > before[1] and len(unlucky.calls) == before[0]
 
 
 # --- AC1/AC8: enrollment that stays alive, non-blocking, self-healing ------
 
 def test_unapproved_key_posts_enroll_without_polling(tmp_path: Path):
-    relay = _Relay(register=(401, "not signed by an approved key"))
+    relay = _Relay(register=(401, host_contract.UNAPPROVED_KEY_DETAIL))
     link = _link(tmp_path, relay, _Clock())
 
     link.tick()
@@ -282,7 +327,7 @@ def test_unapproved_key_posts_enroll_without_polling(tmp_path: Path):
 def test_enroll_is_reposted_on_a_schedule_shorter_than_the_store_ttl(tmp_path: Path):
     """A VM provisioned at 02:00 must still be approvable at 09:00 (AC1)."""
     assert host_contract.ENROLL_REPOST_INTERVAL_S < host_contract.ENROLL_TTL_S
-    relay = _Relay(register=(401, "not signed by an approved key"))
+    relay = _Relay(register=(401, host_contract.UNAPPROVED_KEY_DETAIL))
     clock = _Clock()
     link = _link(tmp_path, relay, clock)
 
@@ -313,7 +358,7 @@ def test_enroll_is_reposted_on_a_schedule_shorter_than_the_store_ttl(tmp_path: P
 
 
 def test_approval_self_heals_with_no_prompt(tmp_path: Path):
-    relay = _Relay(register=(401, "not signed by an approved key"))
+    relay = _Relay(register=(401, host_contract.UNAPPROVED_KEY_DETAIL))
     clock = _Clock()
     link = _link(tmp_path, relay, clock)
     link.tick()
@@ -424,6 +469,22 @@ def test_n_registrations_leave_the_daemon_state_dir_byte_identical(tmp_path: Pat
 
 
 # --- the capability seam + the default re-identify --------------------------
+
+def test_the_default_refresh_store_runs_on_the_links_clock(tmp_path: Path):
+    """Two clocks in one daemon is how a credential expires early (or never):
+    the store the link builds for itself must date records by the same clock the
+    link schedules on."""
+    from mship.core.daemon.host_auth import REFRESH_TTL_S
+    from mship.core.daemon.paths import host_refresh_path
+
+    relay = _Relay()
+    clock = _Clock(t=4_000_000_000.0)          # far from time.time()
+    assert _link(tmp_path, relay, clock, issue_refresh=None).register_once().ok
+    doc = json.loads(host_refresh_path(tmp_path).read_text())
+    record = next(iter(doc["clients"].values()))
+    assert record["created_at"] == clock.t
+    assert record["expires_at"] == clock.t + REFRESH_TTL_S
+
 
 def test_capability_payload_has_one_assembler():
     payload = host_capability_payload()

@@ -42,6 +42,26 @@ CHALLENGE_PATH = f"{HOSTS_PREFIX}/challenge"
 REGISTER_PATH = f"{HOSTS_PREFIX}/register"
 ROUTE_PATHS: tuple[str, ...] = (LIST_PATH, CHALLENGE_PATH, REGISTER_PATH)
 
+# The pre-existing enrollment route, spelled once: the daemon's relay link, the
+# `mship relay enroll` CLI and the app that serves it must all name it the same.
+ENROLL_PATH = "/enroll"
+
+# The two ways `/hosts/register` answers 401, as the exact `detail` each carries.
+# The status code cannot tell them apart, and they need opposite handling: an
+# unapproved key must (re-)enroll and wait for a human, while a stale nonce is a
+# lost race on a 120s window that the next attempt fixes by itself. So the
+# strings ARE the contract — the daemon discriminates on them — and both ends
+# read them from here rather than restating a literal.
+UNAPPROVED_KEY_DETAIL = "registration is not signed by an approved key"
+MALFORMED_NONCE_DETAIL = "malformed nonce"
+UNKNOWN_NONCE_DETAIL = "unknown or already-used nonce"
+EXPIRED_CHALLENGE_DETAIL = "challenge expired"
+CHALLENGE_REFUSAL_DETAILS: tuple[str, ...] = (
+    MALFORMED_NONCE_DETAIL,
+    UNKNOWN_NONCE_DETAIL,
+    EXPIRED_CHALLENGE_DETAIL,
+)
+
 # A nonce only has to survive one round trip; short because it is single-use
 # and a replay window is the whole point of issuing one.
 CHALLENGE_TTL_S = 120

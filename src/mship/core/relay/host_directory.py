@@ -268,21 +268,21 @@ class HostDirectory:
         in one process).
         """
         if not _NONCE_RE.match(nonce or ""):
-            raise ChallengeRefused("malformed nonce")
+            raise ChallengeRefused(host_contract.MALFORMED_NONCE_DETAIL)
         path = self._challenges / f"{nonce}.json"
         claim = self._challenges / f"{nonce}.{secrets.token_hex(8)}.claim"
         try:
             os.rename(path, claim)
         except OSError:
-            raise ChallengeRefused("unknown or already-used nonce") from None
+            raise ChallengeRefused(host_contract.UNKNOWN_NONCE_DETAIL) from None
         try:
             rec = self._read_challenge(claim)
         finally:
             claim.unlink(missing_ok=True)
         if rec is None:
-            raise ChallengeRefused("unknown or already-used nonce")
+            raise ChallengeRefused(host_contract.UNKNOWN_NONCE_DETAIL)
         if self._clock() >= _as_float(rec.get("expires_at")):
-            raise ChallengeRefused("challenge expired")
+            raise ChallengeRefused(host_contract.EXPIRED_CHALLENGE_DETAIL)
 
     # --- registration -------------------------------------------------------
 
@@ -311,7 +311,7 @@ class HostDirectory:
             allowed_signers=self._allowed_signers(),
             namespace=host_contract.NAMESPACE,
         ):
-            raise SignatureRefused("registration is not signed by an approved key")
+            raise SignatureRefused(host_contract.UNAPPROVED_KEY_DETAIL)
 
         now = self._clock()
         incumbent = self._read_rec(path) if path.exists() else None

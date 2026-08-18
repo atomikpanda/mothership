@@ -62,8 +62,9 @@ DIRECTORY_CLIENT = "relay-directory"
 # First retry delay; doubles per consecutive failure up to MAX_BACKOFF_S.
 RETRY_BASE_S = 2.0
 
-# ±20%: enough to de-phase a fleet that all lost the relay in the same second,
-# small enough that the cap still means roughly what it says.
+# Up to 20% OFF the scheduled delay (never added — see `_jittered`): enough to
+# de-phase a fleet that all lost the relay in the same second, small enough that
+# the delay still means roughly what it says.
 JITTER = 0.2
 
 # DERIVED, not picked: the first exponent at which the delay already exceeds
@@ -168,7 +169,7 @@ class RelayLink:
     def _issue_from_store(self, host_id: str) -> str:
         from mship.core.daemon.host_auth import RefreshStore
 
-        return RefreshStore(self._home).issue_refresh(
+        return RefreshStore(self._home, clock=self._clock).issue_refresh(
             host_id=host_id, client=DIRECTORY_CLIENT
         )
 
@@ -208,7 +209,16 @@ class RelayLink:
                 False, "refused", detail=_detail(challenge),
                 status_code=challenge.status_code,
             )
-        nonce = str((challenge.json() or {}).get("nonce", ""))
+        # A 200 is not a promise of JSON: a captive portal, a misrouted vhost or
+        # a proxy's error page all answer 200 with HTML, and a `.json()` raising
+        # here would break this function's never-raises contract.
+        nonce = str((_body(challenge) or {}).get("nonce", ""))
+        if not nonce:
+            return RegistrationOutcome(
+                False, "refused", status_code=challenge.status_code,
+                detail="challenge response carried no nonce "
+                       f"(is {self._base} really the relay's enroll server?)",
+            )
 
         payload = self._payload()
         try:
@@ -229,11 +239,10 @@ class RelayLink:
             return RegistrationOutcome(
                 True, "registered", refresh=payload["refresh"], status_code=200
             )
-        kind = {401: "unapproved", 409: "duplicate-identity"}.get(
-            resp.status_code, "refused"
-        )
+        detail = _detail(resp)
         return RegistrationOutcome(
-            False, kind, detail=_detail(resp), status_code=resp.status_code
+            False, _classify(resp.status_code, detail),
+            detail=detail, status_code=resp.status_code,
         )
 
     def _sample_skew(self, resp) -> None:
@@ -302,7 +311,10 @@ class RelayLink:
         )
 
     def _jittered(self, delay: float) -> float:
-        return delay * (1 + JITTER * (2 * self._rng() - 1))
+        """De-phase DOWNWARD only. `DIRECTORY_STALE_S` is derived from
+        `MAX_BACKOFF_S`, so a delay jittered *above* the cap would let a healthy
+        reconnecting host read as stale in the directory."""
+        return delay * (1 - JITTER * self._rng())
 
     def _auto_reidentify(self, now: float) -> None:
         """The relay says someone else holds this identity and we cannot talk it
@@ -335,7 +347,7 @@ class RelayLink:
             return
         try:
             self._post(
-                self._base + "/enroll",
+                self._base + host_contract.ENROLL_PATH,
                 json={"pubkey": self._pubkey, "hostname": socket.gethostname()},
                 timeout=self._timeout,
             )
@@ -358,17 +370,41 @@ class RelayLink:
         return self._delay
 
 
-def _detail(resp) -> str:
-    """The relay's own explanation, which is what the operator must read (a 409
-    carries the `mship daemon reidentify` hint). Never raises on a proxy's HTML
-    error page."""
+def _classify(status_code: int, detail: str) -> str:
+    """Which failure a refused registration actually is.
+
+    `/hosts/register` answers 401 for two unrelated things: an unapproved key,
+    and a challenge the relay would not accept — a nonce that expired, raced
+    another attempt, or was already spent, on a `CHALLENGE_TTL_S` window. Only
+    the first means "wait for a human". Reading the second as unapproved would
+    make an approved host on a slow link report `awaiting-enrollment` and
+    re-post `/enroll` for a key that is already in `pubkeys/`, so the two are
+    told apart by the `detail` both ends read from `host_contract`. An
+    unrecognised 401 falls back to `unapproved`: enrolling once too often is
+    recoverable, never enrolling at all is not.
+    """
+    if status_code == 409:
+        return "duplicate-identity"
+    if status_code != 401:
+        return "refused"
+    return "refused" if detail in host_contract.CHALLENGE_REFUSAL_DETAILS else "unapproved"
+
+
+def _body(resp) -> dict | None:
+    """The response's JSON object, or None for anything else — HTML error page,
+    truncated body, a bare list. Never raises (the `health.py` discipline)."""
     try:
         body = resp.json()
     except Exception:
-        return ""
-    if isinstance(body, dict):
-        return str(body.get("detail", ""))
-    return ""
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def _detail(resp) -> str:
+    """The relay's own explanation, which is what the operator must read (a 409
+    carries the `mship daemon reidentify` hint) and what `_classify` reads to
+    tell the two flavors of 401 apart."""
+    return str((_body(resp) or {}).get("detail", ""))
 
 
 def _default_get(url, **kw):

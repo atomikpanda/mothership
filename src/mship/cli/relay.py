@@ -441,6 +441,7 @@ def register(parent: typer.Typer, get_container):
 
         import httpx
 
+        from mship.core.relay import host_contract
         from mship.core.relay.keys import ensure_relay_key, relay_public_key
 
         out = Output()
@@ -455,7 +456,7 @@ def register(parent: typer.Typer, get_container):
         # rather than dumping an httpx traceback.
         try:
             r = httpx.post(
-                f"{base}/enroll",
+                base + host_contract.ENROLL_PATH,
                 json={"pubkey": pub, "hostname": socket.gethostname()},
                 timeout=10,
             )

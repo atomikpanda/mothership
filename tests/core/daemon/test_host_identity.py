@@ -53,6 +53,11 @@ def test_reimage_reidentifies_once_and_rotates_key(tmp_path: Path):
     assert second.host_id != first.host_id
     assert second.cloned_from == first.host_id
     assert second.reidentified is True
+    # The RUNNING machine's fingerprint is what gets recorded — the branch now
+    # delegates to force_reidentify, whose fallback would otherwise carry the
+    # stale one forward and re-fire the mismatch on every call.
+    assert second.fingerprint == "B"
+    assert json.loads(host_identity_path(tmp_path).read_text())["fingerprint"] == "B"
     assert rotated == [tmp_path]  # the clone's copied key must stop working
     third = ensure_host_identity(tmp_path, fingerprint="B", rotate_key=lambda h: rotated.append(h))
     assert third.host_id == second.host_id  # stable; no re-identify loop

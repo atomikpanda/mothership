@@ -83,7 +83,7 @@ def build_enroll_app(
 ) -> FastAPI:
     app = FastAPI(title="mship relay enroll")
 
-    @app.post("/enroll")
+    @app.post(host_contract.ENROLL_PATH)
     def enroll(body: _EnrollBody):
         if not validate_pubkey(body.pubkey):
             raise HTTPException(status_code=400, detail="invalid ssh public key")

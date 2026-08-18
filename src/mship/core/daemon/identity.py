@@ -113,17 +113,19 @@ def _rotate_relay_key(home: Path) -> None:
 def force_reidentify(
     home: Path,
     *,
+    fingerprint: str | None = None,
     rotate_key: Callable[[Path], None] = _rotate_relay_key,
     now: datetime | None = None,
 ) -> HostIdentity:
     """Re-identify unconditionally: mint a new `host_id`, record the old one as
-    `cloned_from`, and rotate the relay key — the same two moves
-    `ensure_host_identity` makes on a fingerprint mismatch, for the case where
-    the *relay* (not the local fingerprint) is what noticed the collision.
+    `cloned_from`, and rotate the relay key so the twin's copy stops working.
 
-    The daemon calls this itself after repeated `409 duplicate-identity`
-    answers, and `mship daemon reidentify` calls it for an operator: a headless
-    VM must be able to recover without anyone SSHing into it.
+    The single owner of that move. `ensure_host_identity` delegates here when a
+    changed machine fingerprint is what noticed the clone (passing the running
+    machine's `fingerprint`); the daemon calls it directly after repeated
+    `409 duplicate-identity` answers, when the *relay* is what noticed and the
+    local fingerprint still matches; `mship daemon reidentify` calls it for an
+    operator. A headless VM must be able to recover without anyone SSHing in.
     """
     from mship.core.daemon.paths import host_identity_path
 
@@ -133,7 +135,7 @@ def force_reidentify(
     ident = HostIdentity(
         host_id=mint_host_id(now),
         created_at=(now or datetime.now(timezone.utc)).isoformat(),
-        fingerprint=previous.get("fingerprint") or machine_fingerprint(),
+        fingerprint=fingerprint or previous.get("fingerprint") or machine_fingerprint(),
         cloned_from=previous.get("host_id"),
         reidentified=True,
     )
@@ -197,13 +199,6 @@ def ensure_host_identity(
         _write(path, ident)
         return ident
 
-    rotate_key(home)
-    ident = HostIdentity(
-        host_id=mint_host_id(now),
-        created_at=(now or datetime.now(timezone.utc)).isoformat(),
-        fingerprint=fingerprint,
-        cloned_from=raw["host_id"],
-        reidentified=True,
+    return force_reidentify(
+        home, fingerprint=fingerprint, rotate_key=rotate_key, now=now
     )
-    _write(path, ident)
-    return ident
