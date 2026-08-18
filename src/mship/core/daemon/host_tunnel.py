@@ -121,7 +121,7 @@ def reap_orphan_tunnels(
     """
     if kill is None:
         kill = lambda pid: os.kill(pid, signal.SIGTERM)
-    killed = []
+    signalled = []
     for proc in processes():
         if proc.ppid != 1 or _forward_label(proc.cmdline) != subdomain:
             continue
@@ -131,8 +131,8 @@ def reap_orphan_tunnels(
             log.debug("could not signal orphan tunnel pid=%s: %s", proc.pid, exc)
             continue
         log.warning("signalled orphaned relay tunnel pid=%s holding %s", proc.pid, subdomain)
-        killed.append(proc.pid)
-    return killed
+        signalled.append(proc.pid)
+    return signalled
 
 
 class HostTunnel:

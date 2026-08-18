@@ -311,10 +311,19 @@ def test_a_drop_after_a_healthy_run_registers_once_and_never_while_the_child_is_
         "the link's own schedule came due — the counts above stopped meaning anything"
 
 
-def test_redialing_after_a_duplicate_identity_clears_does_not_register_twice(fx):
+def test_redialing_after_a_duplicate_identity_clears_does_not_register_twice(tmp_path):
     """`TunnelSupervisor.start()` zeroes `restart_count`, so the teardown +
-    re-dial cycle looks like a respawn to anything that diffs it."""
+    re-dial cycle looks like a respawn to anything that diffs it.
+
+    The flap streak is load-bearing: with a counter sitting at 0 on both sides of
+    the teardown there is no difference to observe, and this test would pass
+    against the very implementation it exists to rule out."""
+    fx = _Fixture(tmp_path, _Relay(), _Clock(), backoff=1.0, max_backoff=8.0)
     fx.connect()
+    for _ in range(3):
+        fx.drop_and_wait()
+    assert fx.sup.restart_count == 3
+
     fx.relay.refuse(409, "identity already registered")
     fx.clock.advance(120)
     fx.tunnel.tick()
@@ -323,7 +332,7 @@ def test_redialing_after_a_duplicate_identity_clears_does_not_register_twice(fx)
     fx.relay.refuse(200)
     fx.clock.advance(120)
     fx.tunnel.tick()                       # re-dials, and registers once, here
-    assert len(fx.procs) == 2
+    assert len(fx.procs) == 5 and fx.sup.restart_count == 0
     after_redial = len(fx.relay.registrations)
 
     for _ in range(5):
