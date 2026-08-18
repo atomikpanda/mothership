@@ -4,9 +4,10 @@ One supervised daemon process per OS user per host, shipped from the same
 package as the CLI. The daemon makes a host reachable/operable without a
 terminal (#469); v1 (#470) provides provisioning, supervision, singleton-ness,
 logs, and status, while the workspace registry (#472) discovers and serves
-every healthy workspace under configured scan roots. It opens no tunnel (#471)
-and supervises no workers (#473) yet; those remain sibling capabilities behind
-the seams reported by `mship daemon status`.
+every healthy workspace under configured scan roots and the host tunnel (#471)
+registers this machine with a relay and keeps an `ssh -R` up to it. It
+supervises no workers (#473) yet; that remains a sibling capability behind the
+seam reported by `mship daemon status`.
 
 ## Lifecycle
 
@@ -36,6 +37,11 @@ commands never require the daemon.
   `launchctl print user/<uid>/com.mothership.daemon` / the unified log
   (`log show`) on macOS.
 - Start history: `~/.mothership/daemon/start-history.json` (crash-loop visibility)
+- Host identity: `~/.mothership/daemon/host-identity.json` (#471 — see
+  [Tunnel registration](#tunnel-registration-471)), beside the credential stores
+  `host-root-secret`, `host-tokens.json` and `host-refresh.json` (all 0600 in a
+  0700 dir) and the tunnel's captured `ssh -R` output,
+  `~/.mothership/daemon/logs/relay-tunnel.log`.
 - Control socket: `$XDG_RUNTIME_DIR/mship/daemon.sock`, else
   `~/.mothership/daemon/run/daemon.sock`. Status probes prefer the socket path
   recorded in the lease (the daemon's env and your shell can disagree about
@@ -83,6 +89,150 @@ per merge).
 - Reboot-survival on a headless Mac requires a login session (enable
   auto-login); a system-domain LaunchDaemon is out of scope for v1.
 
+## Tunnel registration (#471)
+
+With a relay configured, the daemon does two things beside the servers on the
+same asyncio loop: it keeps an `ssh -R` tunnel to the relay up, and it keeps
+this host's entry in the relay's host directory current. Together they are what
+makes a freshly provisioned VM reachable from the phone with **no address typed
+anywhere** — the phone scans one relay QR and reads the directory.
+
+### Identity
+
+Three distinct things, in `core/daemon/identity.py`:
+
+- **`host_id`** — minted once (`hst-<ts>-<uuid8>`), persisted to
+  `~/.mothership/daemon/host-identity.json`, and the name the relay's directory
+  keys on. Deliberately *not* derived from the relay key: that key is a file,
+  and a cloned VM reproduces it byte-for-byte.
+- **machine fingerprint** — best-effort binding to the machine, read from the
+  first readable of `/etc/machine-id`, `/var/lib/dbus/machine-id`,
+  `/sys/class/dmi/id/product_uuid`, and recorded beside the `host_id`. It
+  catches a *re-imaged* host. It does **not** catch a `cp -a`/snapshot clone,
+  which copies it verbatim. An unreadable fingerprint (containers) reads as
+  unknown, never as a mismatch — no false clone alarms.
+- **`instance_id`** — minted per **process**, in memory, never written to disk.
+  It is the one thing a clone cannot copy, so it is what lets the relay (and the
+  tunnel's own read-back of its public `/health`) tell a restart from a second
+  live claimant.
+
+The relay subdomain is derived from the `host_id`, the relay key's device id and
+the local subdomain secret — the same `<opaque-slug>-<6hex>` shape a serve
+subdomain already has, so it needs no TLS/Caddy cert change.
+
+**Re-identification** mints a new `host_id`, records the old one as
+`cloned_from`, and **rotates the relay key**: the current key pair is moved
+aside to `<name>.pre-reidentify-<UTC timestamp>` and a new one generated. The
+rotation is the point — the clone still holds a copy of the old private key and
+that key is still in the relay's `pubkeys/`, so keeping it would let the twin go
+on authenticating as this host. The new key is unapproved by construction, so
+the host lands back in the enrollment queue and needs one more
+`mship relay approve <id>` on the relay box.
+
+### Tokens
+
+The phone's credential chain has two tiers, both self-issued by the host and
+verified by that same host — nothing is proxied and no shared secret is
+distributed:
+
+- a **refresh credential** per `(host_id, client)`, *derived* (HMAC over the
+  host root secret and a per-record nonce) rather than stored, so a
+  reconnect/re-registration re-publishes the identical string and writes
+  nothing at all. TTL 30 days; only `revoke` and a first mint touch the file.
+  It is the field the directory entry carries.
+- a **short-lived bearer**, `<token_id>.<secret>`, minted by
+  `POST /host/token` in exchange for that refresh credential and good for
+  `HOST_TOKEN_TTL_S` (300s). Only its sha256 is stored; verification is a pure
+  read, so a reconnecting phone never churns the store.
+
+Expiry is owned in one place (`core/relay/token_clock.py`) and is the **earlier**
+of two bounds: an epoch-tagged monotonic deadline and the wall deadline plus a
+120s skew grace. The monotonic floor is what makes an NTP step (or
+`timedatectl set-time`) unable to silently extend a live bearer; the epoch tag
+(the kernel boot id, or a per-process id where there is none) is what keeps a
+floor taken in a previous boot from being compared against this boot's
+`time.monotonic()`. Because the monotonic bound fires first for any ordinary
+token, the skew grace only ever applies where the anchor cannot vouch for
+elapsed time — a check after a restart, or a caller with no anchor.
+
+Clock skew is *reported*, never gating: the link samples the enroll server's
+`Date` header on every call and publishes `clock_skew_seconds`, which
+`mship daemon status` prints once it exceeds a second.
+
+### Provisioning
+
+```bash
+mship daemon install --serve 127.0.0.1:47190 --relay relay.example.com
+mship daemon start
+# then, once, on the relay box:
+mship relay approve <id>
+```
+
+`--relay` needs a local bind to forward, from this install or an earlier one
+(`--serve HOST:PORT`); like `--serve`, a **changed** relay takes effect on
+`mship daemon restart`. Nothing else is manual: while its key is unapproved the
+daemon posts `/enroll` non-blockingly and re-posts every 600s against the
+relay's 1800s pending TTL, so a VM provisioned at 02:00 is still approvable at
+09:00 with nobody at its terminal. Registration itself is challenge/response —
+fetch a nonce (120s TTL), sign `namespace ‖ nonce ‖ canonical payload` with the
+same ed25519 relay key the tunnel authenticates with (`ssh-keygen -Y sign`,
+namespace `host-registration@mship`), POST it — repeated every 60s, and after a
+failure on a 2s backoff doubling to a 60s cap, jittered **downward** so a fleet
+coming back after a relay redeploy does not retry in lockstep.
+
+`mship relay hosts` on the relay box lists the directory; a host that has not
+re-registered within 240s (three intervals plus a worst-case backoff) reads as
+`offline` there rather than disappearing.
+
+### Tunnel state
+
+There is no tunnel state file. The tunnel lives inside the daemon process, so
+its published snapshot on `/health` is the only honest source — with no daemon
+answering, `status` says so rather than guessing:
+
+| state | what `mship daemon status` prints |
+|---|---|
+| `disabled` | `tunnel: disabled (no relay configured)` |
+| `awaiting-enrollment` | `tunnel: awaiting relay approval (run 'mship relay approve <id>' on the relay host)` |
+| `connecting` | `tunnel: connecting <public_url>` |
+| `online` | `tunnel: online <public_url> (<n> restarts)` |
+| `contended` | `tunnel: contended — another host holds <subdomain>` |
+| `duplicate-identity` | `tunnel: rejected (duplicate-identity) — re-identifying automatically; 'mship daemon reidentify' to force` |
+| `error` | `tunnel: error — <last_error>` |
+
+(with no daemon running: `tunnel: unknown (daemon not running)`.)
+
+`mship --json daemon status` carries the `/health` tunnel block verbatim under
+`tunnel` — `state`, `subdomain`, `public_url`, `restarts`, `last_error`,
+`clock_skew_seconds` — plus `clock_skew_seconds` at the top level, so a reader
+never has to re-parse the prose.
+
+`contended` outranks `error` deliberately: a live twin answering on our
+subdomain is a specific, actionable fact, and the two co-occur constantly.
+
+### Clone recovery
+
+A `cp -a` clone booted beside its source publishes the same `host_id` on the
+same subdomain, and the relay arbitrates by probing the incumbent's published
+URL: the claim is refused only when the incumbent is still live and still
+answers with its own `instance_id`. A stale entry is nobody's and is taken over
+without a probe; an identical `(key fp, machine fp, instance_id)` re-post is the
+same daemon reconnecting, not contention. The refused claimant gets
+`409 duplicate-identity` and stops dialing — fighting a live twin for the
+subdomain helps nobody.
+
+- **Automatic.** After 3 consecutive 409s the link re-identifies itself — new
+  `host_id`, rotated key — and drops back to `awaiting-enrollment`, re-posting
+  `/enroll` at once. The clone therefore reappears in `GET /hosts` as
+  `pending-approval` with no SSH session: the machine that needs this recovery
+  is by definition one nobody can log into. It still needs approving.
+- **Manual.** `mship daemon reidentify` forces the same move and prints the new
+  host id and subdomain. `mship daemon reidentify --keep-identity` is the
+  opposite claim — "this *is* the same host" — and adopts the running machine's
+  fingerprint after a re-image or hardware change tripped the check, keeping the
+  `host_id` and the key. After a forced re-identify, approve the new key and
+  `mship daemon restart` to dial with it.
+
 ## Manual/VM verification checklist
 
 The suite fakes the supervisor boundary; these OS-contract behaviors need a
@@ -106,6 +256,10 @@ real VM pass:
    is already active in a shell → exactly one daemon survives; the loser logs
    the holder pid and exits 0.
 
+The tunnel half needs real sockets, a real relay and a second VM, which the
+suite has none of: those items live in
+[`checklists/host-tunnel-manual.md`](checklists/host-tunnel-manual.md).
+
 ## Workspaces (#472)
 
 The daemon discovers workspaces instead of being told about them: at startup
@@ -125,8 +279,9 @@ mship daemon install --scan-root ~/src --scan-root ~/work --serve 127.0.0.1:4719
   last registry state unchanged. A symlink supplied as a root is never traversed.
 - Derived registry state is `~/.mothership/daemon/workspaces.json`.
 - Without `--serve` the daemon is control-socket only: local `mship daemon ...`
-  works, but the phone cannot reach it. Address-less reachability is #471; until
-  then bind a tailnet/LAN address here.
+  works, but the phone cannot reach it — and `--relay` refuses without a bind to
+  forward. Bind a tailnet/LAN address here for direct reachability; the
+  address-less path is [Tunnel registration](#tunnel-registration-471).
 
 ### Addressing
 

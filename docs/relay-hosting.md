@@ -264,6 +264,94 @@ After the stack is running, verify each layer:
 
 ---
 
+## Host directory + fleet token (#471)
+
+A relay that already serves device enrollment gains two things with #471: a
+**host directory** (`GET /hosts` on the enroll server, where each daemon
+publishes its identity, subdomain and refresh credential) and a **fleet token**
+— the per-device credential a phone carries to read that directory. Together
+they are why a freshly provisioned VM needs no address typed on the phone.
+
+### The exact relay-box delta
+
+Four commands, all on the relay host:
+
+```bash
+# 1. Ship the new enroll-server code, then restart the (supervised) process.
+uv tool install --force --no-cache /path/to/mothership
+systemctl restart mship-relay-enroll.service
+
+# 2. Pick up the ONE new Caddyfile matcher (@hosts).
+cd /path/to/mothership
+docker compose -f docker/relay/docker-compose.yml up -d --force-recreate caddy
+
+# 3. Once per phone: mint its fleet token and show the pairing QR.
+mship relay fleet-token --label phone \
+  --relay-domain relay.example.com \
+  --store-dir /path/to/docker/relay/pending-store
+
+# 4. Per new VM, exactly as before — one approval, then it is done.
+mship relay approve <id> \
+  --store-dir /path/to/docker/relay/pending-store \
+  --pubkeys-dir /path/to/docker/relay/pubkeys
+```
+
+Notes on each:
+
+- **Step 1** is not optional: `/hosts`, `/hosts/challenge` and `/hosts/register`
+  are served by the enroll-server process, and merging does not deploy — the
+  live process keeps running the version it imported.
+- **Step 2** is the only edge change. `docker/relay/Caddyfile` gains one
+  matcher, `@hosts { path /hosts /hosts/* }`, plus its `handle` block
+  (`request_body max_size 8KB` → `127.0.0.1:47180`). Without it the site's
+  `respond "not found" 404` catch-all swallows every `/hosts` route in
+  production while every unit test stays green. A `caddy reload` inside the
+  running container works too; the force-recreate above is the version that
+  needs no exec.
+- **Step 3** prints the token, a `groundcontrol://add-relay?relay=…&token=…`
+  deep link and its QR. Re-running it for the same `--label` reprints the **same
+  token** — showing the QR again never unpairs the device that already scanned
+  it. `--store-dir` must be the directory the enroll-server runs with, or the
+  token is minted into a store nothing verifies against.
+- **Step 4** is unchanged because the signature allowlist *is* the sish
+  `pubkeys/` allowlist, re-read per verification: approving a host's key both
+  admits its tunnel and makes its signed registrations verify, with no restart.
+  `mship relay hosts --store-dir …` lists what the directory holds.
+
+### What does **not** change
+
+- `docker/relay/docker-compose.yml` — no new service, no new mount, no new port.
+- sish's flags — unchanged (including `--idle-connection*`, see above).
+- DNS — the existing wildcard `*.relay.example.com` record already covers both
+  `enroll.<relay>` and every per-host subdomain.
+- Firewall/ports — still 2222/80/443; `:47180` stays loopback-only.
+- `tls_ask.py` — a host subdomain is the same `<opaque-slug>-<6hex>` label shape
+  a serve subdomain already has, so the on-demand-TLS allowlist needs no edit.
+
+The `Caddyfile` is deliberately **not** on that list: it is the one file that
+changes, which is exactly why step 2 exists.
+
+### Fleet-token exposure
+
+A fleet token is a **fleet-wide read credential**. `GET /hosts` returns every
+host's directory entry *including its `refresh` credential* — which is the
+credential that trades for short-lived bearers on that host. So one leaked
+fleet token is read access to the whole fleet, not to one host. Treat it like a
+password:
+
+- one `--label` per physical device, so a lost phone can be cut off by itself;
+- `mship relay fleet-token --label phone --revoke` invalidates that label
+  (`--revoke` is a boolean flag used *with* `--label`, not a value). A later
+  re-mint under the same label derives a **different** token rather than
+  resurrecting the revoked one.
+
+Revocation stops future directory reads, and that is all it does: it does not
+rotate the per-host refresh credentials a paired phone already fetched. Those
+live on the hosts, expire on their own 30-day TTL, and are re-derived from a
+per-record nonce — so to invalidate them *now*, delete
+`~/.mothership/daemon/host-refresh.json` on the host; the daemon's next
+registration (within a minute) publishes freshly derived ones.
+
 ## Configuration Reference
 
 The relay is configured entirely through environment variables passed to `docker compose`. The bootstrap script sets them; you can also export them in a `.env` file alongside `docker-compose.yml`:
@@ -309,5 +397,30 @@ Data directories (`keys/`, `pubkeys/`, `caddy-data/`, `caddy-config/`) are mount
 **sish container exits immediately** — run `docker compose -f docker/relay/docker-compose.yml logs sish` to inspect startup errors. Common causes: port already in use, or missing `RELAY_DOMAIN` environment variable.
 
 **Caddy container exits immediately** — check `docker compose logs caddy`. A malformed `Caddyfile` or a missing `RELAY_DOMAIN`/`ACME_EMAIL` variable is the usual cause.
+
+**Every host went offline right after a relay redeploy** — expected, and it
+fixes itself. `docker compose … up -d --force-recreate sish` drops every open
+tunnel, because sish *is* the SSH endpoint. No host action is needed: each
+daemon's `ssh -R` notices the dead peer through its keepalives
+(`ServerAliveInterval=30` × `ServerAliveCountMax=3`, so roughly 90s worst case),
+respawns, and re-registers. The reconnect backoff is capped at 60s and jittered
+**downward only** — deliberately, so a whole fleet coming back does not
+stampede the relay in lockstep, and so a jittered delay can never exceed the cap
+the directory's staleness window is derived from. Recreating **caddy** does not
+drop tunnels at all (sish owns them); it only interrupts HTTPS for the moment
+the container restarts.
+
+**Phone says the fleet token is invalid** — the token is verified against
+`fleet-tokens.json` in the enroll-server's `--store-dir`. Minting it with a
+different `--store-dir` than the running server uses is the usual cause; a
+revoked label is the other (`mship relay fleet-token --label <device>` re-mints
+a *new* token after a revoke — the device must scan the fresh QR).
+
+**A host never appears in `mship relay hosts`** — check its own view first:
+`mship daemon status` on that host prints a `tunnel:` line naming the state
+(`awaiting-enrollment` means it is waiting for `mship relay approve`;
+`duplicate-identity` means a twin holds the entry). If the host reports
+`online` but `/hosts` 404s from outside, the `@hosts` Caddy matcher is missing —
+see [Host directory + fleet token](#host-directory-fleet-token-471).
 
 **Enroll request times out** — confirm the enroll-server process is running on the relay host (`curl http://127.0.0.1:47180/status/x` from the host should return a JSON status). Also check that Caddy is running and that `enroll.<relay>` resolves to the relay IP.
