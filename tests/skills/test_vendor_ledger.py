@@ -1,5 +1,5 @@
 """The vendor ledger keeps re-vendors honest: every vendored file that differs
-from upstream 6.2.0 must be named in VENDOR.md, and banned patterns must never
+from upstream 6.3.0 must be named in VENDOR.md, and banned patterns must never
 reappear (spec re-vendor-superpowers-620-with-mship ac3/ac6)."""
 import hashlib
 import json
@@ -29,7 +29,7 @@ def test_vendor_ledger_names_every_modified_file():
             continue
         if _sha(local) != upstream_sha and rel not in ledger:
             unledgered.append(rel)
-    assert not unledgered, f"files diverge from upstream 6.2.0 without a VENDOR.md entry: {unledgered}"
+    assert not unledgered, f"files diverge from upstream 6.3.0 without a VENDOR.md entry: {unledgered}"
 
 
 def test_local_files_not_in_manifest_are_ledgered_or_original():
