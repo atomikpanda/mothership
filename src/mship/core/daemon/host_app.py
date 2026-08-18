@@ -31,7 +31,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from mship.core.daemon.control import RESCAN_ERROR_STATUS
-from mship.core.daemon.registry import RegistryStore, WorkspaceEntry
+from mship.core.daemon.registry import RegistryReadError, RegistryStore, WorkspaceEntry
 from mship.core.workspace_context import ContextError
 
 
@@ -384,7 +384,7 @@ def create_host_app(
         if rescan is not None:
             try:
                 await asyncio.get_running_loop().run_in_executor(None, rescan)
-            except ValueError as exc:
+            except (ValueError, RegistryReadError) as exc:
                 raise HTTPException(
                     status_code=RESCAN_ERROR_STATUS, detail=str(exc)
                 ) from exc

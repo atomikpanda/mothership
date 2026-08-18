@@ -6,8 +6,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mship.core.daemon.host_app import create_host_app, ensure_host_token
+from mship.core.daemon.discovery import ScanRootError
 from mship.core.daemon.paths import registry_path
-from mship.core.daemon.registry import RegistryStore, RepoInfo, RuntimeInfo, WorkspaceEntry
+from mship.core.daemon.registry import RegistryReadError, RegistryStore, RepoInfo, RuntimeInfo, WorkspaceEntry
 
 NOW = datetime(2026, 8, 17, 3, 0, tzinfo=timezone.utc)
 
@@ -181,6 +182,38 @@ def test_default_workspace_subapp_routes_under_host_namespace(tmp_path):
         assert client.get("/workspaces/ws-actual/ui/").status_code == 200
 
 
+def test_default_workspace_subapp_ui_uses_host_cookie_flow(tmp_path):
+    workspace = tmp_path / "actual"
+    workspace.mkdir()
+    (workspace / "mothership.yaml").write_text(
+        "workspace: actual\nrepos: {}\n"
+    )
+    home = tmp_path / "home"
+    store = _seed(home, [_entry("ws-actual", "actual", workspace)])
+    app = create_host_app(
+        store,
+        auth_token="sekrit",
+        pr_watch_interval=0,
+    )
+    ui_root = "/workspaces/ws-actual/ui"
+
+    with TestClient(app, base_url="https://testserver") as client:
+        assert client.get("/workspaces/ws-actual/health").status_code == 401
+        assert client.get(
+            "/workspaces/ws-actual/health",
+            headers={"Authorization": "Bearer sekrit"},
+        ).status_code == 200
+
+        exchange = client.get(
+            f"{ui_root}/?token=sekrit",
+            follow_redirects=False,
+        )
+        assert exchange.status_code == 303
+        assert exchange.headers["location"] == f"{ui_root}/"
+        assert f"Path={ui_root}" in exchange.headers["set-cookie"]
+        assert client.get(exchange.headers["location"]).status_code == 200
+
+
 
 def test_subapp_lifespans_actually_start_and_stop(two_ws_app):
     """The mounted-lifespan gotcha, pinned: forwarding must run each sub-app's
@@ -278,11 +311,16 @@ def test_workspace_ui_keeps_host_namespace_for_links_assets_and_cookie(
         assert client.get(f"{ui_root}/doctor").status_code == 200
 
 
-def test_host_refresh_reports_scan_error_without_dropping_cached_subapp(
-    tmp_path,
+@pytest.mark.parametrize(
+    ("error_type", "detail"),
+    [
+        (ScanRootError, "/unmounted/workspaces is unavailable"),
+        (RegistryReadError, "/registry/workspaces.json is unreadable"),
+    ],
+)
+def test_host_refresh_reports_operational_error_without_dropping_cached_subapp(
+    tmp_path, error_type, detail
 ):
-    from mship.core.daemon.discovery import ScanRootError
-
     home = tmp_path / "home"
     store = _seed(home, [_entry("ws-a", "a", tmp_path / "a")])
     built = {}
@@ -293,7 +331,7 @@ def test_host_refresh_reports_scan_error_without_dropping_cached_subapp(
         return subapp
 
     def fail_rescan():
-        raise ScanRootError("/unmounted/workspaces is unavailable")
+        raise error_type(detail)
 
     app = create_host_app(
         store,
@@ -308,7 +346,7 @@ def test_host_refresh_reports_scan_error_without_dropping_cached_subapp(
         response = client.post("/workspaces/refresh")
 
         assert response.status_code == 503
-        assert "/unmounted/workspaces" in response.json()["detail"]
+        assert detail in response.json()["detail"]
         assert cached.lifespan_stopped is False
         assert store.load().entries[0].state == "healthy"
         assert client.get("/workspaces/ws-a/specs").status_code == 200

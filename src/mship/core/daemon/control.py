@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from mship.core.daemon.registry import RegistryReadError
+
 # CLI<->daemon control-protocol version; bump on breaking payload changes.
 # 2: capabilities.registry/serve became real + /workspaces endpoints (#472).
 PROTOCOL = 2
@@ -95,7 +97,7 @@ def create_control_app(
                     await asyncio.get_running_loop().run_in_executor(
                         None, rescan
                     )
-                except ValueError as exc:
+                except (ValueError, RegistryReadError) as exc:
                     raise HTTPException(
                         status_code=RESCAN_ERROR_STATUS, detail=str(exc)
                     ) from exc

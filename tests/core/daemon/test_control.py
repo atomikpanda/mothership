@@ -3,11 +3,13 @@ process start (the upgrade-in-place lie #470 calls out), capabilities are the
 #471/#472/#473 seams."""
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from fastapi.testclient import TestClient
 
 import mship
 from mship.core.daemon.control import PROTOCOL, create_control_app, probe_control_socket
-from mship.core.daemon.registry import RegistryStore, WorkspaceEntry
+from mship.core.daemon.discovery import ScanRootError
+from mship.core.daemon.registry import RegistryReadError, RegistryStore, WorkspaceEntry
 
 STARTED = datetime(2026, 8, 16, 11, 0, 0, tzinfo=timezone.utc)
 
@@ -152,17 +154,22 @@ def test_control_refresh_runs_host_cleanup_after_rescan(tmp_path):
     assert events == ["cleanup"]
 
 
-def test_control_refresh_reports_scan_error_without_cleanup_or_mutation(
-    tmp_path,
+@pytest.mark.parametrize(
+    ("error_type", "detail"),
+    [
+        (ScanRootError, "/unmounted/workspaces is unavailable"),
+        (RegistryReadError, "/registry/workspaces.json is unreadable"),
+    ],
+)
+def test_control_refresh_reports_operational_error_without_cleanup_or_mutation(
+    tmp_path, error_type, detail
 ):
-    from mship.core.daemon.discovery import ScanRootError
-
     events = []
     store = _registry_store(tmp_path)
     original = store.load()
 
     def fail_rescan():
-        raise ScanRootError("/unmounted/workspaces is unavailable")
+        raise error_type(detail)
 
     async def cleanup():
         events.append("cleanup")
@@ -179,7 +186,7 @@ def test_control_refresh_reports_scan_error_without_cleanup_or_mutation(
     response = TestClient(app).post("/workspaces/refresh")
 
     assert response.status_code == 503
-    assert "/unmounted/workspaces" in response.json()["detail"]
+    assert detail in response.json()["detail"]
     assert events == []
     assert store.load() == original
 
