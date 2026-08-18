@@ -54,7 +54,13 @@ def _restore_daemon_credentials(
 def _resolve_daemon_credential_overrides(
     output: Output,
 ) -> tuple[str | None, str | None, str | None]:
-    token = os.environ.get("MSHIP_SERVE_TOKEN") or None
+    from mship.core.daemon.host_app import load_host_token_override
+
+    try:
+        token = load_host_token_override(os.environ)
+    except ValueError as exc:
+        output.error(str(exc))
+        raise typer.Exit(1)
     app_id = private_key = None
     if os.environ.get("MSHIP_GH_APP_ID") or os.environ.get("MSHIP_GH_APP_KEY"):
         from mship.cli.serve import _read_gh_app_creds
@@ -195,6 +201,12 @@ def register(parent: typer.Typer, get_container):
         resolved_credentials = _resolve_effective_daemon_credentials(
             Path.home(), out
         )
+        if any(resolved_credentials) and sup.query().state == "active":
+            out.error(
+                "daemon is already active; credential overrides were not "
+                "persisted — use `mship daemon restart` to apply them"
+            )
+            raise typer.Exit(1)
         home = Path.home()
         previous_cfg = _validate_daemon_config(home, out)
         merged = None
@@ -233,12 +245,19 @@ def register(parent: typer.Typer, get_container):
     def start():
         out = Output()
         resolved_credentials = _preflight_daemon_start(Path.home(), out)
+        sup = _supervisor()
+        if any(resolved_credentials) and sup.query().state == "active":
+            out.error(
+                "daemon is already active; credential overrides were not "
+                "persisted — use `mship daemon restart` to apply them"
+            )
+            raise typer.Exit(1)
         credential_snapshots = None
         try:
             credential_snapshots = _persist_daemon_credential_overrides(
                 Path.home(), out, resolved_credentials
             )
-            _supervisor().start()
+            sup.start()
         except (DaemonSupervisorError, OSError) as e:
             _restore_daemon_credentials(credential_snapshots)
             out.error(str(e))

@@ -77,7 +77,7 @@ def test_install_scan_serve_end_to_end(tmp_path, monkeypatch):
     # 3) the TCP host app serves BOTH workspaces, addressed by id.
     from mship.core.daemon.host_app import ensure_host_token
 
-    token = ensure_host_token(home)
+    token = ensure_host_token(home, env={})
     with TestClient(captured["host"]) as client:
         hdrs = {"Authorization": f"Bearer {token}"}
         ws = client.get("/workspaces", headers=hdrs).json()["workspaces"]

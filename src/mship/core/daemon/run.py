@@ -270,7 +270,7 @@ def _run(home: Path, env: Mapping[str, str]) -> int:
         gh_app_id, gh_app_key = load_gh_app_credentials(home, env=env)
         host_app = create_host_app(
             store,
-            auth_token=ensure_host_token(home),
+            auth_token=ensure_host_token(home, env=env),
             rescan=rescan,
             gh_app_id=gh_app_id,
             gh_app_key=gh_app_key,

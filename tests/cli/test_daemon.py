@@ -260,6 +260,7 @@ def test_install_persists_shell_host_token_before_supervisor_bootstrap(
     from mship.core.daemon.paths import daemon_state_dir
 
     app, fake = cli
+    fake._state = "absent"
     observed = {}
     monkeypatch.setenv("MSHIP_SERVE_TOKEN", "shell-token")
 
@@ -279,17 +280,18 @@ def test_start_persists_shell_host_token_before_supervisor_start(
     from mship.core.daemon.paths import daemon_state_dir
 
     app, fake = cli
+    fake._state = "absent"
     observed = {}
-    monkeypatch.setenv("MSHIP_SERVE_TOKEN", "shell-token")
+    monkeypatch.setenv("MSHIP_SERVE_TOKEN", "  shell-token \n")
 
     def start():
-        observed["token"] = (daemon_state_dir(tmp_path) / "serve-token").read_text().strip()
+        observed["token"] = (daemon_state_dir(tmp_path) / "serve-token").read_bytes()
 
     fake.start = start
     res = runner.invoke(app, ["daemon", "start"])
 
     assert res.exit_code == 0, res.output
-    assert observed["token"] == "shell-token"
+    assert observed["token"] == b"shell-token\n"
 
 
 def test_start_persists_github_app_credentials_before_supervisor_start(
@@ -298,6 +300,7 @@ def test_start_persists_github_app_credentials_before_supervisor_start(
     from mship.core.daemon.host_app import load_gh_app_credentials
 
     app, fake = cli
+    fake._state = "absent"
     key_path = tmp_path / "app.pem"
     key_path.write_text("PRIVATE KEY")
     monkeypatch.setenv("MSHIP_GH_APP_ID", "123")
@@ -323,6 +326,7 @@ def test_start_failure_restores_previous_github_app_credentials(
     )
 
     app, fake = cli
+    fake._state = "absent"
     persist_gh_app_credentials(tmp_path, "old-id", "OLD KEY")
     key_path = tmp_path / "new.pem"
     key_path.write_text("NEW KEY")
@@ -337,6 +341,81 @@ def test_start_failure_restores_previous_github_app_credentials(
 
     assert res.exit_code == 1
     assert load_gh_app_credentials(tmp_path, env={}) == ("old-id", "OLD KEY")
+
+
+@pytest.mark.parametrize("override", ["host-token", "github-app"])
+def test_active_install_rejects_credential_override_without_persisting(
+    override, cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.host_app import (
+        ensure_host_token,
+        load_gh_app_credentials,
+        persist_gh_app_credentials,
+        persist_host_token,
+    )
+
+    app, fake = cli
+    persist_host_token(tmp_path, "old-token")
+    persist_gh_app_credentials(tmp_path, "old-id", "OLD KEY")
+    if override == "host-token":
+        monkeypatch.setenv("MSHIP_SERVE_TOKEN", "new-token")
+    else:
+        key_path = tmp_path / "new.pem"
+        key_path.write_text("NEW KEY")
+        monkeypatch.setenv("MSHIP_GH_APP_ID", "new-id")
+        monkeypatch.setenv("MSHIP_GH_APP_KEY", str(key_path))
+
+    res = runner.invoke(app, ["daemon", "install"])
+
+    assert res.exit_code == 1
+    assert "already active" in res.output
+    assert "restart" in res.output
+    assert ensure_host_token(tmp_path, env={}) == "old-token"
+    assert load_gh_app_credentials(tmp_path, env={}) == ("old-id", "OLD KEY")
+    assert not any(call.startswith("install") for call in fake.calls)
+
+
+def test_active_start_rejects_host_token_override_without_persisting(
+    cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.host_app import persist_host_token
+    from mship.core.daemon.paths import daemon_state_dir
+
+    app, fake = cli
+    persist_host_token(tmp_path, "old-token")
+    monkeypatch.setenv("MSHIP_SERVE_TOKEN", "new-token")
+
+    res = runner.invoke(app, ["daemon", "start"])
+
+    assert res.exit_code == 1
+    assert "already active" in res.output
+    assert "restart" in res.output
+    assert (daemon_state_dir(tmp_path) / "serve-token").read_text().strip() == "old-token"
+    assert "start" not in fake.calls
+
+
+def test_active_start_rejects_github_app_override_without_persisting(
+    cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.host_app import (
+        load_gh_app_credentials,
+        persist_gh_app_credentials,
+    )
+
+    app, fake = cli
+    persist_gh_app_credentials(tmp_path, "old-id", "OLD KEY")
+    key_path = tmp_path / "new.pem"
+    key_path.write_text("NEW KEY")
+    monkeypatch.setenv("MSHIP_GH_APP_ID", "new-id")
+    monkeypatch.setenv("MSHIP_GH_APP_KEY", str(key_path))
+
+    res = runner.invoke(app, ["daemon", "start"])
+
+    assert res.exit_code == 1
+    assert "already active" in res.output
+    assert "restart" in res.output
+    assert load_gh_app_credentials(tmp_path, env={}) == ("old-id", "OLD KEY")
+    assert "start" not in fake.calls
 
 
 @pytest.mark.parametrize("command", ["install", "start", "restart"])
@@ -491,6 +570,20 @@ def test_starting_command_rejects_unavailable_configured_scan_root(
 
     assert res.exit_code == 1
     assert str(missing) in res.output
+    assert not any(call.startswith(command) for call in fake.calls)
+
+
+@pytest.mark.parametrize("command", ["install", "start", "restart"])
+def test_blank_host_token_override_fails_before_supervisor(
+    command, cli, monkeypatch
+):
+    app, fake = cli
+    monkeypatch.setenv("MSHIP_SERVE_TOKEN", " \t\n")
+
+    res = runner.invoke(app, ["daemon", command])
+
+    assert res.exit_code == 1
+    assert "MSHIP_SERVE_TOKEN must not be blank" in res.output
     assert not any(call.startswith(command) for call in fake.calls)
 
 

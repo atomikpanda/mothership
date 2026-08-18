@@ -190,18 +190,35 @@ def test_ignored_entries_hidden_and_unroutable(tmp_path):
 
 
 def test_ensure_host_token_stable(tmp_path):
-    t1 = ensure_host_token(tmp_path)
-    t2 = ensure_host_token(tmp_path)
+    t1 = ensure_host_token(tmp_path, env={})
+    t2 = ensure_host_token(tmp_path, env={})
     assert t1 == t2 and len(t1) > 20
 
 
-def test_ensure_host_token_prefers_environment(tmp_path, monkeypatch):
-    monkeypatch.delenv("MSHIP_SERVE_TOKEN", raising=False)
-    persisted = ensure_host_token(tmp_path)
-    monkeypatch.setenv("MSHIP_SERVE_TOKEN", "configured-token")
+def test_ensure_host_token_prefers_environment(tmp_path):
+    persisted = ensure_host_token(tmp_path, env={})
 
-    assert ensure_host_token(tmp_path) == "configured-token"
+    assert ensure_host_token(
+        tmp_path, env={"MSHIP_SERVE_TOKEN": "configured-token"}
+    ) == "configured-token"
     assert persisted != "configured-token"
+
+
+def test_ensure_host_token_canonicalizes_environment_override(tmp_path):
+    from mship.core.daemon.paths import daemon_state_dir
+
+    assert ensure_host_token(
+        tmp_path, env={"MSHIP_SERVE_TOKEN": "  canonical-token \n"}
+    ) == "canonical-token"
+    assert not (daemon_state_dir(tmp_path) / "serve-token").exists()
+
+
+def test_ensure_host_token_rejects_blank_environment_override(tmp_path):
+    from mship.core.daemon.paths import daemon_state_dir
+
+    with pytest.raises(ValueError, match="must not be blank"):
+        ensure_host_token(tmp_path, env={"MSHIP_SERVE_TOKEN": " \t\n"})
+    assert not (daemon_state_dir(tmp_path) / "serve-token").exists()
 
 
 def test_persist_host_token_preserves_live_token_when_replace_fails(
@@ -243,7 +260,7 @@ def test_ensure_host_token_read_error_does_not_rotate_token(
 
     monkeypatch.setattr(Path, "read_text", fail_token_read)
     with pytest.raises(RuntimeError, match=str(path)):
-        host_mod.ensure_host_token(tmp_path)
+        host_mod.ensure_host_token(tmp_path, env={})
 
     assert path.read_bytes() == b"previous\n"
 

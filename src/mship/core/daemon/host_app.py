@@ -73,6 +73,17 @@ def persist_gh_app_credentials(home: Path, app_id: str, private_key: str) -> Non
     _atomic_write_owner_file(app_key_path, private_key.encode())
 
 
+def load_host_token_override(env: Mapping[str, str]) -> str | None:
+    """Return the canonical host-token environment override, when configured."""
+    raw = env.get("MSHIP_SERVE_TOKEN")
+    if raw is None:
+        return None
+    token = raw.strip()
+    if not token:
+        raise ValueError("MSHIP_SERVE_TOKEN must not be blank")
+    return token
+
+
 def load_gh_app_credentials(
     home: Path | None = None,
     *,
@@ -140,12 +151,12 @@ def load_gh_app_credentials(
     return persisted_id, persisted_key
 
 
-def ensure_host_token(home: Path) -> str:
+def ensure_host_token(home: Path, *, env: Mapping[str, str]) -> str:
     """Host-level bearer token (env>file>generate shape of relay/token.py's
     ensure_serve_token, but per OS user, not per workspace)."""
-    env = os.environ.get("MSHIP_SERVE_TOKEN")
-    if env:
-        return env
+    override = load_host_token_override(env)
+    if override is not None:
+        return override
     path, _app_id_path, _app_key_path = _credential_paths(home)
     try:
         existing = path.read_text().strip()
