@@ -210,6 +210,14 @@ def test_missing_configured_scan_root_fails_with_path(tmp_path: Path):
         scan_roots(_cfg(missing))
 
 
+def test_dangling_symlink_scan_root_fails_with_path(tmp_path: Path):
+    dangling = tmp_path / "dangling"
+    dangling.symlink_to(tmp_path / "missing", target_is_directory=True)
+
+    with pytest.raises(ValueError, match=str(dangling)):
+        scan_roots(_cfg(dangling))
+
+
 def test_max_depth_respected(tmp_path: Path):
     deep = tmp_path / "a" / "b" / "c"
     _mk_single(deep, "deep-ws")

@@ -161,14 +161,22 @@ class DaemonConfig(BaseModel):
         return {"host": host, "port": port}
 
 
+class DaemonConfigReadError(ValueError):
+    """Existing daemon config could not be read; never equivalent to invalid."""
+
+
 def load_daemon_config(home: Path) -> DaemonConfig:
     from mship.core.daemon.paths import daemon_config_path
 
     path = daemon_config_path(home)
     try:
         raw = yaml.safe_load(path.read_text()) or {}
-    except OSError:
+    except FileNotFoundError:
         return DaemonConfig()
+    except OSError as exc:
+        raise DaemonConfigReadError(
+            f"cannot read daemon config {path}: {exc}"
+        ) from exc
     except yaml.YAMLError as e:
         raise ValueError(f"invalid daemon config {path}: {e}") from e
     cfg = DaemonConfig.model_validate(raw)

@@ -163,12 +163,15 @@ def _materialize(ws_dir: Path) -> Candidate:
     cand.runner = runner_raw
     return cand
 
-
 def scan_roots(cfg: DaemonConfig) -> list[Candidate]:
     marker_dirs: list[Path] = []
     for root_str in cfg.scan_roots:
         root = Path(root_str)
         if root.is_symlink():
+            if not root.exists():
+                raise ScanRootError(
+                    f"configured scan root is missing or inaccessible: {root}"
+                )
             continue
         if not root.is_dir():
             raise ScanRootError(

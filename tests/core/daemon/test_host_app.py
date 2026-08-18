@@ -225,6 +225,29 @@ def test_persist_host_token_preserves_live_token_when_replace_fails(
     assert list(path.parent.glob("serve-token.*")) == []
 
 
+def test_ensure_host_token_read_error_does_not_rotate_token(
+    tmp_path, monkeypatch
+):
+    import mship.core.daemon.host_app as host_mod
+    from mship.core.daemon.paths import daemon_state_dir
+
+    monkeypatch.delenv("MSHIP_SERVE_TOKEN", raising=False)
+    host_mod.persist_host_token(tmp_path, "previous")
+    path = daemon_state_dir(tmp_path) / "serve-token"
+    real_read_text = Path.read_text
+
+    def fail_token_read(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError("permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_token_read)
+    with pytest.raises(RuntimeError, match=str(path)):
+        host_mod.ensure_host_token(tmp_path)
+
+    assert path.read_bytes() == b"previous\n"
+
+
 class StreamingSubApp:
     """ASGI app that emits body chunks with gaps — proves the proxy streams
     rather than buffering to completion (the `/exec` iter_raw contract)."""

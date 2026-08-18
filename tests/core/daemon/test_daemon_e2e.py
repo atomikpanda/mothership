@@ -176,3 +176,36 @@ def test_missing_scan_root_fails_without_mutating_healthy_registry(tmp_path):
         entry = store.load().entries[0]
         assert entry.id == workspace_id
         assert entry.state == "healthy"
+
+
+def test_unreadable_config_fails_without_mutating_healthy_registry(
+    tmp_path, monkeypatch
+):
+    from mship.core.daemon.paths import daemon_config_path
+    from mship.core.daemon.registry import (
+        DaemonConfig,
+        DaemonConfigReadError,
+        save_daemon_config,
+    )
+
+    home = tmp_path / "home"
+    root = tmp_path / "root"
+    _mk_ws(root, "existing")
+    save_daemon_config(home, DaemonConfig(scan_roots=[str(root)]))
+    store, rescan, _serve = run_mod._build_registry(home)
+    workspace_id = store.load().entries[0].id
+    config_path = daemon_config_path(home)
+    real_read_text = Path.read_text
+
+    def fail_config_read(self, *args, **kwargs):
+        if self == config_path:
+            raise PermissionError("permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_config_read)
+    for scan in (rescan, lambda: run_mod._build_registry(home)):
+        with pytest.raises(DaemonConfigReadError, match=str(config_path)):
+            scan()
+        entry = store.load().entries[0]
+        assert entry.id == workspace_id
+        assert entry.state == "healthy"

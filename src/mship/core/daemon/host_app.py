@@ -128,8 +128,10 @@ def ensure_host_token(home: Path) -> str:
         existing = path.read_text().strip()
         if existing:
             return existing
-    except OSError:
+    except FileNotFoundError:
         pass
+    except OSError as exc:
+        raise RuntimeError(f"cannot read host token {path}: {exc}") from exc
     token = secrets.token_urlsafe(32)
     persist_host_token(home, token)
     return token

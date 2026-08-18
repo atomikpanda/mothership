@@ -60,7 +60,12 @@ def _build_registry(home: Path):
     """
     from mship.core.daemon.discovery import ScanRootError, scan_roots
     from mship.core.daemon.paths import registry_path
-    from mship.core.daemon.registry import RegistryStore, load_daemon_config, reconcile
+    from mship.core.daemon.registry import (
+        DaemonConfigReadError,
+        RegistryStore,
+        load_daemon_config,
+        reconcile,
+    )
 
     store = RegistryStore(registry_path(home))
 
@@ -69,6 +74,9 @@ def _build_registry(home: Path):
 
     try:
         cfg = load_daemon_config(home)
+    except DaemonConfigReadError:
+        log.exception("daemon config unreadable — registry unchanged")
+        raise
     except ValueError as e:
         log.error("daemon config invalid: %s — serving empty registry", e)
         clear_registry()
@@ -82,6 +90,11 @@ def _build_registry(home: Path):
         # boundary, and status reports the running bind.)
         try:
             current = load_daemon_config(home)
+        except DaemonConfigReadError:
+            log.exception(
+                "daemon config unreadable on refresh — registry unchanged"
+            )
+            raise
         except ValueError as e:
             log.error(
                 "daemon config invalid on refresh: %s — serving empty registry",

@@ -128,6 +128,27 @@ def test_daemon_config_malformed_yaml_is_a_value_error(tmp_path: Path):
         load_daemon_config(tmp_path)
 
 
+def test_daemon_config_read_error_is_not_treated_as_absent(
+    tmp_path: Path, monkeypatch
+):
+    path = daemon_config_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    original = b"scan_roots: []\n"
+    path.write_bytes(original)
+    real_read_text = Path.read_text
+
+    def fail_config_read(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError("permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_config_read)
+    with pytest.raises(ValueError, match=str(path)):
+        load_daemon_config(tmp_path)
+
+    assert path.read_bytes() == original
+
+
 @pytest.mark.parametrize(
     "serve",
     [
