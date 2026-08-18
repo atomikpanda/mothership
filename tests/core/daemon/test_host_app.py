@@ -768,16 +768,27 @@ def test_real_token_stores_compose_through_the_exchange(tmp_path):
     assert revoked.status_code == 401
 
 
-def test_standing_token_works_direct_but_never_over_the_relay(bearer_app):
+@pytest.mark.parametrize(
+    ("edge_header", "value"),
+    [
+        ("X-Forwarded-For", "203.0.113.7"),
+        ("X-Forwarded-Host", "hst-abc.relay.example"),
+        ("X-Forwarded-Proto", "https"),
+    ],
+)
+def test_standing_token_works_direct_but_never_over_the_relay(
+    bearer_app, edge_header, value
+):
     """AC9: no standing credential authorizes relay-borne traffic, while
-    first-time LAN/loopback pairing still works."""
+    first-time LAN/loopback pairing still works. Every header the edge may
+    stamp counts — Caddy sets all three, but only one is needed to give the
+    request away."""
     app, _built = bearer_app
     standing = {"Authorization": "Bearer standing"}
     with TestClient(app) as client:
         assert client.get("/workspaces", headers=standing).status_code == 200
         relay_borne = client.get(
-            "/workspaces",
-            headers={**standing, "X-Forwarded-For": "203.0.113.7"},
+            "/workspaces", headers={**standing, edge_header: value}
         )
 
     assert relay_borne.status_code == 401
@@ -801,6 +812,41 @@ def test_host_token_exchange_needs_no_bearer(bearer_app):
     assert minted.status_code == 200
     assert minted.json() == {"token": "0123456789abcdef.minted", "expires_in": 300}
     assert rejected.status_code == 401
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"refresh": "x" * 4096},   # over the bound
+        {"refresh": ""},           # empty
+        {"refresh": 17},           # wrong type
+        {},                        # missing the field
+        [],                        # not an object
+    ],
+)
+def test_host_token_answers_401_for_every_malformed_body(bearer_app, body):
+    """A 422 here would make the unauthenticated route an oracle separating
+    "malformed" from "wrong" — every failure reads the same."""
+    app, _built = bearer_app
+    with TestClient(app) as client:
+        assert client.post("/host/token", json=body).status_code == 401
+        assert client.post("/host/token", content=b"not json").status_code == 401
+
+
+def test_host_token_route_is_absent_without_an_exchange(tmp_path):
+    """No refresh store means nothing to mint: the route does not exist rather
+    than 401ing on a credential this host could never honour."""
+    home = tmp_path / "home"
+    store = _seed(home, [_entry("ws-a", "a", tmp_path / "a")])
+    app = create_host_app(
+        store,
+        auth_token="standing",
+        verify_bearer=lambda _presented: False,
+        build_subapp=lambda e, **kw: FakeSubApp(e.name),
+    )
+
+    with TestClient(app) as client:
+        assert client.post("/host/token", json={"refresh": "x"}).status_code == 404
 
 
 def test_health_needs_no_bearer_and_reports_identity(tmp_path):
@@ -847,6 +893,25 @@ def test_health_reports_disabled_tunnel_when_no_relay_is_configured(tmp_path):
     assert health["host_id"] is None and health["instance_id"] is None
 
 
+def test_health_runner_reads_the_injected_host_runner_config(tmp_path):
+    """The host-level runner rides the same projection as a workspace's — this
+    is the seam #473 fills; unwired, the host reports no runner."""
+    home = tmp_path / "home"
+    store = _seed(home, [_entry("ws-a", "a", tmp_path / "a")])
+    app = create_host_app(
+        store,
+        auth_token=None,
+        runner_config=lambda: {"enabled": True, "max_concurrency": 1},
+        build_subapp=lambda e, **kw: FakeSubApp(e.name),
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/health").json()["runner"] == {
+            "enabled": True,
+            "state": "unknown",
+        }
+
+
 @pytest.mark.parametrize(
     ("raw_runner", "projected"),
     [
@@ -879,14 +944,14 @@ def test_workspaces_project_runner_and_pass_metarepo_repos_through(
         (listed,) = client.get("/workspaces").json()["workspaces"]
 
     assert listed["runner"] == projected
-    assert [r["name"] for r in listed["repos"]] == ["alpha", "beta"]
-    assert [r["git_root"] for r in listed["repos"]] == [None, None]
+    assert listed["repos"] == [r.model_dump() for r in candidate.repos]
 
 
 def test_workspaces_runner_projection_degrades_a_malformed_block(tmp_path):
     """A non-dict `runner:` must read as disabled, never 500. Driven off an
-    in-memory state: a persisted malformed block never survives
-    `RegistryStore.load`'s validation, so only this seam can carry it."""
+    in-memory state because a persisted one cannot reach the projection at all:
+    `RegistryStore._load_nolock` answers a failed `model_validate` with an
+    EMPTY `RegistryState`, dropping the whole registry rather than one entry."""
     from mship.core.daemon.registry import RegistryState
 
     entry = _entry("ws-a", "a", tmp_path / "a")

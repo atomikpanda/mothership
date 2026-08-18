@@ -29,16 +29,17 @@ reachability, so both stay open.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import secrets
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
 
 from mship.core.daemon.control import RESCAN_ERROR_STATUS
 from mship.core.daemon.registry import RegistryReadError, RegistryStore, WorkspaceEntry
@@ -315,11 +316,29 @@ def _make_host_auth_dependency(
     return require_host_credential
 
 
-class _TokenExchange(BaseModel):
-    """Bounded like the enroll app's `_EnrollBody`: an unbounded body on an
-    unauthenticated route is free memory for anyone who can reach it."""
+# A refresh credential is `<16 hex>.<64 hex>`; the bound is generous slack over
+# that, not a schema. Bounded like the enroll app's `_EnrollBody`, because this
+# route is unauthenticated by design.
+_MAX_REFRESH_LEN = 512
 
-    refresh: str = Field(max_length=512)
+
+def _presented_refresh(body: bytes) -> str | None:
+    """The refresh credential in a `/host/token` body, or None if there isn't
+    one. Every malformed shape collapses to None so the route answers a uniform
+    401: a 422 for an over-long or non-JSON body would make the endpoint an
+    oracle that separates "malformed" from "wrong"."""
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    credential = payload.get("refresh")
+    if not isinstance(credential, str) or not credential:
+        return None
+    if len(credential) > _MAX_REFRESH_LEN:
+        return None
+    return credential
 
 
 def _with_internal_authorization(
@@ -346,6 +365,7 @@ def create_host_app(
     host_id: str | None = None,
     instance_id: str | None = None,
     host_state: Callable[[], Mapping] | None = None,
+    runner_config: Callable[[], Any] | None = None,
     build_subapp: Callable = _default_build_subapp,
     rescan: Callable | None = None,
     pr_watch_interval: float | None = None,
@@ -364,7 +384,9 @@ def create_host_app(
     what `POST /host/token` publishes. Without an exchange the route is not
     registered at all — a host with no refresh store has nothing to mint.
     `host_id`/`instance_id`/`host_state()` are the identity and tunnel state
-    `/health` reports for the daemon's read-back and GC's ladder.
+    `/health` reports for the daemon's read-back and GC's ladder, and
+    `runner_config()` is the host-level runner block `/health` projects — the
+    seam #473 fills; absent, the host reports no runner.
     """
     from contextlib import asynccontextmanager
 
@@ -452,16 +474,24 @@ def create_host_app(
             "workspaces": len([e for e in entries if not e.ignored]),
             "degraded": len([e for e in entries if e.state == "degraded" and not e.ignored]),
             "tunnel": dict(host_state()) if host_state is not None else {"state": "disabled"},
-            "runner": runner_block(None),
+            "runner": runner_block(
+                runner_config() if runner_config is not None else None
+            ),
         }
 
     if exchange_refresh is not None:
         @app.post("/host/token")
-        def mint_host_token(body: _TokenExchange):
+        async def mint_host_token(request: Request):
             """The bootstrap exchange (AC9): the phone's persisted refresh
             credential in, a short-lived bearer out — from the host that will
-            verify it, never proxied and never published into the directory."""
-            granted = exchange_refresh(body.refresh)
+            verify it, never proxied and never published into the directory.
+
+            The body is read here rather than declared as a model so that a
+            malformed one fails exactly like a wrong credential (401), instead
+            of a 422 that tells an unauthenticated caller which it was.
+            """
+            credential = _presented_refresh(await request.body())
+            granted = exchange_refresh(credential) if credential else None
             if granted is None:
                 raise HTTPException(
                     status_code=401, detail="invalid or expired refresh credential"
