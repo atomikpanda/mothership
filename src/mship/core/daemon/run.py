@@ -225,9 +225,20 @@ def _run(home: Path, env: Mapping[str, str]) -> int:
     )
     host_app = None
     if serve_cfg is not None:
-        from mship.core.daemon.host_app import create_host_app, ensure_host_token
+        from mship.core.daemon.host_app import (
+            create_host_app,
+            ensure_host_token,
+            load_gh_app_credentials,
+        )
 
-        host_app = create_host_app(store, auth_token=ensure_host_token(home), rescan=rescan)
+        gh_app_id, gh_app_key = load_gh_app_credentials(home, env=env)
+        host_app = create_host_app(
+            store,
+            auth_token=ensure_host_token(home),
+            rescan=rescan,
+            gh_app_id=gh_app_id,
+            gh_app_key=gh_app_key,
+        )
     app = create_control_app(
         started_at=started_at, version=version, socket_path=str(socket_path),
         store=store, rescan=rescan, serve_bound=host_app is not None,

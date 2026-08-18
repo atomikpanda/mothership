@@ -149,6 +149,16 @@ def test_daemon_config_rejects_negative_max_depth():
         DaemonConfig(max_depth=-1)
 
 
+def test_registry_lock_boundary_enforces_owner_only_modes(tmp_path: Path):
+    import stat
+
+    path = registry_path(tmp_path)
+    RegistryStore(path).load()
+
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.with_name(path.name + ".lock").stat().st_mode) == 0o600
+
+
 def test_corrupt_registry_loads_empty(tmp_path: Path):
     p = registry_path(tmp_path)
     p.parent.mkdir(parents=True)

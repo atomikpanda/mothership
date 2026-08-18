@@ -314,3 +314,18 @@ def test_move_then_reuse_old_path_registers_both_workspaces(tmp_path: Path):
     assert by_path[str(moved.resolve())].id == original_id
     assert by_path[str(replacement.resolve())].id != original_id
     assert by_path[str(replacement.resolve())].name == "replacement"
+
+
+def test_manual_workspace_is_revalidated_outside_scan_roots(tmp_path: Path):
+    home, root = tmp_path / "home", tmp_path / "manual"
+    workspace = _mk_ws(root, "workspace")
+    store = _store(home)
+    reconcile(store, _scan(root), NOW)
+    store.mutate(lambda state: setattr(state.entries[0], "origin", "manual"))
+    (workspace / "mothership.yaml").write_text("workspace: [broken\n")
+
+    entry = reconcile(store, [], LATER).entries[0]
+
+    assert entry.origin == "manual"
+    assert entry.state == "degraded"
+    assert "invalid" in entry.detail

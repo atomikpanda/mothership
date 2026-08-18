@@ -29,36 +29,72 @@ def _daemon_main() -> int:
     return main()
 
 
-def _restore_host_token(snapshot: tuple[Path, bytes | None] | None) -> None:
-    if snapshot is None:
-        return
-    path, previous = snapshot
-    if previous is None:
-        path.unlink(missing_ok=True)
-    else:
-        path.write_bytes(previous)
-        path.chmod(0o600)
-
-
-def _persist_host_token_override(home: Path) -> tuple[Path, bytes | None] | None:
-    token = os.environ.get("MSHIP_SERVE_TOKEN")
-    if not token:
-        return None
-    from mship.core.daemon.host_app import persist_host_token
-    from mship.core.daemon.paths import daemon_state_dir
-
-    path = daemon_state_dir(home) / "serve-token"
+def _snapshot_file(path: Path) -> tuple[Path, bytes | None]:
     try:
         previous = path.read_bytes()
     except FileNotFoundError:
         previous = None
-    snapshot = (path, previous)
+    return path, previous
+
+
+def _restore_daemon_credentials(
+    snapshots: list[tuple[Path, bytes | None]] | None,
+) -> None:
+    if snapshots is None:
+        return
+    from mship.core.daemon.host_app import _atomic_write_owner_file
+
+    for path, previous in reversed(snapshots):
+        if previous is None:
+            path.unlink(missing_ok=True)
+        else:
+            _atomic_write_owner_file(path, previous)
+
+
+def _resolve_daemon_credential_overrides(
+    output: Output,
+) -> tuple[str | None, str | None, str | None]:
+    token = os.environ.get("MSHIP_SERVE_TOKEN") or None
+    app_id = private_key = None
+    if os.environ.get("MSHIP_GH_APP_ID") or os.environ.get("MSHIP_GH_APP_KEY"):
+        from mship.cli.serve import _read_gh_app_creds
+
+        app_id, private_key = _read_gh_app_creds(output)
+    return token, app_id, private_key
+
+
+def _persist_daemon_credential_overrides(
+    home: Path,
+    output: Output,
+    resolved: tuple[str | None, str | None, str | None] | None = None,
+) -> list[tuple[Path, bytes | None]]:
+    from mship.core.daemon.host_app import (
+        _credential_paths,
+        persist_gh_app_credentials,
+        persist_host_token,
+    )
+
+    token_path, app_id_path, app_key_path = _credential_paths(home)
+    snapshots: list[tuple[Path, bytes | None]] = []
+    token, app_id, private_key = (
+        resolved
+        if resolved is not None
+        else _resolve_daemon_credential_overrides(output)
+    )
     try:
-        persist_host_token(home, token)
-    except OSError:
-        _restore_host_token(snapshot)
+        if token:
+            snapshots.append(_snapshot_file(token_path))
+            persist_host_token(home, token)
+        if app_id and private_key:
+            snapshots.extend([
+                _snapshot_file(app_id_path),
+                _snapshot_file(app_key_path),
+            ])
+            persist_gh_app_credentials(home, app_id, private_key)
+    except BaseException:
+        _restore_daemon_credentials(snapshots)
         raise
-    return snapshot
+    return snapshots
 
 
 def register(parent: typer.Typer, get_container):
@@ -112,6 +148,7 @@ def register(parent: typer.Typer, get_container):
         except DaemonExecResolutionError as e:
             out.error(str(e))
             raise typer.Exit(1)
+        resolved_credentials = _resolve_daemon_credential_overrides(out)
         previous_cfg = None
         merged = None
         if roots or serve_cfg is not None:
@@ -129,14 +166,16 @@ def register(parent: typer.Typer, get_container):
             # validated config first so that first process sees the requested
             # roots/bind rather than the old snapshot.
             save_daemon_config(home, merged)
-        token_snapshot = None
+        credential_snapshots = None
         try:
-            token_snapshot = _persist_host_token_override(Path.home())
+            credential_snapshots = _persist_daemon_credential_overrides(
+                Path.home(), out, resolved_credentials
+            )
             sup.install(argv)
         except (DaemonSupervisorError, OSError) as e:
             if previous_cfg is not None:
                 save_daemon_config(home, previous_cfg)
-            _restore_host_token(token_snapshot)
+            _restore_daemon_credentials(credential_snapshots)
             out.error(str(e))
             raise typer.Exit(1)
         if merged is not None:
@@ -146,12 +185,14 @@ def register(parent: typer.Typer, get_container):
     @daemon_app.command("start")
     def start():
         out = Output()
-        token_snapshot = None
+        credential_snapshots = None
         try:
-            token_snapshot = _persist_host_token_override(Path.home())
+            credential_snapshots = _persist_daemon_credential_overrides(
+                Path.home(), out
+            )
             _supervisor().start()
         except (DaemonSupervisorError, OSError) as e:
-            _restore_host_token(token_snapshot)
+            _restore_daemon_credentials(credential_snapshots)
             out.error(str(e))
             raise typer.Exit(1)
         out.print("daemon started")
@@ -173,12 +214,14 @@ def register(parent: typer.Typer, get_container):
         if blockers:
             out.error("restart refused:\n" + "\n".join(f"  - {b}" for b in blockers))
             raise typer.Exit(1)
-        token_snapshot = None
+        credential_snapshots = None
         try:
-            token_snapshot = _persist_host_token_override(Path.home())
+            credential_snapshots = _persist_daemon_credential_overrides(
+                Path.home(), out
+            )
             _supervisor().restart()
         except (DaemonSupervisorError, OSError) as e:
-            _restore_host_token(token_snapshot)
+            _restore_daemon_credentials(credential_snapshots)
             out.error(str(e))
             raise typer.Exit(1)
         out.print("daemon restarted")

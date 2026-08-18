@@ -281,6 +281,99 @@ def test_start_persists_shell_host_token_before_supervisor_start(
     assert observed["token"] == "shell-token"
 
 
+def test_start_persists_github_app_credentials_before_supervisor_start(
+    cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.host_app import load_gh_app_credentials
+
+    app, fake = cli
+    key_path = tmp_path / "app.pem"
+    key_path.write_text("PRIVATE KEY")
+    monkeypatch.setenv("MSHIP_GH_APP_ID", "123")
+    monkeypatch.setenv("MSHIP_GH_APP_KEY", str(key_path))
+    observed = {}
+
+    def start():
+        observed["credentials"] = load_gh_app_credentials(tmp_path, env={})
+
+    fake.start = start
+    res = runner.invoke(app, ["daemon", "start"])
+
+    assert res.exit_code == 0, res.output
+    assert observed["credentials"] == ("123", "PRIVATE KEY")
+
+
+def test_start_failure_restores_previous_github_app_credentials(
+    cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.host_app import (
+        load_gh_app_credentials,
+        persist_gh_app_credentials,
+    )
+
+    app, fake = cli
+    persist_gh_app_credentials(tmp_path, "old-id", "OLD KEY")
+    key_path = tmp_path / "new.pem"
+    key_path.write_text("NEW KEY")
+    monkeypatch.setenv("MSHIP_GH_APP_ID", "new-id")
+    monkeypatch.setenv("MSHIP_GH_APP_KEY", str(key_path))
+
+    def fail_start():
+        raise DaemonSupervisorError("start failed")
+
+    fake.start = fail_start
+    res = runner.invoke(app, ["daemon", "start"])
+
+    assert res.exit_code == 1
+    assert load_gh_app_credentials(tmp_path, env={}) == ("old-id", "OLD KEY")
+
+
+@pytest.mark.parametrize("command", ["install", "start", "restart"])
+def test_partial_github_app_override_fails_before_supervisor(
+    command, cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.host_app import (
+        load_gh_app_credentials,
+        persist_gh_app_credentials,
+    )
+
+    app, fake = cli
+    persist_gh_app_credentials(tmp_path, "old-id", "OLD KEY")
+    monkeypatch.setenv("MSHIP_GH_APP_ID", "new-id")
+    monkeypatch.delenv("MSHIP_GH_APP_KEY", raising=False)
+
+    res = runner.invoke(app, ["daemon", command])
+
+    assert res.exit_code == 1
+    assert "must be set together" in res.output
+    assert not any(call.startswith(command) for call in fake.calls)
+    assert load_gh_app_credentials(tmp_path, env={}) == ("old-id", "OLD KEY")
+
+
+def test_install_invalid_github_app_key_does_not_mutate_config(
+    cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.registry import (
+        DaemonConfig,
+        load_daemon_config,
+        save_daemon_config,
+    )
+
+    app, fake = cli
+    previous = DaemonConfig(scan_roots=["/existing"], max_depth=4)
+    save_daemon_config(tmp_path, previous)
+    monkeypatch.setenv("MSHIP_GH_APP_ID", "new-id")
+    monkeypatch.setenv("MSHIP_GH_APP_KEY", str(tmp_path / "missing.pem"))
+
+    res = runner.invoke(
+        app, ["daemon", "install", "--scan-root", str(tmp_path / "new")]
+    )
+
+    assert res.exit_code == 1
+    assert load_daemon_config(tmp_path) == previous
+    assert not any(call.startswith("install:") for call in fake.calls)
+
+
 def test_install_failure_restores_previous_config(cli, tmp_path):
     from mship.core.daemon.registry import (
         DaemonConfig,

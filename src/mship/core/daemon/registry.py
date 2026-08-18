@@ -79,8 +79,10 @@ def mint_workspace_id(now: datetime | None = None) -> str:
 @contextmanager
 def _locked(lock_path: Path, mode: int):
     """Advisory flock (mirrors state.py's `_locked`)."""
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path.touch(exist_ok=True)
+    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_path.parent.chmod(0o700)
+    lock_path.touch(exist_ok=True, mode=0o600)
+    lock_path.chmod(0o600)
     with open(lock_path, "r+") as lf:
         fcntl.flock(lf, mode)
         try:
@@ -229,10 +231,26 @@ def reconcile(store: RegistryStore, candidates: list, now: datetime) -> Registry
     def apply(state: RegistryState) -> None:
         by_id = {e.id: e for e in state.entries}
         by_path = {e.path: e for e in state.entries}
+        round_candidates = list(candidates)
+        candidate_paths = {str(cand.path) for cand in round_candidates}
+        manual_paths = [
+            Path(entry.path)
+            for entry in state.entries
+            if entry.origin == "manual"
+            and entry.path not in candidate_paths
+            and Path(entry.path).exists()
+        ]
+        if manual_paths:
+            from mship.core.daemon.discovery import _materialize
+
+            round_candidates.extend(_materialize(path) for path in manual_paths)
+
         seen_paths: set[str] = set()
         # Resolve known identities before path-only newcomers. This makes a
         # move vacate its old path before a new workspace there is matched.
-        prepared = [(cand, _read_id_file(cand.path)) for cand in candidates]
+        prepared = [
+            (cand, _read_id_file(cand.path)) for cand in round_candidates
+        ]
         ordered = sorted(
             prepared,
             key=lambda item: (

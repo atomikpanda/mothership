@@ -27,6 +27,7 @@ ALLOWLIST: dict[tuple[str, str, str], str] = {
     ("mship/util/shell.py", "*", "env"): "#473 seam: subprocess env construction, not workspace selection",
     ("mship/core/relay/token.py", "*", "env"): "#471 seam: MSHIP_SERVE_TOKEN host auth material",
     ("mship/core/daemon/host_app.py", "ensure_host_token", "env"): "#472 seam: MSHIP_SERVE_TOKEN host auth material",
+    ("mship/core/daemon/host_app.py", "load_gh_app_credentials", "env"): "#472 seam: GitHub App host auth material",
     ("mship/core/gh_auth.py", "*", "env"): "#471 seam: broker URL/token + GH token, host-level auth",
     ("mship/core/evidence_url.py", "*", "env"): "env augmentation (GIT_SSH_COMMAND), not selection",
     ("mship/core/run_host/store.py", "RunHostStore.get", "env"): "run-host connection env override (per-machine, not workspace selection)",

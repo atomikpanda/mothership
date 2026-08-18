@@ -22,9 +22,10 @@ from __future__ import annotations
 import asyncio
 import os
 import secrets
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -33,14 +34,87 @@ from mship.core.daemon.registry import RegistryStore, WorkspaceEntry
 from mship.core.workspace_context import ContextError
 
 
-def persist_host_token(home: Path, token: str) -> None:
-    """Persist the token inherited by a supervisor-launched daemon."""
+def _credential_paths(home: Path) -> tuple[Path, Path, Path]:
     from mship.core.daemon.paths import daemon_state_dir
 
-    path = daemon_state_dir(home) / "serve-token"
+    state_dir = daemon_state_dir(home)
+    return (
+        state_dir / "serve-token",
+        state_dir / "gh-app-id",
+        state_dir / "gh-app-key.pem",
+    )
+
+
+def _atomic_write_owner_file(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.write_text(token + "\n")
+    path.parent.chmod(0o700)
+    fd, temp_name = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    temp = Path(temp_name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+        os.replace(temp, path)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
     path.chmod(0o600)
+
+
+def persist_host_token(home: Path, token: str) -> None:
+    """Atomically persist the token inherited by a supervisor-launched daemon."""
+    token_path, _app_id_path, _app_key_path = _credential_paths(home)
+    _atomic_write_owner_file(token_path, (token + "\n").encode())
+
+
+def persist_gh_app_credentials(home: Path, app_id: str, private_key: str) -> None:
+    """Persist validated App credentials for the supervisor-launched daemon."""
+    _token_path, app_id_path, app_key_path = _credential_paths(home)
+    _atomic_write_owner_file(app_id_path, (app_id + "\n").encode())
+    _atomic_write_owner_file(app_key_path, private_key.encode())
+
+
+def load_gh_app_credentials(
+    home: Path | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> tuple[str | None, str | None]:
+    """Load App id + private-key text, preferring the invoking environment."""
+    env = os.environ if env is None else env
+    app_id = env.get("MSHIP_GH_APP_ID") or None
+    key_path = env.get("MSHIP_GH_APP_KEY")
+    if bool(app_id) != bool(key_path):
+        raise ValueError(
+            "MSHIP_GH_APP_ID and MSHIP_GH_APP_KEY must be set together"
+        )
+    if app_id is not None or key_path:
+        private_key = None
+        if key_path:
+            path = Path(key_path)
+            if not path.is_file():
+                raise ValueError(
+                    f"MSHIP_GH_APP_KEY is set but not a readable file ({key_path!r})"
+                )
+            try:
+                private_key = path.read_text()
+            except OSError as exc:
+                raise ValueError(
+                    f"MSHIP_GH_APP_KEY is set but not a readable file ({key_path!r})"
+                ) from exc
+        return app_id, private_key
+
+    if home is None:
+        return None, None
+    _token_path, app_id_path, app_key_path = _credential_paths(home)
+    try:
+        persisted_id = app_id_path.read_text().strip()
+        persisted_key = app_key_path.read_text()
+    except FileNotFoundError:
+        if not app_id_path.exists() and not app_key_path.exists():
+            return None, None
+        raise ValueError("persisted GitHub App credentials are incomplete")
+    if not persisted_id or not persisted_key:
+        raise ValueError("persisted GitHub App credentials are incomplete")
+    return persisted_id, persisted_key
 
 
 def ensure_host_token(home: Path) -> str:
@@ -49,9 +123,7 @@ def ensure_host_token(home: Path) -> str:
     env = os.environ.get("MSHIP_SERVE_TOKEN")
     if env:
         return env
-    from mship.core.daemon.paths import daemon_state_dir
-
-    path = daemon_state_dir(home) / "serve-token"
+    path, _app_id_path, _app_key_path = _credential_paths(home)
     try:
         existing = path.read_text().strip()
         if existing:
@@ -93,7 +165,14 @@ class _SubApp:
             self._cm = None
 
 
-def _default_build_subapp(entry: WorkspaceEntry, *, auth_token: str | None, pr_watch_interval: float | None):
+def _default_build_subapp(
+    entry: WorkspaceEntry,
+    *,
+    auth_token: str | None,
+    pr_watch_interval: float | None,
+    gh_app_id: str | None,
+    gh_app_key: str | None,
+):
     from mship.core.serve import create_app
     from mship.core.spec_store import SPECS_DIRNAME
     from mship.core.workspace_context import build_workspace_context
@@ -108,6 +187,8 @@ def _default_build_subapp(entry: WorkspaceEntry, *, auth_token: str | None, pr_w
         auth_token=auth_token,
         worktree_manager=ctx.worktree_manager,
         config=ctx.config,
+        gh_app_id=gh_app_id,
+        gh_app_key=gh_app_key,
         pr_watch_interval=pr_watch_interval,
     )
 
@@ -119,6 +200,8 @@ def create_host_app(
     build_subapp: Callable = _default_build_subapp,
     rescan: Callable | None = None,
     pr_watch_interval: float | None = None,
+    gh_app_id: str | None = None,
+    gh_app_key: str | None = None,
 ):
     """Build the host FastAPI app over a registry store.
 
@@ -163,7 +246,13 @@ def create_host_app(
                 sub = None
             if sub is None:
                 sub = _SubApp(
-                    build_subapp(entry, auth_token=auth_token, pr_watch_interval=pr_watch_interval),
+                    build_subapp(
+                        entry,
+                        auth_token=auth_token,
+                        pr_watch_interval=pr_watch_interval,
+                        gh_app_id=gh_app_id,
+                        gh_app_key=gh_app_key,
+                    ),
                     fp,
                 )
                 await sub.start()

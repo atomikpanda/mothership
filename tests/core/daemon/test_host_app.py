@@ -76,7 +76,7 @@ def two_ws_app(tmp_path):
     store = _seed(home, [meta, mono, bad])
     built: dict[str, FakeSubApp] = {}
 
-    def build(entry, *, auth_token, pr_watch_interval):
+    def build(entry, *, auth_token, pr_watch_interval, **_credentials):
         sub = FakeSubApp(entry.name)
         built[entry.id] = sub
         return sub
@@ -157,6 +157,29 @@ def test_host_token_gates_everything(tmp_path):
         assert client.get("/workspaces/ws-a/specs", headers={"Authorization": "Bearer sekrit"}).status_code == 200
 
 
+def test_host_passes_github_app_credentials_to_workspace_subapp(tmp_path):
+    home = tmp_path / "home"
+    store = _seed(home, [_entry("ws-a", "a", tmp_path / "a")])
+    captured = {}
+
+    def build(entry, **kwargs):
+        captured.update(kwargs)
+        return FakeSubApp(entry.name)
+
+    app = create_host_app(
+        store,
+        auth_token=None,
+        gh_app_id="123",
+        gh_app_key="PRIVATE KEY",
+        build_subapp=build,
+    )
+    with TestClient(app) as client:
+        assert client.get("/workspaces/ws-a/specs").status_code == 200
+
+    assert captured["gh_app_id"] == "123"
+    assert captured["gh_app_key"] == "PRIVATE KEY"
+
+
 def test_ignored_entries_hidden_and_unroutable(tmp_path):
     home = tmp_path / "home"
     store = _seed(home, [_entry("ws-i", "i", tmp_path / "i", ignored=True)])
@@ -179,6 +202,27 @@ def test_ensure_host_token_prefers_environment(tmp_path, monkeypatch):
 
     assert ensure_host_token(tmp_path) == "configured-token"
     assert persisted != "configured-token"
+
+
+def test_persist_host_token_preserves_live_token_when_replace_fails(
+    tmp_path, monkeypatch
+):
+    import mship.core.daemon.host_app as host_mod
+    from mship.core.daemon.paths import daemon_state_dir
+
+    persist_host_token = host_mod.persist_host_token
+    persist_host_token(tmp_path, "previous")
+    path = daemon_state_dir(tmp_path) / "serve-token"
+
+    def fail_replace(_source, _target):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(host_mod.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        persist_host_token(tmp_path, "replacement")
+
+    assert path.read_text().strip() == "previous"
+    assert list(path.parent.glob("serve-token.*")) == []
 
 
 class StreamingSubApp:
