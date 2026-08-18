@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from mship.core.relay.host_contract import ENROLL_TTL_S
+
 
 def _b64decode_strict(body: str) -> bytes:
     """Decode base64, adding padding if needed, rejecting non-base64 characters."""
@@ -88,7 +90,7 @@ class RequestStore:
     def __init__(
         self,
         base_dir,
-        ttl_seconds: int = 1800,
+        ttl_seconds: int = ENROLL_TTL_S,
         max_pending: int = 50,
         clock: Callable[[], float] = time.time,
     ) -> None:

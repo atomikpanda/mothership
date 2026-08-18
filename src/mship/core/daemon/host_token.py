@@ -27,13 +27,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from mship.core.daemon.paths import host_secret_path, host_tokens_path
+from mship.core.relay.host_contract import HOST_TOKEN_TTL_S
 from mship.core.relay.keys import ensure_secret_file
 from mship.core.relay.token_clock import AnchoredClock, Deadline
 
-# Deliberately short: a host token is the credential a phone carries, and the
-# only revocation that survives a lost/stolen device is expiry (revocation
-# happens one tier up, on the refresh credential in `host_auth`).
-HOST_TOKEN_TTL_S = 300
+# HOST_TOKEN_TTL_S is deliberately short — a host token is the credential a
+# phone carries, and the only revocation that survives a lost/stolen device is
+# expiry (revocation happens one tier up, on the refresh credential in
+# `host_auth`). It is OWNED by `core.relay.host_contract` because both ends of
+# the wire need it, and re-exported here so the mint site reads as one name.
 
 # Bounded so the doc cannot grow without limit while every token is still live
 # (many devices, or a client re-minting in a tight loop).
