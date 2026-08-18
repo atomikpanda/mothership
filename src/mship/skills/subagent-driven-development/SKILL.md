@@ -225,7 +225,8 @@ Read the stub's resolved model before dispatch:
   model/effort selector, don't leave it blank (that silently inherits the
   session's model, usually the most expensive): choose a deliberate tier by
   the task-complexity rules below and set model AND effort explicitly.
-  Where the API has no selector, the harness default applies.
+  Only where the API has no selector at all is the selector omitted, and
+  the harness default applies.
 - any other value: pass it unchanged through a supported model selector.
 - if the available subagent API has no model selector, do not dispatch with
   an explicit value. Report: "mship resolved explicit model '<value>', but this subagent API cannot select a model; set this mode to inherit or use a selector-capable dispatch tool."

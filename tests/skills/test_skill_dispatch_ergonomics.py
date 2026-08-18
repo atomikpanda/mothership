@@ -125,7 +125,9 @@ def test_codex_and_pi_references_apply_or_reject_explicit_models():
     codex = _read("using-mothership", "references/codex-tools.md")
     pi = _read("using-mothership", "references/pi-tools.md")
 
-    assert "spawn_agent without a model selector" in codex
+    # inherit resolves to an explicit deliberate tier on selector-capable
+    # APIs (operator directive 2026-08-18) — never a silently omitted selector
+    assert "Choose a deliberate tier" in codex
     assert "pass it unchanged" in codex
     assert _UNSUPPORTED_SELECTOR_ERROR in codex
     assert "inspect its schema" in pi
