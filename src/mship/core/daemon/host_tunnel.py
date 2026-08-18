@@ -53,6 +53,11 @@ READBACK_INTERVAL_S = 30.0
 # `TunnelSupervisor` documents for its own tick.
 TICK_INTERVAL_S = 1.0
 
+# Bound on the orphan sweep's shell-out. Named because the daemon's shutdown
+# derives its tunnel-join bound from it (`core/daemon/run.py`) — a tick must
+# not be able to outlast the wait that exists to keep it from orphaning ssh.
+PROCESS_LIST_TIMEOUT_S = 10.0
+
 # What ssh prints when the relay has our key on file but nobody has approved it
 # yet. It is the FIRST evidence of that state — it arrives before any
 # registration verdict does — which is why the log tail is worth reading.
@@ -80,7 +85,8 @@ def list_processes() -> list[ProcessInfo]:
     try:
         out = subprocess.run(
             ["ps", "-eo", "pid=,ppid=,args="],
-            capture_output=True, text=True, timeout=10, check=True,
+            capture_output=True, text=True, timeout=PROCESS_LIST_TIMEOUT_S,
+            check=True,
         ).stdout
     except Exception as exc:
         log.debug("could not list processes for the orphan sweep: %s", exc)
@@ -194,12 +200,15 @@ class HostTunnel:
         return self.state()
 
     def stop(self) -> None:
-        """Terminate the ssh child and stay down. Idempotent — the second call
-        must not signal a pid the supervisor has already released."""
+        """Terminate the ssh child and stay down, for good. Idempotent — the
+        second call must not signal a pid the supervisor has already released.
+
+        `final=True` because this is the shutdown path: a tick still in flight
+        on another thread must not be able to dial a replacement behind us."""
         if self._stopped:
             return
         self._stopped = True
-        self._supervisor.stop()
+        self._supervisor.stop(final=True)
         self._online = False
 
     def _guard(self, what: str, fn: Callable[[], object]) -> None:

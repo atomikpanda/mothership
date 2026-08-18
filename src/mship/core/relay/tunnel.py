@@ -2,6 +2,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import logging
 import math
 import os
 import random
@@ -12,6 +13,8 @@ from pathlib import Path
 from typing import Callable
 
 from mship.core.relay.config import RelayConfig
+
+log = logging.getLogger(__name__)
 
 # Up to 20% OFF a scheduled delay (never added — see `jittered`): enough to
 # de-phase a fleet that all lost the relay in the same second, small enough that
@@ -170,6 +173,7 @@ class TunnelSupervisor:
 
         self._proc = None
         self._stopped = False          # True once stop() has been called
+        self._final = False            # ... and stopped for good: never spawn again
         self._restart_count = 0
         # Every process this supervisor has successfully launched. Unlike
         # `_restart_count` it only ever increases — `start()` zeroes the restart
@@ -190,7 +194,13 @@ class TunnelSupervisor:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Spawn the process for the first time."""
+        """Spawn the process for the first time.
+
+        Refused after a FINAL stop, and deliberately not re-armable: the caller
+        that wants a tunnel again after a shutdown is a new process."""
+        if self._final:
+            log.warning("refusing to dial: this tunnel supervisor was stopped for good")
+            return
         self._stopped = False
         self._restart_count = 0
         self._last_restart_at = None
@@ -229,12 +239,22 @@ class TunnelSupervisor:
         self._last_restart_at = None
         self._spawn()
 
-    def stop(self) -> None:
+    def stop(self, *, final: bool = False) -> None:
         """Terminate the supervised process and mark as intentionally stopped.
 
-        After stop(), tick() will not respawn the process.
+        After stop(), tick() will not respawn the process — but `start()` still
+        may, which is what the duplicate-identity recovery in `HostTunnel`
+        depends on.
+
+        `final=True` LATCHES that shut, and nothing re-arms it. It is for
+        process shutdown, where a caller already past its own checks (a tick
+        running on the executor thread while this runs on the loop thread) could
+        otherwise reach `start()` a moment after the child was signalled and
+        fork a fresh `start_new_session=True` ssh that nothing then owns — an
+        orphan holding the subdomain against the next boot (#471 AC7).
         """
         self._stopped = True
+        self._final = self._final or final
         if self._proc is not None:
             try:
                 self._proc.terminate()
@@ -300,6 +320,10 @@ class TunnelSupervisor:
         # never-started process as a healthy run and wipe the failure streak —
         # sawtoothing the escalation the clamp exists to reach.
         self._spawned_at = None
+        if self._final:
+            # Checked at the LAST moment, not only in start(): the caller may
+            # have passed its own check before the latch closed.
+            return
         argv = self._argv() if callable(self._argv) else self._argv
         self._proc = self._proc_factory(argv)
         self._spawned_at = self._clock()

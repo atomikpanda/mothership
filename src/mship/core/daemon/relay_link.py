@@ -73,7 +73,10 @@ JITTER = tunnel.BACKOFF_JITTER
 # daemon does.
 _MAX_EXPONENT = math.ceil(math.log2(host_contract.MAX_BACKOFF_S / RETRY_BASE_S))
 
-_HTTP_TIMEOUT_S = 10.0
+# Per-call bound on every relay HTTP call this link makes. Public: the daemon's
+# shutdown derives its tunnel-join bound from it (`core/daemon/run.py`), so a
+# worst-case tick cannot outlast the wait that exists to prevent an orphan.
+HTTP_TIMEOUT_S = 10.0
 
 # States that describe what the RELAY decided about us. A transport blip must
 # not erase them: "the relay is unreachable" is not "the relay approved us".
@@ -109,7 +112,7 @@ class RelayLink:
         signer: Callable[[bytes], str] | None = None,
         issue_refresh: Callable[[str], str] | None = None,
         reidentify: Callable[[], HostIdentity] | None = None,
-        timeout: float = _HTTP_TIMEOUT_S,
+        timeout: float = HTTP_TIMEOUT_S,
     ) -> None:
         self._home = Path(home)
         self._relay = relay_cfg

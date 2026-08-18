@@ -217,7 +217,11 @@ def register(parent: typer.Typer, get_container):
                 "persisted — use `mship daemon restart` to apply them"
             )
             raise typer.Exit(1)
-        relay_cfg = {"host": relay} if relay is not None else None
+        relay_host = relay.strip() if relay is not None else None
+        if relay is not None and not relay_host:
+            out.error(f"--relay expects HOST, got {relay!r}")
+            raise typer.Exit(1)
+        relay_cfg = {"host": relay_host} if relay_host else None
         merged = None
         if roots or serve_cfg is not None or relay_cfg is not None:
             from mship.core.daemon.registry import save_daemon_config

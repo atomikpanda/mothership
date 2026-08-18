@@ -180,11 +180,21 @@ def _build_tunnel(home: Path, relay_cfg, serve_cfg):
         return None
 
 
-# How long a shutdown waits for the tunnel loop's in-flight tick before it
-# cancels: bounded because that tick can be inside a 10s HTTP timeout, and
-# systemd's TimeoutStopSec ends in SIGKILL — which is precisely how an ssh child
-# orphans onto the subdomain.
-_TUNNEL_JOIN_TIMEOUT_S = 5.0
+def _tunnel_join_timeout() -> float:
+    """How long a shutdown waits for the tunnel loop's in-flight tick.
+
+    DERIVED, never picked: cancelling the loop cannot interrupt the tick already
+    running in the executor, so a bound shorter than a worst-case tick would
+    routinely give up while one is still in flight. That worst case is the three
+    relay calls a single tick can make (challenge, register, enroll) plus the
+    orphan sweep's `ps`, each bounded by its own timeout. Still bounded, because
+    a daemon that never returns is SIGKILLed by systemd — which is itself how an
+    ssh child orphans onto the subdomain (#471 AC7).
+    """
+    from mship.core.daemon.host_tunnel import PROCESS_LIST_TIMEOUT_S
+    from mship.core.daemon.relay_link import HTTP_TIMEOUT_S
+
+    return 3 * HTTP_TIMEOUT_S + PROCESS_LIST_TIMEOUT_S
 
 
 def _serve_forever(control_app, socket_path, host_app, serve_cfg, tunnel=None) -> None:
@@ -278,9 +288,17 @@ def _install_stop_handlers(stop, servers) -> None:
     """One Event for the whole process, set by SIGTERM/SIGINT.
 
     Uvicorn's own handlers only set `should_exit` on the server that installed
-    them, so nothing else in the process would ever learn a stop was requested;
-    the shutdown path below sets this Event too, making the handlers the fast
-    path rather than the only one."""
+    them, so nothing else in the process would ever learn a stop was requested.
+
+    ORDERING, deliberately not relied upon: uvicorn captures signals with
+    `signal.signal` from inside `serve()`, and so does `add_signal_handler` —
+    last install wins. Ours goes in after the TCP bind wait, which is after both
+    servers have started (so ours wins) in the host shape, but before the
+    control server's first await in the control-only shape (so uvicorn's wins
+    there). Both outcomes are correct, and that is the point: uvicorn's handler
+    ends its server's task, and the shutdown path below sets this Event the
+    moment ANY server task completes. The handler here is the fast path, never
+    the only one."""
     import asyncio
     import signal
 
@@ -330,9 +348,15 @@ async def _join_tunnel(task) -> None:
 
     if task is None:
         return
-    await asyncio.wait({task}, timeout=_TUNNEL_JOIN_TIMEOUT_S)
+    await asyncio.wait({task}, timeout=_tunnel_join_timeout())
     task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
+    for result in await asyncio.gather(task, return_exceptions=True):
+        # `return_exceptions` keeps a shutdown going; it must not also make a
+        # crashed tunnel loop invisible.
+        if isinstance(result, BaseException) and not isinstance(
+            result, asyncio.CancelledError
+        ):
+            log.error("tunnel loop stopped on an error: %r", result)
 
 
 def _configure_logging(home: Path) -> None:

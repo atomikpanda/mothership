@@ -51,15 +51,18 @@ def _fake_uvicorn(monkeypatch, *, on_serve=None, hold=False):
     Config it builds rather than on a `run()` call. Reaching `uvicorn.run` at
     all is now itself a failure, which is what pins the asyncio branch.
 
-    Returns `(control_kwargs, servers)`. `hold=True` makes `serve()` run until
-    something sets `should_exit`, so a test can drive shutdown; otherwise each
-    server serves once and reports the clean exit a signalled uvicorn does.
+    Returns `(configs, servers)`, in construction order and unfiltered — the
+    shape of a startup is how many servers it builds and what each was given,
+    so a test asserts both rather than reading a dict that only ever holds the
+    kwargs it expected. `hold=True` makes `serve()` run until something sets
+    `should_exit`, so a test can drive shutdown; otherwise each server serves
+    once and reports the clean exit a signalled uvicorn does.
     """
     import asyncio
 
     import uvicorn
 
-    control_kwargs: dict = {}
+    configs: list = []
     servers: list = []
 
     class _Config:
@@ -67,8 +70,7 @@ def _fake_uvicorn(monkeypatch, *, on_serve=None, hold=False):
             self.app = app
             self.kwargs = kwargs
             self.host = kwargs.get("host")
-            if self.host is None:  # the control server, on the unix socket
-                control_kwargs.update(kwargs)
+            configs.append(self)
 
     class _Server:
         def __init__(self, config):
@@ -93,12 +95,12 @@ def _fake_uvicorn(monkeypatch, *, on_serve=None, hold=False):
     monkeypatch.setattr(uvicorn, "Config", _Config)
     monkeypatch.setattr(uvicorn, "Server", _Server)
     monkeypatch.setattr(uvicorn, "run", _forbidden)
-    return control_kwargs, servers
+    return configs, servers
 
 
 def _capture_uvicorn(monkeypatch, on_serve=None):
-    seen, _servers = _fake_uvicorn(monkeypatch, on_serve=on_serve)
-    return seen
+    configs, _servers = _fake_uvicorn(monkeypatch, on_serve=on_serve)
+    return configs
 
 
 def test_main_acquires_lease_then_serves_socket(env_home, monkeypatch):
@@ -110,12 +112,15 @@ def test_main_acquires_lease_then_serves_socket(env_home, monkeypatch):
         lease_seen_held_by_uvicorn["lease"] = json.loads(lease_path(home).read_text())
         lease_seen_held_by_uvicorn["history"] = [e.kind for e in read_history(run_mod.paths.start_history_path(home))]
 
-    seen = _capture_uvicorn(monkeypatch, on_serve=record)
+    configs = _capture_uvicorn(monkeypatch, on_serve=record)
     rc = run_mod.main(home=home, env=env)
     assert rc == 0
-    assert seen["uds"] == str(daemon_socket_path(env, home))
-    assert "host" not in seen and "port" not in seen
-    assert seen["log_config"] is None
+    # No serve bind configured: ONE server, on the unix socket and nothing else.
+    assert len(configs) == 1
+    bound = configs[0].kwargs
+    assert bound["uds"] == str(daemon_socket_path(env, home))
+    assert "host" not in bound and "port" not in bound
+    assert bound["log_config"] is None
     assert lease_seen_held_by_uvicorn["lease"]["pid"] > 0
     assert "start" in lease_seen_held_by_uvicorn["history"]
 
@@ -149,7 +154,7 @@ def test_lost_race_with_live_holder_exits_zero(env_home, foreign_holder, monkeyp
     with caplog.at_level(logging.INFO):
         rc = run_mod.main(home=home, env=env)
     assert rc == 0
-    assert called == {}  # uvicorn never entered
+    assert called == []  # no server was ever configured
     assert any("already running" in r.message for r in caplog.records)
 
 
@@ -159,7 +164,7 @@ def test_lost_race_with_dead_holder_exits_nonzero(env_home, foreign_holder, monk
     monkeypatch.setattr(run_mod, "_probe", lambda sock: None)  # holder never answers
     rc = run_mod.main(home=home, env=env)
     assert rc != 0
-    assert called == {}
+    assert called == []
 
 
 def test_stale_socket_file_is_removed_before_bind(env_home, monkeypatch):
@@ -459,7 +464,7 @@ def test_unbuildable_relay_logs_and_leaves_the_daemon_healthy(env_home, monkeypa
     host without a tunnel, never a host that refuses to start."""
     home, env = env_home
     _seed_config(home, serve=SERVE_BLOCK, relay=RELAY_BLOCK)
-    seen = _capture_uvicorn(monkeypatch)
+    configs = _capture_uvicorn(monkeypatch)
 
     def boom(*a, **k):
         raise RuntimeError("no key material")
@@ -469,7 +474,10 @@ def test_unbuildable_relay_logs_and_leaves_the_daemon_healthy(env_home, monkeypa
     rc = run_mod.main(home=home, env=env)
 
     assert rc == 0
-    assert seen["uds"] == str(daemon_socket_path(env, home))
+    # The serve bind still came up beside the control socket; only the tunnel
+    # is missing.
+    assert [c.kwargs.get("host") for c in configs] == [None, SERVE_BLOCK["host"]]
+    assert configs[0].kwargs["uds"] == str(daemon_socket_path(env, home))
     assert [e.kind for e in read_history(run_mod.paths.start_history_path(home))] == [
         "start", "clean_stop",
     ]
@@ -543,3 +551,34 @@ def test_no_relay_block_means_no_tunnel(tmp_path):
     home.mkdir()
     assert run_mod._relay_config(home) is None
     assert run_mod._build_tunnel(home, None, SERVE_BLOCK) is None
+
+
+@pytest.mark.parametrize("server_count", [1, 2])
+def test_sigterm_sets_the_shared_event_and_stops_every_server(server_count):
+    """Decision (c)'s centerpiece, asserted in-process because a signal handler
+    has no other honest test: uvicorn's own handlers set `should_exit` on the
+    ONE server that installed them, so a tunnel loop beside them would never
+    learn a stop was requested — the daemon would then outlive
+    `TimeoutStopSec`, be SIGKILLed, and orphan its ssh child. Both shapes:
+    control-only (1) and control+host (2)."""
+    import asyncio
+    import os
+    import signal
+
+    class _Server:
+        def __init__(self):
+            self.should_exit = False
+
+    async def scenario():
+        stop = asyncio.Event()
+        servers = [_Server() for _ in range(server_count)]
+        run_mod._install_stop_handlers(stop, servers)
+        if signal.getsignal(signal.SIGTERM) in (signal.SIG_DFL, signal.SIG_IGN):
+            pytest.skip("no asyncio signal handlers on this platform")
+        os.kill(os.getpid(), signal.SIGTERM)
+        await asyncio.wait_for(stop.wait(), timeout=5)
+        return servers
+
+    servers = asyncio.run(scenario())
+
+    assert all(server.should_exit for server in servers)

@@ -626,3 +626,54 @@ def test_state_covers_the_whole_vocabulary(tmp_path):
     seen.add(broken.tunnel.tick())
 
     assert seen == set(STATES)
+
+
+def test_stop_landing_inside_a_tick_spawns_nothing_afterwards(tmp_path):
+    """AC7's orphan window: `stop()` runs on the daemon's loop thread while a
+    tick runs in the executor. A tick already past its own stopped-check goes on
+    to `_redial`, and without a latch that call would fork a fresh
+    `start_new_session=True` ssh AFTER the child was signalled — an orphan
+    holding the subdomain that nothing in this process owns any more."""
+    clock = _Clock()
+    fixture = _Fixture(tmp_path, _Relay(), clock)
+    real_link_tick = fixture.link.tick
+
+    def shutdown_lands_mid_tick():
+        fixture.tunnel.stop()
+        return real_link_tick()
+
+    fixture.link.tick = shutdown_lands_mid_tick
+
+    fixture.tunnel.tick()
+
+    assert fixture.procs == [], "dialed a tunnel after the daemon stopped it"
+    assert fixture.tunnel.state() == "disabled"
+
+
+def test_a_child_respawned_in_the_same_tick_as_the_stop_is_still_terminated(
+    tmp_path,
+):
+    """The same window one layer in: the respawn happens earlier in the very
+    tick the shutdown lands in. That child must be signalled and must be the
+    last one — the danger is not the spawn, it is a spawn nothing then owns."""
+    clock = _Clock()
+    fixture = _Fixture(tmp_path, _Relay(), clock)
+    fixture.connect()
+    fixture.kill_child()
+    clock.advance(120)                      # any backoff has long since elapsed
+    real_link_tick = fixture.link.tick
+
+    def shutdown_lands_mid_tick():
+        fixture.tunnel.stop()
+        return real_link_tick()
+
+    fixture.link.tick = shutdown_lands_mid_tick
+
+    fixture.tunnel.tick()
+    spawned_by_shutdown_tick = len(fixture.procs)
+    fixture.tunnel.tick()
+    clock.advance(120)
+    fixture.tunnel.tick()
+
+    assert fixture.child.terminated, "the respawned child outlived the stop"
+    assert len(fixture.procs) == spawned_by_shutdown_tick

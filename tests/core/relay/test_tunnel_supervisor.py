@@ -239,3 +239,28 @@ def test_callable_argv_is_re_resolved_at_every_spawn():
 
     assert len(spawned) == 2
     assert spawned[1][-1].startswith("new-sub:")
+
+
+def test_plain_stop_is_reversible_but_a_final_stop_is_not():
+    """`HostTunnel` stops the child to sit out a duplicate identity and dials
+    again when it clears, so stop() must stay reversible — while the shutdown
+    path must be able to latch it shut against a tick still in flight (#471
+    AC7)."""
+    procs = []
+
+    def factory(argv):
+        procs.append(FakeProc())
+        return procs[-1]
+
+    sup = TunnelSupervisor(argv=["ssh", "..."], proc_factory=factory)
+    sup.start()
+    sup.stop()
+    sup.start()
+    assert len(procs) == 2, "a transient stop must not end the tunnel for good"
+
+    sup.stop(final=True)
+    sup.start()
+    sup.tick()
+
+    assert len(procs) == 2
+    assert not sup.is_running()

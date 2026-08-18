@@ -663,11 +663,40 @@ def test_install_rejects_relay_when_merged_config_has_no_serve_bind(cli, tmp_pat
     assert not any(call.startswith("install:") for call in fake.calls)
 
 
+@pytest.mark.parametrize("relay", ["", "   "])
+def test_install_rejects_an_empty_relay_host(cli, tmp_path, relay):
+    from mship.core.daemon.registry import load_daemon_config
+
+    app, fake = cli
+    res = runner.invoke(app, [
+        "daemon", "install", "--serve", "127.0.0.1:47190", "--relay", relay,
+    ])
+    assert res.exit_code == 1
+    assert "HOST" in res.output
+    assert load_daemon_config(tmp_path).relay is None
+    assert not any(call.startswith("install:") for call in fake.calls)
+
+
+def test_install_strips_surrounding_whitespace_from_the_relay_host(cli, tmp_path):
+    from mship.core.daemon.registry import load_daemon_config
+
+    app, _fake = cli
+    res = runner.invoke(app, [
+        "daemon", "install", "--serve", "127.0.0.1:47190",
+        "--relay", "  relay.example.com  ",
+    ])
+    assert res.exit_code == 0, res.output
+    assert load_daemon_config(tmp_path).relay == {"host": "relay.example.com"}
+
+
 def test_install_help_documents_that_relay_needs_a_restart(cli):
     app, _fake = cli
     res = runner.invoke(app, ["daemon", "install", "--help"])
     assert res.exit_code == 0
-    assert "restart" in res.output
+    # Rich wraps option help across lines inside a box; strip the frame and
+    # collapse the wrapping before matching the sentence.
+    text = " ".join(res.output.replace("│", " ").split())
+    assert "a changed relay takes effect on `mship daemon restart`" in text
 
 
 @pytest.mark.parametrize("serve", ["nonsense", "127.0.0.1:0", "127.0.0.1:65536"])
