@@ -13,6 +13,7 @@ from mship.webui import mount_webui
 PAYLOAD = {
     "version": 1, "mship_version": "0.5.20", "workspace": "ws",
     "probed_at": "2026-07-25T16:00:00+00:00",
+    "ui_root": "/ui",
     "edges": [{
         "kind": "relay", "name": "relay", "status": "fail",
         "code": "relay_unreachable", "detail": "down",
@@ -84,9 +85,9 @@ def test_per_edge_derivation_stays_inside_edges(monkeypatch):
 _PAGE_PAYLOADS = {
     "topology.html": set(PAYLOAD),
     "doctor.html": {"workspace", "checks", "failures", "warnings",
-                    "mship_version", "probed_at"},
+                    "mship_version", "probed_at", "ui_root"},
     "pair.html": {"workspace", "qr_data_uri", "unavailable_reason",
-                  "mship_version", "probed_at"},
+                  "mship_version", "probed_at", "ui_root"},
 }
 
 #: Shared shell: every payload must carry these, plus `request`, which

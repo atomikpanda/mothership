@@ -21,6 +21,7 @@ import fcntl
 import json
 import os
 import stat
+import tempfile
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -201,10 +202,30 @@ def load_daemon_config(home: Path) -> DaemonConfig:
 
 def save_daemon_config(home: Path, cfg: DaemonConfig) -> None:
     from mship.core.daemon.paths import daemon_config_path
-
     path = daemon_config_path(home)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.write_text(yaml.safe_dump(cfg.model_dump(exclude_none=True), sort_keys=False))
+    path.parent.chmod(0o700)
+    content = yaml.safe_dump(
+        cfg.model_dump(exclude_none=True), sort_keys=False
+    ).encode()
+    fd, temp_name = tempfile.mkstemp(
+        prefix=path.name + ".", dir=path.parent
+    )
+    temp = Path(temp_name)
+    try:
+        os.fchmod(fd, 0o600)
+        stream = os.fdopen(fd, "wb")
+        fd = -1
+        with stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        temp.unlink(missing_ok=True)
+        raise
 
 
 # ---------------------------------------------------------------------------

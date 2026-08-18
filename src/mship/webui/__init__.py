@@ -175,6 +175,15 @@ def mount_webui(
         "unavailable_reason": "Pairing is not available from this serve.",
     })
 
+    def _ui_root(request: Request) -> str:
+        return request.scope.get("root_path") or MOUNT_PATH
+
+    def _page_payload(request: Request, source: Callable[[], dict]) -> dict:
+        payload = dict(source())
+        payload["ui_root"] = _ui_root(request)
+        return payload
+
+
     def _credentialed(request: Request) -> bool:
         if auth_token is None:
             return True
@@ -195,13 +204,13 @@ def mount_webui(
     def doctor_page(request: Request):
         from mship.webui.views import render_doctor
 
-        return render_doctor(request, _doctor())
+        return render_doctor(request, _page_payload(request, _doctor))
 
     @console.get("/pair", include_in_schema=False)
     def pair_page(request: Request):
         from mship.webui.views import render_pair
 
-        return render_pair(request, _pair())
+        return render_pair(request, _page_payload(request, _pair))
 
     @console.get("/", include_in_schema=False)
     def ui(request: Request, token: str | None = Query(default=None)):
@@ -234,12 +243,14 @@ def mount_webui(
                 max_age=COOKIE_MAX_AGE_SECONDS,
                 httponly=True,
                 samesite="strict",
-                path=MOUNT_PATH,
+                path=_ui_root(request),
                 secure=secure,
             )
             return response
 
-        return render_topology(request, payload_source())
+        return render_topology(
+            request, _page_payload(request, payload_source)
+        )
 
     console.mount(
         "/static",

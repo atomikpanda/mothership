@@ -102,8 +102,14 @@ def test_forward_routes_to_right_workspace_no_cross_bleed(two_ws_app):
     with TestClient(app) as client:
         r1 = client.get("/workspaces/ws-meta/specs")
         r2 = client.get("/workspaces/ws-mono/specs")
-        assert r1.json() == {"workspace": "meta", "path": "/specs"}
-        assert r2.json() == {"workspace": "mono", "path": "/specs"}
+        assert r1.json() == {
+            "workspace": "meta",
+            "path": "/workspaces/ws-meta/specs",
+        }
+        assert r2.json() == {
+            "workspace": "mono",
+            "path": "/workspaces/ws-mono/specs",
+        }
 
 
 def test_subapp_lifespans_actually_start_and_stop(two_ws_app):
@@ -155,6 +161,51 @@ def test_host_token_gates_everything(tmp_path):
         ok = client.get("/workspaces", headers={"Authorization": "Bearer sekrit"})
         assert ok.status_code == 200
         assert client.get("/workspaces/ws-a/specs", headers={"Authorization": "Bearer sekrit"}).status_code == 200
+
+
+def test_workspace_ui_keeps_host_namespace_for_links_assets_and_cookie(
+    tmp_path,
+):
+    from fastapi import FastAPI
+
+    from mship.webui import mount_webui
+
+    home = tmp_path / "home"
+    store = _seed(home, [_entry("ws-a", "a", tmp_path / "a")])
+
+    def build(_entry, *, auth_token, **_kwargs):
+        subapp = FastAPI()
+        mount_webui(
+            subapp,
+            payload_source=lambda: {
+                "workspace": "a",
+                "edges": [],
+                "mship_version": "test",
+                "probed_at": "now",
+            },
+            auth_token=auth_token,
+        )
+        return subapp
+
+    app = create_host_app(
+        store, auth_token="sekrit", build_subapp=build
+    )
+    ui_root = "/workspaces/ws-a/ui"
+    with TestClient(app, base_url="https://testserver") as client:
+        exchange = client.get(
+            f"{ui_root}/?token=sekrit",
+            follow_redirects=False,
+        )
+        assert exchange.status_code == 303
+        assert exchange.headers["location"] == f"{ui_root}/"
+        assert f"Path={ui_root}" in exchange.headers["set-cookie"]
+
+        html = client.get(exchange.headers["location"])
+        assert html.status_code == 200
+        assert f'href="{ui_root}/static/app.css"' in html.text
+        assert f'href="{ui_root}/doctor"' in html.text
+        assert client.get(f"{ui_root}/static/app.css").status_code == 200
+        assert client.get(f"{ui_root}/doctor").status_code == 200
 
 
 def test_host_passes_github_app_credentials_to_workspace_subapp(tmp_path):

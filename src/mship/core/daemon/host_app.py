@@ -229,6 +229,45 @@ def _default_build_subapp(
     )
 
 
+def _make_host_auth_dependency(token: str):
+    """Accept the host bearer, plus the namespaced UI's token/cookie exchange."""
+    import hmac
+    import time
+
+    from fastapi import Header
+
+    from mship.webui import COOKIE_NAME, _cookie_is_valid
+
+    expected = f"Bearer {token}".encode()
+
+    def require_host_token(
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ):
+        provided = (authorization or "").encode()
+        if hmac.compare_digest(provided, expected):
+            return
+        segments = request.url.path.split("/")
+        is_workspace_ui = any(
+            segments[index] == "workspaces"
+            and segments[index + 1]
+            and segments[index + 2] == "ui"
+            for index in range(len(segments) - 2)
+        )
+        if is_workspace_ui:
+            supplied = request.query_params.get("token") or ""
+            if hmac.compare_digest(supplied.encode(), token.encode()):
+                return
+            cookie = request.cookies.get(COOKIE_NAME) or ""
+            if cookie and _cookie_is_valid(cookie, token, now=int(time.time())):
+                return
+        raise HTTPException(
+            status_code=401, detail="missing or invalid bearer token"
+        )
+
+    return require_host_token
+
+
 def create_host_app(
     store: RegistryStore,
     *,
@@ -247,7 +286,7 @@ def create_host_app(
     """
     from contextlib import asynccontextmanager
 
-    from mship.core.serve import _make_auth_dependency
+
 
     subapps: dict[str, _SubApp] = {}
     lock = asyncio.Lock()
@@ -262,7 +301,7 @@ def create_host_app(
                     await sub.stop()
                 subapps.clear()
 
-    dependencies = [Depends(_make_auth_dependency(auth_token))] if auth_token else []
+    dependencies = [Depends(_make_host_auth_dependency(auth_token))] if auth_token else []
     app = FastAPI(title="mship host", docs_url=None, redoc_url=None,
                   openapi_url=None, dependencies=dependencies, lifespan=_lifespan)
 
@@ -363,11 +402,16 @@ def create_host_app(
             # never an opaque 500.
             raise HTTPException(status_code=503, detail=f"workspace {entry.name!r} unavailable: {e}")
 
-        # ASGI forward with the prefix stripped, so create_app's routes see /specs etc.
+        # ASGI path remains the full request path while root_path identifies the
+        # host-owned workspace prefix. Starlette removes root_path for sub-app
+        # route matching and appends mounted /ui for URL/cookie generation.
         scope = dict(request.scope)
-        scope["path"] = "/" + path
-        scope["raw_path"] = ("/" + path).encode()
-        scope["root_path"] = ""
+        host_root = request.scope.get("root_path", "").rstrip("/")
+        workspace_root = f"{host_root}/workspaces/{workspace_id}"
+        subapp_path = "/" + path
+        scope["root_path"] = workspace_root
+        scope["path"] = workspace_root + subapp_path
+        scope["raw_path"] = scope["path"].encode()
 
         # STREAMED, not buffered: `POST /exec/{verb}` is consumed with
         # iter_raw() to render task output live, and a client disconnect must

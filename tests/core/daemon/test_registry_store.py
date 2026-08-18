@@ -2,6 +2,8 @@
 behavioral pin for "no exclusive cross-host ownership": arbitration belongs to
 #473's claims (see WorkspaceEntry docstring), not to registry state."""
 import multiprocessing
+import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -221,3 +223,60 @@ def test_registry_read_error_fails_load_mutate_and_reconcile_without_overwrite(
 
     assert mutation_calls == 0
     assert path.read_bytes() == previous
+
+
+def test_daemon_config_save_is_atomically_visible(tmp_path, monkeypatch):
+    previous = DaemonConfig(scan_roots=["/previous"])
+    replacement = DaemonConfig(scan_roots=["/replacement"])
+    save_daemon_config(tmp_path, previous)
+    path = daemon_config_path(tmp_path)
+    replace_started = threading.Event()
+    allow_replace = threading.Event()
+    errors = []
+    real_replace = os.replace
+
+    def delayed_replace(source, destination):
+        replace_started.set()
+        if not allow_replace.wait(timeout=1):
+            raise TimeoutError("test did not release config replace")
+        real_replace(source, destination)
+
+    def save_replacement():
+        try:
+            save_daemon_config(tmp_path, replacement)
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(os, "replace", delayed_replace)
+    worker = threading.Thread(target=save_replacement, daemon=True)
+    worker.start()
+    assert replace_started.wait(timeout=1)
+    assert load_daemon_config(tmp_path) == previous
+    allow_replace.set()
+    worker.join(timeout=1)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert load_daemon_config(tmp_path) == replacement
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_daemon_config_replace_failure_preserves_previous_bytes(
+    tmp_path, monkeypatch
+):
+    previous = DaemonConfig(scan_roots=["/previous"])
+    save_daemon_config(tmp_path, previous)
+    path = daemon_config_path(tmp_path)
+    previous_bytes = path.read_bytes()
+
+    def fail_replace(_source, _destination):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        save_daemon_config(
+            tmp_path, DaemonConfig(scan_roots=["/replacement"])
+        )
+
+    assert path.read_bytes() == previous_bytes
+    assert list(path.parent.glob(path.name + ".*")) == []
