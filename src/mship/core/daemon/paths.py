@@ -34,6 +34,20 @@ def host_identity_path(home: Path) -> Path:
     return daemon_state_dir(home) / "host-identity.json"
 
 
+def host_secret_path(home: Path) -> Path:
+    """The per-host root secret (`core.daemon.host_token`). Read-only — creates
+    nothing, so a reporter can check for it without minting one."""
+    return daemon_state_dir(home) / "host-root-secret"
+
+
+def host_tokens_path(home: Path) -> Path:
+    return daemon_state_dir(home) / "host-tokens.json"
+
+
+def host_refresh_path(home: Path) -> Path:
+    return daemon_state_dir(home) / "host-refresh.json"
+
+
 def registry_path(home: Path) -> Path:
     return daemon_state_dir(home) / "workspaces.json"
 
