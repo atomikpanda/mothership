@@ -344,8 +344,8 @@ def test_stale_launchd_capture_does_not_hide_fresh_daemon_log(tmp_path):
     assert tail == ["fresh-1", "fresh-2"], tail
 
 
-def test_trimming_oversized_stale_capture_preserves_log_order(tmp_path):
-    """Compaction must not make an old launchd capture look newer than daemon.log."""
+def test_rotating_oversized_stale_capture_preserves_log_order(tmp_path):
+    """Rollover must not make an old launchd capture look newer than daemon.log."""
     import os
     import time
 
@@ -477,17 +477,45 @@ def test_logs_tail_read_is_bounded_not_just_the_seek(tmp_path):
     assert len("\n".join(lines).encode()) <= sup_mod._TAIL_READ_BYTES
 
 
-def test_logs_tail_preserves_latest_evidence_when_trimming_oversized_capture(tmp_path):
-    """The operator-facing trim must retain the newest crash evidence."""
+def test_logs_tail_preserves_latest_evidence_when_rotating_oversized_capture(tmp_path):
+    """The operator-facing rollover must retain the newest crash evidence."""
     from mship.core.daemon.log_capture import LAUNCHD_CAPTURE_MAX_BYTES
 
     log_dir = tmp_path / ".mothership" / "daemon" / "logs"
     log_dir.mkdir(parents=True)
     (log_dir / "daemon.log").write_text("app\n")
-    huge = log_dir / "launchd.err.log"
+    capture = log_dir / "launchd.err.log"
     latest = b"latest startup traceback\n"
-    huge.write_bytes(b"y" * (LAUNCHD_CAPTURE_MAX_BYTES + 2048) + b"\n" + latest)
+    capture.write_bytes(b"y" * (LAUNCHD_CAPTURE_MAX_BYTES + 2048) + b"\n" + latest)
     sup, _ = _linux(tmp_path)
     assert sup.logs_tail(5)[-1] == latest.decode().strip()
-    assert huge.stat().st_size == LAUNCHD_CAPTURE_MAX_BYTES
-    assert huge.read_bytes().endswith(latest)
+    assert not capture.exists()
+    assert (log_dir / "launchd.err.log.1").read_bytes().endswith(latest)
+
+
+def test_capture_rollover_does_not_discard_open_writer_appends(tmp_path, monkeypatch):
+    """An O_APPEND fd follows the atomic rename, so writes survive rollover."""
+    import os
+
+    import mship.core.daemon.log_capture as capture_mod
+
+    log_dir = tmp_path / ".mothership" / "daemon" / "logs"
+    log_dir.mkdir(parents=True)
+    capture = log_dir / "launchd.err.log"
+    capture.write_bytes(b"x" * (capture_mod.LAUNCHD_CAPTURE_MAX_BYTES + 1))
+    marker = b"concurrent launchd append\n"
+    writer = open(capture, "ab", buffering=0)
+    real_replace = os.replace
+
+    def replace_and_append(src, dst):
+        real_replace(src, dst)
+        writer.write(marker)
+
+    monkeypatch.setattr(capture_mod.os, "replace", replace_and_append)
+    try:
+        capture_mod.rotate_launchd_captures(log_dir)
+    finally:
+        writer.close()
+
+    retired = log_dir / "launchd.err.log.1"
+    assert retired.read_bytes().endswith(marker)

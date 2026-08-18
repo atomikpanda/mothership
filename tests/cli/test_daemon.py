@@ -125,6 +125,34 @@ def test_status_renders_skew_and_warnings(cli, monkeypatch):
     assert "outside the supervisor" in res.output
 
 
+def test_status_rotates_oversized_launchd_capture(cli, tmp_path):
+    """Status must bound a pre-main crash loop even when logs is never called."""
+    from mship.core.daemon.log_capture import LAUNCHD_CAPTURE_MAX_BYTES
+    from mship.core.daemon.paths import daemon_log_dir
+
+    app, _ = cli
+    log_dir = daemon_log_dir(tmp_path)
+    log_dir.mkdir(parents=True)
+    capture = log_dir / "launchd.err.log"
+    latest = b"latest startup traceback\n"
+    capture.write_bytes(b"x" * (LAUNCHD_CAPTURE_MAX_BYTES + 1) + latest)
+
+    res = runner.invoke(app, ["daemon", "status"])
+
+    assert res.exit_code == 0, res.output
+    retired = log_dir / "launchd.err.log.1"
+    assert not capture.exists()
+    assert retired.read_bytes().endswith(latest)
+
+    # A later launch recreates the active path only after the retired writer
+    # exits; the next status can then compact that inactive generation safely.
+    capture.write_text("next launch\n")
+    res = runner.invoke(app, ["daemon", "status"])
+    assert res.exit_code == 0, res.output
+    assert retired.stat().st_size == LAUNCHD_CAPTURE_MAX_BYTES
+    assert retired.read_bytes().endswith(latest)
+
+
 def test_logs_prints_tail(cli):
     app, fake = cli
     res = runner.invoke(app, ["daemon", "logs"])

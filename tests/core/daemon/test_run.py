@@ -183,34 +183,36 @@ def test_entrypoint_registered():
 def test_oversized_launchd_capture_preserves_latest_evidence_on_start(
     env_home, monkeypatch
 ):
-    """Capping launchd's unrotated capture retains the newest crash evidence."""
+    """Atomic rollover caps the active capture without losing crash evidence."""
     home, env = env_home
     _capture_uvicorn(monkeypatch)
     log_dir = daemon_log_dir(home)
     log_dir.mkdir(parents=True, exist_ok=True)
-    big = log_dir / "launchd.err.log"
+    capture = log_dir / "launchd.err.log"
     latest = b"latest startup traceback\n"
-    big.write_bytes(b"x" * (run_mod.LAUNCHD_CAPTURE_MAX_BYTES + 1024) + latest)
+    capture.write_bytes(b"x" * (run_mod.LAUNCHD_CAPTURE_MAX_BYTES + 1024) + latest)
     small = log_dir / "launchd.out.log"
     small.write_text("keep me\n")
 
     assert run_mod.main(home=home, env=env) == 0
 
-    assert big.stat().st_size == run_mod.LAUNCHD_CAPTURE_MAX_BYTES
-    assert big.read_bytes().endswith(latest)
+    assert not capture.exists()
+    assert (log_dir / "launchd.err.log.1").read_bytes().endswith(latest)
     assert small.read_text() == "keep me\n"
-    assert "trimmed oversized launchd capture" in (log_dir / "daemon.log").read_text()
+    assert "rolled over oversized launchd capture" in (
+        log_dir / "daemon.log"
+    ).read_text()
 
 
-def test_capture_trimmed_before_logging_setup(env_home, monkeypatch):
+def test_capture_rotated_before_logging_setup(env_home, monkeypatch):
     """A crash loop is often a BROKEN IMPORT that dies before logging is
-    configured; trimming must happen first, not inside _configure_logging."""
+    configured; rollover must happen first, not inside _configure_logging."""
     home, env = env_home
     order: list[str] = []
-    monkeypatch.setattr(run_mod, "trim_launchd_captures",
-                        lambda d: order.append("trim") or [])
+    monkeypatch.setattr(run_mod, "rotate_launchd_captures",
+                        lambda d: order.append("rotate") or [])
     monkeypatch.setattr(run_mod, "_configure_logging",
                         lambda h: order.append("logging"))
     monkeypatch.setattr(run_mod, "_run", lambda h, e: order.append("run") or 0)
     assert run_mod.main(home=home, env=env) == 0
-    assert order[0] == "trim", order
+    assert order[0] == "rotate", order

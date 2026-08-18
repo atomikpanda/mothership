@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable, Literal
 
 from mship.core.daemon.paths import daemon_log_dir
-from mship.core.daemon.log_capture import trim_launchd_captures
+from mship.core.daemon.log_capture import rotate_launchd_captures
 from mship.core.daemon.units import (
     LAUNCHD_LABEL,
     SYSTEMD_UNIT_NAME,
@@ -98,9 +98,9 @@ class _BaseSupervisor:
         """Last N lines across daemon.log + rotated siblings — pure Python, no
         journalctl (the phone-only-client case needs OS-independent logs)."""
         log_dir = daemon_log_dir(self._home)
-        # A daemon that dies before main() cannot trim its own capture, so the
-        # operator-facing path trims too (#475 review).
-        trim_launchd_captures(log_dir)
+        # A daemon that dies before main() cannot roll over its own capture, so
+        # the operator-facing path does too (#475 review).
+        rotate_launchd_captures(log_dir)
         files = sorted(
             log_dir.glob("daemon.log*"),
             key=lambda p: int(p.suffix[1:]) if p.suffix[1:].isdigit() else 0,
@@ -116,7 +116,7 @@ class _BaseSupervisor:
         # Ordered by MTIME against the daemon logs rather than appended last:
         # a stale launchd.err.log with >= n lines would otherwise crowd the
         # current daemon.log out of the `-n` tail.
-        launchd = sorted(log_dir.glob("launchd.*.log"))
+        launchd = sorted(log_dir.glob("launchd.*.log*"))
         if launchd:
             def _mtime(p: Path) -> float:
                 try:

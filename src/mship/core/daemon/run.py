@@ -22,7 +22,10 @@ from pathlib import Path
 from typing import Mapping
 
 from mship.core.daemon import history, lease as lease_mod, paths
-from mship.core.daemon.log_capture import LAUNCHD_CAPTURE_MAX_BYTES, trim_launchd_captures
+from mship.core.daemon.log_capture import (
+    LAUNCHD_CAPTURE_MAX_BYTES,
+    rotate_launchd_captures,
+)
 
 log = logging.getLogger(__name__)
 
@@ -77,11 +80,15 @@ def main(home: Path | None = None, env: Mapping[str, str] | None = None) -> int:
     # FIRST, before any heavier import or setup can fail: the crash loop this
     # guards against is frequently a broken import, and every relaunch appends
     # another traceback to the launchd capture. Logged once logging exists, so
-    # the compaction is never silent.
-    trimmed = trim_launchd_captures(paths.daemon_log_dir(home))
+    # the rollover is never silent.
+    changed = rotate_launchd_captures(paths.daemon_log_dir(home))
     _configure_logging(home)
-    for name in trimmed:
-        log.warning("trimmed oversized launchd capture %s (>%d bytes)", name, LAUNCHD_CAPTURE_MAX_BYTES)
+    for name in changed:
+        log.warning(
+            "rolled over oversized launchd capture %s (>%d bytes)",
+            name,
+            LAUNCHD_CAPTURE_MAX_BYTES,
+        )
     try:
         return _run(home, env)
     except Exception:
