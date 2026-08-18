@@ -158,6 +158,7 @@ WORKSPACE_FREE_MODULES = (
     "host_auth.py",
     "capabilities.py",
     "relay_link.py",
+    "host_tunnel.py",
 )
 
 _FORBIDDEN_IMPORTS = ("mship.core.config", "mship.core.workspace_context")

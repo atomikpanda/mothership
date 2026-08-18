@@ -6,10 +6,18 @@ from typing import Callable
 @dataclass(frozen=True)
 class HealthProbe:
     """Outcome of one `/health` request. Exactly one of `status_code` (a
-    response arrived) or `error` (transport/DNS/TLS failure) is set."""
+    response arrived) or `error` (transport/DNS/TLS failure) is set.
+
+    `body`/`date_header` exist for the daemon's tunnel read-back (#471): it asks
+    *which* host is answering on its own subdomain, which is a fact only the
+    body carries. They are additive — every other caller reads `ok`,
+    `status_code` and `error` only.
+    """
     ok: bool
     status_code: int | None = None
     error: str | None = None
+    body: dict | None = None
+    date_header: str | None = None
 
 
 def probe_health(public_url: str, token: str, *, get: Callable | None = None,
@@ -31,7 +39,23 @@ def probe_health(public_url: str, token: str, *, get: Callable | None = None,
     except Exception as e:  # transport/DNS/TLS error
         return HealthProbe(ok=False, error=str(e))
     code = r.status_code
-    return HealthProbe(ok=200 <= code < 300, status_code=code)
+    return HealthProbe(ok=200 <= code < 300, status_code=code,
+                       body=_json_object(r), date_header=_date_header(r))
+
+
+def _json_object(resp) -> dict | None:
+    """The response's JSON object, or None for anything else — an HTML error
+    page, a truncated body, a bare list. Never raises: a probe that blew up on a
+    captive portal's 200 would turn a reachability check into a crash."""
+    try:
+        body = resp.json()
+    except Exception:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def _date_header(resp) -> str | None:
+    return (getattr(resp, "headers", None) or {}).get("Date")
 
 
 def verify_relay_reachable(public_url: str, token: str, *, get: Callable | None = None,

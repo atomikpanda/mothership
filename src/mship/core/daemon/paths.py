@@ -48,6 +48,22 @@ def host_refresh_path(home: Path) -> Path:
     return daemon_state_dir(home) / "host-refresh.json"
 
 
+def tunnel_log_path(home: Path) -> Path:
+    """Captured `ssh -R` output for the HOST tunnel (#471).
+
+    Daemon-owned and per-OS-user, deliberately NOT the workspace-scoped
+    `.mothership/relay-tunnel.log` that `mship serve --relay` writes: the daemon
+    dials one tunnel for the machine, not one per workspace, and it must not
+    write into a workspace it happens to have discovered."""
+    return daemon_log_dir(home) / "relay-tunnel.log"
+
+
+def tunnel_runtime_path(home: Path) -> Path:
+    """Where the live tunnel's subdomain/public URL is recorded for a reader
+    outside the daemon process (`mship daemon status`)."""
+    return daemon_state_dir(home) / "tunnel.json"
+
+
 def registry_path(home: Path) -> Path:
     return daemon_state_dir(home) / "workspaces.json"
 

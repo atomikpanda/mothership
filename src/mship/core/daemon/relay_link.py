@@ -62,10 +62,10 @@ DIRECTORY_CLIENT = "relay-directory"
 # First retry delay; doubles per consecutive failure up to MAX_BACKOFF_S.
 RETRY_BASE_S = 2.0
 
-# Up to 20% OFF the scheduled delay (never added — see `_jittered`): enough to
-# de-phase a fleet that all lost the relay in the same second, small enough that
-# the delay still means roughly what it says.
-JITTER = 0.2
+# The de-phasing fraction, re-exported under this module's name: the tunnel
+# supervisor jitters its respawn backoff with the same constant and the same
+# downward-only formula, so both live in `core/relay/tunnel.py`.
+JITTER = tunnel.BACKOFF_JITTER
 
 # DERIVED, not picked: the first exponent at which the delay already exceeds
 # the cap. Clamping here is what keeps `2 ** n` from overflowing a float after
@@ -311,10 +311,7 @@ class RelayLink:
         )
 
     def _jittered(self, delay: float) -> float:
-        """De-phase DOWNWARD only. `DIRECTORY_STALE_S` is derived from
-        `MAX_BACKOFF_S`, so a delay jittered *above* the cap would let a healthy
-        reconnecting host read as stale in the directory."""
-        return delay * (1 - JITTER * self._rng())
+        return tunnel.jittered(delay, self._rng)
 
     def _auto_reidentify(self, now: float) -> None:
         """The relay says someone else holds this identity and we cannot talk it
@@ -368,6 +365,15 @@ class RelayLink:
     def next_attempt_delay(self) -> float:
         """Seconds from the last attempt until the next one is due."""
         return self._delay
+
+    def register_soon(self) -> None:
+        """Make the next `tick()` register instead of waiting out the schedule.
+
+        The tunnel calls this once per respawn (AC2): a reconnected `ssh -R`
+        lands on a fresh sish route, so the directory entry must be re-published
+        without waiting up to `REGISTER_INTERVAL_S` for it. It only clears the
+        schedule — one extra registration per call, never a re-register storm."""
+        self._last_attempt_at = None
 
 
 def _classify(status_code: int, detail: str) -> str:

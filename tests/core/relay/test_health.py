@@ -103,3 +103,55 @@ def test_probe_health_carries_transport_error_and_never_raises():
     p = probe_health("https://w-ab12.relay", "tok", get=boom)
     assert p.ok is False and p.status_code is None
     assert "name resolution failed" in p.error
+
+
+# --- the body + Date, for the tunnel's read-back (#471 AC4b) ---------------
+#
+# `probe_health` is the ONE prober, so the daemon's "who is actually answering
+# on my subdomain?" check reads the parsed `/health` body from here rather than
+# growing a second prober beside it.
+
+class _JsonResp:
+    def __init__(self, status, body=None, headers=None, raises=None):
+        self.status_code = status
+        self.headers = headers or {}
+        self._body = body
+        self._raises = raises
+
+    def json(self):
+        if self._raises is not None:
+            raise self._raises
+        return self._body
+
+
+def test_probe_health_carries_the_parsed_body_and_date():
+    p = probe_health("https://w.relay", "tok", get=lambda *a, **k: _JsonResp(
+        200, {"status": "ok", "instance_id": "inst-1"}, {"Date": "Mon, 18 Aug 2026 12:00:00 GMT"}))
+    assert p.body == {"status": "ok", "instance_id": "inst-1"}
+    assert p.date_header == "Mon, 18 Aug 2026 12:00:00 GMT"
+
+
+def test_probe_health_body_is_none_on_malformed_json_and_never_raises():
+    # a captive portal / proxy error page answers 200 with HTML
+    p = probe_health("https://w.relay", "tok", get=lambda *a, **k: _JsonResp(
+        200, raises=ValueError("Expecting value: line 1 column 1 (char 0)")))
+    assert p.ok is True and p.body is None and p.date_header is None
+
+
+def test_probe_health_body_is_none_for_a_non_object_json_body():
+    p = probe_health("https://w.relay", "tok",
+                     get=lambda *a, **k: _JsonResp(200, ["not", "an", "object"]))
+    assert p.body is None
+
+
+def test_probe_health_body_and_date_default_to_none_on_transport_failure():
+    def boom(*a, **k): raise RuntimeError("connection refused")
+    p = probe_health("https://w.relay", "tok", get=boom)
+    assert p.body is None and p.date_header is None
+
+
+def test_probe_health_tolerates_a_response_without_json_or_headers():
+    """`verify_relay_reachable` and `mship.core.topology` read only ok/status/
+    error, and their callers hand in bare response stand-ins."""
+    p = probe_health("https://w.relay", "tok", get=lambda *a, **k: _Resp(200))
+    assert p.ok is True and p.body is None and p.date_header is None
