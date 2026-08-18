@@ -753,7 +753,13 @@ def test_real_token_stores_compose_through_the_exchange(tmp_path):
     )
 
     with TestClient(app) as client:
-        tampered = client.post("/host/token", json={"refresh": refresh[:-1] + "0"})
+        # Flip the last character to one it CANNOT already be: appending a fixed
+        # hex digit leaves the credential unchanged 1 run in 16, and that run
+        # asserts 401 against the genuine credential.
+        tampered = client.post(
+            "/host/token",
+            json={"refresh": refresh[:-1] + ("1" if refresh[-1] == "0" else "0")},
+        )
         minted = client.post("/host/token", json={"refresh": refresh}).json()
         auth = {"Authorization": f"Bearer {minted['token']}"}
         live = client.get("/workspaces", headers=auth)

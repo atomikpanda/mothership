@@ -17,6 +17,7 @@ import pytest
 
 from mship.core.daemon.capabilities import host_capability_payload, runner_block
 from mship.core.daemon.identity import HostIdentity, force_reidentify
+from mship.core.daemon import relay_link
 from mship.core.daemon.relay_link import RelayLink
 from mship.core.relay import host_contract
 from mship.core.relay.config import RelayConfig
@@ -232,6 +233,19 @@ def test_a_stale_challenge_401_is_transient_not_unapproved(tmp_path: Path):
         assert relay.posts_to(host_contract.ENROLL_PATH) == []
 
 
+def test_an_unrecognised_401_still_enrolls(tmp_path: Path):
+    """The deliberate fallback: only the challenge refusals are transient, so a
+    401 nobody recognises — a proxy's own body, an older relay's wording —
+    enrolls. Enrolling once too often is recoverable; a host that never enrolls
+    can never be approved."""
+    relay = _Relay(register=(401, "Unauthorized"))
+    link = _link(tmp_path, relay, _Clock())
+    outcome = link.tick()
+    assert outcome.kind == "unapproved"
+    assert link.state == "awaiting-enrollment"
+    assert len(relay.posts_to(host_contract.ENROLL_PATH)) == 1
+
+
 # --- tick(): jittered, capped, ceiling-free backoff (AC2/AC3) --------------
 
 def _fail(relay: _Relay, why: str = "boom") -> None:
@@ -285,7 +299,9 @@ def test_jitter_never_schedules_past_the_cap(tmp_path: Path):
             link.tick()
             _advance_past(clock, link)
         assert 0 < link.next_attempt_delay() <= host_contract.MAX_BACKOFF_S
-        assert link.next_attempt_delay() >= host_contract.MAX_BACKOFF_S * (1 - 0.2)
+        assert link.next_attempt_delay() >= host_contract.MAX_BACKOFF_S * (
+            1 - relay_link.JITTER
+        )
 
 
 def test_two_links_do_not_retry_on_the_same_tick(tmp_path: Path):
