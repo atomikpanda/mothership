@@ -248,6 +248,19 @@ def test_ensure_host_token_read_error_does_not_rotate_token(
     assert path.read_bytes() == b"previous\n"
 
 
+def test_github_app_loader_rejects_blank_private_key(tmp_path):
+    from mship.core.daemon.host_app import load_gh_app_credentials
+
+    key_path = tmp_path / "blank.pem"
+    key_path.write_text("  \n\t")
+
+    with pytest.raises(ValueError, match=str(key_path)):
+        load_gh_app_credentials(env={
+            "MSHIP_GH_APP_ID": "123",
+            "MSHIP_GH_APP_KEY": str(key_path),
+        })
+
+
 class StreamingSubApp:
     """ASGI app that emits body chunks with gaps — proves the proxy streams
     rather than buffering to completion (the `/exec` iter_raw contract)."""

@@ -100,6 +100,10 @@ def load_gh_app_credentials(
                 raise ValueError(
                     f"MSHIP_GH_APP_KEY is set but not a readable file ({key_path!r})"
                 ) from exc
+            if not private_key.strip():
+                raise ValueError(
+                    f"MSHIP_GH_APP_KEY contains a blank private key ({key_path!r})"
+                )
         return app_id, private_key
 
     if home is None:
@@ -112,8 +116,10 @@ def load_gh_app_credentials(
         if not app_id_path.exists() and not app_key_path.exists():
             return None, None
         raise ValueError("persisted GitHub App credentials are incomplete")
-    if not persisted_id or not persisted_key:
+    if not persisted_id:
         raise ValueError("persisted GitHub App credentials are incomplete")
+    if not persisted_key.strip():
+        raise ValueError(f"persisted GitHub App key is blank: {app_key_path}")
     return persisted_id, persisted_key
 
 

@@ -489,3 +489,27 @@ def test_start_rejects_unavailable_configured_scan_root(cli, tmp_path):
     assert res.exit_code == 1
     assert str(missing) in res.output
     assert "start" not in fake.calls
+
+
+@pytest.mark.parametrize("command", ["install", "start", "restart"])
+def test_blank_github_app_key_fails_before_supervisor(
+    command, cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.host_app import (
+        load_gh_app_credentials,
+        persist_gh_app_credentials,
+    )
+
+    app, fake = cli
+    persist_gh_app_credentials(tmp_path, "old-id", "OLD KEY")
+    key_path = tmp_path / "blank.pem"
+    key_path.write_text("  \n")
+    monkeypatch.setenv("MSHIP_GH_APP_ID", "new-id")
+    monkeypatch.setenv("MSHIP_GH_APP_KEY", str(key_path))
+
+    res = runner.invoke(app, ["daemon", command])
+
+    assert res.exit_code == 1
+    assert str(key_path) in res.output
+    assert not any(call.startswith(command) for call in fake.calls)
+    assert load_gh_app_credentials(tmp_path, env={}) == ("old-id", "OLD KEY")
