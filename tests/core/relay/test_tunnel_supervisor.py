@@ -1,3 +1,5 @@
+import pytest
+
 from mship.core.relay.tunnel import BACKOFF_JITTER, TunnelSupervisor
 
 
@@ -166,3 +168,45 @@ def test_two_supervisors_do_not_respawn_on_the_same_tick():
     t[0] = 60.0 * (1 - BACKOFF_JITTER)
     slow.tick(); fast.tick()
     assert len(fast_procs) == 2 and len(slow_procs) == 1
+
+
+def test_a_spawn_that_raises_never_reads_as_a_healthy_run():
+    """A failed spawn started no run at all. Stamping one lets the next
+    exit-detection wipe the streak once the delay reaches the cap, so the
+    escalation the clamp exists for sawtooths at restart_count 1 forever."""
+    procs, t = [], [0.0]
+    sup = _sup(procs, t)                       # backoff 5s, cap 60s
+    sup.start()
+    procs[0]._alive = False
+    sup._proc_factory = lambda argv: (_ for _ in ()).throw(OSError("ssh: not found"))
+
+    counts = []
+    for _ in range(10):
+        t[0] += 1000.0                         # far past the healthy-run threshold
+        sup.tick()                             # freeze the delay for this exit
+        t[0] += 1000.0
+        with pytest.raises(OSError):
+            sup.tick()                         # the respawn attempt itself fails
+        counts.append(sup.restart_count)
+
+    assert counts == list(range(1, 11)), "the failure streak did not escalate monotonically"
+    assert len(procs) == 1 and sup.spawn_count == 1
+
+
+def test_spawn_count_only_ever_increases():
+    """The signal a caller needs for 'a new child exists': `restart_count` is
+    reset by a healthy run and zeroed by start(), and this is not."""
+    procs, t = [], [0.0]
+    sup = _sup(procs, t, backoff_delay=0.0)
+    sup.start()
+    assert sup.spawn_count == 1
+
+    for _ in range(3):
+        procs[-1]._alive = False
+        sup.tick()
+    assert sup.spawn_count == 4 and sup.restart_count == 3
+
+    sup.stop()
+    sup.start()
+    assert sup.restart_count == 0, "start() resets the restart counter"
+    assert sup.spawn_count == 5, "...but never the spawn counter"

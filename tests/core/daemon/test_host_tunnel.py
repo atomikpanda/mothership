@@ -133,7 +133,8 @@ def _health_get(instance_id: str | None, *, error: str | None = None, status: in
 class _Fixture:
     """One wired-up tunnel: link + supervisor + the argv a daemon would build."""
 
-    def __init__(self, home: Path, relay: _Relay, clock: _Clock, **kw):
+    def __init__(self, home: Path, relay: _Relay, clock: _Clock, *,
+                 backoff: float = 0.0, max_backoff: float = 60.0, **kw):
         self.home, self.relay, self.clock = home, relay, clock
         self.procs: list[FakeProc] = []
         self.argvs: list[list[str]] = []
@@ -144,8 +145,9 @@ class _Fixture:
             key_path=relay_key_path(home),
         )
         self.sup = TunnelSupervisor(
-            argv=self.argv, proc_factory=self._factory, backoff_delay=0.0,
-            clock=clock, log_path=tunnel_log_path(home), rng=lambda: 0.0,
+            argv=self.argv, proc_factory=self._factory, backoff_delay=backoff,
+            max_backoff_delay=max_backoff, clock=clock,
+            log_path=tunnel_log_path(home), rng=lambda: 0.0,
         )
         kw.setdefault("verify", partial(probe_health, get=_health_get(self.link.instance_id)))
         kw.setdefault("reaper", self._reaper)
@@ -175,6 +177,18 @@ class _Fixture:
         self.tunnel.tick()
         self.clock.advance(1)
         return self.tunnel.tick()
+
+    def drop_and_wait(self, step: float = 0.5, limit: int = 40) -> None:
+        """Kill the child, then tick until the supervisor's backoff lets a
+        replacement through — the real shape, rather than a zero backoff."""
+        before = len(self.procs)
+        self.kill_child()
+        for _ in range(limit):
+            self.tunnel.tick()
+            if len(self.procs) > before:
+                return
+            self.clock.advance(step)
+        raise AssertionError("supervisor never respawned within the tick budget")
 
     def write_ssh_log(self, text: str) -> None:
         path = tunnel_log_path(self.home)
@@ -262,6 +276,60 @@ def test_a_respawn_triggers_exactly_one_additional_registration(fx):
         fx.clock.advance(1)
         fx.tunnel.tick()
     assert len(fx.relay.registrations) == 2, "re-registered once per tick, not once per respawn"
+
+
+def test_a_drop_after_a_healthy_run_registers_once_and_never_while_the_child_is_gone(tmp_path):
+    """The regression the zero-backoff fixture cannot see: `restart_count` is
+    reset by a healthy run, so diffing it reads the DROP as a respawn and
+    re-registers while no child exists, then registers again on the respawn."""
+    fx = _Fixture(tmp_path, _Relay(), _Clock(), backoff=1.0, max_backoff=8.0)
+    started = fx.clock.t
+    fx.connect()
+
+    for _ in range(3):                     # a flap streak builds the count up
+        fx.drop_and_wait()
+    fx.clock.advance(9.0)                  # ...then a run outliving the cap
+    fx.tunnel.tick()
+    assert fx.sup.is_running() and fx.sup.restart_count == 3
+
+    before = len(fx.relay.registrations)
+    fx.kill_child()
+    fx.tunnel.tick()                       # the drop is detected; nothing is up
+    assert fx.sup.restart_count == 0, "the healthy run should have reset the streak"
+    assert len(fx.relay.registrations) == before, "registered while no child existed"
+
+    fx.clock.advance(1.0)
+    fx.tunnel.tick()
+    assert len(fx.procs) == 5
+    assert len(fx.relay.registrations) == before + 1
+
+    for _ in range(5):
+        fx.clock.advance(0.5)
+        fx.tunnel.tick()
+    assert len(fx.relay.registrations) == before + 1
+    assert fx.clock.t - started < host_contract.REGISTER_INTERVAL_S, \
+        "the link's own schedule came due — the counts above stopped meaning anything"
+
+
+def test_redialing_after_a_duplicate_identity_clears_does_not_register_twice(fx):
+    """`TunnelSupervisor.start()` zeroes `restart_count`, so the teardown +
+    re-dial cycle looks like a respawn to anything that diffs it."""
+    fx.connect()
+    fx.relay.refuse(409, "identity already registered")
+    fx.clock.advance(120)
+    fx.tunnel.tick()
+    assert fx.tunnel.state() == "duplicate-identity" and not fx.sup.is_running()
+
+    fx.relay.refuse(200)
+    fx.clock.advance(120)
+    fx.tunnel.tick()                       # re-dials, and registers once, here
+    assert len(fx.procs) == 2
+    after_redial = len(fx.relay.registrations)
+
+    for _ in range(5):
+        fx.clock.advance(1)
+        fx.tunnel.tick()
+    assert len(fx.relay.registrations) == after_redial
 
 
 def test_registration_failure_does_not_kill_the_tunnel(fx):
@@ -396,6 +464,28 @@ def test_reaper_leaves_other_hosts_tunnels_and_non_tunnels_alone(fx):
     )
 
     assert reaped == [] and killed == []
+
+
+def test_reaper_spares_a_label_that_merely_ends_with_ours(fx):
+    """A substring match would take down an unrelated host: its own opaque slug
+    can end with the whole of ours, and it is orphaned-looking to us either way.
+    The label is a token, so it is compared as one."""
+    collider = _proc(103, 1, f"ssh -N -R xyz-{fx.link.subdomain}:80:localhost:9000 relay.example")
+    prefix = _proc(104, 1, f"ssh -N -R {fx.link.subdomain}-extra:80:localhost:9000 relay.example")
+    killed = []
+
+    reaped = reap_orphan_tunnels(
+        fx.link.subdomain, processes=lambda: [collider, prefix],
+        kill=lambda pid: killed.append(pid),
+    )
+
+    assert reaped == [] and killed == []
+
+
+def test_reaper_tolerates_a_trailing_dash_r_with_no_forward_spec(fx):
+    dangling = _proc(105, 1, "ssh -N relay.example -R")
+    assert reap_orphan_tunnels(fx.link.subdomain, processes=lambda: [dangling],
+                               kill=lambda pid: pytest.fail("signalled a malformed row")) == []
 
 
 def test_reaper_survives_a_process_that_vanished_between_list_and_kill(fx):

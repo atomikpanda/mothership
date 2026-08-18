@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import subprocess
 import time
 from dataclasses import dataclass
@@ -89,34 +90,47 @@ def list_processes() -> list[ProcessInfo]:
     return rows
 
 
+def _forward_label(cmdline: str) -> str | None:
+    """The subdomain an `ssh … -R <label>:<port>:…` command forwards to.
+
+    Parsed as a token, never matched as a substring: `-R xyz-<oursub>:80:…` is
+    somebody else's label that merely ends with ours, and signalling it would
+    take down an unrelated host's tunnel.
+    """
+    tokens = cmdline.split()
+    try:
+        spec = tokens[tokens.index("-R") + 1]
+    except (ValueError, IndexError):
+        return None
+    return spec.split(":")[0]
+
+
 def reap_orphan_tunnels(
     subdomain: str,
     *,
     processes: Callable[[], Sequence[ProcessInfo]] = list_processes,
     kill: Callable[[int], None] | None = None,
 ) -> list[int]:
-    """Kill any `ssh -R <subdomain>:…` reparented to init; return the pids killed.
+    """Signal any `ssh -R <subdomain>:…` reparented to init; return those pids.
 
     Reparenting to init is the whole test: a tunnel we own has *us* as its
     parent, so PPID 1 means the process that dialed it is gone and nothing will
     ever clean it up. Anything that merely mentions the subdomain (an operator's
-    interactive `ssh`, a `grep`) is left alone — only a live reverse forward of
-    OUR label can collide with us.
+    interactive `ssh`, a `grep`, a host whose label ends with ours) is left
+    alone — only a live reverse forward of OUR exact label can collide with us.
     """
     if kill is None:
-        kill = lambda pid: os.kill(pid, 15)
+        kill = lambda pid: os.kill(pid, signal.SIGTERM)
     killed = []
     for proc in processes():
-        if proc.ppid != 1 or "-R" not in proc.cmdline.split():
-            continue
-        if f"{subdomain}:" not in proc.cmdline:
+        if proc.ppid != 1 or _forward_label(proc.cmdline) != subdomain:
             continue
         try:
             kill(proc.pid)
         except Exception as exc:  # already gone, or not ours to signal
-            log.debug("could not kill orphan tunnel pid=%s: %s", proc.pid, exc)
+            log.debug("could not signal orphan tunnel pid=%s: %s", proc.pid, exc)
             continue
-        log.warning("killed orphaned relay tunnel pid=%s holding %s", proc.pid, subdomain)
+        log.warning("signalled orphaned relay tunnel pid=%s holding %s", proc.pid, subdomain)
         killed.append(proc.pid)
     return killed
 
@@ -151,7 +165,10 @@ class HostTunnel:
         self._failure: str | None = None   # this tick's own fault, if any
         self._detail: str | None = None    # the last read-back's explanation
         self._last_readback_at: float | None = None
-        self._restarts_seen = supervisor.restart_count
+        # Monotonic: `restart_count` is NOT a respawn signal — a healthy run
+        # resets it and `start()` zeroes it, so diffing it would read a *drop*
+        # as a respawn and re-register while no child exists at all (AC2).
+        self._spawns_seen = supervisor.spawn_count
 
     # -- the loop -----------------------------------------------------------
 
@@ -199,10 +216,10 @@ class HostTunnel:
                 self._sample_ssh_log()
                 self._reap()
                 sup.tick()          # gated by the supervisor's own backoff
-        if sup.restart_count != self._restarts_seen:
-            self._restarts_seen = sup.restart_count
-            # The new child holds a fresh sish route; re-publish the entry now
-            # rather than waiting out `REGISTER_INTERVAL_S` (AC2).
+        if sup.spawn_count != self._spawns_seen:
+            self._spawns_seen = sup.spawn_count
+            # A new child is up, holding a fresh sish route; re-publish the entry
+            # now rather than waiting out `REGISTER_INTERVAL_S` (AC2).
             self._link.register_soon()
 
     def _redial(self) -> None:
@@ -220,6 +237,10 @@ class HostTunnel:
             # relay already refuses as a duplicate never spawns ssh at all (AC4).
             self._reap()
             self._supervisor.start()
+            # This tick's `link.tick()` already published the entry for this
+            # child, so the initial dial (and the re-dial after a duplicate
+            # identity clears) must not also count as a respawn.
+            self._spawns_seen = self._supervisor.spawn_count
             self._started = True
 
     def _reap(self) -> None:
@@ -292,7 +313,15 @@ class HostTunnel:
     def state(self) -> str:
         """The tunnel's state, most authoritative verdict first: what the relay
         decided about our identity, then what our own read-back saw, then how
-        far along the dial is."""
+        far along the dial is.
+
+        `contended` deliberately outranks `error`: a live twin answering on our
+        subdomain is a specific, named, operator-actionable fact, while `error`
+        is the catch-all for "a tick faulted or registration is failing" — and
+        the two co-occur constantly (a twin holding the route is exactly what
+        makes our own registrations fail), so the specific verdict has to win or
+        it would never be the one displayed.
+        """
         if self._stopped:
             return "disabled"
         if not self._link.should_dial():

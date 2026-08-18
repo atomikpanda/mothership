@@ -167,8 +167,14 @@ class TunnelSupervisor:
         self._proc = None
         self._stopped = False          # True once stop() has been called
         self._restart_count = 0
+        # Every process this supervisor has successfully launched. Unlike
+        # `_restart_count` it only ever increases — `start()` zeroes the restart
+        # counter and a healthy run resets it, so a caller that wants to know
+        # "did a NEW child appear?" must ask this instead (#471 AC2).
+        self._spawn_count = 0
         # Monotonic time (seconds) the current process was spawned at; a run
-        # longer than the backoff cap is what ends a failure streak.
+        # longer than the backoff cap is what ends a failure streak. None while
+        # no process is known to be up, INCLUDING after a spawn that raised.
         self._spawned_at: float | None = None
         # Monotonic time (seconds) an exit was first detected at, and the delay
         # frozen for it. None while a process is (believed) alive.
@@ -249,6 +255,12 @@ class TunnelSupervisor:
         """Number of times the supervised process has been restarted."""
         return self._restart_count
 
+    @property
+    def spawn_count(self) -> int:
+        """Processes successfully launched, monotonically. The signal for "a new
+        child exists" — `restart_count` is not, it resets."""
+        return self._spawn_count
+
     def next_delay(self) -> float:
         """Seconds from the detected exit until the respawn is due (0 while the
         process is believed alive) — the jittered value actually being waited."""
@@ -278,8 +290,15 @@ class TunnelSupervisor:
         )
 
     def _spawn(self) -> None:
-        self._spawned_at = self._clock()
+        # Cleared FIRST and stamped only once the factory has actually returned:
+        # a spawn that raises (log file EACCES, `ssh` not on PATH) started no
+        # run at all, and recording one would let the next exit-detection read a
+        # never-started process as a healthy run and wipe the failure streak —
+        # sawtoothing the escalation the clamp exists to reach.
+        self._spawned_at = None
         self._proc = self._proc_factory(self._argv)
+        self._spawned_at = self._clock()
+        self._spawn_count += 1
 
 
 def host_subdomain(host_id: str, dev_id: str, secret: bytes) -> str:
