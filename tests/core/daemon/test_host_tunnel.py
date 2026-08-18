@@ -677,3 +677,46 @@ def test_a_child_respawned_in_the_same_tick_as_the_stop_is_still_terminated(
 
     assert fixture.child.terminated, "the respawned child outlived the stop"
     assert len(fixture.procs) == spawned_by_shutdown_tick
+
+
+# --- the snapshot the daemon publishes (#471 Task 9) ------------------------
+
+def test_snapshot_is_published_per_tick_not_read_live(fx):
+    """`/health` serves this from the request thread while ticks mutate the
+    tunnel on the executor thread (`run.py::_tunnel_loop`), so a snapshot must
+    be an immutable per-tick publication: the dict a reader already holds can
+    never change under it, and a later tick publishes a NEW one."""
+    before = fx.tunnel.snapshot()
+    assert before["state"] == "connecting"
+
+    fx.connect()
+    after = fx.tunnel.snapshot()
+
+    assert before["state"] == "connecting", "a published snapshot mutated"
+    assert after is not before
+    assert after["state"] == "online"
+    assert after["subdomain"] == fx.link.subdomain
+    assert after["public_url"] == fx.link.public_url
+    assert after["restarts"] == 0
+    assert after["last_error"] is None
+    assert after["clock_skew_seconds"] is None  # the fake relay sends no Date
+
+
+def test_snapshot_reports_the_states_and_reasons_the_operator_acts_on(tmp_path):
+    dup = _Fixture(tmp_path / "dup", _Relay(register=(409, "held by hst-other")), _Clock())
+    dup.connect()
+    assert dup.tunnel.snapshot()["state"] == "duplicate-identity"
+    assert "held by hst-other" in dup.tunnel.snapshot()["last_error"]
+
+    fx = _Fixture(tmp_path / "up", _Relay(), _Clock())
+    fx.connect()
+    fx.tunnel.stop()
+    assert fx.tunnel.snapshot()["state"] == "disabled"
+
+
+def test_snapshot_carries_the_links_clock_skew(fx):
+    """Sourced from the ENROLL SERVER's `Date` (Task 6), never the read-back's:
+    that one is emitted by this host's own uvicorn and is ~0 by construction."""
+    fx.link.clock_skew_seconds = -3600.0
+    fx.tunnel.tick()
+    assert fx.tunnel.snapshot()["clock_skew_seconds"] == -3600.0

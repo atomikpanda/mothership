@@ -202,6 +202,25 @@ def test_relay_date_header_samples_clock_skew(tmp_path: Path):
     assert link.clock_skew_seconds == pytest.approx(3600, abs=1)
 
 
+def test_register_post_date_alone_samples_skew(tmp_path: Path):
+    """Both relay calls carry the enroll server's clock; a challenge without a
+    `Date` (a proxy that strips it on GETs) must not leave the skew unknown —
+    `mship daemon status` reports it from whichever answer carried one."""
+    class _NoDateOnGet(_Relay):
+        def get(self, url, **kw):
+            self.calls.append(("GET", url, None))
+            return _Resp(200, {"nonce": self.nonce, "expires_at": 0})
+
+    relay = _NoDateOnGet()
+    clock = _Clock(t=1_755_003_600.0)                     # 2025-08-12T13:00:00Z
+    relay.date_header = "Tue, 12 Aug 2025 12:00:00 GMT"   # an hour behind us
+    link = _link(tmp_path, relay, clock)
+
+    link.register_once()
+
+    assert link.clock_skew_seconds == pytest.approx(3600, abs=1)
+
+
 def test_unparseable_date_header_leaves_skew_unknown(tmp_path: Path):
     relay = _Relay()
     relay.date_header = "not a date"

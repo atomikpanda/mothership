@@ -83,6 +83,19 @@ HTTP_TIMEOUT_S = 10.0
 _STICKY_STATES = ("awaiting-enrollment", "duplicate-identity")
 
 
+def host_subdomain_for(home: Path, host_id: str) -> str:
+    """The relay subdomain this host publishes on, derived in ONE place.
+
+    Two callers must agree exactly or an operator approves a key for a name the
+    daemon never dials: the link derives it on every identity adoption, and
+    `mship daemon reidentify` prints it after minting a new identity.
+    """
+    pubkey = keys.relay_public_key(keys.ensure_relay_key(home)).strip()
+    return tunnel.host_subdomain(
+        host_id, tunnel.device_id(pubkey), keys.ensure_subdomain_secret(home)
+    )
+
+
 @dataclass(frozen=True)
 class RegistrationOutcome:
     """One registration attempt, as data. Never an exception: the caller is a
@@ -155,11 +168,7 @@ class RelayLink:
         key_path = keys.ensure_relay_key(self._home)
         self._pubkey = keys.relay_public_key(key_path).strip()
         self.key_fingerprint = fingerprint(self._pubkey)
-        self.subdomain = tunnel.host_subdomain(
-            ident.host_id,
-            tunnel.device_id(self._pubkey),
-            keys.ensure_subdomain_secret(self._home),
-        )
+        self.subdomain = host_subdomain_for(self._home, ident.host_id)
         self.public_url = f"https://{self.subdomain}.{self._relay.host}"
 
     def _sign_with_relay_key(self, blob: bytes) -> str:

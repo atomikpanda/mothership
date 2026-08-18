@@ -368,11 +368,50 @@ def register(parent: typer.Typer, get_container):
                     "supervisor": {"state": st.supervisor.state, "detail": st.supervisor.detail},
                     "linger": st.linger,
                     "unclean_starts": st.unclean_starts,
+                    "tunnel": st.tunnel,
+                    "clock_skew_seconds": st.clock_skew_seconds,
                     "lines": st.lines,
                 }
             )
         else:
             out.print(st.render())
+
+    @daemon_app.command("reidentify")
+    def reidentify(
+        keep_identity: bool = typer.Option(
+            False, "--keep-identity",
+            help="This IS the same host: adopt the running machine's fingerprint "
+                 "instead of minting a new identity (after a re-image or a "
+                 "hardware change that tripped the clone check).",
+        ),
+    ):
+        """Mint a new host identity + relay key after a clone (or adopt this
+        machine's fingerprint with --keep-identity)."""
+        from mship.core.daemon.identity import (
+            ensure_host_identity,
+            force_reidentify,
+            machine_fingerprint,
+        )
+        from mship.core.daemon.relay_link import host_subdomain_for
+
+        out = Output()
+        home = Path.home()
+        if keep_identity:
+            ident = ensure_host_identity(
+                home, fingerprint=machine_fingerprint(), on_mismatch="keep"
+            )
+            out.print(
+                f"kept host id {ident.host_id}; adopted machine fingerprint "
+                f"{ident.fingerprint}"
+            )
+            return
+        ident = force_reidentify(home)
+        out.print(
+            f"re-identified as {ident.host_id} (was {ident.cloned_from})\n"
+            f"new relay subdomain: {host_subdomain_for(home, ident.host_id)}\n"
+            "the rotated key needs approving again (`mship relay approve <id>` on "
+            "the relay host); run `mship daemon restart` to dial with it"
+        )
 
     @daemon_app.command("logs")
     def logs(n: int = typer.Option(100, "-n", "--lines", help="Lines to show.")):

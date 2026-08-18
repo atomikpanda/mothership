@@ -582,3 +582,24 @@ def test_sigterm_sets_the_shared_event_and_stops_every_server(server_count):
     servers = asyncio.run(scenario())
 
     assert all(server.should_exit for server in servers)
+
+
+def test_the_control_app_publishes_the_tunnel_it_was_built_with(env_home, monkeypatch):
+    """#471 Task 9: `/health` is the ONLY reader-visible source of tunnel state
+    (it lives inside this process), so a daemon that builds a tunnel and does
+    not hand it to the control app renders `mship daemon status` blind."""
+    from fastapi.testclient import TestClient
+
+    home, env = env_home
+    _seed_config(home, serve=SERVE_BLOCK, relay=RELAY_BLOCK)
+    configs = _capture_uvicorn(monkeypatch)
+    snapshot = {"state": "online", "subdomain": "hst-fake"}
+    tunnel = _FakeTunnel()
+    tunnel.snapshot = lambda: snapshot
+    monkeypatch.setattr(run_mod, "_build_tunnel", lambda *a: tunnel)
+
+    assert run_mod.main(home=home, env=env) == 0
+
+    body = TestClient(configs[0].app).get("/health").json()
+    assert body["capabilities"]["tunnel"] is True
+    assert body["tunnel"] == snapshot

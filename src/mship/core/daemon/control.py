@@ -21,7 +21,8 @@ from mship.core.daemon.registry import RegistryReadError
 
 # CLI<->daemon control-protocol version; bump on breaking payload changes.
 # 2: capabilities.registry/serve became real + /workspaces endpoints (#472).
-PROTOCOL = 2
+# 3: capabilities.tunnel became real + /health carries a `tunnel` block (#471).
+PROTOCOL = 3
 RESCAN_ERROR_STATUS = 503
 
 _PROBE_TIMEOUT_S = 3.0
@@ -36,6 +37,7 @@ def create_control_app(
     rescan=None,
     after_rescan=None,
     serve_bound: bool = False,
+    tunnel=None,
 ):
     """Tiny closure app factory (the `core/serve.py::create_app` style).
 
@@ -43,7 +45,12 @@ def create_control_app(
     endpoints over the control socket; `rescan()` re-runs discovery+reconcile.
     `after_rescan()` lets the sibling TCP host app stop stale workspace
     lifespans after a control-socket refresh. `serve_bound` reports whether the
-    TCP host app is up (#472).
+    TCP host app is up (#472). `tunnel` is the `HostTunnel` this daemon dials
+    with, or None for a host with no relay (#471).
+
+    Only the tunnel's PUBLISHED SNAPSHOT is ever read here: ticks mutate it on
+    an executor thread (`run.py::_tunnel_loop`) while requests are served on the
+    loop thread, so reading its live fields would be a torn read.
     """
     from fastapi import FastAPI, HTTPException
 
@@ -65,10 +72,13 @@ def create_control_app(
             "socket": socket_path,
             "capabilities": {
                 "serve": serve_state["bound"],  # actual TCP listener lifecycle
-                "tunnel": False,  # #471: relay tunnel registration
+                "tunnel": tunnel is not None,  # #471: relay tunnel registration
                 "registry": store is not None,  # #472: workspace discovery/registry
                 "runner": False,  # #473: unattended worker supervision
             },
+            # State, not capability: `mship daemon status` renders this, and it
+            # is the only reader-visible source — the tunnel lives in-process.
+            "tunnel": tunnel.snapshot() if tunnel is not None else None,
         }
 
     if store is not None:

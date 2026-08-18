@@ -461,19 +461,21 @@ def _run(home: Path, env: Mapping[str, str]) -> int:
             gh_app_id=gh_app_id,
             gh_app_key=gh_app_key,
         )
+    # AFTER the lease is won: a tunnel dialed by a process that then stands down
+    # for the incumbent would fork an ssh child onto a subdomain it is about to
+    # abandon. Constructing one dials nothing — only `tick()` does — so it is
+    # safe to build here, and the control app needs it to publish its state.
+    tunnel = _build_tunnel(home, relay_cfg, serve_cfg)
+    if tunnel is not None:
+        log.info("relay tunnel enabled — dialing %s", tunnel.public_url)
     app = create_control_app(
         started_at=started_at, version=version, socket_path=str(socket_path),
         store=store, rescan=rescan, serve_bound=host_app is not None,
+        tunnel=tunnel,
         after_rescan=(
             host_app.state.drop_stale_subapps if host_app is not None else None
         ),
     )
-    # AFTER the lease is won and the apps are built: a tunnel dialed by a
-    # process that then stands down for the incumbent would fork an ssh child
-    # onto a subdomain it is about to abandon.
-    tunnel = _build_tunnel(home, relay_cfg, serve_cfg)
-    if tunnel is not None:
-        log.info("relay tunnel enabled — dialing %s", tunnel.public_url)
     _serve_forever(app, socket_path, host_app, serve_cfg, tunnel)
     history.append_clean_stop(paths.start_history_path(home), datetime.now(timezone.utc))
     log.info("mshipd stopped cleanly")

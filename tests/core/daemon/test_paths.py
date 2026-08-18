@@ -9,7 +9,6 @@ from mship.core.daemon.paths import (
     lease_path,
     start_history_path,
     tunnel_log_path,
-    tunnel_runtime_path,
 )
 
 
@@ -21,15 +20,13 @@ def test_state_dir_and_derivatives(tmp_path: Path):
     assert lease_path(home) == state / "daemon.lease"
     assert start_history_path(home) == state / "start-history.json"
     assert tunnel_log_path(home) == state / "logs" / "relay-tunnel.log"
-    assert tunnel_runtime_path(home) == state / "tunnel.json"
 
 
-def test_tunnel_paths_are_never_workspace_scoped(tmp_path: Path):
+def test_tunnel_log_is_never_workspace_scoped(tmp_path: Path):
     """`mship serve --relay` logs to `<workspace>/.mothership/relay-tunnel.log`;
     the daemon's tunnel is per-machine and must not write into a workspace it
     merely discovered."""
-    for path in (tunnel_log_path(tmp_path), tunnel_runtime_path(tmp_path)):
-        assert daemon_state_dir(tmp_path) in path.parents
+    assert daemon_state_dir(tmp_path) in tunnel_log_path(tmp_path).parents
 
 
 def test_the_suite_cannot_reach_the_real_daemon_socket(tmp_path: Path):

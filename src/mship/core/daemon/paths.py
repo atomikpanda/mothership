@@ -58,12 +58,6 @@ def tunnel_log_path(home: Path) -> Path:
     return daemon_log_dir(home) / "relay-tunnel.log"
 
 
-def tunnel_runtime_path(home: Path) -> Path:
-    """Where the live tunnel's subdomain/public URL is recorded for a reader
-    outside the daemon process (`mship daemon status`)."""
-    return daemon_state_dir(home) / "tunnel.json"
-
-
 def registry_path(home: Path) -> Path:
     return daemon_state_dir(home) / "workspaces.json"
 

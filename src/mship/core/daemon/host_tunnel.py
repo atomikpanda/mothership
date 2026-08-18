@@ -182,6 +182,7 @@ class HostTunnel:
         # resets it and `start()` zeroes it, so diffing it would read a *drop*
         # as a respawn and re-register while no child exists at all (AC2).
         self._spawns_seen = supervisor.spawn_count
+        self._publish()
 
     # -- the loop -----------------------------------------------------------
 
@@ -197,6 +198,7 @@ class HostTunnel:
         self._guard("tunnel", self._supervise)
         self._guard("registration", self._link.tick)
         self._guard("tunnel", self._redial)
+        self._publish()
         return self.state()
 
     def stop(self) -> None:
@@ -210,6 +212,7 @@ class HostTunnel:
         self._stopped = True
         self._supervisor.stop(final=True)
         self._online = False
+        self._publish()
 
     def _guard(self, what: str, fn: Callable[[], object]) -> None:
         try:
@@ -369,3 +372,27 @@ class HostTunnel:
     @property
     def restart_count(self) -> int:
         return self._supervisor.restart_count
+
+    def snapshot(self) -> dict:
+        """What `/health` (and through it `mship daemon status`) publishes.
+
+        A PUBLICATION, not a live read: ticks run in the daemon's executor
+        (`run.py::_tunnel_loop`) while requests are served on the loop thread,
+        so a reader assembling this field-by-field could see half of one tick
+        and half of the next. `_publish` builds a fresh dict at the end of every
+        tick and nothing ever mutates a published one, which makes a read a
+        single attribute load."""
+        return self._published
+
+    def _publish(self) -> None:
+        self._published = {
+            "state": self.state(),
+            "subdomain": self._link.subdomain,
+            "public_url": self._link.public_url,
+            "restarts": self._supervisor.restart_count,
+            "last_error": self.last_error,
+            # The ENROLL SERVER's clock, sampled by the link — never the
+            # read-back's, which is this host's own uvicorn (~0 by
+            # construction). Reported only; it gates nothing.
+            "clock_skew_seconds": self._link.clock_skew_seconds,
+        }

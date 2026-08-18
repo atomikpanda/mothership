@@ -37,6 +37,48 @@ def test_health_payload_shape():
         "registry": False,
         "runner": False,
     }
+    assert body["tunnel"] is None
+
+
+def test_protocol_is_3_now_that_health_carries_a_tunnel_block():
+    """A payload change the CLI reads (`daemon status`) is a protocol bump —
+    the version-skew line is what tells an operator to restart."""
+    assert PROTOCOL == 3
+
+
+class _FakeTunnel:
+    """What the control app is allowed to touch: a published snapshot, nothing
+    else. Ticks run on an executor thread (`run.py::_tunnel_loop`), so anything
+    read live from the request thread would be a torn read."""
+
+    def __init__(self, snapshot: dict):
+        self._snapshot = snapshot
+
+    def snapshot(self) -> dict:
+        return self._snapshot
+
+    def state(self):  # pragma: no cover - failure path
+        raise AssertionError("/health read live tunnel state instead of a snapshot")
+
+
+SNAPSHOT = {
+    "state": "online",
+    "subdomain": "hst-abc",
+    "public_url": "https://hst-abc.relay.example",
+    "restarts": 0,
+    "last_error": None,
+    "clock_skew_seconds": 1.5,
+}
+
+
+def test_tunnel_capability_is_the_injected_value_and_health_carries_the_snapshot():
+    app = create_control_app(
+        started_at=STARTED, version="1", socket_path="/s",
+        tunnel=_FakeTunnel(SNAPSHOT),
+    )
+    body = TestClient(app).get("/health").json()
+    assert body["capabilities"]["tunnel"] is True
+    assert body["tunnel"] == SNAPSHOT
 
 
 def test_version_is_captured_at_start_not_reread(monkeypatch):
