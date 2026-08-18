@@ -268,6 +268,32 @@ def test_host_passes_github_app_credentials_to_workspace_subapp(tmp_path):
     assert captured["gh_app_key"] == "PRIVATE KEY"
 
 
+@pytest.mark.parametrize("ambient_interval", ["0", "not-a-number"])
+def test_daemon_host_passes_explicit_default_watch_interval(
+    tmp_path, monkeypatch, ambient_interval
+):
+    from mship.core.serve import PR_WATCH_INTERVAL_SECONDS
+
+    monkeypatch.setenv("MSHIP_PR_WATCH_INTERVAL", ambient_interval)
+    home = tmp_path / "home"
+    store = _seed(home, [_entry("ws-a", "a", tmp_path / "a")])
+    captured = {}
+
+    def build(entry, **kwargs):
+        captured.update(kwargs)
+        return FakeSubApp(entry.name)
+
+    app = create_host_app(
+        store,
+        auth_token=None,
+        build_subapp=build,
+    )
+    with TestClient(app) as client:
+        assert client.get("/workspaces/ws-a/specs").status_code == 200
+
+    assert captured["pr_watch_interval"] == PR_WATCH_INTERVAL_SECONDS
+
+
 def test_ignored_entries_hidden_and_unroutable(tmp_path):
     home = tmp_path / "home"
     store = _seed(home, [_entry("ws-i", "i", tmp_path / "i", ignored=True)])

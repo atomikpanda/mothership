@@ -287,6 +287,10 @@ def create_host_app(
     """
     from contextlib import asynccontextmanager
 
+    if pr_watch_interval is None:
+        from mship.core.serve import PR_WATCH_INTERVAL_SECONDS
+
+        pr_watch_interval = PR_WATCH_INTERVAL_SECONDS
 
 
     subapps: dict[str, _SubApp] = {}
