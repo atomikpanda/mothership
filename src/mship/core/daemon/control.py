@@ -88,8 +88,8 @@ def create_control_app(
             }
 
         @app.post("/workspaces/refresh")
-        async def refresh():
-            if rescan is not None:
+        async def refresh(cleanup_only: bool = False):
+            if not cleanup_only and rescan is not None:
                 await asyncio.get_running_loop().run_in_executor(None, rescan)
             if after_rescan is not None:
                 await after_rescan()

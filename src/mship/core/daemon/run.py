@@ -60,10 +60,14 @@ def _build_registry(home: Path):
     from mship.core.daemon.registry import RegistryStore, load_daemon_config, reconcile
 
     store = RegistryStore(registry_path(home))
+    def clear_registry() -> None:
+        store.mutate(lambda state: state.entries.clear())
+
     try:
         cfg = load_daemon_config(home)
     except ValueError as e:
         log.error("daemon config invalid: %s — serving empty registry", e)
+        clear_registry()
         return store, lambda: None, None
 
     def rescan():
@@ -75,8 +79,12 @@ def _build_registry(home: Path):
         try:
             current = load_daemon_config(home)
         except ValueError as e:
-            log.error("daemon config invalid on refresh: %s — keeping previous roots", e)
-            current = cfg
+            log.error(
+                "daemon config invalid on refresh: %s — serving empty registry",
+                e,
+            )
+            clear_registry()
+            return
         reconcile(store, scan_roots(current), datetime.now(timezone.utc))
 
     try:

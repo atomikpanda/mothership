@@ -72,6 +72,77 @@ def test_add_validates_and_registers_manual(cli):
     assert res.exit_code == 1
 
 
+def test_add_rehydrates_existing_degraded_workspace(cli):
+    app, home, tmp = cli
+    workspace = _mk_ws(tmp / "elsewhere", "manual-ws")
+    assert runner.invoke(
+        app, ["workspace", "add", str(workspace)]
+    ).exit_code == 0
+
+    def degrade(state):
+        entry = state.entries[0]
+        entry.state = "degraded"
+        entry.detail = "workspace no longer under configured scan roots"
+        entry.name = "stale"
+        entry.repos = []
+        entry.ignored = True
+
+    RegistryStore(registry_path(home)).mutate(degrade)
+    result = runner.invoke(app, ["workspace", "add", str(workspace)])
+    entry = RegistryStore(registry_path(home)).load().entries[0]
+
+    assert result.exit_code == 0, result.output
+    assert entry.origin == "manual"
+    assert entry.ignored is False
+    assert entry.state == "healthy"
+    assert entry.detail == ""
+    assert entry.name == "manual-ws"
+    assert [repo.name for repo in entry.repos] == ["app"]
+
+
+def test_add_repairs_registry_only_identity_before_move(cli):
+    from mship.core.daemon.registry import (
+        ID_FILE_RELPATH,
+        WorkspaceEntry,
+    )
+
+    app, home, tmp = cli
+    root = tmp / "elsewhere"
+    workspace = _mk_ws(root, "manual-ws")
+    store = RegistryStore(registry_path(home))
+    workspace_id = "ws-registry-only"
+    store.mutate(lambda state: state.entries.append(WorkspaceEntry(
+        id=workspace_id,
+        name="stale",
+        path=str(workspace.resolve()),
+        config_path=str(workspace / "mothership.yaml"),
+        state="degraded",
+        detail="workspace no longer under configured scan roots",
+        identity_source="registry-only",
+        first_seen=NOW,
+        last_seen=NOW,
+    )))
+
+    result = runner.invoke(app, ["workspace", "add", str(workspace)])
+    repaired = store.load().entries[0]
+
+    assert result.exit_code == 0, result.output
+    assert repaired.id == workspace_id
+    assert repaired.identity_source == "idfile"
+    assert (workspace / ID_FILE_RELPATH).read_text().strip() == workspace_id
+
+    moved = root / "moved"
+    workspace.rename(moved)
+    state = reconcile(
+        store,
+        scan_roots(DaemonConfig(scan_roots=[str(root)])),
+        NOW,
+    )
+    assert len(state.entries) == 1
+    assert state.entries[0].id == workspace_id
+    assert state.entries[0].path == str(moved.resolve())
+
+
 def test_add_duplicate_identity_copy_mints_fresh_id(cli):
     app, home, tmp = cli
     root = tmp / "root"
@@ -117,6 +188,35 @@ def test_remove_and_ignore_by_id(cli):
     assert runner.invoke(app, ["workspace", "remove", wid]).exit_code == 0
     assert RegistryStore(registry_path(home)).load().entries == []
     assert runner.invoke(app, ["workspace", "remove", "ws-nope"]).exit_code == 1
+
+
+def test_ignore_and_remove_notify_live_daemon_cleanup(cli, monkeypatch):
+    from mship.core.daemon.paths import lease_path
+
+    app, home, tmp = cli
+    root = tmp / "root"
+    _mk_ws(root, "a")
+    workspace_id = _seed_scan(home, root).entries[0].id
+    lease = lease_path(home)
+    lease.write_text('{"pid": 1, "socket_path": "/run/mship/daemon.sock"}')
+    pokes = []
+    monkeypatch.setattr(
+        ws_mod,
+        "_poke_daemon_refresh",
+        lambda socket, **kwargs: pokes.append((socket, kwargs)),
+    )
+
+    assert runner.invoke(
+        app, ["workspace", "ignore", workspace_id]
+    ).exit_code == 0
+    assert runner.invoke(
+        app, ["workspace", "remove", workspace_id]
+    ).exit_code == 0
+
+    assert pokes == [
+        ("/run/mship/daemon.sock", {"cleanup_only": True}),
+        ("/run/mship/daemon.sock", {"cleanup_only": True}),
+    ]
 
 
 def test_refresh_direct_when_no_daemon(cli):

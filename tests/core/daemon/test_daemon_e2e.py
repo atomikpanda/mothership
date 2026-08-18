@@ -115,3 +115,20 @@ def test_refresh_rereads_daemon_config(tmp_path, monkeypatch):
     save_daemon_config(home, DaemonConfig(scan_roots=[str(root_a), str(root_b)]))
     rescan()
     assert sorted(e.name for e in store.load().entries) == ["first", "second"]
+
+
+def test_invalid_daemon_config_clears_previously_healthy_registry(tmp_path):
+    from mship.core.daemon.paths import daemon_config_path
+    from mship.core.daemon.registry import DaemonConfig, save_daemon_config
+
+    home = tmp_path / "home"
+    root = tmp_path / "root"
+    _mk_ws(root, "existing")
+    save_daemon_config(home, DaemonConfig(scan_roots=[str(root)]))
+    store, _rescan, _serve = run_mod._build_registry(home)
+    assert store.load().entries[0].state == "healthy"
+
+    daemon_config_path(home).write_text("scan_roots: [broken\n")
+    failed_store, _rescan, _serve = run_mod._build_registry(home)
+
+    assert failed_store.load().entries == []

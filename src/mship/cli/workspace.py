@@ -29,6 +29,12 @@ def _store(home: Path) -> RegistryStore:
     return RegistryStore(registry_path(home))
 
 
+def _notify_live_daemon_cleanup(home: Path) -> None:
+    record = read_lease_record(lease_path(home))
+    if record is not None and record.socket_path:
+        _poke_daemon_refresh(record.socket_path, cleanup_only=True)
+
+
 def register(parent: typer.Typer, get_container):
     ws_app = typer.Typer(
         name="workspace",
@@ -72,12 +78,33 @@ def register(parent: typer.Typer, get_container):
         now = datetime.now(timezone.utc)
 
         def apply(state):
-            from mship.core.daemon.registry import WorkspaceEntry, _read_id_file
+            from mship.core.daemon.registry import (
+                WorkspaceEntry,
+                _read_id_file,
+                _recover_registry_only_identity,
+            )
 
             existing_by_path = next((e for e in state.entries if e.path == str(ws_dir)), None)
-            if existing_by_path is not None and "duplicate-identity" not in existing_by_path.detail:
+            if (
+                existing_by_path is not None
+                and "duplicate-identity" not in existing_by_path.detail
+                and _recover_registry_only_identity(
+                    existing_by_path,
+                    ws_dir,
+                    _read_id_file(ws_dir),
+                    {entry.id: entry for entry in state.entries},
+                )
+            ):
                 existing_by_path.origin = "manual"
                 existing_by_path.ignored = False
+                existing_by_path.state = "healthy"
+                existing_by_path.detail = ""
+                existing_by_path.name = cand.name
+                existing_by_path.config_path = str(cand.config_path)
+                existing_by_path.repos = cand.repos
+                existing_by_path.runtime = cand.runtime
+                existing_by_path.runner = cand.runner
+                existing_by_path.last_seen = now
                 return
             # Duplicate-identity copy (or fresh manual add): mint a new id and
             # claim the directory with it.
@@ -111,6 +138,7 @@ def register(parent: typer.Typer, get_container):
             out.error(f"unknown workspace id {workspace_id!r}")
             raise typer.Exit(1)
         out.print(f"removed {workspace_id}")
+        _notify_live_daemon_cleanup(Path.home())
 
     @ws_app.command("ignore")
     def ignore(workspace_id: str):
@@ -129,6 +157,7 @@ def register(parent: typer.Typer, get_container):
             out.error(f"unknown workspace id {workspace_id!r}")
             raise typer.Exit(1)
         out.print(f"ignored {workspace_id}")
+        _notify_live_daemon_cleanup(Path.home())
 
     @ws_app.command("refresh")
     def refresh():
@@ -153,15 +182,20 @@ def register(parent: typer.Typer, get_container):
     parent.add_typer(ws_app, rich_help_panel="Runtime")
 
 
-def _poke_daemon_refresh(socket_path: str) -> dict | None:
-    """POST /workspaces/refresh over the control socket. None on any failure
-    (daemon dead or pre-#472) — caller falls back to the direct store path."""
+def _poke_daemon_refresh(
+    socket_path: str, *, cleanup_only: bool = False
+) -> dict | None:
+    """POST the control app's registry/host cleanup owner. None on any failure
+    (daemon dead or pre-#472); direct registry mutations are already complete."""
     try:
         import httpx
 
-        client = httpx.Client(transport=httpx.HTTPTransport(uds=str(socket_path)), timeout=10.0)
+        client = httpx.Client(
+            transport=httpx.HTTPTransport(uds=str(socket_path)), timeout=10.0
+        )
         try:
-            r = client.post("http://mshipd/workspaces/refresh")
+            params = {"cleanup_only": "true"} if cleanup_only else None
+            r = client.post("http://mshipd/workspaces/refresh", params=params)
             return r.json() if r.status_code == 200 else None
         finally:
             client.close()

@@ -210,6 +210,29 @@ def _write_id_file(ws_path: Path, workspace_id: str) -> bool:
         return False
 
 
+def _recover_registry_only_identity(
+    entry: WorkspaceEntry,
+    workspace_path: Path,
+    file_id: str | None,
+    by_id: dict[str, WorkspaceEntry],
+) -> bool:
+    """Repair a healthy registry-only entry; false means a known ID collision."""
+    if entry.identity_source != "registry-only":
+        return True
+    if file_id is not None:
+        owner = by_id.get(file_id)
+        if owner is not None and owner is not entry:
+            return False
+        if by_id.get(entry.id) is entry:
+            by_id.pop(entry.id)
+        entry.id = file_id
+        entry.identity_source = "idfile"
+        by_id[file_id] = entry
+    elif _write_id_file(workspace_path, entry.id):
+        entry.identity_source = "idfile"
+    return True
+
+
 def reconcile(store: RegistryStore, candidates: list, now: datetime) -> RegistryState:
     """One flock'd RMW folding a scan's candidates into the registry.
 
@@ -332,18 +355,10 @@ def reconcile(store: RegistryStore, candidates: list, now: datetime) -> Registry
                 claimed_ids[entry.id] = path_str
                 continue
 
-            if cand.healthy and existing.identity_source == "registry-only":
-                if file_id is not None:
-                    # A copied workspace may carry a durable id minted by
-                    # another host. It was unknown while this candidate was
-                    # degraded, but once healthy it is authoritative; the
-                    # by-id lookup above already handles known collisions.
-                    by_id.pop(existing.id, None)
-                    existing.id = file_id
-                    existing.identity_source = "idfile"
-                    by_id[file_id] = existing
-                elif _write_id_file(cand.path, existing.id):
-                    existing.identity_source = "idfile"
+            if cand.healthy:
+                _recover_registry_only_identity(
+                    existing, cand.path, file_id, by_id
+                )
             # Refresh an existing entry in place.
             existing.last_seen = now
             claimed_ids[existing.id] = existing.path

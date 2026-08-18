@@ -143,6 +143,14 @@ def test_control_refresh_runs_host_cleanup_after_rescan(tmp_path):
     assert response.status_code == 200
     assert events == ["rescan", "cleanup"]
 
+    events.clear()
+    response = TestClient(app).post(
+        "/workspaces/refresh?cleanup_only=true"
+    )
+
+    assert response.status_code == 200
+    assert events == ["cleanup"]
+
 
 def test_no_store_means_no_registry_routes():
     client = _client()
