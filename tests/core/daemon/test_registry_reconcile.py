@@ -1,7 +1,11 @@
 """Reconciliation + identity (#472 Task 4): id files, moves, copies, missing."""
+import os
 import shutil
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 from mship.core.daemon.discovery import scan_roots
 from mship.core.daemon.paths import registry_path
@@ -329,6 +333,86 @@ def test_manual_workspace_is_revalidated_outside_scan_roots(tmp_path: Path):
     assert entry.origin == "manual"
     assert entry.state == "degraded"
     assert "invalid" in entry.detail
+
+
+@pytest.mark.parametrize("target_is_live", [False, True])
+def test_manual_workspace_becoming_task_worktree_is_excluded(
+    tmp_path: Path, target_is_live: bool
+):
+    from mship.core.workspace_marker import MARKER_NAME
+
+    home, root = tmp_path / "home", tmp_path / "manual"
+    workspace = _mk_ws(root, "workspace")
+    store = _store(home)
+    reconcile(store, _scan(root), NOW)
+    store.mutate(lambda state: setattr(state.entries[0], "origin", "manual"))
+    target = tmp_path / "deleted-owner"
+    if target_is_live:
+        target = _mk_ws(tmp_path / "owner", "workspace")
+    (workspace / MARKER_NAME).write_text(str(target))
+
+    entry = reconcile(store, [], LATER).entries[0]
+
+    assert entry.origin == "manual"
+    assert entry.state == "degraded"
+    assert "task worktree" in entry.detail
+
+
+@pytest.mark.parametrize("symlink_owner", [False, True])
+def test_workspace_id_writer_never_follows_symlinked_owner_path(
+    tmp_path: Path, symlink_owner: bool
+):
+    home, root = tmp_path / "home", tmp_path / "root"
+    workspace = _mk_ws(root, "workspace")
+    external = tmp_path / "external"
+    external.mkdir()
+    external_id = external / "workspace-id"
+    external_id.write_text("do-not-clobber\n")
+    owner = workspace / ".mothership"
+    if symlink_owner:
+        owner.symlink_to(external, target_is_directory=True)
+    else:
+        owner.mkdir()
+        (owner / "workspace-id").symlink_to(external_id)
+
+    entry = reconcile(_store(home), _scan(root), NOW).entries[0]
+
+    assert entry.state == "healthy"
+    assert entry.identity_source == "registry-only"
+    assert external_id.read_text() == "do-not-clobber\n"
+
+
+def test_workspace_id_fifo_is_rejected_without_blocking_or_replacement(
+    tmp_path: Path,
+):
+    home, root = tmp_path / "home", tmp_path / "root"
+    workspace = _mk_ws(root, "workspace")
+    owner = workspace / ".mothership"
+    owner.mkdir()
+    fifo = owner / "workspace-id"
+    os.mkfifo(fifo)
+    results = []
+    errors = []
+
+    def run_reconcile():
+        try:
+            results.append(reconcile(_store(home), _scan(root), NOW))
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=run_reconcile, daemon=True)
+    worker.start()
+    worker.join(timeout=1)
+
+    assert not worker.is_alive(), "workspace-id FIFO blocked reconciliation"
+    assert errors == []
+    entry = results[0].entries[0]
+    assert entry.state == "healthy"
+    assert entry.identity_source == "registry-only"
+    assert fifo.is_fifo()
+    assert list(owner.iterdir()) == [fifo]
+
+
 
 
 def test_replacement_at_deleted_path_gets_new_identity_and_keeps_history(

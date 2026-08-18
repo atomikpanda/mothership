@@ -20,6 +20,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import stat
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -214,20 +215,90 @@ ID_FILE_RELPATH = Path(".mothership") / "workspace-id"
 
 
 def _read_id_file(ws_path: Path) -> str | None:
+    root_fd = owner_fd = file_fd = None
     try:
-        value = (ws_path / ID_FILE_RELPATH).read_text().strip()
+        root_fd = os.open(
+            ws_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        )
+        owner_fd = os.open(
+            ".mothership",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=root_fd,
+        )
+        file_fd = os.open(
+            "workspace-id",
+            os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+            dir_fd=owner_fd,
+        )
+        if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+            return None
+        with os.fdopen(file_fd) as stream:
+            file_fd = None
+            value = stream.read().strip()
         return value or None
     except OSError:
         return None
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if owner_fd is not None:
+            os.close(owner_fd)
+        if root_fd is not None:
+            os.close(root_fd)
 
 
 def _write_id_file(ws_path: Path, workspace_id: str) -> bool:
+    root_fd = owner_fd = None
+    temp_name = f".workspace-id.{uuid.uuid4().hex}.tmp"
     try:
-        (ws_path / ID_FILE_RELPATH).parent.mkdir(parents=True, exist_ok=True)
-        (ws_path / ID_FILE_RELPATH).write_text(workspace_id + "\n")
+        root_fd = os.open(
+            ws_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        )
+        try:
+            os.mkdir(".mothership", mode=0o700, dir_fd=root_fd)
+        except FileExistsError:
+            pass
+        owner_fd = os.open(
+            ".mothership",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=root_fd,
+        )
+        try:
+            target = os.stat(
+                "workspace-id", dir_fd=owner_fd, follow_symlinks=False
+            )
+        except FileNotFoundError:
+            target = None
+        if target is not None and not stat.S_ISREG(target.st_mode):
+            return False
+        fd = os.open(
+            temp_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=owner_fd,
+        )
+        with os.fdopen(fd, "w") as stream:
+            stream.write(workspace_id + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(
+            temp_name,
+            "workspace-id",
+            src_dir_fd=owner_fd,
+            dst_dir_fd=owner_fd,
+        )
         return True
     except OSError:
         return False
+    finally:
+        if owner_fd is not None:
+            try:
+                os.unlink(temp_name, dir_fd=owner_fd)
+            except OSError:
+                pass
+            os.close(owner_fd)
+        if root_fd is not None:
+            os.close(root_fd)
 
 
 def _recover_registry_only_identity(
@@ -312,8 +383,8 @@ def reconcile(store: RegistryStore, candidates: list, now: datetime) -> Registry
         }
         round_candidates = list(candidates)
         candidate_paths = {str(cand.path) for cand in round_candidates}
-        manual_paths = [
-            Path(entry.path)
+        manual_entries = [
+            entry
             for entry in state.entries
             if entry.origin == "manual"
             and entry.path not in candidate_paths
@@ -323,10 +394,20 @@ def reconcile(store: RegistryStore, candidates: list, now: datetime) -> Registry
                 or _read_id_file(Path(entry.path)) == entry.id
             )
         ]
-        if manual_paths:
-            from mship.core.daemon.discovery import _materialize
+        if manual_entries:
+            from mship.core.daemon.discovery import (
+                _is_task_worktree,
+                _materialize,
+            )
 
-            round_candidates.extend(_materialize(path) for path in manual_paths)
+            for entry in manual_entries:
+                path = Path(entry.path)
+                if _is_task_worktree(path):
+                    entry.state = "degraded"
+                    entry.detail = "task worktree is not an independent workspace"
+                    entry.last_seen = now
+                    continue
+                round_candidates.append(_materialize(path))
 
         seen_paths: set[str] = set()
         # Resolve known identities before path-only newcomers. This makes a
