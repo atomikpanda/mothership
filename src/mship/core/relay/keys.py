@@ -39,7 +39,10 @@ def ensure_secret_file(path: Path, length: int = _SUBDOMAIN_SECRET_LEN) -> bytes
     """Return the random secret stored at `path`, generating it if absent.
 
     `length` random bytes with mode 0600, created O_EXCL so there is no
-    world-readable window.
+    world-readable window. The parent dir is forced to 0700 — mkdir's mode is
+    masked by the umask and `exist_ok=True` never tightens an existing loose
+    dir, so the corrective chmod is what actually makes it owner-only (the
+    `registry.py`/`host_app.py` house pattern).
 
     Concurrency-safe: if two callers race to create it, the loser adopts the
     winner's secret (so both derive the same values from it) rather than
@@ -52,7 +55,8 @@ def ensure_secret_file(path: Path, length: int = _SUBDOMAIN_SECRET_LEN) -> bytes
     if path.exists():
         # Present but too short → corrupt/truncated; discard and regenerate.
         path.unlink(missing_ok=True)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
     secret = os.urandom(length)
     try:
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

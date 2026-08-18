@@ -8,6 +8,7 @@ credential silently becomes one of many.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,7 @@ from mship.core.daemon.host_auth import (
     REFRESH_TTL_S,
     RefreshStore,
 )
-from mship.core.daemon.paths import host_refresh_path
+from mship.core.daemon.paths import daemon_state_dir, host_refresh_path
 
 HOST = "hst-20260817120000-abcd1234"
 
@@ -174,3 +175,63 @@ def test_the_store_is_capped(tmp_path: Path):
         store.issue_refresh(host_id=HOST, client=f"phone-{i}")
         clock.advance(1)  # distinct created_at, so "drop the oldest" is defined
     assert len(_records(tmp_path)) == MAX_REFRESH_CLIENTS
+
+
+def test_every_issued_credential_verifies_while_the_cap_churns(tmp_path: Path):
+    """The cap must never evict the credential it is handing back — including
+    the pathological case where the new record is the oldest by tie-break."""
+    clock = _Wall()
+    store = _store(tmp_path, clock=clock)
+    for i in range(MAX_REFRESH_CLIENTS + 5):
+        cred = store.issue_refresh(host_id=HOST, client=f"phone-{i}")
+        assert store.verify_refresh(cred) is not None, f"evicted its own mint at {i}"
+
+
+def test_revoke_prunes_expired_siblings(tmp_path: Path):
+    clock = _Wall()
+    store = _store(tmp_path, clock=clock)
+    store.issue_refresh(host_id=HOST, client="stale")
+    clock.advance(REFRESH_TTL_S + 86_400)
+    store.issue_refresh(host_id=HOST, client="live")
+    store.issue_refresh(host_id=HOST, client="doomed")
+
+    assert store.revoke(host_id=HOST, client="doomed") is True
+    assert set(r["client"] for r in _records(tmp_path).values()) == {"live"}
+
+
+# --- the state dir is owner-only, whatever the umask -----------------------
+
+
+@pytest.fixture
+def loose_umask():
+    """A permissive umask, so these assertions test the corrective chmod rather
+    than the ambient umask (mkdir's mode argument is umask-masked)."""
+    previous = os.umask(0o002)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
+def _mode(path: Path) -> str:
+    return oct(path.stat().st_mode & 0o777)
+
+
+def test_state_dir_and_store_are_owner_only(tmp_path: Path, loose_umask):
+    store = _store(tmp_path)
+    cred = store.issue_refresh(host_id=HOST, client="phone-a")
+    assert _mode(daemon_state_dir(tmp_path)) == "0o700"
+    assert _mode(host_refresh_path(tmp_path)) == "0o600"
+
+    store.verify_refresh(cred)
+    store.revoke(host_id=HOST, client="phone-a")
+    assert _mode(daemon_state_dir(tmp_path)) == "0o700"
+    assert _mode(host_refresh_path(tmp_path)) == "0o600"
+
+
+def test_a_pre_existing_loose_state_dir_is_tightened(tmp_path: Path, loose_umask):
+    state_dir = daemon_state_dir(tmp_path)
+    state_dir.mkdir(parents=True)
+    state_dir.chmod(0o755)
+    _store(tmp_path).issue_refresh(host_id=HOST, client="phone-a")
+    assert _mode(state_dir) == "0o700"

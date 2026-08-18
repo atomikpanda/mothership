@@ -129,9 +129,6 @@ class AnchoredClock:
     def epoch(self) -> str:
         return self._epoch
 
-    def now(self) -> float:
-        return self._wall()
-
     def deadline(self, ttl_seconds: float) -> Deadline:
         return Deadline(
             expires_at=self._wall() + ttl_seconds,

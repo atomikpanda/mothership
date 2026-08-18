@@ -10,6 +10,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from mship.core.daemon.identity import (
     ensure_host_identity,
     machine_fingerprint,
@@ -143,17 +145,33 @@ def test_host_subdomain_shape_and_tls(tmp_path: Path):
     assert tls_ask_allowed(f"{sub}.relay.example.com", "relay.example.com")
 
 
-def test_host_modules_are_workspace_free():
-    """Assumption-header invariant: host identity must not depend on which
+# Every host-level module #471 adds. Extend this list as tasks 3+ land — the
+# invariant is the point, not the one file it started on.
+WORKSPACE_FREE_MODULES = (
+    "identity.py",
+    "host_token.py",
+    "host_auth.py",
+)
+
+_FORBIDDEN_IMPORTS = ("mship.core.config", "mship.core.workspace_context")
+_FORBIDDEN_ARGS = {"workspace", "repos", "config", "workspace_root"}
+
+
+@pytest.mark.parametrize("module_name", WORKSPACE_FREE_MODULES)
+def test_host_modules_are_workspace_free(module_name):
+    """Assumption-header invariant: the host tier must not depend on which
     workspaces this daemon serves."""
-    src = Path(__file__).resolve().parents[3] / "src" / "mship" / "core" / "daemon" / "identity.py"
+    src = (
+        Path(__file__).resolve().parents[3]
+        / "src" / "mship" / "core" / "daemon" / module_name
+    )
     tree = ast.parse(src.read_text())
     imported = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module)
-    assert not any(m in imported for m in ("mship.core.config", "mship.core.workspace_context"))
+    assert not any(m in imported for m in _FORBIDDEN_IMPORTS), module_name
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             args = {a.arg for a in node.args.args + node.args.kwonlyargs}
-            assert not (args & {"workspace", "repos", "config", "workspace_root"}), node.name
+            assert not (args & _FORBIDDEN_ARGS), f"{module_name}:{node.name}"

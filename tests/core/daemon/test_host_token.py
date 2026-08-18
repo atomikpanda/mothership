@@ -8,6 +8,7 @@ one residual hazard (AC10). Every test here pins a behavior that a bare
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,11 @@ from mship.core.daemon.host_token import (
     issue_host_token,
     verify_host_token,
 )
-from mship.core.daemon.paths import host_secret_path, host_tokens_path
+from mship.core.daemon.paths import (
+    daemon_state_dir,
+    host_secret_path,
+    host_tokens_path,
+)
 from mship.core.relay import keys as relay_keys
 from mship.core.relay.token_clock import SKEW_SECONDS, AnchoredClock, boot_epoch
 
@@ -225,6 +230,31 @@ def test_issuing_caps_the_number_of_live_records(tmp_path: Path):
     assert len(_records(tmp_path)) == MAX_HOST_TOKENS
 
 
+def test_a_shorter_lived_token_minted_at_the_cap_still_verifies(tmp_path: Path):
+    """The cap must never evict the credential it is handing back. Evicting
+    'the soonest to expire' AFTER inserting picks the new token whenever it has
+    the shorter TTL — it would be issued already dead."""
+    clk = _Clock()
+    for _ in range(MAX_HOST_TOKENS):
+        issue_host_token(tmp_path, ttl_seconds=10_000, clock=clk.anchored())
+    short = issue_host_token(tmp_path, ttl_seconds=60, clock=clk.anchored())
+
+    assert verify_host_token(tmp_path, short, clock=clk.anchored()) is not None
+    assert len(_records(tmp_path)) == MAX_HOST_TOKENS
+    assert short.split(".", 1)[0] in _records(tmp_path)
+
+
+def test_every_issued_token_verifies_while_the_cap_churns(tmp_path: Path):
+    clk = _Clock()
+    for i in range(MAX_HOST_TOKENS + 10):
+        # Alternate long and short TTLs so the new record lands on both sides
+        # of the eviction ordering.
+        token = issue_host_token(
+            tmp_path, ttl_seconds=60 if i % 2 else 10_000, clock=clk.anchored()
+        )
+        assert verify_host_token(tmp_path, token, clock=clk.anchored()) is not None
+
+
 def test_verify_writes_nothing(tmp_path: Path):
     """AC11's "reconnect performs no writes" starts here: verification is a
     pure read, so a flapping phone cannot churn the store."""
@@ -234,6 +264,51 @@ def test_verify_writes_nothing(tmp_path: Path):
     for _ in range(5):
         assert verify_host_token(tmp_path, token, clock=clk.anchored()) is not None
     assert host_tokens_path(tmp_path).read_bytes() == before
+
+
+# --- the state dir is owner-only, whatever the umask -----------------------
+
+
+@pytest.fixture
+def loose_umask():
+    """A permissive umask, so these assertions test the corrective chmod rather
+    than the ambient umask (mkdir's mode argument is umask-masked)."""
+    previous = os.umask(0o002)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
+def _mode(path: Path) -> str:
+    return oct(path.stat().st_mode & 0o777)
+
+
+@pytest.mark.parametrize("entry_point", [
+    lambda home: ensure_host_root_secret(home),
+    lambda home: issue_host_token(home, clock=_Clock().anchored()),
+    lambda home: verify_host_token(home, "deadbeefdeadbeef.s", clock=_Clock().anchored()),
+])
+def test_state_dir_is_owner_only_after_any_entry_point(
+    tmp_path: Path, loose_umask, entry_point
+):
+    entry_point(tmp_path)
+    assert _mode(daemon_state_dir(tmp_path)) == "0o700"
+
+
+def test_a_pre_existing_loose_state_dir_is_tightened(tmp_path: Path, loose_umask):
+    """`exist_ok=True` never fixes a dir that is already too loose — only the
+    corrective chmod does."""
+    state_dir = daemon_state_dir(tmp_path)
+    state_dir.mkdir(parents=True)
+    state_dir.chmod(0o755)
+    ensure_host_root_secret(tmp_path)
+    assert _mode(state_dir) == "0o700"
+
+
+def test_the_token_file_is_owner_only(tmp_path: Path, loose_umask):
+    issue_host_token(tmp_path, clock=_Clock().anchored())
+    assert _mode(host_tokens_path(tmp_path)) == "0o600"
 
 
 # --- the epoch tag itself --------------------------------------------------

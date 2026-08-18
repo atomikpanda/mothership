@@ -21,8 +21,10 @@ import fcntl
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
+import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -39,8 +41,10 @@ REFRESH_TTL_S = 30 * 86_400
 
 MAX_REFRESH_CLIENTS = 32
 
-# Client ids are a truncated sha256 hex digest (see `_client_id`).
-_ID_RE = re.compile(r"\A[0-9a-f]{1,64}\Z")
+# Client ids are exactly the first 16 hex chars of a sha256 digest
+# (`_client_id`); anything else is rejected before it is used as a lookup key.
+_CLIENT_ID_LEN = 16
+_ID_RE = re.compile(r"\A[0-9a-f]{%d}\Z" % _CLIENT_ID_LEN)
 
 
 @dataclass(frozen=True)
@@ -50,10 +54,18 @@ class RefreshGrant:
     host_id: str
 
 
+def _private_dir(path: Path) -> None:
+    """Owner-only parent dir. The corrective chmod is not redundant: mkdir's
+    mode is masked by the umask, and `exist_ok=True` never tightens a dir that
+    already exists too loose (the `registry.py`/`host_app.py` house pattern)."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+
+
 @contextmanager
 def _locked(lock_path: Path, mode: int):
     """Advisory flock (the `registry.py`/`state.py` house pattern)."""
-    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _private_dir(lock_path)
     lock_path.touch(exist_ok=True, mode=0o600)
     with open(lock_path, "r+") as lf:
         fcntl.flock(lf, mode)
@@ -103,11 +115,22 @@ class RefreshStore:
             return {}
 
     def _save(self, clients: dict) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        tmp = self._path.with_name(self._path.name + ".tmp")
-        tmp.write_text(json.dumps({"clients": clients}, indent=2))
-        tmp.chmod(0o600)
-        tmp.replace(self._path)
+        """Atomic, owner-only write (`host_app._atomic_write_owner_file` shape):
+        mkstemp creates the temp file 0600, so the hashes are never briefly
+        world-readable."""
+        _private_dir(self._path)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=self._path.name + ".", dir=self._path.parent
+        )
+        temp = Path(temp_name)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                stream.write(json.dumps({"clients": clients}, indent=2))
+            os.replace(temp, self._path)
+        except BaseException:
+            temp.unlink(missing_ok=True)
+            raise
+        self._path.chmod(0o600)
 
     def _live(self, clients: dict) -> dict:
         now = self._clock()
@@ -141,6 +164,14 @@ class RefreshStore:
                     self._save(live)
                 return f"{client_id}.{self._derive(host_id, client, existing['nonce'])}"
             # No usable record (absent, expired, or hand-corrupted) → mint one.
+            # Evict from the PRE-EXISTING set only, so the credential we are
+            # about to hand back can never be the one the cap drops.
+            if len(live) >= self._max_clients:
+                live = dict(sorted(
+                    live.items(),
+                    key=lambda kv: kv[1].get("created_at", 0),
+                    reverse=True,
+                )[: max(self._max_clients - 1, 0)])
 
             nonce = secrets.token_hex(16)
             secret = self._derive(host_id, client, nonce)
@@ -154,11 +185,6 @@ class RefreshStore:
                 "created_at": now,
                 "expires_at": now + self._ttl,
             }
-            if len(live) > self._max_clients:
-                keep = sorted(
-                    live.items(), key=lambda kv: kv[1].get("created_at", 0), reverse=True
-                )[: self._max_clients]
-                live = dict(keep)
             self._save(live)
         return f"{client_id}.{secret}"
 
@@ -191,6 +217,9 @@ class RefreshStore:
             clients = self._load()
             if client_id not in clients:
                 return False
-            del clients[client_id]
-            self._save(clients)
+            # Prune here too: this is a write, so pay off the expired records
+            # rather than re-persisting them.
+            remaining = self._live(clients)
+            remaining.pop(client_id, None)
+            self._save(remaining)
         return True

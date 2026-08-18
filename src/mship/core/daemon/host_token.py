@@ -18,8 +18,10 @@ import fcntl
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,9 +41,10 @@ MAX_HOST_TOKENS = 64
 
 _ROOT_SECRET_LEN = 32
 
-# Token ids are `secrets.token_hex(8)`. Anything else is rejected before it is
-# used as a lookup key — defense in depth against a crafted `../../evil` id.
-_ID_RE = re.compile(r"\A[0-9a-f]{1,32}\Z")
+# Token ids are exactly `secrets.token_hex(8)` — 16 lowercase hex. Anything
+# else is rejected before it is used as a lookup key: defense in depth against
+# a crafted `../../evil` id ever reaching a path or a record.
+_ID_RE = re.compile(r"\A[0-9a-f]{16}\Z")
 
 
 @dataclass(frozen=True)
@@ -60,10 +63,18 @@ def ensure_host_root_secret(home: Path) -> bytes:
     return ensure_secret_file(host_secret_path(home), _ROOT_SECRET_LEN)
 
 
+def _private_dir(path: Path) -> None:
+    """Owner-only parent dir. The corrective chmod is not redundant: mkdir's
+    mode is masked by the umask, and `exist_ok=True` never tightens a dir that
+    already exists too loose (the `registry.py`/`host_app.py` house pattern)."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+
+
 @contextmanager
 def _locked(lock_path: Path, mode: int):
     """Advisory flock (the `registry.py`/`state.py` house pattern)."""
-    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _private_dir(lock_path)
     lock_path.touch(exist_ok=True, mode=0o600)
     with open(lock_path, "r+") as lf:
         fcntl.flock(lf, mode)
@@ -85,11 +96,20 @@ def _load(path: Path) -> dict:
 
 
 def _save(path: Path, tokens: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps({"tokens": tokens}, indent=2))
-    tmp.chmod(0o600)
-    tmp.replace(path)
+    """Atomic, owner-only write (`host_app._atomic_write_owner_file` shape):
+    mkstemp creates the temp file 0600, so the hashes are never briefly
+    world-readable."""
+    _private_dir(path)
+    fd, temp_name = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    temp = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(json.dumps({"tokens": tokens}, indent=2))
+        os.replace(temp, path)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
+    path.chmod(0o600)
 
 
 def _hash(secret: str) -> str:
@@ -117,16 +137,20 @@ def issue_host_token(
         tokens = {
             tid: rec for tid, rec in _load(path).items() if not _expired(rec, clock)
         }
+        # Evict from the PRE-EXISTING set only: the token we are about to hand
+        # back must never be the one the cap drops (a short-TTL mint at the cap
+        # sorts last and would be issued already dead).
+        if len(tokens) >= max_tokens:
+            tokens = dict(sorted(
+                tokens.items(),
+                key=lambda kv: kv[1].get("expires_at", 0),
+                reverse=True,
+            )[: max(max_tokens - 1, 0)])
         tokens[token_id] = {
             "token_id": token_id,
             "secret_hash": _hash(secret),
             **clock.deadline(ttl_seconds).as_record(),
         }
-        if len(tokens) > max_tokens:
-            keep = sorted(
-                tokens.items(), key=lambda kv: kv[1]["expires_at"], reverse=True
-            )[:max_tokens]
-            tokens = dict(keep)
         _save(path, tokens)
     return f"{token_id}.{secret}"
 
