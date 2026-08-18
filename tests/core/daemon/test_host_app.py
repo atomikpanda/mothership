@@ -106,10 +106,39 @@ def test_forward_routes_to_right_workspace_no_cross_bleed(two_ws_app):
             "workspace": "meta",
             "path": "/workspaces/ws-meta/specs",
         }
+
         assert r2.json() == {
             "workspace": "mono",
             "path": "/workspaces/ws-mono/specs",
         }
+
+def test_default_workspace_subapp_routes_under_host_namespace(tmp_path):
+    workspace = tmp_path / "actual"
+    workspace.mkdir()
+    (workspace / "mothership.yaml").write_text(
+        "workspace: actual\nrepos: {}\n"
+    )
+    home = tmp_path / "home"
+    store = _seed(home, [_entry("ws-actual", "actual", workspace)])
+    app = create_host_app(
+        store,
+        auth_token=None,
+        pr_watch_interval=0,
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/workspaces/ws-actual/health").status_code == 200
+        assert client.get("/workspaces/ws-actual/specs").status_code == 200
+        redirect = client.get(
+            "/workspaces/ws-actual/ui", follow_redirects=False
+        )
+        assert redirect.status_code == 307
+        assert (
+            redirect.headers["location"]
+            == "http://testserver/workspaces/ws-actual/ui/"
+        )
+        assert client.get("/workspaces/ws-actual/ui/").status_code == 200
+
 
 
 def test_subapp_lifespans_actually_start_and_stop(two_ws_app):

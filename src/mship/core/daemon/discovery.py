@@ -166,7 +166,7 @@ def scan_roots(cfg: DaemonConfig) -> list[Candidate]:
     for root_str in cfg.scan_roots:
         root = Path(root_str)
         if root.is_symlink():
-            if not root.exists():
+            if not root.exists() or not root.is_dir():
                 raise ScanRootError(
                     f"configured scan root is missing or inaccessible: {root}"
                 )

@@ -218,6 +218,16 @@ def test_dangling_symlink_scan_root_fails_with_path(tmp_path: Path):
         scan_roots(_cfg(dangling))
 
 
+def test_file_symlink_scan_root_fails_with_path(tmp_path: Path):
+    target = tmp_path / "workspace.txt"
+    target.write_text("not a directory")
+    linked_root = tmp_path / "linked-root"
+    linked_root.symlink_to(target)
+
+    with pytest.raises(ValueError, match=str(linked_root)):
+        scan_roots(_cfg(linked_root))
+
+
 def test_max_depth_respected(tmp_path: Path):
     deep = tmp_path / "a" / "b" / "c"
     _mk_single(deep, "deep-ws")
