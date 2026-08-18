@@ -143,6 +143,12 @@ def test_daemon_config_rejects_invalid_serve_bind(serve):
         DaemonConfig(serve=serve)
 
 
+
+def test_daemon_config_rejects_negative_max_depth():
+    with pytest.raises(ValueError, match="max_depth"):
+        DaemonConfig(max_depth=-1)
+
+
 def test_corrupt_registry_loads_empty(tmp_path: Path):
     p = registry_path(tmp_path)
     p.parent.mkdir(parents=True)

@@ -102,7 +102,51 @@ def _serve_forever(control_app, socket_path, host_app, serve_cfg) -> None:
         host = uvicorn.Server(uvicorn.Config(
             host_app, host=serve_cfg["host"], port=int(serve_cfg["port"]), log_config=None,
         ))
-        await asyncio.gather(control.serve(), host.serve())
+        control_app.state.set_serve_bound(False)
+        control_task = asyncio.create_task(control.serve())
+        host_task = asyncio.create_task(host.serve())
+        try:
+            while not host.started:
+                if host_task.done():
+                    control.should_exit = True
+                    await asyncio.gather(control_task, return_exceptions=True)
+                    failure = host_task.exception()
+                    if failure is not None:
+                        raise RuntimeError("TCP server failed to bind") from failure
+                    raise RuntimeError("TCP server failed to bind")
+                if control_task.done():
+                    host.should_exit = True
+                    await asyncio.gather(host_task, return_exceptions=True)
+                    failure = control_task.exception()
+                    if failure is not None:
+                        raise RuntimeError("control server stopped before TCP bind") from failure
+                    raise RuntimeError("control server stopped before TCP bind")
+                await asyncio.sleep(0)
+
+            control_app.state.set_serve_bound(True)
+            done, _pending = await asyncio.wait(
+                {control_task, host_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            unexpected = (
+                control_task in done and not control.should_exit
+            ) or (
+                host_task in done and not host.should_exit
+            )
+            control.should_exit = True
+            host.should_exit = True
+            results = await asyncio.gather(
+                control_task, host_task, return_exceptions=True
+            )
+            failure = next(
+                (result for result in results if isinstance(result, BaseException)),
+                None,
+            )
+            if failure is not None:
+                raise RuntimeError("daemon server failed") from failure
+            if unexpected:
+                raise RuntimeError("daemon server stopped unexpectedly")
+        finally:
+            control_app.state.set_serve_bound(False)
 
     asyncio.run(_both())
 

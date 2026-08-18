@@ -296,3 +296,21 @@ def test_state_dir_collision_uses_effective_resolver(tmp_path: Path, monkeypatch
     collisions = [e for e in state.entries if "state-dir collision" in e.detail]
     assert len(healthy) == 1
     assert len(collisions) == 1
+
+
+def test_move_then_reuse_old_path_registers_both_workspaces(tmp_path: Path):
+    home, root = tmp_path / "home", tmp_path / "root"
+    original = _mk_ws(root, "a")
+    store = _store(home)
+    original_id = reconcile(store, _scan(root), NOW).entries[0].id
+
+    moved = root / "z"
+    original.rename(moved)
+    replacement = _mk_ws(root, "a", ws_name="replacement")
+    state = reconcile(store, _scan(root), LATER)
+
+    by_path = {e.path: e for e in state.entries}
+    assert len(state.entries) == 2
+    assert by_path[str(moved.resolve())].id == original_id
+    assert by_path[str(replacement.resolve())].id != original_id
+    assert by_path[str(replacement.resolve())].name == "replacement"

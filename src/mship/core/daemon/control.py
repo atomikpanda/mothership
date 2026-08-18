@@ -45,6 +45,9 @@ def create_control_app(
     from fastapi import FastAPI
 
     app = FastAPI(title="mshipd control", docs_url=None, redoc_url=None)
+    serve_state = {"bound": serve_bound}
+    app.state.set_serve_bound = lambda bound: serve_state.update(bound=bound)
+
 
     @app.get("/health")
     def health():
@@ -58,7 +61,7 @@ def create_control_app(
             "uptime_s": (now - started_at).total_seconds(),
             "socket": socket_path,
             "capabilities": {
-                "serve": serve_bound,  # #472: TCP host app bound (config-dependent)
+                "serve": serve_state["bound"],  # actual TCP listener lifecycle
                 "tunnel": False,  # #471: relay tunnel registration
                 "registry": store is not None,  # #472: workspace discovery/registry
                 "runner": False,  # #473: unattended worker supervision

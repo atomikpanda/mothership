@@ -135,6 +135,14 @@ class DaemonConfig(BaseModel):
     max_depth: int = 6
     serve: Optional[dict] = None  # {"host": str, "port": int}
 
+    @field_validator("max_depth")
+    @classmethod
+    def _validate_max_depth(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("daemon max_depth must be nonnegative")
+        return value
+
+
     @field_validator("serve", mode="before")
     @classmethod
     def _validate_serve(cls, value):
@@ -222,13 +230,20 @@ def reconcile(store: RegistryStore, candidates: list, now: datetime) -> Registry
         by_id = {e.id: e for e in state.entries}
         by_path = {e.path: e for e in state.entries}
         seen_paths: set[str] = set()
-        # Deterministic order regardless of scanner ordering.
-        ordered = sorted(candidates, key=lambda c: str(c.path))
+        # Resolve known identities before path-only newcomers. This makes a
+        # move vacate its old path before a new workspace there is matched.
+        prepared = [(cand, _read_id_file(cand.path)) for cand in candidates]
+        ordered = sorted(
+            prepared,
+            key=lambda item: (
+                0 if item[1] is not None and item[1] in by_id else 1,
+                str(item[0].path),
+            ),
+        )
         claimed_ids: dict[str, str] = {}  # id -> path that holds it this round
-        for cand in ordered:
+        for cand, file_id in ordered:
             path_str = str(cand.path)
             seen_paths.add(path_str)
-            file_id = _read_id_file(cand.path)
             existing = None
             if file_id is not None and file_id in by_id:
                 existing = by_id[file_id]
@@ -267,8 +282,12 @@ def reconcile(store: RegistryStore, candidates: list, now: datetime) -> Registry
                     ))
                     continue
                 # MOVE: same id, old path gone -> update path, preserve overrides.
+                old_path = existing.path
                 existing.path = path_str
                 existing.config_path = str(cand.config_path)
+                if by_path.get(old_path) is existing:
+                    by_path.pop(old_path)
+                by_path[path_str] = existing
 
             if existing is None:
                 if not cand.healthy:

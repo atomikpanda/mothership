@@ -178,3 +178,50 @@ def test_entrypoint_registered():
         pyproject = tomllib.load(f)
     assert pyproject["project"]["scripts"]["mshipd"] == "mship.core.daemon.run:main"
     assert callable(run_mod.main)
+
+
+def test_tcp_bind_failure_stops_control_and_clears_capability(monkeypatch):
+    import asyncio
+    from datetime import datetime, timezone
+
+    import uvicorn
+    from fastapi.testclient import TestClient
+
+    from mship.core.daemon.control import create_control_app
+
+    class FakeConfig:
+        def __init__(self, app, **kwargs):
+            self.app = app
+            self.host = kwargs.get("host")
+
+    class FakeServer:
+        def __init__(self, config):
+            self.config = config
+            self.started = False
+            self.should_exit = False
+
+        async def serve(self):
+            if self.config.host is not None:
+                return  # TCP bind failed before Uvicorn marked the server started
+            self.started = True
+            while not self.should_exit:
+                await asyncio.sleep(0)
+
+    monkeypatch.setattr(uvicorn, "Config", FakeConfig)
+    monkeypatch.setattr(uvicorn, "Server", FakeServer)
+    control_app = create_control_app(
+        started_at=datetime.now(timezone.utc),
+        version="1",
+        socket_path="/control.sock",
+        serve_bound=True,
+    )
+
+    with pytest.raises(RuntimeError, match="TCP server failed to bind"):
+        run_mod._serve_forever(
+            control_app,
+            Path("/control.sock"),
+            object(),
+            {"host": "127.0.0.1", "port": 47190},
+        )
+
+    assert TestClient(control_app).get("/health").json()["capabilities"]["serve"] is False
