@@ -22,15 +22,25 @@ PUB2 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE
 
 
 class Recorder:
-    """Fake ssh-keygen: records (argv, stdin), returns scripted results."""
+    """Fake ssh-keygen: records (argv, stdin), returns scripted results.
+
+    Also snapshots the CONTENT of any `-f`/`-s` file while the call is in
+    flight — they are temp files the caller deletes on return, so asserting
+    after the fact could only see their names."""
 
     def __init__(self, result=None, raises=None):
         self.calls: list[tuple[list[str], bytes]] = []
+        self.files: dict[str, str] = {}
         self._result = result
         self._raises = raises
 
     def __call__(self, argv, input_bytes):
         self.calls.append((list(argv), input_bytes))
+        for flag in ("-f", "-s"):
+            if flag in argv:
+                path = Path(argv[argv.index(flag) + 1])
+                if path.is_file():
+                    self.files[flag] = path.read_text()
         if self._raises is not None:
             raise self._raises
         if self._result is not None:
@@ -95,12 +105,13 @@ def test_verify_builds_the_ssh_keygen_verify_argv_over_temp_files():
     assert argv[:3] == ["ssh-keygen", "-Y", "verify"]
     assert argv[argv.index("-n") + 1] == NS
     assert argv[argv.index("-I") + 1] == "SHA256:abc"
-    signers = Path(argv[argv.index("-f") + 1])
-    sig = Path(argv[argv.index("-s") + 1])
-    # The two files exist only for the duration of the call; assert on the
-    # recorded content-bearing paths' names, not their (temp) location.
-    assert signers.name and sig.name
+    # The two files exist only for the duration of the call — assert what
+    # ssh-keygen actually reads out of them.
+    assert rec.files["-f"] == f"SHA256:abc {PUB}\n"
+    assert rec.files["-s"] == "SIG\n"
     assert stdin == b"payload-bytes"
+    # …and nothing is left behind afterwards.
+    assert not Path(argv[argv.index("-f") + 1]).exists()
 
 
 def test_verify_returns_false_on_a_bad_signature_without_raising():

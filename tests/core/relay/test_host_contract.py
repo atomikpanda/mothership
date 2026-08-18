@@ -59,6 +59,16 @@ def test_max_backoff_matches_the_tunnel_supervisor_cap():
 # --- AC13: one Caddy matcher is enough --------------------------------------
 
 
+def test_the_wire_literals_are_pinned_by_value():
+    # Symbolic comparisons alone would let a rename sail through green tests
+    # and break every deployed daemon: these strings ARE the wire.
+    assert host_contract.NAMESPACE == "host-registration@mship"
+    assert host_contract.HOSTS_PREFIX == "/hosts"
+    assert host_contract.CHALLENGE_PATH == "/hosts/challenge"
+    assert host_contract.REGISTER_PATH == "/hosts/register"
+    assert host_contract.LIST_PATH == "/hosts"
+
+
 def test_every_route_path_lives_under_the_single_hosts_prefix():
     assert host_contract.ROUTE_PATHS, "routes must be enumerated here, not inline"
     for path in host_contract.ROUTE_PATHS:

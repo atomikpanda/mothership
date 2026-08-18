@@ -11,6 +11,7 @@ import pytest
 
 from mship.core.relay import host_contract
 from mship.core.relay.host_directory import (
+    ChallengeCapReached,
     ChallengeRefused,
     DuplicateIdentity,
     HostDirectory,
@@ -122,6 +123,53 @@ def test_an_expired_nonce_is_refused_on_the_relay_clock(tmp_path):
     with pytest.raises(ChallengeRefused):
         d.register(payload, nonce=ch["nonce"], signature=_sign(ch["nonce"], payload))
     assert d.get_host(payload["host_id"]) is None
+
+
+def test_a_nonce_is_claimed_before_it_is_read_so_a_racing_twin_loses(tmp_path):
+    """Two registrations quoting one nonce must not BOTH pass the check.
+
+    Reachable in one process: the enroll app serves sync endpoints on a
+    threadpool. The interleave is simulated by re-entering `_consume_nonce`
+    from inside the read — i.e. a second consumer arriving after the first has
+    read the record but before it finished — which an exists()-read-unlink
+    sequence would let through.
+    """
+    d = _dir(tmp_path)
+    nonce = d.issue_challenge()["nonce"]
+    losers = []
+    real_read = d._read_challenge
+
+    def racing_read(path):
+        rec = real_read(path)
+        if not losers:
+            try:
+                d._consume_nonce(nonce)
+                losers.append("ADMITTED")
+            except ChallengeRefused:
+                losers.append("refused")
+        return rec
+
+    d._read_challenge = racing_read
+    d._consume_nonce(nonce)                       # the winner
+    assert losers == ["refused"]
+    assert list((tmp_path / "challenges").iterdir()) == []
+
+
+def test_the_challenge_store_is_capped(tmp_path):
+    # Public, unauthenticated, and every call writes a file: the store is the
+    # security boundary (`RequestStore.create`'s max_pending precedent).
+    clock = Clock()
+    d = HostDirectory(
+        tmp_path, allowed_signers=lambda: FP_A, verify=_verify,
+        probe=Prober(), clock=clock, max_challenges=3,
+    )
+    for _ in range(3):
+        d.issue_challenge()
+    with pytest.raises(ChallengeCapReached):
+        d.issue_challenge()
+    # The cap is on LIVE challenges: it clears itself one TTL later.
+    clock.t += host_contract.CHALLENGE_TTL_S + 1
+    assert d.issue_challenge()["nonce"]
 
 
 def test_an_unknown_nonce_is_refused(tmp_path):
@@ -267,6 +315,18 @@ def test_an_unreachable_incumbent_yields_a_takeover_recording_the_predecessor(tm
     assert len(list((tmp_path / "hosts").glob("*.json"))) == 1
 
 
+def test_a_heartbeat_after_a_takeover_keeps_the_predecessor_on_record(tmp_path):
+    clock = Clock()
+    probe = Prober(raises=TimeoutError("no route"))
+    d = _incumbent(tmp_path, probe, clock)
+    clock.t += 10
+    _register(d, _payload(instance_id="inst-2"))
+    clock.t += 10
+    # The takeover is a fact about the entry; the next idempotent re-post must
+    # not silently erase who used to hold it.
+    assert _register(d, _payload(instance_id="inst-2"))["previous_instance_id"] == "inst-1"
+
+
 def test_a_probe_returning_no_id_yields_a_takeover(tmp_path):
     clock = Clock()
     probe = Prober({})            # answered, but not by an mship host
@@ -362,6 +422,20 @@ def test_a_corrupt_entry_file_is_quarantined_not_fatal(tmp_path):
     assert [h["host_id"] for h in d.list_hosts()] == [_payload()["host_id"]]
     assert (tmp_path / "hosts" / "broken.json.corrupt").is_file()
     assert not (tmp_path / "hosts" / "broken.json").exists()
+
+
+def test_a_non_numeric_last_seen_reads_as_offline_not_as_a_crash(tmp_path):
+    # A hand-edited entry must degrade, not brick every listing (and must not
+    # accidentally read as fresh, which would make it un-takeoverable).
+    clock = Clock()
+    d = _dir(tmp_path, clock=clock)
+    _register(d)
+    path = tmp_path / "hosts" / f"{_payload()['host_id']}.json"
+    rec = json.loads(path.read_text())
+    rec["last_seen"] = "yesterday"
+    path.write_text(json.dumps(rec))
+    assert d.list_hosts()[0]["state"] == "offline"
+    assert _register(d, _payload(instance_id="inst-2"))["previous_instance_id"] == "inst-1"
 
 
 def test_the_directory_survives_a_process_restart(tmp_path):

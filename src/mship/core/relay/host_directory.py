@@ -9,8 +9,8 @@ Two invariants carry the security of this module:
 
 - **The relay never asserts identity.** Every write is gated on a signature it
   verified against the `pubkeys/` allowlist sish itself authenticates against.
-  There is exactly one write path (`_write_entry`) and `register` is the only
-  caller.
+  There is exactly one entry-write call site (in `register`, after the
+  signature check) and it is the only caller of `_write_atomic` for `hosts/`.
 - **Only the relay's clock decides freshness.** `last_seen`, challenge issue
   and expiry, staleness and takeover eligibility are stamped from the injected
   clock, never from a payload field — a VM whose wall clock stepped an hour
@@ -24,8 +24,10 @@ and silently overwrite the incumbent's URL and credential (decision f).
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
+import tempfile
 import time
 from pathlib import Path
 from typing import Callable, Sequence
@@ -54,14 +56,34 @@ _PAYLOAD_FIELDS = (
     "refresh",
 )
 
+# Bounded so a public, unauthenticated route cannot fill the relay's disk. Sized
+# far above any real fleet: every host asks for at most one challenge per
+# registration, and a challenge lives CHALLENGE_TTL_S.
+MAX_CHALLENGES = 1000
+
 _REIDENTIFY_HINT = (
     "another live host already claims this host_id; "
     "run `mship daemon reidentify` on the new machine"
 )
 
 
+def _as_float(value, default: float = 0.0) -> float:
+    """A timestamp read back from disk, or `default` if it is not a number.
+
+    A hand-edited entry must degrade to "very old" (→ offline, takeover-
+    eligible) rather than raise and brick every listing."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class ChallengeRefused(Exception):
     """The nonce is unknown, already used, or expired (401)."""
+
+
+class ChallengeCapReached(Exception):
+    """Too many outstanding challenges to mint another (429)."""
 
 
 class SignatureRefused(Exception):
@@ -89,6 +111,7 @@ class HostDirectory:
         clock: Callable[[], float] = time.time,
         challenge_ttl_s: float = host_contract.CHALLENGE_TTL_S,
         stale_after_s: float = host_contract.DIRECTORY_STALE_S,
+        max_challenges: int = MAX_CHALLENGES,
     ) -> None:
         """`allowed_signers` is re-read per verification (an approval between
         two registrations must take effect without restarting the server), and
@@ -111,14 +134,25 @@ class HostDirectory:
         self._clock = clock
         self._challenge_ttl = challenge_ttl_s
         self._stale_after = stale_after_s
+        self._max_challenges = max_challenges
 
     # --- storage primitives -------------------------------------------------
 
     def _write_atomic(self, path: Path, rec: dict) -> None:
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(rec, sort_keys=True))
-        tmp.chmod(0o600)          # an entry carries a refresh credential
-        tmp.replace(path)
+        """Owner-only atomic write (`host_token._save` shape): mkstemp creates
+        the file 0600, so an entry's refresh credential is never briefly
+        world-readable, and the unique temp name means two writers to the same
+        entry cannot scribble over each other's half-written temp file."""
+        fd, temp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp",
+                                         dir=path.parent)
+        temp = Path(temp_name)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                stream.write(json.dumps(rec, sort_keys=True))
+            os.replace(temp, path)
+        except BaseException:
+            temp.unlink(missing_ok=True)
+            raise
 
     def _read_rec(self, path: Path) -> dict | None:
         """Load a record, quarantining a corrupt/truncated file instead of
@@ -138,16 +172,41 @@ class HostDirectory:
 
     # --- challenges ---------------------------------------------------------
 
-    def _sweep_challenges(self) -> None:
+    def _read_challenge(self, path: Path) -> dict | None:
+        """Load a challenge, DELETING a corrupt one rather than quarantining
+        it: unlike a host entry it carries nothing recoverable, and a `.corrupt`
+        file nothing ever reaps is just litter on a public write path."""
+        try:
+            rec = json.loads(path.read_text())
+            if not isinstance(rec, dict):
+                raise ValueError("not an object")
+            return rec
+        except (json.JSONDecodeError, OSError, ValueError):
+            path.unlink(missing_ok=True)
+            return None
+
+    def _sweep_challenges(self) -> list[Path]:
+        """Drop expired/corrupt challenges; return what is still live."""
         now = self._clock()
-        for path in list(self._challenges.glob("*.json")):
-            rec = self._read_rec(path)
-            if rec is None or now >= float(rec.get("expires_at", 0)):
+        live = []
+        for path in sorted(self._challenges.glob("*.json")):
+            rec = self._read_challenge(path)
+            if rec is None or now >= _as_float(rec.get("expires_at")):
                 path.unlink(missing_ok=True)
+            else:
+                live.append(path)
+        return live
 
     def issue_challenge(self) -> dict:
-        """Mint a single-use nonce, stamped and expiring on the relay clock."""
-        self._sweep_challenges()
+        """Mint a single-use nonce, stamped and expiring on the relay clock.
+
+        Capped: this route is public and unauthenticated, and each call writes a
+        file, so the store — not the HTTP layer — is the security boundary
+        (`RequestStore.create`'s `max_pending` precedent). The cap is per *live*
+        challenge, so it only ever bites on a flood inside one TTL window.
+        """
+        if len(self._sweep_challenges()) >= self._max_challenges:
+            raise ChallengeCapReached("too many outstanding challenges; try later")
         now = self._clock()
         rec = {
             "nonce": secrets.token_hex(16),
@@ -158,16 +217,30 @@ class HostDirectory:
         return rec
 
     def _consume_nonce(self, nonce: str) -> None:
-        """Spend a nonce, or refuse. Single use: the record is unlinked before
-        anything else happens, so a replay loses even if it races."""
+        """Spend a nonce, or refuse.
+
+        Single use is enforced by *claiming* the file with `os.rename` before
+        reading it: rename is atomic and fails with FileNotFoundError for every
+        loser, so two concurrent registrations quoting one nonce cannot both
+        proceed (an exists()-read-unlink sequence would let both through — the
+        enroll app serves sync endpoints on a threadpool, so this is reachable
+        in one process).
+        """
         if not _NONCE_RE.match(nonce or ""):
             raise ChallengeRefused("malformed nonce")
         path = self._challenges / f"{nonce}.json"
-        rec = self._read_rec(path) if path.exists() else None
-        path.unlink(missing_ok=True)
+        claim = self._challenges / f"{nonce}.{secrets.token_hex(8)}.claim"
+        try:
+            os.rename(path, claim)
+        except OSError:
+            raise ChallengeRefused("unknown or already-used nonce") from None
+        try:
+            rec = self._read_challenge(claim)
+        finally:
+            claim.unlink(missing_ok=True)
         if rec is None:
             raise ChallengeRefused("unknown or already-used nonce")
-        if self._clock() >= float(rec.get("expires_at", 0)):
+        if self._clock() >= _as_float(rec.get("expires_at")):
             raise ChallengeRefused("challenge expired")
 
     # --- registration -------------------------------------------------------
@@ -211,7 +284,14 @@ class HostDirectory:
             **{f: payload.get(f) for f in _PAYLOAD_FIELDS},
             "first_seen": incumbent.get("first_seen", now) if incumbent else now,
             "last_seen": now,                       # relay clock, never the payload's
-            "previous_instance_id": previous_instance_id,
+            # Carried forward on a heartbeat: the takeover is a fact about the
+            # entry, and the next re-registration must not erase the audit of
+            # who used to hold it.
+            "previous_instance_id": (
+                previous_instance_id
+                if incumbent is None or previous_instance_id is not None
+                else incumbent.get("previous_instance_id")
+            ),
         }
         self._write_atomic(path, entry)
         return entry
@@ -234,7 +314,7 @@ class HostDirectory:
         or unrecognisable incumbent, or one already answering as the claimant
         (a restart whose old tunnel is gone), yields the entry.
         """
-        if now - float(incumbent.get("last_seen", 0)) >= self._stale_after:
+        if now - _as_float(incumbent.get("last_seen")) >= self._stale_after:
             return
         public_url = incumbent.get("public_url") or ""
         try:
@@ -271,7 +351,7 @@ class HostDirectory:
         known_keys = set()
         for rec in self._entries():
             known_keys.add(rec.get("key_fingerprint"))
-            stale = now - float(rec.get("last_seen", 0)) >= self._stale_after
+            stale = now - _as_float(rec.get("last_seen")) >= self._stale_after
             hosts.append({**rec, "state": "offline" if stale else "online"})
         for req in pending:
             if req.get("fingerprint") in known_keys:
