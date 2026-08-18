@@ -22,7 +22,7 @@ def _app(monkeypatch):
     monkeypatch.setattr(relay_mod, "_run_uvicorn",
                         lambda app, host, port: captured.update(host=host, port=port, app=app))
     monkeypatch.setattr(ea, "build_enroll_app",
-                        lambda store, *, relay_domain: captured.update(relay_domain=relay_domain) or "APP")
+                        lambda store, **kw: captured.update(kw) or "APP")
     app = typer.Typer()
     relay_mod.register(app, lambda: None)
     return app, captured

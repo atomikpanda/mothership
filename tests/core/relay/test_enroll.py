@@ -6,6 +6,13 @@ from mship.core.relay.enroll import RequestStore, PendingCapReached, NotPending
 _PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBodyAAAAAAAAAAAAAAAAAAAAAAAA host"
 
 
+def _key(tag: str) -> str:
+    """A distinct (shape-valid) public key per tag — enrollment is deduped by
+    key fingerprint, so a test about *counts* needs distinct keys."""
+    body = "AAAAC3NzaC1lZDI1NTE5AAAAI" + tag.ljust(4, "Z") * 6
+    return f"ssh-ed25519 {body}A host"
+
+
 def test_validate_accepts_ssh_key():
     assert validate_pubkey(_PUB)
     assert validate_pubkey("ssh-rsa AAAAB3NzaC1yc2EAAAAD host")
@@ -96,11 +103,13 @@ def test_expiry_after_ttl(tmp_path):
 
 
 def test_pending_cap_enforced(tmp_path):
+    # Distinct keys: same-key posts are deduped, so the cap can only be reached
+    # by distinct devices.
     s = _store(tmp_path, cap=2)
-    s.create(_PUB, "a")
-    s.create(_PUB, "b")
+    s.create(_key("a"), "a")
+    s.create(_key("b"), "b")
     with pytest.raises(PendingCapReached):
-        s.create(_PUB, "c")
+        s.create(_key("c"), "c")
 
 
 def test_same_hostname_does_not_clobber(tmp_path):
@@ -175,3 +184,49 @@ def test_approve_and_deny_on_corrupt_own_record_raise_cleanly(tmp_path):
     (pending_dir / f"{rid2}.json").write_text("not json at all")
     with pytest.raises(NotPending):
         s.deny(rid2)
+
+
+# --- idempotent enrollment (the daemon re-posts on a schedule) --------------
+
+
+def test_create_is_idempotent_per_key_fingerprint(tmp_path):
+    # The daemon re-posts its enroll request every ENROLL_REPOST_INTERVAL_S while
+    # awaiting approval. Without dedupe, one unapproved host fills the 50-slot cap
+    # in under 9 hours and 429s enrollment for the whole fleet.
+    store = RequestStore(tmp_path)
+    rid = store.create(_PUB, "vm-alpha")
+    for _ in range(10):
+        assert store.create(_PUB, "vm-alpha") == rid
+    assert len(store.list_pending()) == 1
+    assert len(list((tmp_path / "pending").glob("*.json"))) == 1
+
+
+def test_dedupe_is_by_key_not_hostname(tmp_path):
+    store = RequestStore(tmp_path)
+    rid = store.create(_PUB, "vm-alpha")
+    # A renamed host re-posting the same key is still one request…
+    assert store.create(_PUB, "vm-alpha-renamed") == rid
+    # …and a different key is a different request.
+    other = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAISecondKeyBodyBBBBBBBBBBBBBBBBBBBBBBBB two"
+    assert store.create(other, "vm-beta") != rid
+    assert len(store.list_pending()) == 2
+
+
+def test_a_re_post_does_not_extend_the_pending_ttl(tmp_path):
+    # Dedupe must be a pure read: refreshing created_at would make an unapproved
+    # request immortal, and the TTL is what bounds the store.
+    now = [1000.0]
+    store = RequestStore(tmp_path, ttl_seconds=100, clock=lambda: now[0])
+    rid = store.create(_PUB, "vm-alpha")
+    now[0] += 60
+    assert store.create(_PUB, "vm-alpha") == rid
+    now[0] += 60
+    assert store.get(rid) == "expired"
+
+
+def test_a_resolved_request_does_not_block_a_new_one(tmp_path):
+    # Dedupe is scoped to PENDING records: once denied, the same key may re-enroll.
+    store = RequestStore(tmp_path)
+    rid = store.create(_PUB, "vm-alpha")
+    store.deny(rid)
+    assert store.create(_PUB, "vm-alpha") != rid

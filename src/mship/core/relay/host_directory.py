@@ -84,6 +84,33 @@ def _as_float(value, default: float = 0.0) -> float:
     return parsed if math.isfinite(parsed) else default
 
 
+def probe_instance_id(public_url: str, *, get: Callable | None = None,
+                      timeout: float = 5.0) -> str | None:
+    """Ask an incumbent's published URL who it is: `GET <url>/health` →
+    `instance_id`, or None if it does not answer recognisably.
+
+    The production `probe` for `HostDirectory`, kept a free function (and
+    injectable via `get`) because the directory takes its prober as a required
+    argument — a directory that cannot probe cannot tell a restart from a clone,
+    so it must never quietly default to one. Unauthenticated on purpose:
+    `/health` needs no bearer (it exposes only ids and counts), and the relay
+    holds no credential for a host it is arbitrating.
+
+    Transport failures propagate; `_arbitrate` already treats an unreachable
+    incumbent as "yields the entry" and is the only caller.
+    """
+    if get is None:
+        import httpx
+
+        get = httpx.get
+    response = get(public_url.rstrip("/") + "/health", timeout=timeout,
+                   follow_redirects=True)
+    if response.status_code != 200:
+        return None
+    body = response.json()
+    return body.get("instance_id") if isinstance(body, dict) else None
+
+
 class ChallengeRefused(Exception):
     """The nonce is unknown, already used, or expired (401)."""
 

@@ -48,13 +48,33 @@ def _enroll_server_impl(*, store_dir, pubkeys_dir, port, host, ttl, relay_domain
 
     from mship.core.relay.enroll import RequestStore
     from mship.core.relay.enroll_app import build_enroll_app
+    from mship.core.relay.fleet_token import FleetTokenStore
+    from mship.core.relay.host_directory import HostDirectory, probe_instance_id
+    from mship.core.relay.ssh_sig import build_allowed_signers
 
     if not relay_domain:
         raise typer.BadParameter("relay domain required: pass --relay-domain or set RELAY_DOMAIN")
     store = RequestStore(Path(store_dir), ttl_seconds=ttl)
+    # The signature allowlist IS the sish `pubkeys/` allowlist, re-read per
+    # verification: that is what makes signature-auth and tunnel-auth one
+    # identity, and what lets an approval take effect without a restart.
+    directory = HostDirectory(
+        Path(store_dir),
+        allowed_signers=lambda: build_allowed_signers(Path(pubkeys_dir)),
+        probe=probe_instance_id,
+    )
     Output().print(f"enroll-server → http://{host}:{port}  (relay: {relay_domain}, "
                    f"pubkeys: {pubkeys_dir}, store: {store_dir}, ttl: {ttl}s)")
-    _run_uvicorn(build_enroll_app(store, relay_domain=relay_domain), host=host, port=port)
+    _run_uvicorn(
+        build_enroll_app(
+            store,
+            relay_domain=relay_domain,
+            host_directory=directory,
+            fleet_tokens=FleetTokenStore(Path(store_dir)),
+        ),
+        host=host,
+        port=port,
+    )
 
 
 def register(parent: typer.Typer, get_container):
@@ -188,6 +208,89 @@ def register(parent: typer.Typer, get_container):
         except NotPending:
             out.error(f"no pending request {rid!r} (unknown, already resolved, or expired)")
             raise typer.Exit(1)
+
+    # -------------------------------------------------------------------------
+    # Owner-side: the host directory + the phone's fleet credential (#471)
+    # -------------------------------------------------------------------------
+
+    @relay_app.command("fleet-token")
+    def fleet_token_cmd(
+        label: str = typer.Option(..., "--label",
+                                  help="Nickname for the device this token is for (e.g. phone)."),
+        store_dir: str = typer.Option("./pending-store", "--store-dir",
+                                      help="Directory for pending enroll request state."),
+        relay_domain: str = typer.Option(lambda: os.environ.get("RELAY_DOMAIN", ""),
+                                         "--relay-domain",
+                                         help="Relay domain to pair against (default $RELAY_DOMAIN)."),
+        revoke: bool = typer.Option(False, "--revoke",
+                                    help="Invalidate this label's token instead of minting one."),
+    ):
+        """Mint (or revoke) a device's fleet token and print its pairing QR.
+
+        Re-running for the same label reprints the SAME token, so showing the QR
+        again never unpairs the device that already scanned it.
+        """
+        from pathlib import Path
+
+        import segno
+
+        from mship.core.relay.fleet_token import FleetTokenStore
+        from mship.core.relay.pairing import build_relay_account_link
+
+        out = Output()
+        store = FleetTokenStore(Path(store_dir))
+        if revoke:
+            if not store.revoke(label):
+                out.error(f"no fleet token for label {label!r}")
+                raise typer.Exit(1)
+            out.success(f"revoked {label} — that device must scan a fresh QR to return")
+            return
+        if not relay_domain:
+            raise typer.BadParameter(
+                "relay domain required: pass --relay-domain or set RELAY_DOMAIN"
+            )
+        try:
+            token = store.issue(label)
+        except ValueError as e:
+            raise typer.BadParameter(f"--label {e}")
+        link = build_relay_account_link(relay=relay_domain, token=token)
+        out.print(token)
+        out.print(link)
+        typer.echo(segno.make(link).terminal(compact=True))
+
+    @relay_app.command("hosts")
+    def hosts_cmd(
+        store_dir: str = typer.Option("./pending-store", "--store-dir",
+                                      help="Directory for pending enroll request state."),
+    ):
+        """List the relay's host directory (host_id · label · state · last_seen)."""
+        import time
+        from pathlib import Path
+
+        from mship.core.relay.enroll import RequestStore
+        from mship.core.relay.host_directory import HostDirectory
+
+        out = Output()
+        directory = HostDirectory(
+            Path(store_dir),
+            allowed_signers=lambda: "",       # listing verifies nothing…
+            probe=lambda public_url: None,    # …and never arbitrates
+        )
+        entries = directory.list_hosts(RequestStore(Path(store_dir)).list_pending())
+        if not entries:
+            out.print("no hosts")
+            return
+        for entry in entries:
+            last_seen = entry.get("last_seen") or entry.get("created_at")
+            when = (
+                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(last_seen))
+                if isinstance(last_seen, (int, float))
+                else "-"
+            )
+            # Never the entry's `refresh`: that credential goes to the paired
+            # phone over GET /hosts, not into a terminal's scrollback.
+            out.print(f"{entry.get('host_id') or '-'}  {entry.get('label') or '-'}  "
+                      f"{entry['state']}  {when}")
 
     # ---- typed grants + per-run tokens (cloud-worker-auth-spine) ----
 

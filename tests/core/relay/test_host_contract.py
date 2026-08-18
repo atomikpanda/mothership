@@ -132,3 +132,52 @@ def test_signing_blob_binds_the_nonce_and_the_payload_together():
         host_contract.signing_blob("n1", p2),
     }
     assert len(blobs) == 3
+
+
+# --- identity across the ends -----------------------------------------------
+
+
+def test_the_enroll_app_reads_the_contract_module_rather_than_copies():
+    # The relay end must not restate the namespace, header, or route paths: an
+    # equal-but-separate literal drifts silently and 401s / 404s in production
+    # while both ends' unit tests stay green.
+    from mship.core.relay import enroll_app
+
+    assert enroll_app.host_contract is host_contract
+
+
+def test_the_enroll_app_declares_no_wire_literals_of_its_own():
+    import inspect
+
+    from mship.core.relay import enroll_app
+
+    source = inspect.getsource(enroll_app)
+    for literal in (
+        host_contract.HOSTS_PREFIX,
+        host_contract.FLEET_TOKEN_HEADER,
+        host_contract.NAMESPACE,
+    ):
+        assert f'"{literal}' not in source and f"'{literal}" not in source, literal
+
+
+def test_the_enroll_app_serves_exactly_the_contract_routes():
+    from fastapi.routing import APIRoute
+
+    from mship.core.relay import enroll_app, host_directory
+    from mship.core.relay.fleet_token import FleetTokenStore
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as base:
+        app = enroll_app.build_enroll_app(
+            enroll.RequestStore(base),
+            relay_domain="relay.example",
+            host_directory=host_directory.HostDirectory(
+                base, allowed_signers=lambda: "", probe=lambda url: None
+            ),
+            fleet_tokens=FleetTokenStore(base),
+        )
+    served = {r.path for r in app.routes if isinstance(r, APIRoute)}
+    assert set(host_contract.ROUTE_PATHS) <= served
+    # …and the pre-existing surface is untouched (it gates cert issuance).
+    assert {"/enroll", "/status/{rid}", "/tls-check"} <= served

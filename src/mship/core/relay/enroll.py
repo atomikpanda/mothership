@@ -146,8 +146,18 @@ class RequestStore:
         # be smuggled in here and later written into the pubkeys allowlist on approve.
         if not validate_pubkey(pubkey):
             raise ValueError("invalid pubkey")
-        self._sweep()
-        if len(list(self._pending.glob("*.json"))) >= self._max_pending:
+        pending = self.list_pending()          # sweeps expired records first
+        # Idempotent per key: the daemon re-posts its request on a schedule while
+        # it waits for approval, so without dedupe one unapproved host would fill
+        # the pending cap by itself and 429 enrollment for the whole fleet. A
+        # re-post is a pure read — `created_at` is NOT refreshed, or an
+        # unapproved request would never expire and the TTL would stop bounding
+        # the store.
+        fp = fingerprint(pubkey)
+        for rec in pending:
+            if rec.get("fingerprint") == fp:
+                return rec["id"]
+        if len(pending) >= self._max_pending:
             raise PendingCapReached()
         rid = secrets.token_hex(16)
         self._write_atomic(

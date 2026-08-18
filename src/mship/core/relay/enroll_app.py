@@ -1,8 +1,20 @@
 from __future__ import annotations
-from fastapi import FastAPI, HTTPException, Query, Response
+from typing import Annotated, Union
+
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
+from mship.core.relay import host_contract
 from mship.core.relay.enroll import RequestStore, PendingCapReached, validate_pubkey
+from mship.core.relay.fleet_token import FleetTokenStore
+from mship.core.relay.host_directory import (
+    ChallengeCapReached,
+    ChallengeRefused,
+    DuplicateIdentity,
+    HostDirectory,
+    InvalidHostId,
+    SignatureRefused,
+)
 from mship.core.relay.tls_ask import tls_ask_allowed
 
 
@@ -14,7 +26,59 @@ class _EnrollBody(BaseModel):
     hostname: str = Field(default="", max_length=253)
 
 
-def build_enroll_app(store: RequestStore, *, relay_domain: str) -> FastAPI:
+# `/hosts/register` is public too (the signature, not the transport, is the
+# gate), and its payload is verified as the bytes the client sent — so it is
+# accepted as a bounded dict rather than a field-by-field model: a model with
+# defaults would re-serialize keys the client never sent and every signature
+# would fail. `capabilities`/`runner` are the one nested level the contract
+# defines, so a value is a scalar or a flat map of scalars.
+_MAX_STR = 512
+_MAX_PAYLOAD_FIELDS = 64
+_MAX_NESTED_FIELDS = 32
+
+_Scalar = Union[Annotated[str, Field(max_length=_MAX_STR)], bool, int, float, None]
+_PayloadValue = Union[
+    _Scalar, Annotated[dict[str, _Scalar], Field(max_length=_MAX_NESTED_FIELDS)]
+]
+
+
+class _RegisterBody(BaseModel):
+    nonce: str = Field(max_length=128)
+    signature: str = Field(max_length=8192)      # an armored SSHSIG, ~600B for ed25519
+    payload: dict[str, _PayloadValue] = Field(max_length=_MAX_PAYLOAD_FIELDS)
+
+
+# The directory is a PUBLISHED surface: a field added to a stored entry must not
+# auto-appear on every paired phone. `refresh` is here deliberately — fetching it
+# is why the phone reads this route at all — and appears on no other response.
+_DIRECTORY_FIELDS = (
+    "host_id",
+    "state",
+    "label",
+    "instance_id",
+    "key_fingerprint",
+    "machine_fingerprint",
+    "subdomain",
+    "public_url",
+    "mship_version",
+    "capabilities",
+    "runner",
+    "refresh",
+    "first_seen",
+    "last_seen",
+    "previous_instance_id",
+    "request_id",
+    "created_at",
+)
+
+
+def build_enroll_app(
+    store: RequestStore,
+    *,
+    relay_domain: str,
+    host_directory: HostDirectory,
+    fleet_tokens: FleetTokenStore,
+) -> FastAPI:
     app = FastAPI(title="mship relay enroll")
 
     @app.post("/enroll")
@@ -41,5 +105,42 @@ def build_enroll_app(store: RequestStore, *, relay_domain: str) -> FastAPI:
         if not tls_ask_allowed(domain, relay_domain):
             raise HTTPException(status_code=403, detail="host not allowed")
         return Response(status_code=200)
+
+    @app.get(host_contract.CHALLENGE_PATH)
+    def hosts_challenge():
+        try:
+            challenge = host_directory.issue_challenge()
+        except ChallengeCapReached as exc:
+            # Public and unauthenticated: a flood is refused, never a 500.
+            raise HTTPException(status_code=429, detail=str(exc))
+        return {"nonce": challenge["nonce"], "expires_at": challenge["expires_at"]}
+
+    @app.post(host_contract.REGISTER_PATH)
+    def hosts_register(body: _RegisterBody):
+        try:
+            entry = host_directory.register(
+                body.payload, nonce=body.nonce, signature=body.signature
+            )
+        except InvalidHostId:
+            raise HTTPException(status_code=400, detail="malformed host_id")
+        except (ChallengeRefused, SignatureRefused) as exc:
+            raise HTTPException(status_code=401, detail=str(exc))
+        except DuplicateIdentity as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        # Echoes identity only: the entry carries the host's refresh credential,
+        # which is published on `GET /hosts` and nowhere else.
+        return {"status": "registered", "host_id": entry["host_id"]}
+
+    @app.get(host_contract.LIST_PATH)
+    def hosts_list(request: Request):
+        presented = request.headers.get(host_contract.FLEET_TOKEN_HEADER, "")
+        if fleet_tokens.verify(presented) is None:
+            raise HTTPException(status_code=401, detail="invalid or revoked fleet token")
+        entries = host_directory.list_hosts(store.list_pending())
+        return {
+            "hosts": [
+                {f: entry[f] for f in _DIRECTORY_FIELDS if f in entry} for entry in entries
+            ]
+        }
 
     return app

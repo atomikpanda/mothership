@@ -127,7 +127,7 @@ keepalives at all needs either its own keepalive or a longer timeout here.
 
 The `Caddyfile` (`docker/relay/Caddyfile`) wires:
 
-- `enroll.{$RELAY_DOMAIN}` → `127.0.0.1:47180` (enroll-server; only `POST /enroll` and `GET /status/*` are forwarded — everything else returns 404).
+- `enroll.{$RELAY_DOMAIN}` → `127.0.0.1:47180` (enroll-server; only `POST /enroll`, `GET /status/*` and the host-directory routes under `/hosts` are forwarded — everything else returns 404). Adding a route to the enroll app is therefore not enough on its own: it must sit under one of those matchers, or the `respond "not found" 404` catch-all swallows it in production while every unit test passes.
 - `*.{$RELAY_DOMAIN}` → `127.0.0.1:8080` (sish HTTP, `Host` header preserved).
 
 The GitHub token broker is no longer a separate host/route: it's folded into `mship serve`'s `GET /gh-token` and reached over the workspace's own `*.{$RELAY_DOMAIN}` serve tunnel. See [`docs/cloud-agent-auth.md`](cloud-agent-auth.md).
