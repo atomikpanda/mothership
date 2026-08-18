@@ -209,3 +209,73 @@ def test_deleted_original_does_not_promote_registered_duplicate(tmp_path: Path):
     assert duplicate.state == "degraded"
     assert "duplicate-identity" in duplicate.detail
     assert len({e.path for e in state.entries}) == len(state.entries)
+
+
+def test_discovered_workspace_outside_scan_roots_is_not_healthy(tmp_path: Path):
+    home, root = tmp_path / "home", tmp_path / "root"
+    workspace = _mk_ws(root, "a")
+    store = _store(home)
+    reconcile(store, _scan(root), NOW)
+
+    state = reconcile(store, [], LATER)
+
+    assert workspace.exists()
+    assert state.entries[0].state == "degraded"
+    assert "configured scan roots" in state.entries[0].detail
+
+
+def test_recovered_registry_only_workspace_persists_identity(tmp_path: Path):
+    home, root = tmp_path / "home", tmp_path / "root"
+    workspace = root / "a"
+    workspace.mkdir(parents=True)
+    (workspace / "mothership.yaml").write_text("workspace: [\n")
+    store = _store(home)
+    degraded = reconcile(store, _scan(root), NOW).entries[0]
+    assert degraded.identity_source == "registry-only"
+    assert not (workspace / ID_FILE_RELPATH).exists()
+
+    app = workspace / "app"
+    app.mkdir()
+    (workspace / "mothership.yaml").write_text(
+        "workspace: a\nrepos:\n  app:\n    path: app\n    type: service\n"
+    )
+    recovered = reconcile(store, _scan(root), LATER).entries[0]
+
+    assert recovered.id == degraded.id
+    assert recovered.identity_source == "idfile"
+    assert (workspace / ID_FILE_RELPATH).read_text().strip() == degraded.id
+
+    moved = root / "moved"
+    workspace.rename(moved)
+    after_move = reconcile(store, _scan(root), LATER + timedelta(minutes=10))
+    assert len(after_move.entries) == 1
+    assert after_move.entries[0].id == degraded.id
+    assert after_move.entries[0].path == str(moved.resolve())
+
+
+def test_recovered_registry_only_workspace_adopts_unknown_id_file(tmp_path: Path):
+    """A degraded workspace copied from another host keeps that host's durable
+    identity instead of replacing it with this registry's temporary id."""
+    home, root = tmp_path / "home", tmp_path / "root"
+    workspace = root / "a"
+    workspace.mkdir(parents=True)
+    (workspace / "mothership.yaml").write_text("workspace: [\n")
+    id_file = workspace / ID_FILE_RELPATH
+    id_file.parent.mkdir()
+    id_file.write_text("ws-from-other-host\n")
+    store = _store(home)
+
+    degraded = reconcile(store, _scan(root), NOW).entries[0]
+    assert degraded.identity_source == "registry-only"
+    assert degraded.id != "ws-from-other-host"
+
+    app = workspace / "app"
+    app.mkdir()
+    (workspace / "mothership.yaml").write_text(
+        "workspace: a\nrepos:\n  app:\n    path: app\n    type: service\n"
+    )
+    recovered = reconcile(store, _scan(root), LATER).entries[0]
+
+    assert recovered.id == "ws-from-other-host"
+    assert recovered.identity_source == "idfile"
+    assert id_file.read_text().strip() == "ws-from-other-host"

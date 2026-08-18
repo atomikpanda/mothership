@@ -119,6 +119,30 @@ def test_daemon_config_relative_roots_rejected(tmp_path: Path):
         load_daemon_config(tmp_path)
 
 
+def test_daemon_config_malformed_yaml_is_a_value_error(tmp_path: Path):
+    path = daemon_config_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text("scan_roots: [\n")
+
+    with pytest.raises(ValueError, match="invalid daemon config"):
+        load_daemon_config(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "serve",
+    [
+        {"host": "127.0.0.1"},
+        {"port": 47190},
+        {"host": "", "port": 47190},
+        {"host": "127.0.0.1", "port": 0},
+        {"host": "127.0.0.1", "port": 65536},
+    ],
+)
+def test_daemon_config_rejects_invalid_serve_bind(serve):
+    with pytest.raises(ValueError, match="serve"):
+        DaemonConfig(serve=serve)
+
+
 def test_corrupt_registry_loads_empty(tmp_path: Path):
     p = registry_path(tmp_path)
     p.parent.mkdir(parents=True)

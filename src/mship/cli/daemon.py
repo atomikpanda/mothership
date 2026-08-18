@@ -29,6 +29,38 @@ def _daemon_main() -> int:
     return main()
 
 
+def _restore_host_token(snapshot: tuple[Path, bytes | None] | None) -> None:
+    if snapshot is None:
+        return
+    path, previous = snapshot
+    if previous is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.write_bytes(previous)
+        path.chmod(0o600)
+
+
+def _persist_host_token_override(home: Path) -> tuple[Path, bytes | None] | None:
+    token = os.environ.get("MSHIP_SERVE_TOKEN")
+    if not token:
+        return None
+    from mship.core.daemon.host_app import persist_host_token
+    from mship.core.daemon.paths import daemon_state_dir
+
+    path = daemon_state_dir(home) / "serve-token"
+    try:
+        previous = path.read_bytes()
+    except FileNotFoundError:
+        previous = None
+    snapshot = (path, previous)
+    try:
+        persist_host_token(home, token)
+    except OSError:
+        _restore_host_token(snapshot)
+        raise
+    return snapshot
+
+
 def register(parent: typer.Typer, get_container):
     daemon_app = typer.Typer(
         name="daemon",
@@ -58,7 +90,11 @@ def register(parent: typer.Typer, get_container):
             if not sep or not host or not port_s.isdigit():
                 out.error(f"--serve expects HOST:PORT, got {serve!r}")
                 raise typer.Exit(1)
-            serve_cfg = {"host": host, "port": int(port_s)}
+            port = int(port_s)
+            if not 1 <= port <= 65535:
+                out.error(f"--serve expects HOST:PORT, got {serve!r}")
+                raise typer.Exit(1)
+            serve_cfg = {"host": host, "port": port}
         roots = list(scan_root or [])
         bad = [r for r in roots if not Path(r).is_absolute()]
         if bad:
@@ -93,11 +129,14 @@ def register(parent: typer.Typer, get_container):
             # validated config first so that first process sees the requested
             # roots/bind rather than the old snapshot.
             save_daemon_config(home, merged)
+        token_snapshot = None
         try:
+            token_snapshot = _persist_host_token_override(Path.home())
             sup.install(argv)
         except (DaemonSupervisorError, OSError) as e:
             if previous_cfg is not None:
                 save_daemon_config(home, previous_cfg)
+            _restore_host_token(token_snapshot)
             out.error(str(e))
             raise typer.Exit(1)
         if merged is not None:
@@ -107,9 +146,12 @@ def register(parent: typer.Typer, get_container):
     @daemon_app.command("start")
     def start():
         out = Output()
+        token_snapshot = None
         try:
+            token_snapshot = _persist_host_token_override(Path.home())
             _supervisor().start()
-        except DaemonSupervisorError as e:
+        except (DaemonSupervisorError, OSError) as e:
+            _restore_host_token(token_snapshot)
             out.error(str(e))
             raise typer.Exit(1)
         out.print("daemon started")

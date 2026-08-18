@@ -206,6 +206,44 @@ def test_install_persists_config_before_supervisor_bootstrap(cli, tmp_path):
     assert observed["config"].serve == {"host": "127.0.0.1", "port": 47190}
 
 
+def test_install_persists_shell_host_token_before_supervisor_bootstrap(
+    cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.paths import daemon_state_dir
+
+    app, fake = cli
+    observed = {}
+    monkeypatch.setenv("MSHIP_SERVE_TOKEN", "shell-token")
+
+    def install(_argv):
+        observed["token"] = (daemon_state_dir(tmp_path) / "serve-token").read_text().strip()
+
+    fake.install = install
+    res = runner.invoke(app, ["daemon", "install"])
+
+    assert res.exit_code == 0, res.output
+    assert observed["token"] == "shell-token"
+
+
+def test_start_persists_shell_host_token_before_supervisor_start(
+    cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.paths import daemon_state_dir
+
+    app, fake = cli
+    observed = {}
+    monkeypatch.setenv("MSHIP_SERVE_TOKEN", "shell-token")
+
+    def start():
+        observed["token"] = (daemon_state_dir(tmp_path) / "serve-token").read_text().strip()
+
+    fake.start = start
+    res = runner.invoke(app, ["daemon", "start"])
+
+    assert res.exit_code == 0, res.output
+    assert observed["token"] == "shell-token"
+
+
 def test_install_failure_restores_previous_config(cli, tmp_path):
     from mship.core.daemon.registry import (
         DaemonConfig,
@@ -257,9 +295,10 @@ def test_install_without_serve_leaves_null_bind(cli, tmp_path):
     assert load_daemon_config(tmp_path).serve is None
 
 
-def test_install_rejects_malformed_serve(cli):
+@pytest.mark.parametrize("serve", ["nonsense", "127.0.0.1:0", "127.0.0.1:65536"])
+def test_install_rejects_malformed_serve(cli, serve):
     app, fake = cli
-    res = runner.invoke(app, ["daemon", "install", "--serve", "nonsense"])
+    res = runner.invoke(app, ["daemon", "install", "--serve", serve])
     assert res.exit_code == 1
     assert "HOST:PORT" in res.output
     assert not any(c.startswith("install:") for c in fake.calls)

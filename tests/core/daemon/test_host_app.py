@@ -297,6 +297,28 @@ def test_moved_workspace_rebuilds_subapp(tmp_path):
         assert built == [str(tmp_path / "before"), str(tmp_path / "after")]
 
 
+def test_workspace_config_edit_rebuilds_subapp(tmp_path):
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    config = workspace / "mothership.yaml"
+    config.write_text("workspace: before\nrepos: {}\n")
+    store = _seed(home, [_entry("ws-e", "edited", workspace)])
+    built = []
+
+    def build(entry, **kw):
+        built.append(entry.path)
+        return FakeSubApp(entry.name)
+
+    app = create_host_app(store, auth_token=None, build_subapp=build)
+    with TestClient(app) as client:
+        client.get("/workspaces/ws-e/specs")
+        config.write_text("workspace: after-a-valid-edit\nrepos: {}\n")
+        client.get("/workspaces/ws-e/specs")
+
+    assert built == [str(workspace), str(workspace)]
+
+
 def test_unbuildable_workspace_is_503_not_500(tmp_path):
     """A workspace the registry advertises but that won't build now must
     degrade with a reason, never surface an opaque 500."""

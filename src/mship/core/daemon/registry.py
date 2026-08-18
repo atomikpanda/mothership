@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Callable, Literal, Optional
 
 import yaml
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class RepoInfo(BaseModel):
@@ -135,6 +135,21 @@ class DaemonConfig(BaseModel):
     max_depth: int = 6
     serve: Optional[dict] = None  # {"host": str, "port": int}
 
+    @field_validator("serve", mode="before")
+    @classmethod
+    def _validate_serve(cls, value):
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError("daemon serve must be a host/port mapping")
+        host = value.get("host")
+        port = value.get("port")
+        if not isinstance(host, str) or not host.strip():
+            raise ValueError("daemon serve.host must be a non-empty string")
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise ValueError("daemon serve.port must be an integer from 1 to 65535")
+        return {"host": host, "port": port}
+
 
 def load_daemon_config(home: Path) -> DaemonConfig:
     from mship.core.daemon.paths import daemon_config_path
@@ -144,6 +159,8 @@ def load_daemon_config(home: Path) -> DaemonConfig:
         raw = yaml.safe_load(path.read_text()) or {}
     except OSError:
         return DaemonConfig()
+    except yaml.YAMLError as e:
+        raise ValueError(f"invalid daemon config {path}: {e}") from e
     cfg = DaemonConfig.model_validate(raw)
     bad = [r for r in cfg.scan_roots if not os.path.isabs(r)]
     if bad:
@@ -278,6 +295,18 @@ def reconcile(store: RegistryStore, candidates: list, now: datetime) -> Registry
                 claimed_ids[entry.id] = path_str
                 continue
 
+            if cand.healthy and existing.identity_source == "registry-only":
+                if file_id is not None:
+                    # A copied workspace may carry a durable id minted by
+                    # another host. It was unknown while this candidate was
+                    # degraded, but once healthy it is authoritative; the
+                    # by-id lookup above already handles known collisions.
+                    by_id.pop(existing.id, None)
+                    existing.id = file_id
+                    existing.identity_source = "idfile"
+                    by_id[file_id] = existing
+                elif _write_id_file(cand.path, existing.id):
+                    existing.identity_source = "idfile"
             # Refresh an existing entry in place.
             existing.last_seen = now
             claimed_ids[existing.id] = existing.path
@@ -294,11 +323,15 @@ def reconcile(store: RegistryStore, candidates: list, now: datetime) -> Registry
 
         # Anything registered but not seen this round.
         for e in state.entries:
-            if e.path in seen_paths or e.origin == "manual" and Path(e.path).exists():
+            path_exists = Path(e.path).exists()
+            if e.path in seen_paths or e.origin == "manual" and path_exists:
                 continue
-            if e.path not in seen_paths and not Path(e.path).exists():
+            if not path_exists:
                 e.state = "missing"
                 e.detail = "workspace path no longer exists"
+            elif e.origin == "discovered":
+                e.state = "degraded"
+                e.detail = "workspace no longer under configured scan roots"
 
         # State-dir collision backstop: two entries, one resolved state dir.
         state_dirs: dict[str, str] = {}

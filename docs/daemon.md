@@ -169,6 +169,10 @@ that host found; picking one stores a connection pointed at
 (old per-workspace URL), you'll see two cards until you remove the manual one —
 migration lands with #471.
 
+`mship daemon install` and `mship daemon start` persist a non-empty shell
+override to that owner-only file before handing off to the supervisor, so the
+same effective token survives launchd/systemd startup.
+
 ### Multiple hosts
 
 The registry is **per host**. The same workspace discovered on two hosts is two

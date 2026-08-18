@@ -33,6 +33,16 @@ from mship.core.daemon.registry import RegistryStore, WorkspaceEntry
 from mship.core.workspace_context import ContextError
 
 
+def persist_host_token(home: Path, token: str) -> None:
+    """Persist the token inherited by a supervisor-launched daemon."""
+    from mship.core.daemon.paths import daemon_state_dir
+
+    path = daemon_state_dir(home) / "serve-token"
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.write_text(token + "\n")
+    path.chmod(0o600)
+
+
 def ensure_host_token(home: Path) -> str:
     """Host-level bearer token (env>file>generate shape of relay/token.py's
     ensure_serve_token, but per OS user, not per workspace)."""
@@ -49,16 +59,19 @@ def ensure_host_token(home: Path) -> str:
     except OSError:
         pass
     token = secrets.token_urlsafe(32)
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.write_text(token + "\n")
-    path.chmod(0o600)
+    persist_host_token(home, token)
     return token
 
 
 def _fingerprint(entry: WorkspaceEntry) -> tuple:
     """What a cached sub-app was built FROM. Any change here means the cached
     app holds a stale workspace root / state dir / config and must be rebuilt."""
-    return (entry.path, entry.config_path, entry.state)
+    try:
+        stat = Path(entry.config_path).stat()
+        config_revision = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        config_revision = None
+    return (entry.path, entry.config_path, entry.state, config_revision)
 
 
 class _SubApp:
