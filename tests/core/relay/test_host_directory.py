@@ -172,6 +172,21 @@ def test_the_challenge_store_is_capped(tmp_path):
     assert d.issue_challenge()["nonce"]
 
 
+def test_a_claim_stranded_by_a_crash_is_swept_like_any_challenge(tmp_path):
+    # A crash between the claiming rename and the spending unlink must not
+    # leave a file nothing ever reaps on a public write path.
+    clock = Clock()
+    d = _dir(tmp_path, clock=clock)
+    ch = d.issue_challenge()
+    stranded = (tmp_path / "challenges" / f"{ch['nonce']}.deadbeef.claim")
+    (tmp_path / "challenges" / f"{ch['nonce']}.json").rename(stranded)
+    d.issue_challenge()                       # sweeps, but the claim is live
+    assert stranded.is_file()
+    clock.t += host_contract.CHALLENGE_TTL_S + 1
+    d.issue_challenge()
+    assert not stranded.exists()
+
+
 def test_an_unknown_nonce_is_refused(tmp_path):
     d = _dir(tmp_path)
     payload = _payload()
@@ -424,15 +439,17 @@ def test_a_corrupt_entry_file_is_quarantined_not_fatal(tmp_path):
     assert not (tmp_path / "hosts" / "broken.json").exists()
 
 
-def test_a_non_numeric_last_seen_reads_as_offline_not_as_a_crash(tmp_path):
-    # A hand-edited entry must degrade, not brick every listing (and must not
-    # accidentally read as fresh, which would make it un-takeoverable).
+@pytest.mark.parametrize("bad", ["yesterday", None, "NaN", "Infinity", "-Infinity"])
+def test_an_unusable_last_seen_reads_as_offline_not_as_a_crash(tmp_path, bad):
+    # A hand-edited entry must degrade, not brick every listing — and must not
+    # read as FRESH, which would make it permanently online and un-takeoverable
+    # (`now - nan >= stale` is False, so NaN needs the same treatment as junk).
     clock = Clock()
     d = _dir(tmp_path, clock=clock)
     _register(d)
     path = tmp_path / "hosts" / f"{_payload()['host_id']}.json"
     rec = json.loads(path.read_text())
-    rec["last_seen"] = "yesterday"
+    rec["last_seen"] = bad
     path.write_text(json.dumps(rec))
     assert d.list_hosts()[0]["state"] == "offline"
     assert _register(d, _payload(instance_id="inst-2"))["previous_instance_id"] == "inst-1"

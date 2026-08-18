@@ -57,15 +57,38 @@ def _disable_git_signing_for_tests():
 def _isolate_runtime_dir(monkeypatch, tmp_path: Path):
     """No test may reach the real user's daemon control socket.
 
-    `daemon_socket_path` resolves `$XDG_RUNTIME_DIR/mship/daemon.sock`, and
-    `probe_daemon` falls back to that computed path whenever the (tmp) home has
-    no lease. On a box where a real `mship daemon` is running, that probe
-    answers from the LIVE daemon — so a test asserting "daemon: not running"
-    fails for reasons that have nothing to do with the code under test.
-    Pointing the variable at a per-test dir isolates the probe; production
-    socket resolution is untouched (it reads whatever env it is given).
+    `probe_daemon` has TWO ways to find a live daemon, and isolating one is not
+    enough (a full-suite run of `test_status_reports_registry_read_error_...`
+    answered from the live mshipd, pid and all, while passing in isolation):
+
+    - the COMPUTED path, `$XDG_RUNTIME_DIR/mship/daemon.sock` — closed by
+      pointing the variable at a per-test dir;
+    - the LEASE-recorded path, read from `Path.home()/.mothership/daemon/` and
+      PREFERRED over the computed one whenever a lease exists — so a test whose
+      `Path.home` patch does not cover every caller reads the REAL user's lease
+      and probes the socket it names, whatever XDG_RUNTIME_DIR says. Closed by
+      refusing, in the probe seam itself, any socket outside the test's own
+      tmp dir: the guard is about *which socket* is reachable, which is the
+      actual invariant, and unlike moving `$HOME` it disturbs nothing else.
+
+    Production resolution is untouched — both paths read whatever env they are
+    given, and a test that patches `probe_control_socket` itself still wins
+    (its patch is applied after this one). Pinned by
+    `tests/core/daemon/test_paths.py`.
     """
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "xdg-runtime"))
+
+    from mship.core.daemon import control, status
+
+    real_probe = control.probe_control_socket
+
+    def sandboxed_probe(socket_path, **kw):
+        if not str(socket_path).startswith(str(tmp_path)):
+            return None                     # the real user's daemon: unreachable
+        return real_probe(socket_path, **kw)
+
+    monkeypatch.setattr(control, "probe_control_socket", sandboxed_probe)
+    monkeypatch.setattr(status, "probe_control_socket", sandboxed_probe)
 
 
 @pytest.fixture

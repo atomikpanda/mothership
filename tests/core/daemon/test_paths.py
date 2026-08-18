@@ -29,6 +29,22 @@ def test_the_suite_cannot_reach_the_real_daemon_socket(tmp_path: Path):
     assert not daemon_socket_path(os.environ, tmp_path).exists()
 
 
+def test_the_suite_cannot_reach_the_real_daemon_through_the_lease_either(tmp_path: Path):
+    """The second escape hatch: `probe_daemon` PREFERS the socket recorded in
+    `Path.home()/.mothership/daemon/daemon.lease`, so isolating XDG_RUNTIME_DIR
+    alone still lets a test that reaches the REAL home answer from the
+    operator's live daemon (that is how `test_status_reports_registry_read_
+    error_...` once reported `running: true` with the live pid). Probe the real
+    home for real: on a box with a running mshipd this returns None only
+    because the autouse sandbox refuses sockets outside the test tmp dir."""
+    from pathlib import Path as _Path
+
+    from mship.core.daemon.status import probe_daemon
+
+    assert probe_daemon(home=_Path.home(), env=os.environ) is None
+    assert probe_daemon(home=tmp_path, env=os.environ) is None
+
+
 def test_socket_prefers_xdg_runtime_dir(tmp_path: Path):
     runtime = tmp_path / "runtime"
     sock = daemon_socket_path({"XDG_RUNTIME_DIR": str(runtime)}, tmp_path / "home", create=True)

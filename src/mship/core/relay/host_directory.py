@@ -24,6 +24,7 @@ and silently overwrite the incumbent's URL and credential (decision f).
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import secrets
@@ -68,14 +69,19 @@ _REIDENTIFY_HINT = (
 
 
 def _as_float(value, default: float = 0.0) -> float:
-    """A timestamp read back from disk, or `default` if it is not a number.
+    """A finite timestamp read back from disk, or `default` if it is not one.
 
     A hand-edited entry must degrade to "very old" (→ offline, takeover-
-    eligible) rather than raise and brick every listing."""
+    eligible) rather than raise and brick every listing. NaN and infinities are
+    rejected for the same reason and not merely for tidiness: `now - nan >=
+    stale` is False, so a NaN `last_seen` would read as permanently ONLINE and
+    un-takeoverable — the exact opposite of the intended degradation.
+    """
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
         return default
+    return parsed if math.isfinite(parsed) else default
 
 
 class ChallengeRefused(Exception):
@@ -186,15 +192,23 @@ class HostDirectory:
             return None
 
     def _sweep_challenges(self) -> list[Path]:
-        """Drop expired/corrupt challenges; return what is still live."""
+        """Drop expired/corrupt challenges; return what is still live.
+
+        `*.claim` files are swept on the same rule: a crash between the rename
+        that claims a nonce and the unlink that spends it would otherwise
+        strand one forever, and a claim past its own expiry can never be
+        spent by anyone.
+        """
         now = self._clock()
         live = []
-        for path in sorted(self._challenges.glob("*.json")):
+        for path in sorted(self._challenges.glob("*")):
+            if path.suffix not in (".json", ".claim"):
+                continue
             rec = self._read_challenge(path)
             if rec is None or now >= _as_float(rec.get("expires_at")):
                 path.unlink(missing_ok=True)
-            else:
-                live.append(path)
+            elif path.suffix == ".json":
+                live.append(path)                    # a claim is already spent
         return live
 
     def issue_challenge(self) -> dict:
