@@ -168,22 +168,14 @@ class SystemdUserSupervisor(_BaseSupervisor):
         return False
 
     def install(self, argv: list[str]) -> None:
-        # Validate BEFORE any unit mutation: linger is mandatory, so if we can
-        # never enable it, writing+enabling a unit first would leave an enabled
-        # unit that starts and dies without linger (worse than not installing).
+        # Validate linger BEFORE any unit mutation: it is mandatory, so a setup
+        # failure must not leave an enabled unit that starts and dies on logout.
         if self._user is None:
             raise DaemonSupervisorError(
                 f"uid {os.getuid()} has no passwd entry, so `loginctl enable-linger` has no "
                 "user to target — linger is mandatory (without it the daemon dies when your "
                 "last session ends). Run as a real user, or use `mship daemon run`."
             )
-        unit_path = systemd_unit_path(self._home)
-        unit_path.parent.mkdir(parents=True, exist_ok=True)
-        unit_path.write_text(render_systemd_unit(argv))
-        self._checked("daemon-reload")
-        self._checked("enable", SYSTEMD_UNIT_NAME.removesuffix(".service"))
-        # Linger is mandatory: without it the user unit is torn down when the
-        # last SSH session ends — precisely the moment the daemon is needed.
         try:
             r = self._run(["loginctl", "enable-linger", self._user])
         except OSError as e:
@@ -195,6 +187,12 @@ class SystemdUserSupervisor(_BaseSupervisor):
                 "loginctl enable-linger did not stick (Linger!=yes) — without linger the "
                 "daemon dies when your last SSH session ends. Check `loginctl show-user`."
             )
+
+        unit_path = systemd_unit_path(self._home)
+        unit_path.parent.mkdir(parents=True, exist_ok=True)
+        unit_path.write_text(render_systemd_unit(argv))
+        self._checked("daemon-reload")
+        self._checked("enable", SYSTEMD_UNIT_NAME.removesuffix(".service"))
 
     def start(self) -> None:
         self._checked("start", SYSTEMD_UNIT_NAME.removesuffix(".service"))

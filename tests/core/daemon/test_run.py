@@ -180,23 +180,26 @@ def test_entrypoint_registered():
     assert callable(run_mod.main)
 
 
-def test_oversized_launchd_capture_is_truncated_on_start(env_home, monkeypatch):
-    """launchd never rotates StandardErrorPath: under KeepAlive relaunch a
-    persistent startup failure would grow it forever, so the daemon caps it."""
+def test_oversized_launchd_capture_preserves_latest_evidence_on_start(
+    env_home, monkeypatch
+):
+    """Capping launchd's unrotated capture retains the newest crash evidence."""
     home, env = env_home
     _capture_uvicorn(monkeypatch)
     log_dir = daemon_log_dir(home)
     log_dir.mkdir(parents=True, exist_ok=True)
     big = log_dir / "launchd.err.log"
-    big.write_bytes(b"x" * (run_mod.LAUNCHD_CAPTURE_MAX_BYTES + 1024))
+    latest = b"latest startup traceback\n"
+    big.write_bytes(b"x" * (run_mod.LAUNCHD_CAPTURE_MAX_BYTES + 1024) + latest)
     small = log_dir / "launchd.out.log"
     small.write_text("keep me\n")
 
     assert run_mod.main(home=home, env=env) == 0
 
-    assert big.stat().st_size == 0            # capped
-    assert small.read_text() == "keep me\n"   # under the cap: untouched
-    assert "truncated oversized launchd capture" in (log_dir / "daemon.log").read_text()
+    assert big.stat().st_size == run_mod.LAUNCHD_CAPTURE_MAX_BYTES
+    assert big.read_bytes().endswith(latest)
+    assert small.read_text() == "keep me\n"
+    assert "trimmed oversized launchd capture" in (log_dir / "daemon.log").read_text()
 
 
 def test_capture_trimmed_before_logging_setup(env_home, monkeypatch):

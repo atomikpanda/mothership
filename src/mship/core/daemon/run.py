@@ -77,11 +77,11 @@ def main(home: Path | None = None, env: Mapping[str, str] | None = None) -> int:
     # FIRST, before any heavier import or setup can fail: the crash loop this
     # guards against is frequently a broken import, and every relaunch appends
     # another traceback to the launchd capture. Logged once logging exists, so
-    # the truncation is never silent.
+    # the compaction is never silent.
     trimmed = trim_launchd_captures(paths.daemon_log_dir(home))
     _configure_logging(home)
     for name in trimmed:
-        log.warning("truncated oversized launchd capture %s (>%d bytes)", name, LAUNCHD_CAPTURE_MAX_BYTES)
+        log.warning("trimmed oversized launchd capture %s (>%d bytes)", name, LAUNCHD_CAPTURE_MAX_BYTES)
     try:
         return _run(home, env)
     except Exception:

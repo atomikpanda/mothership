@@ -13,18 +13,20 @@ too, giving a never-starting daemon's capture a bound whenever an operator
 looks at it.
 """
 from __future__ import annotations
+import os
 
 from pathlib import Path
 
-# Truncate a capture larger than this. In place, never renamed: launchd holds
-# the fd open across relaunches, so a renamed file keeps growing invisibly.
+# Compact a capture larger than this, preserving its newest bytes. In place,
+# never renamed: launchd holds the fd open across relaunches, so a renamed file
+# keeps growing invisibly.
 LAUNCHD_CAPTURE_MAX_BYTES = 5 * 1024 * 1024
 
 
 def trim_launchd_captures(log_dir: Path, max_bytes: int = LAUNCHD_CAPTURE_MAX_BYTES) -> list[str]:
-    """Truncate oversized `launchd.*.log` captures. Returns the names trimmed.
-    Never raises: this runs on the crash path, where failing loudly would
-    replace one problem with a worse one."""
+    """Compact oversized `launchd.*.log` captures to their newest bytes.
+    Returns the names trimmed. Never raises: this runs on the crash path, where
+    failing loudly would replace one problem with a worse one."""
     trimmed: list[str] = []
     try:
         candidates = sorted(Path(log_dir).glob("launchd.*.log"))
@@ -32,10 +34,18 @@ def trim_launchd_captures(log_dir: Path, max_bytes: int = LAUNCHD_CAPTURE_MAX_BY
         return trimmed
     for path in candidates:
         try:
-            if path.stat().st_size <= max_bytes:
+            stat = path.stat()
+            if stat.st_size <= max_bytes:
                 continue
             with open(path, "r+b") as fh:
-                fh.truncate(0)
+                fh.seek(-max_bytes, os.SEEK_END)
+                tail = fh.read(max_bytes)
+                fh.seek(0)
+                fh.write(tail)
+                fh.truncate()
+            # Contents are compacted, not newly produced. Preserve their
+            # timestamp so logs_tail's cross-file chronology remains truthful.
+            os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
             trimmed.append(path.name)
         except OSError:
             continue

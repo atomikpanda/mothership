@@ -45,7 +45,7 @@ def _linux(tmp_path, responses=None):
     return sup, rec
 
 
-def test_linux_install_order_and_linger_verify(tmp_path):
+def test_linux_install_linger_precedes_unit_mutation(tmp_path):
     sup, rec = _linux(
         tmp_path, {"show-user": _ok("Linger=yes\n"), "is-system-running": _ok("running\n")}
     )
@@ -57,13 +57,32 @@ def test_linux_install_order_and_linger_verify(tmp_path):
     enable_i = next(i for i, c in enumerate(cmds) if " enable " in f" {c} ")
     linger_i = next(i for i, c in enumerate(cmds) if "enable-linger" in c)
     verify_i = next(i for i, c in enumerate(cmds) if "show-user" in c)
-    assert reload_i < enable_i < linger_i < verify_i
+    assert linger_i < verify_i < reload_i < enable_i
 
 
-def test_linux_install_fails_loudly_when_linger_does_not_stick(tmp_path):
-    sup, _ = _linux(tmp_path, {"show-user": _ok("Linger=no\n")})
+def test_linux_install_fails_before_unit_mutation_when_linger_does_not_stick(tmp_path):
+    sup, rec = _linux(tmp_path, {"show-user": _ok("Linger=no\n")})
     with pytest.raises(DaemonSupervisorError, match="[Ll]inger"):
         sup.install(["/venv/bin/mshipd"])
+    unit = tmp_path / ".config" / "systemd" / "user" / "mship-daemon.service"
+    assert not unit.exists()
+    assert all(call[0] == "loginctl" for call in rec.calls)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [_fail(stderr="permission denied"), OSError("loginctl missing")],
+    ids=["nonzero", "os-error"],
+)
+def test_linux_install_fails_before_unit_mutation_when_enable_linger_fails(
+    tmp_path, response
+):
+    sup, rec = _linux(tmp_path, {"enable-linger": response})
+    with pytest.raises(DaemonSupervisorError, match="loginctl enable-linger failed"):
+        sup.install(["/venv/bin/mshipd"])
+    unit = tmp_path / ".config" / "systemd" / "user" / "mship-daemon.service"
+    assert not unit.exists()
+    assert all(call[0] == "loginctl" for call in rec.calls)
 
 
 def test_linux_lifecycle_commands(tmp_path):
@@ -325,6 +344,28 @@ def test_stale_launchd_capture_does_not_hide_fresh_daemon_log(tmp_path):
     assert tail == ["fresh-1", "fresh-2"], tail
 
 
+def test_trimming_oversized_stale_capture_preserves_log_order(tmp_path):
+    """Compaction must not make an old launchd capture look newer than daemon.log."""
+    import os
+    import time
+
+    from mship.core.daemon.log_capture import LAUNCHD_CAPTURE_MAX_BYTES
+
+    log_dir = tmp_path / ".mothership" / "daemon" / "logs"
+    log_dir.mkdir(parents=True)
+    stale = log_dir / "launchd.err.log"
+    stale.write_bytes(
+        b"x" * LAUNCHD_CAPTURE_MAX_BYTES + b"\nstale-1\nstale-2\n"
+    )
+    fresh = log_dir / "daemon.log"
+    fresh.write_text("fresh-1\nfresh-2\n")
+    old = time.time() - 3600
+    os.utime(stale, (old, old))
+
+    sup, _ = _linux(tmp_path)
+    assert sup.logs_tail(2) == ["fresh-1", "fresh-2"]
+
+
 def test_uid_username_is_none_without_pwd_module(monkeypatch):
     """Windows has no `pwd`; mship.cli imports this module for EVERY command, so
     the import must be lazy and failure-tolerant."""
@@ -436,16 +477,17 @@ def test_logs_tail_read_is_bounded_not_just_the_seek(tmp_path):
     assert len("\n".join(lines).encode()) <= sup_mod._TAIL_READ_BYTES
 
 
-def test_logs_tail_trims_oversized_capture(tmp_path):
-    """A daemon that never reaches main() can't trim its own capture, so the
-    operator-facing path does it."""
+def test_logs_tail_preserves_latest_evidence_when_trimming_oversized_capture(tmp_path):
+    """The operator-facing trim must retain the newest crash evidence."""
     from mship.core.daemon.log_capture import LAUNCHD_CAPTURE_MAX_BYTES
 
     log_dir = tmp_path / ".mothership" / "daemon" / "logs"
     log_dir.mkdir(parents=True)
     (log_dir / "daemon.log").write_text("app\n")
     huge = log_dir / "launchd.err.log"
-    huge.write_bytes(b"y" * (LAUNCHD_CAPTURE_MAX_BYTES + 2048))
+    latest = b"latest startup traceback\n"
+    huge.write_bytes(b"y" * (LAUNCHD_CAPTURE_MAX_BYTES + 2048) + b"\n" + latest)
     sup, _ = _linux(tmp_path)
-    sup.logs_tail(5)
-    assert huge.stat().st_size == 0
+    assert sup.logs_tail(5)[-1] == latest.decode().strip()
+    assert huge.stat().st_size == LAUNCHD_CAPTURE_MAX_BYTES
+    assert huge.read_bytes().endswith(latest)
