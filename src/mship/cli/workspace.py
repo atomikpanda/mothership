@@ -203,7 +203,12 @@ def register(parent: typer.Typer, get_container):
         if record is not None and record.socket_path:
             payload = _poke_daemon_refresh(record.socket_path)
             if payload is not None:
-                out.print(f"daemon rescanned: {payload.get('workspaces')} workspace(s)")
+                if payload.get("error"):
+                    out.error(payload["error"])
+                    raise typer.Exit(1)
+                out.print(
+                    f"daemon rescanned: {payload.get('workspaces')} workspace(s)"
+                )
                 return
         try:
             cfg = load_daemon_config(home)
@@ -220,8 +225,9 @@ def register(parent: typer.Typer, get_container):
 def _poke_daemon_refresh(
     socket_path: str, *, cleanup_only: bool = False
 ) -> dict | None:
-    """POST the control app's registry/host cleanup owner. None on any failure
-    (daemon dead or pre-#472); direct registry mutations are already complete."""
+    """POST the control app's registry/host cleanup owner. None means the
+    daemon is unreachable/pre-#472; an HTTP rejection returns an explicit error
+    so refresh never ambiguously falls back to an offline second scan."""
     try:
         import httpx
 
@@ -231,7 +237,17 @@ def _poke_daemon_refresh(
         try:
             params = {"cleanup_only": "true"} if cleanup_only else None
             r = client.post("http://mshipd/workspaces/refresh", params=params)
-            return r.json() if r.status_code == 200 else None
+            if r.status_code == 200:
+                return r.json()
+            if r.status_code == 404:
+                return None
+            try:
+                detail = r.json().get("detail") or r.text
+            except ValueError:
+                detail = r.text
+            return {
+                "error": f"daemon refresh failed ({r.status_code}): {detail}"
+            }
         finally:
             client.close()
     except Exception:

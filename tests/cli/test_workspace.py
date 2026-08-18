@@ -367,3 +367,57 @@ def test_refresh_pokes_live_daemon(cli, monkeypatch):
     assert res.exit_code == 0, res.output
     assert poked["sock"] == "/run/mship/daemon.sock"
     assert "3" in res.output
+
+
+def test_refresh_falls_back_offline_when_live_daemon_lacks_endpoint(
+    cli, monkeypatch
+):
+    from mship.core.daemon.paths import lease_path
+
+    app, home, tmp = cli
+    root = tmp / "root"
+    _mk_ws(root, "fresh")
+    save_daemon_config(home, DaemonConfig(scan_roots=[str(root)]))
+    lp = lease_path(home)
+    lp.parent.mkdir(parents=True, exist_ok=True)
+    lp.write_text('{"pid": 1, "socket_path": "/run/mship/daemon.sock"}')
+    monkeypatch.setattr(
+        ws_mod, "_poke_daemon_refresh", lambda _socket: None
+    )
+
+    res = runner.invoke(app, ["workspace", "refresh"])
+
+    assert res.exit_code == 0, res.output
+    assert "rescanned directly" in res.output
+    assert len(RegistryStore(registry_path(home)).load().entries) == 1
+
+
+
+def test_refresh_reports_live_daemon_rejection_without_offline_fallback(
+    cli, monkeypatch
+):
+    from mship.core.daemon.paths import lease_path
+
+    app, home, tmp = cli
+    lp = lease_path(home)
+    lp.parent.mkdir(parents=True)
+    lp.write_text('{"pid": 1, "socket_path": "/run/mship/daemon.sock"}')
+    offline_loads = []
+    monkeypatch.setattr(
+        ws_mod,
+        "_poke_daemon_refresh",
+        lambda _socket: {
+            "error": "daemon refresh failed (503): /unmounted/workspaces"
+        },
+    )
+    monkeypatch.setattr(
+        ws_mod,
+        "load_daemon_config",
+        lambda _home: offline_loads.append(_home),
+    )
+
+    res = runner.invoke(app, ["workspace", "refresh"])
+
+    assert res.exit_code == 1
+    assert "/unmounted/workspaces" in res.output
+    assert offline_loads == []

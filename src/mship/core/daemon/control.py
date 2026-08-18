@@ -20,6 +20,7 @@ from typing import Callable
 # CLI<->daemon control-protocol version; bump on breaking payload changes.
 # 2: capabilities.registry/serve became real + /workspaces endpoints (#472).
 PROTOCOL = 2
+RESCAN_ERROR_STATUS = 503
 
 _PROBE_TIMEOUT_S = 3.0
 
@@ -42,7 +43,7 @@ def create_control_app(
     lifespans after a control-socket refresh. `serve_bound` reports whether the
     TCP host app is up (#472).
     """
-    from fastapi import FastAPI
+    from fastapi import FastAPI, HTTPException
 
     app = FastAPI(title="mshipd control", docs_url=None, redoc_url=None)
     serve_state = {"bound": serve_bound}
@@ -90,7 +91,14 @@ def create_control_app(
         @app.post("/workspaces/refresh")
         async def refresh(cleanup_only: bool = False):
             if not cleanup_only and rescan is not None:
-                await asyncio.get_running_loop().run_in_executor(None, rescan)
+                try:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, rescan
+                    )
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=RESCAN_ERROR_STATUS, detail=str(exc)
+                    ) from exc
             if after_rescan is not None:
                 await after_rescan()
             return {"workspaces": len(store.load().entries)}

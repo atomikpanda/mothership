@@ -152,6 +152,38 @@ def test_control_refresh_runs_host_cleanup_after_rescan(tmp_path):
     assert events == ["cleanup"]
 
 
+def test_control_refresh_reports_scan_error_without_cleanup_or_mutation(
+    tmp_path,
+):
+    from mship.core.daemon.discovery import ScanRootError
+
+    events = []
+    store = _registry_store(tmp_path)
+    original = store.load()
+
+    def fail_rescan():
+        raise ScanRootError("/unmounted/workspaces is unavailable")
+
+    async def cleanup():
+        events.append("cleanup")
+
+    app = create_control_app(
+        started_at=STARTED,
+        version="1",
+        socket_path="/s",
+        store=store,
+        rescan=fail_rescan,
+        after_rescan=cleanup,
+    )
+
+    response = TestClient(app).post("/workspaces/refresh")
+
+    assert response.status_code == 503
+    assert "/unmounted/workspaces" in response.json()["detail"]
+    assert events == []
+    assert store.load() == original
+
+
 def test_no_store_means_no_registry_routes():
     client = _client()
     assert client.get("/health").json()["capabilities"]["registry"] is False

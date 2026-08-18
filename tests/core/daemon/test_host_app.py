@@ -208,6 +208,43 @@ def test_workspace_ui_keeps_host_namespace_for_links_assets_and_cookie(
         assert client.get(f"{ui_root}/doctor").status_code == 200
 
 
+def test_host_refresh_reports_scan_error_without_dropping_cached_subapp(
+    tmp_path,
+):
+    from mship.core.daemon.discovery import ScanRootError
+
+    home = tmp_path / "home"
+    store = _seed(home, [_entry("ws-a", "a", tmp_path / "a")])
+    built = {}
+
+    def build(entry, **_kwargs):
+        subapp = FakeSubApp(entry.name)
+        built[entry.id] = subapp
+        return subapp
+
+    def fail_rescan():
+        raise ScanRootError("/unmounted/workspaces is unavailable")
+
+    app = create_host_app(
+        store,
+        auth_token=None,
+        build_subapp=build,
+        rescan=fail_rescan,
+    )
+    with TestClient(app) as client:
+        assert client.get("/workspaces/ws-a/specs").status_code == 200
+        cached = built["ws-a"]
+
+        response = client.post("/workspaces/refresh")
+
+        assert response.status_code == 503
+        assert "/unmounted/workspaces" in response.json()["detail"]
+        assert cached.lifespan_stopped is False
+        assert store.load().entries[0].state == "healthy"
+        assert client.get("/workspaces/ws-a/specs").status_code == 200
+        assert built["ws-a"] is cached
+
+
 def test_host_passes_github_app_credentials_to_workspace_subapp(tmp_path):
     home = tmp_path / "home"
     store = _seed(home, [_entry("ws-a", "a", tmp_path / "a")])

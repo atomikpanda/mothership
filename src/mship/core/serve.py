@@ -403,6 +403,7 @@ def create_app(
             config=config,
             state_dir=workspace_root / ".mothership",
             workspace_root=workspace_root,
+            gh_app_credentials_loaded=bool(gh_app_id and gh_app_key),
         ))
 
     def _doctor_payload() -> dict:

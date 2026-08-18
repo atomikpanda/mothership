@@ -95,13 +95,11 @@ def _build_registry(home: Path):
                 "daemon config unreadable on refresh — registry unchanged"
             )
             raise
-        except ValueError as e:
-            log.error(
-                "daemon config invalid on refresh: %s — serving empty registry",
-                e,
+        except ValueError:
+            log.exception(
+                "daemon config invalid on refresh — registry unchanged"
             )
-            clear_registry()
-            return
+            raise
         reconcile(store, scan_roots(current), datetime.now(timezone.utc))
 
     if cfg is None:

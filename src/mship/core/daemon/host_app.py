@@ -30,6 +30,7 @@ from typing import Callable, Mapping
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from mship.core.daemon.control import RESCAN_ERROR_STATUS
 from mship.core.daemon.registry import RegistryStore, WorkspaceEntry
 from mship.core.workspace_context import ContextError
 
@@ -377,7 +378,12 @@ def create_host_app(
     @app.post("/workspaces/refresh")
     async def refresh():
         if rescan is not None:
-            await asyncio.get_running_loop().run_in_executor(None, rescan)
+            try:
+                await asyncio.get_running_loop().run_in_executor(None, rescan)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=RESCAN_ERROR_STATUS, detail=str(exc)
+                ) from exc
         await _drop_stale()
         return {"workspaces": len(_entries())}
 
