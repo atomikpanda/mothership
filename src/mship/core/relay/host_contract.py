@@ -30,6 +30,13 @@ FLEET_TOKEN_HEADER = "Mship-Fleet-Token"
 # catch-all, so every route below must sit under ONE prefix — that is what
 # keeps a single `@hosts { path /hosts /hosts/* }` Caddy matcher sufficient.
 HOSTS_PREFIX = "/hosts"
+
+# The enroll site's public name, derived from the relay domain. One spelling:
+# `mship relay enroll` (a human on a new device) and the daemon's relay link (a
+# headless host) must reach the SAME server, or a host enrolls where nobody is
+# looking for it.
+ENROLL_SUBDOMAIN = "enroll"
+
 LIST_PATH = HOSTS_PREFIX
 CHALLENGE_PATH = f"{HOSTS_PREFIX}/challenge"
 REGISTER_PATH = f"{HOSTS_PREFIX}/register"
@@ -61,6 +68,11 @@ ENROLL_TTL_S = 1800
 # approval. Strictly shorter than the store's TTL, so a VM provisioned at 02:00
 # is still approvable at 09:00 (AC1/AC8).
 ENROLL_REPOST_INTERVAL_S = ENROLL_TTL_S // 3
+
+
+def enroll_base_url(relay_host: str) -> str:
+    """`https://enroll.<relay domain>` — the base every route above hangs off."""
+    return f"https://{ENROLL_SUBDOMAIN}.{relay_host.strip().rstrip('.')}"
 
 
 def canonical_payload(payload: dict) -> bytes:

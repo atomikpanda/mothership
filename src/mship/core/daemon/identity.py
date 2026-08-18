@@ -110,6 +110,37 @@ def _rotate_relay_key(home: Path) -> None:
             path.replace(path.with_name(f"{path.name}.pre-reidentify-{stamp}"))
 
 
+def force_reidentify(
+    home: Path,
+    *,
+    rotate_key: Callable[[Path], None] = _rotate_relay_key,
+    now: datetime | None = None,
+) -> HostIdentity:
+    """Re-identify unconditionally: mint a new `host_id`, record the old one as
+    `cloned_from`, and rotate the relay key — the same two moves
+    `ensure_host_identity` makes on a fingerprint mismatch, for the case where
+    the *relay* (not the local fingerprint) is what noticed the collision.
+
+    The daemon calls this itself after repeated `409 duplicate-identity`
+    answers, and `mship daemon reidentify` calls it for an operator: a headless
+    VM must be able to recover without anyone SSHing into it.
+    """
+    from mship.core.daemon.paths import host_identity_path
+
+    path = host_identity_path(home)
+    previous = _read(path) or {}
+    rotate_key(home)
+    ident = HostIdentity(
+        host_id=mint_host_id(now),
+        created_at=(now or datetime.now(timezone.utc)).isoformat(),
+        fingerprint=previous.get("fingerprint") or machine_fingerprint(),
+        cloned_from=previous.get("host_id"),
+        reidentified=True,
+    )
+    _write(path, ident)
+    return ident
+
+
 def ensure_host_identity(
     home: Path,
     *,

@@ -151,6 +151,8 @@ WORKSPACE_FREE_MODULES = (
     "identity.py",
     "host_token.py",
     "host_auth.py",
+    "capabilities.py",
+    "relay_link.py",
 )
 
 _FORBIDDEN_IMPORTS = ("mship.core.config", "mship.core.workspace_context")

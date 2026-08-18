@@ -26,7 +26,9 @@ def enroll_base_url(*, enroll_url, relay_host, config_host):
     host = relay_host or config_host
     if not host:
         raise ValueError("provide --relay-host (or configure relay.host)")
-    return f"https://enroll.{host.strip().rstrip('.')}"
+    from mship.core.relay.host_contract import enroll_base_url as derive
+
+    return derive(host)
 
 
 def _configured_relay_host(get_container):

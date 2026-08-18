@@ -41,6 +41,7 @@ from typing import Any, Callable
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from mship.core.daemon.capabilities import runner_block
 from mship.core.daemon.control import RESCAN_ERROR_STATUS
 from mship.core.daemon.registry import RegistryReadError, RegistryStore, WorkspaceEntry
 from mship.core.workspace_context import ContextError
@@ -248,19 +249,6 @@ _BEARER_PREFIX = "Bearer "
 # stamps are the only honest discriminator. A direct caller who forges one only
 # denies itself the standing-token fallback, so the failure direction is safe.
 _EDGE_HEADERS = ("x-forwarded-for", "x-forwarded-host", "x-forwarded-proto")
-
-
-def runner_block(raw: object | None) -> dict:
-    """Project the registry's opaque `runner:` passthrough (AC6's one owner).
-
-    One projection, one shape, everywhere a runner block is published — #473
-    fills `state` in here and nowhere else. Declared-and-enabled reads
-    `unknown` because #471 carries runner state but never observes it; anything
-    else — absent, disabled, or malformed from a hand-edited registry — reads
-    `disabled` rather than failing a request.
-    """
-    enabled = bool(raw.get("enabled")) if isinstance(raw, Mapping) else False
-    return {"enabled": enabled, "state": "unknown" if enabled else "disabled"}
 
 
 def _is_relay_borne(request: Request) -> bool:
