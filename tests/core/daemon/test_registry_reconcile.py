@@ -329,3 +329,83 @@ def test_manual_workspace_is_revalidated_outside_scan_roots(tmp_path: Path):
     assert entry.origin == "manual"
     assert entry.state == "degraded"
     assert "invalid" in entry.detail
+
+
+def test_replacement_at_deleted_path_gets_new_identity_and_keeps_history(
+    tmp_path: Path,
+):
+    home, root = tmp_path / "home", tmp_path / "root"
+    workspace = _mk_ws(root, "workspace")
+    store = _store(home)
+    original_id = reconcile(store, _scan(root), NOW).entries[0].id
+
+    shutil.rmtree(workspace)
+    replacement = _mk_ws(root, "workspace", ws_name="replacement")
+    state = reconcile(store, _scan(root), LATER)
+
+    original = next(entry for entry in state.entries if entry.id == original_id)
+    current = next(entry for entry in state.entries if entry.id != original_id)
+    assert len(state.entries) == 2
+    assert original.state == "missing"
+    assert "replaced" in original.detail
+    assert current.state == "healthy"
+    assert current.name == "replacement"
+    assert current.path == original.path == str(replacement.resolve())
+
+
+def test_replacement_history_does_not_shadow_later_known_move(tmp_path: Path):
+    home, root = tmp_path / "home", tmp_path / "root"
+    workspace_a = _mk_ws(root, "a")
+    workspace_y = _mk_ws(root, "y")
+    store = _store(home)
+    initial = reconcile(store, _scan(root), NOW)
+    id_a = next(entry.id for entry in initial.entries if entry.name == "a")
+    id_y = next(entry.id for entry in initial.entries if entry.name == "y")
+
+    shutil.rmtree(workspace_y)
+    replacement = _mk_ws(root, "y", ws_name="replacement")
+    replaced = reconcile(store, _scan(root), LATER)
+    id_replacement = next(
+        entry.id for entry in replaced.entries if entry.state == "healthy"
+        and entry.path == str(replacement.resolve())
+    )
+
+    shutil.rmtree(replacement)
+    workspace_a.rename(workspace_y)
+    moved = reconcile(store, _scan(root), LATER + timedelta(minutes=1))
+
+    by_id = {entry.id: entry for entry in moved.entries}
+    assert by_id[id_a].state == "healthy"
+    assert by_id[id_a].path == str(workspace_y.resolve())
+    assert by_id[id_y].state == "missing"
+    assert by_id[id_replacement].state == "missing"
+    assert [entry.id for entry in moved.entries if entry.state == "healthy"] == [id_a]
+
+
+def test_known_move_displaces_registry_only_destination_owner(tmp_path: Path):
+    from mship.core.daemon.registry import WorkspaceEntry
+
+    home, root = tmp_path / "home", tmp_path / "root"
+    workspace = _mk_ws(root, "a")
+    store = _store(home)
+    workspace_id = reconcile(store, _scan(root), NOW).entries[0].id
+    destination = root / "y"
+    store.mutate(lambda state: state.entries.append(WorkspaceEntry(
+        id="ws-destination-history",
+        name="destination",
+        path=str(destination.resolve()),
+        config_path=str(destination / "mothership.yaml"),
+        state="healthy",
+        identity_source="registry-only",
+        first_seen=NOW,
+        last_seen=NOW,
+    )))
+
+    workspace.rename(destination)
+    state = reconcile(store, _scan(root), LATER)
+    by_id = {entry.id: entry for entry in state.entries}
+
+    assert by_id[workspace_id].state == "healthy"
+    assert by_id[workspace_id].path == str(destination.resolve())
+    assert by_id["ws-destination-history"].state == "missing"
+    assert "replaced" in by_id["ws-destination-history"].detail

@@ -233,6 +233,38 @@ def _recover_registry_only_identity(
     return True
 
 
+def _active_path_owner(
+    entries: list[WorkspaceEntry], path: str
+) -> WorkspaceEntry | None:
+    """Current path ownership excludes retained missing identity history."""
+    return next(
+        (
+            entry
+            for entry in reversed(entries)
+            if entry.path == path and entry.state != "missing"
+        ),
+        None,
+    )
+
+
+def _displace_conflicting_path_owner(
+    entries: list[WorkspaceEntry],
+    path: str,
+    authoritative_id: str,
+) -> WorkspaceEntry | None:
+    """Durable ID wins a path unless its owner is a deliberate duplicate."""
+    owner = _active_path_owner(entries, path)
+    if (
+        owner is not None
+        and owner.id != authoritative_id
+        and "duplicate-identity" not in owner.detail
+    ):
+        owner.state = "missing"
+        owner.detail = "workspace was replaced at this path"
+        return None
+    return owner
+
+
 def reconcile(store: RegistryStore, candidates: list, now: datetime) -> RegistryState:
     """One flock'd RMW folding a scan's candidates into the registry.
 
@@ -253,7 +285,11 @@ def reconcile(store: RegistryStore, candidates: list, now: datetime) -> Registry
 
     def apply(state: RegistryState) -> None:
         by_id = {e.id: e for e in state.entries}
-        by_path = {e.path: e for e in state.entries}
+        by_path = {
+            entry.path: entry
+            for entry in state.entries
+            if entry.state != "missing"
+        }
         round_candidates = list(candidates)
         candidate_paths = {str(cand.path) for cand in round_candidates}
         manual_paths = [
@@ -262,6 +298,10 @@ def reconcile(store: RegistryStore, candidates: list, now: datetime) -> Registry
             if entry.origin == "manual"
             and entry.path not in candidate_paths
             and Path(entry.path).exists()
+            and (
+                entry.state != "missing"
+                or _read_id_file(Path(entry.path)) == entry.id
+            )
         ]
         if manual_paths:
             from mship.core.daemon.discovery import _materialize
@@ -291,6 +331,21 @@ def reconcile(store: RegistryStore, candidates: list, now: datetime) -> Registry
             elif path_str in by_path:
                 existing = by_path[path_str]
 
+            if (
+                existing is not None
+                and cand.healthy
+                and file_id is None
+                and existing.identity_source == "idfile"
+            ):
+                # The durable identity vanished while a healthy workspace now
+                # occupies the same path. Preserve the old identity as history;
+                # registry-only entries are the recoverable no-id-file case.
+                existing.state = "missing"
+                existing.detail = "workspace was replaced at this path"
+                if by_path.get(path_str) is existing:
+                    by_path.pop(path_str)
+                existing = None
+
             if file_id is not None and file_id in claimed_ids and claimed_ids[file_id] != path_str:
                 # Duplicate identity within one scan round: keeper decided below
                 # by current-path rule; both orders converge because the entry's
@@ -302,7 +357,11 @@ def reconcile(store: RegistryStore, candidates: list, now: datetime) -> Registry
                 # duplicate until `workspace add` re-identifies it — even if
                 # the original disappears. Otherwise the original is moved
                 # here and two entries wind up claiming this path.
-                dup = next((e for e in state.entries if e.path == path_str), None)
+                dup = _displace_conflicting_path_owner(
+                    state.entries, path_str, existing.id
+                )
+                if dup is None:
+                    by_path.pop(path_str, None)
                 if dup is not None:
                     dup.state = "degraded"
                     dup.detail = (

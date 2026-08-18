@@ -82,35 +82,66 @@ def register(parent: typer.Typer, get_container):
                 WorkspaceEntry,
                 _read_id_file,
                 _recover_registry_only_identity,
+                _active_path_owner,
+                _displace_conflicting_path_owner,
             )
 
-            existing_by_path = next((e for e in state.entries if e.path == str(ws_dir)), None)
+            file_id = _read_id_file(ws_dir)
+            by_id = {entry.id: entry for entry in state.entries}
+            existing_by_id = by_id.get(file_id) if file_id is not None else None
+            existing_by_path = _active_path_owner(
+                state.entries, str(ws_dir)
+            )
+            existing = existing_by_path
+            if existing_by_id is not None:
+                if existing_by_id.path == str(ws_dir):
+                    existing = existing_by_id
+                else:
+                    existing_by_path = _displace_conflicting_path_owner(
+                        state.entries, str(ws_dir), existing_by_id.id
+                    )
+                    existing = existing_by_path
+                    if (
+                        existing_by_path is None
+                        and not (
+                            Path(existing_by_id.path).exists()
+                            and _read_id_file(Path(existing_by_id.path)) == file_id
+                        )
+                    ):
+                        existing_by_id.path = str(ws_dir)
+                        existing_by_id.config_path = str(cand.config_path)
+                        existing = existing_by_id
+
             if (
-                existing_by_path is not None
-                and "duplicate-identity" not in existing_by_path.detail
+                existing is not None
+                and "duplicate-identity" not in existing.detail
                 and _recover_registry_only_identity(
-                    existing_by_path,
+                    existing,
                     ws_dir,
-                    _read_id_file(ws_dir),
-                    {entry.id: entry for entry in state.entries},
+                    file_id,
+                    by_id,
                 )
             ):
-                existing_by_path.origin = "manual"
-                existing_by_path.ignored = False
-                existing_by_path.state = "healthy"
-                existing_by_path.detail = ""
-                existing_by_path.name = cand.name
-                existing_by_path.config_path = str(cand.config_path)
-                existing_by_path.repos = cand.repos
-                existing_by_path.runtime = cand.runtime
-                existing_by_path.runner = cand.runner
-                existing_by_path.last_seen = now
+                existing.origin = "manual"
+                existing.ignored = False
+                existing.state = "healthy"
+                existing.detail = ""
+                existing.name = cand.name
+                existing.config_path = str(cand.config_path)
+                existing.repos = cand.repos
+                existing.runtime = cand.runtime
+                existing.runner = cand.runner
+                existing.last_seen = now
                 return
             # Duplicate-identity copy (or fresh manual add): mint a new id and
             # claim the directory with it.
             new_id = mint_workspace_id(now)
             wrote = _write_id_file(ws_dir, new_id)
-            state.entries = [e for e in state.entries if e.path != str(ws_dir)]
+            state.entries = [
+                entry
+                for entry in state.entries
+                if entry.path != str(ws_dir) or entry.state == "missing"
+            ]
             state.entries.append(WorkspaceEntry(
                 id=new_id, name=cand.name, path=str(ws_dir),
                 config_path=str(cand.config_path), origin="manual",

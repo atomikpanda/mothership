@@ -143,6 +143,108 @@ def test_add_repairs_registry_only_identity_before_move(cli):
     assert state.entries[0].path == str(moved.resolve())
 
 
+
+def test_add_moved_manual_workspace_preserves_durable_identity(cli):
+    from mship.core.daemon.registry import ID_FILE_RELPATH
+
+    app, home, tmp = cli
+    workspace = _mk_ws(tmp / "outside", "manual-ws")
+    assert runner.invoke(
+        app, ["workspace", "add", str(workspace)]
+    ).exit_code == 0
+    store = RegistryStore(registry_path(home))
+    original_id = store.load().entries[0].id
+
+    moved = tmp / "moved"
+    workspace.rename(moved)
+    result = runner.invoke(app, ["workspace", "add", str(moved)])
+    entries = store.load().entries
+
+    assert result.exit_code == 0, result.output
+    assert len(entries) == 1
+    assert entries[0].id == original_id
+    assert entries[0].path == str(moved.resolve())
+    assert (moved / ID_FILE_RELPATH).read_text().strip() == original_id
+
+
+def test_add_exact_path_replacement_ignores_missing_history(cli):
+    from mship.core.daemon.registry import ID_FILE_RELPATH, WorkspaceEntry
+
+    app, home, tmp = cli
+    workspace = _mk_ws(tmp / "outside", "replacement")
+    store = RegistryStore(registry_path(home))
+    store.mutate(lambda state: state.entries.extend([
+        WorkspaceEntry(
+            id="ws-history",
+            name="deleted",
+            path=str(workspace.resolve()),
+            config_path=str(workspace / "mothership.yaml"),
+            state="missing",
+            detail="workspace was replaced at this path",
+            first_seen=NOW,
+            last_seen=NOW,
+        ),
+        WorkspaceEntry(
+            id="ws-current",
+            name="stale",
+            path=str(workspace.resolve()),
+            config_path=str(workspace / "mothership.yaml"),
+            state="degraded",
+            detail="workspace no longer under configured scan roots",
+            identity_source="registry-only",
+            first_seen=NOW,
+            last_seen=NOW,
+        ),
+    ]))
+
+    result = runner.invoke(app, ["workspace", "add", str(workspace)])
+    by_id = {
+        entry.id: entry
+        for entry in store.load().entries
+    }
+
+    assert result.exit_code == 0, result.output
+    assert by_id["ws-history"].state == "missing"
+    assert by_id["ws-current"].state == "healthy"
+    assert by_id["ws-current"].origin == "manual"
+    assert (workspace / ID_FILE_RELPATH).read_text().strip() == "ws-current"
+
+
+def test_add_known_move_displaces_registry_only_destination_owner(cli):
+    from mship.core.daemon.registry import WorkspaceEntry
+
+    app, home, tmp = cli
+    workspace = _mk_ws(tmp / "outside", "manual-ws")
+    assert runner.invoke(
+        app, ["workspace", "add", str(workspace)]
+    ).exit_code == 0
+    store = RegistryStore(registry_path(home))
+    workspace_id = store.load().entries[0].id
+    destination = tmp / "destination"
+    workspace.rename(destination)
+    store.mutate(lambda state: state.entries.append(WorkspaceEntry(
+        id="ws-destination-history",
+        name="destination",
+        path=str(destination.resolve()),
+        config_path=str(destination / "mothership.yaml"),
+        state="healthy",
+        identity_source="registry-only",
+        first_seen=NOW,
+        last_seen=NOW,
+    )))
+
+    result = runner.invoke(app, ["workspace", "add", str(destination)])
+    by_id = {
+        entry.id: entry
+        for entry in store.load().entries
+    }
+
+    assert result.exit_code == 0, result.output
+    assert by_id[workspace_id].state == "healthy"
+    assert by_id[workspace_id].path == str(destination.resolve())
+    assert by_id["ws-destination-history"].state == "missing"
+
+
 def test_add_duplicate_identity_copy_mints_fresh_id(cli):
     app, home, tmp = cli
     root = tmp / "root"
