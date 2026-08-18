@@ -15,8 +15,9 @@ import typer
 
 import mship
 from mship.core.daemon.history import read_history
+from mship.core.daemon.log_capture import rotate_launchd_captures
 from mship.core.daemon.lease import read_lease_record
-from mship.core.daemon.paths import lease_path, start_history_path
+from mship.core.daemon.paths import daemon_log_dir, lease_path, start_history_path
 from mship.core.daemon.registry import DaemonConfig
 from mship.core.daemon.status import build_status, probe_daemon, restart_blockers
 from mship.core.daemon.supervisor import DaemonSupervisorError, pick_supervisor
@@ -301,6 +302,7 @@ def register(parent: typer.Typer, get_container):
     def status():
         out = Output()
         home = Path.home()
+        rotate_launchd_captures(daemon_log_dir(home))
         sup = _supervisor()
         from mship.core.daemon.paths import registry_path
         from mship.core.daemon.registry import RegistryReadError, RegistryStore
