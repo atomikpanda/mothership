@@ -184,3 +184,28 @@ def test_duplicate_copy_does_not_accumulate_entries(tmp_path: Path):
     dups = [e for e in state.entries if "duplicate-identity" in e.detail]
     assert len(dups) == 1, [e.detail for e in state.entries]
     assert len(state.entries) == 2  # original + one degraded copy, stable
+
+
+def test_deleted_original_does_not_promote_registered_duplicate(tmp_path: Path):
+    """A known duplicate remains degraded until explicitly re-identified, even
+    after the original disappears."""
+    home, root = tmp_path / "home", tmp_path / "root"
+    original = _mk_ws(root, "a")
+    store = _store(home)
+    first = reconcile(store, _scan(root), NOW)
+    original_id = first.entries[0].id
+    copy = root / "a-copy"
+    shutil.copytree(original, copy)
+    reconcile(store, _scan(root), LATER)
+
+    shutil.rmtree(original)
+    state = reconcile(store, _scan(root), LATER + timedelta(minutes=10))
+
+    keeper = next(e for e in state.entries if e.id == original_id)
+    duplicate = next(e for e in state.entries if e.path == str(copy.resolve()))
+    assert keeper.path == str(original.resolve())
+    assert keeper.state == "missing"
+    assert duplicate.id != original_id
+    assert duplicate.state == "degraded"
+    assert "duplicate-identity" in duplicate.detail
+    assert len({e.path for e in state.entries}) == len(state.entries)

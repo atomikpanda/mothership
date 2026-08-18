@@ -20,6 +20,7 @@ One host-level token gates everything (the #471 short-lived-token seam).
 from __future__ import annotations
 
 import asyncio
+import os
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +36,9 @@ from mship.core.workspace_context import ContextError
 def ensure_host_token(home: Path) -> str:
     """Host-level bearer token (env>file>generate shape of relay/token.py's
     ensure_serve_token, but per OS user, not per workspace)."""
+    env = os.environ.get("MSHIP_SERVE_TOKEN")
+    if env:
+        return env
     from mship.core.daemon.paths import daemon_state_dir
 
     path = daemon_state_dir(home) / "serve-token"
@@ -153,11 +157,18 @@ def create_host_app(
                 subapps[entry.id] = sub
             return sub
 
-    async def _drop_stale(healthy_ids: set[str]) -> None:
+    async def _drop_stale() -> None:
+        healthy_ids = {
+            e.id for e in _entries() if e.state == "healthy" and not e.ignored
+        }
         async with lock:
             for wid in list(subapps):
                 if wid not in healthy_ids:
                     await subapps.pop(wid).stop()
+
+    # The control-socket refresh route runs the same registry rescan but lives
+    # in a sibling ASGI app. Expose only the post-rescan cleanup it must await.
+    app.state.drop_stale_subapps = _drop_stale
 
     @app.get("/health")
     def health():
@@ -190,9 +201,8 @@ def create_host_app(
     async def refresh():
         if rescan is not None:
             await asyncio.get_running_loop().run_in_executor(None, rescan)
-        entries = _entries()
-        await _drop_stale({e.id for e in entries if e.state == "healthy" and not e.ignored})
-        return {"workspaces": len(entries)}
+        await _drop_stale()
+        return {"workspaces": len(_entries())}
 
     @app.api_route(
         "/workspaces/{workspace_id}/{path:path}",

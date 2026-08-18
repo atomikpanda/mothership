@@ -109,8 +109,9 @@ mship daemon install --scan-root ~/src --scan-root ~/work --serve 127.0.0.1:4719
 ```
 
 - Scan roots and the optional TCP bind live in `~/.mothership/daemon/config.yaml`;
-  edit that file and run `mship workspace refresh` to pick changes up. With no
-  roots configured the daemon scans **nothing** (never the whole filesystem).
+  edit scan roots and run `mship workspace refresh` to pick them up. Changes to
+  the `serve:` bind require `mship daemon restart`. With no roots configured the
+  daemon scans **nothing** (never the whole filesystem).
 - Derived registry state is `~/.mothership/daemon/workspaces.json`.
 - Without `--serve` the daemon is control-socket only: local `mship daemon ...`
   works, but the phone cannot reach it. Address-less reachability is #471; until
@@ -159,9 +160,11 @@ failing obscurely at dispatch time.
 
 ### Ground Control
 
-Pair a **host** once (its base URL + host token from
-`~/.mothership/daemon/serve-token`), then "Discover workspaces on host" lists
-what that host found; picking one stores a connection pointed at
+Pair a **host** once using its base URL and effective host token. A non-empty
+`MSHIP_SERVE_TOKEN` in the daemon process takes precedence over
+`~/.mothership/daemon/serve-token`; when the environment override is unset, pair
+with the token from that file. "Discover workspaces on host" then lists what
+that host found; picking one stores a connection pointed at
 `{host}/workspaces/{id}`. If you previously paired that same workspace by hand
 (old per-workspace URL), you'll see two cards until you remove the manual one —
 migration lands with #471.

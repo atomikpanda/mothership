@@ -73,22 +73,34 @@ def register(parent: typer.Typer, get_container):
             raise typer.Exit(1)
         try:
             argv = resolve_mshipd_argv()
-            sup.install(argv)
-        except (DaemonExecResolutionError, DaemonSupervisorError) as e:
+        except DaemonExecResolutionError as e:
             out.error(str(e))
             raise typer.Exit(1)
+        previous_cfg = None
+        merged = None
         if roots or serve_cfg is not None:
             from mship.core.daemon.registry import DaemonConfig, load_daemon_config, save_daemon_config
 
             home = Path.home()
-            cfg = load_daemon_config(home)
+            previous_cfg = load_daemon_config(home)
             merged = DaemonConfig(
-                scan_roots=sorted(set(cfg.scan_roots) | set(roots)),
-                ignore_globs=cfg.ignore_globs,
-                max_depth=cfg.max_depth,
-                serve=serve_cfg if serve_cfg is not None else cfg.serve,
+                scan_roots=sorted(set(previous_cfg.scan_roots) | set(roots)),
+                ignore_globs=previous_cfg.ignore_globs,
+                max_depth=previous_cfg.max_depth,
+                serve=serve_cfg if serve_cfg is not None else previous_cfg.serve,
             )
+            # Launchd's bootstrap starts a RunAtLoad job immediately. Persist
+            # validated config first so that first process sees the requested
+            # roots/bind rather than the old snapshot.
             save_daemon_config(home, merged)
+        try:
+            sup.install(argv)
+        except (DaemonSupervisorError, OSError) as e:
+            if previous_cfg is not None:
+                save_daemon_config(home, previous_cfg)
+            out.error(str(e))
+            raise typer.Exit(1)
+        if merged is not None:
             out.print(f"daemon config seeded: {len(merged.scan_roots)} scan root(s)" + (", serve bind set" if merged.serve else ""))
         out.print("daemon installed and enabled — start it with `mship daemon start`")
 

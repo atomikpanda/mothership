@@ -10,6 +10,8 @@ Remote traffic stays on the #471 tunnel path.
 """
 from __future__ import annotations
 
+import asyncio
+
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,13 +31,17 @@ def create_control_app(
     socket_path: str,
     store=None,
     rescan=None,
+    after_rescan=None,
     serve_bound: bool = False,
 ):
     """Tiny closure app factory (the `core/serve.py::create_app` style).
 
     `store` (a RegistryStore) enables the registry capability + /workspaces
     endpoints over the control socket; `rescan()` re-runs discovery+reconcile.
-    `serve_bound` reports whether the TCP host app is up (#472)."""
+    `after_rescan()` lets the sibling TCP host app stop stale workspace
+    lifespans after a control-socket refresh. `serve_bound` reports whether the
+    TCP host app is up (#472).
+    """
     from fastapi import FastAPI
 
     app = FastAPI(title="mshipd control", docs_url=None, redoc_url=None)
@@ -71,9 +77,11 @@ def create_control_app(
             }
 
         @app.post("/workspaces/refresh")
-        def refresh():
+        async def refresh():
             if rescan is not None:
-                rescan()
+                await asyncio.get_running_loop().run_in_executor(None, rescan)
+            if after_rescan is not None:
+                await after_rescan()
             return {"workspaces": len(store.load().entries)}
 
     return app

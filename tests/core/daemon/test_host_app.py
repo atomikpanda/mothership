@@ -171,6 +171,15 @@ def test_ensure_host_token_stable(tmp_path):
     assert t1 == t2 and len(t1) > 20
 
 
+def test_ensure_host_token_prefers_environment(tmp_path, monkeypatch):
+    monkeypatch.delenv("MSHIP_SERVE_TOKEN", raising=False)
+    persisted = ensure_host_token(tmp_path)
+    monkeypatch.setenv("MSHIP_SERVE_TOKEN", "configured-token")
+
+    assert ensure_host_token(tmp_path) == "configured-token"
+    assert persisted != "configured-token"
+
+
 class StreamingSubApp:
     """ASGI app that emits body chunks with gaps — proves the proxy streams
     rather than buffering to completion (the `/exec` iter_raw contract)."""

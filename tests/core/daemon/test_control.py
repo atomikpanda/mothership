@@ -121,6 +121,27 @@ def test_control_workspaces_endpoints(tmp_path):
     assert r.status_code == 200 and calls == [1]
 
 
+def test_control_refresh_runs_host_cleanup_after_rescan(tmp_path):
+    events = []
+
+    async def cleanup():
+        events.append("cleanup")
+
+    app = create_control_app(
+        started_at=STARTED,
+        version="1",
+        socket_path="/s",
+        store=_registry_store(tmp_path),
+        rescan=lambda: events.append("rescan"),
+        after_rescan=cleanup,
+    )
+
+    response = TestClient(app).post("/workspaces/refresh")
+
+    assert response.status_code == 200
+    assert events == ["rescan", "cleanup"]
+
+
 def test_no_store_means_no_registry_routes():
     client = _client()
     assert client.get("/health").json()["capabilities"]["registry"] is False

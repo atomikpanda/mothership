@@ -187,6 +187,67 @@ def test_install_seeds_scan_roots_and_serve(cli, tmp_path):
     assert cfg.serve == {"host": "127.0.0.1", "port": 47190}
 
 
+def test_install_persists_config_before_supervisor_bootstrap(cli, tmp_path):
+    from mship.core.daemon.registry import load_daemon_config
+
+    app, fake = cli
+    observed = {}
+
+    def install(_argv):
+        observed["config"] = load_daemon_config(tmp_path)
+
+    fake.install = install
+    res = runner.invoke(app, [
+        "daemon", "install", "--scan-root", "/src", "--serve", "127.0.0.1:47190",
+    ])
+
+    assert res.exit_code == 0, res.output
+    assert observed["config"].scan_roots == ["/src"]
+    assert observed["config"].serve == {"host": "127.0.0.1", "port": 47190}
+
+
+def test_install_failure_restores_previous_config(cli, tmp_path):
+    from mship.core.daemon.registry import (
+        DaemonConfig,
+        load_daemon_config,
+        save_daemon_config,
+    )
+
+    app, fake = cli
+    previous = DaemonConfig(scan_roots=["/existing"], max_depth=4)
+    save_daemon_config(tmp_path, previous)
+
+    def fail_install(_argv):
+        raise DaemonSupervisorError("bootstrap failed")
+
+    fake.install = fail_install
+    res = runner.invoke(app, ["daemon", "install", "--scan-root", "/new"])
+
+    assert res.exit_code == 1
+    assert load_daemon_config(tmp_path) == previous
+
+
+def test_install_filesystem_failure_restores_previous_config(cli, tmp_path):
+    from mship.core.daemon.registry import (
+        DaemonConfig,
+        load_daemon_config,
+        save_daemon_config,
+    )
+
+    app, fake = cli
+    previous = DaemonConfig(scan_roots=["/existing"], max_depth=4)
+    save_daemon_config(tmp_path, previous)
+
+    def fail_install(_argv):
+        raise OSError("unit write failed")
+
+    fake.install = fail_install
+    res = runner.invoke(app, ["daemon", "install", "--scan-root", "/new"])
+
+    assert res.exit_code == 1
+    assert load_daemon_config(tmp_path) == previous
+
+
 def test_install_without_serve_leaves_null_bind(cli, tmp_path):
     from mship.core.daemon.registry import load_daemon_config
 

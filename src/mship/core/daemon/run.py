@@ -187,6 +187,9 @@ def _run(home: Path, env: Mapping[str, str]) -> int:
     app = create_control_app(
         started_at=started_at, version=version, socket_path=str(socket_path),
         store=store, rescan=rescan, serve_bound=host_app is not None,
+        after_rescan=(
+            host_app.state.drop_stale_subapps if host_app is not None else None
+        ),
     )
     _serve_forever(app, socket_path, host_app, serve_cfg)
     history.append_clean_stop(paths.start_history_path(home), datetime.now(timezone.utc))
