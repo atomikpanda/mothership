@@ -162,6 +162,37 @@ def test_status_renders_skew_and_warnings(cli, monkeypatch):
     assert "outside the supervisor" in res.output
 
 
+def test_status_counts_missing_as_discovered_not_degraded(cli, tmp_path):
+    from datetime import datetime, timezone
+
+    from mship.core.daemon.paths import registry_path
+    from mship.core.daemon.registry import RegistryStore, WorkspaceEntry
+
+    app, _ = cli
+    now = datetime.now(timezone.utc)
+    store = RegistryStore(registry_path(tmp_path))
+
+    def seed(state):
+        state.entries = [
+            WorkspaceEntry(
+                id=f"ws-{entry_state}",
+                name=entry_state,
+                path=str(tmp_path / entry_state),
+                config_path=str(tmp_path / entry_state / "mothership.yaml"),
+                state=entry_state,
+                first_seen=now,
+                last_seen=now,
+            )
+            for entry_state in ("healthy", "degraded", "missing")
+        ]
+
+    store.mutate(seed)
+    res = runner.invoke(app, ["daemon", "status"])
+
+    assert res.exit_code == 0, res.output
+    assert "workspaces: 3 discovered (1 degraded)" in res.output
+
+
 def test_logs_prints_tail(cli):
     app, fake = cli
     res = runner.invoke(app, ["daemon", "logs"])

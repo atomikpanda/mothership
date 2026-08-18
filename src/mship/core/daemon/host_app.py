@@ -358,7 +358,7 @@ def create_host_app(
         return {
             "status": "ok",
             "workspaces": len([e for e in entries if not e.ignored]),
-            "degraded": len([e for e in entries if e.state != "healthy" and not e.ignored]),
+            "degraded": len([e for e in entries if e.state == "degraded" and not e.ignored]),
         }
 
     @app.get("/workspaces")

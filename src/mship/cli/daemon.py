@@ -304,7 +304,7 @@ def register(parent: typer.Typer, get_container):
 
         entries = [e for e in RegistryStore(registry_path(home)).load().entries if not e.ignored]
         st = build_status(
-            workspaces=(len(entries), len([e for e in entries if e.state != "healthy"])),
+            workspaces=(len(entries), len([e for e in entries if e.state == "degraded"])),
             supervisor_state=sup.query(),
             linger=sup.linger_state(),
             lease_info=read_lease_record(lease_path(home)),

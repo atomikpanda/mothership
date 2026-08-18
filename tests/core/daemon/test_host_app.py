@@ -97,6 +97,47 @@ def test_list_workspaces_includes_all_states(two_ws_app):
         assert ws["ws-mono"]["repos"][1]["git_root"] == "mono"
 
 
+def test_health_count_and_list_distinguish_degraded_from_missing(tmp_path):
+    home = tmp_path / "home"
+    store = _seed(
+        home,
+        [
+            _entry("ws-healthy", "healthy", tmp_path / "healthy"),
+            _entry(
+                "ws-degraded",
+                "degraded",
+                tmp_path / "degraded",
+                state="degraded",
+            ),
+            _entry(
+                "ws-missing",
+                "missing",
+                tmp_path / "missing",
+                state="missing",
+            ),
+        ],
+    )
+    app = create_host_app(
+        store,
+        auth_token=None,
+        build_subapp=lambda entry, **kwargs: FakeSubApp(entry.name),
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/health").json() == {
+            "status": "ok",
+            "workspaces": 3,
+            "degraded": 1,
+        }
+        workspaces = client.get("/workspaces").json()["workspaces"]
+
+    assert {workspace["state"] for workspace in workspaces} == {
+        "healthy",
+        "degraded",
+        "missing",
+    }
+
+
 def test_forward_routes_to_right_workspace_no_cross_bleed(two_ws_app):
     app, store, built = two_ws_app
     with TestClient(app) as client:
