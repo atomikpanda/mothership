@@ -137,6 +137,27 @@ def test_invalid_daemon_config_clears_previously_healthy_registry(tmp_path):
     assert failed_store.load().entries == []
 
 
+def test_initial_invalid_config_recovers_on_refresh_without_restart(tmp_path):
+    from mship.core.daemon.paths import daemon_config_path
+    from mship.core.daemon.registry import DaemonConfig, save_daemon_config
+
+    home = tmp_path / "home"
+    root = tmp_path / "root"
+    _mk_ws(root, "recovered")
+    config_path = daemon_config_path(home)
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("scan_roots: [broken\n")
+
+    store, rescan, serve = run_mod._build_registry(home)
+    assert store.load().entries == []
+    assert serve is None
+
+    save_daemon_config(home, DaemonConfig(scan_roots=[str(root)]))
+    rescan()
+
+    assert [entry.name for entry in store.load().entries] == ["recovered"]
+
+
 def test_missing_scan_root_fails_without_mutating_healthy_registry(tmp_path):
     from mship.core.daemon.discovery import ScanRootError
     from mship.core.daemon.registry import DaemonConfig, save_daemon_config

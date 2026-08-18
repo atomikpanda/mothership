@@ -97,6 +97,16 @@ def _persist_daemon_credential_overrides(
     return snapshots
 
 
+def _validate_scan_roots(cfg, output: Output) -> None:
+    from mship.core.daemon.discovery import ScanRootError, scan_roots
+
+    try:
+        scan_roots(cfg)
+    except ScanRootError as exc:
+        output.error(str(exc))
+        raise typer.Exit(1)
+
+
 def register(parent: typer.Typer, get_container):
     daemon_app = typer.Typer(
         name="daemon",
@@ -162,13 +172,7 @@ def register(parent: typer.Typer, get_container):
                 max_depth=previous_cfg.max_depth,
                 serve=serve_cfg if serve_cfg is not None else previous_cfg.serve,
             )
-            from mship.core.daemon.discovery import ScanRootError, scan_roots
-
-            try:
-                scan_roots(merged)
-            except ScanRootError as exc:
-                out.error(str(exc))
-                raise typer.Exit(1)
+            _validate_scan_roots(merged, out)
 
             # Launchd's bootstrap starts a RunAtLoad job immediately. Persist
             # validated config first so that first process sees the requested
@@ -193,6 +197,14 @@ def register(parent: typer.Typer, get_container):
     @daemon_app.command("start")
     def start():
         out = Output()
+        from mship.core.daemon.registry import load_daemon_config
+
+        try:
+            cfg = load_daemon_config(Path.home())
+        except ValueError as exc:
+            out.error(str(exc))
+            raise typer.Exit(1)
+        _validate_scan_roots(cfg, out)
         credential_snapshots = None
         try:
             credential_snapshots = _persist_daemon_credential_overrides(

@@ -156,6 +156,10 @@ def _materialize(ws_dir: Path) -> Candidate:
             runner_raw = (yaml.safe_load(config_path.read_text()) or {}).get("runner")
         except Exception:
             runner_raw = None
+    if runner_raw is not None and not isinstance(runner_raw, dict):
+        cand.healthy = False
+        cand.detail = "invalid runner: expected a mapping"
+        return cand
     cand.runner = runner_raw
     return cand
 

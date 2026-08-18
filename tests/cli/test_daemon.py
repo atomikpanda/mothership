@@ -473,3 +473,19 @@ def test_install_rejects_missing_scan_root(cli, tmp_path):
     assert res.exit_code == 1
     assert str(missing) in res.output
     assert not any(call.startswith("install:") for call in fake.calls)
+
+
+def test_start_rejects_unavailable_configured_scan_root(cli, tmp_path):
+    from mship.core.daemon.registry import DaemonConfig, save_daemon_config
+
+    app, fake = cli
+    missing = tmp_path / "unmounted"
+    save_daemon_config(
+        tmp_path, DaemonConfig(scan_roots=[str(missing)])
+    )
+
+    res = runner.invoke(app, ["daemon", "start"])
+
+    assert res.exit_code == 1
+    assert str(missing) in res.output
+    assert "start" not in fake.calls

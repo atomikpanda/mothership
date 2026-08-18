@@ -72,7 +72,7 @@ def _build_registry(home: Path):
     except ValueError as e:
         log.error("daemon config invalid: %s — serving empty registry", e)
         clear_registry()
-        return store, lambda: None, None
+        cfg = None
 
     def rescan():
         # Re-READ the config every time: `mship workspace refresh` exists
@@ -90,6 +90,11 @@ def _build_registry(home: Path):
             clear_registry()
             return
         reconcile(store, scan_roots(current), datetime.now(timezone.utc))
+
+    if cfg is None:
+        # Keep the real callback: fixing config.yaml + control refresh must
+        # recover discovery without requiring a process restart.
+        return store, rescan, None
 
     try:
         rescan()

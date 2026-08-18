@@ -409,3 +409,18 @@ def test_known_move_displaces_registry_only_destination_owner(tmp_path: Path):
     assert by_id[workspace_id].path == str(destination.resolve())
     assert by_id["ws-destination-history"].state == "missing"
     assert "replaced" in by_id["ws-destination-history"].detail
+
+
+def test_invalid_runner_degrades_only_its_workspace(tmp_path: Path):
+    home, root = tmp_path / "home", tmp_path / "root"
+    _mk_ws(root, "healthy")
+    malformed = _mk_ws(root, "malformed")
+    with (malformed / "mothership.yaml").open("a") as config:
+        config.write("runner: broken\n")
+
+    state = reconcile(_store(home), _scan(root), NOW)
+    by_name = {entry.name: entry for entry in state.entries}
+
+    assert by_name["healthy"].state == "healthy"
+    assert by_name["malformed"].state == "degraded"
+    assert "runner" in by_name["malformed"].detail
