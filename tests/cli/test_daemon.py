@@ -516,3 +516,35 @@ def test_blank_github_app_key_fails_before_supervisor(
     assert str(key_path) in res.output
     assert not any(call.startswith(command) for call in fake.calls)
     assert load_gh_app_credentials(tmp_path, env={}) == ("old-id", "OLD KEY")
+
+
+@pytest.mark.parametrize("command", ["install", "start", "restart"])
+def test_daemon_command_rejects_incomplete_persisted_github_app(
+    command, cli, tmp_path
+):
+    from mship.core.daemon.host_app import _credential_paths
+    from mship.core.daemon.registry import (
+        DaemonConfig,
+        load_daemon_config,
+        save_daemon_config,
+    )
+
+    app, fake = cli
+    previous_config = DaemonConfig()
+    save_daemon_config(tmp_path, previous_config)
+    _token_path, app_id_path, app_key_path = _credential_paths(tmp_path)
+    app_id_path.parent.mkdir(parents=True, exist_ok=True)
+    app_id_path.write_text("123\n")
+
+    args = ["daemon", command]
+    if command == "install":
+        new_root = tmp_path / "new-root"
+        new_root.mkdir()
+        args.extend(["--scan-root", str(new_root)])
+
+    res = runner.invoke(app, args)
+
+    assert res.exit_code == 1
+    assert str(app_key_path) in res.output
+    assert not any(call.startswith(command) for call in fake.calls)
+    assert load_daemon_config(tmp_path) == previous_config

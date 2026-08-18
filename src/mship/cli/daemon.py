@@ -118,6 +118,28 @@ def _validate_daemon_config(home: Path, output: Output) -> None:
     _validate_scan_roots(cfg, output)
 
 
+def _resolve_effective_daemon_credentials(
+    home: Path, output: Output
+) -> tuple[str | None, str | None, str | None]:
+    from mship.core.daemon.host_app import load_gh_app_credentials
+
+    resolved = _resolve_daemon_credential_overrides(output)
+    if resolved[1] is None:
+        try:
+            load_gh_app_credentials(home, env={})
+        except ValueError as exc:
+            output.error(str(exc))
+            raise typer.Exit(1)
+    return resolved
+
+
+def _preflight_daemon_start(
+    home: Path, output: Output
+) -> tuple[str | None, str | None, str | None]:
+    _validate_daemon_config(home, output)
+    return _resolve_effective_daemon_credentials(home, output)
+
+
 def register(parent: typer.Typer, get_container):
     daemon_app = typer.Typer(
         name="daemon",
@@ -169,7 +191,9 @@ def register(parent: typer.Typer, get_container):
         except DaemonExecResolutionError as e:
             out.error(str(e))
             raise typer.Exit(1)
-        resolved_credentials = _resolve_daemon_credential_overrides(out)
+        resolved_credentials = _resolve_effective_daemon_credentials(
+            Path.home(), out
+        )
         previous_cfg = None
         merged = None
         if roots or serve_cfg is not None:
@@ -208,11 +232,11 @@ def register(parent: typer.Typer, get_container):
     @daemon_app.command("start")
     def start():
         out = Output()
-        _validate_daemon_config(Path.home(), out)
+        resolved_credentials = _preflight_daemon_start(Path.home(), out)
         credential_snapshots = None
         try:
             credential_snapshots = _persist_daemon_credential_overrides(
-                Path.home(), out
+                Path.home(), out, resolved_credentials
             )
             _supervisor().start()
         except (DaemonSupervisorError, OSError) as e:
@@ -238,11 +262,11 @@ def register(parent: typer.Typer, get_container):
         if blockers:
             out.error("restart refused:\n" + "\n".join(f"  - {b}" for b in blockers))
             raise typer.Exit(1)
-        _validate_daemon_config(Path.home(), out)
+        resolved_credentials = _preflight_daemon_start(Path.home(), out)
         credential_snapshots = None
         try:
             credential_snapshots = _persist_daemon_credential_overrides(
-                Path.home(), out
+                Path.home(), out, resolved_credentials
             )
             _supervisor().restart()
         except (DaemonSupervisorError, OSError) as e:

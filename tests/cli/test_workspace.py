@@ -283,8 +283,9 @@ def test_offline_refresh_reports_malformed_config_without_mutation(cli):
     assert entry.state == "healthy"
 
 
-def test_add_refuses_task_worktree(cli):
-    from mship.core.workspace_marker import write_marker
+@pytest.mark.parametrize("stale_marker", [False, True])
+def test_add_refuses_task_worktree(cli, stale_marker):
+    from mship.core.workspace_marker import MARKER_NAME, write_marker
 
     app, home, tmp = cli
     real = _mk_ws(tmp, "real")
@@ -292,7 +293,10 @@ def test_add_refuses_task_worktree(cli):
     wt = hub / "repo"
     wt.mkdir(parents=True)
     (wt / "mothership.yaml").write_text("workspace: inherited\nrepos: {}\n")
-    write_marker(hub, real)
+    if stale_marker:
+        (hub / MARKER_NAME).write_text(str(tmp / "deleted-workspace"))
+    else:
+        write_marker(hub, real)
     res = runner.invoke(app, ["workspace", "add", str(wt)])
     assert res.exit_code == 1
     assert "worktree" in res.output

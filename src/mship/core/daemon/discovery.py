@@ -56,14 +56,12 @@ class Candidate:
 
 
 def _is_task_worktree(ws_dir: Path) -> bool:
-    from mship.core.workspace_marker import read_marker_from_ancestor
+    from mship.core.workspace_marker import find_marker_owner
 
     git = ws_dir / ".git"
     if git.is_file():  # linked worktree: .git is a gitdir: pointer file
         return True
-    if read_marker_from_ancestor(ws_dir) is not None:
-        return True
-    return False
+    return find_marker_owner(ws_dir) is not None
 
 
 def _walk_up_enclosing(root: Path) -> Path | None:
