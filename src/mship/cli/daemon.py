@@ -172,6 +172,10 @@ def register(parent: typer.Typer, get_container):
             None, "--serve", metavar="HOST:PORT",
             help="Also bind the workspace-addressed HTTP API on HOST:PORT (pre-#471 phone reachability). Without it the daemon is control-socket only.",
         ),
+        relay: str = typer.Option(
+            None, "--relay", metavar="HOST",
+            help="Register this host with the relay at HOST and keep an ssh -R tunnel to it up. Needs a --serve bind (here or from an earlier install). Like --serve, a changed relay takes effect on `mship daemon restart`.",
+        ),
     ):
         """Install + enable the OS-user supervisor unit (systemd --user / launchd)."""
         out = Output()
@@ -213,8 +217,9 @@ def register(parent: typer.Typer, get_container):
                 "persisted — use `mship daemon restart` to apply them"
             )
             raise typer.Exit(1)
+        relay_cfg = {"host": relay} if relay is not None else None
         merged = None
-        if roots or serve_cfg is not None:
+        if roots or serve_cfg is not None or relay_cfg is not None:
             from mship.core.daemon.registry import save_daemon_config
 
             merged = DaemonConfig(
@@ -222,7 +227,18 @@ def register(parent: typer.Typer, get_container):
                 ignore_globs=previous_cfg.ignore_globs,
                 max_depth=previous_cfg.max_depth,
                 serve=serve_cfg if serve_cfg is not None else previous_cfg.serve,
+                relay=relay_cfg if relay_cfg is not None else previous_cfg.relay,
             )
+            # The MERGED config, not the flag: `--relay` on a host whose
+            # `serve:` an earlier install already set is the normal
+            # incremental-provisioning path, and validating the flag alone
+            # would reject it.
+            if merged.relay is not None and merged.serve is None:
+                out.error(
+                    "--relay needs a local bind to forward: pass --serve HOST:PORT "
+                    "(here or in an earlier install)"
+                )
+                raise typer.Exit(1)
             _validate_scan_roots(merged, out)
 
             # Launchd's bootstrap starts a RunAtLoad job immediately. Persist
@@ -242,7 +258,11 @@ def register(parent: typer.Typer, get_container):
             out.error(str(e))
             raise typer.Exit(1)
         if merged is not None:
-            out.print(f"daemon config seeded: {len(merged.scan_roots)} scan root(s)" + (", serve bind set" if merged.serve else ""))
+            out.print(
+                f"daemon config seeded: {len(merged.scan_roots)} scan root(s)"
+                + (", serve bind set" if merged.serve else "")
+                + (f", relay {merged.relay['host']}" if merged.relay else "")
+            )
         out.print("daemon installed and enabled — start it with `mship daemon start`")
 
     @daemon_app.command("start")

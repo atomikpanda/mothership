@@ -125,7 +125,11 @@ class TunnelSupervisor:
     with a fake proc factory.
 
     Args:
-        argv: The command + arguments to launch (e.g. from build_tunnel_argv).
+        argv: The command + arguments to launch (e.g. from build_tunnel_argv),
+            or a zero-argument callable returning them. Pass the callable when
+            any part of the command can change between spawns: the daemon's
+            subdomain moves with its host identity (#471 AC4), and a frozen
+            argv would re-dial a subdomain the host no longer owns.
         proc_factory: Callable(argv) → proc-like object.  Defaults to
             subprocess.Popen with process-group isolation.  Inject a fake for
             tests.
@@ -138,7 +142,7 @@ class TunnelSupervisor:
 
     def __init__(
         self,
-        argv: list[str],
+        argv: list[str] | Callable[[], list[str]],
         proc_factory: Callable | None = None,
         backoff_delay: float = 5.0,
         max_backoff_delay: float = 60.0,
@@ -296,7 +300,8 @@ class TunnelSupervisor:
         # never-started process as a healthy run and wipe the failure streak —
         # sawtoothing the escalation the clamp exists to reach.
         self._spawned_at = None
-        self._proc = self._proc_factory(self._argv)
+        argv = self._argv() if callable(self._argv) else self._argv
+        self._proc = self._proc_factory(argv)
         self._spawned_at = self._clock()
         self._spawn_count += 1
 

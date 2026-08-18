@@ -210,3 +210,32 @@ def test_spawn_count_only_ever_increases():
     sup.start()
     assert sup.restart_count == 0, "start() resets the restart counter"
     assert sup.spawn_count == 5, "...but never the spawn counter"
+
+
+def test_callable_argv_is_re_resolved_at_every_spawn():
+    """#471 AC4: an auto-reidentify mints a new host id and therefore a new
+    subdomain, so an argv frozen at construction would reconnect the
+    re-identified host to a subdomain it no longer owns."""
+    procs, spawned = [], []
+    subdomain = ["old-sub"]
+
+    def factory(argv):
+        spawned.append(argv)
+        proc = FakeProc()
+        procs.append(proc)
+        return proc
+
+    sup = TunnelSupervisor(
+        argv=lambda: ["ssh", "-R", f"{subdomain[0]}:80:localhost:47190"],
+        proc_factory=factory,
+        backoff_delay=0,
+    )
+    sup.start()
+    assert spawned[0][-1].startswith("old-sub:")
+
+    subdomain[0] = "new-sub"
+    procs[0]._alive = False
+    sup.tick()
+
+    assert len(spawned) == 2
+    assert spawned[1][-1].startswith("new-sub:")

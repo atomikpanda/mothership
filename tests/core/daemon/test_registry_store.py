@@ -167,6 +167,32 @@ def test_daemon_config_rejects_invalid_serve_bind(serve):
 
 
 
+def test_daemon_config_missing_relay_block_is_tunnel_disabled(tmp_path: Path):
+    """No `relay:` is the ordinary LAN/tailnet host, not a misconfiguration."""
+    assert load_daemon_config(tmp_path).relay is None
+
+
+def test_daemon_config_relay_roundtrip(tmp_path: Path):
+    save_daemon_config(
+        tmp_path,
+        DaemonConfig(relay={"host": "relay.example.com", "ssh_port": 2222}),
+    )
+    assert load_daemon_config(tmp_path).relay == {
+        "host": "relay.example.com", "ssh_port": 2222,
+    }
+
+
+@pytest.mark.parametrize(
+    "relay",
+    [{}, {"ssh_port": 2222}, {"host": ""}, {"user": "mship"}, "relay.example.com"],
+)
+def test_daemon_config_rejects_relay_block_without_host(relay):
+    """A present-but-hostless block is a typo, never a quiet "tunnel off": the
+    host it was meant to reach would silently never be dialed."""
+    with pytest.raises(ValueError, match="relay"):
+        DaemonConfig(relay=relay)
+
+
 def test_daemon_config_rejects_negative_max_depth():
     with pytest.raises(ValueError, match="max_depth"):
         DaemonConfig(max_depth=-1)

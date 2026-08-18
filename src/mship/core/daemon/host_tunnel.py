@@ -46,6 +46,13 @@ log = logging.getLogger(__name__)
 # round trip out to the relay and back down our own tunnel.
 READBACK_INTERVAL_S = 30.0
 
+# How often the daemon's loop calls `tick()`. Not a schedule of its own: every
+# collaborator this class drives already owns one (the link's registration
+# interval, the supervisor's respawn backoff, `READBACK_INTERVAL_S`), so this is
+# only the resolution at which they are asked — the "every second" cadence
+# `TunnelSupervisor` documents for its own tick.
+TICK_INTERVAL_S = 1.0
+
 # What ssh prints when the relay has our key on file but nobody has approved it
 # yet. It is the FIRST evidence of that state — it arrives before any
 # registration verdict does — which is why the log tail is worth reading.

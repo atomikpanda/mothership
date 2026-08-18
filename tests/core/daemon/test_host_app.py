@@ -800,6 +800,47 @@ def test_standing_token_works_direct_but_never_over_the_relay(
     assert relay_borne.status_code == 401
 
 
+@pytest.fixture
+def relay_domain_app(tmp_path):
+    """The same shape as `bearer_app`, but told which domain the relay serves."""
+    home = tmp_path / "home"
+    store = _seed(home, [_entry("ws-a", "a", tmp_path / "a")])
+    return create_host_app(
+        store,
+        auth_token="standing",
+        verify_bearer=lambda presented: presented == LIVE_BEARER,
+        relay_domain="relay.example",
+        build_subapp=lambda entry, **_kwargs: FakeSubApp(entry.name),
+    )
+
+
+@pytest.mark.parametrize(
+    ("host_header", "expected"),
+    [
+        ("hst-abc.relay.example", 401),      # our subdomain, headers stripped
+        ("HST-ABC.Relay.Example:443", 401),  # DNS is case-insensitive; so is this
+        ("relay.example", 401),              # the relay's own name
+        ("notrelay.example", 200),           # merely ends with the same letters
+        ("192.168.1.5:47190", 200),          # the LAN pairing path (AC9)
+    ],
+)
+def test_relay_host_header_is_relay_borne_even_with_edge_headers_stripped(
+    relay_domain_app, host_header, expected
+):
+    """Defense in depth for AC9: `_EDGE_HEADERS` is the edge's own testimony, so
+    a proxy misconfigured to strip them would silently re-open the standing
+    token to the whole internet. The `Host` the request was addressed to is the
+    second, independent witness — nothing on the LAN reaches this app under the
+    relay's domain."""
+    with TestClient(relay_domain_app) as client:
+        response = client.get(
+            "/workspaces",
+            headers={"Authorization": "Bearer standing", "Host": host_header},
+        )
+
+    assert response.status_code == expected
+
+
 def test_every_guarded_route_401s_without_a_credential(bearer_app):
     app, _built = bearer_app
     with TestClient(app) as client:

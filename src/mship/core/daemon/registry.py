@@ -140,16 +140,17 @@ class RegistryStore:
 
 
 class DaemonConfig(BaseModel):
-    """The daemon's own scan/serve configuration (`~/.mothership/daemon/config.yaml`).
+    """The daemon's own scan/serve/relay configuration (`~/.mothership/daemon/config.yaml`).
 
-    Missing file → empty scan roots (scan NOTHING — bounded by construction)
-    and no TCP bind (control-UDS only)."""
+    Missing file → empty scan roots (scan NOTHING — bounded by construction),
+    no TCP bind (control-UDS only) and no relay tunnel."""
 
     model_config = ConfigDict(extra="ignore")
     scan_roots: list[str] = []
     ignore_globs: list[str] = []
     max_depth: int = 6
     serve: Optional[dict] = None  # {"host": str, "port": int}
+    relay: Optional[dict] = None  # {"host": str, "ssh_port": int?, "user": str?}
 
     @field_validator("max_depth")
     @classmethod
@@ -173,6 +174,26 @@ class DaemonConfig(BaseModel):
         if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
             raise ValueError("daemon serve.port must be an integer from 1 to 65535")
         return {"host": host, "port": port}
+
+    @field_validator("relay", mode="before")
+    @classmethod
+    def _validate_relay(cls, value):
+        """Validated THROUGH `RelayConfig.from_mapping` — the tunnel's own
+        constructor — so the config boundary and the dialer can never disagree
+        about what a usable relay block is. An empty block is rejected rather
+        than read as "no relay": `from_mapping` treats falsy input as absent,
+        which is right for a caller that never wrote one and wrong for an
+        operator who wrote `relay:` and forgot the host."""
+        from mship.core.relay.config import RELAY_HOST_REQUIRED, RelayConfig
+
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError("daemon relay must be a host/ssh_port/user mapping")
+        if not value:
+            raise ValueError(RELAY_HOST_REQUIRED)
+        RelayConfig.from_mapping(value)
+        return value
 
 
 class DaemonConfigReadError(ValueError):

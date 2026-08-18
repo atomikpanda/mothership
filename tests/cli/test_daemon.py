@@ -611,6 +611,65 @@ def test_install_without_serve_leaves_null_bind(cli, tmp_path):
     assert load_daemon_config(tmp_path).serve is None
 
 
+def test_install_seeds_relay_beside_scan_roots_and_serve(cli, tmp_path):
+    from mship.core.daemon.registry import load_daemon_config
+
+    app, fake = cli
+    src = tmp_path / "src"
+    src.mkdir()
+    res = runner.invoke(app, [
+        "daemon", "install",
+        "--scan-root", str(src),
+        "--serve", "127.0.0.1:47190",
+        "--relay", "relay.example.com",
+    ])
+    assert res.exit_code == 0, res.output
+    cfg = load_daemon_config(tmp_path)
+    assert cfg.scan_roots == [str(src)]
+    assert cfg.serve == {"host": "127.0.0.1", "port": 47190}
+    assert cfg.relay == {"host": "relay.example.com"}
+
+
+def test_bare_relay_install_succeeds_when_serve_was_set_earlier(cli, tmp_path):
+    """Incremental provisioning: `--serve` yesterday, `--relay` today. The
+    config MERGES, so validating the flag instead of the merged result would
+    reject the normal path."""
+    from mship.core.daemon.registry import load_daemon_config
+
+    app, fake = cli
+    assert runner.invoke(
+        app, ["daemon", "install", "--serve", "127.0.0.1:47190"]
+    ).exit_code == 0
+
+    res = runner.invoke(app, ["daemon", "install", "--relay", "relay.example.com"])
+
+    assert res.exit_code == 0, res.output
+    cfg = load_daemon_config(tmp_path)
+    assert cfg.relay == {"host": "relay.example.com"}
+    assert cfg.serve == {"host": "127.0.0.1", "port": 47190}
+
+
+def test_install_rejects_relay_when_merged_config_has_no_serve_bind(cli, tmp_path):
+    """A tunnel forwards a local port; with no bind there is nothing to
+    forward, and the host would register itself as reachable and 502."""
+    from mship.core.daemon.registry import load_daemon_config
+
+    app, fake = cli
+    res = runner.invoke(app, ["daemon", "install", "--relay", "relay.example.com"])
+
+    assert res.exit_code == 1
+    assert "--serve" in res.output
+    assert load_daemon_config(tmp_path).relay is None
+    assert not any(call.startswith("install:") for call in fake.calls)
+
+
+def test_install_help_documents_that_relay_needs_a_restart(cli):
+    app, _fake = cli
+    res = runner.invoke(app, ["daemon", "install", "--help"])
+    assert res.exit_code == 0
+    assert "restart" in res.output
+
+
 @pytest.mark.parametrize("serve", ["nonsense", "127.0.0.1:0", "127.0.0.1:65536"])
 def test_install_rejects_malformed_serve(cli, serve):
     app, fake = cli

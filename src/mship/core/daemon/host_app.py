@@ -251,12 +251,29 @@ _BEARER_PREFIX = "Bearer "
 _EDGE_HEADERS = ("x-forwarded-for", "x-forwarded-host", "x-forwarded-proto")
 
 
-def _is_relay_borne(request: Request) -> bool:
-    return any(name in request.headers for name in _EDGE_HEADERS)
+def _is_relay_borne(request: Request, relay_domain: str | None = None) -> bool:
+    """Two independent witnesses, either of which is enough (fail closed).
+
+    The edge headers are the edge's own testimony, and an edge misconfigured to
+    strip them would silently re-open the standing token to everything that can
+    reach the relay. The `Host` the request was addressed to is the second: our
+    tunnel is only ever addressed under the relay's domain, so a request that
+    names it arrived through the relay whatever the headers say. Matched as a
+    dotted suffix, never a substring — `notrelay.example` is somebody else."""
+    if any(name in request.headers for name in _EDGE_HEADERS):
+        return True
+    if not relay_domain:
+        return False
+    # Host may carry a port, and DNS names are case-insensitive.
+    hostname = request.headers.get("host", "").split(":")[0].strip(".").lower()
+    domain = relay_domain.strip().strip(".").lower()
+    return hostname == domain or hostname.endswith(f".{domain}")
 
 
 def _make_host_auth_dependency(
-    token: str | None, verify_bearer: Callable[[str], bool] | None
+    token: str | None,
+    verify_bearer: Callable[[str], bool] | None,
+    relay_domain: str | None = None,
 ):
     """Accept a short-lived host bearer; fall back to the standing token for
     direct origins only, plus the namespaced UI's token/cookie exchange."""
@@ -277,7 +294,7 @@ def _make_host_auth_dependency(
         if verify_bearer is not None and provided.startswith(_BEARER_PREFIX):
             if verify_bearer(provided[len(_BEARER_PREFIX):]):
                 return
-        if token is None or _is_relay_borne(request):
+        if token is None or _is_relay_borne(request, relay_domain):
             raise HTTPException(
                 status_code=401, detail="missing or invalid bearer token"
             )
@@ -349,6 +366,7 @@ def create_host_app(
     *,
     auth_token: str | None,
     verify_bearer: Callable[[str], bool] | None = None,
+    relay_domain: str | None = None,
     exchange_refresh: Callable[[str], tuple[str, float] | None] | None = None,
     host_id: str | None = None,
     instance_id: str | None = None,
@@ -371,6 +389,9 @@ def create_host_app(
     `(token, expires_in)` for a valid refresh credential (None → 401), which is
     what `POST /host/token` publishes. Without an exchange the route is not
     registered at all — a host with no refresh store has nothing to mint.
+    `relay_domain` is the domain of the relay this host tunnels to; it is the
+    second, edge-independent witness `_is_relay_borne` uses to keep the standing
+    token off relay-borne traffic.
     `host_id`/`instance_id`/`host_state()` are the identity and tunnel state
     `/health` reports for the daemon's read-back and GC's ladder, and
     `runner_config()` is the host-level runner block `/health` projects — the
@@ -404,7 +425,7 @@ def create_host_app(
     # unauthenticated reachability probe the daemon and GC both poll.
     guarded = APIRouter(
         dependencies=(
-            [Depends(_make_host_auth_dependency(auth_token, verify_bearer))]
+            [Depends(_make_host_auth_dependency(auth_token, verify_bearer, relay_domain))]
             if (auth_token or verify_bearer)
             else []
         )

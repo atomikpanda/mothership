@@ -61,7 +61,7 @@ def test_install_scan_serve_end_to_end(tmp_path, monkeypatch):
     captured = {}
     monkeypatch.setattr(
         run_mod, "_serve_forever",
-        lambda control_app, socket_path, host_app, serve_cfg: captured.update(
+        lambda control_app, socket_path, host_app, serve_cfg, tunnel: captured.update(
             control=control_app, host=host_app, serve=serve_cfg,
         ),
     )
@@ -109,7 +109,7 @@ def test_refresh_rereads_daemon_config(tmp_path, monkeypatch):
     captured = {}
     monkeypatch.setattr(
         run_mod, "_serve_forever",
-        lambda control_app, socket_path, host_app, serve_cfg: captured.update(rescan=True),
+        lambda control_app, socket_path, host_app, serve_cfg, tunnel: captured.update(rescan=True),
     )
     store, rescan, _serve = run_mod._build_registry(home)
     assert sorted(e.name for e in store.load().entries) == ["first"]

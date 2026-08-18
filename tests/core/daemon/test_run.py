@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+import mship.core.daemon.host_tunnel as host_tunnel_mod
+import mship.core.daemon.relay_link as relay_link_mod
 import mship.core.daemon.run as run_mod
 from mship.core.daemon.history import read_history
 from mship.core.daemon.lease import DaemonLease
@@ -40,30 +42,75 @@ def env_home(tmp_path, monkeypatch):
             h.close()
 
 
-def _capture_uvicorn(monkeypatch):
-    seen = {}
+def _fake_uvicorn(monkeypatch, *, on_serve=None, hold=False):
+    """Stub uvicorn's Config/Server, and forbid `uvicorn.run` outright.
+
+    The capture seam moved with the code: `_serve_forever` runs on asyncio in
+    every shape now (#471 — a tunnel loop has to live beside the servers, and
+    `uvicorn.run` owns the loop), so what a startup binds is visible on the
+    Config it builds rather than on a `run()` call. Reaching `uvicorn.run` at
+    all is now itself a failure, which is what pins the asyncio branch.
+
+    Returns `(control_kwargs, servers)`. `hold=True` makes `serve()` run until
+    something sets `should_exit`, so a test can drive shutdown; otherwise each
+    server serves once and reports the clean exit a signalled uvicorn does.
+    """
+    import asyncio
+
     import uvicorn
 
-    monkeypatch.setattr(uvicorn, "run", lambda app, **k: seen.update(k))
+    control_kwargs: dict = {}
+    servers: list = []
+
+    class _Config:
+        def __init__(self, app, **kwargs):
+            self.app = app
+            self.kwargs = kwargs
+            self.host = kwargs.get("host")
+            if self.host is None:  # the control server, on the unix socket
+                control_kwargs.update(kwargs)
+
+    class _Server:
+        def __init__(self, config):
+            self.config = config
+            self.started = False
+            self.should_exit = False
+            servers.append(self)
+
+        async def serve(self):
+            self.started = True
+            if on_serve is not None:
+                on_serve()
+            while hold and not self.should_exit:
+                await asyncio.sleep(0)
+            # A real server returns from serve() with should_exit set once it
+            # has been asked to stop; leaving it False reads as a crash.
+            self.should_exit = True
+
+    def _forbidden(app, **kwargs):
+        raise AssertionError("uvicorn.run bypasses the asyncio branch (#471 AC7)")
+
+    monkeypatch.setattr(uvicorn, "Config", _Config)
+    monkeypatch.setattr(uvicorn, "Server", _Server)
+    monkeypatch.setattr(uvicorn, "run", _forbidden)
+    return control_kwargs, servers
+
+
+def _capture_uvicorn(monkeypatch, on_serve=None):
+    seen, _servers = _fake_uvicorn(monkeypatch, on_serve=on_serve)
     return seen
 
 
 def test_main_acquires_lease_then_serves_socket(env_home, monkeypatch):
     home, env = env_home
-    seen = _capture_uvicorn(monkeypatch)
     lease_seen_held_by_uvicorn = {}
 
-    import uvicorn
-
-    real_update = seen.update
-
-    def fake_run(app, **k):
+    def record():
         # By the time uvicorn is entered, lease + history must already exist.
         lease_seen_held_by_uvicorn["lease"] = json.loads(lease_path(home).read_text())
         lease_seen_held_by_uvicorn["history"] = [e.kind for e in read_history(run_mod.paths.start_history_path(home))]
-        real_update(k)
 
-    monkeypatch.setattr(uvicorn, "run", fake_run)
+    seen = _capture_uvicorn(monkeypatch, on_serve=record)
     rc = run_mod.main(home=home, env=env)
     assert rc == 0
     assert seen["uds"] == str(daemon_socket_path(env, home))
@@ -140,9 +187,11 @@ def test_rotating_log_handler_configured(env_home, monkeypatch):
 
 def test_uncaught_exception_lands_in_daemon_log(env_home, monkeypatch):
     home, env = env_home
-    import uvicorn
 
-    monkeypatch.setattr(uvicorn, "run", lambda app, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    def boom():
+        raise RuntimeError("boom")
+
+    _capture_uvicorn(monkeypatch, on_serve=boom)
     rc = run_mod.main(home=home, env=env)
     assert rc != 0
     assert "boom" in (daemon_log_dir(home) / "daemon.log").read_text()
@@ -261,3 +310,236 @@ def test_capture_rotated_before_logging_setup(env_home, monkeypatch):
     monkeypatch.setattr(run_mod, "_run", lambda h, e: order.append("run") or 0)
     assert run_mod.main(home=home, env=env) == 0
     assert order[0] == "rotate", order
+
+
+# ---------------------------------------------------------------------------
+# #471 Task 8: the tunnel beside the servers, and the shutdown that owns it.
+# ---------------------------------------------------------------------------
+
+RELAY_BLOCK = {"host": "relay.example"}
+SERVE_BLOCK = {"host": "127.0.0.1", "port": 47190}
+
+
+def _control_app():
+    from datetime import datetime, timezone
+
+    from mship.core.daemon.control import create_control_app
+
+    return create_control_app(
+        started_at=datetime.now(timezone.utc),
+        version="1",
+        socket_path="/control.sock",
+    )
+
+
+def _seed_config(home, **kwargs):
+    from mship.core.daemon.registry import DaemonConfig, save_daemon_config
+
+    save_daemon_config(home, DaemonConfig(**kwargs))
+
+
+def _seed_relay_key(home):
+    """A keypair on disk so nothing here spawns ssh-keygen (test_relay_link's
+    `_seed_key` discipline)."""
+    from mship.core.relay.keys import relay_key_path
+
+    key = relay_key_path(home)
+    key.parent.mkdir(parents=True, exist_ok=True)
+    key.write_text("PRIVATE")
+    key.with_name(key.name + ".pub").write_text("ssh-ed25519 " + "A" * 68 + " mship\n")
+
+
+class _FakeTunnel:
+    """What the daemon knows about a tunnel: a public URL, a tick and a stop."""
+
+    public_url = "https://hst-fake.relay.example"
+
+    def __init__(self, *, events=None, stop_after=None, servers=(), raising=False):
+        self.ticks = 0
+        self.stopped = False
+        self._events = events if events is not None else []
+        self._stop_after = stop_after
+        self._servers = servers
+        self._raising = raising
+
+    def tick(self):
+        # A tick after stop() means the loop was torn down without being joined
+        # — the window in which a respawn forks an ssh child nothing owns.
+        assert not self.stopped, "ticked after stop()"
+        self.ticks += 1
+        self._events.append("tick")
+        if self._stop_after is not None and self.ticks >= self._stop_after:
+            for server in self._servers:  # a SIGTERM lands on the servers
+                server.should_exit = True
+        if self._raising:
+            raise RuntimeError("tick boom")
+
+    def stop(self):
+        self.stopped = True
+        self._events.append("sup.stop")
+
+
+@pytest.mark.parametrize(
+    ("host_app", "serve_cfg", "with_tunnel", "servers"),
+    [
+        (None, None, False, 1),                 # control-only
+        (object(), SERVE_BLOCK, False, 2),      # control + host
+        (object(), SERVE_BLOCK, True, 2),       # control + host + tunnel
+    ],
+)
+def test_serve_forever_always_runs_on_asyncio(
+    monkeypatch, host_app, serve_cfg, with_tunnel, servers
+):
+    """All three shapes take the asyncio branch: `uvicorn.run` owns the loop
+    and the signal handlers, so a shape that used it would have nowhere to run
+    a tunnel and no way to stop one (the stub raises if it is reached)."""
+    tunnel = _FakeTunnel() if with_tunnel else None
+    _seen, built = _fake_uvicorn(monkeypatch)
+
+    run_mod._serve_forever(
+        _control_app(), Path("/control.sock"), host_app, serve_cfg, tunnel
+    )
+
+    assert len(built) == servers
+    assert tunnel is None or tunnel.stopped
+
+
+def test_shutdown_joins_the_tunnel_then_stops_it_then_records_clean_stop(
+    env_home, monkeypatch
+):
+    """AC7, in order. The join COMPLETING is the first assertion: a hung gather
+    would never reach the side effects, so asserting only those would pass on
+    exactly the bug this shape exists to prevent — and a daemon that outlives
+    `TimeoutStopSec` is SIGKILLed, leaving its ssh child holding the
+    subdomain."""
+    home, env = env_home
+    _seed_config(home, serve=SERVE_BLOCK)
+    events: list[str] = []
+    _seen, servers = _fake_uvicorn(monkeypatch, hold=True)
+    monkeypatch.setattr(host_tunnel_mod, "TICK_INTERVAL_S", 0)
+    tunnel = _FakeTunnel(events=events, stop_after=3, servers=servers)
+    monkeypatch.setattr(run_mod, "_build_tunnel", lambda *a: tunnel)
+    real_clean_stop = run_mod.history.append_clean_stop
+    monkeypatch.setattr(
+        run_mod.history, "append_clean_stop",
+        lambda *a, **k: (events.append("clean_stop"), real_clean_stop(*a, **k))[1],
+    )
+
+    rc = run_mod.main(home=home, env=env)
+
+    assert rc == 0
+    assert tunnel.ticks >= 3
+    assert events[-2:] == ["sup.stop", "clean_stop"]
+
+
+def test_clean_stop_is_recorded_even_when_every_tunnel_tick_raises(
+    env_home, monkeypatch
+):
+    """The tunnel is the half of the daemon that recovers by retrying; a relay
+    outage must not cost the workspaces it serves on the LAN, nor turn a clean
+    shutdown into an unclean-start entry the next boot reports."""
+    home, env = env_home
+    _seed_config(home, serve=SERVE_BLOCK)
+    _seen, servers = _fake_uvicorn(monkeypatch, hold=True)
+    monkeypatch.setattr(host_tunnel_mod, "TICK_INTERVAL_S", 0)
+    tunnel = _FakeTunnel(stop_after=3, servers=servers, raising=True)
+    monkeypatch.setattr(run_mod, "_build_tunnel", lambda *a: tunnel)
+
+    rc = run_mod.main(home=home, env=env)
+
+    assert rc == 0
+    assert [e.kind for e in read_history(run_mod.paths.start_history_path(home))] == [
+        "start", "clean_stop",
+    ]
+    assert "tick boom" in (daemon_log_dir(home) / "daemon.log").read_text()
+
+
+def test_unbuildable_relay_logs_and_leaves_the_daemon_healthy(env_home, monkeypatch):
+    """`_build_registry`'s never-raise discipline: a relay we cannot build is a
+    host without a tunnel, never a host that refuses to start."""
+    home, env = env_home
+    _seed_config(home, serve=SERVE_BLOCK, relay=RELAY_BLOCK)
+    seen = _capture_uvicorn(monkeypatch)
+
+    def boom(*a, **k):
+        raise RuntimeError("no key material")
+
+    monkeypatch.setattr(relay_link_mod, "RelayLink", boom)
+
+    rc = run_mod.main(home=home, env=env)
+
+    assert rc == 0
+    assert seen["uds"] == str(daemon_socket_path(env, home))
+    assert [e.kind for e in read_history(run_mod.paths.start_history_path(home))] == [
+        "start", "clean_stop",
+    ]
+    log_text = (daemon_log_dir(home) / "daemon.log").read_text()
+    assert "relay tunnel unavailable" in log_text and "no key material" in log_text
+
+
+def test_loser_never_builds_a_tunnel_or_spawns_ssh(
+    env_home, foreign_holder, monkeypatch
+):
+    """A process that stands down for the incumbent must not first fork an ssh
+    child onto the subdomain the incumbent is serving."""
+    from mship.core.relay import tunnel as tunnel_mod
+
+    home, env = env_home
+    _seed_config(home, serve=SERVE_BLOCK, relay=RELAY_BLOCK)
+    _capture_uvicorn(monkeypatch)
+    spawned, built = [], []
+    monkeypatch.setattr(
+        tunnel_mod, "_default_proc_factory",
+        lambda argv, log_path=None: spawned.append(argv),
+    )
+    real_build = run_mod._build_tunnel
+    monkeypatch.setattr(
+        run_mod, "_build_tunnel",
+        lambda *a: (built.append(a), real_build(*a))[1],
+    )
+    monkeypatch.setattr(
+        run_mod, "_probe",
+        lambda sock: {"status": "ok"} if str(sock) == foreign_holder else None,
+    )
+
+    assert run_mod.main(home=home, env=env) == 0
+    assert built == [] and spawned == []
+
+
+def test_build_tunnel_dials_the_subdomain_the_link_currently_owns(
+    tmp_path, monkeypatch
+):
+    """AC4's other half: an auto-reidentify moves this host to a NEW subdomain
+    mid-run, and argv frozen at startup would keep re-dialing the one it no
+    longer owns — reconnecting a re-identified host to somebody else's route."""
+    from mship.core.relay import tunnel as tunnel_mod
+    from mship.core.relay.config import RelayConfig
+
+    class _Proc:
+        def poll(self): return None
+        def terminate(self): pass
+        def wait(self, timeout=None): return 0
+
+    home = tmp_path / "home"
+    home.mkdir()
+    _seed_relay_key(home)
+    spawned = []
+    monkeypatch.setattr(
+        tunnel_mod, "_default_proc_factory",
+        lambda argv, log_path=None: (spawned.append(argv), _Proc())[1],
+    )
+
+    tunnel = run_mod._build_tunnel(home, RelayConfig(host="relay.example"), SERVE_BLOCK)
+    # Stands in for the auto-reidentify `test_relay_link.py` drives end to end.
+    tunnel._link.subdomain = "hst-reidentified"
+    tunnel._supervisor.start()
+
+    assert spawned[-1][spawned[-1].index("-R") + 1].startswith("hst-reidentified:")
+    assert str(SERVE_BLOCK["port"]) in spawned[-1][spawned[-1].index("-R") + 1]
+
+
+def test_no_relay_block_means_no_tunnel(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    assert run_mod._relay_config(home) is None
+    assert run_mod._build_tunnel(home, None, SERVE_BLOCK) is None
