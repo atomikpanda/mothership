@@ -577,6 +577,39 @@ def test_starting_command_rejects_unavailable_configured_scan_root(
     assert not any(call.startswith(command) for call in fake.calls)
 
 
+@pytest.mark.parametrize("command", ["install", "start"])
+def test_daemon_rejects_scan_root_below_symlinked_ancestor(
+    command, cli, tmp_path
+):
+    from mship.core.daemon.registry import DaemonConfig, save_daemon_config
+
+    app, fake = cli
+    outside = tmp_path / "outside"
+    nested = outside / "nested"
+    nested.mkdir(parents=True)
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    linked = trusted / "link"
+    linked.symlink_to(outside, target_is_directory=True)
+    configured = linked / "nested"
+
+    args = ["daemon", command]
+    if command == "install":
+        args.extend(["--scan-root", str(configured)])
+    else:
+        save_daemon_config(
+            tmp_path,
+            DaemonConfig(scan_roots=[str(configured)]),
+        )
+
+    res = runner.invoke(app, args)
+
+    assert res.exit_code == 1
+    assert str(linked) in res.output
+    assert str(configured) in res.output
+    assert not any(call.startswith(command) for call in fake.calls)
+
+
 @pytest.mark.parametrize("command", ["install", "start", "restart"])
 def test_blank_host_token_override_fails_before_supervisor(
     command, cli, monkeypatch

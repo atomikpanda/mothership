@@ -165,6 +165,15 @@ def scan_roots(cfg: DaemonConfig) -> list[Candidate]:
     marker_dirs: list[Path] = []
     for root_str in cfg.scan_roots:
         root = Path(root_str)
+        symlinked_ancestor = next(
+            (parent for parent in root.parents if parent.is_symlink()),
+            None,
+        )
+        if symlinked_ancestor is not None:
+            raise ScanRootError(
+                "configured scan root crosses symlinked path component "
+                f"{symlinked_ancestor}: {root}"
+            )
         if root.is_symlink():
             if not root.exists() or not root.is_dir():
                 raise ScanRootError(

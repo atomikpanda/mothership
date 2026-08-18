@@ -228,6 +228,25 @@ def test_file_symlink_scan_root_fails_with_path(tmp_path: Path):
         scan_roots(_cfg(linked_root))
 
 
+def test_scan_root_below_symlinked_ancestor_never_walks_target(
+    tmp_path: Path,
+):
+    outside = tmp_path / "outside"
+    nested = outside / "nested"
+    _mk_single(nested, "escaped")
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    linked = trusted / "link"
+    linked.symlink_to(outside, target_is_directory=True)
+    configured = linked / "nested"
+
+    with pytest.raises(
+        ValueError,
+        match=rf"{linked}.*{configured}",
+    ):
+        scan_roots(_cfg(configured))
+
+
 def test_max_depth_respected(tmp_path: Path):
     deep = tmp_path / "a" / "b" / "c"
     _mk_single(deep, "deep-ws")
