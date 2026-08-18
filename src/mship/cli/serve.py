@@ -36,8 +36,8 @@ def _read_gh_app_creds(output: Output) -> tuple[Optional[str], Optional[str]]:
         output.error(
             f"{exc}. Refusing to start: with an App configured, silently falling "
             "back to `gh auth token` would push as a different identity. Fix the "
-            "path, or unset MSHIP_GH_APP_KEY to use the gh-auth-token fallback "
-            "deliberately."
+            "path, or unset both MSHIP_GH_APP_ID and MSHIP_GH_APP_KEY to use "
+            "the gh-auth-token fallback deliberately."
         )
         raise typer.Exit(1)
     if os.environ.get("MSHIP_GH_APP_INSTALLATION"):

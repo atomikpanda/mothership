@@ -436,6 +436,10 @@ def test_partial_github_app_override_fails_before_supervisor(
 
     assert res.exit_code == 1
     assert "must be set together" in res.output
+    assert (
+        "unset both MSHIP_GH_APP_ID and MSHIP_GH_APP_KEY"
+        in res.output
+    )
     assert not any(call.startswith(command) for call in fake.calls)
     assert load_gh_app_credentials(tmp_path, env={}) == ("old-id", "OLD KEY")
 

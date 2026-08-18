@@ -245,7 +245,11 @@ def test_serve_refuses_when_gh_app_key_unreadable(_configured, monkeypatch, tmp_
 
     result = runner.invoke(app, ["serve"])
     assert result.exit_code == 1, result.output
-    assert "not a readable file" in result.output or "Refusing to start" in result.output
+    assert "not a readable file" in result.output
+    assert (
+        "unset both MSHIP_GH_APP_ID and MSHIP_GH_APP_KEY"
+        in result.output
+    )
     # Serve never started — no silent identity downgrade.
     assert called["create_app"] is False
 
