@@ -87,6 +87,10 @@ with `mship plan check-assumptions --plan <path>`.]
 
 **Tech Stack:** [Key technologies/libraries]
 
+**Spec:** [the approved `mship spec` id this plan implements, plus the
+spec file path (`specs/<date>-<id>.md`) — the plan argues from the spec,
+so the spec travels with it; executors read both]
+
 ## Global Constraints
 
 [The spec's project-wide requirements — version floors, dependency limits,
