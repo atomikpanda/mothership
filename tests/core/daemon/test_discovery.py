@@ -192,6 +192,15 @@ def test_symlinked_dir_not_followed(tmp_path: Path):
     assert scan_roots(_cfg(scanned)) == []
 
 
+def test_symlinked_scan_root_not_followed(tmp_path: Path):
+    real = tmp_path / "outside"
+    _mk_single(real, "hidden")
+    linked_root = tmp_path / "linked-root"
+    linked_root.symlink_to(real, target_is_directory=True)
+
+    assert scan_roots(_cfg(linked_root)) == []
+
+
 def test_max_depth_respected(tmp_path: Path):
     deep = tmp_path / "a" / "b" / "c"
     _mk_single(deep, "deep-ws")

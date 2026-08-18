@@ -151,6 +151,7 @@ def test_host_token_gates_everything(tmp_path):
     with TestClient(app) as client:
         assert client.get("/workspaces").status_code == 401
         assert client.get("/workspaces", headers={"Authorization": "Bearer wrong"}).status_code == 401
+        assert client.get("/openapi.json").status_code == 404
         ok = client.get("/workspaces", headers={"Authorization": "Bearer sekrit"})
         assert ok.status_code == 200
         assert client.get("/workspaces/ws-a/specs", headers={"Authorization": "Bearer sekrit"}).status_code == 200

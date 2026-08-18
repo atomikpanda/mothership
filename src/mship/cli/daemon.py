@@ -173,9 +173,12 @@ def register(parent: typer.Typer, get_container):
         if blockers:
             out.error("restart refused:\n" + "\n".join(f"  - {b}" for b in blockers))
             raise typer.Exit(1)
+        token_snapshot = None
         try:
+            token_snapshot = _persist_host_token_override(Path.home())
             _supervisor().restart()
-        except DaemonSupervisorError as e:
+        except (DaemonSupervisorError, OSError) as e:
+            _restore_host_token(token_snapshot)
             out.error(str(e))
             raise typer.Exit(1)
         out.print("daemon restarted")

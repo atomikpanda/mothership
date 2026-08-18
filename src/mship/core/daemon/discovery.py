@@ -150,7 +150,7 @@ def scan_roots(cfg: DaemonConfig) -> list[Candidate]:
     marker_dirs: list[Path] = []
     for root_str in cfg.scan_roots:
         root = Path(root_str)
-        if not root.is_dir():
+        if root.is_symlink() or not root.is_dir():
             continue
         marker_dirs.extend(_find_marker_dirs(root, cfg))
 

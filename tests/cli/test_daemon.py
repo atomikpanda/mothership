@@ -103,6 +103,43 @@ def test_restart_proceeds_when_unblocked(cli):
     assert "restart" in fake.calls
 
 
+def test_restart_persists_shell_host_token_before_supervisor_restart(
+    cli, tmp_path, monkeypatch
+):
+    from mship.core.daemon.paths import daemon_state_dir
+
+    app, fake = cli
+    observed = {}
+    monkeypatch.setenv("MSHIP_SERVE_TOKEN", "shell-token")
+
+    def restart():
+        observed["token"] = (daemon_state_dir(tmp_path) / "serve-token").read_text().strip()
+
+    fake.restart = restart
+    res = runner.invoke(app, ["daemon", "restart"])
+
+    assert res.exit_code == 0, res.output
+    assert observed["token"] == "shell-token"
+
+
+def test_restart_failure_restores_previous_host_token(cli, tmp_path, monkeypatch):
+    from mship.core.daemon.host_app import persist_host_token
+    from mship.core.daemon.paths import daemon_state_dir
+
+    app, fake = cli
+    persist_host_token(tmp_path, "previous-token")
+    monkeypatch.setenv("MSHIP_SERVE_TOKEN", "new-token")
+
+    def fail_restart():
+        raise DaemonSupervisorError("restart failed")
+
+    fake.restart = fail_restart
+    res = runner.invoke(app, ["daemon", "restart"])
+
+    assert res.exit_code == 1
+    assert (daemon_state_dir(tmp_path) / "serve-token").read_text().strip() == "previous-token"
+
+
 def test_status_renders_skew_and_warnings(cli, monkeypatch):
     app, fake = cli
     fake._state = "absent"

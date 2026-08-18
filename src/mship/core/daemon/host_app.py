@@ -145,7 +145,7 @@ def create_host_app(
 
     dependencies = [Depends(_make_auth_dependency(auth_token))] if auth_token else []
     app = FastAPI(title="mship host", docs_url=None, redoc_url=None,
-                  dependencies=dependencies, lifespan=_lifespan)
+                  openapi_url=None, dependencies=dependencies, lifespan=_lifespan)
 
     def _entries() -> list[WorkspaceEntry]:
         return store.load().entries
