@@ -1,3 +1,5 @@
+import json
+
 from pathlib import Path
 
 import pytest
@@ -5,7 +7,9 @@ import pytest
 from mship.core.relay.enroll import validate_pubkey, fingerprint, sanitize_label
 from mship.core.relay.enroll import RequestStore, PendingCapReached, NotPending
 
-_PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBodyAAAAAAAAAAAAAAAAAAAAAAAA host"
+_PUB = (
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBodyAAAAAAAAAAAAAAAAAAAAAAAA host"
+)
 
 
 def _key(tag: str) -> str:
@@ -66,7 +70,9 @@ class _Clock:
 
 
 def _store(tmp_path, ttl=1800, clock=None, cap=50):
-    return RequestStore(tmp_path / "store", ttl_seconds=ttl, max_pending=cap, clock=clock or _Clock())
+    return RequestStore(
+        tmp_path / "store", ttl_seconds=ttl, max_pending=cap, clock=clock or _Clock()
+    )
 
 
 def test_create_then_pending_then_approve_writes_allowlist(tmp_path):
@@ -180,6 +186,19 @@ def test_corrupt_pending_file_does_not_brick_store(tmp_path):
     assert list(pending_dir.glob("*.json.corrupt"))  # bad file moved aside
 
 
+def test_malformed_legacy_expiry_does_not_brick_store(tmp_path):
+    store = _store(tmp_path)
+    rid = store.create(_PUB, "malformed")
+    path = tmp_path / "store" / "pending" / f"{rid}.json"
+    record = json.loads(path.read_text())
+    record["created_at"] = "not-a-time"
+    record["expires_at"] = "not-a-time"
+    path.write_text(json.dumps(record))
+
+    assert store.list_pending() == []
+    assert store.get(rid) == "expired"
+
+
 def test_approve_and_deny_on_corrupt_own_record_raise_cleanly(tmp_path):
     """A truncated/corrupt pending file at approve/deny time → NotPending, not a traceback."""
     pubkeys = tmp_path / "pubkeys"
@@ -220,7 +239,9 @@ def test_dedupe_is_by_key_not_hostname(tmp_path):
     # A renamed host re-posting the same key is still one request…
     assert store.create(_PUB, "vm-alpha-renamed") == rid
     # …and a different key is a different request.
-    other = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAISecondKeyBodyBBBBBBBBBBBBBBBBBBBBBBBB two"
+    other = (
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAISecondKeyBodyBBBBBBBBBBBBBBBBBBBBBBBB two"
+    )
     assert store.create(other, "vm-beta") != rid
     assert len(store.list_pending()) == 2
 
@@ -242,7 +263,9 @@ def test_a_re_post_renews_the_pending_ttl_without_changing_request_id(tmp_path):
     assert store.get(rid) == "expired"
 
 
-def test_pending_request_keeps_the_servers_ttl_when_an_operator_reopens_the_store(tmp_path):
+def test_pending_request_keeps_the_servers_ttl_when_an_operator_reopens_the_store(
+    tmp_path,
+):
     now = [1000.0]
     server = RequestStore(tmp_path, ttl_seconds=7200, clock=lambda: now[0])
     rid = server.create(_PUB, "vm-alpha")

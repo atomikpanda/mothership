@@ -26,6 +26,7 @@ internet
 | A domain you control | Example: `relay.example.com`. You only need a subdomain — the relay does not take over the root domain. |
 | SSH access to the VPS as root (or a sudo user) | To run the bootstrap script and open ports. |
 | OpenSSH client tools on the VPS | `ssh-keygen` verifies signed host registrations. On Debian/Ubuntu: `apt install openssh-client`. |
+| [uv](https://docs.astral.sh/uv/getting-started/installation/) | Installs and upgrades `mship` on the relay host; it automatically provisions the Python version required by `pyproject.toml`. |
 
 ---
 
@@ -80,7 +81,9 @@ Clone (or copy) the mothership repo to your VPS, then run the one-shot bootstrap
 
 ```bash
 git clone https://github.com/your-org/mothership.git
+
 cd mothership
+uv tool install --force --no-cache .
 
 RELAY_DOMAIN=relay.example.com \
 ACME_EMAIL=you@example.com \

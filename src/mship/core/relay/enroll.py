@@ -122,10 +122,10 @@ class RequestStore:
         self._ttl = ttl_seconds
         self._max_pending = max_pending
         self._clock = clock
+
     @property
     def ttl_seconds(self) -> int:
         return self._ttl
-
 
     def _write_atomic(self, path: Path, rec: dict) -> None:
         tmp = path.with_suffix(".json.tmp")
@@ -149,7 +149,7 @@ class RequestStore:
             if "created_at" not in rec:
                 raise ValueError("missing created_at")
             return rec
-        except (json.JSONDecodeError, OSError, ValueError):
+        except json.JSONDecodeError, OSError, ValueError:
             try:
                 p.replace(p.with_suffix(".json.corrupt"))
             except OSError:
@@ -163,11 +163,14 @@ class RequestStore:
             if rec is None:
                 continue
             try:
-                expires_at = float(rec["expires_at"])
-                expired = not math.isfinite(expires_at) or now >= expires_at
-            except (KeyError, TypeError, ValueError):
+                deadline = float(rec["expires_at"])
+            except KeyError, TypeError, ValueError:
                 # Records created before per-request deadlines used the store TTL.
-                expired = now - rec["created_at"] >= self._ttl
+                try:
+                    deadline = float(rec["created_at"]) + self._ttl
+                except KeyError, TypeError, ValueError:
+                    deadline = math.nan
+            expired = not math.isfinite(deadline) or now >= deadline
             if expired:
                 self._resolve(p, rec, "expired")
 
@@ -200,9 +203,7 @@ class RequestStore:
                     renewed_at = self._clock()
                     renewed["created_at"] = renewed_at
                     renewed["expires_at"] = renewed_at + self._ttl
-                    self._write_atomic(
-                        self._pending / f"{rec['id']}.json", renewed
-                    )
+                    self._write_atomic(self._pending / f"{rec['id']}.json", renewed)
                     return rec["id"]
             # An approval can win the lock immediately before an in-flight
             # daemon re-post. Return that approved request so the daemon
