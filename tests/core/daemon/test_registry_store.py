@@ -184,7 +184,7 @@ def test_daemon_config_relay_roundtrip(tmp_path: Path):
 
 @pytest.mark.parametrize(
     "relay",
-    [{}, {"ssh_port": 2222}, {"host": ""}, {"user": "mship"}, "relay.example.com"],
+    [{}, {"ssh_port": 2222}, {"host": ""}, {"host": 123}, {"user": "mship"}, "relay.example.com"],
 )
 def test_daemon_config_rejects_relay_block_without_host(relay):
     """A present-but-hostless block is a typo, never a quiet "tunnel off": the

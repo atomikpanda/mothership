@@ -33,7 +33,7 @@ from typing import Callable
 
 from mship.core.daemon.host_token import ensure_host_root_secret
 from mship.core.daemon.paths import host_refresh_path
-from mship.core.relay.token_clock import is_expired
+from mship.core.relay.token_clock import AnchoredClock, Deadline
 
 # Long-lived by design (it is the thing that survives reboots and flaps), but
 # not forever: a phone that has not come back in a month re-pairs.
@@ -94,13 +94,16 @@ class RefreshStore:
         ttl_seconds: float = REFRESH_TTL_S,
         max_clients: int = MAX_REFRESH_CLIENTS,
         clock: Callable[[], float] = time.time,
+        monotonic_clock: Callable[[], float] = time.monotonic,
+        epoch: str | None = None,
     ) -> None:
         self._home = Path(home)
         self._path = host_refresh_path(self._home)
         self._lock = self._path.with_name(self._path.name + ".lock")
         self._ttl = ttl_seconds
         self._max_clients = max_clients
-        self._clock = clock
+        self._wall_clock = clock
+        self._clock = AnchoredClock(wall=clock, mono=monotonic_clock, epoch=epoch)
 
     # -- storage ----------------------------------------------------------
 
@@ -133,11 +136,11 @@ class RefreshStore:
         self._path.chmod(0o600)
 
     def _live(self, clients: dict) -> dict:
-        now = self._clock()
         return {
             cid: rec
             for cid, rec in clients.items()
-            if isinstance(rec, dict) and not is_expired(rec.get("expires_at", 0), now)
+            if isinstance(rec, dict)
+            and not self._clock.is_expired(Deadline.from_record(rec))
         }
 
     # -- credential derivation --------------------------------------------
@@ -160,9 +163,16 @@ class RefreshStore:
             live = self._live(clients)
             existing = live.get(client_id)
             if existing is not None and existing.get("nonce"):
-                if live != clients:  # expired siblings to drop; else touch nothing
+                secret = self._derive(host_id, client, existing["nonce"])
+                needs_save = live != clients
+                if not hmac.compare_digest(
+                    _hash(secret), str(existing.get("secret_hash", ""))
+                ):
+                    live[client_id] = {**existing, "secret_hash": _hash(secret)}
+                    needs_save = True
+                if needs_save:
                     self._save(live)
-                return f"{client_id}.{self._derive(host_id, client, existing['nonce'])}"
+                return f"{client_id}.{secret}"
             # No usable record (absent, expired, or hand-corrupted) → mint one.
             # Evict from the PRE-EXISTING set only, so the credential we are
             # about to hand back can never be the one the cap drops.
@@ -175,7 +185,7 @@ class RefreshStore:
 
             nonce = secrets.token_hex(16)
             secret = self._derive(host_id, client, nonce)
-            now = self._clock()
+            now = self._wall_clock()
             live[client_id] = {
                 "client_id": client_id,
                 "client": client,
@@ -183,7 +193,7 @@ class RefreshStore:
                 "nonce": nonce,
                 "secret_hash": _hash(secret),
                 "created_at": now,
-                "expires_at": now + self._ttl,
+                **self._clock.deadline(self._ttl).as_record(),
             }
             self._save(live)
         return f"{client_id}.{secret}"
@@ -202,7 +212,7 @@ class RefreshStore:
             return None
         if not hmac.compare_digest(_hash(secret), str(rec.get("secret_hash", ""))):
             return None
-        if is_expired(rec.get("expires_at", 0), self._clock()):
+        if self._clock.is_expired(Deadline.from_record(rec)):
             return None
         return RefreshGrant(
             client_id=client_id,

@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 
 from mship.core.relay.tunnel import BACKOFF_JITTER, TunnelSupervisor
@@ -18,6 +20,35 @@ def test_start_then_stop_terminates_process():
     assert sup.is_running() and len(procs) == 1
     sup.stop()
     assert procs[0].terminated and not sup.is_running()
+
+
+def test_stop_kills_a_process_that_ignores_terminate():
+    class WedgedProc(FakeProc):
+        def __init__(self):
+            super().__init__()
+            self.killed = False
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            if self._alive:
+                raise subprocess.TimeoutExpired("ssh", timeout)
+            return 0
+
+        def kill(self):
+            self.killed = True
+            self._alive = False
+
+    proc = WedgedProc()
+    sup = TunnelSupervisor(argv=["ssh", "..."], proc_factory=lambda _argv: proc)
+    sup.start()
+
+    sup.stop(final=True)
+
+    assert proc.terminated
+    assert proc.killed
+    assert not sup.is_running()
 
 
 def test_restart_on_unexpected_exit():

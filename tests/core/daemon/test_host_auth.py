@@ -18,7 +18,7 @@ from mship.core.daemon.host_auth import (
     REFRESH_TTL_S,
     RefreshStore,
 )
-from mship.core.daemon.paths import daemon_state_dir, host_refresh_path
+from mship.core.daemon.paths import daemon_state_dir, host_refresh_path, host_secret_path
 
 HOST = "hst-20260817120000-abcd1234"
 
@@ -166,6 +166,35 @@ def test_expired_credentials_are_rejected_and_pruned_on_issue(tmp_path: Path):
 
     store.issue_refresh(host_id=HOST, client="phone-b")
     assert set(r["client"] for r in _records(tmp_path).values()) == {"phone-b"}
+
+
+def test_wall_clock_step_back_does_not_extend_a_refresh_credential(tmp_path: Path):
+    wall = _Wall()
+    mono = _Wall(0)
+    store = _store(
+        tmp_path,
+        clock=wall,
+        monotonic_clock=mono,
+        epoch="boot-a",
+    )
+    credential = store.issue_refresh(host_id=HOST, client="phone-a")
+
+    wall.advance(-86_400)
+    mono.advance(REFRESH_TTL_S)
+
+    assert store.verify_refresh(credential) is None
+
+
+def test_reissue_repairs_the_hash_after_root_secret_regeneration(tmp_path: Path):
+    store = _store(tmp_path)
+    original = store.issue_refresh(host_id=HOST, client="phone-a")
+    host_secret_path(tmp_path).unlink()
+
+    replacement = store.issue_refresh(host_id=HOST, client="phone-a")
+
+    assert replacement != original
+    assert store.verify_refresh(original) is None
+    assert store.verify_refresh(replacement) is not None
 
 
 def test_the_store_is_capped(tmp_path: Path):

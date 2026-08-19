@@ -267,6 +267,12 @@ class TunnelSupervisor:
                 pass
             try:
                 proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -344,6 +350,12 @@ class TunnelSupervisor:
                 pass
             try:
                 proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
             except Exception:
                 pass
 

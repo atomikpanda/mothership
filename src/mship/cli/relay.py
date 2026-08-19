@@ -256,8 +256,10 @@ def register(parent: typer.Typer, get_container):
         except ValueError as e:
             raise typer.BadParameter(f"--label {e}")
         link = build_relay_account_link(relay=relay_domain, token=token)
-        out.print(token)
-        out.print(link)
+        # These are command results the operator must transfer, not log lines.
+        # Keep them off Output.print's general-purpose logging path.
+        typer.echo(token)
+        typer.echo(link)
         typer.echo(segno.make(link).terminal(compact=True))
 
     @relay_app.command("hosts")

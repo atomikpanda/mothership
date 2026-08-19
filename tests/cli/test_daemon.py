@@ -2,6 +2,8 @@
 interaction is monkeypatched (`pick_supervisor` → recording fake, the
 `tests/cli/test_relay_enroll_server.py` seam style)."""
 from pathlib import Path
+from click import unstyle
+
 
 import pytest
 import typer
@@ -693,9 +695,9 @@ def test_install_help_documents_that_relay_needs_a_restart(cli):
     app, _fake = cli
     res = runner.invoke(app, ["daemon", "install", "--help"])
     assert res.exit_code == 0
-    # Rich wraps option help across lines inside a box; strip the frame and
-    # collapse the wrapping before matching the sentence.
-    text = " ".join(res.output.replace("│", " ").split())
+    # Rich wraps option help across lines inside a box and may emit ANSI
+    # between words on newer Python/Rich combinations.
+    text = " ".join(unstyle(res.output).replace("│", " ").split())
     assert "a changed relay takes effect on `mship daemon restart`" in text
 
 

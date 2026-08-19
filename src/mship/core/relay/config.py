@@ -18,10 +18,10 @@ class RelayConfig:
         if not data:
             return None
         host = data.get("host")
-        if not host:
+        if not isinstance(host, str) or not host.strip():
             raise ValueError(RELAY_HOST_REQUIRED)
         return RelayConfig(
-            host=host,
+            host=host.strip(),
             ssh_port=int(data.get("ssh_port", 2222)),
             user=data.get("user"),
         )
