@@ -264,3 +264,35 @@ def test_plain_stop_is_reversible_but_a_final_stop_is_not():
 
     assert len(procs) == 2
     assert not sup.is_running()
+
+
+def test_final_stop_terminates_a_child_created_during_spawn():
+    """Shutdown can close the latch while a blocking process factory is still
+    creating the session-started ssh child on the tunnel executor thread."""
+    from threading import Event, Thread
+
+    factory_entered = Event()
+    release_factory = Event()
+    procs = []
+
+    def factory(argv):
+        factory_entered.set()
+        assert release_factory.wait(timeout=5)
+        proc = FakeProc()
+        procs.append(proc)
+        return proc
+
+    sup = TunnelSupervisor(argv=["ssh", "..."], proc_factory=factory)
+    spawning = Thread(target=sup.start)
+    spawning.start()
+    assert factory_entered.wait(timeout=5)
+
+    sup.stop(final=True)
+    release_factory.set()
+    spawning.join(timeout=5)
+
+    assert not spawning.is_alive()
+    assert len(procs) == 1
+    assert procs[0].terminated
+    assert sup.spawn_count == 0
+    assert not sup.is_running()

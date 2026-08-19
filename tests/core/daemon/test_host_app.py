@@ -854,10 +854,15 @@ def test_host_token_exchange_needs_no_bearer(bearer_app):
     app, _built = bearer_app
     with TestClient(app) as client:
         minted = client.post("/host/token", json={"refresh": "good-refresh"})
+        form_minted = client.post(
+            "/host/token", data={"refresh": "good-refresh"}
+        )
         rejected = client.post("/host/token", json={"refresh": "revoked-refresh"})
 
     assert minted.status_code == 200
     assert minted.json() == {"token": "0123456789abcdef.minted", "expires_in": 300}
+    assert form_minted.status_code == 200
+    assert form_minted.json() == minted.json()
     assert rejected.status_code == 401
 
 
@@ -878,6 +883,59 @@ def test_host_token_answers_401_for_every_malformed_body(bearer_app, body):
     with TestClient(app) as client:
         assert client.post("/host/token", json=body).status_code == 401
         assert client.post("/host/token", content=b"not json").status_code == 401
+
+
+def test_host_token_stops_reading_as_soon_as_the_body_limit_is_exceeded(
+    bearer_app,
+):
+    """The public exchange must reject the first oversized chunk without
+    requesting the unbounded remainder from the ASGI receive channel."""
+    import asyncio
+
+    app, _built = bearer_app
+
+    async def drive():
+        receive_calls = 0
+        sent = []
+
+        async def receive():
+            nonlocal receive_calls
+            receive_calls += 1
+            if receive_calls > 1:
+                raise AssertionError("oversized request body was still being buffered")
+            return {
+                "type": "http.request",
+                "body": b"x" * 2048,
+                "more_body": True,
+            }
+
+        async def send(message):
+            sent.append(message)
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "path": "/host/token",
+            "raw_path": b"/host/token",
+            "root_path": "",
+            "scheme": "http",
+            "query_string": b"",
+            "headers": [(b"content-type", b"application/json")],
+            "client": ("test", 1),
+            "server": ("test", 80),
+        }
+        async with app.router.lifespan_context(app):
+            await asyncio.wait_for(app(scope, receive, send), timeout=5)
+        return receive_calls, sent
+
+    receive_calls, sent = asyncio.run(drive())
+    response_start = next(
+        message for message in sent if message["type"] == "http.response.start"
+    )
+    assert receive_calls == 1
+    assert response_start["status"] == 401
 
 
 def test_host_token_route_is_absent_without_an_exchange(tmp_path):

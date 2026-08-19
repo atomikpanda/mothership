@@ -37,6 +37,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -321,24 +322,51 @@ def _make_host_auth_dependency(
     return require_host_credential
 
 
-# A refresh credential is `<16 hex>.<64 hex>`; the bound is generous slack over
-# that, not a schema. Bounded like the enroll app's `_EnrollBody`, because this
-# route is unauthenticated by design.
+# A refresh credential is `<16 hex>.<64 hex>`; the credential and request-body
+# bounds are generous slack over that shape, not a schema. Both are local
+# because this route is unauthenticated by design.
 _MAX_REFRESH_LEN = 512
+_MAX_REFRESH_BODY_BYTES = _MAX_REFRESH_LEN * 2
 
 
-def _presented_refresh(body: bytes) -> str | None:
+async def _read_refresh_body(request: Request) -> bytes | None:
+    """Read at most the public exchange's hard body cap.
+
+    Returning as soon as a chunk crosses the cap is load-bearing: `Request.body`
+    would continue receiving and buffering an attacker-controlled stream before
+    the credential-length check ever ran.
+    """
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > _MAX_REFRESH_BODY_BYTES:
+            return None
+        body.extend(chunk)
+    return bytes(body)
+
+
+def _presented_refresh(body: bytes, content_type: str = "") -> str | None:
     """The refresh credential in a `/host/token` body, or None if there isn't
     one. Every malformed shape collapses to None so the route answers a uniform
-    401: a 422 for an over-long or non-JSON body would make the endpoint an
-    oracle that separates "malformed" from "wrong"."""
-    try:
-        payload = json.loads(body)
-    except ValueError:
-        return None
-    if not isinstance(payload, Mapping):
-        return None
-    credential = payload.get("refresh")
+    401 rather than telling an unauthenticated caller which failure occurred."""
+    if content_type.partition(";")[0].strip().lower() == (
+        "application/x-www-form-urlencoded"
+    ):
+        try:
+            fields = parse_qs(
+                body.decode("utf-8"), keep_blank_values=True, max_num_fields=4
+            )
+        except (UnicodeDecodeError, ValueError):
+            return None
+        values = fields.get("refresh", [])
+        credential = values[0] if len(values) == 1 else None
+    else:
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            return None
+        if not isinstance(payload, Mapping):
+            return None
+        credential = payload.get("refresh")
     if not isinstance(credential, str) or not credential:
         return None
     if len(credential) > _MAX_REFRESH_LEN:
@@ -499,7 +527,14 @@ def create_host_app(
             malformed one fails exactly like a wrong credential (401), instead
             of a 422 that tells an unauthenticated caller which it was.
             """
-            credential = _presented_refresh(await request.body())
+            body = await _read_refresh_body(request)
+            credential = (
+                _presented_refresh(
+                    body, request.headers.get("content-type", "")
+                )
+                if body is not None
+                else None
+            )
             granted = exchange_refresh(credential) if credential else None
             if granted is None:
                 raise HTTPException(

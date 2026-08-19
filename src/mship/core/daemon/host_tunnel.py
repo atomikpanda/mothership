@@ -362,6 +362,14 @@ class HostTunnel:
         return self._failure or self._detail or self._link.last_error
 
     @property
+    def host_id(self) -> str:
+        return self._link.host_id
+
+    @property
+    def instance_id(self) -> str:
+        return self._link.instance_id
+
+    @property
     def subdomain(self) -> str:
         return self._link.subdomain
 

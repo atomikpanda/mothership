@@ -444,6 +444,14 @@ def _run(home: Path, env: Mapping[str, str]) -> int:
         version, socket_path, os.getpid(), len(entries),
     )
     relay_cfg = _relay_config(home)
+    # AFTER the lease is won: a tunnel dialed by a process that then stands down
+    # for the incumbent would fork an ssh child onto a subdomain it is about to
+    # abandon. Constructing one dials nothing — only `tick()` does — so it is
+    # safe to build here, and both HTTP apps need its runtime identity/state.
+    tunnel = _build_tunnel(home, relay_cfg, serve_cfg)
+    if tunnel is not None:
+        log.info("relay tunnel enabled — dialing %s", tunnel.public_url)
+
     host_app = None
     if serve_cfg is not None:
         from mship.core.daemon.host_app import (
@@ -451,23 +459,51 @@ def _run(home: Path, env: Mapping[str, str]) -> int:
             ensure_host_token,
             load_gh_app_credentials,
         )
+        from mship.core.daemon.host_auth import RefreshStore
+        from mship.core.daemon.host_token import issue_host_token, verify_host_token
+        from mship.core.relay.host_contract import HOST_TOKEN_TTL_S
+
+        if tunnel is not None:
+            host_id = tunnel.host_id
+            instance_id = tunnel.instance_id
+            host_state = tunnel.snapshot
+        else:
+            from mship.core.daemon.identity import (
+                ensure_host_identity,
+                machine_fingerprint,
+                mint_instance_id,
+            )
+
+            host_id = ensure_host_identity(
+                home, fingerprint=machine_fingerprint()
+            ).host_id
+            instance_id = mint_instance_id()
+            host_state = None
+
+        refresh_store = RefreshStore(home)
+
+        def exchange_refresh(credential: str):
+            grant = refresh_store.verify_refresh(credential)
+            if grant is None or grant.host_id != host_id:
+                return None
+            return issue_host_token(home), HOST_TOKEN_TTL_S
 
         gh_app_id, gh_app_key = load_gh_app_credentials(home, env=env)
         host_app = create_host_app(
             store,
             auth_token=ensure_host_token(home, env=env),
+            verify_bearer=lambda presented: (
+                verify_host_token(home, presented) is not None
+            ),
             relay_domain=relay_cfg.host if relay_cfg is not None else None,
+            exchange_refresh=exchange_refresh,
+            host_id=host_id,
+            instance_id=instance_id,
+            host_state=host_state,
             rescan=rescan,
             gh_app_id=gh_app_id,
             gh_app_key=gh_app_key,
         )
-    # AFTER the lease is won: a tunnel dialed by a process that then stands down
-    # for the incumbent would fork an ssh child onto a subdomain it is about to
-    # abandon. Constructing one dials nothing — only `tick()` does — so it is
-    # safe to build here, and the control app needs it to publish its state.
-    tunnel = _build_tunnel(home, relay_cfg, serve_cfg)
-    if tunnel is not None:
-        log.info("relay tunnel enabled — dialing %s", tunnel.public_url)
     app = create_control_app(
         started_at=started_at, version=version, socket_path=str(socket_path),
         store=store, rescan=rescan, serve_bound=host_app is not None,

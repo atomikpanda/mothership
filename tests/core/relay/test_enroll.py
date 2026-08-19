@@ -214,15 +214,20 @@ def test_dedupe_is_by_key_not_hostname(tmp_path):
     assert len(store.list_pending()) == 2
 
 
-def test_a_re_post_does_not_extend_the_pending_ttl(tmp_path):
-    # Dedupe must be a pure read: refreshing created_at would make an unapproved
-    # request immortal, and the TTL is what bounds the store.
+def test_a_re_post_renews_the_pending_ttl_without_changing_request_id(tmp_path):
+    # The daemon re-post interval is shorter than this TTL specifically so an
+    # unattended request stays approvable while the daemon is still alive.
     now = [1000.0]
     store = RequestStore(tmp_path, ttl_seconds=100, clock=lambda: now[0])
     rid = store.create(_PUB, "vm-alpha")
-    now[0] += 60
+
+    now[0] = 1060.0
     assert store.create(_PUB, "vm-alpha") == rid
-    now[0] += 60
+    assert store.list_pending()[0]["created_at"] == 1060.0
+
+    now[0] = 1159.0
+    assert store.get(rid) == "pending"
+    now[0] = 1160.0
     assert store.get(rid) == "expired"
 
 

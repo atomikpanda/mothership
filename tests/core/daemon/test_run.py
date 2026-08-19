@@ -358,6 +358,11 @@ class _FakeTunnel:
     """What the daemon knows about a tunnel: a public URL, a tick and a stop."""
 
     public_url = "https://hst-fake.relay.example"
+    host_id = "hst-production"
+    instance_id = "0123456789abcdef"
+
+    def snapshot(self):
+        return {"state": "online", "subdomain": "hst-fake"}
 
     def __init__(self, *, events=None, stop_after=None, servers=(), raising=False):
         self.ticks = 0
@@ -538,6 +543,8 @@ def test_build_tunnel_dials_the_subdomain_the_link_currently_owns(
     )
 
     tunnel = run_mod._build_tunnel(home, RelayConfig(host="relay.example"), SERVE_BLOCK)
+    assert tunnel.host_id == tunnel._link.host_id
+    assert tunnel.instance_id == tunnel._link.instance_id
     # Stands in for the auto-reidentify `test_relay_link.py` drives end to end.
     tunnel._link.subdomain = "hst-reidentified"
     tunnel._supervisor.start()
@@ -603,3 +610,39 @@ def test_the_control_app_publishes_the_tunnel_it_was_built_with(env_home, monkey
     body = TestClient(configs[0].app).get("/health").json()
     assert body["capabilities"]["tunnel"] is True
     assert body["tunnel"] == snapshot
+
+
+def test_production_host_app_wires_identity_tunnel_and_token_services(
+    env_home, monkeypatch
+):
+    """The composition root must enable the host-facing seams, not merely leave
+    their independently-tested defaults disabled."""
+    from fastapi.testclient import TestClient
+
+    from mship.core.daemon.host_auth import RefreshStore
+
+    home, env = env_home
+    _seed_config(home, serve=SERVE_BLOCK, relay=RELAY_BLOCK)
+    configs = _capture_uvicorn(monkeypatch)
+    tunnel = _FakeTunnel()
+    refresh = RefreshStore(home).issue_refresh(
+        host_id=tunnel.host_id, client="phone"
+    )
+    monkeypatch.setattr(run_mod, "_build_tunnel", lambda *a: tunnel)
+
+    assert run_mod.main(home=home, env=env) == 0
+
+    with TestClient(configs[1].app) as client:
+        health = client.get("/health").json()
+        minted = client.post("/host/token", json={"refresh": refresh})
+        assert minted.status_code == 200
+        authorized = client.get(
+            "/workspaces",
+            headers={"Authorization": f"Bearer {minted.json()['token']}"},
+        )
+
+    assert health["host_id"] == tunnel.host_id
+    assert health["instance_id"] == tunnel.instance_id
+    assert health["tunnel"] == tunnel.snapshot()
+    assert health["runner"] == {"enabled": False, "state": "disabled"}
+    assert authorized.status_code == 200

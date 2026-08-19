@@ -9,6 +9,7 @@ import random
 import re
 import subprocess
 import time
+from threading import Lock
 from pathlib import Path
 from typing import Callable
 
@@ -161,6 +162,7 @@ class TunnelSupervisor:
         self._max_backoff_delay = max_backoff_delay
         self._clock = clock if clock is not None else time.monotonic
         self._rng = rng if rng is not None else random.random
+        self._proc_lock = Lock()
         # DERIVED, not picked: the first exponent whose delay already exceeds the
         # cap. Clamping there is what keeps `2 ** n` from overflowing a float
         # after ~1024 restarts — a bound a CLI never reaches and an immortal
@@ -253,18 +255,20 @@ class TunnelSupervisor:
         fork a fresh `start_new_session=True` ssh that nothing then owns — an
         orphan holding the subdomain against the next boot (#471 AC7).
         """
-        self._stopped = True
-        self._final = self._final or final
-        if self._proc is not None:
-            try:
-                self._proc.terminate()
-            except Exception:
-                pass
-            try:
-                self._proc.wait(timeout=5)
-            except Exception:
-                pass
+        with self._proc_lock:
+            self._stopped = True
+            self._final = self._final or final
+            proc = self._proc
             self._proc = None
+        if proc is not None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
 
     def is_running(self) -> bool:
         """Return True if a live process is being supervised."""
@@ -320,14 +324,28 @@ class TunnelSupervisor:
         # never-started process as a healthy run and wipe the failure streak —
         # sawtoothing the escalation the clamp exists to reach.
         self._spawned_at = None
-        if self._final:
-            # Checked at the LAST moment, not only in start(): the caller may
-            # have passed its own check before the latch closed.
-            return
+        with self._proc_lock:
+            if self._final:
+                # Checked at the LAST moment, not only in start(): the caller
+                # may have passed its own check before the latch closed.
+                return
         argv = self._argv() if callable(self._argv) else self._argv
-        self._proc = self._proc_factory(argv)
-        self._spawned_at = self._clock()
-        self._spawn_count += 1
+        proc = self._proc_factory(argv)
+        with self._proc_lock:
+            stopped_during_spawn = self._stopped
+            if not stopped_during_spawn:
+                self._proc = proc
+                self._spawned_at = self._clock()
+                self._spawn_count += 1
+        if stopped_during_spawn:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
 
 
 def host_subdomain(host_id: str, dev_id: str, secret: bytes) -> str:
