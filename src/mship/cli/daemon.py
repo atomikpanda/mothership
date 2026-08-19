@@ -402,7 +402,8 @@ def register(parent: typer.Typer, get_container):
             )
             out.print(
                 f"kept host id {ident.host_id}; adopted machine fingerprint "
-                f"{ident.fingerprint}"
+                f"{ident.fingerprint}\n"
+                "run `mship daemon restart` to make a running daemon use it"
             )
             return
         ident = force_reidentify(home)

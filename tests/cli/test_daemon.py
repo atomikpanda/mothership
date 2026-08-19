@@ -1048,3 +1048,4 @@ def test_reidentify_keep_identity_adopts_the_fingerprint_without_reminting(
     assert kept["fingerprint"] == "fp-new"
     assert relay_key_path(tmp_path).read_text() == original_key
     assert "fp-new" in res.output
+    assert "restart" in res.output.lower()

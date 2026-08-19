@@ -1,3 +1,5 @@
+import json
+
 from pathlib import Path
 from mship.core.relay.grants import Scope
 from mship.core.relay.run_token import issue_run_token, verify_run_token
@@ -46,6 +48,23 @@ def test_verify_rejects_expired(tmp_path: Path):
 def test_verify_rejects_unknown_token(tmp_path: Path):
     (tmp_path / "run-tokens").mkdir(parents=True, exist_ok=True)
     assert verify_run_token(tmp_path, "deadbeef.secret") is None
+
+
+def test_verify_rejects_a_malformed_persisted_expiry(tmp_path: Path):
+    token = issue_run_token(
+        tmp_path,
+        enrollment_id="enr1",
+        scope=Scope(repos=("acme/api",), push_branch="feat/x"),
+        ttl_seconds=3600,
+        clock=lambda: 1000.0,
+    )
+    token_id, _secret = token.split(".", 1)
+    path = tmp_path / "run-tokens" / f"{token_id}.json"
+    record = json.loads(path.read_text())
+    record["expires_at"] = "not-a-number"
+    path.write_text(json.dumps(record))
+
+    assert verify_run_token(tmp_path, token, clock=lambda: 1000.0) is None
 
 
 # --- expiry is owned by token_clock, not by a bare `clock() >= expires_at` ---

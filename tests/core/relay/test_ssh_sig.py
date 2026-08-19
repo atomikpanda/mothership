@@ -162,6 +162,7 @@ def test_build_allowed_signers_skips_what_validate_pubkey_rejects(tmp_path):
     (tmp_path / "good.pub").write_text(PUB + "\n")
     (tmp_path / "junk.pub").write_text("not-a-key\n")
     (tmp_path / "injected.pub").write_text(PUB + "\nssh-ed25519 AAAAsmuggled evil\n")
+    (tmp_path / "binary").write_bytes(b"\xff")
     out = build_allowed_signers(tmp_path)
     assert out.strip().count("\n") == 0
     assert "evil" not in out and "not-a-key" not in out

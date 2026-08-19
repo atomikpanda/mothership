@@ -117,7 +117,7 @@ def build_allowed_signers(pubkeys_dir) -> str:
     for path in sorted(directory.rglob("*")) if directory.is_dir() else []:
         try:
             key = path.read_text().strip()
-        except OSError:
+        except (OSError, UnicodeError):
             continue
         if not validate_pubkey(key):
             continue

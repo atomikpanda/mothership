@@ -71,6 +71,10 @@ def current_epoch() -> str:
 def is_expired(expires_at: float, now: float, *, skew: float = SKEW_SECONDS) -> bool:
     """Wall-clock expiry with a skew grace — the bound for callers with no
     monotonic anchor to appeal to. Invalid persisted deadlines fail closed."""
+    try:
+        expires_at = float(expires_at)
+    except (TypeError, ValueError, OverflowError):
+        return True
     return not math.isfinite(expires_at) or now >= expires_at + skew
 
 

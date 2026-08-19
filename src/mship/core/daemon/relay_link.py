@@ -386,8 +386,12 @@ class RelayLink:
                 _detail(response) or f"enroll post failed: HTTP {response.status_code}"
             )
             return
+        body = _body(response)
+        if not body or not isinstance(body.get("id"), str) or not body["id"]:
+            self.last_error = "enroll post failed: invalid response"
+            return
         try:
-            ttl = float((_body(response) or {}).get("expires_in"))
+            ttl = float(body.get("expires_in"))
         except TypeError, ValueError:
             ttl = 0
         if math.isfinite(ttl) and ttl > 0:

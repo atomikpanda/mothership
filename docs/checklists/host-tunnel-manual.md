@@ -37,7 +37,7 @@ Run this pass on a real host + the live relay before calling #471 done.
    that URL answers `/health` from off-box.
 
 2. **Re-registration after a tunnel flap (AC2 in reality).**
-   `pkill -f 'ssh -R <subdomain>'` → the supervisor respawns the child and the
+   `pkill -f ' -R <subdomain>:80:localhost:'` → the supervisor respawns the child and the
    daemon re-registers *once* (not once per tick): `last_seen` in
    `mship relay hosts` advances within seconds of the respawn, `restarts`
    increments in `mship --json daemon status`, and the public URL serves again.
@@ -45,7 +45,7 @@ Run this pass on a real host + the live relay before calling #471 done.
 3. **No orphan holds the subdomain.** `kill -9 <mshipd pid>` → on the next start
    the daemon reaps the reparented `ssh -R` (it survives the kill;
    `start_new_session=True`) and reaches `online` again on the same subdomain.
-   Confirm with `pgrep -af 'ssh -R'` that exactly one ssh child exists
+   Confirm with `pgrep -af ' -R <subdomain>:80:localhost:'` that exactly one ssh child exists
    afterwards.
 
 4. **Clean shutdown (AC7 shutdown).** `systemctl --user stop mship-daemon` →

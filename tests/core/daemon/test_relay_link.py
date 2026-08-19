@@ -503,6 +503,26 @@ def test_failed_enroll_response_retries_on_the_next_registration_attempt(
     assert len(relay.posts_to("/enroll")) == 2
 
 
+def test_malformed_successful_enroll_response_retries_on_the_next_attempt(
+    tmp_path: Path,
+):
+    relay = _Relay(
+        register=(401, host_contract.UNAPPROVED_KEY_DETAIL),
+        enroll=(204, None),
+    )
+    clock = _Clock()
+    link = _link(tmp_path, relay, clock)
+
+    link.tick()
+    assert len(relay.posts_to("/enroll")) == 1
+    assert "invalid response" in (link.last_error or "")
+
+    _advance_past(clock, link)
+    link.tick()
+
+    assert len(relay.posts_to("/enroll")) == 2
+
+
 def test_challenge_stage_unapproved_self_heals_with_no_prompt(tmp_path: Path):
     relay = _Relay(challenge=(401, host_contract.UNAPPROVED_KEY_DETAIL))
     clock = _Clock()
