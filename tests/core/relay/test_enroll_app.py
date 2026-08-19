@@ -370,6 +370,31 @@ def test_register_bounds_every_body_field(tmp_path, case):
     assert r.status_code == 422, (case, r.status_code, r.text[:200])
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _payload(clock_skew_seconds=float("nan")),
+        _payload(runner={"load": float("inf")}),
+    ],
+)
+def test_register_rejects_non_finite_scalars_at_the_request_boundary(tmp_path, payload):
+    h = _harness(tmp_path)
+    client = TestClient(h.client.app, raise_server_exceptions=False)
+    nonce = _challenge(h).json()["nonce"]
+    body = json.dumps(
+        {"nonce": nonce, "signature": "s", "payload": payload},
+        allow_nan=True,
+    )
+
+    response = client.post(
+        host_contract.REGISTER_PATH,
+        content=body,
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 400
+
+
 # ---------------------------------------------------------------------------
 # GET /hosts
 # ---------------------------------------------------------------------------

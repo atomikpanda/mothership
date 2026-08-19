@@ -27,6 +27,7 @@ Like everything it supervises, this class is entirely tick-driven: no threads,
 no sleeps, every collaborator (`clock`, `reaper`, `verify`) injected, so the
 whole loop is unit-testable without a socket.
 """
+
 from __future__ import annotations
 
 import logging
@@ -64,8 +65,15 @@ PROCESS_LIST_TIMEOUT_S = 10.0
 _UNAPPROVED_SSH_MARKER = "permission denied"
 
 # The states this reports, in the order `state()` resolves them.
-STATES = ("disabled", "duplicate-identity", "awaiting-enrollment", "contended",
-          "error", "online", "connecting")
+STATES = (
+    "disabled",
+    "duplicate-identity",
+    "awaiting-enrollment",
+    "contended",
+    "error",
+    "online",
+    "connecting",
+)
 
 
 @dataclass(frozen=True)
@@ -85,7 +93,9 @@ def list_processes() -> list[ProcessInfo]:
     try:
         out = subprocess.run(
             ["ps", "-eo", "pid=,ppid=,args="],
-            capture_output=True, text=True, timeout=PROCESS_LIST_TIMEOUT_S,
+            capture_output=True,
+            text=True,
+            timeout=PROCESS_LIST_TIMEOUT_S,
             check=True,
         ).stdout
     except Exception as exc:
@@ -97,7 +107,9 @@ def list_processes() -> list[ProcessInfo]:
         if len(parts) != 3:
             continue
         try:
-            rows.append(ProcessInfo(pid=int(parts[0]), ppid=int(parts[1]), cmdline=parts[2]))
+            rows.append(
+                ProcessInfo(pid=int(parts[0]), ppid=int(parts[1]), cmdline=parts[2])
+            )
         except ValueError:
             continue
     return rows
@@ -113,7 +125,7 @@ def _forward_label(cmdline: str) -> str | None:
     tokens = cmdline.split()
     try:
         spec = tokens[tokens.index("-R") + 1]
-    except (ValueError, IndexError):
+    except ValueError, IndexError:
         return None
     return spec.split(":")[0]
 
@@ -143,7 +155,9 @@ def reap_orphan_tunnels(
         except Exception as exc:  # already gone, or not ours to signal
             log.debug("could not signal orphan tunnel pid=%s: %s", proc.pid, exc)
             continue
-        log.warning("signalled orphaned relay tunnel pid=%s holding %s", proc.pid, subdomain)
+        log.warning(
+            "signalled orphaned relay tunnel pid=%s holding %s", proc.pid, subdomain
+        )
         signalled.append(proc.pid)
     return signalled
 
@@ -169,14 +183,14 @@ class HostTunnel:
         self._readback_interval = readback_interval
 
         self._stopped = False
-        self._started = False          # True once we have dialed at least once
-        self._reaped = False           # swept during the current downtime
-        self._online = False           # the last read-back was us
+        self._started = False  # True after the first dial attempt
+        self._reaped = False  # swept during the current downtime
+        self._online = False  # the last read-back was us
         self._ever_online = False
-        self._ssh_rejected = False     # the ssh log tail says "not approved yet"
+        self._ssh_rejected = False  # the ssh log tail says "not approved yet"
         self._contended_with: str | None = None
-        self._failure: str | None = None   # this tick's own fault, if any
-        self._detail: str | None = None    # the last read-back's explanation
+        self._failure: str | None = None  # this tick's own fault, if any
+        self._detail: str | None = None  # the last read-back's explanation
         self._last_readback_at: float | None = None
         # Monotonic: `restart_count` is NOT a respawn signal — a healthy run
         # resets it and `start()` zeroes it, so diffing it would read a *drop*
@@ -234,7 +248,7 @@ class HostTunnel:
                 self._online = False
                 self._sample_ssh_log()
                 self._reap()
-                sup.tick()          # gated by the supervisor's own backoff
+                sup.tick()  # gated by the supervisor's own backoff
         if sup.spawn_count != self._spawns_seen:
             self._spawns_seen = sup.spawn_count
             # A new child is up, holding a fresh sish route; re-publish the entry
@@ -256,12 +270,13 @@ class HostTunnel:
                 self._online = False
             return
         if not self._started:
+            # Once start is attempted, every retry belongs to the supervisor's
+            # capped backoff — including failures before a child is returned.
+            self._started = True
             self._supervisor.start()
             # This tick's `link.tick()` already published the entry for this
-            # child, so the initial dial (and the re-dial after a duplicate
-            # identity clears) must not also count as a respawn.
+            # child, so the initial dial must not also count as a respawn.
             self._spawns_seen = self._supervisor.spawn_count
-            self._started = True
 
     def _reap(self) -> None:
         """Sweep orphans once per downtime, not once per tick: this shells out to
@@ -293,8 +308,10 @@ class HostTunnel:
         clone. Same split `health.py` makes between a stale token and a route
         that has not come up yet.
         """
-        if (self._last_readback_at is not None
-                and 0 <= now - self._last_readback_at < self._readback_interval):
+        if (
+            self._last_readback_at is not None
+            and 0 <= now - self._last_readback_at < self._readback_interval
+        ):
             return
         self._last_readback_at = now
         probe = self._verify(self._link.public_url, "")
@@ -309,7 +326,9 @@ class HostTunnel:
         answered = (probe.body or {}).get("instance_id")
         if not answered:
             self._online = False
-            self._detail = f"read-back of {self._link.public_url} carried no instance_id"
+            self._detail = (
+                f"read-back of {self._link.public_url} carried no instance_id"
+            )
             return
         if answered == self._link.instance_id:
             self._online = True

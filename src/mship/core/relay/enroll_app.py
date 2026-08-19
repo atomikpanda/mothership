@@ -132,6 +132,10 @@ def build_enroll_app(
             raise HTTPException(status_code=400, detail="malformed host_id")
         except InvalidPublicUrl as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail="malformed registration payload"
+            )
         except (ChallengeRefused, SignatureRefused) as exc:
             raise HTTPException(status_code=401, detail=str(exc))
         except DuplicateIdentity as exc:

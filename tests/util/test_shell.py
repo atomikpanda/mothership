@@ -28,7 +28,11 @@ def test_run_streaming_uses_new_process_group_on_windows():
     CREATE_NEW_PROCESS_GROUP = 0x00000200  # Windows constant, may not exist on Linux
     runner = ShellRunner()
     with patch("mship.util.shell.os.name", "nt"):
-        with patch("mship.util.shell.subprocess.CREATE_NEW_PROCESS_GROUP", CREATE_NEW_PROCESS_GROUP, create=True):
+        with patch(
+            "mship.util.shell.subprocess.CREATE_NEW_PROCESS_GROUP",
+            CREATE_NEW_PROCESS_GROUP,
+            create=True,
+        ):
             with patch("subprocess.Popen") as mock_popen:
                 runner.run_streaming("sleep 1", cwd=Path("."))
                 kwargs = mock_popen.call_args.kwargs
@@ -207,9 +211,7 @@ def test_cancellable_run_argv_accepts_supported_posix_hosts(
     if platform == "linux":
         process_dir = proc_root / "123"
         process_dir.mkdir(parents=True)
-        (process_dir / "stat").write_bytes(
-            b"123 (python) S 1 123 0 0 0 0 0\n"
-        )
+        (process_dir / "stat").write_bytes(b"123 (python) S 1 123 0 0 0 0 0\n")
     popen = _successful_popen()
     monkeypatch.setattr(shell_module.os, "name", "posix")
     monkeypatch.setattr(shell_module.sys, "platform", platform)
@@ -279,11 +281,17 @@ while True:
     runner_thread = threading.Thread(target=run_command, daemon=True)
     runner_thread.start()
     deadline = time.monotonic() + 5
-    while not ready_path.exists() and time.monotonic() < deadline:
-        threading.Event().wait(0.01)
-    assert ready_path.exists(), "descendant did not report readiness"
+    descendant_pid_text = ""
+    while not descendant_pid_text and time.monotonic() < deadline:
+        try:
+            descendant_pid_text = ready_path.read_text()
+        except FileNotFoundError:
+            pass
+        if not descendant_pid_text:
+            threading.Event().wait(0.01)
+    assert descendant_pid_text, "descendant did not report readiness"
 
-    descendant_pid = int(ready_path.read_text())
+    descendant_pid = int(descendant_pid_text)
     process_group = os.getpgid(descendant_pid)
     proc_stat = Path(f"/proc/{descendant_pid}/stat")
     try:
@@ -376,9 +384,7 @@ def test_forced_group_cleanup_reaps_leader_before_absence_wait(
 def test_linux_group_scan_accepts_non_utf8_process_name(tmp_path, monkeypatch):
     process_dir = tmp_path / "123"
     process_dir.mkdir()
-    (process_dir / "stat").write_bytes(
-        b"123 (\xff process) S 1 424242 0 0 0 0 0\n"
-    )
+    (process_dir / "stat").write_bytes(b"123 (\xff process) S 1 424242 0 0 0 0 0\n")
     real_scandir = os.scandir
 
     def scan_test_proc(path):
@@ -396,9 +402,7 @@ def test_linux_group_scan_accepts_zombie_with_unreadable_unrelated_stat(
 ):
     zombie_dir = tmp_path / "123"
     zombie_dir.mkdir()
-    (zombie_dir / "stat").write_bytes(
-        b"123 (zombie) Z 1 424242 0 0 0 0 0\n"
-    )
+    (zombie_dir / "stat").write_bytes(b"123 (zombie) Z 1 424242 0 0 0 0 0\n")
     unreadable_dir = tmp_path / "456"
     unreadable_dir.mkdir()
     (unreadable_dir / "stat").write_bytes(b"malformed")

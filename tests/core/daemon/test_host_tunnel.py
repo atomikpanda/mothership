@@ -264,6 +264,42 @@ def test_tick_dials_the_host_subdomain_on_the_daemons_bind_port(fx):
     )
 
 
+def test_initial_spawn_failure_uses_the_supervisor_backoff(tmp_path):
+    clock = _Clock()
+    link = _link(tmp_path, _Relay(), clock)
+    attempts = []
+
+    def fail_to_spawn(_argv):
+        attempts.append(clock())
+        raise FileNotFoundError("ssh")
+
+    supervisor = TunnelSupervisor(
+        argv=["ssh"],
+        proc_factory=fail_to_spawn,
+        backoff_delay=5,
+        max_backoff_delay=60,
+        clock=clock,
+        rng=lambda: 0.0,
+        log_path=tmp_path,
+    )
+    tunnel = HostTunnel(
+        link,
+        supervisor,
+        clock=clock,
+        reaper=lambda _subdomain: [],
+    )
+
+    assert tunnel.tick() == "error"
+    for _ in range(4):
+        clock.advance(1)
+        tunnel.tick()
+    assert attempts == [1_000_000.0]
+
+    clock.advance(1)
+    tunnel.tick()
+    assert attempts == [1_000_000.0, 1_000_005.0]
+
+
 def test_tick_registers_and_reads_back_to_go_online(fx):
     assert fx.connect() == "online"
 

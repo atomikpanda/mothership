@@ -83,18 +83,27 @@ def device_subdomain(workspace: str, dev_id: str, secret: bytes) -> str:
     return f"{base}{suffix}"
 
 
-def build_tunnel_argv(rc: RelayConfig, *, subdomain: str, local_port: int, key_path: Path) -> list[str]:
+def build_tunnel_argv(
+    rc: RelayConfig, *, subdomain: str, local_port: int, key_path: Path
+) -> list[str]:
     target = f"{rc.user}@{rc.host}" if rc.user else rc.host
     return [
         "ssh",
-        "-p", str(rc.ssh_port),
-        "-i", str(key_path),
-        "-o", "ExitOnForwardFailure=yes",
-        "-o", "ServerAliveInterval=30",
-        "-o", "ServerAliveCountMax=3",
-        "-o", "StrictHostKeyChecking=accept-new",
+        "-p",
+        str(rc.ssh_port),
+        "-i",
+        str(key_path),
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
         "-N",
-        "-R", f"{subdomain}:80:localhost:{local_port}",
+        "-R",
+        f"{subdomain}:80:localhost:{local_port}",
         target,
     ]
 
@@ -156,8 +165,11 @@ class TunnelSupervisor:
     ) -> None:
         self._argv = argv
         self._log_path = log_path
-        self._proc_factory = proc_factory if proc_factory is not None \
+        self._proc_factory = (
+            proc_factory
+            if proc_factory is not None
             else (lambda a: _default_proc_factory(a, self._log_path))
+        )
         self._backoff_delay = backoff_delay
         self._max_backoff_delay = max_backoff_delay
         self._clock = clock if clock is not None else time.monotonic
@@ -174,8 +186,8 @@ class TunnelSupervisor:
         )
 
         self._proc = None
-        self._stopped = False          # True once stop() has been called
-        self._final = False            # ... and stopped for good: never spawn again
+        self._stopped = False  # True once stop() has been called
+        self._final = False  # ... and stopped for good: never spawn again
         self._restart_count = 0
         # Every process this supervisor has successfully launched. Unlike
         # `_restart_count` it only ever increases — `start()` zeroes the restart
@@ -217,19 +229,21 @@ class TunnelSupervisor:
         """
         if self._stopped:
             return
-        if self._proc is None:
-            return
-        if self._proc.poll() is None:
+        if self._proc is not None and self._proc.poll() is None:
             # Still alive — nothing to do.
             return
-        # Process has exited unexpectedly.  Check whether the backoff delay has
-        # elapsed before respawning.
+        # A process exit or a failed spawn both enter the same retry gate.
         now = self._clock()
         if self._last_restart_at is None:
+            if self._proc is None:
+                return
             # First detected exit: freeze one delay for it (re-jittering it on
             # every tick would resample the gate instead of honouring it) and
             # wait the backoff out.
-            if self._spawned_at is not None and now - self._spawned_at >= self._max_backoff_delay:
+            if (
+                self._spawned_at is not None
+                and now - self._spawned_at >= self._max_backoff_delay
+            ):
                 # The tunnel held for longer than the worst case we would ever
                 # wait, so whatever streak preceded it is over.
                 self._restart_count = 0
@@ -301,13 +315,13 @@ class TunnelSupervisor:
         return self._delay if self._last_restart_at is not None else 0.0
 
     def recent_output(self, limit: int = 4000) -> str:
-        """Tail of the captured ssh output (empty if no log or file not yet written)."""
+        """Tail of captured ssh output, or empty when the log is unreadable."""
         if self._log_path is None:
             return ""
         try:
             data = Path(self._log_path).read_bytes()[-limit:]
             return data.decode(errors="replace")
-        except FileNotFoundError:
+        except OSError:
             return ""
 
     # ------------------------------------------------------------------
@@ -336,7 +350,12 @@ class TunnelSupervisor:
                 # may have passed its own check before the latch closed.
                 return
         argv = self._argv() if callable(self._argv) else self._argv
-        proc = self._proc_factory(argv)
+        try:
+            proc = self._proc_factory(argv)
+        except Exception:
+            self._delay = jittered(self._backoff(), self._rng)
+            self._last_restart_at = self._clock()
+            raise
         with self._proc_lock:
             stopped_during_spawn = self._stopped
             if not stopped_during_spawn:

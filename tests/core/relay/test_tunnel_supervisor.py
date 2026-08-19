@@ -6,15 +6,30 @@ from mship.core.relay.tunnel import BACKOFF_JITTER, TunnelSupervisor
 
 
 class FakeProc:
-    def __init__(self): self._alive = True; self.terminated = False
-    def poll(self): return None if self._alive else 0
-    def terminate(self): self.terminated = True; self._alive = False
-    def wait(self, timeout=None): self._alive = False; return 0
+    def __init__(self):
+        self._alive = True
+        self.terminated = False
+
+    def poll(self):
+        return None if self._alive else 0
+
+    def terminate(self):
+        self.terminated = True
+        self._alive = False
+
+    def wait(self, timeout=None):
+        self._alive = False
+        return 0
 
 
 def test_start_then_stop_terminates_process():
     procs = []
-    def factory(argv): p = FakeProc(); procs.append(p); return p
+
+    def factory(argv):
+        p = FakeProc()
+        procs.append(p)
+        return p
+
     sup = TunnelSupervisor(argv=["ssh", "..."], proc_factory=factory)
     sup.start()
     assert sup.is_running() and len(procs) == 1
@@ -54,7 +69,11 @@ def test_stop_kills_a_process_that_ignores_terminate():
 def test_restart_on_unexpected_exit():
     """tick() respawns the process when it exits unexpectedly (not via stop())."""
     procs = []
-    def factory(argv): p = FakeProc(); procs.append(p); return p
+
+    def factory(argv):
+        p = FakeProc()
+        procs.append(p)
+        return p
 
     sup = TunnelSupervisor(argv=["ssh", "..."], proc_factory=factory, backoff_delay=0)
     sup.start()
@@ -73,10 +92,16 @@ def test_restart_on_unexpected_exit():
 def test_backoff_gates_respawn():
     """tick() must NOT respawn until the backoff delay has elapsed."""
     procs = []
-    def factory(argv): p = FakeProc(); procs.append(p); return p
+
+    def factory(argv):
+        p = FakeProc()
+        procs.append(p)
+        return p
 
     t = [0.0]
-    def fake_clock(): return t[0]
+
+    def fake_clock():
+        return t[0]
 
     sup = TunnelSupervisor(
         argv=["ssh", "..."],
@@ -105,13 +130,19 @@ def test_backoff_gates_respawn():
 # --- #471: an immortal daemon owns this supervisor, so the backoff must be
 # --- clamped, jittered from an injected RNG, and reset by a healthy run.
 
+
 def _sup(procs, clock, **kw):
-    def factory(argv): p = FakeProc(); procs.append(p); return p
+    def factory(argv):
+        p = FakeProc()
+        procs.append(p)
+        return p
+
     kw.setdefault("backoff_delay", 5.0)
     kw.setdefault("max_backoff_delay", 60.0)
-    kw.setdefault("rng", lambda: 0.0)          # no jitter unless a test asks
-    return TunnelSupervisor(argv=["ssh", "..."], proc_factory=factory,
-                            clock=lambda: clock[0], **kw)
+    kw.setdefault("rng", lambda: 0.0)  # no jitter unless a test asks
+    return TunnelSupervisor(
+        argv=["ssh", "..."], proc_factory=factory, clock=lambda: clock[0], **kw
+    )
 
 
 def test_backoff_is_clamped_past_1024_restarts():
@@ -120,13 +151,13 @@ def test_backoff_is_clamped_past_1024_restarts():
     procs, t = [], [0.0]
     sup = _sup(procs, t)
     sup.start()
-    sup._restart_count = 2000                  # what 17h of flapping leaves behind
+    sup._restart_count = 2000  # what 17h of flapping leaves behind
 
     procs[0]._alive = False
-    sup.tick()                                 # must not raise OverflowError
+    sup.tick()  # must not raise OverflowError
     assert len(procs) == 1, "capped delay still gates the respawn"
 
-    t[0] = 60.0                                # the cap, not 5 * 2**2000
+    t[0] = 60.0  # the cap, not 5 * 2**2000
     sup.tick()
     assert len(procs) == 2
     assert sup.restart_count == 2001
@@ -140,12 +171,12 @@ def test_a_healthy_run_resets_the_restart_count():
     sup.start()
     sup._restart_count = 9
 
-    t[0] = 500.0                               # the child held for 500s
+    t[0] = 500.0  # the child held for 500s
     procs[0]._alive = False
     sup.tick()
     assert sup.restart_count == 0, "the streak ended when the run went healthy"
 
-    t[0] = 505.0                               # one base delay later, not the cap
+    t[0] = 505.0  # one base delay later, not the cap
     sup.tick()
     assert len(procs) == 2 and sup.restart_count == 1
 
@@ -156,7 +187,7 @@ def test_a_short_run_does_not_reset_the_restart_count():
     sup.start()
     sup._restart_count = 3
 
-    t[0] = 2.0                                 # died well inside the backoff cap
+    t[0] = 2.0  # died well inside the backoff cap
     procs[0]._alive = False
     sup.tick()
     assert sup.restart_count == 3
@@ -172,7 +203,7 @@ def test_jitter_comes_from_the_injected_rng_and_only_shortens():
         sup._restart_count = 2000
         procs[0]._alive = False
 
-        sup.tick()                             # freezes the jittered delay
+        sup.tick()  # freezes the jittered delay
         delay = sup.next_delay()
         assert 60.0 * (1 - BACKOFF_JITTER) <= delay <= 60.0
 
@@ -188,8 +219,8 @@ def test_two_supervisors_do_not_respawn_on_the_same_tick():
     """A fleet that all lost the relay in one second must not stampede it."""
     t = [0.0]
     slow_procs, fast_procs = [], []
-    slow = _sup(slow_procs, t, rng=lambda: 0.0)     # full delay
-    fast = _sup(fast_procs, t, rng=lambda: 1.0)     # 20% off it
+    slow = _sup(slow_procs, t, rng=lambda: 0.0)  # full delay
+    fast = _sup(fast_procs, t, rng=lambda: 1.0)  # 20% off it
     for sup, procs in ((slow, slow_procs), (fast, fast_procs)):
         sup.start()
         sup._restart_count = 2000
@@ -197,7 +228,8 @@ def test_two_supervisors_do_not_respawn_on_the_same_tick():
         sup.tick()
 
     t[0] = 60.0 * (1 - BACKOFF_JITTER)
-    slow.tick(); fast.tick()
+    slow.tick()
+    fast.tick()
     assert len(fast_procs) == 2 and len(slow_procs) == 1
 
 
@@ -206,21 +238,22 @@ def test_a_spawn_that_raises_never_reads_as_a_healthy_run():
     exit-detection wipe the streak once the delay reaches the cap, so the
     escalation the clamp exists for sawtooths at restart_count 1 forever."""
     procs, t = [], [0.0]
-    sup = _sup(procs, t)                       # backoff 5s, cap 60s
+    sup = _sup(procs, t)  # backoff 5s, cap 60s
     sup.start()
     procs[0]._alive = False
     sup._proc_factory = lambda argv: (_ for _ in ()).throw(OSError("ssh: not found"))
 
     counts = []
+    sup.tick()  # freeze the delay for the process that exited
     for _ in range(10):
-        t[0] += 1000.0                         # far past the healthy-run threshold
-        sup.tick()                             # freeze the delay for this exit
-        t[0] += 1000.0
+        t[0] += 1000.0  # far past each scheduled retry
         with pytest.raises(OSError):
-            sup.tick()                         # the respawn attempt itself fails
+            sup.tick()
         counts.append(sup.restart_count)
 
-    assert counts == list(range(1, 11)), "the failure streak did not escalate monotonically"
+    assert counts == list(range(1, 11)), (
+        "the failure streak did not escalate monotonically"
+    )
     assert len(procs) == 1 and sup.spawn_count == 1
 
 

@@ -171,6 +171,22 @@ def test_hosts_shows_pending_enrollments_alongside_registered_ones(tmp_path):
     assert "fresh-vm" in res.output
 
 
+def test_hosts_renders_untrusted_labels_as_one_literal_line(tmp_path):
+    from mship.core.relay.enroll import RequestStore
+
+    label = "[bold red]trusted[/]\nspoof\x1b[2J"
+    RequestStore(tmp_path).create(
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAISecondKeyBodyBBBBBBBBBBBBBBBBBBBBBBBB two",
+        label,
+    )
+
+    res = _run("hosts", "--store-dir", str(tmp_path))
+
+    assert res.exit_code == 0, res.output
+    assert "[bold red]trusted[/]\\nspoof\\u001b[2J" in res.output
+    assert "\x1b" not in res.output
+
+
 def test_hosts_never_prints_the_refresh_credential(tmp_path):
     # The phone fetches it over `GET /hosts`; the owner's terminal (and its
     # scrollback) is not a place to widen it to.

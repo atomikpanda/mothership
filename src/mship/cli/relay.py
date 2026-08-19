@@ -8,11 +8,14 @@ host (`docker/relay/pubkeys/`). See plan Task B7 (ac4).
 host; `mship relay requests/approve/deny` manage pending enroll requests
 (owner-side); `mship relay enroll` is the requester path (new device).
 """
+
 from __future__ import annotations
 
 import os
+import json
 
 import typer
+from rich.markup import escape
 
 from mship.cli.output import Output
 
@@ -40,8 +43,9 @@ def _configured_relay_host(get_container):
         return None
 
 
-def _run_uvicorn(app, host, port):   # seam so tests don't boot a server
+def _run_uvicorn(app, host, port):  # seam so tests don't boot a server
     import uvicorn
+
     uvicorn.run(app, host=host, port=port)
 
 
@@ -55,7 +59,9 @@ def _enroll_server_impl(*, store_dir, pubkeys_dir, port, host, ttl, relay_domain
     from mship.core.relay.ssh_sig import build_allowed_signers
 
     if not relay_domain:
-        raise typer.BadParameter("relay domain required: pass --relay-domain or set RELAY_DOMAIN")
+        raise typer.BadParameter(
+            "relay domain required: pass --relay-domain or set RELAY_DOMAIN"
+        )
     store = RequestStore(Path(store_dir), ttl_seconds=ttl)
     # The signature allowlist IS the sish `pubkeys/` allowlist, re-read per
     # verification: that is what makes signature-auth and tunnel-auth one
@@ -66,8 +72,10 @@ def _enroll_server_impl(*, store_dir, pubkeys_dir, port, host, ttl, relay_domain
         allowed_signers=lambda: build_allowed_signers(Path(pubkeys_dir)),
         probe=probe_instance_id,
     )
-    Output().print(f"enroll-server → http://{host}:{port}  (relay: {relay_domain}, "
-                   f"pubkeys: {pubkeys_dir}, store: {store_dir}, ttl: {ttl}s)")
+    Output().print(
+        f"enroll-server → http://{host}:{port}  (relay: {relay_domain}, "
+        f"pubkeys: {pubkeys_dir}, store: {store_dir}, ttl: {ttl}s)"
+    )
     _run_uvicorn(
         build_enroll_app(
             store,
@@ -120,7 +128,7 @@ def register(parent: typer.Typer, get_container):
             f"  • On the relay host itself, just copy it in:\n"
             f"      cp {pub_path} <relay-dir>/docker/relay/pubkeys/{label}\n\n"
             f"  • From another machine, scp it over (the tunnel auths by key, so there is\n"
-            f"    no \"relay user\" — <login> is just your normal SSH account on the relay box):\n"
+            f'    no "relay user" — <login> is just your normal SSH account on the relay box):\n'
             f"      scp {pub_path} <login>@{relay_host}:<relay-dir>/docker/relay/pubkeys/{label}\n\n"
             f"  <relay-dir> = where you deployed the docker/relay/ compose; the filename is "
             f"just a unique label."
@@ -132,23 +140,40 @@ def register(parent: typer.Typer, get_container):
 
     @relay_app.command("enroll-server")
     def enroll_server(
-        pubkeys_dir: str = typer.Option("./pubkeys", "--pubkeys-dir",
-                                        help="Allowlist dir used by 'mship relay approve' "
-                                             "(this server only creates pending requests; "
-                                             "it never writes keys)."),
-        store_dir: str = typer.Option("./pending-store", "--store-dir",
-                                      help="Directory for pending enroll request state."),
+        pubkeys_dir: str = typer.Option(
+            "./pubkeys",
+            "--pubkeys-dir",
+            help="Allowlist dir used by 'mship relay approve' "
+            "(this server only creates pending requests; "
+            "it never writes keys).",
+        ),
+        store_dir: str = typer.Option(
+            "./pending-store",
+            "--store-dir",
+            help="Directory for pending enroll request state.",
+        ),
         port: int = typer.Option(47180, "--port", help="Port to listen on."),
-        host: str = typer.Option("127.0.0.1", "--host",
-                                 help="Interface to bind (loopback; Caddy fronts it)."),
-        ttl: int = typer.Option(1800, "--ttl",
-                                help="Pending request TTL in seconds (default 30 min)."),
-        relay_domain: str = typer.Option(lambda: os.environ.get("RELAY_DOMAIN", ""), "--relay-domain",
-                                         help="Relay domain for the on-demand TLS ask (default $RELAY_DOMAIN)."),
+        host: str = typer.Option(
+            "127.0.0.1", "--host", help="Interface to bind (loopback; Caddy fronts it)."
+        ),
+        ttl: int = typer.Option(
+            1800, "--ttl", help="Pending request TTL in seconds (default 30 min)."
+        ),
+        relay_domain: str = typer.Option(
+            lambda: os.environ.get("RELAY_DOMAIN", ""),
+            "--relay-domain",
+            help="Relay domain for the on-demand TLS ask (default $RELAY_DOMAIN).",
+        ),
     ):
         """Run the public enroll endpoint on the relay host (devices POST their key here)."""
-        _enroll_server_impl(store_dir=store_dir, pubkeys_dir=pubkeys_dir,
-                            port=port, host=host, ttl=ttl, relay_domain=relay_domain)
+        _enroll_server_impl(
+            store_dir=store_dir,
+            pubkeys_dir=pubkeys_dir,
+            port=port,
+            host=host,
+            ttl=ttl,
+            relay_domain=relay_domain,
+        )
 
     # -------------------------------------------------------------------------
     # Owner-side: list / approve / deny
@@ -156,8 +181,11 @@ def register(parent: typer.Typer, get_container):
 
     @relay_app.command("requests")
     def requests_cmd(
-        store_dir: str = typer.Option("./pending-store", "--store-dir",
-                                      help="Directory for pending enroll request state."),
+        store_dir: str = typer.Option(
+            "./pending-store",
+            "--store-dir",
+            help="Directory for pending enroll request state.",
+        ),
     ):
         """List pending enroll requests (id · hostname · fingerprint)."""
         from pathlib import Path
@@ -175,10 +203,16 @@ def register(parent: typer.Typer, get_container):
     @relay_app.command("approve")
     def approve_cmd(
         rid: str = typer.Argument(..., help="Request ID to approve."),
-        store_dir: str = typer.Option("./pending-store", "--store-dir",
-                                      help="Directory for pending enroll request state."),
-        pubkeys_dir: str = typer.Option("./pubkeys", "--pubkeys-dir",
-                                        help="Directory where approved keys are written (sish pubkeys/)."),
+        store_dir: str = typer.Option(
+            "./pending-store",
+            "--store-dir",
+            help="Directory for pending enroll request state.",
+        ),
+        pubkeys_dir: str = typer.Option(
+            "./pubkeys",
+            "--pubkeys-dir",
+            help="Directory where approved keys are written (sish pubkeys/).",
+        ),
     ):
         """Approve a pending request: add its key to the allowlist (sish picks it up, no restart)."""
         from pathlib import Path
@@ -190,14 +224,19 @@ def register(parent: typer.Typer, get_container):
             RequestStore(Path(store_dir)).approve(rid, Path(pubkeys_dir))
             out.success(f"approved {rid} — key enrolled into {pubkeys_dir}")
         except NotPending:
-            out.error(f"no pending request {rid!r} (unknown, already resolved, or expired)")
+            out.error(
+                f"no pending request {rid!r} (unknown, already resolved, or expired)"
+            )
             raise typer.Exit(1)
 
     @relay_app.command("deny")
     def deny_cmd(
         rid: str = typer.Argument(..., help="Request ID to deny."),
-        store_dir: str = typer.Option("./pending-store", "--store-dir",
-                                      help="Directory for pending enroll request state."),
+        store_dir: str = typer.Option(
+            "./pending-store",
+            "--store-dir",
+            help="Directory for pending enroll request state.",
+        ),
     ):
         """Deny a pending request (does not touch the allowlist)."""
         from pathlib import Path
@@ -209,7 +248,9 @@ def register(parent: typer.Typer, get_container):
             RequestStore(Path(store_dir)).deny(rid)
             out.print(f"denied {rid}")
         except NotPending:
-            out.error(f"no pending request {rid!r} (unknown, already resolved, or expired)")
+            out.error(
+                f"no pending request {rid!r} (unknown, already resolved, or expired)"
+            )
             raise typer.Exit(1)
 
     # -------------------------------------------------------------------------
@@ -218,15 +259,26 @@ def register(parent: typer.Typer, get_container):
 
     @relay_app.command("fleet-token")
     def fleet_token_cmd(
-        label: str = typer.Option(..., "--label",
-                                  help="Nickname for the device this token is for (e.g. phone)."),
-        store_dir: str = typer.Option("./pending-store", "--store-dir",
-                                      help="Directory for pending enroll request state."),
-        relay_domain: str = typer.Option(lambda: os.environ.get("RELAY_DOMAIN", ""),
-                                         "--relay-domain",
-                                         help="Relay domain to pair against (default $RELAY_DOMAIN)."),
-        revoke: bool = typer.Option(False, "--revoke",
-                                    help="Invalidate this label's token instead of minting one."),
+        label: str = typer.Option(
+            ...,
+            "--label",
+            help="Nickname for the device this token is for (e.g. phone).",
+        ),
+        store_dir: str = typer.Option(
+            "./pending-store",
+            "--store-dir",
+            help="Directory for pending enroll request state.",
+        ),
+        relay_domain: str = typer.Option(
+            lambda: os.environ.get("RELAY_DOMAIN", ""),
+            "--relay-domain",
+            help="Relay domain to pair against (default $RELAY_DOMAIN).",
+        ),
+        revoke: bool = typer.Option(
+            False,
+            "--revoke",
+            help="Invalidate this label's token instead of minting one.",
+        ),
     ):
         """Mint (or revoke) a device's fleet token and print its pairing QR.
 
@@ -265,8 +317,11 @@ def register(parent: typer.Typer, get_container):
 
     @relay_app.command("hosts")
     def hosts_cmd(
-        store_dir: str = typer.Option("./pending-store", "--store-dir",
-                                      help="Directory for pending enroll request state."),
+        store_dir: str = typer.Option(
+            "./pending-store",
+            "--store-dir",
+            help="Directory for pending enroll request state.",
+        ),
     ):
         """List the relay's host directory (host_id · label · state · last_seen)."""
         import time
@@ -278,9 +333,9 @@ def register(parent: typer.Typer, get_container):
         out = Output()
         directory = HostDirectory(
             Path(store_dir),
-            relay_domain="",                   # read-only: never registers/probes
-            allowed_signers=lambda: "",       # listing verifies nothing…
-            probe=lambda public_url: None,    # …and never arbitrates
+            relay_domain="",  # read-only: never registers/probes
+            allowed_signers=lambda: "",  # listing verifies nothing…
+            probe=lambda public_url: None,  # …and never arbitrates
         )
         entries = directory.list_hosts(RequestStore(Path(store_dir)).list_pending())
         if not entries:
@@ -295,26 +350,48 @@ def register(parent: typer.Typer, get_container):
             )
             # Never the entry's `refresh`: that credential goes to the paired
             # phone over GET /hosts, not into a terminal's scrollback.
-            out.print(f"{entry.get('host_id') or '-'}  {entry.get('label') or '-'}  "
-                      f"{entry['state']}  {when}")
+            host_id = json.dumps(str(entry.get("host_id") or "-"), ensure_ascii=False)[
+                1:-1
+            ]
+            label = json.dumps(str(entry.get("label") or "-"), ensure_ascii=False)[1:-1]
+            line = f"{host_id}  {label}  {entry['state']}  {when}"
+            out.print(escape(line) if out.human_mode else line)
 
     # ---- typed grants + per-run tokens (cloud-worker-auth-spine) ----
 
     @relay_app.command("grant")
     def grant_cmd(
-        rid: str = typer.Argument(..., help="Approved enrollment id to grant repos to."),
-        provider: str = typer.Option("github-app", "--provider", help="Credential provider."),
-        repos: str = typer.Option(..., "--repos", help="Ceiling repos owner/a,owner/b."),
-        store_dir: str = typer.Option("./pending-store", "--store-dir",
-                                      help="Enroll request store (to confirm approval)."),
-        grant_store_dir: str = typer.Option("./grants-store", "--grant-store-dir",
-                                            help="Directory for the typed-grant store."),
+        rid: str = typer.Argument(
+            ..., help="Approved enrollment id to grant repos to."
+        ),
+        provider: str = typer.Option(
+            "github-app", "--provider", help="Credential provider."
+        ),
+        repos: str = typer.Option(
+            ..., "--repos", help="Ceiling repos owner/a,owner/b."
+        ),
+        store_dir: str = typer.Option(
+            "./pending-store",
+            "--store-dir",
+            help="Enroll request store (to confirm approval).",
+        ),
+        grant_store_dir: str = typer.Option(
+            "./grants-store",
+            "--grant-store-dir",
+            help="Directory for the typed-grant store.",
+        ),
     ):
         """Set/update an enrollment's typed grant (the repo CEILING it may ever touch)."""
         from pathlib import Path
 
         from mship.core.relay.enroll import RequestStore
-        from mship.core.relay.grants import Grant, GrantStore, RepoSpecError, Scope, parse_repos
+        from mship.core.relay.grants import (
+            Grant,
+            GrantStore,
+            RepoSpecError,
+            Scope,
+            parse_repos,
+        )
 
         out = Output()
         if RequestStore(Path(store_dir)).get(rid) != "approved":
@@ -333,18 +410,35 @@ def register(parent: typer.Typer, get_container):
     @relay_app.command("issue-run-token")
     def issue_run_token_cmd(
         rid: str = typer.Argument(..., help="Approved+granted enrollment id."),
-        repos: str = typer.Option(..., "--repos", help="Run repos (⊆ the grant ceiling)."),
-        push_branch: str = typer.Option(..., "--push-branch", help="The run's branch, e.g. feat/<slug>."),
-        ttl: int = typer.Option(86400, "--ttl", help="Token TTL in seconds (default 24h)."),
-        grant_store_dir: str = typer.Option("./grants-store", "--grant-store-dir",
-                                            help="Directory for the typed-grant store."),
-        run_token_dir: str = typer.Option("./run-tokens-store", "--run-token-dir",
-                                           help="Directory for per-run token records."),
+        repos: str = typer.Option(
+            ..., "--repos", help="Run repos (⊆ the grant ceiling)."
+        ),
+        push_branch: str = typer.Option(
+            ..., "--push-branch", help="The run's branch, e.g. feat/<slug>."
+        ),
+        ttl: int = typer.Option(
+            86400, "--ttl", help="Token TTL in seconds (default 24h)."
+        ),
+        grant_store_dir: str = typer.Option(
+            "./grants-store",
+            "--grant-store-dir",
+            help="Directory for the typed-grant store.",
+        ),
+        run_token_dir: str = typer.Option(
+            "./run-tokens-store",
+            "--run-token-dir",
+            help="Directory for per-run token records.",
+        ),
     ):
         """Issue a per-run token {repos ⊆ ceiling, push_branch}; prints plaintext ONCE."""
         from pathlib import Path
 
-        from mship.core.relay.grants import GrantStore, RepoSpecError, Scope, parse_repos
+        from mship.core.relay.grants import (
+            GrantStore,
+            RepoSpecError,
+            Scope,
+            parse_repos,
+        )
         from mship.core.relay.run_token import issue_run_token
 
         out = Output()
@@ -354,14 +448,26 @@ def register(parent: typer.Typer, get_container):
         if not push_branch.strip():
             out.error("--push-branch must be a non-empty branch name")
             raise typer.Exit(1)
-        if push_branch.strip().startswith("refs/") and not push_branch.strip().startswith("refs/heads/"):
-            out.error("--push-branch must be a branch (bare name or refs/heads/...), "
-                      "not a tag or other ref")
+        if push_branch.strip().startswith(
+            "refs/"
+        ) and not push_branch.strip().startswith("refs/heads/"):
+            out.error(
+                "--push-branch must be a branch (bare name or refs/heads/...), "
+                "not a tag or other ref"
+            )
             raise typer.Exit(1)
-        ceiling = next((g for g in GrantStore(Path(grant_store_dir)).get_grants(rid)
-                        if g.provider == "github-app"), None)
+        ceiling = next(
+            (
+                g
+                for g in GrantStore(Path(grant_store_dir)).get_grants(rid)
+                if g.provider == "github-app"
+            ),
+            None,
+        )
         if ceiling is None:
-            out.error(f"enrollment {rid!r} has no github-app grant; run `mship relay grant` first")
+            out.error(
+                f"enrollment {rid!r} has no github-app grant; run `mship relay grant` first"
+            )
             raise typer.Exit(1)
         try:
             run_repos = parse_repos(repos)
@@ -370,20 +476,33 @@ def register(parent: typer.Typer, get_container):
             raise typer.Exit(1)
         run_scope = Scope(repos=run_repos, push_branch=push_branch.strip())
         if not ceiling.scope.covers(run_scope):
-            out.error(f"requested repos exceed the grant ceiling {list(ceiling.scope.repos)}")
+            out.error(
+                f"requested repos exceed the grant ceiling {list(ceiling.scope.repos)}"
+            )
             raise typer.Exit(1)
-        token = issue_run_token(Path(run_token_dir), enrollment_id=rid,
-                                scope=run_scope, ttl_seconds=ttl)
+        token = issue_run_token(
+            Path(run_token_dir), enrollment_id=rid, scope=run_scope, ttl_seconds=ttl
+        )
         out.print(f"run token (store on the worker, shown once): {token}")
 
     @relay_app.command("egress-server")
     def egress_server(
-        grant_store_dir: str = typer.Option("./grants-store", "--grant-store-dir",
-                                             help="Directory for the typed-grant store."),
-        run_token_dir: str = typer.Option("./run-tokens-store", "--run-token-dir",
-                                           help="Directory for per-run token records."),
-        port: int = typer.Option(47280, "--port", help="Port to listen on (Caddy fronts it)."),
-        host: str = typer.Option("127.0.0.1", "--host", help="Interface to bind (loopback)."),
+        grant_store_dir: str = typer.Option(
+            "./grants-store",
+            "--grant-store-dir",
+            help="Directory for the typed-grant store.",
+        ),
+        run_token_dir: str = typer.Option(
+            "./run-tokens-store",
+            "--run-token-dir",
+            help="Directory for per-run token records.",
+        ),
+        port: int = typer.Option(
+            47280, "--port", help="Port to listen on (Caddy fronts it)."
+        ),
+        host: str = typer.Option(
+            "127.0.0.1", "--host", help="Interface to bind (loopback)."
+        ),
     ):
         """Run the credential-attaching egress proxy (worker git/API traffic terminates here)."""
         import os
@@ -415,12 +534,15 @@ def register(parent: typer.Typer, get_container):
             provider = GitHubAppProvider(app_id=app_id, private_key=app_key)
             routes = build_default_routes(provider)
         else:
-            out.warning("no App creds (MSHIP_GH_APP_ID/MSHIP_GH_APP_KEY) — egress will "
-                        "refuse to forward (503) until configured.")
+            out.warning(
+                "no App creds (MSHIP_GH_APP_ID/MSHIP_GH_APP_KEY) — egress will "
+                "refuse to forward (503) until configured."
+            )
 
         app = build_egress_app(
             grant_store=GrantStore(Path(grant_store_dir)),
-            run_token_dir=Path(run_token_dir), routes=routes,
+            run_token_dir=Path(run_token_dir),
+            routes=routes,
         )
         out.print(f"egress-server → http://{host}:{port}")
         _run_uvicorn(app, host, port)
@@ -431,12 +553,21 @@ def register(parent: typer.Typer, get_container):
 
     @relay_app.command("enroll")
     def enroll_cmd(
-        enroll_url: str = typer.Option(None, "--enroll-url",
-                                       help="Explicit enroll base URL (overrides --relay-host)."),
-        relay_host: str = typer.Option(None, "--relay-host",
-                                       help="Relay host, e.g. mship-relay.example.com (enroll URL is derived)."),
-        wait: bool = typer.Option(True, "--wait/--no-wait",
-                                  help="Poll until approved/denied (default) or return immediately."),
+        enroll_url: str = typer.Option(
+            None,
+            "--enroll-url",
+            help="Explicit enroll base URL (overrides --relay-host).",
+        ),
+        relay_host: str = typer.Option(
+            None,
+            "--relay-host",
+            help="Relay host, e.g. mship-relay.example.com (enroll URL is derived).",
+        ),
+        wait: bool = typer.Option(
+            True,
+            "--wait/--no-wait",
+            help="Poll until approved/denied (default) or return immediately.",
+        ),
     ):
         """From a NEW device: request relay access; the relay owner approves/denies."""
         import socket
@@ -451,10 +582,14 @@ def register(parent: typer.Typer, get_container):
         out = Output()
         pub = relay_public_key(ensure_relay_key(home=Path.home())).strip()
         try:
-            base = enroll_base_url(enroll_url=enroll_url, relay_host=relay_host,
-                                   config_host=_configured_relay_host(get_container))
+            base = enroll_base_url(
+                enroll_url=enroll_url,
+                relay_host=relay_host,
+                config_host=_configured_relay_host(get_container),
+            )
         except ValueError as e:
-            out.error(str(e)); raise typer.Exit(2)
+            out.error(str(e))
+            raise typer.Exit(2)
         # The requester runs on a remote device hitting a public endpoint, so
         # connection-refused / DNS / timeout are LIKELY: surface them cleanly
         # rather than dumping an httpx traceback.
@@ -472,10 +607,12 @@ def register(parent: typer.Typer, get_container):
             raise typer.Exit(1)
         try:
             rid = r.json()["id"]
-        except (ValueError, KeyError):
+        except ValueError, KeyError:
             out.error("enroll server returned an unexpected response (no request id)")
             raise typer.Exit(1)
-        out.print(f"requested (id {rid}) — ask the relay owner to run: mship relay approve {rid}")
+        out.print(
+            f"requested (id {rid}) — ask the relay owner to run: mship relay approve {rid}"
+        )
         if not wait:
             return
         deadline = time.monotonic() + 1800
@@ -487,7 +624,7 @@ def register(parent: typer.Typer, get_container):
                 try:
                     resp = httpx.get(f"{base}/status/{rid}", timeout=10)
                     st = resp.json().get("status", "pending")
-                except (httpx.RequestError, ValueError):  # ValueError covers JSON decode
+                except httpx.RequestError, ValueError:  # ValueError covers JSON decode
                     time.sleep(3)
                     continue
                 if st == "approved":
@@ -512,7 +649,9 @@ def register(parent: typer.Typer, get_container):
             ..., help="A relay subdomain (or full label <slug>-<devid>, or <sub>.host)."
         ),
         workspace: list[str] = typer.Option(
-            None, "--workspace", "-w",
+            None,
+            "--workspace",
+            "-w",
             help="Candidate workspace name(s) to test. Defaults to the current workspace.",
         ),
     ):
