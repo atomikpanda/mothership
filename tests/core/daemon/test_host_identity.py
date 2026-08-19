@@ -39,6 +39,35 @@ def test_mint_on_empty_home(tmp_path: Path):
     assert json.loads(path.read_text())["host_id"] == ident.host_id
 
 
+def test_identity_write_retries_short_writes_and_syncs_file_and_directory(
+    tmp_path: Path, monkeypatch
+):
+    from mship.core.daemon import identity as identity_mod
+
+    real_write = identity_mod.os.write
+    write_sizes = []
+    fsynced = []
+
+    def short_write(fd, data):
+        chunk = bytes(data[:3])
+        write_sizes.append(len(chunk))
+        return real_write(fd, chunk)
+
+    monkeypatch.setattr(identity_mod.os, "write", short_write)
+    monkeypatch.setattr(identity_mod.os, "fsync", lambda fd: fsynced.append(fd))
+
+    ident = ensure_host_identity(
+        tmp_path, fingerprint="fp-A", now=NOW, rotate_key=_noop_rotate
+    )
+
+    assert len(write_sizes) > 1
+    assert (
+        json.loads(host_identity_path(tmp_path).read_text())["host_id"]
+        == ident.host_id
+    )
+    assert len(fsynced) == 2
+
+
 def test_idempotent_and_per_home(tmp_path: Path):
     a1 = ensure_host_identity(tmp_path / "a", fingerprint="fp", rotate_key=_noop_rotate)
     a2 = ensure_host_identity(tmp_path / "a", fingerprint="fp", rotate_key=_noop_rotate)

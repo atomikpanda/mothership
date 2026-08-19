@@ -69,10 +69,6 @@ MAX_PROCESS_LIST_CALLS_PER_REAP = 3
 ORPHAN_EXIT_TIMEOUT_S = 2.0
 _ORPHAN_EXIT_POLL_S = 0.05
 
-# What ssh prints when the relay has our key on file but nobody has approved it
-# yet. It is the FIRST evidence of that state — it arrives before any
-# registration verdict does — which is why the log tail is worth reading.
-_UNAPPROVED_SSH_MARKER = "permission denied"
 
 # The states this reports, in the order `state()` resolves them.
 STATES = (
@@ -338,8 +334,6 @@ class HostTunnel:
         self._started = False  # True after the first dial attempt
         self._reaped = False  # swept during the current downtime
         self._online = False  # the last read-back was us
-        self._ever_online = False
-        self._ssh_rejected = False  # the ssh log tail says "not approved yet"
         self._contended_with: str | None = None
         self._failure: str | None = None  # persists until the failed operation recovers
         self._detail: str | None = None  # the last read-back's explanation
@@ -404,7 +398,6 @@ class HostTunnel:
                 self._read_back(self._clock())
             else:
                 self._online = False
-                self._sample_ssh_log()
                 self._reap()
                 sup.tick()  # gated by the supervisor's own backoff
         if sup.spawn_count != self._spawns_seen:
@@ -457,16 +450,6 @@ class HostTunnel:
         self._reaper(self._link.subdomain)
         self._reaped = True
 
-    def _sample_ssh_log(self) -> None:
-        """Read the ssh tail while the child is down — the only time it explains
-        anything. Ignored once a read-back has ever confirmed us: the log is
-        append-only, so an old rejection stays in the tail long after the key
-        was approved, and from then on the relay's own verdict is authoritative.
-        """
-        if self._ever_online:
-            return
-        tail = self._supervisor.recent_output()
-        self._ssh_rejected = _UNAPPROVED_SSH_MARKER in tail.lower()
 
     def _read_back(self, now: float) -> None:
         """Ask our own public URL who is answering on it.
@@ -505,8 +488,6 @@ class HostTunnel:
             return
         if answered == self._link.instance_id:
             self._online = True
-            self._ever_online = True
-            self._ssh_rejected = False
             self._contended_with = None
             self._detail = None
             return
@@ -538,7 +519,7 @@ class HostTunnel:
             return "disabled"
         if not self._link.should_dial():
             return "duplicate-identity"
-        if self._link.state == "awaiting-enrollment" or self._ssh_rejected:
+        if self._link.state == "awaiting-enrollment":
             return "awaiting-enrollment"
         if self._contended_with is not None:
             return "contended"

@@ -10,6 +10,7 @@ authenticates against is what makes signature-auth and tunnel-auth one identity.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 
@@ -18,6 +19,8 @@ from typer.testing import CliRunner
 
 import mship.cli.relay as relay_mod
 import mship.core.relay.enroll_app as ea
+from mship.cli import app as mship_app
+from mship.cli.output import reset_output_settings
 from mship.core.relay.fleet_token import FleetTokenStore
 from mship.core.relay.host_directory import HostDirectory
 
@@ -169,6 +172,35 @@ def _seed(store_dir, clock, **over):
     return payload
 
 
+def test_hosts_json_mode_returns_one_structured_document_without_credentials(tmp_path):
+    store_dir = tmp_path / "s"
+    now = time.time()
+    _seed(store_dir, lambda: now)
+
+    reset_output_settings()
+    try:
+        res = CliRunner().invoke(
+            mship_app,
+            ["--json", "relay", "hosts", "--store-dir", str(store_dir)],
+        )
+    finally:
+        reset_output_settings()
+
+    assert res.exit_code == 0, res.output
+    assert json.loads(res.output) == {
+        "hosts": [
+            {
+                "host_id": "hst-20260818120000-aaaaaaaa",
+                "label": "vm-alpha",
+                "state": "online",
+                "last_seen": time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)
+                ),
+            }
+        ]
+    }
+
+
 def test_hosts_lists_id_label_state_and_last_seen(tmp_path):
     store_dir = tmp_path / "s"
     now = time.time()
@@ -227,10 +259,10 @@ def test_hosts_never_prints_the_refresh_credential(tmp_path):
     assert "refresh-credential-1" not in res.output
 
 
-def test_hosts_on_an_empty_relay_says_so(tmp_path):
+def test_hosts_on_an_empty_relay_returns_an_empty_json_list(tmp_path):
     res = _run("hosts", "--store-dir", str(tmp_path / "s"))
     assert res.exit_code == 0
-    assert "no hosts" in res.output
+    assert json.loads(res.output) == {"hosts": []}
 
 
 # --- enroll-server wiring ---------------------------------------------------

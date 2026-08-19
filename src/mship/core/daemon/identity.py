@@ -73,18 +73,34 @@ def machine_fingerprint(readers: Sequence[Path] | None = None) -> str | None:
 
 def _write(path: Path, ident: HostIdentity) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    payload = memoryview(
+        json.dumps(
+            {
+                "host_id": ident.host_id,
+                "created_at": ident.created_at,
+                "fingerprint": ident.fingerprint,
+                "cloned_from": ident.cloned_from,
+            }
+        ).encode()
+    )
     tmp = path.with_name(path.name + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.write(fd, json.dumps({
-            "host_id": ident.host_id,
-            "created_at": ident.created_at,
-            "fingerprint": ident.fingerprint,
-            "cloned_from": ident.cloned_from,
-        }).encode())
+        remaining = payload
+        while remaining:
+            written = os.write(fd, remaining)
+            if written == 0:
+                raise OSError("host identity write made no progress")
+            remaining = remaining[written:]
+        os.fsync(fd)
     finally:
         os.close(fd)
     tmp.replace(path)
+    parent_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
 
 
 def _read(path: Path) -> dict | None:

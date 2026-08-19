@@ -155,6 +155,11 @@ mship relay enroll-server \
 
 `--relay-domain` can also be set via the `RELAY_DOMAIN` environment variable. The enroll-server is reached from the internet only through Caddy at `https://enroll.<relay>` — the raw `:47180` port is not accessible externally.
 
+Every owner-side command must receive its applicable `--store-dir` and
+`--pubkeys-dir` explicitly. The examples below use
+`/path/to/docker/relay/pending-store` and `/path/to/docker/relay/pubkeys`;
+substitute the exact values from the running unit's `ExecStart`.
+
 > **Important — keep the enroll-server supervised.** The enroll-server backs Caddy's on-demand TLS `ask` endpoint, which gates cert issuance **and renewal** for every relay subdomain — not just new enrollment requests. If the enroll-server is down, Caddy cannot renew existing certs and will refuse to issue new ones for serve subdomains. Unlike sish and Caddy (which Docker Compose restarts automatically), the enroll-server runs outside the compose stack and **must run under a supervisor so it survives reboots**.
 >
 > The bootstrap script installs a systemd unit automatically when run as root (it runs the service as the user that owns the relay dir, so `mship relay approve` can still read the pending store). To install it manually, set `User=` to the operator who owns `<relay-dir>` and runs `mship relay approve` — not root:
@@ -234,12 +239,15 @@ mship relay enroll --enroll-url https://enroll.relay.example.com
 **Back on the relay host**, review and grant (or deny):
 
 ```bash
-mship relay requests                 # id · hostname · key fingerprint
+mship relay requests \
+  --store-dir /path/to/docker/relay/pending-store
+# id · hostname · key fingerprint
 mship relay approve a1c2 \
-  --store-dir docker/relay/pending-store \
-  --pubkeys-dir docker/relay/pubkeys
+  --store-dir /path/to/docker/relay/pending-store \
+  --pubkeys-dir /path/to/docker/relay/pubkeys
 # writes the key into pubkeys/ → sish picks it up (no restart needed).
-# `mship relay deny <id>` discards it.
+mship relay deny <id> \
+  --store-dir /path/to/docker/relay/pending-store
 ```
 
 A request only ever creates a *pending* entry — nothing reaches the allowlist until you `approve` it, and pending requests auto-expire after 30 minutes. The device can then `mship serve --relay`.
@@ -260,7 +268,14 @@ After the stack is running, verify each layer:
    ```
    It should print a request ID and enter polling. `:47180` should **not** be reachable directly from outside the relay host.
 
-4. **Approve and confirm**: on the relay host, `mship relay approve <id>` — the device should print `approved`.
+4. **Approve and confirm**: on the relay host, use the same store and allowlist
+   paths as the enroll-server:
+   ```bash
+   mship relay approve <id> \
+     --store-dir /path/to/docker/relay/pending-store \
+     --pubkeys-dir /path/to/docker/relay/pubkeys
+   ```
+   The device should print `approved`.
 
 5. **Serve subdomain**: run `mship serve --relay` from an enrolled device and confirm the printed URL (`https://<slug>-<6hex>.relay.example.com`) loads through Caddy (look for a valid TLS certificate issued by Let's Encrypt).
 
@@ -278,10 +293,14 @@ they are why a freshly provisioned VM needs no address typed on the phone.
 
 ### The exact relay-box delta
 
-Four commands, all on the relay host:
+Four steps, all on the relay host:
 
 ```bash
-# 1. Ship the new enroll-server code, then restart the (supervised) process.
+# 1. Keep the unit's existing stores: they contain enrollment history. Inspect
+#    ExecStart, then copy its exact --store-dir and --pubkeys-dir values here.
+systemctl cat mship-relay-enroll.service
+RELAY_STORE=/path/already/configured/in/ExecStart
+RELAY_PUBKEYS=/path/already/configured/in/ExecStart
 uv tool install --force --no-cache /path/to/mothership
 systemctl restart mship-relay-enroll.service
 
@@ -292,19 +311,25 @@ docker compose -f docker/relay/docker-compose.yml up -d --force-recreate caddy
 # 3. Once per phone: mint its fleet token and show the pairing QR.
 mship relay fleet-token --label phone \
   --relay-domain relay.example.com \
-  --store-dir /path/to/docker/relay/pending-store
+  --store-dir "$RELAY_STORE"
 
 # 4. Per new VM, exactly as before — one approval, then it is done.
 mship relay approve <id> \
-  --store-dir /path/to/docker/relay/pending-store \
-  --pubkeys-dir /path/to/docker/relay/pubkeys
+  --store-dir "$RELAY_STORE" \
+  --pubkeys-dir "$RELAY_PUBKEYS"
 ```
 
 Notes on each:
 
-- **Step 1** is not optional: `/hosts`, `/hosts/challenge` and `/hosts/register`
-  are served by the enroll-server process, and merging does not deploy — the
-  live process keeps running the version it imported.
+- **Step 1** deliberately retains the unit's configured store. Older units may
+  call it `<relay-dir>/enroll-store`; current ones use
+  `<relay-dir>/pending-store`. The name does not matter, but changing it during
+  an upgrade loses the existing request/history state unless the entire store
+  is migrated first. Keep `ExecStart`, `$RELAY_STORE`, and every later owner
+  command on that one directory. Likewise, `$RELAY_PUBKEYS` must remain the
+  allowlist sish reads. `/hosts`, `/hosts/challenge` and `/hosts/register` are
+  served by the upgraded process, and merging does not deploy — it keeps
+  running the version it imported.
 - **Step 2** is the only edge change. `docker/relay/Caddyfile` gains one
   matcher, `@hosts { path /hosts /hosts/* }`, plus its `handle` block
   (`request_body max_size 8KB` → `127.0.0.1:47180`). Without it the site's
@@ -320,7 +345,7 @@ Notes on each:
 - **Step 4** is unchanged because the signature allowlist *is* the sish
   `pubkeys/` allowlist, re-read per verification: approving a host's key both
   admits its tunnel and makes its signed registrations verify, with no restart.
-  `mship relay hosts --store-dir …` lists what the directory holds.
+  `mship relay hosts --store-dir "$RELAY_STORE"` lists what the directory holds.
 
 ### What does **not** change
 
@@ -345,10 +370,10 @@ fleet token is read access to the whole fleet, not to one host. Treat it like a
 password:
 
 - one `--label` per physical device, so a lost phone can be cut off by itself;
-- `mship relay fleet-token --label phone --revoke` invalidates that label
-  (`--revoke` is a boolean flag used *with* `--label`, not a value). A later
-  re-mint under the same label derives a **different** token rather than
-  resurrecting the revoked one.
+- `mship relay fleet-token --label phone --revoke --store-dir "$RELAY_STORE"`
+  invalidates that label (`--revoke` is a boolean flag used *with* `--label`,
+  not a value). A later re-mint under the same label derives a **different**
+  token rather than resurrecting the revoked one.
 
 Revocation stops future directory reads, and that is all it does: it does not
 rotate the per-host refresh credentials a paired phone already fetched. Those
@@ -417,15 +442,19 @@ the container restarts.
 
 **Phone says the fleet token is invalid** — the token is verified against
 `fleet-tokens.json` in the enroll-server's `--store-dir`. Minting it with a
-different `--store-dir` than the running server uses is the usual cause; a
-revoked label is the other (`mship relay fleet-token --label <device>` re-mints
-a *new* token after a revoke — the device must scan the fresh QR).
+different store than the running server uses is the usual cause; a revoked
+label is the other. Re-mint from the configured store:
+`mship relay fleet-token --label <device> --relay-domain relay.example.com
+--store-dir "$RELAY_STORE"`. The device must scan the fresh QR.
 
-**A host never appears in `mship relay hosts`** — check its own view first:
-`mship daemon status` on that host prints a `tunnel:` line naming the state
-(`awaiting-enrollment` means it is waiting for `mship relay approve`;
-`duplicate-identity` means a twin holds the entry). If the host reports
-`online` but `/hosts` 404s from outside, the `@hosts` Caddy matcher is missing —
-see [Host directory + fleet token](#host-directory-fleet-token-471).
+**A host never appears in
+`mship relay hosts --store-dir "$RELAY_STORE"`** — check its own view first:
+`mship daemon status` on that host prints a `tunnel:` line naming the state.
+`awaiting-enrollment` means it is waiting for
+`mship relay approve <id> --store-dir "$RELAY_STORE" --pubkeys-dir
+"$RELAY_PUBKEYS"`; `duplicate-identity` means a twin holds the entry. If the
+host reports `online` but `/hosts` 404s from outside, the `@hosts` Caddy matcher
+is missing — see
+[Host directory + fleet token](#host-directory-fleet-token-471).
 
 **Enroll request times out** — confirm the enroll-server process is running on the relay host (`curl http://127.0.0.1:47180/status/x` from the host should return a JSON status). Also check that Caddy is running and that `enroll.<relay>` resolves to the relay IP.

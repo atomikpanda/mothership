@@ -362,9 +362,7 @@ def register(parent: typer.Typer, get_container):
             probe=lambda public_url: None,  # …and never arbitrates
         )
         entries = directory.list_hosts(RequestStore(Path(store_dir)).list_pending())
-        if not entries:
-            out.print("no hosts")
-            return
+        hosts = []
         for entry in entries:
             last_seen = entry.get("last_seen") or entry.get("created_at")
             when = (
@@ -374,12 +372,27 @@ def register(parent: typer.Typer, get_container):
             )
             # Never the entry's `refresh`: that credential goes to the paired
             # phone over GET /hosts, not into a terminal's scrollback.
-            host_id = json.dumps(str(entry.get("host_id") or "-"), ensure_ascii=False)[
-                1:-1
-            ]
-            label = json.dumps(str(entry.get("label") or "-"), ensure_ascii=False)[1:-1]
-            line = f"{host_id}  {label}  {entry['state']}  {when}"
-            out.print(escape(line) if out.human_mode else line)
+            hosts.append(
+                {
+                    "host_id": str(entry.get("host_id") or "-"),
+                    "label": str(entry.get("label") or "-"),
+                    "state": entry["state"],
+                    "last_seen": when,
+                }
+            )
+        if out.json_mode:
+            out.json({"hosts": hosts})
+            return
+        if not hosts:
+            out.print("no hosts")
+            return
+        for host in hosts:
+            host_id = json.dumps(host["host_id"], ensure_ascii=False)[1:-1]
+            label = json.dumps(host["label"], ensure_ascii=False)[1:-1]
+            line = (
+                f"{host_id}  {label}  {host['state']}  {host['last_seen']}"
+            )
+            out.print(escape(line))
 
     # ---- typed grants + per-run tokens (cloud-worker-auth-spine) ----
 

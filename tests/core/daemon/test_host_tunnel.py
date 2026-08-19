@@ -853,10 +853,18 @@ def test_orphans_are_reaped_before_dialing_and_before_each_respawn(fx):
 # --- the state ladder -------------------------------------------------------
 
 
-def test_awaiting_enrollment_is_classified_from_the_ssh_log_tail(fx):
-    """ssh's own refusal is the first evidence that the relay has the key but
-    nobody has approved it — it arrives before any registration verdict."""
-    fx.write_ssh_log("Permission denied (publickey).\n")
+@pytest.mark.parametrize(
+    "ssh_log",
+    [
+        "Permission denied (publickey).\n",
+        "Permissions 0644 for 'relay_ed25519' are too open.\n"
+        "Load key \"relay_ed25519\": bad permissions\n",
+    ],
+)
+def test_ssh_permission_errors_do_not_override_the_signed_registration_verdict(
+    fx, ssh_log
+):
+    fx.write_ssh_log(ssh_log)
     fx.relay.transport_error = "connection refused"
 
     fx.tunnel.tick()
@@ -864,7 +872,7 @@ def test_awaiting_enrollment_is_classified_from_the_ssh_log_tail(fx):
     fx.clock.advance(120)
     fx.tunnel.tick()
 
-    assert fx.tunnel.state() == "awaiting-enrollment"
+    assert fx.tunnel.state() == "error"
 
 
 def test_awaiting_enrollment_is_classified_from_the_relays_verdict(tmp_path):
