@@ -1,6 +1,7 @@
 """Control app: the daemon's local identity surface. Version is captured at
 process start (the upgrade-in-place lie #470 calls out), capabilities are the
 #471/#472/#473 seams."""
+
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -15,7 +16,9 @@ STARTED = datetime(2026, 8, 16, 11, 0, 0, tzinfo=timezone.utc)
 
 
 def _client(version: str = "0.5.52") -> TestClient:
-    app = create_control_app(started_at=STARTED, version=version, socket_path="/run/mship/daemon.sock")
+    app = create_control_app(
+        started_at=STARTED, version=version, socket_path="/run/mship/daemon.sock"
+    )
     return TestClient(app)
 
 
@@ -73,12 +76,36 @@ SNAPSHOT = {
 
 def test_tunnel_capability_is_the_injected_value_and_health_carries_the_snapshot():
     app = create_control_app(
-        started_at=STARTED, version="1", socket_path="/s",
+        started_at=STARTED,
+        version="1",
+        socket_path="/s",
         tunnel=_FakeTunnel(SNAPSHOT),
     )
     body = TestClient(app).get("/health").json()
     assert body["capabilities"]["tunnel"] is True
     assert body["tunnel"] == SNAPSHOT
+
+
+def test_tunnel_initialization_error_is_state_not_a_live_capability():
+    error = {
+        "state": "error",
+        "subdomain": None,
+        "public_url": None,
+        "restarts": 0,
+        "last_error": "relay tunnel initialization failed: boom",
+        "clock_skew_seconds": None,
+    }
+    app = create_control_app(
+        started_at=STARTED,
+        version="1",
+        socket_path="/s",
+        tunnel_state=lambda: error,
+    )
+
+    body = TestClient(app).get("/health").json()
+
+    assert body["capabilities"]["tunnel"] is False
+    assert body["tunnel"] == error
 
 
 def test_version_is_captured_at_start_not_reread(monkeypatch):
@@ -138,16 +165,29 @@ def _registry_store(tmp_path):
 
     store = RegistryStore(tmp_path / "workspaces.json")
     now = datetime(2026, 8, 17, tzinfo=tz.utc)
-    store.mutate(lambda s: s.entries.append(WorkspaceEntry(
-        id="ws-1", name="a", path="/w/a", config_path="/w/a/mothership.yaml",
-        first_seen=now, last_seen=now,
-    )))
+    store.mutate(
+        lambda s: s.entries.append(
+            WorkspaceEntry(
+                id="ws-1",
+                name="a",
+                path="/w/a",
+                config_path="/w/a/mothership.yaml",
+                first_seen=now,
+                last_seen=now,
+            )
+        )
+    )
     return store
 
 
 def test_registry_capability_flips_with_store(tmp_path):
-    app = create_control_app(started_at=STARTED, version="1", socket_path="/s",
-                             store=_registry_store(tmp_path), serve_bound=True)
+    app = create_control_app(
+        started_at=STARTED,
+        version="1",
+        socket_path="/s",
+        store=_registry_store(tmp_path),
+        serve_bound=True,
+    )
     caps = TestClient(app).get("/health").json()["capabilities"]
     assert caps["registry"] is True
     assert caps["serve"] is True
@@ -156,8 +196,13 @@ def test_registry_capability_flips_with_store(tmp_path):
 
 def test_control_workspaces_endpoints(tmp_path):
     calls = []
-    app = create_control_app(started_at=STARTED, version="1", socket_path="/s",
-                             store=_registry_store(tmp_path), rescan=lambda: calls.append(1))
+    app = create_control_app(
+        started_at=STARTED,
+        version="1",
+        socket_path="/s",
+        store=_registry_store(tmp_path),
+        rescan=lambda: calls.append(1),
+    )
     client = TestClient(app)
     ws = client.get("/workspaces").json()["workspaces"]
     assert [w["id"] for w in ws] == ["ws-1"]
@@ -188,9 +233,7 @@ def test_control_refresh_runs_host_cleanup_after_rescan(tmp_path):
     assert events == ["rescan", "cleanup"]
 
     events.clear()
-    response = TestClient(app).post(
-        "/workspaces/refresh?cleanup_only=true"
-    )
+    response = TestClient(app).post("/workspaces/refresh?cleanup_only=true")
 
     assert response.status_code == 200
     assert events == ["cleanup"]

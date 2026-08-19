@@ -5,6 +5,7 @@ exit 0 (launchd's KeepAlive.SuccessfulExit=false relaunches on ANY nonzero exit
 every ThrottleInterval — a permanent hot loop; systemd Restart=on-failure
 already skips 0). Contended-but-dead → nonzero so the supervisor retries.
 """
+
 import json
 import logging
 import multiprocessing
@@ -110,7 +111,9 @@ def test_main_acquires_lease_then_serves_socket(env_home, monkeypatch):
     def record():
         # By the time uvicorn is entered, lease + history must already exist.
         lease_seen_held_by_uvicorn["lease"] = json.loads(lease_path(home).read_text())
-        lease_seen_held_by_uvicorn["history"] = [e.kind for e in read_history(run_mod.paths.start_history_path(home))]
+        lease_seen_held_by_uvicorn["history"] = [
+            e.kind for e in read_history(run_mod.paths.start_history_path(home))
+        ]
 
     configs = _capture_uvicorn(monkeypatch, on_serve=record)
     rc = run_mod.main(home=home, env=env)
@@ -125,7 +128,12 @@ def test_main_acquires_lease_then_serves_socket(env_home, monkeypatch):
     assert "start" in lease_seen_held_by_uvicorn["history"]
 
 
-def _hold_lease(path_str: str, sock_str: str, ready: multiprocessing.Event, done: multiprocessing.Event):
+def _hold_lease(
+    path_str: str,
+    sock_str: str,
+    ready: multiprocessing.Event,
+    done: multiprocessing.Event,
+):
     lease = DaemonLease(Path(path_str))
     assert lease.try_acquire(version="held", socket_path=sock_str) is None
     ready.set()
@@ -147,10 +155,16 @@ def foreign_holder(env_home):
     p.join(timeout=30)
 
 
-def test_lost_race_with_live_holder_exits_zero(env_home, foreign_holder, monkeypatch, caplog):
+def test_lost_race_with_live_holder_exits_zero(
+    env_home, foreign_holder, monkeypatch, caplog
+):
     home, env = env_home
     called = _capture_uvicorn(monkeypatch)
-    monkeypatch.setattr(run_mod, "_probe", lambda sock: {"status": "ok"} if str(sock) == foreign_holder else None)
+    monkeypatch.setattr(
+        run_mod,
+        "_probe",
+        lambda sock: {"status": "ok"} if str(sock) == foreign_holder else None,
+    )
     with caplog.at_level(logging.INFO):
         rc = run_mod.main(home=home, env=env)
     assert rc == 0
@@ -158,7 +172,9 @@ def test_lost_race_with_live_holder_exits_zero(env_home, foreign_holder, monkeyp
     assert any("already running" in r.message for r in caplog.records)
 
 
-def test_lost_race_with_dead_holder_exits_nonzero(env_home, foreign_holder, monkeypatch):
+def test_lost_race_with_dead_holder_exits_nonzero(
+    env_home, foreign_holder, monkeypatch
+):
     home, env = env_home
     called = _capture_uvicorn(monkeypatch)
     monkeypatch.setattr(run_mod, "_probe", lambda sock: None)  # holder never answers
@@ -187,7 +203,9 @@ def test_rotating_log_handler_configured(env_home, monkeypatch):
     assert rotating, "root logger must carry the rotating handler"
     for name in ("uvicorn", "uvicorn.error"):
         lg = logging.getLogger(name)
-        assert any(h in rotating for h in lg.handlers), f"{name} not routed to daemon.log"
+        assert any(h in rotating for h in lg.handlers), (
+            f"{name} not routed to daemon.log"
+        )
 
 
 def test_uncaught_exception_lands_in_daemon_log(env_home, monkeypatch):
@@ -213,8 +231,12 @@ def test_broken_import_still_appends_history(env_home, monkeypatch):
     monkeypatch.setattr(run_mod, "_import_server_stack", broken_import)
     rc = run_mod.main(home=home, env=env)
     assert rc != 0
-    assert [e.kind for e in read_history(run_mod.paths.start_history_path(home))] == ["start"]
-    assert "missing dep after upgrade" in (daemon_log_dir(home) / "daemon.log").read_text()
+    assert [e.kind for e in read_history(run_mod.paths.start_history_path(home))] == [
+        "start"
+    ]
+    assert (
+        "missing dep after upgrade" in (daemon_log_dir(home) / "daemon.log").read_text()
+    )
 
 
 def test_clean_stop_recorded(env_home, monkeypatch):
@@ -278,7 +300,11 @@ def test_tcp_bind_failure_stops_control_and_clears_capability(monkeypatch):
             {"host": "127.0.0.1", "port": 47190},
         )
 
-    assert TestClient(control_app).get("/health").json()["capabilities"]["serve"] is False
+    assert (
+        TestClient(control_app).get("/health").json()["capabilities"]["serve"] is False
+    )
+
+
 def test_oversized_launchd_capture_preserves_latest_evidence_on_start(
     env_home, monkeypatch
 ):
@@ -298,9 +324,9 @@ def test_oversized_launchd_capture_preserves_latest_evidence_on_start(
     assert not capture.exists()
     assert (log_dir / "launchd.err.log.1").read_bytes().endswith(latest)
     assert small.read_text() == "keep me\n"
-    assert "rolled over oversized launchd capture" in (
-        log_dir / "daemon.log"
-    ).read_text()
+    assert (
+        "rolled over oversized launchd capture" in (log_dir / "daemon.log").read_text()
+    )
 
 
 def test_capture_rotated_before_logging_setup(env_home, monkeypatch):
@@ -308,10 +334,12 @@ def test_capture_rotated_before_logging_setup(env_home, monkeypatch):
     configured; rollover must happen first, not inside _configure_logging."""
     home, env = env_home
     order: list[str] = []
-    monkeypatch.setattr(run_mod, "rotate_launchd_captures",
-                        lambda d: order.append("rotate") or [])
-    monkeypatch.setattr(run_mod, "_configure_logging",
-                        lambda h: order.append("logging"))
+    monkeypatch.setattr(
+        run_mod, "rotate_launchd_captures", lambda d: order.append("rotate") or []
+    )
+    monkeypatch.setattr(
+        run_mod, "_configure_logging", lambda h: order.append("logging")
+    )
     monkeypatch.setattr(run_mod, "_run", lambda h, e: order.append("run") or 0)
     assert run_mod.main(home=home, env=env) == 0
     assert order[0] == "rotate", order
@@ -392,9 +420,9 @@ class _FakeTunnel:
 @pytest.mark.parametrize(
     ("host_app", "serve_cfg", "with_tunnel", "servers"),
     [
-        (None, None, False, 1),                 # control-only
-        (object(), SERVE_BLOCK, False, 2),      # control + host
-        (object(), SERVE_BLOCK, True, 2),       # control + host + tunnel
+        (None, None, False, 1),  # control-only
+        (object(), SERVE_BLOCK, False, 2),  # control + host
+        (object(), SERVE_BLOCK, True, 2),  # control + host + tunnel
     ],
 )
 def test_serve_forever_always_runs_on_asyncio(
@@ -431,7 +459,8 @@ def test_shutdown_joins_the_tunnel_then_stops_it_then_records_clean_stop(
     monkeypatch.setattr(run_mod, "_build_tunnel", lambda *a: tunnel)
     real_clean_stop = run_mod.history.append_clean_stop
     monkeypatch.setattr(
-        run_mod.history, "append_clean_stop",
+        run_mod.history,
+        "append_clean_stop",
         lambda *a, **k: (events.append("clean_stop"), real_clean_stop(*a, **k))[1],
     )
 
@@ -459,7 +488,8 @@ def test_clean_stop_is_recorded_even_when_every_tunnel_tick_raises(
 
     assert rc == 0
     assert [e.kind for e in read_history(run_mod.paths.start_history_path(home))] == [
-        "start", "clean_stop",
+        "start",
+        "clean_stop",
     ]
     assert "tick boom" in (daemon_log_dir(home) / "daemon.log").read_text()
 
@@ -484,7 +514,8 @@ def test_unbuildable_relay_logs_and_leaves_the_daemon_healthy(env_home, monkeypa
     assert [c.kwargs.get("host") for c in configs] == [None, SERVE_BLOCK["host"]]
     assert configs[0].kwargs["uds"] == str(daemon_socket_path(env, home))
     assert [e.kind for e in read_history(run_mod.paths.start_history_path(home))] == [
-        "start", "clean_stop",
+        "start",
+        "clean_stop",
     ]
     log_text = (daemon_log_dir(home) / "daemon.log").read_text()
     assert "relay tunnel unavailable" in log_text and "no key material" in log_text
@@ -502,16 +533,19 @@ def test_loser_never_builds_a_tunnel_or_spawns_ssh(
     _capture_uvicorn(monkeypatch)
     spawned, built = [], []
     monkeypatch.setattr(
-        tunnel_mod, "_default_proc_factory",
+        tunnel_mod,
+        "_default_proc_factory",
         lambda argv, log_path=None: spawned.append(argv),
     )
     real_build = run_mod._build_tunnel
     monkeypatch.setattr(
-        run_mod, "_build_tunnel",
+        run_mod,
+        "_build_tunnel",
         lambda *a: (built.append(a), real_build(*a))[1],
     )
     monkeypatch.setattr(
-        run_mod, "_probe",
+        run_mod,
+        "_probe",
         lambda sock: {"status": "ok"} if str(sock) == foreign_holder else None,
     )
 
@@ -529,16 +563,22 @@ def test_build_tunnel_dials_the_subdomain_the_link_currently_owns(
     from mship.core.relay.config import RelayConfig
 
     class _Proc:
-        def poll(self): return None
-        def terminate(self): pass
-        def wait(self, timeout=None): return 0
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
 
     home = tmp_path / "home"
     home.mkdir()
     _seed_relay_key(home)
     spawned = []
     monkeypatch.setattr(
-        tunnel_mod, "_default_proc_factory",
+        tunnel_mod,
+        "_default_proc_factory",
         lambda argv, log_path=None: (spawned.append(argv), _Proc())[1],
     )
 
@@ -558,6 +598,33 @@ def test_no_relay_block_means_no_tunnel(tmp_path):
     home.mkdir()
     assert run_mod._relay_config(home) is None
     assert run_mod._build_tunnel(home, None, SERVE_BLOCK) is None
+
+
+def test_configured_tunnel_construction_failure_is_published_without_stopping_local_service(
+    env_home, monkeypatch
+):
+    from fastapi.testclient import TestClient
+
+    home, env = env_home
+    _seed_config(home, serve=SERVE_BLOCK, relay=RELAY_BLOCK)
+    configs = _capture_uvicorn(monkeypatch)
+    monkeypatch.setattr(
+        run_mod,
+        "_build_tunnel",
+        lambda *args: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    assert run_mod.main(home=home, env=env) == 0
+    assert len(configs) == 2
+
+    control_health = TestClient(configs[0].app).get("/health").json()
+    host_health = TestClient(configs[1].app).get("/health").json()
+    for health in (control_health, host_health):
+        assert health["tunnel"]["state"] == "error"
+        assert health["tunnel"]["last_error"] == (
+            "relay tunnel initialization failed: boom"
+        )
+    assert control_health["capabilities"]["tunnel"] is False
 
 
 @pytest.mark.parametrize("server_count", [1, 2])
@@ -612,9 +679,7 @@ def test_the_control_app_publishes_the_tunnel_it_was_built_with(env_home, monkey
     assert body["tunnel"] == snapshot
 
 
-def test_production_host_app_tracks_reidentified_tunnel_identity(
-    env_home, monkeypatch
-):
+def test_production_host_app_tracks_reidentified_tunnel_identity(env_home, monkeypatch):
     """The composition root must read the tunnel's current identity: an
     automatic re-identification happens after the host app is already built."""
     from fastapi.testclient import TestClient

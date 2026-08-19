@@ -18,6 +18,7 @@ would never learn a stop was requested, the daemon would outlive
 orphaned on the subdomain — where it blocks the next start from claiming it. One
 shared `asyncio.Event` is the stop condition for everything.
 """
+
 from __future__ import annotations
 
 import logging
@@ -102,14 +103,10 @@ def _build_registry(home: Path):
         try:
             current = load_daemon_config(home)
         except DaemonConfigReadError:
-            log.exception(
-                "daemon config unreadable on refresh — registry unchanged"
-            )
+            log.exception("daemon config unreadable on refresh — registry unchanged")
             raise
         except ValueError:
-            log.exception(
-                "daemon config invalid on refresh — registry unchanged"
-            )
+            log.exception("daemon config invalid on refresh — registry unchanged")
             raise
         reconcile(store, scan_roots(current), datetime.now(timezone.utc))
 
@@ -151,33 +148,30 @@ def _build_tunnel(home: Path, relay_cfg, serve_cfg):
     """The relay tunnel + registration link (#471), or None when either half of
     what it needs — a relay to dial or a local bind to forward — is absent.
 
-    Same never-raise contract and deferred-import seam as `_build_registry`.
+    Construction failures propagate to `_run`, which keeps local service alive
+    while publishing the failure separately from the live tunnel lifecycle.
     """
     if relay_cfg is None or serve_cfg is None:
         return None
-    try:
-        from mship.core.daemon.host_tunnel import HostTunnel
-        from mship.core.daemon.relay_link import RelayLink
-        from mship.core.relay import keys
-        from mship.core.relay.tunnel import TunnelSupervisor, build_tunnel_argv
+    from mship.core.daemon.host_tunnel import HostTunnel
+    from mship.core.daemon.relay_link import RelayLink
+    from mship.core.relay import keys
+    from mship.core.relay.tunnel import TunnelSupervisor, build_tunnel_argv
 
-        link = RelayLink(home, relay_cfg)
-        supervisor = TunnelSupervisor(
-            # A callable, not a frozen list: an auto-reidentify moves the link
-            # onto a NEW subdomain mid-run (AC4), and argv frozen at startup
-            # would keep re-dialing the one this host no longer owns.
-            argv=lambda: build_tunnel_argv(
-                relay_cfg,
-                subdomain=link.subdomain,
-                local_port=int(serve_cfg["port"]),
-                key_path=keys.relay_key_path(home),
-            ),
-            log_path=paths.tunnel_log_path(home),
-        )
-        return HostTunnel(link, supervisor)
-    except Exception:
-        log.exception("relay tunnel unavailable — daemon continues without one")
-        return None
+    link = RelayLink(home, relay_cfg)
+    supervisor = TunnelSupervisor(
+        # A callable, not a frozen list: an auto-reidentify moves the link
+        # onto a NEW subdomain mid-run (AC4), and argv frozen at startup
+        # would keep re-dialing the one this host no longer owns.
+        argv=lambda: build_tunnel_argv(
+            relay_cfg,
+            subdomain=link.subdomain,
+            local_port=int(serve_cfg["port"]),
+            key_path=keys.relay_key_path(home),
+        ),
+        log_path=paths.tunnel_log_path(home),
+    )
+    return HostTunnel(link, supervisor)
 
 
 def _tunnel_join_timeout() -> float:
@@ -225,10 +219,14 @@ async def _serve(control_app, socket_path, host_app, serve_cfg, tunnel) -> None:
     tunnel_task = None
     try:
         if host_app is not None and serve_cfg is not None:
-            host = uvicorn.Server(uvicorn.Config(
-                host_app, host=serve_cfg["host"], port=int(serve_cfg["port"]),
-                log_config=None,
-            ))
+            host = uvicorn.Server(
+                uvicorn.Config(
+                    host_app,
+                    host=serve_cfg["host"],
+                    port=int(serve_cfg["port"]),
+                    log_config=None,
+                )
+            )
             servers.append(host)
             tasks.append(asyncio.create_task(host.serve()))
             await _await_tcp_bind(control, tasks[0], host, tasks[1])
@@ -312,7 +310,7 @@ def _install_stop_handlers(stop, servers) -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
             loop.add_signal_handler(sig, _request_stop)
-        except (NotImplementedError, RuntimeError, ValueError):
+        except NotImplementedError, RuntimeError, ValueError:
             # Non-POSIX, or not the main thread (tests). Uvicorn's own handlers
             # plus the shutdown path still stop everything.
             log.debug("no asyncio signal handler available for %s", sig)
@@ -365,7 +363,9 @@ def _configure_logging(home: Path) -> None:
     handler = RotatingFileHandler(
         log_dir / "daemon.log", maxBytes=_LOG_MAX_BYTES, backupCount=_LOG_BACKUPS
     )
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     root.addHandler(handler)
@@ -375,7 +375,6 @@ def _configure_logging(home: Path) -> None:
         lg = logging.getLogger(name)
         lg.addHandler(handler)
         lg.setLevel(logging.INFO)
-
 
 
 def main(home: Path | None = None, env: Mapping[str, str] | None = None) -> int:
@@ -441,16 +440,37 @@ def _run(home: Path, env: Mapping[str, str]) -> int:
     entries = store.load().entries
     log.info(
         "mshipd %s starting on %s (pid %s) — %d workspace(s) discovered",
-        version, socket_path, os.getpid(), len(entries),
+        version,
+        socket_path,
+        os.getpid(),
+        len(entries),
     )
     relay_cfg = _relay_config(home)
     # AFTER the lease is won: a tunnel dialed by a process that then stands down
     # for the incumbent would fork an ssh child onto a subdomain it is about to
     # abandon. Constructing one dials nothing — only `tick()` does — so it is
     # safe to build here, and both HTTP apps need its runtime identity/state.
-    tunnel = _build_tunnel(home, relay_cfg, serve_cfg)
-    if tunnel is not None:
-        log.info("relay tunnel enabled — dialing %s", tunnel.public_url)
+    tunnel_state = None
+    try:
+        tunnel = _build_tunnel(home, relay_cfg, serve_cfg)
+    except Exception as exc:
+        log.exception("relay tunnel unavailable — daemon continues without one")
+        tunnel = None
+        failed_tunnel_state = {
+            "state": "error",
+            "subdomain": None,
+            "public_url": None,
+            "restarts": 0,
+            "last_error": f"relay tunnel initialization failed: {exc}",
+            "clock_skew_seconds": None,
+        }
+
+        def tunnel_state():
+            return failed_tunnel_state.copy()
+    else:
+        if tunnel is not None:
+            log.info("relay tunnel enabled — dialing %s", tunnel.public_url)
+            tunnel_state = tunnel.snapshot
 
     host_app = None
     if serve_cfg is not None:
@@ -464,13 +484,13 @@ def _run(home: Path, env: Mapping[str, str]) -> int:
         from mship.core.relay.host_contract import HOST_TOKEN_TTL_S
 
         if tunnel is not None:
+
             def current_host_id():
                 return tunnel.host_id
 
             def current_instance_id():
                 return tunnel.instance_id
 
-            host_state = tunnel.snapshot
         else:
             from mship.core.daemon.identity import (
                 ensure_host_identity,
@@ -478,9 +498,7 @@ def _run(home: Path, env: Mapping[str, str]) -> int:
                 mint_instance_id,
             )
 
-            identity = ensure_host_identity(
-                home, fingerprint=machine_fingerprint()
-            )
+            identity = ensure_host_identity(home, fingerprint=machine_fingerprint())
             process_instance_id = mint_instance_id()
 
             def current_host_id():
@@ -488,8 +506,6 @@ def _run(home: Path, env: Mapping[str, str]) -> int:
 
             def current_instance_id():
                 return process_instance_id
-
-            host_state = None
 
         refresh_store = RefreshStore(home)
 
@@ -510,21 +526,28 @@ def _run(home: Path, env: Mapping[str, str]) -> int:
             exchange_refresh=exchange_refresh,
             host_id=current_host_id,
             instance_id=current_instance_id,
-            host_state=host_state,
+            host_state=tunnel_state,
             rescan=rescan,
             gh_app_id=gh_app_id,
             gh_app_key=gh_app_key,
         )
     app = create_control_app(
-        started_at=started_at, version=version, socket_path=str(socket_path),
-        store=store, rescan=rescan, serve_bound=host_app is not None,
+        started_at=started_at,
+        version=version,
+        socket_path=str(socket_path),
+        store=store,
+        rescan=rescan,
+        serve_bound=host_app is not None,
         tunnel=tunnel,
+        tunnel_state=tunnel_state,
         after_rescan=(
             host_app.state.drop_stale_subapps if host_app is not None else None
         ),
     )
     _serve_forever(app, socket_path, host_app, serve_cfg, tunnel)
-    history.append_clean_stop(paths.start_history_path(home), datetime.now(timezone.utc))
+    history.append_clean_stop(
+        paths.start_history_path(home), datetime.now(timezone.utc)
+    )
     log.info("mshipd stopped cleanly")
     return 0
 

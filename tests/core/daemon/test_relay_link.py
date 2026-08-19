@@ -76,10 +76,12 @@ class _Relay:
         register=(200, None),
         challenge=(200, None),
         enroll_ttl=host_contract.ENROLL_TTL_S,
+        enroll=(200, None),
     ):
         self.register_status, self.register_detail = register
         self.challenge_status, self.challenge_detail = challenge
         self.enroll_ttl = enroll_ttl
+        self.enroll_status, self.enroll_detail = enroll
         self.calls: list[tuple[str, str, dict | None]] = []
         self.nonce = "nonce-1"
         self.date_header: str | None = None
@@ -101,10 +103,12 @@ class _Relay:
             )
             return _Resp(self.challenge_status, body, headers)
         if url.endswith("/enroll"):
-            return _Resp(
-                200,
-                {"id": "req-1", "status": "pending", "expires_in": self.enroll_ttl},
+            body = (
+                {"id": "req-1", "status": "pending", "expires_in": self.enroll_ttl}
+                if self.enroll_status == 200
+                else {"detail": self.enroll_detail}
             )
+            return _Resp(self.enroll_status, body)
         body = (
             {"status": "registered", "host_id": json["payload"]["host_id"]}
             if self.register_status == 200
@@ -439,6 +443,27 @@ def test_enroll_repost_follows_the_servers_advertised_ttl(tmp_path: Path):
 
     assert len(relay.posts_to("/enroll")) == 2
     assert clock() - started_at < 60
+
+
+@pytest.mark.parametrize("status", [429, 500])
+def test_failed_enroll_response_retries_on_the_next_registration_attempt(
+    tmp_path: Path, status: int
+):
+    relay = _Relay(
+        register=(401, host_contract.UNAPPROVED_KEY_DETAIL),
+        enroll=(status, "enrollment unavailable"),
+    )
+    clock = _Clock()
+    link = _link(tmp_path, relay, clock)
+
+    link.tick()
+    assert len(relay.posts_to("/enroll")) == 1
+    assert "enrollment unavailable" in (link.last_error or "")
+
+    _advance_past(clock, link)
+    link.tick()
+
+    assert len(relay.posts_to("/enroll")) == 2
 
 
 def test_challenge_stage_unapproved_self_heals_with_no_prompt(tmp_path: Path):

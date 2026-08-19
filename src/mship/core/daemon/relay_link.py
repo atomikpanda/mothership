@@ -380,6 +380,11 @@ class RelayLink:
             # Leaves `_last_enroll_at` alone, so the next tick retries.
             self.last_error = f"enroll post failed: {exc}"
             return
+        if not 200 <= response.status_code < 300:
+            self.last_error = (
+                _detail(response) or f"enroll post failed: HTTP {response.status_code}"
+            )
+            return
         try:
             ttl = float((_body(response) or {}).get("expires_in"))
         except TypeError, ValueError:
