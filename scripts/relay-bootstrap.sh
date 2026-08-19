@@ -5,6 +5,10 @@ set -euo pipefail
 : "${RELAY_DOMAIN:?set RELAY_DOMAIN (the wildcard base, e.g. relay.example.com)}"
 : "${ACME_EMAIL:?set ACME_EMAIL (for Lets Encrypt / ACME)}"
 
+if ! command -v ssh-keygen >/dev/null 2>&1; then
+  echo "[bootstrap] ssh-keygen is required; install the openssh-client package." >&2
+  exit 1
+fi
 if ! command -v docker >/dev/null 2>&1; then
   echo "[bootstrap] installing Docker..."
   curl -fsSL https://get.docker.com | sh

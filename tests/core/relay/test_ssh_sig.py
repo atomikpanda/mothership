@@ -144,9 +144,10 @@ def test_verify_never_shells_out_for_an_empty_allowlist():
 # --- allowed_signers -------------------------------------------------------
 
 
-def test_build_allowed_signers_emits_one_line_per_approved_key(tmp_path):
+def test_build_allowed_signers_emits_approved_keys_regardless_of_filename(tmp_path):
     (tmp_path / "a.pub").write_text(PUB + "\n")
-    (tmp_path / "b.pub").write_text(PUB2 + "\n")
+    (tmp_path / "team").mkdir()
+    (tmp_path / "team" / "key-without-suffix").write_text(PUB2 + "\n")
     from mship.core.relay.enroll import fingerprint
 
     lines = build_allowed_signers(tmp_path).strip().splitlines()

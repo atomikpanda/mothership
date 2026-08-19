@@ -47,3 +47,25 @@ def test_enroll_server_relay_domain_defaults_from_env(monkeypatch, tmp_path):
                                    "--pubkeys-dir", str(tmp_path / "p")])
     assert res.exit_code == 0, res.output
     assert captured["relay_domain"] == "env.example.com"
+
+def test_enroll_server_requires_ssh_keygen(monkeypatch, tmp_path):
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+    app, _captured = _app(monkeypatch)
+
+    res = CliRunner().invoke(
+        app,
+        [
+            "relay",
+            "enroll-server",
+            "--store-dir",
+            str(tmp_path / "s"),
+            "--pubkeys-dir",
+            str(tmp_path / "p"),
+            "--relay-domain",
+            "r.example.com",
+        ],
+    )
+
+    assert res.exit_code != 0
+    assert "ssh-keygen" in res.output
+    assert "openssh-client" in res.output

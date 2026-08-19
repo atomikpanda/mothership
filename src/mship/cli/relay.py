@@ -51,6 +51,7 @@ def _run_uvicorn(app, host, port):  # seam so tests don't boot a server
 
 def _enroll_server_impl(*, store_dir, pubkeys_dir, port, host, ttl, relay_domain):
     from pathlib import Path
+    import shutil
 
     from mship.core.relay.enroll import RequestStore
     from mship.core.relay.enroll_app import build_enroll_app
@@ -61,6 +62,10 @@ def _enroll_server_impl(*, store_dir, pubkeys_dir, port, host, ttl, relay_domain
     if not relay_domain:
         raise typer.BadParameter(
             "relay domain required: pass --relay-domain or set RELAY_DOMAIN"
+        )
+    if shutil.which("ssh-keygen") is None:
+        raise typer.BadParameter(
+            "ssh-keygen is required for host registration; install openssh-client"
         )
     store = RequestStore(Path(store_dir), ttl_seconds=ttl)
     # The signature allowlist IS the sish `pubkeys/` allowlist, re-read per

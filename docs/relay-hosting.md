@@ -25,6 +25,7 @@ internet
 | A VPS (Debian 12 or Ubuntu 22.04+) | 1 CPU / 512 MB RAM is sufficient. A $5/month cloud instance (Hetzner, DigitalOcean, Vultr, etc.) works. |
 | A domain you control | Example: `relay.example.com`. You only need a subdomain — the relay does not take over the root domain. |
 | SSH access to the VPS as root (or a sudo user) | To run the bootstrap script and open ports. |
+| OpenSSH client tools on the VPS | `ssh-keygen` verifies signed host registrations. On Debian/Ubuntu: `apt install openssh-client`. |
 
 ---
 

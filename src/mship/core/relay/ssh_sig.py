@@ -107,13 +107,14 @@ def build_allowed_signers(pubkeys_dir) -> str:
 
     One line per approved key, principal = that key's fingerprint (which is
     what a registration payload claims, so the relay verifies against exactly
-    the key the payload names). Anything `validate_pubkey` rejects is skipped —
-    the same guard that keeps a smuggled second line out of `authorized_keys`
-    keeps it out of the signer allowlist.
+    the key the payload names). Filenames and subdirectories are ignored,
+    matching sish's recursive directory loader. Anything `validate_pubkey`
+    rejects is skipped — the same guard that keeps a smuggled second line out
+    of both allowlists.
     """
     directory = Path(pubkeys_dir)
     lines: list[str] = []
-    for path in sorted(directory.glob("*.pub")) if directory.is_dir() else []:
+    for path in sorted(directory.rglob("*")) if directory.is_dir() else []:
         try:
             key = path.read_text().strip()
         except OSError:
