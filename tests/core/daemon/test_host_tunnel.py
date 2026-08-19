@@ -140,18 +140,21 @@ class _Fixture:
         self.argvs: list[list[str]] = []
         self.reaped: list[str] = []
         self.link = _link(home, relay, clock)
-        self.argv = build_tunnel_argv(
-            RELAY, subdomain=self.link.subdomain, local_port=BIND_PORT,
-            key_path=relay_key_path(home),
-        )
+        self.argv = self._argv()
         self.sup = TunnelSupervisor(
-            argv=self.argv, proc_factory=self._factory, backoff_delay=backoff,
+            argv=self._argv, proc_factory=self._factory, backoff_delay=backoff,
             max_backoff_delay=max_backoff, clock=clock,
             log_path=tunnel_log_path(home), rng=lambda: 0.0,
         )
         kw.setdefault("verify", partial(probe_health, get=_health_get(self.link.instance_id)))
         kw.setdefault("reaper", self._reaper)
         self.tunnel = HostTunnel(self.link, self.sup, clock=clock, **kw)
+
+    def _argv(self):
+        return build_tunnel_argv(
+            RELAY, subdomain=self.link.subdomain, local_port=BIND_PORT,
+            key_path=relay_key_path(self.home),
+        )
 
     def _factory(self, argv):
         self.argvs.append(list(argv))
@@ -238,14 +241,14 @@ def test_no_ssh_process_is_ever_spawned_while_the_link_says_not_to_dial(tmp_path
     assert fx.procs == [], "dialed while the relay says another host holds our identity"
     assert fx.tunnel.state() == "duplicate-identity"
 
-    # ...and the recovery path un-blocks the dial: the link re-identifies itself,
-    # lands in the enrollment queue, and stops refusing to dial. (The argv the
-    # supervisor holds still carries the OLD subdomain — a re-identify rotates
-    # the key too, so the tunnel only really comes back after the restart
-    # `mship daemon reidentify` tells the operator to perform.)
+    # ...and the recovery path un-blocks the dial on the newly minted identity:
+    # the old key/subdomain cannot serve the new directory entry.
+    old_subdomain = fx.link.subdomain
     fx.tunnel.tick()
     assert fx.tunnel.state() == "awaiting-enrollment"
     assert len(fx.procs) == 1
+    assert old_subdomain not in " ".join(fx.argvs[-1])
+    assert fx.link.subdomain in " ".join(fx.argvs[-1])
 
 
 def test_duplicate_identity_still_reaps_a_local_orphan_before_refusing_to_dial(tmp_path):

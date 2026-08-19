@@ -464,8 +464,12 @@ def _run(home: Path, env: Mapping[str, str]) -> int:
         from mship.core.relay.host_contract import HOST_TOKEN_TTL_S
 
         if tunnel is not None:
-            host_id = tunnel.host_id
-            instance_id = tunnel.instance_id
+            def current_host_id():
+                return tunnel.host_id
+
+            def current_instance_id():
+                return tunnel.instance_id
+
             host_state = tunnel.snapshot
         else:
             from mship.core.daemon.identity import (
@@ -474,17 +478,24 @@ def _run(home: Path, env: Mapping[str, str]) -> int:
                 mint_instance_id,
             )
 
-            host_id = ensure_host_identity(
+            identity = ensure_host_identity(
                 home, fingerprint=machine_fingerprint()
-            ).host_id
-            instance_id = mint_instance_id()
+            )
+            process_instance_id = mint_instance_id()
+
+            def current_host_id():
+                return identity.host_id
+
+            def current_instance_id():
+                return process_instance_id
+
             host_state = None
 
         refresh_store = RefreshStore(home)
 
         def exchange_refresh(credential: str):
             grant = refresh_store.verify_refresh(credential)
-            if grant is None or grant.host_id != host_id:
+            if grant is None or grant.host_id != current_host_id():
                 return None
             return issue_host_token(home), HOST_TOKEN_TTL_S
 
@@ -497,8 +508,8 @@ def _run(home: Path, env: Mapping[str, str]) -> int:
             ),
             relay_domain=relay_cfg.host if relay_cfg is not None else None,
             exchange_refresh=exchange_refresh,
-            host_id=host_id,
-            instance_id=instance_id,
+            host_id=current_host_id,
+            instance_id=current_instance_id,
             host_state=host_state,
             rescan=rescan,
             gh_app_id=gh_app_id,

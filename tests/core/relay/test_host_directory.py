@@ -486,6 +486,22 @@ def test_a_signed_registration_cannot_publish_a_non_relay_url(tmp_path, public_u
     assert d.get_host(_payload()["host_id"]) is None
 
 
+@pytest.mark.parametrize("subdomain", ("enroll", "egress"))
+def test_a_host_cannot_claim_a_reserved_relay_route(tmp_path, subdomain):
+    d = _dir(tmp_path)
+
+    with pytest.raises(ValueError):
+        _register(
+            d,
+            _payload(
+                subdomain=subdomain,
+                public_url=f"https://{subdomain}.relay.example",
+            ),
+        )
+
+    assert d.get_host(_payload()["host_id"]) is None
+
+
 def test_instance_probe_never_follows_a_relay_redirect():
     calls = []
 

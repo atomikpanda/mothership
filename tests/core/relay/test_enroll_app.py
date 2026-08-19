@@ -80,9 +80,12 @@ def _payload(**over):
     return payload
 
 
-def _harness(tmp_path, cap=50, answers=None, max_challenges=1000):
+def _harness(
+    tmp_path, cap=50, answers=None, max_challenges=1000,
+    ttl=host_contract.ENROLL_TTL_S,
+):
     base = tmp_path / "s"
-    store = RequestStore(base, max_pending=cap)
+    store = RequestStore(base, ttl_seconds=ttl, max_pending=cap)
     clock = Clock()
     prober = Prober(answers)
     directory = HostDirectory(
@@ -115,8 +118,8 @@ def _register(h, payload=None, nonce=None, signature=None):
     )
 
 
-def _client(tmp_path, cap=50):
-    h = _harness(tmp_path, cap=cap)
+def _client(tmp_path, cap=50, ttl=host_contract.ENROLL_TTL_S):
+    h = _harness(tmp_path, cap=cap, ttl=ttl)
     return h.client, h.store
 
 
@@ -124,10 +127,11 @@ def _ask_client(tmp_path):
     return _harness(tmp_path).client
 
 
-def test_enroll_creates_pending_and_status(tmp_path):
-    c, _ = _client(tmp_path)
+def test_enroll_creates_pending_with_the_store_ttl(tmp_path):
+    c, _ = _client(tmp_path, ttl=60)
     r = c.post("/enroll", json={"pubkey": _PUB, "hostname": "laptop"})
     assert r.status_code == 200
+    assert r.json()["expires_in"] == 60
     rid = r.json()["id"]
     assert c.get(f"/status/{rid}").json()["status"] == "pending"
 

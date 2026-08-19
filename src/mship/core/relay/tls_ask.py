@@ -8,6 +8,12 @@ import re
 _SERVE_LABEL = re.compile(r"[a-z0-9][a-z0-9-]*-[0-9a-f]{6}")
 
 
+def host_subdomain_allowed(label: str) -> bool:
+    """Whether a label is a tunnel-served host route, excluding relay services."""
+    label = (label or "").strip().lower()
+    return len(label) <= 63 and _SERVE_LABEL.fullmatch(label) is not None
+
+
 def tls_ask_allowed(domain: str, relay_domain: str) -> bool:
     """Whether Caddy may provision an on-demand TLS cert for `domain`.
 
@@ -30,4 +36,4 @@ def tls_ask_allowed(domain: str, relay_domain: str) -> bool:
         return False
     if label in ("enroll", "egress"):
         return True
-    return len(label) <= 63 and _SERVE_LABEL.fullmatch(label) is not None
+    return host_subdomain_allowed(label)

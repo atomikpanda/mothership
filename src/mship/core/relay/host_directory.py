@@ -35,7 +35,7 @@ from typing import Callable, Sequence
 
 from mship.core.relay import host_contract, ssh_sig
 from mship.core.relay.enroll import _locked
-from mship.core.relay.tls_ask import tls_ask_allowed
+from mship.core.relay.tls_ask import host_subdomain_allowed
 
 # host_ids are `hst-<timestamp>-<hex>` (`core.daemon.identity.mint_host_id`).
 # Anything else is rejected before it is used as a path component — the
@@ -369,7 +369,7 @@ class HostDirectory:
             return None
         hostname = f"{subdomain}.{self._relay_domain}"
         canonical = f"https://{hostname}"
-        if not tls_ask_allowed(hostname, self._relay_domain) or public_url != canonical:
+        if not host_subdomain_allowed(subdomain) or public_url != canonical:
             return None
         return canonical
 

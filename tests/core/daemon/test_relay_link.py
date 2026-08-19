@@ -65,14 +65,14 @@ def _advance_past(clock: "_Clock", link) -> None:
 class _Relay:
     """Scriptable stand-in for the enroll app's `/hosts/*` + `/enroll` routes."""
 
-    def __init__(self, register=(200, None)):
+    def __init__(self, register=(200, None), enroll_ttl=host_contract.ENROLL_TTL_S):
         self.register_status, self.register_detail = register
+        self.enroll_ttl = enroll_ttl
         self.calls: list[tuple[str, str, dict | None]] = []
         self.nonce = "nonce-1"
         self.date_header: str | None = None
         self.transport_error: str | None = None
         self.challenge_html: str | None = None
-
     def get(self, url, **kw):
         self.calls.append(("GET", url, None))
         if self.transport_error:
@@ -87,7 +87,10 @@ class _Relay:
         if self.transport_error:
             raise RuntimeError(self.transport_error)
         if url.endswith("/enroll"):
-            return _Resp(200, {"id": "req-1", "status": "pending"})
+            return _Resp(
+                200,
+                {"id": "req-1", "status": "pending", "expires_in": self.enroll_ttl},
+            )
         body = (
             {"status": "registered", "host_id": json["payload"]["host_id"]}
             if self.register_status == 200
@@ -390,6 +393,24 @@ def test_enroll_is_reposted_on_a_schedule_shorter_than_the_store_ttl(tmp_path: P
         >= 7 * 3600 // host_contract.ENROLL_REPOST_INTERVAL_S - 1
     )
     assert link.state == "awaiting-enrollment"
+
+
+def test_enroll_repost_follows_the_servers_advertised_ttl(tmp_path: Path):
+    relay = _Relay(
+        register=(401, host_contract.UNAPPROVED_KEY_DETAIL),
+        enroll_ttl=60,
+    )
+    clock = _Clock()
+    link = _link(tmp_path, relay, clock)
+
+    started_at = clock()
+    link.tick()
+    while len(relay.posts_to("/enroll")) == 1 and clock() - started_at < 60:
+        _advance_past(clock, link)
+        link.tick()
+
+    assert len(relay.posts_to("/enroll")) == 2
+    assert clock() - started_at < 60
 
 
 def test_approval_self_heals_with_no_prompt(tmp_path: Path):

@@ -612,11 +612,11 @@ def test_the_control_app_publishes_the_tunnel_it_was_built_with(env_home, monkey
     assert body["tunnel"] == snapshot
 
 
-def test_production_host_app_wires_identity_tunnel_and_token_services(
+def test_production_host_app_tracks_reidentified_tunnel_identity(
     env_home, monkeypatch
 ):
-    """The composition root must enable the host-facing seams, not merely leave
-    their independently-tested defaults disabled."""
+    """The composition root must read the tunnel's current identity: an
+    automatic re-identification happens after the host app is already built."""
     from fastapi.testclient import TestClient
 
     from mship.core.daemon.host_auth import RefreshStore
@@ -625,22 +625,31 @@ def test_production_host_app_wires_identity_tunnel_and_token_services(
     _seed_config(home, serve=SERVE_BLOCK, relay=RELAY_BLOCK)
     configs = _capture_uvicorn(monkeypatch)
     tunnel = _FakeTunnel()
-    refresh = RefreshStore(home).issue_refresh(
-        host_id=tunnel.host_id, client="phone"
+    refresh_store = RefreshStore(home)
+    stale_refresh = refresh_store.issue_refresh(
+        host_id=tunnel.host_id, client="old-phone"
     )
     monkeypatch.setattr(run_mod, "_build_tunnel", lambda *a: tunnel)
 
     assert run_mod.main(home=home, env=env) == 0
 
-    with TestClient(configs[1].app) as client:
+    tunnel.host_id = "hst-reidentified"
+    tunnel.instance_id = "fedcba9876543210"
+    current_refresh = refresh_store.issue_refresh(
+        host_id=tunnel.host_id, client="phone"
+    )
+    host_app = configs[-1].app
+    with TestClient(host_app) as client:
         health = client.get("/health").json()
-        minted = client.post("/host/token", json={"refresh": refresh})
+        stale = client.post("/host/token", json={"refresh": stale_refresh})
+        minted = client.post("/host/token", json={"refresh": current_refresh})
         assert minted.status_code == 200
         authorized = client.get(
             "/workspaces",
             headers={"Authorization": f"Bearer {minted.json()['token']}"},
         )
 
+    assert stale.status_code == 401
     assert health["host_id"] == tunnel.host_id
     assert health["instance_id"] == tunnel.instance_id
     assert health["tunnel"] == tunnel.snapshot()

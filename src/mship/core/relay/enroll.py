@@ -120,6 +120,10 @@ class RequestStore:
         self._ttl = ttl_seconds
         self._max_pending = max_pending
         self._clock = clock
+    @property
+    def ttl_seconds(self) -> int:
+        return self._ttl
+
 
     def _write_atomic(self, path: Path, rec: dict) -> None:
         tmp = path.with_suffix(".json.tmp")

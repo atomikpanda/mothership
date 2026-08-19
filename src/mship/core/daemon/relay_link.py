@@ -153,6 +153,7 @@ class RelayLink:
         self._duplicate_streak = 0
         self._last_attempt_at: float | None = None
         self._last_enroll_at: float | None = None
+        self._enroll_repost_interval = host_contract.ENROLL_REPOST_INTERVAL_S
         self._delay = 0.0
         self._adopt(
             ensure_host_identity(self._home, fingerprint=machine_fingerprint())
@@ -351,11 +352,11 @@ class RelayLink:
         refreshes the record's TTL instead of filling the pending cap."""
         if (
             self._last_enroll_at is not None
-            and 0 <= now - self._last_enroll_at < host_contract.ENROLL_REPOST_INTERVAL_S
+            and 0 <= now - self._last_enroll_at < self._enroll_repost_interval
         ):
             return
         try:
-            self._post(
+            response = self._post(
                 self._base + host_contract.ENROLL_PATH,
                 json={"pubkey": self._pubkey, "hostname": socket.gethostname()},
                 timeout=self._timeout,
@@ -364,6 +365,12 @@ class RelayLink:
             # Leaves `_last_enroll_at` alone, so the next tick retries.
             self.last_error = f"enroll post failed: {exc}"
             return
+        try:
+            ttl = float((_body(response) or {}).get("expires_in"))
+        except (TypeError, ValueError):
+            ttl = 0
+        if math.isfinite(ttl) and ttl > 0:
+            self._enroll_repost_interval = ttl / 3
         self._last_enroll_at = now
 
     # -- what the tunnel asks ------------------------------------------------

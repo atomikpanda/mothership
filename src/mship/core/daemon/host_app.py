@@ -396,8 +396,8 @@ def create_host_app(
     verify_bearer: Callable[[str], bool] | None = None,
     relay_domain: str | None = None,
     exchange_refresh: Callable[[str], tuple[str, float] | None] | None = None,
-    host_id: str | None = None,
-    instance_id: str | None = None,
+    host_id: str | Callable[[], str | None] | None = None,
+    instance_id: str | Callable[[], str | None] | None = None,
     host_state: Callable[[], Mapping] | None = None,
     runner_config: Callable[[], Any] | None = None,
     build_subapp: Callable = _default_build_subapp,
@@ -501,13 +501,16 @@ def create_host_app(
     # in a sibling ASGI app. Expose only the post-rescan cleanup it must await.
     app.state.drop_stale_subapps = _drop_stale
 
+    def _current_identity(value):
+        return value() if callable(value) else value
+
     @app.get("/health")
     def health():
         entries = _entries()
         return {
             "status": "ok",
-            "host_id": host_id,
-            "instance_id": instance_id,
+            "host_id": _current_identity(host_id),
+            "instance_id": _current_identity(instance_id),
             "workspaces": len([e for e in entries if not e.ignored]),
             "degraded": len([e for e in entries if e.state == "degraded" and not e.ignored]),
             "tunnel": dict(host_state()) if host_state is not None else {"state": "disabled"},
