@@ -6,6 +6,7 @@ plaintext — the `core.daemon.host_auth.RefreshStore` shape, for the same reaso
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -101,6 +102,19 @@ def test_token_material_is_owner_only_on_disk(tmp_path):
     for path in (tmp_path / "store").rglob("*"):
         if path.is_file() and not path.name.endswith(".lock"):
             assert path.stat().st_mode & 0o077 == 0, path
+
+
+def test_verify_writes_nothing(tmp_path):
+    store = _store(tmp_path)
+    token = store.issue("phone")
+    lock_path = store.path.with_name(store.path.name + ".lock")
+    before = store.path.read_bytes()
+    os.utime(lock_path, ns=(1_000_000_000, 1_000_000_000))
+    lock_mtime = lock_path.stat().st_mtime_ns
+
+    assert store.verify(token) == "phone"
+    assert store.path.read_bytes() == before
+    assert lock_path.stat().st_mtime_ns == lock_mtime
 
 
 def test_a_corrupt_document_does_not_brick_the_store(tmp_path):

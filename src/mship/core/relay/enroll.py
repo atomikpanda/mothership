@@ -165,15 +165,18 @@ class RequestStore:
             if rec is None:
                 continue
             try:
+                created_at = float(rec["created_at"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                created_at = math.nan
+            if not math.isfinite(created_at):
+                self._resolve(p, rec, "expired")
+                continue
+            try:
                 deadline = float(rec["expires_at"])
-            except (KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError, OverflowError):
                 # Records created before per-request deadlines used the store TTL.
-                try:
-                    deadline = float(rec["created_at"]) + self._ttl
-                except (KeyError, TypeError, ValueError):
-                    deadline = math.nan
-            expired = not math.isfinite(deadline) or now >= deadline
-            if expired:
+                deadline = created_at + self._ttl
+            if not math.isfinite(deadline) or now >= deadline:
                 self._resolve(p, rec, "expired")
 
     def _list_pending_unlocked(self) -> list[dict]:

@@ -98,20 +98,7 @@ def _read(path: Path) -> dict | None:
 
 
 def _preserve_relay_key(_home: Path) -> None:
-    """Automatic recovery cannot prove a copied key is not still in use."""
-
-
-def _revoke_relay_key(home: Path) -> None:
-    """Remove the current key from a configured relay before rotating it."""
-    from mship.core.daemon.registry import load_daemon_config
-    from mship.core.relay.config import RelayConfig
-
-    relay = RelayConfig.from_mapping(load_daemon_config(home).relay)
-    if relay is None:
-        return
-    from mship.core.daemon.relay_link import revoke_relay_key
-
-    revoke_relay_key(home, relay)
+    """A copied key may still be serving a healthy source host."""
 
 
 def _rotate_relay_key(home: Path) -> None:
@@ -130,18 +117,20 @@ def force_reidentify(
     home: Path,
     *,
     fingerprint: str | None = None,
-    revoke_key: Callable[[Path], None] = _revoke_relay_key,
+    revoke_key: Callable[[Path], None] = _preserve_relay_key,
     rotate_key: Callable[[Path], None] = _rotate_relay_key,
     now: datetime | None = None,
 ) -> HostIdentity:
-    """Re-identify unconditionally: revoke the old relay key, mint a new
-    `host_id`, record the old one as `cloned_from`, and rotate local key
-    material.
+    """Re-identify unconditionally: preserve the old relay approval by default,
+    mint a new `host_id`, record the old one as `cloned_from`, and rotate the
+    local key material.
 
-    The single owner of that transition. `ensure_host_identity` delegates here
-    when a changed machine fingerprint is what noticed the clone; the daemon
-    calls it directly after repeated `409 duplicate-identity` answers, when the
-    relay noticed; `mship daemon reidentify` calls it for an operator.
+    A copied key may still be serving a healthy source host, so no recovery
+    path revokes it implicitly. Callers that can prove sole ownership may inject
+    a revoker. `ensure_host_identity` delegates here when a changed machine
+    fingerprint notices the clone; the daemon calls it after repeated
+    `409 duplicate-identity` answers; `mship daemon reidentify` calls it for an
+    operator.
     """
     from mship.core.daemon.paths import host_identity_path
 
@@ -174,9 +163,10 @@ def ensure_host_identity(
     A recorded fingerprint that no longer matches the running machine means the
     identity file travelled to different hardware (a re-imaged/restored host):
     with `on_mismatch="reidentify"` (default) a NEW host_id is minted, the old
-    one recorded as `cloned_from`, and the relay key rotated so the twin cannot
-    keep authenticating as us. `on_mismatch="keep"` is the operator's explicit
-    "this is still the same host" adoption.
+    one recorded as `cloned_from`, and the local relay key rotated so the new
+    identity enrolls independently without revoking a possibly-live source.
+    `on_mismatch="keep"` is the operator's explicit "this is still the same
+    host" adoption.
 
     Idempotent: a second call returns the same identity, and a re-identified
     host does not re-identify again on the next call.

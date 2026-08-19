@@ -14,6 +14,7 @@ import pytest
 
 from mship.core.daemon.identity import (
     ensure_host_identity,
+    force_reidentify,
     machine_fingerprint,
     mint_host_id,
     mint_instance_id,
@@ -58,11 +59,31 @@ def test_reimage_reidentifies_once_and_rotates_key(tmp_path: Path):
     # stale one forward and re-fire the mismatch on every call.
     assert second.fingerprint == "B"
     assert json.loads(host_identity_path(tmp_path).read_text())["fingerprint"] == "B"
-    assert rotated == [tmp_path]  # the clone's copied key must stop working
+    assert rotated == [tmp_path]  # this host must enroll under independent key material
     third = ensure_host_identity(tmp_path, fingerprint="B", rotate_key=lambda h: rotated.append(h))
     assert third.host_id == second.host_id  # stable; no re-identify loop
     assert third.reidentified is False
     assert rotated == [tmp_path]
+
+
+def test_forced_reidentify_preserves_a_possibly_shared_relay_key_approval(
+    tmp_path: Path, monkeypatch
+):
+    from mship.core.daemon import relay_link
+    from mship.core.daemon.registry import DaemonConfig, save_daemon_config
+
+    ensure_host_identity(tmp_path, fingerprint="same", rotate_key=_noop_rotate)
+    save_daemon_config(tmp_path, DaemonConfig(relay={"host": "relay.example"}))
+    revoked = []
+    monkeypatch.setattr(
+        relay_link,
+        "revoke_relay_key",
+        lambda home, relay: revoked.append((home, relay)),
+    )
+
+    force_reidentify(tmp_path, rotate_key=_noop_rotate, now=NOW)
+
+    assert revoked == []
 
 
 def test_real_key_rotation_moves_key_aside(tmp_path: Path):

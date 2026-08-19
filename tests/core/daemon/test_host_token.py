@@ -300,10 +300,25 @@ def test_verify_writes_nothing(tmp_path: Path):
     pure read, so a flapping phone cannot churn the store."""
     clk = _Clock()
     token = issue_host_token(tmp_path, ttl_seconds=300, clock=clk.anchored())
-    before = host_tokens_path(tmp_path).read_bytes()
+    data_path = host_tokens_path(tmp_path)
+    lock_path = data_path.with_name(data_path.name + ".lock")
+    before = data_path.read_bytes()
+    os.utime(lock_path, ns=(1_000_000_000, 1_000_000_000))
+    lock_mtime = lock_path.stat().st_mtime_ns
     for _ in range(5):
         assert verify_host_token(tmp_path, token, clock=clk.anchored()) is not None
-    assert host_tokens_path(tmp_path).read_bytes() == before
+    assert data_path.read_bytes() == before
+    assert lock_path.stat().st_mtime_ns == lock_mtime
+
+
+def test_verify_of_missing_store_creates_no_state_directory(tmp_path: Path):
+    assert (
+        verify_host_token(
+            tmp_path, "deadbeefdeadbeef.s", clock=_Clock().anchored()
+        )
+        is None
+    )
+    assert not daemon_state_dir(tmp_path).exists()
 
 
 # --- the state dir is owner-only, whatever the umask -----------------------
@@ -329,12 +344,9 @@ def _mode(path: Path) -> str:
     [
         lambda home: ensure_host_root_secret(home),
         lambda home: issue_host_token(home, clock=_Clock().anchored()),
-        lambda home: verify_host_token(
-            home, "deadbeefdeadbeef.s", clock=_Clock().anchored()
-        ),
     ],
 )
-def test_state_dir_is_owner_only_after_any_entry_point(
+def test_state_dir_is_owner_only_after_any_mutating_entry_point(
     tmp_path: Path, loose_umask, entry_point
 ):
     entry_point(tmp_path)

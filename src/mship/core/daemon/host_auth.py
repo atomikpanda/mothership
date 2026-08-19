@@ -206,8 +206,7 @@ class RefreshStore:
         client_id, secret = presented.split(".", 1)
         if not _ID_RE.match(client_id):
             return None
-        with _locked(self._lock, fcntl.LOCK_SH):
-            rec = self._load().get(client_id)
+        rec = self._load().get(client_id)
         if not isinstance(rec, dict):
             return None
         if not hmac.compare_digest(_hash(secret), str(rec.get("secret_hash", ""))):

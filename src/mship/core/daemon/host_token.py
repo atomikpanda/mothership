@@ -169,8 +169,7 @@ def verify_host_token(
     if not _ID_RE.match(token_id):
         return None
     path = host_tokens_path(home)
-    with _locked(path.with_name(path.name + ".lock"), fcntl.LOCK_SH):
-        rec = _load(path).get(token_id)
+    rec = _load(path).get(token_id)
     if not isinstance(rec, dict):
         return None
     if not hmac.compare_digest(_hash(secret), str(rec.get("secret_hash", ""))):

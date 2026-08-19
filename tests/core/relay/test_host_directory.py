@@ -26,6 +26,7 @@ from mship.core.relay.host_directory import (
 
 FP_A = "SHA256:keyA"
 FP_B = "SHA256:keyB"
+FP_C = "SHA256:keyC"
 MACHINE = "machine-fingerprint-copied-by-cp-a"
 SUBDOMAIN = "abc123-a1b2c3"
 PUBLIC_URL = f"https://{SUBDOMAIN}.relay.example"
@@ -155,6 +156,73 @@ def test_same_key_different_host_ids_are_serialized_after_nonce_consumption(tmp_
 
     assert d.get_host(first["host_id"]) is None
     assert [host["host_id"] for host in d.list_hosts()] == [second["host_id"]]
+
+
+def test_concurrent_hosts_cannot_claim_the_same_relay_subdomain(tmp_path):
+    d = _dir(tmp_path, signers=(FP_A, FP_B, FP_C))
+    seed = _payload(
+        subdomain="seed123-a1b2c3",
+        public_url="https://seed123-a1b2c3.relay.example",
+    )
+    _register(d, seed)
+    seed_path = tmp_path / "hosts" / f"{seed['host_id']}.json"
+    barrier = threading.Barrier(2)
+    read_rec = d._read_rec
+
+    def read_seed_then_pause(path, **kwargs):
+        rec = read_rec(path, **kwargs)
+        if path == seed_path:
+            try:
+                barrier.wait(timeout=0.1)
+            except threading.BrokenBarrierError:
+                pass
+        return rec
+
+    d._read_rec = read_seed_then_pause
+    payloads = [
+        _payload(
+            host_id="hst-20260818120000-bbbbbbbb",
+            instance_id="inst-2",
+            key_fingerprint=FP_B,
+        ),
+        _payload(
+            host_id="hst-20260818120000-cccccccc",
+            instance_id="inst-3",
+            key_fingerprint=FP_C,
+        ),
+    ]
+
+    def register(payload):
+        try:
+            _register(d, payload, fingerprint=str(payload["key_fingerprint"]))
+            return "registered"
+        except DuplicateIdentity:
+            return "duplicate"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(register, payloads))
+
+    assert sorted(outcomes) == ["duplicate", "registered"]
+    claimed = [
+        host for host in d.list_hosts() if host["subdomain"] == SUBDOMAIN
+    ]
+    assert len(claimed) == 1
+
+
+def test_registered_host_cannot_move_to_another_relay_subdomain(tmp_path):
+    d = _dir(tmp_path)
+    _register(d)
+
+    with pytest.raises(DuplicateIdentity):
+        _register(
+            d,
+            _payload(
+                subdomain="def456-d4e5f6",
+                public_url="https://def456-d4e5f6.relay.example",
+            ),
+        )
+
+    assert d.get_host(_payload()["host_id"])["subdomain"] == SUBDOMAIN
 
 
 # --- challenges -------------------------------------------------------------

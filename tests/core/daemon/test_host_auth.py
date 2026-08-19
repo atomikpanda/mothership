@@ -151,10 +151,15 @@ def test_verify_never_raises_on_a_corrupt_store(tmp_path: Path):
 def test_verify_writes_nothing(tmp_path: Path):
     store = _store(tmp_path)
     cred = store.issue_refresh(host_id=HOST, client="phone-a")
-    before = host_refresh_path(tmp_path).read_bytes()
+    data_path = host_refresh_path(tmp_path)
+    lock_path = data_path.with_name(data_path.name + ".lock")
+    before = data_path.read_bytes()
+    os.utime(lock_path, ns=(1_000_000_000, 1_000_000_000))
+    lock_mtime = lock_path.stat().st_mtime_ns
     for _ in range(5):
         assert store.verify_refresh(cred) is not None
-    assert host_refresh_path(tmp_path).read_bytes() == before
+    assert data_path.read_bytes() == before
+    assert lock_path.stat().st_mtime_ns == lock_mtime
 
 
 def test_expired_credentials_are_rejected_and_pruned_on_issue(tmp_path: Path):

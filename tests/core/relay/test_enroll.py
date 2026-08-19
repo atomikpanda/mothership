@@ -1,4 +1,5 @@
 import json
+import math
 import threading
 
 from pathlib import Path
@@ -250,6 +251,20 @@ def test_malformed_legacy_expiry_does_not_brick_store(tmp_path):
     record = json.loads(path.read_text())
     record["created_at"] = "not-a-time"
     record["expires_at"] = "not-a-time"
+    path.write_text(json.dumps(record))
+
+    assert store.list_pending() == []
+    assert store.get(rid) == "expired"
+
+
+@pytest.mark.parametrize("created_at", [math.nan, math.inf, -math.inf])
+def test_non_finite_pending_creation_time_is_expired(tmp_path, created_at):
+    store = _store(tmp_path)
+    rid = store.create(_PUB, "malformed")
+    path = tmp_path / "store" / "pending" / f"{rid}.json"
+    record = json.loads(path.read_text())
+    record["created_at"] = created_at
+    record["expires_at"] = 10_000.0
     path.write_text(json.dumps(record))
 
     assert store.list_pending() == []
