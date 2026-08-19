@@ -315,6 +315,9 @@ class HostTunnel:
             return
         self._last_readback_at = now
         probe = self._verify(self._link.public_url, "")
+        # Contention is an observation, not a latch: every completed read-back
+        # supersedes the previous verdict, even when the new result is transient.
+        self._contended_with = None
         if probe.error is not None:
             self._online = False
             self._detail = f"read-back failed: {probe.error}"

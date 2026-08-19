@@ -718,6 +718,36 @@ def test_a_foreign_instance_id_is_contended_and_does_not_tear_the_tunnel_down(tm
     assert "inst-of-the-twin" in fx.tunnel.last_error
     assert fx.sup.is_running() and fx.child.terminated == 0
 
+@pytest.mark.parametrize(
+    "next_get",
+    (
+        _health_get(None, error="connection refused"),
+        _health_get(None, status=503),
+        _health_get(None),
+    ),
+    ids=("transport-error", "non-2xx", "missing-instance-id"),
+)
+def test_a_transient_readback_replaces_an_obsolete_contention_verdict(
+    tmp_path, next_get
+):
+    responses = iter((_health_get("inst-of-the-twin"), next_get))
+
+    def get(*args, **kwargs):
+        return next(responses)(*args, **kwargs)
+
+    fx = _Fixture(
+        tmp_path,
+        _Relay(),
+        _Clock(),
+        verify=partial(probe_health, get=get),
+    )
+    assert fx.connect() == "contended"
+
+    fx.clock.advance(120)
+
+    assert fx.tunnel.tick() == "connecting"
+
+
 
 def test_a_transport_failure_on_the_read_back_stays_connecting(tmp_path):
     """Unreachable is not contended — the same terminal-vs-transient split
