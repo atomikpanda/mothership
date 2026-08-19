@@ -23,6 +23,18 @@ def test_ok_when_authed_request_succeeds():
     assert calls["url"] == "https://w-ab12.relay/health"
     assert calls["auth"] == "Bearer tok"
 
+def test_health_probe_does_not_follow_relay_redirects():
+    seen = []
+
+    def get(*_args, **kwargs):
+        seen.append(kwargs["follow_redirects"])
+        return _Resp(302)
+
+    probe_health("https://w-ab12.relay", "", get=get)
+
+    assert seen == [False]
+
+
 def test_not_ok_on_401_explains_token():
     ok, detail = verify_relay_reachable("https://w.relay", "tok", get=lambda *a, **k: _Resp(401))
     assert ok is False and "token" in detail.lower()

@@ -28,6 +28,8 @@ def probe_health(public_url: str, token: str, *, get: Callable | None = None,
     renders its prose from this, and `mship.core.topology` maps the status code
     to a per-edge status + fix hint (a run-host 401 and a phone-pairing 401 need
     different advice, so that mapping belongs with the caller, not here).
+    Redirects are reported, never followed: the relay-owned URL must not become
+    an attacker-selected request from inside the host.
     """
     if get is None:
         import httpx
@@ -35,7 +37,7 @@ def probe_health(public_url: str, token: str, *, get: Callable | None = None,
     url = public_url.rstrip("/") + "/health"
     try:
         r = get(url, headers={"Authorization": f"Bearer {token}"},
-                timeout=timeout, follow_redirects=True)
+                timeout=timeout, follow_redirects=False)
     except Exception as e:  # transport/DNS/TLS error
         return HealthProbe(ok=False, error=str(e))
     code = r.status_code
