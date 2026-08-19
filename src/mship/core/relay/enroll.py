@@ -115,6 +115,7 @@ class RequestStore:
     ) -> None:
         self._pending = Path(base_dir) / "pending"
         self._resolved = Path(base_dir) / "resolved"
+        self._lock_path = Path(base_dir) / "create.lock"
         self._pending.mkdir(parents=True, exist_ok=True)
         self._resolved.mkdir(parents=True, exist_ok=True)
         self._ttl = ttl_seconds
@@ -163,27 +164,28 @@ class RequestStore:
             if now - rec["created_at"] >= self._ttl:
                 self._resolve(p, rec, "expired")
 
+    def _list_pending_unlocked(self) -> list[dict]:
+        self._sweep()
+        out = []
+        for p in sorted(self._pending.glob("*.json")):
+            rec = self._read_rec(p)
+            if rec is not None:
+                out.append(rec)
+        return out
+
     def create(self, pubkey: str, hostname: str) -> str:
         # The store is the security boundary, not just the HTTP layer: self-protect.
         # validate_pubkey rejects multi-line/CRLF input, so a crafted second line can't
         # be smuggled in here and later written into the pubkeys allowlist on approve.
         if not validate_pubkey(pubkey):
             raise ValueError("invalid pubkey")
-        # Scan-then-write under an exclusive flock (the `host_auth`/`registry`
-        # house pattern). The dedupe below and the cap check are both read-then-
-        # write, and the enroll app serves sync endpoints on a threadpool, so two
-        # re-posts of one key can interleave in a single process — the same class
-        # `_consume_nonce` is hardened against. The lock is the linearization
-        # point; every other method is unaffected because only `create` adds a
-        # pending record.
-        with _locked(self._pending.parent / "create.lock"):
-            pending = self.list_pending()      # sweeps expired records first
+        # Every pending-state transition shares this lock. The enrollment app
+        # serves sync endpoints on a threadpool, so create/approve and two
+        # creates can otherwise interleave their scan-then-write operations.
+        with _locked(self._lock_path):
+            pending = self._list_pending_unlocked()
             # Idempotent per key: keep one request id while the daemon is alive
-            # and renew its relay-stamped TTL on each scheduled re-post. The TTL
-            # still bounds abandoned records because renewal stops with the
-            # daemon. This atomic replace happens inside the same create lock as
-            # the dedupe scan, so concurrent re-posts cannot fork ids or lose a
-            # newer timestamp.
+            # and renew its relay-stamped TTL on each scheduled re-post.
             fp = fingerprint(pubkey)
             for rec in pending:
                 if rec.get("fingerprint") == fp:
@@ -192,6 +194,17 @@ class RequestStore:
                     self._write_atomic(
                         self._pending / f"{rec['id']}.json", renewed
                     )
+                    return rec["id"]
+            # An approval can win the lock immediately before an in-flight
+            # daemon re-post. Return that approved request so the daemon
+            # observes its terminal state instead of recreating it as pending.
+            for p in sorted(self._resolved.glob("*.json")):
+                rec = self._read_rec(p)
+                if (
+                    rec is not None
+                    and rec.get("status") == "approved"
+                    and rec.get("fingerprint") == fp
+                ):
                     return rec["id"]
             if len(pending) >= self._max_pending:
                 raise PendingCapReached()
@@ -210,54 +223,52 @@ class RequestStore:
         return rid
 
     def list_pending(self) -> list[dict]:
-        self._sweep()
-        out = []
-        for p in sorted(self._pending.glob("*.json")):
-            rec = self._read_rec(p)
-            if rec is not None:
-                out.append(rec)
-        return out
+        with _locked(self._lock_path):
+            return self._list_pending_unlocked()
 
     def get(self, rid: str) -> str:
         if not _RID_RE.match(rid):
             return "unknown"
-        self._sweep()
-        if (self._pending / f"{rid}.json").exists():
-            return "pending"
-        rec = self._read_rec(self._resolved / f"{rid}.json")
-        return rec.get("status", "unknown") if rec else "unknown"
+        with _locked(self._lock_path):
+            self._sweep()
+            if (self._pending / f"{rid}.json").exists():
+                return "pending"
+            rec = self._read_rec(self._resolved / f"{rid}.json")
+            return rec.get("status", "unknown") if rec else "unknown"
 
     def approve(self, rid: str, pubkeys_dir) -> None:
         if not _RID_RE.match(rid):
             raise NotPending(rid)
-        self._sweep()
-        p = self._pending / f"{rid}.json"
-        if not p.exists():
-            raise NotPending(rid)
-        rec = self._read_rec(p)
-        if rec is None:                       # corrupt/truncated → quarantined, treat as gone
-            raise NotPending(rid)
-        dest = _unique_pub_path(Path(pubkeys_dir), sanitize_label(rec["hostname"]))
-        # Atomic key write: sish re-reads pubkeys/ per connection and must never observe
-        # a half-written key file mid-write.
-        tmp = dest.with_suffix(".pub.tmp")
-        tmp.write_text(rec["pubkey"] + "\n")
-        tmp.replace(dest)
-        self._resolve(p, rec, "approved")
+        with _locked(self._lock_path):
+            self._sweep()
+            p = self._pending / f"{rid}.json"
+            if not p.exists():
+                raise NotPending(rid)
+            rec = self._read_rec(p)
+            if rec is None:
+                raise NotPending(rid)
+            dest = _unique_pub_path(Path(pubkeys_dir), sanitize_label(rec["hostname"]))
+            # Atomic key write: sish re-reads pubkeys/ per connection and must never
+            # observe a half-written key file mid-write.
+            tmp = dest.with_suffix(".pub.tmp")
+            tmp.write_text(rec["pubkey"] + "\n")
+            tmp.replace(dest)
+            self._resolve(p, rec, "approved")
 
     def deny(self, rid: str) -> None:
         if not _RID_RE.match(rid):
             raise NotPending(rid)
-        # Sweep first so denying an already-expired request resolves it as `expired`,
-        # consistent with the other methods.
-        self._sweep()
-        p = self._pending / f"{rid}.json"
-        if not p.exists():
-            raise NotPending(rid)
-        rec = self._read_rec(p)
-        if rec is None:                       # corrupt/truncated → quarantined, treat as gone
-            raise NotPending(rid)
-        self._resolve(p, rec, "denied")
+        with _locked(self._lock_path):
+            # Sweep first so denying an already-expired request resolves it as
+            # `expired`, consistent with the other methods.
+            self._sweep()
+            p = self._pending / f"{rid}.json"
+            if not p.exists():
+                raise NotPending(rid)
+            rec = self._read_rec(p)
+            if rec is None:
+                raise NotPending(rid)
+            self._resolve(p, rec, "denied")
 
 
 # ---------------------------------------------------------------------------

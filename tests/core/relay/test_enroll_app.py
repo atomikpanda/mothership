@@ -136,6 +136,24 @@ def test_enroll_creates_pending_with_the_store_ttl(tmp_path):
     assert c.get(f"/status/{rid}").json()["status"] == "pending"
 
 
+def test_enroll_repost_observes_an_already_approved_request(tmp_path):
+    client, store = _client(tmp_path)
+    first = client.post("/enroll", json={"pubkey": _PUB, "hostname": "laptop"})
+    rid = first.json()["id"]
+    pubkeys = tmp_path / "pubkeys"
+    pubkeys.mkdir()
+    store.approve(rid, pubkeys)
+
+    repost = client.post("/enroll", json={"pubkey": _PUB, "hostname": "laptop"})
+
+    assert repost.json() == {
+        "id": rid,
+        "status": "approved",
+        "expires_in": host_contract.ENROLL_TTL_S,
+    }
+    assert store.list_pending() == []
+
+
 def test_enroll_rejects_bad_key(tmp_path):
     c, _ = _client(tmp_path)
     assert c.post("/enroll", json={"pubkey": "garbage", "hostname": "x"}).status_code == 400

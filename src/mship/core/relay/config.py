@@ -13,6 +13,12 @@ class RelayConfig:
     ssh_port: int = 2222
     user: str | None = None       # ssh user; None → ssh default
 
+    def __post_init__(self) -> None:
+        canonical_host = self.host.strip().lower().rstrip(".")
+        if not canonical_host:
+            raise ValueError(RELAY_HOST_REQUIRED)
+        object.__setattr__(self, "host", canonical_host)
+
     @staticmethod
     def from_mapping(data: dict | None) -> "RelayConfig | None":
         if not data:

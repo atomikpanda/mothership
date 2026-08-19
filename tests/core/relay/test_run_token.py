@@ -1,7 +1,7 @@
 from pathlib import Path
 from mship.core.relay.grants import Scope
 from mship.core.relay.run_token import issue_run_token, verify_run_token
-from mship.core.relay.token_clock import SKEW_SECONDS
+from mship.core.relay.token_clock import SKEW_SECONDS, is_expired
 
 
 def test_issue_returns_plaintext_and_verify_accepts(tmp_path: Path):
@@ -68,3 +68,8 @@ def test_verify_rejects_beyond_the_skew_grace(tmp_path: Path):
                             ttl_seconds=100, clock=lambda: 1000.0)
     just_outside = 1100.0 + SKEW_SECONDS
     assert verify_run_token(tmp_path, token, clock=lambda: just_outside) is None
+
+
+def test_non_finite_expiry_fails_closed():
+    for expires_at in (float("nan"), float("inf"), float("-inf")):
+        assert is_expired(expires_at, now=1000.0) is True

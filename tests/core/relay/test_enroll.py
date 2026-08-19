@@ -118,11 +118,22 @@ def test_same_hostname_does_not_clobber(tmp_path):
     pubkeys = tmp_path / "pubkeys"
     pubkeys.mkdir()
     s = _store(tmp_path)
-    r1 = s.create(_PUB, "laptop")
+    r1 = s.create(_key("first"), "laptop")
     s.approve(r1, pubkeys)
-    r2 = s.create(_PUB, "laptop")
+    r2 = s.create(_key("second"), "laptop")
     s.approve(r2, pubkeys)
     assert len(list(pubkeys.glob("*.pub"))) == 2  # unique filenames
+
+
+def test_reposting_an_approved_key_returns_its_resolved_request(tmp_path):
+    pubkeys = tmp_path / "pubkeys"
+    pubkeys.mkdir()
+    store = _store(tmp_path)
+    rid = store.create(_PUB, "laptop")
+    store.approve(rid, pubkeys)
+
+    assert store.create(_PUB, "laptop") == rid
+    assert store.list_pending() == []
 
 
 # ---------------------------------------------------------------------------

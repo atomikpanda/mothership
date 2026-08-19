@@ -96,7 +96,7 @@ def build_enroll_app(
             # Store self-validates (belt-and-suspenders); surface its rejection
             # as a clean 400 rather than letting it bubble up as a 500.
             raise HTTPException(status_code=400, detail="invalid ssh public key")
-        return {"id": rid, "status": "pending", "expires_in": store.ttl_seconds}
+        return {"id": rid, "status": store.get(rid), "expires_in": store.ttl_seconds}
 
     @app.get("/status/{rid}")
     def status(rid: str):

@@ -23,6 +23,7 @@ cross-epoch (post-restart) check, or a caller with no anchor at all.
 """
 from __future__ import annotations
 
+import math
 import secrets
 import time
 from dataclasses import dataclass
@@ -69,8 +70,8 @@ def current_epoch() -> str:
 
 def is_expired(expires_at: float, now: float, *, skew: float = SKEW_SECONDS) -> bool:
     """Wall-clock expiry with a skew grace — the bound for callers with no
-    monotonic anchor to appeal to."""
-    return now >= expires_at + skew
+    monotonic anchor to appeal to. Invalid persisted deadlines fail closed."""
+    return not math.isfinite(expires_at) or now >= expires_at + skew
 
 
 @dataclass(frozen=True)

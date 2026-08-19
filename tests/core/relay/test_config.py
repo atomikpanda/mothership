@@ -19,6 +19,14 @@ def test_from_mapping_defaults_and_none():
     assert rc.ssh_port == 2222 and rc.user is None          # defaults
 
 
+def test_relay_host_is_canonicalized_for_dns_and_signed_urls():
+    mapped = RelayConfig.from_mapping({"host": " RELAY.EXAMPLE.COM. "})
+    direct = RelayConfig(host="RELAY.EXAMPLE.COM.")
+
+    assert mapped is not None and mapped.host == "relay.example.com"
+    assert direct.host == "relay.example.com"
+
+
 def test_config_loader_parses_relay_block(tmp_path: Path):
     """ConfigLoader.load exposes config.relay.host when a relay: block is present."""
     # Create a minimal repo so ConfigLoader doesn't fail path validation

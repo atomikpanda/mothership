@@ -143,7 +143,7 @@ The enroll-server is not part of the Docker compose stack — it runs as a long-
 ```bash
 mship relay enroll-server \
   --relay-domain relay.example.com \
-  --store-dir /path/to/docker/relay/enroll-store \
+  --store-dir /path/to/docker/relay/pending-store \
   --pubkeys-dir /path/to/docker/relay/pubkeys
 # Binds 127.0.0.1:47180 by default; Caddy proxies public traffic to it.
 # pending requests expire after 30 min.
@@ -232,7 +232,7 @@ mship relay enroll --enroll-url https://enroll.relay.example.com
 ```bash
 mship relay requests                 # id · hostname · key fingerprint
 mship relay approve a1c2 \
-  --store-dir docker/relay/enroll-store \
+  --store-dir docker/relay/pending-store \
   --pubkeys-dir docker/relay/pubkeys
 # writes the key into pubkeys/ → sish picks it up (no restart needed).
 # `mship relay deny <id>` discards it.
