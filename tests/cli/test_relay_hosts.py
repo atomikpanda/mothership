@@ -108,6 +108,7 @@ def _seed(store_dir, clock, **over):
     knowledge in the test)."""
     directory = HostDirectory(
         store_dir,
+        relay_domain="relay.example",
         allowed_signers=lambda: FP,
         probe=lambda url: None,
         verify=lambda *a, **kw: True,
@@ -119,8 +120,8 @@ def _seed(store_dir, clock, **over):
         "label": "vm-alpha",
         "key_fingerprint": FP,
         "machine_fingerprint": "mf",
-        "subdomain": "abc123",
-        "public_url": "https://abc123.relay.example",
+        "subdomain": "abc123-a1b2c3",
+        "public_url": "https://abc123-a1b2c3.relay.example",
         "refresh": "refresh-credential-1",
     }
     payload.update(over)

@@ -62,6 +62,7 @@ def _enroll_server_impl(*, store_dir, pubkeys_dir, port, host, ttl, relay_domain
     # identity, and what lets an approval take effect without a restart.
     directory = HostDirectory(
         Path(store_dir),
+        relay_domain=relay_domain,
         allowed_signers=lambda: build_allowed_signers(Path(pubkeys_dir)),
         probe=probe_instance_id,
     )
@@ -277,6 +278,7 @@ def register(parent: typer.Typer, get_container):
         out = Output()
         directory = HostDirectory(
             Path(store_dir),
+            relay_domain="",                   # read-only: never registers/probes
             allowed_signers=lambda: "",       # listing verifies nothing…
             probe=lambda public_url: None,    # …and never arbitrates
         )

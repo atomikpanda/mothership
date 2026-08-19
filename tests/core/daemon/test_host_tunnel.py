@@ -248,6 +248,19 @@ def test_no_ssh_process_is_ever_spawned_while_the_link_says_not_to_dial(tmp_path
     assert len(fx.procs) == 1
 
 
+def test_duplicate_identity_still_reaps_a_local_orphan_before_refusing_to_dial(tmp_path):
+    fx = _Fixture(
+        tmp_path,
+        _Relay(register=(409, "identity already registered")),
+        _Clock(),
+    )
+
+    fx.tunnel.tick()
+
+    assert fx.reaped == [fx.link.subdomain]
+    assert fx.procs == []
+
+
 def test_a_tunnel_already_up_is_torn_down_when_the_identity_goes_duplicate(fx):
     assert fx.connect() == "online"
 

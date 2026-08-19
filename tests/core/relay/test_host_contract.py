@@ -173,7 +173,8 @@ def test_the_enroll_app_serves_exactly_the_contract_routes():
             enroll.RequestStore(base),
             relay_domain="relay.example",
             host_directory=host_directory.HostDirectory(
-                base, allowed_signers=lambda: "", probe=lambda url: None
+                base, relay_domain="relay.example",
+                allowed_signers=lambda: "", probe=lambda url: None,
             ),
             fleet_tokens=FleetTokenStore(base),
         )

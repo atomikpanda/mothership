@@ -5,7 +5,9 @@ the relay's own clock, and a second live claimant is arbitrated by probing the
 incumbent rather than by trusting a copyable fingerprint."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
+import threading
 
 import pytest
 
@@ -17,11 +19,14 @@ from mship.core.relay.host_directory import (
     HostDirectory,
     InvalidHostId,
     SignatureRefused,
+    probe_instance_id,
 )
 
 FP_A = "SHA256:keyA"
 FP_B = "SHA256:keyB"
 MACHINE = "machine-fingerprint-copied-by-cp-a"
+SUBDOMAIN = "abc123-a1b2c3"
+PUBLIC_URL = f"https://{SUBDOMAIN}.relay.example"
 
 
 class Clock:
@@ -70,8 +75,8 @@ def _payload(**over):
         "label": "vm-alpha",
         "key_fingerprint": FP_A,
         "machine_fingerprint": MACHINE,
-        "subdomain": "abc123",
-        "public_url": "https://abc123.relay.example",
+        "subdomain": SUBDOMAIN,
+        "public_url": PUBLIC_URL,
         "mship_version": "1.2.3",
         "capabilities": {"tunnel": True},
         "runner": {"enabled": False, "state": "disabled"},
@@ -84,6 +89,7 @@ def _payload(**over):
 def _dir(tmp_path, clock=None, probe=None, signers=(FP_A,)):
     return HostDirectory(
         tmp_path,
+        relay_domain="relay.example",
         allowed_signers=lambda: "\n".join(signers),
         verify=_verify,
         probe=probe if probe is not None else Prober(),
@@ -152,7 +158,7 @@ def test_a_nonce_is_claimed_before_it_is_read_so_a_racing_twin_loses(tmp_path):
     d._read_challenge = racing_read
     d._consume_nonce(nonce)                       # the winner
     assert losers == ["refused"]
-    assert list((tmp_path / "challenges").iterdir()) == []
+    assert list((tmp_path / "challenges").glob("*.json")) == []
 
 
 def test_the_challenge_store_is_capped(tmp_path):
@@ -160,7 +166,8 @@ def test_the_challenge_store_is_capped(tmp_path):
     # security boundary (`RequestStore.create`'s max_pending precedent).
     clock = Clock()
     d = HostDirectory(
-        tmp_path, allowed_signers=lambda: FP_A, verify=_verify,
+        tmp_path, relay_domain="relay.example",
+        allowed_signers=lambda: FP_A, verify=_verify,
         probe=Prober(), clock=clock, max_challenges=3,
     )
     for _ in range(3):
@@ -206,7 +213,7 @@ def test_a_verified_registration_writes_one_entry(tmp_path):
     )
     assert on_disk == entry
     assert entry["instance_id"] == "inst-1"
-    assert entry["public_url"] == "https://abc123.relay.example"
+    assert entry["public_url"] == PUBLIC_URL
     assert entry["last_seen"] == 9_000.0 and entry["first_seen"] == 9_000.0
     assert list((tmp_path / "hosts").glob("*.json")) != []
 
@@ -305,15 +312,14 @@ def _incumbent(tmp_path, probe, clock):
 
 def test_a_live_incumbent_answering_with_its_own_id_refuses_the_clone(tmp_path):
     clock = Clock()
-    probe = Prober({"https://abc123.relay.example": "inst-1"})
+    probe = Prober({PUBLIC_URL: "inst-1"})
     d = _incumbent(tmp_path, probe, clock)
     before = (tmp_path / "hosts" / f"{_payload()['host_id']}.json").read_bytes()
     clock.t += 10
-    clone = _payload(instance_id="inst-2", refresh="refresh-token-2",
-                     public_url="https://clone.relay.example")
+    clone = _payload(instance_id="inst-2", refresh="refresh-token-2")
     with pytest.raises(DuplicateIdentity) as e:
         _register(d, clone)
-    assert probe.urls == ["https://abc123.relay.example"]
+    assert probe.urls == [PUBLIC_URL]
     # The incumbent's entry is byte-identical: the clone changed nothing.
     assert (tmp_path / "hosts" / f"{_payload()['host_id']}.json").read_bytes() == before
     assert "reidentify" in str(e.value)
@@ -354,7 +360,7 @@ def test_a_probe_answering_with_the_claimants_id_is_a_restart_takeover(tmp_path)
     # The old tunnel is gone and sish now routes the subdomain to the new
     # process: this is a restart, not a clone.
     clock = Clock()
-    probe = Prober({"https://abc123.relay.example": "inst-2"})
+    probe = Prober({PUBLIC_URL: "inst-2"})
     d = _incumbent(tmp_path, probe, clock)
     clock.t += 10
     entry = _register(d, _payload(instance_id="inst-2"))
@@ -364,7 +370,7 @@ def test_a_probe_answering_with_the_claimants_id_is_a_restart_takeover(tmp_path)
 
 def test_a_different_machine_fingerprint_against_a_live_incumbent_is_refused(tmp_path):
     clock = Clock()
-    probe = Prober({"https://abc123.relay.example": "inst-1"})
+    probe = Prober({PUBLIC_URL: "inst-1"})
     d = _incumbent(tmp_path, probe, clock)
     clock.t += 10
     with pytest.raises(DuplicateIdentity):
@@ -373,7 +379,7 @@ def test_a_different_machine_fingerprint_against_a_live_incumbent_is_refused(tmp
 
 def test_a_stale_entry_is_taken_over_without_probing(tmp_path):
     clock = Clock()
-    probe = Prober({"https://abc123.relay.example": "inst-1"})
+    probe = Prober({PUBLIC_URL: "inst-1"})
     d = _incumbent(tmp_path, probe, clock)
     probe.urls.clear()
     clock.t += host_contract.DIRECTORY_STALE_S + 1
@@ -415,7 +421,8 @@ def test_two_hosts_stay_independent(tmp_path):
     _register(d)
     beta = _payload(host_id="hst-20260818120000-bbbbbbbb", instance_id="inst-b",
                     key_fingerprint=FP_B, machine_fingerprint="machine-b",
-                    subdomain="def456", public_url="https://def456.relay.example",
+                    subdomain="def456-d4e5f6",
+                    public_url="https://def456-d4e5f6.relay.example",
                     refresh="refresh-b")
     _register(d, beta, fingerprint=FP_B)
     clock.t += host_contract.DIRECTORY_STALE_S + 1
@@ -427,7 +434,7 @@ def test_two_hosts_stay_independent(tmp_path):
         beta["host_id"]: "online",
     }
     subdomains = {h["subdomain"] for h in d.list_hosts()}
-    assert subdomains == {"abc123", "def456"}
+    assert subdomains == {SUBDOMAIN, "def456-d4e5f6"}
 
 
 def test_a_corrupt_entry_file_is_quarantined_not_fatal(tmp_path):
@@ -460,3 +467,112 @@ def test_the_directory_survives_a_process_restart(tmp_path):
     clock = Clock()
     _register(_dir(tmp_path, clock=clock))
     assert _dir(tmp_path, clock=clock).get_host(_payload()["host_id"])["label"] == "vm-alpha"
+
+
+@pytest.mark.parametrize(
+    "public_url",
+    (
+        "http://169.254.169.254/latest/meta-data",
+        "http://127.0.0.1:8080",
+        "https://foreign.example",
+    ),
+)
+def test_a_signed_registration_cannot_publish_a_non_relay_url(tmp_path, public_url):
+    d = _dir(tmp_path)
+
+    with pytest.raises(ValueError):
+        _register(d, _payload(public_url=public_url))
+
+    assert d.get_host(_payload()["host_id"]) is None
+
+
+def test_instance_probe_never_follows_a_relay_redirect():
+    calls = []
+
+    class Redirect:
+        status_code = 302
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        return Redirect()
+
+    assert probe_instance_id(PUBLIC_URL, get=get) is None
+    assert calls == [
+        (
+            f"{PUBLIC_URL}/health",
+            {"timeout": 5.0, "follow_redirects": False},
+        )
+    ]
+
+
+def test_concurrent_challenges_cannot_exceed_the_live_cap(tmp_path):
+    d = HostDirectory(
+        tmp_path,
+        allowed_signers=lambda: FP_A,
+        relay_domain="relay.example",
+        verify=_verify,
+        probe=Prober(),
+        max_challenges=1,
+    )
+    barrier = threading.Barrier(2)
+    sweep = d._sweep_challenges
+
+    def racing_sweep():
+        live = sweep()
+        try:
+            barrier.wait(timeout=0.1)
+        except threading.BrokenBarrierError:
+            pass
+        return live
+
+    d._sweep_challenges = racing_sweep
+
+    def issue():
+        try:
+            d.issue_challenge()
+            return "issued"
+        except ChallengeCapReached:
+            return "capped"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(lambda _: issue(), range(2)))
+
+    assert sorted(outcomes) == ["capped", "issued"]
+    assert len(list((tmp_path / "challenges").glob("*.json"))) == 1
+
+
+def test_same_host_registration_arbitration_is_serialized(tmp_path):
+    d = _dir(tmp_path)
+    _register(d)
+    entry_path = tmp_path / "hosts" / f"{_payload()['host_id']}.json"
+    barrier = threading.Barrier(2)
+
+    def probe(_public_url):
+        incumbent_id = json.loads(entry_path.read_text())["instance_id"]
+        try:
+            barrier.wait(timeout=0.1)
+        except threading.BrokenBarrierError:
+            pass
+        return None if incumbent_id == "inst-1" else incumbent_id
+
+    d._probe = probe
+    payloads = [_payload(instance_id="inst-2"), _payload(instance_id="inst-3")]
+    nonces = [d.issue_challenge()["nonce"] for _ in payloads]
+
+    def register(index):
+        payload = payloads[index]
+        try:
+            d.register(
+                payload,
+                nonce=nonces[index],
+                signature=_sign(nonces[index], payload),
+            )
+            return "registered"
+        except DuplicateIdentity:
+            return "duplicate"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(register, range(2)))
+
+    assert sorted(outcomes) == ["duplicate", "registered"]
+    assert d.get_host(_payload()["host_id"])["instance_id"] in {"inst-2", "inst-3"}

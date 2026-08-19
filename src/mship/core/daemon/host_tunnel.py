@@ -245,6 +245,10 @@ class HostTunnel:
         """Act on the link's verdict: a duplicate identity must not hold a
         tunnel open (two twins on one subdomain split traffic between them),
         and everything else dials."""
+        if not self._started:
+            # Reap before accepting the relay's verdict: an orphan from the
+            # previous daemon can itself be the incumbent that caused a 409.
+            self._reap()
         if not self._link.should_dial():
             if self._started:
                 self._supervisor.stop()
@@ -252,9 +256,6 @@ class HostTunnel:
                 self._online = False
             return
         if not self._started:
-            # First dial only after the link has had its say, so a host the
-            # relay already refuses as a duplicate never spawns ssh at all (AC4).
-            self._reap()
             self._supervisor.start()
             # This tick's `link.tick()` already published the entry for this
             # child, so the initial dial (and the re-dial after a duplicate

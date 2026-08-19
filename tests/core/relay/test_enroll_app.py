@@ -69,8 +69,8 @@ def _payload(**over):
         "label": "vm-alpha",
         "key_fingerprint": FP_A,
         "machine_fingerprint": MACHINE,
-        "subdomain": "abc123",
-        "public_url": "https://abc123.relay.example",
+        "subdomain": "abc123-a1b2c3",
+        "public_url": f"https://abc123-a1b2c3.{RELAY}",
         "mship_version": "1.2.3",
         "capabilities": {"tunnel": True},
         "runner": {"enabled": False, "state": "disabled"},
@@ -87,6 +87,7 @@ def _harness(tmp_path, cap=50, answers=None, max_challenges=1000):
     prober = Prober(answers)
     directory = HostDirectory(
         base,
+        relay_domain=RELAY,
         allowed_signers=lambda: FP_A,
         probe=prober,
         verify=_verify,
@@ -220,6 +221,16 @@ def test_register_with_a_valid_signature_lands_the_entry(tmp_path):
     assert entry["last_seen"] == h.clock.t                # relay clock, not the payload's
 
 
+def test_signed_non_relay_url_is_a_clean_400(tmp_path):
+    h = _harness(tmp_path)
+    payload = _payload(public_url="http://169.254.169.254/latest/meta-data")
+
+    response = _register(h, payload)
+
+    assert response.status_code == 400
+    assert h.directory.get_host(payload["host_id"]) is None
+
+
 def test_register_never_echoes_the_refresh_credential(tmp_path):
     # `GET /hosts` publishes it to the fleet-token holder BY DESIGN; no other
     # route may widen it — least of all this unauthenticated one.
@@ -256,7 +267,7 @@ def test_register_with_a_traversal_shaped_host_id_is_400(tmp_path):
 def test_duplicate_identity_is_409_naming_the_recovery_command(tmp_path):
     # The clone case: a live incumbent that answers as itself refuses the claim,
     # and the operator's only recovery must be named in the refusal.
-    h = _harness(tmp_path, answers={"https://abc123.relay.example": "inst-1"})
+    h = _harness(tmp_path, answers={f"https://abc123-a1b2c3.{RELAY}": "inst-1"})
     assert _register(h).status_code == 200
     r = _register(h, _payload(instance_id="inst-2"))
     assert r.status_code == 409

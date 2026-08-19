@@ -34,6 +34,8 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from mship.core.relay import host_contract, ssh_sig
+from mship.core.relay.enroll import _locked
+from mship.core.relay.tls_ask import tls_ask_allowed
 
 # host_ids are `hst-<timestamp>-<hex>` (`core.daemon.identity.mint_host_id`).
 # Anything else is rejected before it is used as a path component — the
@@ -104,7 +106,7 @@ def probe_instance_id(public_url: str, *, get: Callable | None = None,
 
         get = httpx.get
     response = get(public_url.rstrip("/") + "/health", timeout=timeout,
-                   follow_redirects=True)
+                   follow_redirects=False)
     if response.status_code != 200:
         return None
     body = response.json()
@@ -131,6 +133,10 @@ class InvalidHostId(ValueError):
     """The host_id is not a well-formed host id (400)."""
 
 
+class InvalidPublicUrl(ValueError):
+    """The signed registration does not name its relay-owned HTTPS route (400)."""
+
+
 class HostDirectory:
     """Filesystem-backed host directory with signature-gated writes."""
 
@@ -138,6 +144,7 @@ class HostDirectory:
         self,
         base_dir,
         *,
+        relay_domain: str,
         allowed_signers: Callable[[], str],
         probe: Callable[[str], str | None],
         verify: Callable[..., bool] = ssh_sig.verify_blob,
@@ -168,6 +175,7 @@ class HostDirectory:
         self._challenge_ttl = challenge_ttl_s
         self._stale_after = stale_after_s
         self._max_challenges = max_challenges
+        self._relay_domain = relay_domain.strip().lower().rstrip(".")
 
     # --- storage primitives -------------------------------------------------
 
@@ -246,16 +254,17 @@ class HostDirectory:
         (`RequestStore.create`'s `max_pending` precedent). The cap is per *live*
         challenge, so it only ever bites on a flood inside one TTL window.
         """
-        if len(self._sweep_challenges()) >= self._max_challenges:
-            raise ChallengeCapReached("too many outstanding challenges; try later")
-        now = self._clock()
-        rec = {
-            "nonce": secrets.token_hex(16),
-            "issued_at": now,
-            "expires_at": now + self._challenge_ttl,
-        }
-        self._write_atomic(self._challenges / f"{rec['nonce']}.json", rec)
-        return rec
+        with _locked(self._challenges / ".issue.lock"):
+            if len(self._sweep_challenges()) >= self._max_challenges:
+                raise ChallengeCapReached("too many outstanding challenges; try later")
+            now = self._clock()
+            rec = {
+                "nonce": secrets.token_hex(16),
+                "issued_at": now,
+                "expires_at": now + self._challenge_ttl,
+            }
+            self._write_atomic(self._challenges / f"{rec['nonce']}.json", rec)
+            return rec
 
     def _consume_nonce(self, nonce: str) -> None:
         """Spend a nonce, or refuse.
@@ -313,29 +322,35 @@ class HostDirectory:
         ):
             raise SignatureRefused(host_contract.UNAPPROVED_KEY_DETAIL)
 
-        now = self._clock()
-        incumbent = self._read_rec(path) if path.exists() else None
-        previous_instance_id = None
-        if incumbent is not None and not self._same_identity(incumbent, payload):
-            self._arbitrate(incumbent, payload, now)
-            previous_instance_id = incumbent.get("instance_id")
+        public_url = self._trusted_public_url(payload)
+        if public_url is None:
+            raise InvalidPublicUrl("public_url must be the signed relay-owned HTTPS route")
 
-        entry = {
-            "host_id": host_id,
-            **{f: payload.get(f) for f in _PAYLOAD_FIELDS},
-            "first_seen": incumbent.get("first_seen", now) if incumbent else now,
-            "last_seen": now,                       # relay clock, never the payload's
-            # Carried forward on a heartbeat: the takeover is a fact about the
-            # entry, and the next re-registration must not erase the audit of
-            # who used to hold it.
-            "previous_instance_id": (
-                previous_instance_id
-                if incumbent is None or previous_instance_id is not None
-                else incumbent.get("previous_instance_id")
-            ),
-        }
-        self._write_atomic(path, entry)
-        return entry
+        with _locked(self._hosts / f".{host_id}.lock"):
+            now = self._clock()
+            incumbent = self._read_rec(path) if path.exists() else None
+            previous_instance_id = None
+            if incumbent is not None and not self._same_identity(incumbent, payload):
+                self._arbitrate(incumbent, payload, now)
+                previous_instance_id = incumbent.get("instance_id")
+
+            entry = {
+                "host_id": host_id,
+                **{f: payload.get(f) for f in _PAYLOAD_FIELDS},
+                "public_url": public_url,
+                "first_seen": incumbent.get("first_seen", now) if incumbent else now,
+                "last_seen": now,                       # relay clock, never the payload's
+                # Carried forward on a heartbeat: the takeover is a fact about the
+                # entry, and the next re-registration must not erase the audit of
+                # who used to hold it.
+                "previous_instance_id": (
+                    previous_instance_id
+                    if incumbent is None or previous_instance_id is not None
+                    else incumbent.get("previous_instance_id")
+                ),
+            }
+            self._write_atomic(path, entry)
+            return entry
 
     @staticmethod
     def _same_identity(incumbent: dict, payload: dict) -> bool:
@@ -345,6 +360,18 @@ class HostDirectory:
             incumbent.get(f) == payload.get(f)
             for f in ("key_fingerprint", "machine_fingerprint", "instance_id")
         )
+
+    def _trusted_public_url(self, entry: dict) -> str | None:
+        """Canonical relay-owned route, or None for an attacker-controlled URL."""
+        subdomain = entry.get("subdomain")
+        public_url = entry.get("public_url")
+        if not isinstance(subdomain, str) or not isinstance(public_url, str):
+            return None
+        hostname = f"{subdomain}.{self._relay_domain}"
+        canonical = f"https://{hostname}"
+        if not tls_ask_allowed(hostname, self._relay_domain) or public_url != canonical:
+            return None
+        return canonical
 
     def _arbitrate(self, incumbent: dict, payload: dict, now: float) -> None:
         """Refuse the claim iff the incumbent is still live and still itself.
@@ -357,7 +384,7 @@ class HostDirectory:
         """
         if now - _as_float(incumbent.get("last_seen")) >= self._stale_after:
             return
-        public_url = incumbent.get("public_url") or ""
+        public_url = self._trusted_public_url(incumbent)
         try:
             answered = self._probe(public_url) if public_url else None
         except Exception:                            # timeout, DNS, TLS, refused

@@ -13,6 +13,7 @@ from mship.core.relay.host_directory import (
     DuplicateIdentity,
     HostDirectory,
     InvalidHostId,
+    InvalidPublicUrl,
     SignatureRefused,
 )
 from mship.core.relay.tls_ask import tls_ask_allowed
@@ -125,6 +126,8 @@ def build_enroll_app(
             )
         except InvalidHostId:
             raise HTTPException(status_code=400, detail="malformed host_id")
+        except InvalidPublicUrl as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         except (ChallengeRefused, SignatureRefused) as exc:
             raise HTTPException(status_code=401, detail=str(exc))
         except DuplicateIdentity as exc:
