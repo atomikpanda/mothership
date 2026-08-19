@@ -14,6 +14,7 @@ from mship.core.relay.host_directory import (
     InvalidHostId,
     InvalidPublicUrl,
     SignatureRefused,
+    VerificationBusy,
 )
 from mship.core.relay.tls_ask import tls_ask_allowed
 
@@ -138,6 +139,12 @@ def build_enroll_app(
             )
         except (ChallengeRefused, SignatureRefused) as exc:
             raise HTTPException(status_code=401, detail=str(exc))
+        except VerificationBusy:
+            raise HTTPException(
+                status_code=429,
+                detail="signature verification busy; try later",
+                headers={"Retry-After": "1"},
+            )
         except DuplicateIdentity as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         # Echoes identity only: the entry carries the host's refresh credential,

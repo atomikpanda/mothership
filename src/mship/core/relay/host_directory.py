@@ -31,6 +31,7 @@ import re
 import secrets
 import tempfile
 import time
+import threading
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -45,6 +46,7 @@ from mship.core.relay.tls_ask import host_subdomain_allowed
 _HOST_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 _NONCE_RE = re.compile(r"\A[0-9a-f]{1,64}\Z")
 
+_MAX_CONCURRENT_SIGNATURE_VERIFICATIONS = 4
 # Copied from the payload onto the entry. Anything else a future daemon sends
 # is ignored rather than stored: the directory is a published surface.
 _PAYLOAD_FIELDS = (
@@ -131,6 +133,10 @@ class SignatureRefused(Exception):
     """The payload was not signed by the approved key it names (401)."""
 
 
+class VerificationBusy(Exception):
+    """Every bounded signature-verification slot is occupied (429)."""
+
+
 class DuplicateIdentity(Exception):
     """A different live instance already holds this host_id (409)."""
 
@@ -157,6 +163,7 @@ class HostDirectory:
         clock: Callable[[], float] = time.time,
         challenge_ttl_s: float = host_contract.CHALLENGE_TTL_S,
         stale_after_s: float = host_contract.DIRECTORY_STALE_S,
+        max_concurrent_verifications: int = _MAX_CONCURRENT_SIGNATURE_VERIFICATIONS,
     ) -> None:
         """`allowed_signers` is re-read per verification (an approval between
         two registrations must take effect without restarting the server), and
@@ -179,6 +186,9 @@ class HostDirectory:
         self._clock = clock
         self._challenge_ttl = challenge_ttl_s
         self._stale_after = stale_after_s
+        self._verification_slots = threading.BoundedSemaphore(
+            max_concurrent_verifications
+        )
         self._relay_domain = relay_domain.strip().lower().rstrip(".")
 
     # --- storage primitives -------------------------------------------------
@@ -326,13 +336,19 @@ class HostDirectory:
         self._peek_nonce(nonce, identity)
 
         blob = host_contract.signing_blob(nonce, payload)
-        if not self._verify(
-            blob,
-            signature=signature,
-            identity=identity,
-            allowed_signers=self._allowed_signers(),
-            namespace=host_contract.NAMESPACE,
-        ):
+        if not self._verification_slots.acquire(blocking=False):
+            raise VerificationBusy
+        try:
+            verified = self._verify(
+                blob,
+                signature=signature,
+                identity=identity,
+                allowed_signers=self._allowed_signers(),
+                namespace=host_contract.NAMESPACE,
+            )
+        finally:
+            self._verification_slots.release()
+        if not verified:
             raise SignatureRefused(host_contract.UNAPPROVED_KEY_DETAIL)
         self._consume_nonce(nonce, identity)
 

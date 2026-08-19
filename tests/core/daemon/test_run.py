@@ -600,6 +600,16 @@ def test_no_relay_block_means_no_tunnel(tmp_path):
     assert run_mod._build_tunnel(home, None, SERVE_BLOCK) is None
 
 
+def test_relay_without_a_local_serve_bind_is_an_error(tmp_path):
+    from mship.core.relay.config import RelayConfig
+
+    home = tmp_path / "home"
+    home.mkdir()
+
+    with pytest.raises(ValueError, match="relay needs a local serve bind"):
+        run_mod._build_tunnel(home, RelayConfig(host="relay.example"), None)
+
+
 def test_configured_tunnel_construction_failure_is_published_without_stopping_local_service(
     env_home, monkeypatch
 ):

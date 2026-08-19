@@ -131,9 +131,9 @@ def _build_registry(home: Path):
 def _relay_config(home: Path):
     """This host's `relay:` block as a `RelayConfig`, or None for no relay.
 
-    Never raises, for the same reason `_build_tunnel` does not: a relay we
-    cannot read is a host without a tunnel, never a host that refuses to start
-    — the workspaces it serves on the LAN do not depend on one."""
+    This loader never raises: an unreadable relay is a host without a tunnel,
+    never a host that refuses to start — the workspaces it serves on the LAN
+    do not depend on one."""
     from mship.core.daemon.registry import load_daemon_config
     from mship.core.relay.config import RelayConfig
 
@@ -145,14 +145,16 @@ def _relay_config(home: Path):
 
 
 def _build_tunnel(home: Path, relay_cfg, serve_cfg):
-    """The relay tunnel + registration link (#471), or None when either half of
-    what it needs — a relay to dial or a local bind to forward — is absent.
+    """The relay tunnel + registration link (#471), or None without a relay.
 
-    Construction failures propagate to `_run`, which keeps local service alive
-    while publishing the failure separately from the live tunnel lifecycle.
+    A configured relay without a local bind is invalid: there is nowhere for
+    the reverse tunnel to forward. Construction failures propagate to `_run`,
+    which keeps local service alive while publishing the tunnel error.
     """
-    if relay_cfg is None or serve_cfg is None:
+    if relay_cfg is None:
         return None
+    if serve_cfg is None:
+        raise ValueError("relay needs a local serve bind")
     from mship.core.daemon.host_tunnel import HostTunnel
     from mship.core.daemon.relay_link import RelayLink
     from mship.core.relay import keys

@@ -19,6 +19,7 @@ from mship.core.relay.host_directory import (
     HostDirectory,
     InvalidHostId,
     SignatureRefused,
+    VerificationBusy,
     probe_instance_id,
 )
 
@@ -181,6 +182,49 @@ def test_invalid_signature_does_not_burn_the_shared_identity_challenge(tmp_path)
     with pytest.raises(SignatureRefused):
         d.register(payload, nonce=nonce, signature="not-a-signature")
 
+    assert (
+        d.register(payload, nonce=nonce, signature=_sign(nonce, payload))["host_id"]
+        == payload["host_id"]
+    )
+
+
+def test_signature_verification_capacity_refuses_without_spending_nonce(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+    verify_calls = 0
+
+    def blocking_verify(*args, **kwargs):
+        nonlocal verify_calls
+        verify_calls += 1
+        entered.set()
+        release.wait(timeout=1)
+        return False
+
+    d = HostDirectory(
+        tmp_path,
+        relay_domain="relay.example",
+        allowed_signers=lambda: FP_A,
+        probe=Prober(),
+        verify=blocking_verify,
+        max_concurrent_verifications=1,
+    )
+    payload = _payload()
+    nonce = d.issue_challenge(FP_A)["nonce"]
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        first = executor.submit(
+            d.register, payload, nonce=nonce, signature="forged-first"
+        )
+        assert entered.wait(timeout=1)
+        with pytest.raises(VerificationBusy):
+            d.register(payload, nonce=nonce, signature="forged-second")
+        assert verify_calls == 1
+        assert list((tmp_path / "challenges").glob("*.json"))
+        release.set()
+        with pytest.raises(SignatureRefused):
+            first.result()
+
+    d._verify = _verify
     assert (
         d.register(payload, nonce=nonce, signature=_sign(nonce, payload))["host_id"]
         == payload["host_id"]
@@ -428,6 +472,7 @@ def test_a_stale_entry_is_taken_over_without_probing(tmp_path):
     assert entry["previous_instance_id"] == "inst-1"
     assert probe.urls == [], "a stale incumbent needs no probe"
 
+
 def test_a_stale_host_id_cannot_be_claimed_by_another_approved_key(tmp_path):
     clock = Clock()
     probe = Prober()
@@ -443,7 +488,6 @@ def test_a_stale_host_id_cannot_be_claimed_by_another_approved_key(tmp_path):
 
     assert path.read_bytes() == before
     assert probe.urls == []
-
 
 
 # --- listing ----------------------------------------------------------------

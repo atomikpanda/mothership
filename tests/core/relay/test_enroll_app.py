@@ -7,7 +7,7 @@ from mship.core.relay import host_contract
 from mship.core.relay.enroll import RequestStore
 from mship.core.relay.enroll_app import build_enroll_app
 from mship.core.relay.fleet_token import FleetTokenStore
-from mship.core.relay.host_directory import HostDirectory
+from mship.core.relay.host_directory import HostDirectory, VerificationBusy
 
 _PUB = (
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBodyAAAAAAAAAAAAAAAAAAAAAAAA host"
@@ -291,6 +291,21 @@ def test_register_with_a_forged_signature_is_401(tmp_path):
     r = _register(h, signature="sig:SHA256:keyA:not-the-blob")
     assert r.status_code == 401
     assert h.directory.get_host(_payload()["host_id"]) is None
+
+
+def test_register_verification_capacity_is_429(tmp_path):
+    h = _harness(tmp_path)
+
+    def busy(*args, **kwargs):
+        raise VerificationBusy
+
+    h.directory.register = busy
+
+    response = _register(h)
+
+    assert response.status_code == 429
+    assert response.json()["detail"] == "signature verification busy; try later"
+    assert response.headers["retry-after"] == "1"
 
 
 def test_register_with_an_unknown_nonce_is_401(tmp_path):
