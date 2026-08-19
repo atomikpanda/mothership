@@ -21,6 +21,7 @@ fingerprints: `cp -a` copies the machine fingerprint verbatim, so a
 fingerprint-keyed check would read the clone as an idempotent re-registration
 and silently overwrite the incumbent's URL and credential (decision f).
 """
+
 from __future__ import annotations
 
 import json
@@ -59,10 +60,6 @@ _PAYLOAD_FIELDS = (
     "refresh",
 )
 
-# Bounded so a public, unauthenticated route cannot fill the relay's disk. Sized
-# far above any real fleet: every host asks for at most one challenge per
-# registration, and a challenge lives CHALLENGE_TTL_S.
-MAX_CHALLENGES = 1000
 
 _REIDENTIFY_HINT = (
     "another live host already claims this host_id; "
@@ -81,13 +78,25 @@ def _as_float(value, default: float = 0.0) -> float:
     """
     try:
         parsed = float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return default
     return parsed if math.isfinite(parsed) else default
 
 
-def probe_instance_id(public_url: str, *, get: Callable | None = None,
-                      timeout: float = 5.0) -> str | None:
+def _principal_allowed(identity: str, allowed_signers: str) -> bool:
+    """Exact membership in the canonical allowed-signers principal column."""
+    if not identity:
+        return False
+    for line in allowed_signers.splitlines():
+        fields = line.strip().split(None, 1)
+        if fields and identity in fields[0].split(","):
+            return True
+    return False
+
+
+def probe_instance_id(
+    public_url: str, *, get: Callable | None = None, timeout: float = 5.0
+) -> str | None:
     """Ask an incumbent's published URL who it is: `GET <url>/health` →
     `instance_id`, or None if it does not answer recognisably.
 
@@ -105,8 +114,9 @@ def probe_instance_id(public_url: str, *, get: Callable | None = None,
         import httpx
 
         get = httpx.get
-    response = get(public_url.rstrip("/") + "/health", timeout=timeout,
-                   follow_redirects=False)
+    response = get(
+        public_url.rstrip("/") + "/health", timeout=timeout, follow_redirects=False
+    )
     if response.status_code != 200:
         return None
     body = response.json()
@@ -115,10 +125,6 @@ def probe_instance_id(public_url: str, *, get: Callable | None = None,
 
 class ChallengeRefused(Exception):
     """The nonce is unknown, already used, or expired (401)."""
-
-
-class ChallengeCapReached(Exception):
-    """Too many outstanding challenges to mint another (429)."""
 
 
 class SignatureRefused(Exception):
@@ -151,7 +157,6 @@ class HostDirectory:
         clock: Callable[[], float] = time.time,
         challenge_ttl_s: float = host_contract.CHALLENGE_TTL_S,
         stale_after_s: float = host_contract.DIRECTORY_STALE_S,
-        max_challenges: int = MAX_CHALLENGES,
     ) -> None:
         """`allowed_signers` is re-read per verification (an approval between
         two registrations must take effect without restarting the server), and
@@ -174,7 +179,6 @@ class HostDirectory:
         self._clock = clock
         self._challenge_ttl = challenge_ttl_s
         self._stale_after = stale_after_s
-        self._max_challenges = max_challenges
         self._relay_domain = relay_domain.strip().lower().rstrip(".")
 
     # --- storage primitives -------------------------------------------------
@@ -184,8 +188,9 @@ class HostDirectory:
         the file 0600, so an entry's refresh credential is never briefly
         world-readable, and the unique temp name means two writers to the same
         entry cannot scribble over each other's half-written temp file."""
-        fd, temp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp",
-                                         dir=path.parent)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=path.name + ".", suffix=".tmp", dir=path.parent
+        )
         temp = Path(temp_name)
         try:
             with os.fdopen(fd, "w") as stream:
@@ -204,7 +209,7 @@ class HostDirectory:
             if not isinstance(rec, dict):
                 raise ValueError("not an object")
             return rec
-        except (json.JSONDecodeError, OSError, ValueError):
+        except json.JSONDecodeError, OSError, ValueError:
             try:
                 path.replace(path.with_suffix(".json.corrupt"))
             except OSError:
@@ -222,7 +227,7 @@ class HostDirectory:
             if not isinstance(rec, dict):
                 raise ValueError("not an object")
             return rec
-        except (json.JSONDecodeError, OSError, ValueError):
+        except json.JSONDecodeError, OSError, ValueError:
             path.unlink(missing_ok=True)
             return None
 
@@ -243,41 +248,48 @@ class HostDirectory:
             if rec is None or now >= _as_float(rec.get("expires_at")):
                 path.unlink(missing_ok=True)
             elif path.suffix == ".json":
-                live.append(path)                    # a claim is already spent
+                live.append(path)  # a claim is already spent
         return live
 
-    def issue_challenge(self) -> dict:
-        """Mint a single-use nonce, stamped and expiring on the relay clock.
+    def issue_challenge(self, identity: str) -> dict:
+        """Return the one live challenge allocated to an approved identity.
 
-        Capped: this route is public and unauthenticated, and each call writes a
-        file, so the store — not the HTTP layer — is the security boundary
-        (`RequestStore.create`'s `max_pending` precedent). The cap is per *live*
-        challenge, so it only ever bites on a flood inside one TTL window.
+        The allowlist is the storage bound: an unauthenticated caller cannot
+        allocate a file for an unapproved identity, and repeatedly naming an
+        approved identity returns its existing nonce rather than consuming
+        another slot. Verification stays out of this public path so a request
+        flood cannot turn into unbounded ``ssh-keygen`` subprocesses.
         """
+        allowed_signers = self._allowed_signers()
+        if not _principal_allowed(identity, allowed_signers):
+            raise SignatureRefused(host_contract.UNAPPROVED_KEY_DETAIL)
         with _locked(self._challenges / ".issue.lock"):
-            if len(self._sweep_challenges()) >= self._max_challenges:
-                raise ChallengeCapReached("too many outstanding challenges; try later")
+            for path in self._sweep_challenges():
+                rec = self._read_challenge(path)
+                if rec is not None and rec.get("identity") == identity:
+                    return rec
             now = self._clock()
             rec = {
                 "nonce": secrets.token_hex(16),
+                "identity": identity,
                 "issued_at": now,
                 "expires_at": now + self._challenge_ttl,
             }
             self._write_atomic(self._challenges / f"{rec['nonce']}.json", rec)
             return rec
 
-    def _consume_nonce(self, nonce: str) -> None:
-        """Spend a nonce, or refuse.
-
-        Single use is enforced by *claiming* the file with `os.rename` before
-        reading it: rename is atomic and fails with FileNotFoundError for every
-        loser, so two concurrent registrations quoting one nonce cannot both
-        proceed (an exists()-read-unlink sequence would let both through — the
-        enroll app serves sync endpoints on a threadpool, so this is reachable
-        in one process).
-        """
+    def _peek_nonce(self, nonce: str, identity: str) -> None:
+        """Validate a challenge without spending the shared identity slot."""
         if not _NONCE_RE.match(nonce or ""):
             raise ChallengeRefused(host_contract.MALFORMED_NONCE_DETAIL)
+        rec = self._read_challenge(self._challenges / f"{nonce}.json")
+        if rec is None or rec.get("identity") != identity:
+            raise ChallengeRefused(host_contract.UNKNOWN_NONCE_DETAIL)
+        if self._clock() >= _as_float(rec.get("expires_at")):
+            raise ChallengeRefused(host_contract.EXPIRED_CHALLENGE_DETAIL)
+
+    def _consume_nonce(self, nonce: str, identity: str) -> None:
+        """Atomically spend a verified challenge, or refuse a racing replay."""
         path = self._challenges / f"{nonce}.json"
         claim = self._challenges / f"{nonce}.{secrets.token_hex(8)}.claim"
         try:
@@ -288,7 +300,7 @@ class HostDirectory:
             rec = self._read_challenge(claim)
         finally:
             claim.unlink(missing_ok=True)
-        if rec is None:
+        if rec is None or rec.get("identity") != identity:
             raise ChallengeRefused(host_contract.UNKNOWN_NONCE_DETAIL)
         if self._clock() >= _as_float(rec.get("expires_at")):
             raise ChallengeRefused(host_contract.EXPIRED_CHALLENGE_DETAIL)
@@ -303,15 +315,16 @@ class HostDirectory:
     def register(self, payload: dict, *, nonce: str, signature: str) -> dict:
         """Verify and publish one host's registration.
 
-        Order matters and is the invariant: id shape → nonce → signature →
-        arbitration → write. Nothing below the signature check can be reached
-        by an unsigned request, and nothing writes before arbitration.
+        Order is security-sensitive: id shape → challenge identity → signature
+        → atomic claim → arbitration → write. A bad signature cannot burn the
+        approved identity's shared challenge, while two valid replays still
+        serialize at the atomic claim.
         """
         host_id = str(payload.get("host_id", ""))
-        path = self._entry_path(host_id)           # traversal dies here
-        self._consume_nonce(nonce)
-
+        path = self._entry_path(host_id)
         identity = str(payload.get("key_fingerprint", ""))
+        self._peek_nonce(nonce, identity)
+
         blob = host_contract.signing_blob(nonce, payload)
         if not self._verify(
             blob,
@@ -321,10 +334,13 @@ class HostDirectory:
             namespace=host_contract.NAMESPACE,
         ):
             raise SignatureRefused(host_contract.UNAPPROVED_KEY_DETAIL)
+        self._consume_nonce(nonce, identity)
 
         public_url = self._trusted_public_url(payload)
         if public_url is None:
-            raise InvalidPublicUrl("public_url must be the signed relay-owned HTTPS route")
+            raise InvalidPublicUrl(
+                "public_url must be the signed relay-owned HTTPS route"
+            )
 
         with _locked(self._hosts / f".{host_id}.lock"):
             now = self._clock()
@@ -339,7 +355,7 @@ class HostDirectory:
                 **{f: payload.get(f) for f in _PAYLOAD_FIELDS},
                 "public_url": public_url,
                 "first_seen": incumbent.get("first_seen", now) if incumbent else now,
-                "last_seen": now,                       # relay clock, never the payload's
+                "last_seen": now,  # relay clock, never the payload's
                 # Carried forward on a heartbeat: the takeover is a fact about the
                 # entry, and the next re-registration must not erase the audit of
                 # who used to hold it.
@@ -387,7 +403,7 @@ class HostDirectory:
         public_url = self._trusted_public_url(incumbent)
         try:
             answered = self._probe(public_url) if public_url else None
-        except Exception:                            # timeout, DNS, TLS, refused
+        except Exception:  # timeout, DNS, TLS, refused
             answered = None
         if answered is not None and answered == incumbent.get("instance_id"):
             raise DuplicateIdentity(_REIDENTIFY_HINT)
@@ -423,13 +439,15 @@ class HostDirectory:
             hosts.append({**rec, "state": "offline" if stale else "online"})
         for req in pending:
             if req.get("fingerprint") in known_keys:
-                continue                             # already registered
-            hosts.append({
-                "host_id": None,
-                "state": "pending-approval",
-                "label": req.get("hostname") or "",
-                "key_fingerprint": req.get("fingerprint"),
-                "request_id": req.get("id"),
-                "created_at": req.get("created_at"),
-            })
+                continue  # already registered
+            hosts.append(
+                {
+                    "host_id": None,
+                    "state": "pending-approval",
+                    "label": req.get("hostname") or "",
+                    "key_fingerprint": req.get("fingerprint"),
+                    "request_id": req.get("id"),
+                    "created_at": req.get("created_at"),
+                }
+            )
         return hosts

@@ -15,6 +15,7 @@ escaping are free parameters of `json.dumps`: two ends that pick differently
 verify fine in one interpreter and 401 on every registration in production, so
 the bytes are pinned here and golden-tested, never re-derived at a call site.
 """
+
 from __future__ import annotations
 
 import json
@@ -46,12 +47,10 @@ ROUTE_PATHS: tuple[str, ...] = (LIST_PATH, CHALLENGE_PATH, REGISTER_PATH)
 # `mship relay enroll` CLI and the app that serves it must all name it the same.
 ENROLL_PATH = "/enroll"
 
-# The two ways `/hosts/register` answers 401, as the exact `detail` each carries.
-# The status code cannot tell them apart, and they need opposite handling: an
-# unapproved key must (re-)enroll and wait for a human, while a stale nonce is a
-# lost race on a 120s window that the next attempt fixes by itself. So the
-# strings ARE the contract — the daemon discriminates on them — and both ends
-# read them from here rather than restating a literal.
+# Challenge issuance and registration both use 401. The exact detail tells the
+# daemon whether the key is unapproved (enroll and wait for a human) or the
+# signed registration lost a race on its 120s nonce (retry). The strings are
+# therefore wire-contract values read by both ends, not presentation text.
 UNAPPROVED_KEY_DETAIL = "registration is not signed by an approved key"
 MALFORMED_NONCE_DETAIL = "malformed nonce"
 UNKNOWN_NONCE_DETAIL = "unknown or already-used nonce"

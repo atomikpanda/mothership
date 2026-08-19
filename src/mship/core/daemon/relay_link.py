@@ -1,10 +1,10 @@
 """The daemon's side of host registration (#471).
 
-One tick-driven object: fetch a challenge, sign the canonical payload with the
-same ed25519 key the tunnel authenticates with, POST it, and keep doing that
-forever. Every collaborator is injected (`post`/`get`/`clock`/`rng`/`signer`/
-`issue_refresh`/`reidentify`) so the whole loop is testable with no sockets and
-no sleeps, exactly like `core/relay/health.py`.
+One tick-driven object: request an identity-scoped challenge, sign the canonical
+payload with the same ed25519 key the tunnel authenticates with, POST it, and
+keep doing that forever. Every collaborator is injected (`post`/`clock`/`rng`/
+`signer`/`issue_refresh`/`reidentify`) so the whole loop is testable with no
+sockets and no sleeps, exactly like `core/relay/health.py`.
 
 Three properties are the reason this is a class and not a function:
 
@@ -28,6 +28,7 @@ Reconnects write nothing: the refresh credential is *derived*, so re-issuing it
 re-publishes the same string and leaves `~/.mothership/daemon/` byte-identical
 (AC11).
 """
+
 from __future__ import annotations
 
 import logging
@@ -102,7 +103,9 @@ class RegistrationOutcome:
     loop that must keep ticking, and `kind` is what the ladder reads."""
 
     ok: bool
-    kind: str          # registered|unapproved|duplicate-identity|refused|transport|signing|error
+    kind: (
+        str  # registered|unapproved|duplicate-identity|refused|transport|signing|error
+    )
     detail: str = ""
     refresh: str | None = None
     status_code: int | None = None
@@ -119,7 +122,6 @@ class RelayLink:
         relay_cfg,
         *,
         post: Callable | None = None,
-        get: Callable | None = None,
         clock: Callable[[], float] = time.time,
         rng: Callable[[], float] = random.random,
         signer: Callable[[bytes], str] | None = None,
@@ -131,16 +133,17 @@ class RelayLink:
         self._relay = relay_cfg
         self._base = host_contract.enroll_base_url(relay_cfg.host)
         self._timeout = timeout
-        self._clock = clock          # wall clock: it also dates the skew sample
+        self._clock = clock  # wall clock: it also dates the skew sample
         self._rng = rng
         self._post = post if post is not None else _default_post
-        self._get = get if get is not None else _default_get
         self._signer = signer if signer is not None else self._sign_with_relay_key
         self._issue_refresh = (
             issue_refresh if issue_refresh is not None else self._issue_from_store
         )
         self._reidentify = (
-            reidentify if reidentify is not None else (lambda: force_reidentify(self._home))
+            reidentify
+            if reidentify is not None
+            else (lambda: force_reidentify(self._home))
         )
 
         self.instance_id = mint_instance_id()
@@ -155,9 +158,7 @@ class RelayLink:
         self._last_enroll_at: float | None = None
         self._enroll_repost_interval = host_contract.ENROLL_REPOST_INTERVAL_S
         self._delay = 0.0
-        self._adopt(
-            ensure_host_identity(self._home, fingerprint=machine_fingerprint())
-        )
+        self._adopt(ensure_host_identity(self._home, fingerprint=machine_fingerprint()))
 
     # -- identity + key material -------------------------------------------
 
@@ -211,15 +212,20 @@ class RelayLink:
         """Challenge → sign → register, as one typed outcome. Never raises for
         anything the relay or the network can do."""
         try:
-            challenge = self._get(
-                self._base + host_contract.CHALLENGE_PATH, timeout=self._timeout
+            challenge = self._post(
+                self._base + host_contract.CHALLENGE_PATH,
+                json={"key_fingerprint": self.key_fingerprint},
+                timeout=self._timeout,
             )
         except Exception as exc:
             return RegistrationOutcome(False, "transport", detail=str(exc))
         self._sample_skew(challenge)
         if challenge.status_code != 200:
+            detail = _detail(challenge)
             return RegistrationOutcome(
-                False, "refused", detail=_detail(challenge),
+                False,
+                _classify(challenge.status_code, detail),
+                detail=detail,
                 status_code=challenge.status_code,
             )
         # A 200 is not a promise of JSON: a captive portal, a misrouted vhost or
@@ -228,9 +234,11 @@ class RelayLink:
         nonce = str((_body(challenge) or {}).get("nonce", ""))
         if not nonce:
             return RegistrationOutcome(
-                False, "refused", status_code=challenge.status_code,
+                False,
+                "refused",
+                status_code=challenge.status_code,
                 detail="challenge response carried no nonce "
-                       f"(is {self._base} really the relay's enroll server?)",
+                f"(is {self._base} really the relay's enroll server?)",
             )
 
         payload = self._payload()
@@ -254,8 +262,10 @@ class RelayLink:
             )
         detail = _detail(resp)
         return RegistrationOutcome(
-            False, _classify(resp.status_code, detail),
-            detail=detail, status_code=resp.status_code,
+            False,
+            _classify(resp.status_code, detail),
+            detail=detail,
+            status_code=resp.status_code,
         )
 
     def _sample_skew(self, resp) -> None:
@@ -267,8 +277,10 @@ class RelayLink:
         if not raw:
             return
         try:
-            self.clock_skew_seconds = self._clock() - parsedate_to_datetime(raw).timestamp()
-        except (TypeError, ValueError):
+            self.clock_skew_seconds = (
+                self._clock() - parsedate_to_datetime(raw).timestamp()
+            )
+        except TypeError, ValueError:
             return
 
     # -- the loop -----------------------------------------------------------
@@ -319,8 +331,10 @@ class RelayLink:
         elif self.state not in _STICKY_STATES:
             self.state = "error"
         self._delay = self._jittered(
-            min(RETRY_BASE_S * 2 ** min(self.failure_count - 1, _MAX_EXPONENT),
-                host_contract.MAX_BACKOFF_S)
+            min(
+                RETRY_BASE_S * 2 ** min(self.failure_count - 1, _MAX_EXPONENT),
+                host_contract.MAX_BACKOFF_S,
+            )
         )
 
     def _jittered(self, delay: float) -> float:
@@ -335,13 +349,14 @@ class RelayLink:
             "relay refused %s consecutive registrations as a duplicate identity "
             "(%s); re-identifying automatically — this host will reappear in the "
             "relay's host list as pending-approval and needs approving again",
-            self._duplicate_streak, self.last_error,
+            self._duplicate_streak,
+            self.last_error,
         )
         self._adopt(self._reidentify())
         log.warning("re-identified as %s (subdomain %s)", self.host_id, self.subdomain)
         self._duplicate_streak = 0
         self.state = "awaiting-enrollment"
-        self._last_enroll_at = None      # the new key needs approving at once
+        self._last_enroll_at = None  # the new key needs approving at once
         self._post_enroll_if_due(now)
 
     def _post_enroll_if_due(self, now: float) -> None:
@@ -367,7 +382,7 @@ class RelayLink:
             return
         try:
             ttl = float((_body(response) or {}).get("expires_in"))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             ttl = 0
         if math.isfinite(ttl) and ttl > 0:
             self._enroll_repost_interval = ttl / 3
@@ -396,23 +411,23 @@ class RelayLink:
 
 
 def _classify(status_code: int, detail: str) -> str:
-    """Which failure a refused registration actually is.
+    """Classify a challenge or registration refusal for the retry loop.
 
-    `/hosts/register` answers 401 for two unrelated things: an unapproved key,
-    and a challenge the relay would not accept — a nonce that expired, raced
-    another attempt, or was already spent, on a `CHALLENGE_TTL_S` window. Only
-    the first means "wait for a human". Reading the second as unapproved would
-    make an approved host on a slow link report `awaiting-enrollment` and
-    re-post `/enroll` for a key that is already in `pubkeys/`, so the two are
-    told apart by the `detail` both ends read from `host_contract`. An
-    unrecognised 401 falls back to `unapproved`: enrolling once too often is
-    recoverable, never enrolling at all is not.
+    Both host-registration routes can reject an unapproved key; registration
+    can also reject a nonce that expired, raced another attempt, or was already
+    spent. Only the former means "wait for a human". Reading the latter as
+    unapproved would make an approved host on a slow link re-post `/enroll`.
+    The exact details come from `host_contract`; an unrecognised 401 falls back
+    to `unapproved` because enrolling once too often is recoverable while never
+    enrolling at all is not.
     """
     if status_code == 409:
         return "duplicate-identity"
     if status_code != 401:
         return "refused"
-    return "refused" if detail in host_contract.CHALLENGE_REFUSAL_DETAILS else "unapproved"
+    return (
+        "refused" if detail in host_contract.CHALLENGE_REFUSAL_DETAILS else "unapproved"
+    )
 
 
 def _body(resp) -> dict | None:
@@ -430,12 +445,6 @@ def _detail(resp) -> str:
     carries the `mship daemon reidentify` hint) and what `_classify` reads to
     tell the two flavors of 401 apart."""
     return str((_body(resp) or {}).get("detail", ""))
-
-
-def _default_get(url, **kw):
-    import httpx
-
-    return httpx.get(url, **kw)
 
 
 def _default_post(url, **kw):

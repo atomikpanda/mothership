@@ -7,6 +7,7 @@ phone reads. Both default `--store-dir`/`--pubkeys-dir` exactly as the shipped
 those same two directories — the `pubkeys/` allowlist being the one sish
 authenticates against is what makes signature-auth and tunnel-auth one identity.
 """
+
 from __future__ import annotations
 
 import re
@@ -34,8 +35,14 @@ def _run(*args):
 
 
 def _fleet_token(store_dir, *extra):
-    return _run("fleet-token", "--store-dir", str(store_dir),
-                "--relay-domain", "relay.example.com", *extra)
+    return _run(
+        "fleet-token",
+        "--store-dir",
+        str(store_dir),
+        "--relay-domain",
+        "relay.example.com",
+        *extra,
+    )
 
 
 def _token_line(result):
@@ -78,7 +85,7 @@ def test_fleet_token_revoke_invalidates_only_that_label(tmp_path):
     store = FleetTokenStore(tmp_path / "s")
     assert store.verify(phone) is None
     assert store.verify(tablet) == "tablet"
-    assert "groundcontrol://" not in res.output      # nothing to re-scan
+    assert "groundcontrol://" not in res.output  # nothing to re-scan
 
 
 def test_fleet_token_revoking_an_unknown_label_reports_it(tmp_path):
@@ -125,7 +132,9 @@ def _seed(store_dir, clock, **over):
         "refresh": "refresh-credential-1",
     }
     payload.update(over)
-    directory.register(payload, nonce=directory.issue_challenge()["nonce"], signature="s")
+    directory.register(
+        payload, nonce=directory.issue_challenge(FP)["nonce"], signature="s"
+    )
     return payload
 
 
@@ -137,7 +146,7 @@ def test_hosts_lists_id_label_state_and_last_seen(tmp_path):
     assert res.exit_code == 0, res.output
     assert "hst-20260818120000-aaaaaaaa" in res.output
     assert "vm-alpha" in res.output
-    assert "online" in res.output                     # freshness on the real clock
+    assert "online" in res.output  # freshness on the real clock
     assert time.strftime("%Y-%m-%d", time.gmtime(now)) in res.output
 
 
@@ -180,7 +189,9 @@ def test_hosts_on_an_empty_relay_says_so(tmp_path):
 # --- enroll-server wiring ---------------------------------------------------
 
 
-def test_enroll_server_wires_the_directory_and_the_pubkeys_allowlist(monkeypatch, tmp_path):
+def test_enroll_server_wires_the_directory_and_the_pubkeys_allowlist(
+    monkeypatch, tmp_path
+):
     captured = {}
     monkeypatch.setattr(relay_mod, "_run_uvicorn", lambda app, host, port: None)
     monkeypatch.setattr(ea, "build_enroll_app", lambda store, **kw: captured.update(kw))
@@ -190,15 +201,22 @@ def test_enroll_server_wires_the_directory_and_the_pubkeys_allowlist(monkeypatch
     (pubkeys / "vm.pub").write_text(
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBodyAAAAAAAAAAAAAAAAAAAAAAAA host\n"
     )
-    res = _run("enroll-server", "--store-dir", str(tmp_path / "s"),
-               "--pubkeys-dir", str(pubkeys), "--relay-domain", "relay.example.com")
+    res = _run(
+        "enroll-server",
+        "--store-dir",
+        str(tmp_path / "s"),
+        "--pubkeys-dir",
+        str(pubkeys),
+        "--relay-domain",
+        "relay.example.com",
+    )
     assert res.exit_code == 0, res.output
 
     assert isinstance(captured["host_directory"], HostDirectory)
     assert isinstance(captured["fleet_tokens"], FleetTokenStore)
     # The allowed-signers callable is re-read per verification and renders the
     # SAME pubkeys/ dir sish authenticates against.
-    signers = captured["host_directory"]._allowed_signers()      # noqa: SLF001
+    signers = captured["host_directory"]._allowed_signers()  # noqa: SLF001
     assert signers.startswith("SHA256:")
     assert "ssh-ed25519" in signers
 
@@ -210,8 +228,15 @@ def test_enroll_server_fleet_tokens_share_the_store_dir(monkeypatch, tmp_path):
     store_dir = tmp_path / "s"
     token = FleetTokenStore(store_dir).issue("phone")
 
-    res = _run("enroll-server", "--store-dir", str(store_dir),
-               "--pubkeys-dir", str(tmp_path / "p"), "--relay-domain", "relay.example.com")
+    res = _run(
+        "enroll-server",
+        "--store-dir",
+        str(store_dir),
+        "--pubkeys-dir",
+        str(tmp_path / "p"),
+        "--relay-domain",
+        "relay.example.com",
+    )
     assert res.exit_code == 0, res.output
     # A token minted by the CLI must verify inside the running server.
     assert captured["fleet_tokens"].verify(token) == "phone"

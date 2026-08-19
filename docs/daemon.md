@@ -179,14 +179,17 @@ mship relay approve <id>
 `--relay` needs a local bind to forward, from this install or an earlier one
 (`--serve HOST:PORT`); like `--serve`, a **changed** relay takes effect on
 `mship daemon restart`. Nothing else is manual: while its key is unapproved the
-daemon posts `/enroll` non-blockingly and re-posts every 600s against the
-relay's 1800s pending TTL, so a VM provisioned at 02:00 is still approvable at
-09:00 with nobody at its terminal. Registration itself is challenge/response —
-fetch a nonce (120s TTL), sign `namespace ‖ nonce ‖ canonical payload` with the
-same ed25519 relay key the tunnel authenticates with (`ssh-keygen -Y sign`,
-namespace `host-registration@mship`), POST it — repeated every 60s, and after a
-failure on a 2s backoff doubling to a 60s cap, jittered **downward** so a fleet
-coming back after a relay redeploy does not retry in lockstep.
+relay refuses challenge allocation, so the daemon posts `/enroll`
+non-blockingly and re-posts every 600s against the relay's 1800s pending TTL.
+A VM provisioned at 02:00 is therefore still approvable at 09:00 with nobody at
+its terminal. Once approved, registration is challenge/response: the daemon
+POSTs its key fingerprint and receives the one live nonce allocated to that
+approved identity (120s TTL), signs
+`namespace ‖ nonce ‖ canonical payload` with the same ed25519 relay key the
+tunnel authenticates with (`ssh-keygen -Y sign`, namespace
+`host-registration@mship`), then POSTs the registration. It repeats every 60s;
+after a failure it backs off from 2s to a 60s cap, jittered **downward** so a
+fleet returning after a relay redeploy does not retry in lockstep.
 
 `mship relay hosts` on the relay box lists the directory; a host that has not
 re-registered within 240s (three intervals plus a worst-case backoff) reads as

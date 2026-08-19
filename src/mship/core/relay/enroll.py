@@ -3,6 +3,7 @@ import base64
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -161,7 +162,13 @@ class RequestStore:
             rec = self._read_rec(p)
             if rec is None:
                 continue
-            if now - rec["created_at"] >= self._ttl:
+            try:
+                expires_at = float(rec["expires_at"])
+                expired = not math.isfinite(expires_at) or now >= expires_at
+            except (KeyError, TypeError, ValueError):
+                # Records created before per-request deadlines used the store TTL.
+                expired = now - rec["created_at"] >= self._ttl
+            if expired:
                 self._resolve(p, rec, "expired")
 
     def _list_pending_unlocked(self) -> list[dict]:
@@ -190,7 +197,9 @@ class RequestStore:
             for rec in pending:
                 if rec.get("fingerprint") == fp:
                     renewed = dict(rec)
-                    renewed["created_at"] = self._clock()
+                    renewed_at = self._clock()
+                    renewed["created_at"] = renewed_at
+                    renewed["expires_at"] = renewed_at + self._ttl
                     self._write_atomic(
                         self._pending / f"{rec['id']}.json", renewed
                     )
@@ -208,6 +217,7 @@ class RequestStore:
                     return rec["id"]
             if len(pending) >= self._max_pending:
                 raise PendingCapReached()
+            created_at = self._clock()
             rid = secrets.token_hex(16)
             self._write_atomic(
                 self._pending / f"{rid}.json",
@@ -216,7 +226,8 @@ class RequestStore:
                     "pubkey": pubkey.strip(),
                     "hostname": hostname,
                     "fingerprint": fp,
-                    "created_at": self._clock(),
+                    "created_at": created_at,
+                    "expires_at": created_at + self._ttl,
                     "status": "pending",
                 },
             )

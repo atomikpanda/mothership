@@ -5,18 +5,25 @@ from dataclasses import dataclass
 # validator (`core/daemon/registry.py`) rejects an empty block with the same
 # sentence, so an operator sees one message whichever end catches the typo.
 RELAY_HOST_REQUIRED = "relay.host is required when a `relay:` block is present"
+RELAY_SSH_PORT_INVALID = "relay.ssh_port must be an integer from 1 to 65535"
 
 
 @dataclass(frozen=True)
 class RelayConfig:
     host: str
     ssh_port: int = 2222
-    user: str | None = None       # ssh user; None → ssh default
+    user: str | None = None  # ssh user; None → ssh default
 
     def __post_init__(self) -> None:
         canonical_host = self.host.strip().lower().rstrip(".")
         if not canonical_host:
             raise ValueError(RELAY_HOST_REQUIRED)
+        if (
+            isinstance(self.ssh_port, bool)
+            or not isinstance(self.ssh_port, int)
+            or not 1 <= self.ssh_port <= 65535
+        ):
+            raise ValueError(RELAY_SSH_PORT_INVALID)
         object.__setattr__(self, "host", canonical_host)
 
     @staticmethod
@@ -28,6 +35,6 @@ class RelayConfig:
             raise ValueError(RELAY_HOST_REQUIRED)
         return RelayConfig(
             host=host.strip(),
-            ssh_port=int(data.get("ssh_port", 2222)),
+            ssh_port=data.get("ssh_port", 2222),
             user=data.get("user"),
         )

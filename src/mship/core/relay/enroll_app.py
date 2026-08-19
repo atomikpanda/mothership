@@ -8,7 +8,6 @@ from mship.core.relay import host_contract
 from mship.core.relay.enroll import RequestStore, PendingCapReached, validate_pubkey
 from mship.core.relay.fleet_token import FleetTokenStore
 from mship.core.relay.host_directory import (
-    ChallengeCapReached,
     ChallengeRefused,
     DuplicateIdentity,
     HostDirectory,
@@ -45,9 +44,13 @@ _PayloadValue = Union[
 ]
 
 
+class _ChallengeBody(BaseModel):
+    key_fingerprint: str = Field(max_length=_MAX_STR)
+
+
 class _RegisterBody(BaseModel):
     nonce: str = Field(max_length=128)
-    signature: str = Field(max_length=8192)      # an armored SSHSIG, ~600B for ed25519
+    signature: str = Field(max_length=8192)  # an armored SSHSIG, ~600B for ed25519
     payload: dict[_Key, _PayloadValue] = Field(max_length=_MAX_PAYLOAD_FIELDS)
 
 
@@ -91,7 +94,9 @@ def build_enroll_app(
         try:
             rid = store.create(body.pubkey, body.hostname)
         except PendingCapReached:
-            raise HTTPException(status_code=429, detail="too many pending requests; try later")
+            raise HTTPException(
+                status_code=429, detail="too many pending requests; try later"
+            )
         except ValueError:
             # Store self-validates (belt-and-suspenders); surface its rejection
             # as a clean 400 rather than letting it bubble up as a 500.
@@ -109,13 +114,12 @@ def build_enroll_app(
             raise HTTPException(status_code=403, detail="host not allowed")
         return Response(status_code=200)
 
-    @app.get(host_contract.CHALLENGE_PATH)
-    def hosts_challenge():
+    @app.post(host_contract.CHALLENGE_PATH)
+    def hosts_challenge(body: _ChallengeBody):
         try:
-            challenge = host_directory.issue_challenge()
-        except ChallengeCapReached as exc:
-            # Public and unauthenticated: a flood is refused, never a 500.
-            raise HTTPException(status_code=429, detail=str(exc))
+            challenge = host_directory.issue_challenge(body.key_fingerprint)
+        except SignatureRefused as exc:
+            raise HTTPException(status_code=401, detail=str(exc))
         return {"nonce": challenge["nonce"], "expires_at": challenge["expires_at"]}
 
     @app.post(host_contract.REGISTER_PATH)
@@ -140,11 +144,14 @@ def build_enroll_app(
     def hosts_list(request: Request):
         presented = request.headers.get(host_contract.FLEET_TOKEN_HEADER, "")
         if fleet_tokens.verify(presented) is None:
-            raise HTTPException(status_code=401, detail="invalid or revoked fleet token")
+            raise HTTPException(
+                status_code=401, detail="invalid or revoked fleet token"
+            )
         entries = host_directory.list_hosts(store.list_pending())
         return {
             "hosts": [
-                {f: entry[f] for f in _DIRECTORY_FIELDS if f in entry} for entry in entries
+                {f: entry[f] for f in _DIRECTORY_FIELDS if f in entry}
+                for entry in entries
             ]
         }
 

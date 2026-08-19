@@ -3,6 +3,7 @@ writes is backed by a signature it verified against the same `pubkeys/`
 allowlist sish authenticates against, every freshness decision is stamped by
 the relay's own clock, and a second live claimant is arbitrated by probing the
 incumbent rather than by trusting a copyable fingerprint."""
+
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
@@ -13,7 +14,6 @@ import pytest
 
 from mship.core.relay import host_contract
 from mship.core.relay.host_directory import (
-    ChallengeCapReached,
     ChallengeRefused,
     DuplicateIdentity,
     HostDirectory,
@@ -99,7 +99,7 @@ def _dir(tmp_path, clock=None, probe=None, signers=(FP_A,)):
 
 def _register(d, payload=None, *, fingerprint=FP_A, signature=None):
     payload = payload if payload is not None else _payload()
-    nonce = d.issue_challenge()["nonce"]
+    nonce = d.issue_challenge(str(payload["key_fingerprint"]))["nonce"]
     sig = signature if signature is not None else _sign(nonce, payload, fingerprint)
     return d.register(payload, nonce=nonce, signature=sig)
 
@@ -110,7 +110,7 @@ def _register(d, payload=None, *, fingerprint=FP_A, signature=None):
 def test_a_nonce_is_single_use_and_relay_stamped(tmp_path):
     clock = Clock(5_000.0)
     d = _dir(tmp_path, clock=clock)
-    ch = d.issue_challenge()
+    ch = d.issue_challenge(FP_A)
     assert ch["issued_at"] == 5_000.0
     assert ch["expires_at"] == 5_000.0 + host_contract.CHALLENGE_TTL_S
     payload = _payload()
@@ -123,7 +123,7 @@ def test_a_nonce_is_single_use_and_relay_stamped(tmp_path):
 def test_an_expired_nonce_is_refused_on_the_relay_clock(tmp_path):
     clock = Clock()
     d = _dir(tmp_path, clock=clock)
-    ch = d.issue_challenge()
+    ch = d.issue_challenge(FP_A)
     clock.t += host_contract.CHALLENGE_TTL_S + 1
     payload = _payload()
     with pytest.raises(ChallengeRefused):
@@ -141,7 +141,7 @@ def test_a_nonce_is_claimed_before_it_is_read_so_a_racing_twin_loses(tmp_path):
     sequence would let through.
     """
     d = _dir(tmp_path)
-    nonce = d.issue_challenge()["nonce"]
+    nonce = d.issue_challenge(FP_A)["nonce"]
     losers = []
     real_read = d._read_challenge
 
@@ -149,34 +149,68 @@ def test_a_nonce_is_claimed_before_it_is_read_so_a_racing_twin_loses(tmp_path):
         rec = real_read(path)
         if not losers:
             try:
-                d._consume_nonce(nonce)
+                d._consume_nonce(nonce, FP_A)
                 losers.append("ADMITTED")
             except ChallengeRefused:
                 losers.append("refused")
         return rec
 
     d._read_challenge = racing_read
-    d._consume_nonce(nonce)                       # the winner
+    d._consume_nonce(nonce, FP_A)  # the winner
     assert losers == ["refused"]
     assert list((tmp_path / "challenges").glob("*.json")) == []
 
 
-def test_the_challenge_store_is_capped(tmp_path):
-    # Public, unauthenticated, and every call writes a file: the store is the
-    # security boundary (`RequestStore.create`'s max_pending precedent).
+def test_challenges_are_bounded_to_one_live_record_per_approved_identity(tmp_path):
     clock = Clock()
-    d = HostDirectory(
-        tmp_path, relay_domain="relay.example",
-        allowed_signers=lambda: FP_A, verify=_verify,
-        probe=Prober(), clock=clock, max_challenges=3,
+    d = _dir(tmp_path, clock=clock, signers=(FP_A, FP_B))
+
+    first = d.issue_challenge(FP_A)
+    assert d.issue_challenge(FP_A) == first
+    assert d.issue_challenge(FP_B)["nonce"] != first["nonce"]
+    assert len(list((tmp_path / "challenges").glob("*.json"))) == 2
+    with pytest.raises(SignatureRefused):
+        d.issue_challenge("SHA256:not-approved")
+
+
+def test_invalid_signature_does_not_burn_the_shared_identity_challenge(tmp_path):
+    d = _dir(tmp_path)
+    payload = _payload()
+    nonce = d.issue_challenge(FP_A)["nonce"]
+
+    with pytest.raises(SignatureRefused):
+        d.register(payload, nonce=nonce, signature="not-a-signature")
+
+    assert (
+        d.register(payload, nonce=nonce, signature=_sign(nonce, payload))["host_id"]
+        == payload["host_id"]
     )
-    for _ in range(3):
-        d.issue_challenge()
-    with pytest.raises(ChallengeCapReached):
-        d.issue_challenge()
-    # The cap is on LIVE challenges: it clears itself one TTL later.
-    clock.t += host_contract.CHALLENGE_TTL_S + 1
-    assert d.issue_challenge()["nonce"]
+
+
+def test_two_valid_registrations_sharing_a_nonce_admit_exactly_one(tmp_path):
+    d = _dir(tmp_path)
+    payload = _payload()
+    nonce = d.issue_challenge(FP_A)["nonce"]
+    barrier = threading.Barrier(2)
+
+    def verify_together(*args, **kwargs):
+        valid = _verify(*args, **kwargs)
+        barrier.wait(timeout=1)
+        return valid
+
+    d._verify = verify_together
+
+    def register():
+        try:
+            d.register(payload, nonce=nonce, signature=_sign(nonce, payload))
+            return "registered"
+        except ChallengeRefused:
+            return "refused"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(lambda _: register(), range(2)))
+
+    assert sorted(outcomes) == ["refused", "registered"]
 
 
 def test_a_claim_stranded_by_a_crash_is_swept_like_any_challenge(tmp_path):
@@ -184,13 +218,13 @@ def test_a_claim_stranded_by_a_crash_is_swept_like_any_challenge(tmp_path):
     # leave a file nothing ever reaps on a public write path.
     clock = Clock()
     d = _dir(tmp_path, clock=clock)
-    ch = d.issue_challenge()
-    stranded = (tmp_path / "challenges" / f"{ch['nonce']}.deadbeef.claim")
+    ch = d.issue_challenge(FP_A)
+    stranded = tmp_path / "challenges" / f"{ch['nonce']}.deadbeef.claim"
     (tmp_path / "challenges" / f"{ch['nonce']}.json").rename(stranded)
-    d.issue_challenge()                       # sweeps, but the claim is live
+    d.issue_challenge(FP_A)  # sweeps, but the claim is live
     assert stranded.is_file()
     clock.t += host_contract.CHALLENGE_TTL_S + 1
-    d.issue_challenge()
+    d.issue_challenge(FP_A)
     assert not stranded.exists()
 
 
@@ -198,7 +232,9 @@ def test_an_unknown_nonce_is_refused(tmp_path):
     d = _dir(tmp_path)
     payload = _payload()
     with pytest.raises(ChallengeRefused):
-        d.register(payload, nonce="never-issued", signature=_sign("never-issued", payload))
+        d.register(
+            payload, nonce="never-issued", signature=_sign("never-issued", payload)
+        )
 
 
 # --- the relay must not assert identity -------------------------------------
@@ -218,7 +254,9 @@ def test_a_verified_registration_writes_one_entry(tmp_path):
     assert list((tmp_path / "hosts").glob("*.json")) != []
 
 
-def test_the_store_is_owner_only_because_an_entry_carries_a_refresh_credential(tmp_path):
+def test_the_store_is_owner_only_because_an_entry_carries_a_refresh_credential(
+    tmp_path,
+):
     d = _dir(tmp_path)
     _register(d)
     assert oct((tmp_path / "hosts").stat().st_mode & 0o777) == "0o700"
@@ -227,13 +265,11 @@ def test_the_store_is_owner_only_because_an_entry_carries_a_refresh_credential(t
     assert oct(entry.stat().st_mode & 0o777) == "0o600"
 
 
-@pytest.mark.parametrize(
-    "kind", ["unsigned", "wrong-key", "tampered-payload", "not-allowlisted"]
-)
+@pytest.mark.parametrize("kind", ["unsigned", "wrong-key", "tampered-payload"])
 def test_no_entry_is_ever_written_without_a_verified_signature(tmp_path, kind):
     d = _dir(tmp_path)
     payload = _payload()
-    nonce = d.issue_challenge()["nonce"]
+    nonce = d.issue_challenge(FP_A)["nonce"]
     if kind == "unsigned":
         sig = ""
     elif kind == "wrong-key":
@@ -241,9 +277,6 @@ def test_no_entry_is_ever_written_without_a_verified_signature(tmp_path, kind):
         sig = _sign(nonce, payload, fingerprint=FP_B)
     elif kind == "tampered-payload":
         sig = _sign(nonce, _payload(public_url="https://evil.example"))
-    else:
-        payload = _payload(key_fingerprint=FP_B)
-        sig = _sign(nonce, payload, fingerprint=FP_B)
     with pytest.raises(SignatureRefused):
         d.register(payload, nonce=nonce, signature=sig)
     assert d.get_host(payload["host_id"]) is None
@@ -253,7 +286,7 @@ def test_no_entry_is_ever_written_without_a_verified_signature(tmp_path, kind):
 def test_a_traversal_shaped_host_id_never_touches_the_filesystem(tmp_path):
     d = _dir(tmp_path)
     payload = _payload(host_id="../../evil")
-    nonce = d.issue_challenge()["nonce"]
+    nonce = d.issue_challenge(FP_A)["nonce"]
     with pytest.raises(InvalidHostId):
         d.register(payload, nonce=nonce, signature=_sign(nonce, payload))
     assert list(tmp_path.rglob("*evil*")) == []
@@ -289,7 +322,9 @@ def test_re_registration_by_the_same_identity_is_idempotent(tmp_path):
     assert second["capabilities"] == {"tunnel": True, "runner": False}
     # The refresh credential is re-published, never re-minted or appended.
     assert second["refresh"] == first["refresh"]
-    assert "previous_instance_id" not in second or second["previous_instance_id"] is None
+    assert (
+        "previous_instance_id" not in second or second["previous_instance_id"] is None
+    )
 
 
 def test_ten_reconnects_leave_exactly_one_entry(tmp_path):
@@ -345,15 +380,19 @@ def test_a_heartbeat_after_a_takeover_keeps_the_predecessor_on_record(tmp_path):
     clock.t += 10
     # The takeover is a fact about the entry; the next idempotent re-post must
     # not silently erase who used to hold it.
-    assert _register(d, _payload(instance_id="inst-2"))["previous_instance_id"] == "inst-1"
+    assert (
+        _register(d, _payload(instance_id="inst-2"))["previous_instance_id"] == "inst-1"
+    )
 
 
 def test_a_probe_returning_no_id_yields_a_takeover(tmp_path):
     clock = Clock()
-    probe = Prober({})            # answered, but not by an mship host
+    probe = Prober({})  # answered, but not by an mship host
     d = _incumbent(tmp_path, probe, clock)
     clock.t += 10
-    assert _register(d, _payload(instance_id="inst-2"))["previous_instance_id"] == "inst-1"
+    assert (
+        _register(d, _payload(instance_id="inst-2"))["previous_instance_id"] == "inst-1"
+    )
 
 
 def test_a_probe_answering_with_the_claimants_id_is_a_restart_takeover(tmp_path):
@@ -374,7 +413,9 @@ def test_a_different_machine_fingerprint_against_a_live_incumbent_is_refused(tmp
     d = _incumbent(tmp_path, probe, clock)
     clock.t += 10
     with pytest.raises(DuplicateIdentity):
-        _register(d, _payload(instance_id="inst-3", machine_fingerprint="other-machine"))
+        _register(
+            d, _payload(instance_id="inst-3", machine_fingerprint="other-machine")
+        )
 
 
 def test_a_stale_entry_is_taken_over_without_probing(tmp_path):
@@ -395,10 +436,15 @@ def test_list_hosts_marks_stale_entries_offline_and_merges_pending(tmp_path):
     clock = Clock()
     d = _dir(tmp_path, clock=clock)
     _register(d)
-    pending = [{
-        "id": "abc", "hostname": "vm-beta", "fingerprint": FP_B,
-        "created_at": clock.t, "status": "pending",
-    }]
+    pending = [
+        {
+            "id": "abc",
+            "hostname": "vm-beta",
+            "fingerprint": FP_B,
+            "created_at": clock.t,
+            "status": "pending",
+        }
+    ]
     listed = d.list_hosts(pending=pending)
     assert [h["state"] for h in listed] == ["online", "pending-approval"]
     assert listed[1]["label"] == "vm-beta"
@@ -410,8 +456,15 @@ def test_list_hosts_marks_stale_entries_offline_and_merges_pending(tmp_path):
 def test_a_pending_request_for_an_already_registered_key_is_not_listed_twice(tmp_path):
     d = _dir(tmp_path)
     _register(d)
-    pending = [{"id": "abc", "hostname": "vm-alpha", "fingerprint": FP_A,
-                "created_at": 0.0, "status": "pending"}]
+    pending = [
+        {
+            "id": "abc",
+            "hostname": "vm-alpha",
+            "fingerprint": FP_A,
+            "created_at": 0.0,
+            "status": "pending",
+        }
+    ]
     assert [h["state"] for h in d.list_hosts(pending=pending)] == ["online"]
 
 
@@ -419,11 +472,15 @@ def test_two_hosts_stay_independent(tmp_path):
     clock = Clock()
     d = _dir(tmp_path, clock=clock, signers=(FP_A, FP_B))
     _register(d)
-    beta = _payload(host_id="hst-20260818120000-bbbbbbbb", instance_id="inst-b",
-                    key_fingerprint=FP_B, machine_fingerprint="machine-b",
-                    subdomain="def456-d4e5f6",
-                    public_url="https://def456-d4e5f6.relay.example",
-                    refresh="refresh-b")
+    beta = _payload(
+        host_id="hst-20260818120000-bbbbbbbb",
+        instance_id="inst-b",
+        key_fingerprint=FP_B,
+        machine_fingerprint="machine-b",
+        subdomain="def456-d4e5f6",
+        public_url="https://def456-d4e5f6.relay.example",
+        refresh="refresh-b",
+    )
     _register(d, beta, fingerprint=FP_B)
     clock.t += host_contract.DIRECTORY_STALE_S + 1
     # Alpha goes stale; beta re-registers and is unaffected by its neighbour.
@@ -459,14 +516,19 @@ def test_an_unusable_last_seen_reads_as_offline_not_as_a_crash(tmp_path, bad):
     rec["last_seen"] = bad
     path.write_text(json.dumps(rec))
     assert d.list_hosts()[0]["state"] == "offline"
-    assert _register(d, _payload(instance_id="inst-2"))["previous_instance_id"] == "inst-1"
+    assert (
+        _register(d, _payload(instance_id="inst-2"))["previous_instance_id"] == "inst-1"
+    )
 
 
 def test_the_directory_survives_a_process_restart(tmp_path):
     # On-disk store (AC3): a fresh HostDirectory over the same dir sees it.
     clock = Clock()
     _register(_dir(tmp_path, clock=clock))
-    assert _dir(tmp_path, clock=clock).get_host(_payload()["host_id"])["label"] == "vm-alpha"
+    assert (
+        _dir(tmp_path, clock=clock).get_host(_payload()["host_id"])["label"]
+        == "vm-alpha"
+    )
 
 
 @pytest.mark.parametrize(
@@ -521,15 +583,8 @@ def test_instance_probe_never_follows_a_relay_redirect():
     ]
 
 
-def test_concurrent_challenges_cannot_exceed_the_live_cap(tmp_path):
-    d = HostDirectory(
-        tmp_path,
-        allowed_signers=lambda: FP_A,
-        relay_domain="relay.example",
-        verify=_verify,
-        probe=Prober(),
-        max_challenges=1,
-    )
+def test_concurrent_requests_for_one_identity_share_one_live_challenge(tmp_path):
+    d = _dir(tmp_path)
     barrier = threading.Barrier(2)
     sweep = d._sweep_challenges
 
@@ -542,23 +597,15 @@ def test_concurrent_challenges_cannot_exceed_the_live_cap(tmp_path):
         return live
 
     d._sweep_challenges = racing_sweep
-
-    def issue():
-        try:
-            d.issue_challenge()
-            return "issued"
-        except ChallengeCapReached:
-            return "capped"
-
     with ThreadPoolExecutor(max_workers=2) as executor:
-        outcomes = list(executor.map(lambda _: issue(), range(2)))
+        challenges = list(executor.map(lambda _: d.issue_challenge(FP_A), range(2)))
 
-    assert sorted(outcomes) == ["capped", "issued"]
+    assert challenges[0] == challenges[1]
     assert len(list((tmp_path / "challenges").glob("*.json"))) == 1
 
 
 def test_same_host_registration_arbitration_is_serialized(tmp_path):
-    d = _dir(tmp_path)
+    d = _dir(tmp_path, signers=(FP_A, FP_B))
     _register(d)
     entry_path = tmp_path / "hosts" / f"{_payload()['host_id']}.json"
     barrier = threading.Barrier(2)
@@ -572,8 +619,14 @@ def test_same_host_registration_arbitration_is_serialized(tmp_path):
         return None if incumbent_id == "inst-1" else incumbent_id
 
     d._probe = probe
-    payloads = [_payload(instance_id="inst-2"), _payload(instance_id="inst-3")]
-    nonces = [d.issue_challenge()["nonce"] for _ in payloads]
+    payloads = [
+        _payload(instance_id="inst-2", key_fingerprint=FP_A),
+        _payload(instance_id="inst-3", key_fingerprint=FP_B),
+    ]
+    nonces = [
+        d.issue_challenge(str(payload["key_fingerprint"]))["nonce"]
+        for payload in payloads
+    ]
 
     def register(index):
         payload = payloads[index]
@@ -581,7 +634,9 @@ def test_same_host_registration_arbitration_is_serialized(tmp_path):
             d.register(
                 payload,
                 nonce=nonces[index],
-                signature=_sign(nonces[index], payload),
+                signature=_sign(
+                    nonces[index], payload, str(payload["key_fingerprint"])
+                ),
             )
             return "registered"
         except DuplicateIdentity:

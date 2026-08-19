@@ -242,6 +242,18 @@ def test_a_re_post_renews_the_pending_ttl_without_changing_request_id(tmp_path):
     assert store.get(rid) == "expired"
 
 
+def test_pending_request_keeps_the_servers_ttl_when_an_operator_reopens_the_store(tmp_path):
+    now = [1000.0]
+    server = RequestStore(tmp_path, ttl_seconds=7200, clock=lambda: now[0])
+    rid = server.create(_PUB, "vm-alpha")
+    operator = RequestStore(tmp_path, clock=lambda: now[0])
+
+    now[0] += 1800
+    assert operator.get(rid) == "pending"
+    now[0] += 5400
+    assert operator.get(rid) == "expired"
+
+
 def test_a_resolved_request_does_not_block_a_new_one(tmp_path):
     # Dedupe is scoped to PENDING records: once denied, the same key may re-enroll.
     store = RequestStore(tmp_path)

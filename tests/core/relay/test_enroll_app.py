@@ -9,8 +9,12 @@ from mship.core.relay.enroll_app import build_enroll_app
 from mship.core.relay.fleet_token import FleetTokenStore
 from mship.core.relay.host_directory import HostDirectory
 
-_PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBodyAAAAAAAAAAAAAAAAAAAAAAAA host"
-_PUB_B = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAISecondKeyBodyBBBBBBBBBBBBBBBBBBBBBBBB two"
+_PUB = (
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBodyAAAAAAAAAAAAAAAAAAAAAAAA host"
+)
+_PUB_B = (
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAISecondKeyBodyBBBBBBBBBBBBBBBBBBBBBBBB two"
+)
 RELAY = "mship-relay.atomikpanda.com"
 
 FP_A = "SHA256:keyA"
@@ -80,10 +84,7 @@ def _payload(**over):
     return payload
 
 
-def _harness(
-    tmp_path, cap=50, answers=None, max_challenges=1000,
-    ttl=host_contract.ENROLL_TTL_S,
-):
+def _harness(tmp_path, cap=50, answers=None, ttl=host_contract.ENROLL_TTL_S):
     base = tmp_path / "s"
     store = RequestStore(base, ttl_seconds=ttl, max_pending=cap)
     clock = Clock()
@@ -95,7 +96,6 @@ def _harness(
         probe=prober,
         verify=_verify,
         clock=clock,
-        max_challenges=max_challenges,
     )
     fleet = FleetTokenStore(base)
     app = build_enroll_app(
@@ -104,10 +104,16 @@ def _harness(
     return Harness(TestClient(app), store, directory, fleet, clock, prober)
 
 
+def _challenge(h, identity=FP_A):
+    return h.client.post(
+        host_contract.CHALLENGE_PATH, json={"key_fingerprint": identity}
+    )
+
+
 def _register(h, payload=None, nonce=None, signature=None):
     payload = _payload() if payload is None else payload
     if nonce is None:
-        nonce = h.client.get(host_contract.CHALLENGE_PATH).json()["nonce"]
+        nonce = _challenge(h, str(payload["key_fingerprint"])).json()["nonce"]
     return h.client.post(
         host_contract.REGISTER_PATH,
         json={
@@ -156,7 +162,10 @@ def test_enroll_repost_observes_an_already_approved_request(tmp_path):
 
 def test_enroll_rejects_bad_key(tmp_path):
     c, _ = _client(tmp_path)
-    assert c.post("/enroll", json={"pubkey": "garbage", "hostname": "x"}).status_code == 400
+    assert (
+        c.post("/enroll", json={"pubkey": "garbage", "hostname": "x"}).status_code
+        == 400
+    )
 
 
 def test_enroll_over_cap_429(tmp_path):
@@ -164,7 +173,9 @@ def test_enroll_over_cap_429(tmp_path):
     # can reach the cap.
     c, _ = _client(tmp_path, cap=1)
     c.post("/enroll", json={"pubkey": _PUB, "hostname": "a"})
-    assert c.post("/enroll", json={"pubkey": _PUB_B, "hostname": "b"}).status_code == 429
+    assert (
+        c.post("/enroll", json={"pubkey": _PUB_B, "hostname": "b"}).status_code == 429
+    )
 
 
 def test_status_unknown(tmp_path):
@@ -184,7 +195,9 @@ def test_enroll_rejects_oversized_pubkey(tmp_path):
 def test_tls_check_allows_relay_owned_host(tmp_path):
     c = _ask_client(tmp_path)
     assert c.get("/tls-check", params={"domain": f"enroll.{RELAY}"}).status_code == 200
-    assert c.get("/tls-check", params={"domain": f"w-92bbb7.{RELAY}"}).status_code == 200
+    assert (
+        c.get("/tls-check", params={"domain": f"w-92bbb7.{RELAY}"}).status_code == 200
+    )
 
 
 def test_tls_check_rejects_foreign_host(tmp_path):
@@ -204,27 +217,26 @@ def test_tls_check_requires_domain(tmp_path):
 
 def test_challenge_issues_a_nonce(tmp_path):
     h = _harness(tmp_path)
-    r = h.client.get(host_contract.CHALLENGE_PATH)
+    r = _challenge(h)
     assert r.status_code == 200
     body = r.json()
     assert body["nonce"] and isinstance(body["nonce"], str)
     assert body["expires_at"] == h.clock.t + host_contract.CHALLENGE_TTL_S
 
 
-def test_challenge_nonces_are_single_use(tmp_path):
+def test_challenge_is_reused_for_the_same_approved_identity(tmp_path):
     h = _harness(tmp_path)
-    assert (
-        h.client.get(host_contract.CHALLENGE_PATH).json()["nonce"]
-        != h.client.get(host_contract.CHALLENGE_PATH).json()["nonce"]
-    )
+    assert _challenge(h).json()["nonce"] == _challenge(h).json()["nonce"]
 
 
-def test_challenge_flood_is_429_not_500(tmp_path):
-    # The route is public and unauthenticated; a flood must be refused cleanly,
-    # never surface the store's typed cap as an unhandled 500.
-    h = _harness(tmp_path, max_challenges=1)
-    h.client.get(host_contract.CHALLENGE_PATH)
-    assert h.client.get(host_contract.CHALLENGE_PATH).status_code == 429
+def test_unapproved_identity_cannot_allocate_challenge_storage(tmp_path):
+    h = _harness(tmp_path)
+
+    r = _challenge(h, "SHA256:not-approved")
+
+    assert r.status_code == 401
+    assert r.json()["detail"] == host_contract.UNAPPROVED_KEY_DETAIL
+    assert list((tmp_path / "s" / "challenges").glob("*.json")) == []
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +252,7 @@ def test_register_with_a_valid_signature_lands_the_entry(tmp_path):
     entry = h.directory.get_host(_payload()["host_id"])
     assert entry is not None
     assert entry["instance_id"] == "inst-1"
-    assert entry["last_seen"] == h.clock.t                # relay clock, not the payload's
+    assert entry["last_seen"] == h.clock.t  # relay clock, not the payload's
 
 
 def test_signed_non_relay_url_is_a_clean_400(tmp_path):
@@ -260,10 +272,16 @@ def test_register_never_echoes_the_refresh_credential(tmp_path):
     assert "refresh-credential-1" not in _register(h).text
 
 
-def test_register_with_an_unapproved_key_is_401(tmp_path):
+def test_challenge_cannot_authorize_a_different_identity(tmp_path):
     h = _harness(tmp_path)
+    nonce = _challenge(h).json()["nonce"]
     payload = _payload(key_fingerprint="SHA256:notApproved")
-    r = _register(h, payload, signature=_sign("x", payload, "SHA256:notApproved"))
+    r = _register(
+        h,
+        payload,
+        nonce=nonce,
+        signature=_sign(nonce, payload, "SHA256:notApproved"),
+    )
     assert r.status_code == 401
     assert h.directory.get_host(payload["host_id"]) is None
 
@@ -300,7 +318,7 @@ def _signed_body(h, **payload_over):
     """A body that would REGISTER (fresh nonce, matching signature) — so a case
     below can 422 for exactly one reason: the bound it oversizes."""
     payload = _payload(**payload_over)
-    nonce = h.client.get(host_contract.CHALLENGE_PATH).json()["nonce"]
+    nonce = _challenge(h, str(payload["key_fingerprint"])).json()["nonce"]
     return {"nonce": nonce, "signature": _sign(nonce, payload), "payload": payload}
 
 
@@ -321,7 +339,9 @@ _BOUNDED_BODIES = {
     "signature": _oversized_signature,
     "payload-value": lambda h: _signed_body(h, label="w" * 1_000),
     "payload-key": lambda h: _signed_body(h, **{"k" * 300: "v"}),
-    "payload-field-count": lambda h: _signed_body(h, **{f"x{i}": "v" for i in range(80)}),
+    "payload-field-count": lambda h: _signed_body(
+        h, **{f"x{i}": "v" for i in range(80)}
+    ),
     "nested-key": lambda h: _signed_body(h, capabilities={"k" * 300: True}),
     "nested-value": lambda h: _signed_body(h, capabilities={"tunnel": "w" * 1_000}),
     "nested-field-count": lambda h: _signed_body(
@@ -334,7 +354,10 @@ def test_the_bounds_control_body_is_otherwise_accepted(tmp_path):
     # Without this, every case below could be 422ing for an unrelated reason and
     # the bounds could be deleted with the suite still green.
     h = _harness(tmp_path)
-    assert h.client.post(host_contract.REGISTER_PATH, json=_signed_body(h)).status_code == 200
+    assert (
+        h.client.post(host_contract.REGISTER_PATH, json=_signed_body(h)).status_code
+        == 200
+    )
 
 
 @pytest.mark.parametrize("case", sorted(_BOUNDED_BODIES))
@@ -383,7 +406,10 @@ def test_directory_lists_registered_hosts_and_pending_enrollments(tmp_path):
     # The phone fetches the refresh credential from here — that IS the design.
     assert registered["refresh"] == "refresh-credential-1"
     assert registered["host_id"] == _payload()["host_id"]
-    assert next(e for e in hosts if e["state"] == "pending-approval")["label"] == "fresh-vm"
+    assert (
+        next(e for e in hosts if e["state"] == "pending-approval")["label"]
+        == "fresh-vm"
+    )
 
 
 def test_directory_publishes_a_deliberate_projection_not_the_raw_record(tmp_path):
@@ -422,10 +448,15 @@ def test_the_parsed_payload_is_byte_identical_to_what_was_signed(tmp_path):
     # over the directory alone stayed green.
     from mship.core.relay.enroll_app import _RegisterBody
 
-    sent = _payload(mship_version="1.2.3", capabilities={"tunnel": True, "runner": False},
-                    label="wörk-hôst")
+    sent = _payload(
+        mship_version="1.2.3",
+        capabilities={"tunnel": True, "runner": False},
+        label="wörk-hôst",
+    )
     parsed = _RegisterBody(nonce="n", signature="s", payload=sent).payload
-    assert host_contract.canonical_payload(parsed) == host_contract.canonical_payload(sent)
+    assert host_contract.canonical_payload(parsed) == host_contract.canonical_payload(
+        sent
+    )
 
 
 def test_a_future_daemon_field_survives_the_body_model(tmp_path):

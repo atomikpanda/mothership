@@ -2,10 +2,11 @@
 
 Everything the daemon does against the relay's host directory happens here, and
 none of it may block, prompt, raise out of a tick, or write to disk on a
-reconnect. The seams (`post`/`get`/`clock`/`rng`/`signer`/`issue_refresh`/
+reconnect. The seams (`post`/`clock`/`rng`/`signer`/`issue_refresh`/
 `reidentify`) are injected exactly like `tests/core/relay/test_health.py`, so
 these tests use no sockets, no sleeps and no ssh-keygen.
 """
+
 import base64
 import hashlib
 import json
@@ -30,15 +31,20 @@ PUBKEY = "ssh-ed25519 " + base64.b64encode(b"k" * 51).decode() + " mship-relay\n
 
 
 class _Resp:
-    def __init__(self, status: int, body: dict | None = None, headers: dict | None = None,
-                 html: str | None = None):
+    def __init__(
+        self,
+        status: int,
+        body: dict | None = None,
+        headers: dict | None = None,
+        html: str | None = None,
+    ):
         self.status_code = status
         self._body = {} if body is None else body
         self._html = html
         self.headers = headers or {}
 
     def json(self):
-        if self._html is not None:      # what httpx does with a proxy error page
+        if self._html is not None:  # what httpx does with a proxy error page
             raise ValueError("Expecting value: line 1 column 1 (char 0)")
         return self._body
 
@@ -65,27 +71,35 @@ def _advance_past(clock: "_Clock", link) -> None:
 class _Relay:
     """Scriptable stand-in for the enroll app's `/hosts/*` + `/enroll` routes."""
 
-    def __init__(self, register=(200, None), enroll_ttl=host_contract.ENROLL_TTL_S):
+    def __init__(
+        self,
+        register=(200, None),
+        challenge=(200, None),
+        enroll_ttl=host_contract.ENROLL_TTL_S,
+    ):
         self.register_status, self.register_detail = register
+        self.challenge_status, self.challenge_detail = challenge
         self.enroll_ttl = enroll_ttl
         self.calls: list[tuple[str, str, dict | None]] = []
         self.nonce = "nonce-1"
         self.date_header: str | None = None
         self.transport_error: str | None = None
         self.challenge_html: str | None = None
-    def get(self, url, **kw):
-        self.calls.append(("GET", url, None))
-        if self.transport_error:
-            raise RuntimeError(self.transport_error)
-        headers = {"Date": self.date_header} if self.date_header else {}
-        if self.challenge_html is not None:
-            return _Resp(200, headers=headers, html=self.challenge_html)
-        return _Resp(200, {"nonce": self.nonce, "expires_at": 0}, headers)
 
     def post(self, url, json=None, **kw):
         self.calls.append(("POST", url, json))
         if self.transport_error:
             raise RuntimeError(self.transport_error)
+        if url.endswith(host_contract.CHALLENGE_PATH):
+            headers = {"Date": self.date_header} if self.date_header else {}
+            if self.challenge_html is not None:
+                return _Resp(200, headers=headers, html=self.challenge_html)
+            body = (
+                {"nonce": self.nonce, "expires_at": 0}
+                if self.challenge_status == 200
+                else {"detail": self.challenge_detail}
+            )
+            return _Resp(self.challenge_status, body, headers)
         if url.endswith("/enroll"):
             return _Resp(
                 200,
@@ -100,8 +114,11 @@ class _Relay:
         return _Resp(self.register_status, body, headers)
 
     def posts_to(self, path: str) -> list[dict]:
-        return [body for verb, url, body in self.calls
-                if verb == "POST" and url.endswith(path)]
+        return [
+            body
+            for verb, url, body in self.calls
+            if verb == "POST" and url.endswith(path)
+        ]
 
 
 def _seed_key(home: Path) -> None:
@@ -116,7 +133,9 @@ def _sign(blob: bytes) -> str:
     return "SIG:" + hashlib.sha256(blob).hexdigest()
 
 
-def _link(home: Path, relay: _Relay, clock: _Clock, *, rng=lambda: 0.5, **kw) -> RelayLink:
+def _link(
+    home: Path, relay: _Relay, clock: _Clock, *, rng=lambda: 0.5, **kw
+) -> RelayLink:
     _seed_key(home)
     kw.setdefault("issue_refresh", lambda host_id: f"refresh-for-{host_id}")
     kw.setdefault("reidentify", lambda: HostIdentity(host_id="hst-new", created_at=""))
@@ -124,7 +143,6 @@ def _link(home: Path, relay: _Relay, clock: _Clock, *, rng=lambda: 0.5, **kw) ->
         home,
         RELAY,
         post=relay.post,
-        get=relay.get,
         clock=clock,
         rng=rng,
         signer=_sign,
@@ -134,6 +152,7 @@ def _link(home: Path, relay: _Relay, clock: _Clock, *, rng=lambda: 0.5, **kw) ->
 
 # --- register_once: challenge → sign → register ----------------------------
 
+
 def test_register_once_signs_the_posted_payload_and_returns_the_refresh(tmp_path: Path):
     relay = _Relay()
     link = _link(tmp_path, relay, _Clock())
@@ -142,7 +161,11 @@ def test_register_once_signs_the_posted_payload_and_returns_the_refresh(tmp_path
 
     assert outcome.ok and outcome.kind == "registered"
     assert outcome.refresh == f"refresh-for-{link.host_id}"
-    assert relay.calls[0][:2] == ("GET", BASE + host_contract.CHALLENGE_PATH)
+    assert relay.calls[0] == (
+        "POST",
+        BASE + host_contract.CHALLENGE_PATH,
+        {"key_fingerprint": link.key_fingerprint},
+    )
     body = relay.posts_to(host_contract.REGISTER_PATH)[0]
     payload = body["payload"]
     assert payload["host_id"] == link.host_id
@@ -197,8 +220,8 @@ def test_transport_failure_is_typed_not_raised(tmp_path: Path):
 def test_relay_date_header_samples_clock_skew(tmp_path: Path):
     """Task 9 reads this: the enroll server is the only different clock here."""
     relay = _Relay()
-    clock = _Clock(t=1_755_003_600.0)                     # 2025-08-12T13:00:00Z
-    relay.date_header = "Tue, 12 Aug 2025 12:00:00 GMT"   # an hour behind us
+    clock = _Clock(t=1_755_003_600.0)  # 2025-08-12T13:00:00Z
+    relay.date_header = "Tue, 12 Aug 2025 12:00:00 GMT"  # an hour behind us
     link = _link(tmp_path, relay, clock)
     assert link.clock_skew_seconds is None
     link.register_once()
@@ -207,16 +230,19 @@ def test_relay_date_header_samples_clock_skew(tmp_path: Path):
 
 def test_register_post_date_alone_samples_skew(tmp_path: Path):
     """Both relay calls carry the enroll server's clock; a challenge without a
-    `Date` (a proxy that strips it on GETs) must not leave the skew unknown —
-    `mship daemon status` reports it from whichever answer carried one."""
-    class _NoDateOnGet(_Relay):
-        def get(self, url, **kw):
-            self.calls.append(("GET", url, None))
-            return _Resp(200, {"nonce": self.nonce, "expires_at": 0})
+    `Date` must not leave the skew unknown — `mship daemon status` reports it
+    from whichever answer carried one."""
 
-    relay = _NoDateOnGet()
-    clock = _Clock(t=1_755_003_600.0)                     # 2025-08-12T13:00:00Z
-    relay.date_header = "Tue, 12 Aug 2025 12:00:00 GMT"   # an hour behind us
+    class _NoDateOnChallenge(_Relay):
+        def post(self, url, json=None, **kw):
+            if url.endswith(host_contract.CHALLENGE_PATH):
+                self.calls.append(("POST", url, json))
+                return _Resp(200, {"nonce": self.nonce, "expires_at": 0})
+            return super().post(url, json=json, **kw)
+
+    relay = _NoDateOnChallenge()
+    clock = _Clock(t=1_755_003_600.0)  # 2025-08-12T13:00:00Z
+    relay.date_header = "Tue, 12 Aug 2025 12:00:00 GMT"  # an hour behind us
     link = _link(tmp_path, relay, clock)
 
     link.register_once()
@@ -240,7 +266,7 @@ def test_a_200_that_is_not_json_is_typed_not_raised(tmp_path: Path):
     outcome = _link(tmp_path, relay, _Clock()).register_once()
     assert outcome.ok is False and outcome.kind == "refused"
     assert "nonce" in outcome.detail
-    assert relay.posts_to(host_contract.REGISTER_PATH) == []   # nothing signed blind
+    assert relay.posts_to(host_contract.REGISTER_PATH) == []  # nothing signed blind
 
 
 def test_a_stale_challenge_401_is_transient_not_unapproved(tmp_path: Path):
@@ -270,6 +296,7 @@ def test_an_unrecognised_401_still_enrolls(tmp_path: Path):
 
 # --- tick(): jittered, capped, ceiling-free backoff (AC2/AC3) --------------
 
+
 def _fail(relay: _Relay, why: str = "boom") -> None:
     relay.transport_error = why
 
@@ -277,15 +304,15 @@ def _fail(relay: _Relay, why: str = "boom") -> None:
 def test_tick_backs_off_and_a_success_resets_the_delay(tmp_path: Path):
     relay = _Relay()
     clock = _Clock()
-    link = _link(tmp_path, relay, clock, rng=lambda: 0.0)   # no jitter subtracted
+    link = _link(tmp_path, relay, clock, rng=lambda: 0.0)  # no jitter subtracted
 
     _fail(relay)
-    assert link.tick() is not None                          # first tick is due
+    assert link.tick() is not None  # first tick is due
     first = link.next_attempt_delay()
-    assert link.tick() is None                              # not due yet
+    assert link.tick() is None  # not due yet
     clock.advance(first)
     assert link.tick() is not None
-    assert link.next_attempt_delay() > first                # exponential growth
+    assert link.next_attempt_delay() > first  # exponential growth
 
     relay.transport_error = None
     _advance_past(clock, link)
@@ -330,8 +357,8 @@ def test_two_links_do_not_retry_on_the_same_tick(tmp_path: Path):
     """A fleet reconnecting after a relay redeploy must not stampede (AC3)."""
     unlucky, lucky = _Relay(), _Relay()
     clock = _Clock()
-    slow = _link(tmp_path / "a", unlucky, clock, rng=lambda: 0.0)   # full delay
-    fast = _link(tmp_path / "b", lucky, clock, rng=lambda: 1.0)     # 20% off it
+    slow = _link(tmp_path / "a", unlucky, clock, rng=lambda: 0.0)  # full delay
+    fast = _link(tmp_path / "b", lucky, clock, rng=lambda: 1.0)  # 20% off it
     _fail(unlucky)
     _fail(lucky)
     slow.tick()
@@ -347,6 +374,7 @@ def test_two_links_do_not_retry_on_the_same_tick(tmp_path: Path):
 
 # --- AC1/AC8: enrollment that stays alive, non-blocking, self-healing ------
 
+
 def test_unapproved_key_posts_enroll_without_polling(tmp_path: Path):
     relay = _Relay(register=(401, host_contract.UNAPPROVED_KEY_DETAIL))
     link = _link(tmp_path, relay, _Clock())
@@ -354,7 +382,7 @@ def test_unapproved_key_posts_enroll_without_polling(tmp_path: Path):
     link.tick()
 
     assert link.state == "awaiting-enrollment"
-    assert link.should_dial() is True        # ssh may still try; the log classifies
+    assert link.should_dial() is True  # ssh may still try; the log classifies
     assert relay.posts_to("/enroll") == [
         {"pubkey": PUBKEY.strip(), "hostname": socket.gethostname()}
     ]
@@ -413,14 +441,17 @@ def test_enroll_repost_follows_the_servers_advertised_ttl(tmp_path: Path):
     assert clock() - started_at < 60
 
 
-def test_approval_self_heals_with_no_prompt(tmp_path: Path):
-    relay = _Relay(register=(401, host_contract.UNAPPROVED_KEY_DETAIL))
+def test_challenge_stage_unapproved_self_heals_with_no_prompt(tmp_path: Path):
+    relay = _Relay(challenge=(401, host_contract.UNAPPROVED_KEY_DETAIL))
     clock = _Clock()
     link = _link(tmp_path, relay, clock)
-    link.tick()
-    assert link.state == "awaiting-enrollment"
 
-    relay.register_status, relay.register_detail = 200, None    # owner approved
+    link.tick()
+
+    assert link.state == "awaiting-enrollment"
+    assert len(relay.posts_to(host_contract.ENROLL_PATH)) == 1
+
+    relay.challenge_status, relay.challenge_detail = 200, None  # owner approved
     _advance_past(clock, link)
     outcome = link.tick()
 
@@ -429,6 +460,7 @@ def test_approval_self_heals_with_no_prompt(tmp_path: Path):
 
 
 # --- AC4b: a 409 is self-healing, and never needs a terminal ---------------
+
 
 def test_duplicate_identity_stops_dialling_and_reports_the_relay_detail(tmp_path: Path):
     relay = _Relay(register=(409, "duplicate identity; run mship daemon reidentify"))
@@ -459,7 +491,7 @@ def test_consecutive_409s_auto_reidentify_loudly_and_return_to_enrollment(
 
     assert reidentified == [1]
     assert link.host_id == "hst-fresh" != original
-    assert link.subdomain != original_subdomain             # a new subdomain
+    assert link.subdomain != original_subdomain  # a new subdomain
     assert link.state == "awaiting-enrollment"
     assert link.should_dial() is True
     assert any("re-identif" in r.getMessage() for r in caplog.records)
@@ -485,15 +517,17 @@ def test_a_success_clears_the_duplicate_counter(tmp_path: Path):
     _advance_past(clock, link)
     relay.register_status, relay.register_detail = 409, "duplicate identity"
     link.tick()
-    assert calls == []                       # the streak restarted at the success
+    assert calls == []  # the streak restarted at the success
 
 
 # --- AC11: a reconnect writes nothing ---------------------------------------
 
+
 def _snapshot(directory: Path) -> dict[str, bytes]:
     return {
         str(p.relative_to(directory)): p.read_bytes()
-        for p in sorted(directory.rglob("*")) if p.is_file()
+        for p in sorted(directory.rglob("*"))
+        if p.is_file()
     }
 
 
@@ -505,26 +539,29 @@ def test_n_registrations_leave_the_daemon_state_dir_byte_identical(tmp_path: Pat
     clock = _Clock()
     store = RefreshStore(tmp_path, clock=clock)
     link = _link(
-        tmp_path, relay, clock,
+        tmp_path,
+        relay,
+        clock,
         issue_refresh=lambda host_id: store.issue_refresh(
             host_id=host_id, client="relay-directory"
         ),
     )
-    assert link.register_once().ok                     # first run mints state
+    assert link.register_once().ok  # first run mints state
 
     before = _snapshot(daemon_state_dir(tmp_path))
-    assert "host-refresh.json" in before               # the file that could churn
+    assert "host-refresh.json" in before  # the file that could churn
     for _ in range(20):
         clock.advance(host_contract.REGISTER_INTERVAL_S * 2)
         assert link.tick().ok
     assert _snapshot(daemon_state_dir(tmp_path)) == before
     # Idempotent per host: the same credential is re-published, never re-minted.
-    assert {b["payload"]["refresh"] for b in relay.posts_to(host_contract.REGISTER_PATH)} == {
-        link.refresh
-    }
+    assert {
+        b["payload"]["refresh"] for b in relay.posts_to(host_contract.REGISTER_PATH)
+    } == {link.refresh}
 
 
 # --- the capability seam + the default re-identify --------------------------
+
 
 def test_the_default_refresh_store_runs_on_the_links_clock(tmp_path: Path):
     """Two clocks in one daemon is how a credential expires early (or never):
@@ -534,7 +571,7 @@ def test_the_default_refresh_store_runs_on_the_links_clock(tmp_path: Path):
     from mship.core.daemon.paths import host_refresh_path
 
     relay = _Relay()
-    clock = _Clock(t=4_000_000_000.0)          # far from time.time()
+    clock = _Clock(t=4_000_000_000.0)  # far from time.time()
     assert _link(tmp_path, relay, clock, issue_refresh=None).register_once().ok
     doc = json.loads(host_refresh_path(tmp_path).read_text())
     record = next(iter(doc["clients"].values()))

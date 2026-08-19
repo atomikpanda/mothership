@@ -8,15 +8,18 @@ from mship.core.config import ConfigLoader
 
 
 def test_from_mapping_full():
-    rc = RelayConfig.from_mapping({"host": "relay.example.com", "ssh_port": 2222, "user": "tunnel"})
+    rc = RelayConfig.from_mapping(
+        {"host": "relay.example.com", "ssh_port": 2222, "user": "tunnel"}
+    )
     assert rc.host == "relay.example.com"
     assert rc.ssh_port == 2222
     assert rc.user == "tunnel"
 
+
 def test_from_mapping_defaults_and_none():
-    assert RelayConfig.from_mapping(None) is None           # no relay configured
+    assert RelayConfig.from_mapping(None) is None  # no relay configured
     rc = RelayConfig.from_mapping({"host": "r.example.com"})
-    assert rc.ssh_port == 2222 and rc.user is None          # defaults
+    assert rc.ssh_port == 2222 and rc.user is None  # defaults
 
 
 def test_relay_host_is_canonicalized_for_dns_and_signed_urls():
@@ -27,12 +30,26 @@ def test_relay_host_is_canonicalized_for_dns_and_signed_urls():
     assert direct.host == "relay.example.com"
 
 
+@pytest.mark.parametrize("port", [0, 65536, True, "2222"])
+def test_relay_ssh_port_must_be_a_real_tcp_port(port):
+    for build in (
+        lambda: RelayConfig(host="relay.example.com", ssh_port=port),
+        lambda: RelayConfig.from_mapping(
+            {"host": "relay.example.com", "ssh_port": port}
+        ),
+    ):
+        with pytest.raises(ValueError, match="relay.ssh_port"):
+            build()
+
+
 def test_config_loader_parses_relay_block(tmp_path: Path):
     """ConfigLoader.load exposes config.relay.host when a relay: block is present."""
     # Create a minimal repo so ConfigLoader doesn't fail path validation
     repo_dir = tmp_path / "myrepo"
     repo_dir.mkdir()
-    (repo_dir / "Taskfile.yml").write_text("version: '3'\ntasks:\n  test:\n    cmds:\n      - echo ok\n")
+    (repo_dir / "Taskfile.yml").write_text(
+        "version: '3'\ntasks:\n  test:\n    cmds:\n      - echo ok\n"
+    )
 
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text(
@@ -60,7 +77,9 @@ def test_config_loader_relay_none_when_absent(tmp_path: Path):
     """WorkspaceConfig.relay is None when no relay: block is in mothership.yaml."""
     repo_dir = tmp_path / "myrepo"
     repo_dir.mkdir()
-    (repo_dir / "Taskfile.yml").write_text("version: '3'\ntasks:\n  test:\n    cmds:\n      - echo ok\n")
+    (repo_dir / "Taskfile.yml").write_text(
+        "version: '3'\ntasks:\n  test:\n    cmds:\n      - echo ok\n"
+    )
 
     cfg = tmp_path / "mothership.yaml"
     cfg.write_text(
