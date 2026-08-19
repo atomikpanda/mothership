@@ -428,6 +428,23 @@ def test_a_stale_entry_is_taken_over_without_probing(tmp_path):
     assert entry["previous_instance_id"] == "inst-1"
     assert probe.urls == [], "a stale incumbent needs no probe"
 
+def test_a_stale_host_id_cannot_be_claimed_by_another_approved_key(tmp_path):
+    clock = Clock()
+    probe = Prober()
+    d = _dir(tmp_path, clock=clock, probe=probe, signers=(FP_A, FP_B))
+    _register(d)
+    path = tmp_path / "hosts" / f"{_payload()['host_id']}.json"
+    before = path.read_bytes()
+    clock.t += host_contract.DIRECTORY_STALE_S + 1
+
+    claimant = _payload(instance_id="inst-2", key_fingerprint=FP_B)
+    with pytest.raises(DuplicateIdentity):
+        _register(d, claimant, fingerprint=FP_B)
+
+    assert path.read_bytes() == before
+    assert probe.urls == []
+
+
 
 # --- listing ----------------------------------------------------------------
 

@@ -16,10 +16,10 @@ Two invariants carry the security of this module:
   clock, never from a payload field — a VM whose wall clock stepped an hour
   must not be able to render itself offline or become hijackable (AC10).
 
-Restart vs clone is arbitrated by PROBING the incumbent, not by comparing
-fingerprints: `cp -a` copies the machine fingerprint verbatim, so a
-fingerprint-keyed check would read the clone as an idempotent re-registration
-and silently overwrite the incumbent's URL and credential (decision f).
+Restart vs clone is arbitrated by probing the incumbent after key ownership is
+confirmed: `cp -a` copies the key and machine fingerprint verbatim, so neither
+can distinguish two instances. The approved key owns the host-id slot; the
+probe decides which instance currently holds it.
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ _PAYLOAD_FIELDS = (
 
 
 _REIDENTIFY_HINT = (
-    "another live host already claims this host_id; "
+    "another approved key or live host already claims this host_id; "
     "run `mship daemon reidentify` on the new machine"
 )
 
@@ -346,9 +346,14 @@ class HostDirectory:
             now = self._clock()
             incumbent = self._read_rec(path) if path.exists() else None
             previous_instance_id = None
-            if incumbent is not None and not self._same_identity(incumbent, payload):
-                self._arbitrate(incumbent, payload, now)
-                previous_instance_id = incumbent.get("instance_id")
+            if incumbent is not None:
+                # Staleness transfers a copied identity between instances; it
+                # never transfers the host-id slot to a different approved key.
+                if incumbent.get("key_fingerprint") != identity:
+                    raise DuplicateIdentity(_REIDENTIFY_HINT)
+                if not self._same_identity(incumbent, payload):
+                    self._arbitrate(incumbent, payload, now)
+                    previous_instance_id = incumbent.get("instance_id")
 
             entry = {
                 "host_id": host_id,
