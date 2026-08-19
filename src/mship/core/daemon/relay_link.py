@@ -206,8 +206,11 @@ class RelayLink:
             reidentify
             if reidentify is not None
             else (
+                # A snapshot clone shares the incumbent's old private key.
+                # Rotating our copy is required; revoking the shared relay key
+                # would take the healthy source host offline too.
                 lambda: force_reidentify(
-                    self._home, revoke_key=self._revoke_current_key
+                    self._home, revoke_key=lambda _home: None
                 )
             )
         )
@@ -228,20 +231,13 @@ class RelayLink:
             ensure_host_identity(
                 self._home,
                 fingerprint=machine_fingerprint(),
-                revoke_key=self._revoke_current_key,
+                # A fingerprint-changing clone can still share the incumbent's
+                # copied key. Rotate our copy without revoking the shared key.
+                revoke_key=lambda _home: None,
             )
         )
 
     # -- identity + key material -------------------------------------------
-
-    def _revoke_current_key(self, home: Path) -> None:
-        revoke_relay_key(
-            home,
-            self._relay,
-            post=self._post,
-            signer=self._signer,
-            timeout=self._timeout,
-        )
 
     def _adopt(self, ident: HostIdentity) -> None:
         """Take on an identity and everything derived from it. Called again

@@ -32,7 +32,7 @@ Run this pass on a real host + the live relay before calling #471 done.
 
 1. **Real tunnel over the live relay.** `mship daemon install --serve
    127.0.0.1:47190 --relay mship-relay.atomikpanda.com && mship daemon start`,
-   then one `mship relay approve <id>` on the relay box → `mship daemon status`
+   then one `mship relay approve <id> --store-dir <relay-dir>/pending-store --pubkeys-dir <relay-dir>/pubkeys` on the relay box → `mship daemon status`
    reaches `tunnel: online https://<subdomain>.mship-relay.atomikpanda.com`, and
    that URL answers `/health` from off-box.
 

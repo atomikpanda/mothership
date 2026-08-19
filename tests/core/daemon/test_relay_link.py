@@ -696,6 +696,63 @@ def test_consecutive_409s_auto_reidentify_loudly_and_return_to_enrollment(
     assert relay.posts_to("/enroll")
 
 
+def test_startup_fingerprint_recovery_does_not_revoke_a_clones_shared_key(
+    tmp_path: Path, monkeypatch
+):
+    relay = _Relay()
+
+    def fake_ensure_identity(home, *, fingerprint, revoke_key):
+        revoke_key(home)
+        return HostIdentity(host_id="hst-fresh", created_at="")
+
+    monkeypatch.setattr(relay_link, "ensure_host_identity", fake_ensure_identity)
+    _seed_key(tmp_path)
+    link = RelayLink(
+        tmp_path,
+        RELAY,
+        post=relay.post,
+        clock=_Clock(),
+        signer=_sign,
+        issue_refresh=lambda host_id: f"refresh-for-{host_id}",
+    )
+
+    assert relay.posts_to(host_contract.REVOKE_PATH) == []
+    assert link.host_id == "hst-fresh"
+
+
+def test_auto_reidentify_does_not_revoke_the_source_hosts_shared_key(
+    tmp_path: Path, monkeypatch
+):
+    relay = _Relay(register=(409, "duplicate identity"))
+    clock = _Clock()
+
+    def fake_reidentify(home, *, revoke_key):
+        revoke_key(home)
+        return HostIdentity(host_id="hst-fresh", created_at="")
+
+    monkeypatch.setattr(relay_link, "force_reidentify", fake_reidentify)
+    _seed_key(tmp_path)
+    link = RelayLink(
+        tmp_path,
+        RELAY,
+        post=relay.post,
+        clock=clock,
+        rng=lambda: 0.5,
+        signer=_sign,
+        issue_refresh=lambda host_id: f"refresh-for-{host_id}",
+    )
+    for _ in range(RelayLink.DUPLICATE_REIDENTIFY_AFTER - 1):
+        link.tick()
+        _advance_past(clock, link)
+
+    calls_before_recovery = len(relay.calls)
+    link.tick()
+
+    assert relay.posts_to(host_contract.REVOKE_PATH) == []
+    assert len(relay.calls) - calls_before_recovery == 3
+    assert link.host_id == "hst-fresh"
+
+
 def test_failed_auto_reidentify_keeps_identity_and_uses_registration_backoff(
     tmp_path: Path,
 ):

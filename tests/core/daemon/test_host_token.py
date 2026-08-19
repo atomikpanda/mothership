@@ -182,6 +182,20 @@ def test_verify_never_raises_on_a_corrupt_store(tmp_path: Path):
     assert verify_host_token(tmp_path, token, clock=clk.anchored()) is None
 
 
+@pytest.mark.parametrize("field", ["expires_at", "mono_deadline"])
+def test_verify_rejects_an_oversized_persisted_deadline(
+    tmp_path: Path, field: str
+):
+    clk = _Clock()
+    token = issue_host_token(tmp_path, clock=clk.anchored())
+    path = host_tokens_path(tmp_path)
+    doc = json.loads(path.read_text())
+    next(iter(doc["tokens"].values()))[field] = 10**400
+    path.write_text(json.dumps(doc))
+
+    assert verify_host_token(tmp_path, token, clock=clk.anchored()) is None
+
+
 # --- restart safety: a persisted monotonic floor must carry its epoch ------
 
 

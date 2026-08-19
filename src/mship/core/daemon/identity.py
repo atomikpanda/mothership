@@ -97,6 +97,10 @@ def _read(path: Path) -> dict | None:
         return None  # corrupt/truncated → re-mint (RegistryStore._load_nolock precedent)
 
 
+def _preserve_relay_key(_home: Path) -> None:
+    """Automatic recovery cannot prove a copied key is not still in use."""
+
+
 def _revoke_relay_key(home: Path) -> None:
     """Remove the current key from a configured relay before rotating it."""
     from mship.core.daemon.registry import load_daemon_config
@@ -111,7 +115,7 @@ def _revoke_relay_key(home: Path) -> None:
 
 
 def _rotate_relay_key(home: Path) -> None:
-    """Move the revoked relay key aside so the re-identified host generates and
+    """Move the current relay key aside so the re-identified host generates and
     enrolls fresh local key material."""
     from mship.core.relay.keys import relay_key_path
 
@@ -161,7 +165,7 @@ def ensure_host_identity(
     *,
     fingerprint: str | None = None,
     on_mismatch: Literal["reidentify", "keep"] = "reidentify",
-    revoke_key: Callable[[Path], None] = _revoke_relay_key,
+    revoke_key: Callable[[Path], None] = _preserve_relay_key,
     rotate_key: Callable[[Path], None] = _rotate_relay_key,
     now: datetime | None = None,
 ) -> HostIdentity:

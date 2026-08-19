@@ -511,6 +511,35 @@ def test_directory_lists_registered_hosts_and_pending_enrollments(tmp_path):
     )
 
 
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("last_seen", 10**400),
+        ("first_seen", float("nan")),
+    ],
+)
+def test_directory_degrades_unusable_persisted_timestamps(
+    tmp_path, field, bad_value
+):
+    h = _harness(tmp_path)
+    _register(h)
+    path = tmp_path / "s" / "hosts" / f"{_payload()['host_id']}.json"
+    rec = json.loads(path.read_text())
+    rec[field] = bad_value
+    path.write_text(json.dumps(rec, allow_nan=True))
+
+    response = h.client.get(
+        host_contract.LIST_PATH,
+        headers={host_contract.FLEET_TOKEN_HEADER: h.fleet.issue("phone")},
+    )
+
+    assert response.status_code == 200
+    host = response.json()["hosts"][0]
+    assert host[field] == 0.0
+    if field == "last_seen":
+        assert host["state"] == "offline"
+
+
 def test_directory_publishes_a_deliberate_projection_not_the_raw_record(tmp_path):
     # A field added to a stored entry must not auto-publish to every paired
     # phone; the response shape is an allowlist, asserted here.

@@ -58,6 +58,10 @@ TICK_INTERVAL_S = 1.0
 # derives its tunnel-join bound from it (`core/daemon/run.py`) — a tick must
 # not be able to outlast the wait that exists to keep it from orphaning ssh.
 PROCESS_LIST_TIMEOUT_S = 10.0
+# Discovery, pre-TERM revalidation, and pre-KILL revalidation. Each phase takes
+# one bounded process-table snapshot regardless of how many orphans it contains.
+MAX_PROCESS_LIST_CALLS_PER_REAP = 3
+
 
 # One shared grace period for every matching orphan: signal all of them, wait
 # together, then escalate survivors. The daemon's shutdown join bound includes
@@ -209,112 +213,98 @@ def reap_orphan_tunnels(
             and _forward_label(current.cmdline) == subdomain
         )
 
-    def signal_atomically(proc: ProcessInfo, sig: int) -> bool:
-        opener = pidfd_open or getattr(os, "pidfd_open", None)
-        native_sender = getattr(signal, "pidfd_send_signal", None)
-        sender = pidfd_signal or (
-            (lambda fd, signal_number: native_sender(fd, signal_number, None, 0))
-            if native_sender is not None
-            else None
+    pidfd_opener = pidfd_open or getattr(os, "pidfd_open", None)
+    native_pidfd_sender = getattr(signal, "pidfd_send_signal", None)
+    pidfd_sender = pidfd_signal or (
+        (lambda fd, sig: native_pidfd_sender(fd, sig, None, 0))
+        if native_pidfd_sender is not None
+        else None
+    )
+
+    def signal_phase(
+        candidates: list[ProcessInfo],
+        sig: int,
+        injected_signal: Callable[[int], None] | None,
+    ) -> list[ProcessInfo]:
+        """Revalidate and signal a whole phase from one bounded snapshot."""
+        if not candidates:
+            return []
+        use_pidfds = (
+            injected_signal is None
+            and pidfd_opener is not None
+            and pidfd_sender is not None
         )
-        if opener is None or sender is None:
-            raise RuntimeError("atomic pidfd signaling is unavailable")
+        opened: dict[int, int] = {}
         try:
-            fd = opener(proc.pid)
-        except ProcessLookupError:
-            return False
-        except Exception as exc:
-            raise RuntimeError("atomic pidfd signaling is unavailable") from exc
-        try:
-            current = {row.pid: row for row in processes()}.get(proc.pid)
-            if not same_process(proc, current):
-                return False
-            try:
-                sender(fd, sig)
-            except ProcessLookupError:
-                return False
-            return True
+            if use_pidfds:
+                for proc in candidates:
+                    try:
+                        opened[proc.pid] = pidfd_opener(proc.pid)
+                    except ProcessLookupError:
+                        continue
+                    except Exception as exc:
+                        raise RuntimeError(
+                            "atomic pidfd signaling is unavailable"
+                        ) from exc
+
+            current_by_pid = {proc.pid: proc for proc in processes()}
+            accepted = []
+            for proc in candidates:
+                if use_pidfds and proc.pid not in opened:
+                    continue
+                current = current_by_pid.get(proc.pid)
+                if current is None:
+                    if process_exists(proc.pid):
+                        raise RuntimeError(
+                            f"could not revalidate orphan tunnel pid {proc.pid}"
+                        )
+                    continue
+                if not same_process(proc, current):
+                    continue
+                try:
+                    if use_pidfds:
+                        pidfd_sender(opened[proc.pid], sig)
+                    elif injected_signal is not None:
+                        injected_signal(proc.pid)
+                    else:
+                        # macOS has no pidfds. The shared phase snapshot narrows
+                        # the unavoidable PID-reuse race before this signal.
+                        os.kill(proc.pid, sig)
+                except ProcessLookupError:
+                    continue
+                except Exception as exc:
+                    if process_exists(proc.pid):
+                        action = "force-kill" if sig == signal.SIGKILL else "signal"
+                        raise RuntimeError(
+                            f"could not {action} orphan tunnel pid {proc.pid}"
+                        ) from exc
+                    continue
+                accepted.append(proc)
+            return accepted
         finally:
-            close_pidfd(fd)
+            for fd in opened.values():
+                close_pidfd(fd)
 
     candidates = [
         proc
         for proc in processes()
         if proc.ppid == 1 and _forward_label(proc.cmdline) == subdomain
     ]
-    refreshed = (
-        {proc.pid: proc for proc in processes()}
-        if candidates and kill is not None
-        else {}
-    )
-    signalled = []
-    identities = []
-    for proc in candidates:
-        if kill is None:
-            accepted = signal_atomically(proc, signal.SIGTERM)
-        else:
-            current = refreshed.get(proc.pid)
-            if current is None:
-                if process_exists(proc.pid):
-                    raise RuntimeError(
-                        f"could not revalidate orphan tunnel pid {proc.pid}"
-                    )
-                continue
-            if not same_process(proc, current):
-                continue
-            try:
-                kill(proc.pid)
-                accepted = True
-            except Exception as exc:
-                if process_exists(proc.pid):
-                    raise RuntimeError(
-                        f"could not signal orphan tunnel pid {proc.pid}"
-                    ) from exc
-                accepted = False
-        if not accepted:
-            continue
+    identities = signal_phase(candidates, signal.SIGTERM, kill)
+    for proc in identities:
         log.warning(
             "signalled orphaned relay tunnel pid=%s holding %s", proc.pid, subdomain
         )
-        signalled.append(proc.pid)
-        identities.append(proc)
+    signalled = [proc.pid for proc in identities]
+
     survivors = wait_for_exit(identities)
-    refreshed = (
-        {proc.pid: proc for proc in processes()}
-        if survivors and force_kill is not None
-        else {}
-    )
-    force_signalled = []
-    for proc in survivors:
-        if force_kill is None:
-            accepted = signal_atomically(proc, signal.SIGKILL)
-        else:
-            current = refreshed.get(proc.pid)
-            if current is None:
-                if process_exists(proc.pid):
-                    raise RuntimeError(
-                        f"could not revalidate orphan tunnel pid {proc.pid}"
-                    )
-                continue
-            if not same_process(proc, current):
-                continue
-            try:
-                force_kill(proc.pid)
-                accepted = True
-            except Exception as exc:
-                if process_exists(proc.pid):
-                    raise RuntimeError(
-                        f"could not force-kill orphan tunnel pid {proc.pid}"
-                    ) from exc
-                accepted = False
-        if not accepted:
-            continue
+    force_signalled = signal_phase(survivors, signal.SIGKILL, force_kill)
+    for proc in force_signalled:
         log.warning(
             "force-killed orphaned relay tunnel pid=%s holding %s",
             proc.pid,
             subdomain,
         )
-        force_signalled.append(proc)
     still_live = wait_for_exit(force_signalled)
     if still_live:
         raise RuntimeError(

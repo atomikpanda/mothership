@@ -86,7 +86,7 @@ def _as_float(value, default: float = 0.0) -> float:
     """
     try:
         parsed = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     return parsed if math.isfinite(parsed) else default
 
@@ -510,6 +510,7 @@ class HostDirectory:
             hosts.append(
                 {
                     **rec,
+                    "first_seen": _as_float(rec.get("first_seen")),
                     "last_seen": _as_float(rec.get("last_seen")),
                     "state": "offline" if stale else "online",
                 }

@@ -25,6 +25,7 @@ from fastapi.testclient import TestClient
 from mship.core.daemon import history
 from mship.core.daemon.host_app import create_host_app
 from mship.core.daemon.host_tunnel import (
+    MAX_PROCESS_LIST_CALLS_PER_REAP,
     ORPHAN_EXIT_TIMEOUT_S,
     STATES,
     HostTunnel,
@@ -688,19 +689,78 @@ def test_reaper_does_not_term_a_pid_reused_before_the_first_signal(fx):
     assert signals == []
 
 
-def test_reaper_refuses_to_signal_without_atomic_pidfd_support(fx):
+def test_reaper_uses_revalidated_kill_when_pidfds_are_unavailable(
+    fx, monkeypatch
+):
     orphan = _proc(
         100, 1, f"ssh -N -R {fx.link.subdomain}:80:localhost:8765 relay.example"
     )
+    alive = {orphan.pid}
+    signals = []
 
-    with pytest.raises(RuntimeError, match="atomic pidfd signaling"):
-        reap_orphan_tunnels(
-            fx.link.subdomain,
-            processes=lambda: [orphan],
-            pidfd_open=lambda _pid: (_ for _ in ()).throw(
-                NotImplementedError("pidfd unavailable")
-            ),
+    def portable_kill(pid, sig):
+        signals.append((pid, sig))
+        alive.remove(pid)
+
+    monkeypatch.delattr(os, "pidfd_open", raising=False)
+    monkeypatch.delattr(signal, "pidfd_send_signal", raising=False)
+    monkeypatch.setattr(os, "kill", portable_kill)
+
+    reaped = reap_orphan_tunnels(
+        fx.link.subdomain,
+        processes=lambda: [orphan],
+        process_exists=lambda pid: pid in alive,
+    )
+
+    assert reaped == [orphan.pid]
+    assert signals == [(orphan.pid, signal.SIGTERM)]
+
+
+def test_portable_reaper_uses_fixed_process_snapshots_for_many_stubborn_orphans(
+    fx, monkeypatch
+):
+    orphans = [
+        _proc(
+            pid,
+            1,
+            f"ssh -N -R {fx.link.subdomain}:80:localhost:8765 relay.example",
         )
+        for pid in range(100, 110)
+    ]
+    alive = {proc.pid for proc in orphans}
+    scans = []
+    signals = []
+    now = [0.0]
+
+    def process_snapshot():
+        scans.append(1)
+        return orphans
+
+    def portable_kill(pid, sig):
+        signals.append((pid, sig))
+        if sig == signal.SIGKILL:
+            alive.remove(pid)
+
+    monkeypatch.delattr(os, "pidfd_open", raising=False)
+    monkeypatch.delattr(signal, "pidfd_send_signal", raising=False)
+    monkeypatch.setattr(os, "kill", portable_kill)
+
+    reap_orphan_tunnels(
+        fx.link.subdomain,
+        processes=process_snapshot,
+        process_exists=lambda pid: pid in alive,
+        clock=lambda: now[0],
+        sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+    )
+
+    assert len(scans) == MAX_PROCESS_LIST_CALLS_PER_REAP
+    assert signals == [
+        (proc.pid, signal.SIGTERM) for proc in orphans
+    ] + [
+        (proc.pid, signal.SIGKILL) for proc in orphans
+    ]
+
+
 
 
 def test_reaper_leaves_other_hosts_tunnels_and_non_tunnels_alone(fx):

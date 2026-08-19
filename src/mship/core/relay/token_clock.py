@@ -102,7 +102,9 @@ class Deadline:
         try:
             expires_at = float(rec["expires_at"])
             mono_deadline = float(rec.get("mono_deadline", 0.0))
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(expires_at) or not math.isfinite(mono_deadline):
             return None
         epoch = rec.get("epoch")
         return cls(

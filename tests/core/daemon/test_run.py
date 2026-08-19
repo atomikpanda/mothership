@@ -447,6 +447,15 @@ def test_serve_forever_always_runs_on_asyncio(
     assert tunnel is None or tunnel.stopped
 
 
+def test_tunnel_join_timeout_uses_the_reapers_fixed_snapshot_bound(monkeypatch):
+    monkeypatch.setattr(relay_link_mod, "HTTP_TIMEOUT_S", 13)
+    monkeypatch.setattr(host_tunnel_mod, "PROCESS_LIST_TIMEOUT_S", 7)
+    monkeypatch.setattr(host_tunnel_mod, "MAX_PROCESS_LIST_CALLS_PER_REAP", 5)
+    monkeypatch.setattr(host_tunnel_mod, "ORPHAN_EXIT_TIMEOUT_S", 11)
+
+    assert run_mod._tunnel_join_timeout() == 3 * 13 + 5 * 7 + 2 * 11
+
+
 def test_shutdown_joins_the_tunnel_then_stops_it_then_records_clean_stop(
     env_home, monkeypatch
 ):
