@@ -329,6 +329,25 @@ def test_duplicate_identity_is_409_naming_the_recovery_command(tmp_path):
     assert "mship daemon reidentify" in r.json()["detail"]
 
 
+def test_one_approved_key_cannot_register_a_second_host_id(tmp_path):
+    h = _harness(tmp_path)
+    assert _register(h).status_code == 200
+    second = _payload(
+        host_id="hst-20260818120000-bbbbbbbb",
+        instance_id="inst-2",
+        subdomain="def456-d4e5f6",
+        public_url=f"https://def456-d4e5f6.{RELAY}",
+    )
+
+    response = _register(h, second)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "approved key is already bound to another host_id; "
+        "run `mship daemon reidentify` to rotate the key"
+    )
+
+
 def _signed_body(h, **payload_over):
     """A body that would REGISTER (fresh nonce, matching signature) — so a case
     below can 422 for exactly one reason: the bound it oversizes."""

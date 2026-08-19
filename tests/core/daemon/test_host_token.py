@@ -5,6 +5,7 @@ bearer loop is this machine's — which makes a *wall-clock step on this VM* the
 one residual hazard (AC10). Every test here pins a behavior that a bare
 `clock() >= expires_at` predicate would get wrong.
 """
+
 from __future__ import annotations
 
 import json
@@ -36,8 +37,12 @@ class _Clock:
     jump (an NTP correction — the monotonic hand does not move).
     """
 
-    def __init__(self, wall: float = 1_700_000_000.0, mono: float = 10.0,
-                 epoch: str = "boot:aaaa"):
+    def __init__(
+        self,
+        wall: float = 1_700_000_000.0,
+        mono: float = 10.0,
+        epoch: str = "boot:aaaa",
+    ):
         self.wall = wall
         self.mono = mono
         self.epoch = epoch
@@ -88,6 +93,8 @@ def test_root_secret_adopts_the_winner_of_a_creation_race(tmp_path: Path, monkey
     real_open = relay_keys.os.open
 
     def racing_open(target, flags, mode=0o777):
+        if Path(target) != path:
+            return real_open(target, flags, mode)
         # The winner lands its bytes between our unlink and our O_EXCL create.
         Path(target).parent.mkdir(parents=True, exist_ok=True)
         Path(target).write_bytes(winner)
@@ -111,7 +118,13 @@ def test_issue_persists_only_the_hash_expiry_and_epoch_tagged_floor(tmp_path: Pa
     assert secret not in raw  # plaintext is never re-derivable from disk
 
     rec = _records(tmp_path)[token_id]
-    assert set(rec) == {"token_id", "secret_hash", "expires_at", "mono_deadline", "epoch"}
+    assert set(rec) == {
+        "token_id",
+        "secret_hash",
+        "expires_at",
+        "mono_deadline",
+        "epoch",
+    }
     assert rec["expires_at"] == clk.wall + 300
     assert rec["mono_deadline"] == clk.mono + 300
     assert rec["epoch"] == clk.epoch  # the floor is useless untagged
@@ -138,13 +151,25 @@ def test_verify_rejects_a_wrong_secret(tmp_path: Path):
     clk = _Clock()
     token = issue_host_token(tmp_path, ttl_seconds=300, clock=clk.anchored())
     token_id = token.split(".", 1)[0]
-    assert verify_host_token(tmp_path, f"{token_id}.wrong", clock=clk.anchored()) is None
+    assert (
+        verify_host_token(tmp_path, f"{token_id}.wrong", clock=clk.anchored()) is None
+    )
 
 
-@pytest.mark.parametrize("presented", [
-    "", "no-dot", ".", "abc.", "../../../etc/passwd.x", "..%2f..%2fx.y",
-    "DEADBEEF.s", "z" * 40 + ".s", "deadbeef.secret",
-])
+@pytest.mark.parametrize(
+    "presented",
+    [
+        "",
+        "no-dot",
+        ".",
+        "abc.",
+        "../../../etc/passwd.x",
+        "..%2f..%2fx.y",
+        "DEADBEEF.s",
+        "z" * 40 + ".s",
+        "deadbeef.secret",
+    ],
+)
 def test_verify_never_raises_on_hostile_input(tmp_path: Path, presented: str):
     issue_host_token(tmp_path, clock=_Clock().anchored())
     assert verify_host_token(tmp_path, presented, clock=_Clock().anchored()) is None
@@ -171,8 +196,9 @@ def test_survives_a_restart_under_a_new_monotonic_origin_and_epoch(tmp_path: Pat
     fresh = _Clock(wall=minted.wall + 100, mono=500_000.0, epoch="boot:bbbb")
     assert verify_host_token(tmp_path, token, clock=fresh.anchored()) is not None
 
-    stale = _Clock(wall=minted.wall + 300 + SKEW_SECONDS + 1, mono=1.0,
-                   epoch="boot:bbbb")
+    stale = _Clock(
+        wall=minted.wall + 300 + SKEW_SECONDS + 1, mono=1.0, epoch="boot:bbbb"
+    )
     assert verify_host_token(tmp_path, token, clock=stale.anchored()) is None
 
 
@@ -284,11 +310,16 @@ def _mode(path: Path) -> str:
     return oct(path.stat().st_mode & 0o777)
 
 
-@pytest.mark.parametrize("entry_point", [
-    lambda home: ensure_host_root_secret(home),
-    lambda home: issue_host_token(home, clock=_Clock().anchored()),
-    lambda home: verify_host_token(home, "deadbeefdeadbeef.s", clock=_Clock().anchored()),
-])
+@pytest.mark.parametrize(
+    "entry_point",
+    [
+        lambda home: ensure_host_root_secret(home),
+        lambda home: issue_host_token(home, clock=_Clock().anchored()),
+        lambda home: verify_host_token(
+            home, "deadbeefdeadbeef.s", clock=_Clock().anchored()
+        ),
+    ],
+)
 def test_state_dir_is_owner_only_after_any_entry_point(
     tmp_path: Path, loose_umask, entry_point
 ):

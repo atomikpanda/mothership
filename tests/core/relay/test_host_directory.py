@@ -9,6 +9,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import json
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -103,6 +104,57 @@ def _register(d, payload=None, *, fingerprint=FP_A, signature=None):
     nonce = d.issue_challenge(str(payload["key_fingerprint"]))["nonce"]
     sig = signature if signature is not None else _sign(nonce, payload, fingerprint)
     return d.register(payload, nonce=nonce, signature=sig)
+
+
+def test_one_approved_key_owns_at_most_one_host_record(tmp_path):
+    d = _dir(tmp_path)
+    first = _payload()
+    second = _payload(
+        host_id="hst-20260818120000-bbbbbbbb",
+        instance_id="inst-2",
+        subdomain="def456-d4e5f6",
+        public_url="https://def456-d4e5f6.relay.example",
+    )
+
+    _register(d, first)
+    with pytest.raises(DuplicateIdentity) as error:
+        _register(d, second)
+    assert "approved key is already bound to another host_id" in str(error.value)
+
+    assert d.get_host(second["host_id"]) is None
+    assert [host["host_id"] for host in d.list_hosts()] == [first["host_id"]]
+
+
+def test_same_key_different_host_ids_are_serialized_after_nonce_consumption(tmp_path):
+    d = _dir(tmp_path)
+    first = _payload()
+    second = _payload(
+        host_id="hst-20260818120000-bbbbbbbb",
+        instance_id="inst-2",
+        subdomain="def456-d4e5f6",
+        public_url="https://def456-d4e5f6.relay.example",
+    )
+    first_spent = threading.Event()
+    release_first = threading.Event()
+    consume = d._consume_nonce
+
+    def consume_then_pause(nonce, identity):
+        consume(nonce, identity)
+        if not first_spent.is_set():
+            first_spent.set()
+            release_first.wait(timeout=1)
+
+    d._consume_nonce = consume_then_pause
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        earlier = executor.submit(_register, d, first)
+        assert first_spent.wait(timeout=1)
+        assert _register(d, second)["host_id"] == second["host_id"]
+        release_first.set()
+        with pytest.raises(DuplicateIdentity):
+            earlier.result()
+
+    assert d.get_host(first["host_id"]) is None
+    assert [host["host_id"] for host in d.list_hosts()] == [second["host_id"]]
 
 
 # --- challenges -------------------------------------------------------------
@@ -562,6 +614,42 @@ def test_a_corrupt_entry_file_is_quarantined_not_fatal(tmp_path):
     assert [h["host_id"] for h in d.list_hosts()] == [_payload()["host_id"]]
     assert (tmp_path / "hosts" / "broken.json.corrupt").is_file()
     assert not (tmp_path / "hosts" / "broken.json").exists()
+
+
+def test_quarantine_cannot_move_a_concurrently_repaired_host_record(
+    tmp_path, monkeypatch
+):
+    d = _dir(tmp_path)
+    host_id = _payload()["host_id"]
+    path = tmp_path / "hosts" / f"{host_id}.json"
+    path.write_text("{not json")
+    corrupt_read = threading.Event()
+    writer_finished = threading.Event()
+    read_text = Path.read_text
+
+    def pause_after_corrupt_read(self, *args, **kwargs):
+        raw = read_text(self, *args, **kwargs)
+        if self == path and raw == "{not json" and not corrupt_read.is_set():
+            corrupt_read.set()
+            writer_finished.wait(timeout=0.1)
+        return raw
+
+    monkeypatch.setattr(Path, "read_text", pause_after_corrupt_read)
+
+    def register():
+        try:
+            return _register(d)
+        finally:
+            writer_finished.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        reader = executor.submit(d.get_host, host_id)
+        assert corrupt_read.wait(timeout=1)
+        writer = executor.submit(register)
+        reader.result()
+        assert writer.result()["host_id"] == host_id
+
+    assert d.get_host(host_id)["instance_id"] == "inst-1"
 
 
 @pytest.mark.parametrize("bad", ["yesterday", None, "NaN", "Infinity", "-Infinity"])

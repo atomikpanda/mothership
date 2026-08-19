@@ -24,6 +24,7 @@ probe decides which instance currently holds it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -67,6 +68,10 @@ _PAYLOAD_FIELDS = (
 _REIDENTIFY_HINT = (
     "another approved key or live host already claims this host_id; "
     "run `mship daemon reidentify` on the new machine"
+)
+_KEY_BOUND_HINT = (
+    "approved key is already bound to another host_id; "
+    "run `mship daemon reidentify` to rotate the key"
 )
 
 
@@ -211,10 +216,18 @@ class HostDirectory:
             temp.unlink(missing_ok=True)
             raise
 
-    def _read_rec(self, path: Path) -> dict | None:
+    def _read_rec(self, path: Path, *, host_locked: bool = False) -> dict | None:
         """Load a record, quarantining a corrupt/truncated file instead of
         raising: one hand-edited file must not brick the whole directory
-        (`RequestStore._read_rec` precedent)."""
+        (`RequestStore._read_rec` precedent).
+
+        Quarantine is a mutation, so readers take the same per-host lock as
+        registration. Callers already holding that lock opt out of re-locking;
+        flock is not reentrant across distinct file descriptors.
+        """
+        if not host_locked:
+            with _locked(self._hosts / f".{path.stem}.lock"):
+                return self._read_rec(path, host_locked=True)
         try:
             rec = json.loads(path.read_text())
             if not isinstance(rec, dict):
@@ -327,9 +340,9 @@ class HostDirectory:
         """Verify and publish one host's registration.
 
         Order is security-sensitive: id shape → challenge identity → signature
-        → atomic claim → arbitration → write. A bad signature cannot burn the
-        approved identity's shared challenge, while two valid replays still
-        serialize at the atomic claim.
+        → atomic claim → key/host ownership → arbitration → write. A bad
+        signature cannot burn the approved identity's shared challenge, while
+        two valid replays still serialize at the atomic claim.
         """
         host_id = str(payload.get("host_id", ""))
         path = self._entry_path(host_id)
@@ -359,36 +372,55 @@ class HostDirectory:
                 "public_url must be the signed relay-owned HTTPS route"
             )
 
-        with _locked(self._hosts / f".{host_id}.lock"):
-            now = self._clock()
-            incumbent = self._read_rec(path) if path.exists() else None
-            previous_instance_id = None
-            if incumbent is not None:
-                # Staleness transfers a copied identity between instances; it
-                # never transfers the host-id slot to a different approved key.
-                if incumbent.get("key_fingerprint") != identity:
-                    raise DuplicateIdentity(_REIDENTIFY_HINT)
-                if not self._same_identity(incumbent, payload):
-                    self._arbitrate(incumbent, payload, now)
-                    previous_instance_id = incumbent.get("instance_id")
+        # One approved key is one host identity. The per-identity lock makes
+        # scan → claim atomic without making an unrelated host wait behind an
+        # incumbent's network arbitration probe.
+        identity_key = hashlib.sha256(identity.encode()).hexdigest()
+        with _locked(self._hosts / f".identity-{identity_key}.lock"):
+            for candidate in sorted(self._hosts.glob("*.json")):
+                if candidate == path:
+                    continue
+                candidate_rec = self._read_rec(candidate)
+                if (
+                    candidate_rec is not None
+                    and candidate_rec.get("key_fingerprint") == identity
+                ):
+                    raise DuplicateIdentity(_KEY_BOUND_HINT)
 
-            entry = {
-                "host_id": host_id,
-                **{f: payload.get(f) for f in _PAYLOAD_FIELDS},
-                "public_url": public_url,
-                "first_seen": incumbent.get("first_seen", now) if incumbent else now,
-                "last_seen": now,  # relay clock, never the payload's
-                # Carried forward on a heartbeat: the takeover is a fact about the
-                # entry, and the next re-registration must not erase the audit of
-                # who used to hold it.
-                "previous_instance_id": (
-                    previous_instance_id
-                    if incumbent is None or previous_instance_id is not None
-                    else incumbent.get("previous_instance_id")
-                ),
-            }
-            self._write_atomic(path, entry)
-            return entry
+            with _locked(self._hosts / f".{host_id}.lock"):
+                now = self._clock()
+                incumbent = (
+                    self._read_rec(path, host_locked=True) if path.exists() else None
+                )
+                previous_instance_id = None
+                if incumbent is not None:
+                    # Staleness transfers a copied identity between instances; it
+                    # never transfers the host-id slot to a different approved key.
+                    if incumbent.get("key_fingerprint") != identity:
+                        raise DuplicateIdentity(_REIDENTIFY_HINT)
+                    if not self._same_identity(incumbent, payload):
+                        self._arbitrate(incumbent, payload, now)
+                        previous_instance_id = incumbent.get("instance_id")
+
+                entry = {
+                    "host_id": host_id,
+                    **{f: payload.get(f) for f in _PAYLOAD_FIELDS},
+                    "public_url": public_url,
+                    "first_seen": incumbent.get("first_seen", now)
+                    if incumbent
+                    else now,
+                    "last_seen": now,  # relay clock, never the payload's
+                    # Carried forward on a heartbeat: the takeover is a fact about
+                    # the entry, and the next re-registration must not erase the
+                    # audit of who used to hold it.
+                    "previous_instance_id": (
+                        previous_instance_id
+                        if incumbent is None or previous_instance_id is not None
+                        else incumbent.get("previous_instance_id")
+                    ),
+                }
+                self._write_atomic(path, entry)
+                return entry
 
     @staticmethod
     def _same_identity(incumbent: dict, payload: dict) -> bool:
