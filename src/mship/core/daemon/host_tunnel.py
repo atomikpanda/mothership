@@ -59,6 +59,12 @@ TICK_INTERVAL_S = 1.0
 # not be able to outlast the wait that exists to keep it from orphaning ssh.
 PROCESS_LIST_TIMEOUT_S = 10.0
 
+# One shared grace period for every matching orphan: signal all of them, wait
+# together, then escalate survivors. The daemon's shutdown join bound includes
+# both this TERM wait and the post-KILL confirmation wait.
+ORPHAN_EXIT_TIMEOUT_S = 2.0
+_ORPHAN_EXIT_POLL_S = 0.05
+
 # What ssh prints when the relay has our key on file but nobody has approved it
 # yet. It is the FIRST evidence of that state — it arrives before any
 # registration verdict does — which is why the log tail is worth reading.
@@ -78,37 +84,43 @@ STATES = (
 
 @dataclass(frozen=True)
 class ProcessInfo:
-    """One row of the process table, as the reaper needs it."""
+    """One process-table row, including its creation identity."""
 
     pid: int
     ppid: int
     cmdline: str
+    started: str
 
 
 def list_processes() -> list[ProcessInfo]:
-    """The process table via `ps`, or empty if it cannot be read.
+    """Read the process table with a stable creation identity per PID.
 
-    Never raises: failing to enumerate processes must degrade to "reaped
-    nothing", not take the daemon's tick down with it."""
+    Failure is loud: dialing without knowing whether an orphan still owns the
+    reverse forward recreates the collision this sweep exists to prevent.
+    """
     try:
         out = subprocess.run(
-            ["ps", "-eo", "pid=,ppid=,args="],
+            ["ps", "-eo", "pid=,ppid=,lstart=,args="],
             capture_output=True,
             text=True,
             timeout=PROCESS_LIST_TIMEOUT_S,
             check=True,
         ).stdout
     except Exception as exc:
-        log.debug("could not list processes for the orphan sweep: %s", exc)
-        return []
+        raise RuntimeError("could not list processes for the orphan sweep") from exc
     rows = []
     for line in out.splitlines():
-        parts = line.split(None, 2)
-        if len(parts) != 3:
+        parts = line.split(None, 7)
+        if len(parts) != 8:
             continue
         try:
             rows.append(
-                ProcessInfo(pid=int(parts[0]), ppid=int(parts[1]), cmdline=parts[2])
+                ProcessInfo(
+                    pid=int(parts[0]),
+                    ppid=int(parts[1]),
+                    started=" ".join(parts[2:7]),
+                    cmdline=parts[7],
+                )
             )
         except ValueError:
             continue
@@ -130,35 +142,120 @@ def _forward_label(cmdline: str) -> str | None:
     return spec.split(":")[0]
 
 
+def _process_exists(pid: int) -> bool:
+    """Whether pid is still live (a zombie has already released its sockets)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    if not os.path.isdir("/proc"):
+        return True
+    try:
+        with open(f"/proc/{pid}/stat") as stat_file:
+            stat = stat_file.read()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    closing_paren = stat.rfind(")")
+    return closing_paren < 0 or not stat[closing_paren + 2 :].startswith("Z")
+
+
 def reap_orphan_tunnels(
     subdomain: str,
     *,
     processes: Callable[[], Sequence[ProcessInfo]] = list_processes,
     kill: Callable[[int], None] | None = None,
+    force_kill: Callable[[int], None] | None = None,
+    process_exists: Callable[[int], bool] = _process_exists,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> list[int]:
-    """Signal any `ssh -R <subdomain>:…` reparented to init; return those pids.
+    """Terminate `ssh -R <subdomain>:…` processes reparented to init.
 
     Reparenting to init is the whole test: a tunnel we own has *us* as its
     parent, so PPID 1 means the process that dialed it is gone and nothing will
     ever clean it up. Anything that merely mentions the subdomain (an operator's
     interactive `ssh`, a `grep`, a host whose label ends with ours) is left
     alone — only a live reverse forward of OUR exact label can collide with us.
+
+    Every match receives SIGTERM before one shared bounded wait. Survivors then
+    receive SIGKILL and another bounded wait, so the caller cannot redial while
+    an old process still owns the reverse forward. Returns the pids that
+    accepted the initial signal.
     """
     if kill is None:
         kill = lambda pid: os.kill(pid, signal.SIGTERM)
+    if force_kill is None:
+        force_kill = lambda pid: os.kill(pid, signal.SIGKILL)
+
+    def wait_for_exit(processes: list[ProcessInfo]) -> list[ProcessInfo]:
+        deadline = clock() + ORPHAN_EXIT_TIMEOUT_S
+        live = [process for process in processes if process_exists(process.pid)]
+        while live:
+            remaining = deadline - clock()
+            if remaining <= 0:
+                return live
+            sleep(min(_ORPHAN_EXIT_POLL_S, remaining))
+            live = [process for process in live if process_exists(process.pid)]
+        return []
+
     signalled = []
+    identities = []
     for proc in processes():
         if proc.ppid != 1 or _forward_label(proc.cmdline) != subdomain:
             continue
         try:
             kill(proc.pid)
-        except Exception as exc:  # already gone, or not ours to signal
-            log.debug("could not signal orphan tunnel pid=%s: %s", proc.pid, exc)
+        except Exception as exc:
+            if process_exists(proc.pid):
+                raise RuntimeError(
+                    f"could not signal orphan tunnel pid {proc.pid}"
+                ) from exc
             continue
         log.warning(
             "signalled orphaned relay tunnel pid=%s holding %s", proc.pid, subdomain
         )
         signalled.append(proc.pid)
+        identities.append(proc)
+
+    survivors = wait_for_exit(identities)
+    refreshed = {proc.pid: proc for proc in processes()} if survivors else {}
+    force_signalled = []
+    for proc in survivors:
+        current = refreshed.get(proc.pid)
+        if current is None:
+            if process_exists(proc.pid):
+                raise RuntimeError(f"could not revalidate orphan tunnel pid {proc.pid}")
+            continue
+        if (
+            current.started != proc.started
+            or current.ppid != 1
+            or _forward_label(current.cmdline) != subdomain
+        ):
+            continue
+        try:
+            force_kill(proc.pid)
+        except Exception as exc:
+            if process_exists(proc.pid):
+                raise RuntimeError(
+                    f"could not force-kill orphan tunnel pid {proc.pid}"
+                ) from exc
+            continue
+        log.warning(
+            "force-killed orphaned relay tunnel pid=%s holding %s",
+            proc.pid,
+            subdomain,
+        )
+        force_signalled.append(proc)
+    still_live = wait_for_exit(force_signalled)
+    if still_live:
+        raise RuntimeError(
+            "orphaned relay tunnel pids still live after SIGKILL: "
+            + ", ".join(str(proc.pid) for proc in still_live)
+        )
     return signalled
 
 
@@ -284,8 +381,8 @@ class HostTunnel:
         do it hundreds of times."""
         if self._reaped:
             return
-        self._reaped = True
         self._reaper(self._link.subdomain)
+        self._reaped = True
 
     def _sample_ssh_log(self) -> None:
         """Read the ssh tail while the child is down — the only time it explains

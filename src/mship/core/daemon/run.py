@@ -180,15 +180,20 @@ def _tunnel_join_timeout() -> float:
     DERIVED, never picked: cancelling the loop cannot interrupt the tick already
     running in the executor, so a bound shorter than a worst-case tick would
     routinely give up while one is still in flight. That worst case is the three
-    relay calls a single tick can make (challenge, register, enroll) plus the
-    orphan sweep's `ps`, each bounded by its own timeout. Still bounded, because
-    a daemon that never returns is SIGKILLed by systemd — which is itself how an
-    ssh child orphans onto the subdomain (#471 AC7).
+    relay calls a single tick can make (challenge, register, enroll), the two
+    process-table reads needed to identify and revalidate orphans, and the
+    shared TERM/KILL exit waits, each bounded by its own timeout. Still bounded,
+    because a daemon that never returns is
+    SIGKILLed by systemd — which is itself how an ssh child orphans onto the
+    subdomain (#471 AC7).
     """
-    from mship.core.daemon.host_tunnel import PROCESS_LIST_TIMEOUT_S
+    from mship.core.daemon.host_tunnel import (
+        ORPHAN_EXIT_TIMEOUT_S,
+        PROCESS_LIST_TIMEOUT_S,
+    )
     from mship.core.daemon.relay_link import HTTP_TIMEOUT_S
 
-    return 3 * HTTP_TIMEOUT_S + PROCESS_LIST_TIMEOUT_S
+    return 3 * HTTP_TIMEOUT_S + 2 * PROCESS_LIST_TIMEOUT_S + 2 * ORPHAN_EXIT_TIMEOUT_S
 
 
 def _serve_forever(control_app, socket_path, host_app, serve_cfg, tunnel=None) -> None:

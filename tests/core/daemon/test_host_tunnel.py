@@ -14,6 +14,7 @@ Seams are injected exactly like `tests/core/relay/test_tunnel_supervisor.py`
 import base64
 import hashlib
 import os
+import signal
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -24,6 +25,7 @@ from fastapi.testclient import TestClient
 from mship.core.daemon import history
 from mship.core.daemon.host_app import create_host_app
 from mship.core.daemon.host_tunnel import (
+    ORPHAN_EXIT_TIMEOUT_S,
     STATES,
     HostTunnel,
     ProcessInfo,
@@ -498,12 +500,18 @@ def test_fifty_failing_ticks_leave_the_registry_and_host_app_untouched(fx):
 
 
 def test_an_exception_from_a_tick_lands_in_last_error_and_the_loop_keeps_running(fx):
+    attempts = []
+
     def boom(subdomain):
+        attempts.append(subdomain)
         raise RuntimeError("ps: no such process table")
 
     fx.tunnel._reaper = boom
 
     assert fx.tunnel.tick() == "error"
+    assert fx.tunnel.tick() == "error"
+    assert attempts == [fx.link.subdomain, fx.link.subdomain]
+    assert fx.procs == []
     assert "no such process table" in fx.tunnel.last_error
 
     fx.tunnel._reaper = fx._reaper  # the fault clears
@@ -558,8 +566,10 @@ def test_twenty_failure_respawn_cycles_leave_the_registry_and_journal_byte_ident
 # --- the orphan reaper ------------------------------------------------------
 
 
-def _proc(pid, ppid, cmdline):
-    return ProcessInfo(pid=pid, ppid=ppid, cmdline=cmdline)
+def _proc(pid, ppid, cmdline, started=None):
+    return ProcessInfo(
+        pid=pid, ppid=ppid, cmdline=cmdline, started=started or f"start-{pid}"
+    )
 
 
 def test_reaper_kills_an_orphaned_tunnel_on_our_subdomain(fx):
@@ -573,14 +583,77 @@ def test_reaper_kills_an_orphaned_tunnel_on_our_subdomain(fx):
         100, 1, f"ssh -N -R {fx.link.subdomain}:80:localhost:8765 relay.example"
     )
     killed = []
+    alive = {orphan.pid}
+
+    def terminate(pid):
+        killed.append(pid)
+        alive.remove(pid)
 
     reaped = reap_orphan_tunnels(
         fx.link.subdomain,
         processes=lambda: [ours, orphan],
-        kill=lambda pid: killed.append(pid),
+        kill=terminate,
+        process_exists=lambda pid: pid in alive,
     )
 
     assert reaped == [100] and killed == [100]
+
+
+def test_reaper_waits_then_force_kills_a_stubborn_orphan(fx):
+    orphan = _proc(
+        100, 1, f"ssh -N -R {fx.link.subdomain}:80:localhost:8765 relay.example"
+    )
+    now = [0.0]
+    alive = {orphan.pid}
+    signals = []
+
+    def force_kill(pid):
+        signals.append((pid, signal.SIGKILL))
+        alive.remove(pid)
+
+    reap_orphan_tunnels(
+        fx.link.subdomain,
+        processes=lambda: [orphan],
+        kill=lambda pid: signals.append((pid, signal.SIGTERM)),
+        force_kill=force_kill,
+        process_exists=lambda pid: pid in alive,
+        clock=lambda: now[0],
+        sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+    )
+
+    assert signals == [(orphan.pid, signal.SIGTERM), (orphan.pid, signal.SIGKILL)]
+    assert now[0] >= ORPHAN_EXIT_TIMEOUT_S
+
+
+def test_reaper_does_not_force_kill_a_reused_pid(fx):
+    orphan = _proc(
+        100, 1, f"ssh -N -R {fx.link.subdomain}:80:localhost:8765 relay.example"
+    )
+    replacement = _proc(
+        orphan.pid,
+        1,
+        f"ssh -N -R {fx.link.subdomain}:80:localhost:8765 relay.example",
+        started="replacement",
+    )
+    rows = [orphan]
+    now = [0.0]
+    signals = []
+
+    def terminate(pid):
+        signals.append((pid, signal.SIGTERM))
+        rows[0] = replacement
+
+    reap_orphan_tunnels(
+        fx.link.subdomain,
+        processes=lambda: list(rows),
+        kill=terminate,
+        force_kill=lambda pid: pytest.fail(f"force-killed reused pid {pid}"),
+        process_exists=lambda _pid: True,
+        clock=lambda: now[0],
+        sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+    )
+
+    assert signals == [(orphan.pid, signal.SIGTERM)]
 
 
 def test_reaper_leaves_other_hosts_tunnels_and_non_tunnels_alone(fx):
@@ -718,6 +791,7 @@ def test_a_foreign_instance_id_is_contended_and_does_not_tear_the_tunnel_down(tm
     assert "inst-of-the-twin" in fx.tunnel.last_error
     assert fx.sup.is_running() and fx.child.terminated == 0
 
+
 @pytest.mark.parametrize(
     "next_get",
     (
@@ -746,7 +820,6 @@ def test_a_transient_readback_replaces_an_obsolete_contention_verdict(
     fx.clock.advance(120)
 
     assert fx.tunnel.tick() == "connecting"
-
 
 
 def test_a_transport_failure_on_the_read_back_stays_connecting(tmp_path):
