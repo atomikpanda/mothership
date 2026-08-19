@@ -612,6 +612,9 @@ def test_capability_payload_has_one_assembler():
     enabled = host_capability_payload({"enabled": True})
     assert enabled["runner"] == {"enabled": True, "state": "unknown"}
     assert enabled["capabilities"]["runner"] is True
+    malformed = host_capability_payload({"enabled": "false"})
+    assert malformed["runner"] == {"enabled": False, "state": "disabled"}
+    assert malformed["capabilities"]["runner"] is False
 
 
 def test_force_reidentify_mints_a_new_id_and_rotates_the_key(tmp_path: Path):

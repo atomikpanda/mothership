@@ -16,6 +16,7 @@ Nothing is stored in plaintext: only a sha256 of the derived secret, which is
 what `verify` compares against. Verification is a pure read — a phone polling
 the directory must not churn the store.
 """
+
 from __future__ import annotations
 
 import fcntl
@@ -96,14 +97,16 @@ class FleetTokenStore:
             doc = json.loads(self.path.read_text())
             labels = doc["labels"]
             return labels if isinstance(labels, dict) else {}
-        except (OSError, ValueError, KeyError, TypeError):
+        except OSError, ValueError, KeyError, TypeError:
             return {}
 
     def _save(self, labels: dict) -> None:
         """Atomic, owner-only write: mkstemp creates the temp file 0600, so the
         hashes are never briefly world-readable."""
         _private_dir(self.path)
-        fd, temp_name = tempfile.mkstemp(prefix=self.path.name + ".", dir=self.path.parent)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=self.path.name + ".", dir=self.path.parent
+        )
         temp = Path(temp_name)
         try:
             with os.fdopen(fd, "w") as stream:
@@ -118,8 +121,9 @@ class FleetTokenStore:
         """The secret for one record — recomputable, so a re-mint returns the
         same string without ever storing the plaintext."""
         root = ensure_secret_file(self._secret_path, _ROOT_SECRET_LEN)
-        return hmac.new(root, f"{label}\x00{nonce}".encode("utf-8"),
-                        hashlib.sha256).hexdigest()
+        return hmac.new(
+            root, f"{label}\x00{nonce}".encode("utf-8"), hashlib.sha256
+        ).hexdigest()
 
     # -- API ---------------------------------------------------------------
 
@@ -133,16 +137,26 @@ class FleetTokenStore:
         with _locked(self._lock, fcntl.LOCK_EX):
             labels = self._load()
             existing = labels.get(label_id)
-            if isinstance(existing, dict) and existing.get("nonce"):
-                return f"{label_id}.{self._derive(label, existing['nonce'])}"
+            replacing = isinstance(existing, dict) and bool(existing.get("nonce"))
+            if replacing:
+                secret = self._derive(label, existing["nonce"])
+                if hmac.compare_digest(
+                    _hash(secret), str(existing.get("secret_hash", ""))
+                ):
+                    return f"{label_id}.{secret}"
             # Evict from the PRE-EXISTING set only, so the credential we are
-            # about to hand back can never be the one the cap drops.
-            if len(labels) >= self._max_labels:
-                labels = dict(sorted(
-                    labels.items(),
-                    key=lambda kv: kv[1].get("created_at", 0) if isinstance(kv[1], dict) else 0,
-                    reverse=True,
-                )[: max(self._max_labels - 1, 0)])
+            # about to hand back can never be the one the cap drops. Replacing
+            # a record whose root-derived secret no longer matches needs no slot.
+            if not replacing and len(labels) >= self._max_labels:
+                labels = dict(
+                    sorted(
+                        labels.items(),
+                        key=lambda kv: (
+                            kv[1].get("created_at", 0) if isinstance(kv[1], dict) else 0
+                        ),
+                        reverse=True,
+                    )[: max(self._max_labels - 1, 0)]
+                )
             nonce = secrets.token_hex(16)
             secret = self._derive(label, nonce)
             labels[label_id] = {

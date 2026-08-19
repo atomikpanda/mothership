@@ -2,6 +2,7 @@
 `GET /hosts`. Stable per label (re-running the mint command must reprint the same
 QR, not orphan the phone's copy), revocable per label, and never at rest in
 plaintext — the `core.daemon.host_auth.RefreshStore` shape, for the same reasons."""
+
 from __future__ import annotations
 
 import json
@@ -26,6 +27,18 @@ def test_issue_is_stable_for_the_same_label(tmp_path):
 def test_a_second_store_object_over_the_same_dir_derives_the_same_token(tmp_path):
     # The CLI builds a new store per invocation; stability must be on disk.
     assert _store(tmp_path).issue("phone") == _store(tmp_path).issue("phone")
+
+
+def test_reissue_after_root_secret_recovery_returns_a_verifiable_token(tmp_path):
+    store = _store(tmp_path)
+    stale = store.issue("phone")
+    (tmp_path / "store" / "fleet-secret").unlink()
+
+    recovered = store.issue("phone")
+
+    assert recovered != stale
+    assert store.verify(stale) is None
+    assert store.verify(recovered) == "phone"
 
 
 def test_distinct_labels_get_distinct_tokens(tmp_path):
@@ -94,8 +107,8 @@ def test_a_corrupt_document_does_not_brick_the_store(tmp_path):
     store = _store(tmp_path)
     token = store.issue("phone")
     store.path.write_text("{not json")
-    assert store.verify(token) is None            # unverifiable, but no raise
-    assert store.issue("phone")                   # and it self-heals
+    assert store.verify(token) is None  # unverifiable, but no raise
+    assert store.issue("phone")  # and it self-heals
 
 
 def test_labels_are_bounded_so_the_document_cannot_grow_without_limit(tmp_path):

@@ -8,6 +8,7 @@ the projection lives here — workspace-free, import-light — and both call it.
 
 #473 fills a real runner state in `runner_block` and nowhere else.
 """
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -22,7 +23,7 @@ def runner_block(raw: object | None) -> dict:
     else — absent, disabled, or malformed from a hand-edited registry — reads
     `disabled` rather than failing a request.
     """
-    enabled = bool(raw.get("enabled")) if isinstance(raw, Mapping) else False
+    enabled = isinstance(raw, Mapping) and raw.get("enabled") is True
     return {"enabled": enabled, "state": "unknown" if enabled else "disabled"}
 
 
