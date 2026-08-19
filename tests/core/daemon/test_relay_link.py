@@ -326,6 +326,24 @@ def test_tick_backs_off_and_a_success_resets_the_delay(tmp_path: Path):
     assert link.next_attempt_delay() == pytest.approx(host_contract.REGISTER_INTERVAL_S)
 
 
+def test_retry_delay_starts_after_a_slow_registration_finishes(tmp_path: Path):
+    clock = _Clock()
+    link = _link(tmp_path, _Relay(), clock, rng=lambda: 0.0)
+    calls = 0
+
+    def slow_registration():
+        nonlocal calls
+        calls += 1
+        clock.advance(host_contract.REGISTER_INTERVAL_S * 2)
+        return relay_link.RegistrationOutcome(True, "registered", refresh="refresh")
+
+    link.register_once = slow_registration
+
+    assert link.tick().ok
+    assert link.tick() is None
+    assert calls == 1
+
+
 def test_backoff_has_no_ceiling_past_1024_failures(tmp_path: Path):
     """`float * 2**n` raises OverflowError at n == 1024 (assumption 5): the
     daemon is immortal, so that count is reachable — the delay must clamp."""
@@ -425,6 +443,25 @@ def test_enroll_is_reposted_on_a_schedule_shorter_than_the_store_ttl(tmp_path: P
         >= 7 * 3600 // host_contract.ENROLL_REPOST_INTERVAL_S - 1
     )
     assert link.state == "awaiting-enrollment"
+
+
+def test_slow_unapproved_attempt_reposts_when_due_at_completion(tmp_path: Path):
+    relay = _Relay(register=(401, host_contract.UNAPPROVED_KEY_DETAIL))
+    clock = _Clock()
+    link = _link(tmp_path, relay, clock)
+    link.tick()
+    assert len(relay.posts_to("/enroll")) == 1
+
+    def slow_unapproved():
+        clock.advance(2)
+        return relay_link.RegistrationOutcome(False, "unapproved")
+
+    link.register_once = slow_unapproved
+    clock.advance(host_contract.ENROLL_REPOST_INTERVAL_S - 1)
+    link.register_soon()
+    link.tick()
+
+    assert len(relay.posts_to("/enroll")) == 2
 
 
 def test_enroll_repost_follows_the_servers_advertised_ttl(tmp_path: Path):

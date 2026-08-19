@@ -107,6 +107,37 @@ def test_fleet_token_requires_a_relay_domain(monkeypatch, tmp_path):
     assert res.exit_code != 0
 
 
+def test_fleet_token_canonicalizes_the_relay_domain(tmp_path):
+    res = _run(
+        "fleet-token",
+        "--store-dir",
+        str(tmp_path / "s"),
+        "--label",
+        "phone",
+        "--relay-domain",
+        "  Relay.Example.COM.  ",
+    )
+    assert res.exit_code == 0, res.output
+    assert "groundcontrol://add-relay?relay=relay.example.com&token=" in res.output
+    assert "%20" not in res.output
+
+
+def test_fleet_token_rejects_whitespace_before_writing_a_credential(tmp_path):
+    store_dir = tmp_path / "s"
+    res = _run(
+        "fleet-token",
+        "--store-dir",
+        str(store_dir),
+        "--label",
+        "phone",
+        "--relay-domain",
+        "   ",
+    )
+    assert res.exit_code != 0
+    assert not (store_dir / "fleet-tokens.json").exists()
+    assert not (store_dir / "fleet-secret").exists()
+
+
 # --- hosts ------------------------------------------------------------------
 
 

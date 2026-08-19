@@ -8,6 +8,11 @@ RELAY_HOST_REQUIRED = "relay.host is required when a `relay:` block is present"
 RELAY_SSH_PORT_INVALID = "relay.ssh_port must be an integer from 1 to 65535"
 
 
+def canonical_relay_host(host: str) -> str:
+    """The DNS spelling shared by config, directory validation, and pairing."""
+    return host.strip().lower().rstrip(".")
+
+
 @dataclass(frozen=True)
 class RelayConfig:
     host: str
@@ -15,7 +20,7 @@ class RelayConfig:
     user: str | None = None  # ssh user; None → ssh default
 
     def __post_init__(self) -> None:
-        canonical_host = self.host.strip().lower().rstrip(".")
+        canonical_host = canonical_relay_host(self.host)
         if not canonical_host:
             raise ValueError(RELAY_HOST_REQUIRED)
         if (

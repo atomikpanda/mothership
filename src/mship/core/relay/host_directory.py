@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from mship.core.relay import host_contract, ssh_sig
+from mship.core.relay.config import canonical_relay_host
 from mship.core.relay.enroll import _locked
 from mship.core.relay.tls_ask import host_subdomain_allowed
 
@@ -189,7 +190,7 @@ class HostDirectory:
         self._verification_slots = threading.BoundedSemaphore(
             max_concurrent_verifications
         )
-        self._relay_domain = relay_domain.strip().lower().rstrip(".")
+        self._relay_domain = canonical_relay_host(relay_domain)
 
     # --- storage primitives -------------------------------------------------
 

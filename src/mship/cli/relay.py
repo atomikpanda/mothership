@@ -18,6 +18,7 @@ import typer
 from rich.markup import escape
 
 from mship.cli.output import Output
+from mship.core.relay.config import canonical_relay_host
 
 
 def enroll_base_url(*, enroll_url, relay_host, config_host):
@@ -59,6 +60,7 @@ def _enroll_server_impl(*, store_dir, pubkeys_dir, port, host, ttl, relay_domain
     from mship.core.relay.host_directory import HostDirectory, probe_instance_id
     from mship.core.relay.ssh_sig import build_allowed_signers
 
+    relay_domain = canonical_relay_host(relay_domain)
     if not relay_domain:
         raise typer.BadParameter(
             "relay domain required: pass --relay-domain or set RELAY_DOMAIN"
@@ -305,6 +307,7 @@ def register(parent: typer.Typer, get_container):
                 raise typer.Exit(1)
             out.success(f"revoked {label} — that device must scan a fresh QR to return")
             return
+        relay_domain = canonical_relay_host(relay_domain)
         if not relay_domain:
             raise typer.BadParameter(
                 "relay domain required: pass --relay-domain or set RELAY_DOMAIN"

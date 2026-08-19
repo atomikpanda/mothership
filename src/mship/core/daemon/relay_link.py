@@ -290,13 +290,14 @@ class RelayLink:
         now = self._clock()
         if not self._due(now):
             return None
-        self._last_attempt_at = now
         try:
             outcome = self.register_once()
         except Exception as exc:  # a bug here must not kill the daemon's loop
             log.exception("registration attempt failed unexpectedly")
             outcome = RegistrationOutcome(False, "error", detail=str(exc))
-        self._apply(outcome, now)
+        completed_at = self._clock()
+        self._apply(outcome, completed_at)
+        self._last_attempt_at = self._clock()
         return outcome
 
     def _due(self, now: float) -> bool:
