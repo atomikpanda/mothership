@@ -86,7 +86,7 @@ def _as_float(value, default: float = 0.0) -> float:
     """
     try:
         parsed = float(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return default
     return parsed if math.isfinite(parsed) else default
 
@@ -165,6 +165,7 @@ class HostDirectory:
         relay_domain: str,
         allowed_signers: Callable[[], str],
         probe: Callable[[str], str | None],
+        revoke_signer: Callable[[str], object] | None = None,
         verify: Callable[..., bool] = ssh_sig.verify_blob,
         clock: Callable[[], float] = time.time,
         challenge_ttl_s: float = host_contract.CHALLENGE_TTL_S,
@@ -188,6 +189,7 @@ class HostDirectory:
             directory.chmod(0o700)
         self._allowed_signers = allowed_signers
         self._probe = probe
+        self._revoke_signer = revoke_signer
         self._verify = verify
         self._clock = clock
         self._challenge_ttl = challenge_ttl_s
@@ -233,7 +235,7 @@ class HostDirectory:
             if not isinstance(rec, dict):
                 raise ValueError("not an object")
             return rec
-        except json.JSONDecodeError, OSError, ValueError:
+        except (json.JSONDecodeError, OSError, ValueError):
             try:
                 path.replace(path.with_suffix(".json.corrupt"))
             except OSError:
@@ -251,7 +253,7 @@ class HostDirectory:
             if not isinstance(rec, dict):
                 raise ValueError("not an object")
             return rec
-        except json.JSONDecodeError, OSError, ValueError:
+        except (json.JSONDecodeError, OSError, ValueError):
             path.unlink(missing_ok=True)
             return None
 
@@ -329,6 +331,37 @@ class HostDirectory:
         if self._clock() >= _as_float(rec.get("expires_at")):
             raise ChallengeRefused(host_contract.EXPIRED_CHALLENGE_DETAIL)
 
+    def _verify_signed_payload(
+        self, payload: dict, *, nonce: str, signature: str
+    ) -> str:
+        identity = str(payload.get("key_fingerprint", ""))
+        self._peek_nonce(nonce, identity)
+        blob = host_contract.signing_blob(nonce, payload)
+        if not self._verification_slots.acquire(blocking=False):
+            raise VerificationBusy
+        try:
+            verified = self._verify(
+                blob,
+                signature=signature,
+                identity=identity,
+                allowed_signers=self._allowed_signers(),
+                namespace=host_contract.NAMESPACE,
+            )
+        finally:
+            self._verification_slots.release()
+        if not verified:
+            raise SignatureRefused(host_contract.UNAPPROVED_KEY_DETAIL)
+        self._consume_nonce(nonce, identity)
+        return identity
+
+    def revoke_key(self, identity: str, *, nonce: str, signature: str) -> None:
+        """Revoke an allowlisted key after it signs its own removal request."""
+        payload = host_contract.key_revocation_payload(identity)
+        self._verify_signed_payload(payload, nonce=nonce, signature=signature)
+        if self._revoke_signer is None:
+            raise RuntimeError("relay key revocation is not configured")
+        self._revoke_signer(identity)
+
     # --- registration -------------------------------------------------------
 
     def _entry_path(self, host_id: str) -> Path:
@@ -346,25 +379,9 @@ class HostDirectory:
         """
         host_id = str(payload.get("host_id", ""))
         path = self._entry_path(host_id)
-        identity = str(payload.get("key_fingerprint", ""))
-        self._peek_nonce(nonce, identity)
-
-        blob = host_contract.signing_blob(nonce, payload)
-        if not self._verification_slots.acquire(blocking=False):
-            raise VerificationBusy
-        try:
-            verified = self._verify(
-                blob,
-                signature=signature,
-                identity=identity,
-                allowed_signers=self._allowed_signers(),
-                namespace=host_contract.NAMESPACE,
-            )
-        finally:
-            self._verification_slots.release()
-        if not verified:
-            raise SignatureRefused(host_contract.UNAPPROVED_KEY_DETAIL)
-        self._consume_nonce(nonce, identity)
+        identity = self._verify_signed_payload(
+            payload, nonce=nonce, signature=signature
+        )
 
         public_url = self._trusted_public_url(payload)
         if public_url is None:
@@ -490,7 +507,13 @@ class HostDirectory:
         for rec in self._entries():
             known_keys.add(rec.get("key_fingerprint"))
             stale = now - _as_float(rec.get("last_seen")) >= self._stale_after
-            hosts.append({**rec, "state": "offline" if stale else "online"})
+            hosts.append(
+                {
+                    **rec,
+                    "last_seen": _as_float(rec.get("last_seen")),
+                    "state": "offline" if stale else "online",
+                }
+            )
         for req in pending:
             if req.get("fingerprint") in known_keys:
                 continue  # already registered

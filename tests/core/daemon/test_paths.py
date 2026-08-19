@@ -54,6 +54,20 @@ def test_the_suite_cannot_reach_the_real_daemon_through_the_lease_either(tmp_pat
     assert probe_daemon(home=tmp_path, env=os.environ) is None
 
 
+def test_daemon_probe_sandbox_rejects_a_path_with_only_the_tmp_prefix(tmp_path: Path):
+    from mship.core.daemon import control
+
+    contacted = []
+    outside = tmp_path.parent / f"{tmp_path.name}-live" / "daemon.sock"
+
+    def client_factory(**_kwargs):
+        contacted.append(outside)
+        raise AssertionError("probe escaped the per-test sandbox")
+
+    assert control.probe_control_socket(outside, client_factory=client_factory) is None
+    assert contacted == []
+
+
 def test_socket_prefers_xdg_runtime_dir(tmp_path: Path):
     runtime = tmp_path / "runtime"
     sock = daemon_socket_path({"XDG_RUNTIME_DIR": str(runtime)}, tmp_path / "home", create=True)

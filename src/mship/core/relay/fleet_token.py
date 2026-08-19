@@ -97,7 +97,7 @@ class FleetTokenStore:
             doc = json.loads(self.path.read_text())
             labels = doc["labels"]
             return labels if isinstance(labels, dict) else {}
-        except OSError, ValueError, KeyError, TypeError:
+        except (OSError, ValueError, KeyError, TypeError):
             return {}
 
     def _save(self, labels: dict) -> None:

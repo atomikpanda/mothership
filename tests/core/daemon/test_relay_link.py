@@ -22,7 +22,7 @@ from mship.core.daemon import relay_link
 from mship.core.daemon.relay_link import RelayLink
 from mship.core.relay import host_contract
 from mship.core.relay.config import RelayConfig
-from mship.core.relay.enroll import fingerprint
+from mship.core.relay.enroll import RequestStore, fingerprint
 from mship.core.relay.keys import relay_key_path
 
 RELAY = RelayConfig(host="relay.example")
@@ -77,11 +77,13 @@ class _Relay:
         challenge=(200, None),
         enroll_ttl=host_contract.ENROLL_TTL_S,
         enroll=(200, None),
+        revoke=(200, None),
     ):
         self.register_status, self.register_detail = register
         self.challenge_status, self.challenge_detail = challenge
         self.enroll_ttl = enroll_ttl
         self.enroll_status, self.enroll_detail = enroll
+        self.revoke_status, self.revoke_detail = revoke
         self.calls: list[tuple[str, str, dict | None]] = []
         self.nonce = "nonce-1"
         self.date_header: str | None = None
@@ -102,6 +104,13 @@ class _Relay:
                 else {"detail": self.challenge_detail}
             )
             return _Resp(self.challenge_status, body, headers)
+        if url.endswith(host_contract.REVOKE_PATH):
+            body = (
+                {"status": "revoked"}
+                if self.revoke_status == 200
+                else {"detail": self.revoke_detail}
+            )
+            return _Resp(self.revoke_status, body)
         if url.endswith("/enroll"):
             body = (
                 {"id": "req-1", "status": "pending", "expires_in": self.enroll_ttl}
@@ -184,6 +193,60 @@ def test_register_once_signs_the_posted_payload_and_returns_the_refresh(tmp_path
     # Signed over EXACTLY the bytes posted, with the challenge nonce inside.
     assert body["nonce"] == relay.nonce
     assert body["signature"] == _sign(host_contract.signing_blob(relay.nonce, payload))
+
+
+def test_revoke_relay_key_signs_a_single_use_challenge_with_the_old_key(
+    tmp_path: Path,
+):
+    relay = _Relay()
+    _seed_key(tmp_path)
+
+    relay_link.revoke_relay_key(
+        tmp_path,
+        RELAY,
+        post=relay.post,
+        signer=_sign,
+    )
+
+    body = relay.posts_to(host_contract.REVOKE_PATH)[0]
+    payload = host_contract.key_revocation_payload(fingerprint(PUBKEY))
+    assert body["key_fingerprint"] == fingerprint(PUBKEY)
+    assert body["nonce"] == relay.nonce
+    assert body["signature"] == _sign(
+        host_contract.signing_blob(relay.nonce, payload)
+    )
+
+
+def test_revoke_treats_relay_unapproved_as_already_revoked(tmp_path: Path):
+    relay = _Relay(
+        challenge=(401, host_contract.UNAPPROVED_KEY_DETAIL)
+    )
+    _seed_key(tmp_path)
+
+    relay_link.revoke_relay_key(
+        tmp_path,
+        RELAY,
+        post=relay.post,
+        signer=_sign,
+    )
+
+    assert relay.posts_to(host_contract.REVOKE_PATH) == []
+
+
+def test_revoke_refuses_when_only_the_old_public_key_remains(tmp_path: Path):
+    relay = _Relay()
+    _seed_key(tmp_path)
+    relay_key_path(tmp_path).unlink()
+
+    with pytest.raises(RuntimeError, match="private key is missing"):
+        relay_link.revoke_relay_key(
+            tmp_path,
+            RELAY,
+            post=relay.post,
+            signer=_sign,
+        )
+
+    assert relay.calls == []
 
 
 def test_payload_survives_a_canonical_round_trip(tmp_path: Path):
@@ -412,6 +475,58 @@ def test_unapproved_key_posts_enroll_without_polling(tmp_path: Path):
     assert not any("/status/" in url for _verb, url, _body in relay.calls)
 
 
+def test_stale_approved_enroll_response_does_not_delay_a_new_pending_request(
+    tmp_path: Path,
+):
+    approved = {fingerprint(PUBKEY)}
+    store = RequestStore(
+        tmp_path / "enroll-store",
+        is_approved=lambda identity: identity in approved,
+    )
+    historical = store.create(PUBKEY, "vm")
+    store.approve(historical, tmp_path / "pubkeys")
+
+    class CreateWinsThenRevokeRelay(_Relay):
+        def __init__(self):
+            super().__init__(
+                register=(401, host_contract.UNAPPROVED_KEY_DETAIL)
+            )
+            self.enrollment_ids = []
+
+        def post(self, url, json=None, **kw):
+            if not url.endswith(host_contract.ENROLL_PATH):
+                return super().post(url, json=json, **kw)
+            self.calls.append(("POST", url, json))
+            rid = store.create(json["pubkey"], json["hostname"])
+            self.enrollment_ids.append(rid)
+            if len(self.enrollment_ids) == 1:
+                approved.clear()
+            return _Resp(
+                200,
+                {
+                    "id": rid,
+                    "status": store.get(rid),
+                    "expires_in": store.ttl_seconds,
+                },
+            )
+
+    relay = CreateWinsThenRevokeRelay()
+    clock = _Clock()
+    link = _link(tmp_path, relay, clock)
+
+    link.tick()
+    assert relay.enrollment_ids == [historical]
+
+    _advance_past(clock, link)
+    link.tick()
+
+    assert len(relay.enrollment_ids) == 2
+    assert relay.enrollment_ids[1] != historical
+    assert [rec["id"] for rec in store.list_pending()] == [
+        relay.enrollment_ids[1]
+    ]
+
+
 def test_enroll_is_reposted_on_a_schedule_shorter_than_the_store_ttl(tmp_path: Path):
     """A VM provisioned at 02:00 must still be approvable at 09:00 (AC1)."""
     assert host_contract.ENROLL_REPOST_INTERVAL_S < host_contract.ENROLL_TTL_S
@@ -581,6 +696,33 @@ def test_consecutive_409s_auto_reidentify_loudly_and_return_to_enrollment(
     assert relay.posts_to("/enroll")
 
 
+def test_failed_auto_reidentify_keeps_identity_and_uses_registration_backoff(
+    tmp_path: Path,
+):
+    relay = _Relay(register=(409, "duplicate identity"))
+    clock = _Clock()
+    attempts = []
+
+    def fail_reidentify():
+        attempts.append(clock())
+        raise RuntimeError("relay revocation failed")
+
+    link = _link(tmp_path, relay, clock, reidentify=fail_reidentify)
+    original = link.host_id
+    for attempt in range(RelayLink.DUPLICATE_REIDENTIFY_AFTER):
+        link.tick()
+        if attempt + 1 < RelayLink.DUPLICATE_REIDENTIFY_AFTER:
+            _advance_past(clock, link)
+
+    assert attempts == [clock()]
+    assert link.host_id == original
+    assert link.state == "duplicate-identity"
+    assert "relay revocation failed" in (link.last_error or "")
+    assert link.next_attempt_delay() > 1
+    assert link.tick() is None
+    assert attempts == [clock()]
+
+
 def test_a_success_clears_the_duplicate_counter(tmp_path: Path):
     relay = _Relay(register=(409, "duplicate identity"))
     clock = _Clock()
@@ -677,13 +819,42 @@ def test_capability_payload_has_one_assembler():
 def test_force_reidentify_mints_a_new_id_and_rotates_the_key(tmp_path: Path):
     from mship.core.daemon.identity import ensure_host_identity
 
-    rotated: list[Path] = []
-    first = ensure_host_identity(tmp_path, fingerprint="fp", rotate_key=lambda h: None)
-    fresh = force_reidentify(tmp_path, rotate_key=rotated.append)
+    events = []
+    first = ensure_host_identity(
+        tmp_path, fingerprint="fp", rotate_key=lambda h: None
+    )
+    fresh = force_reidentify(
+        tmp_path,
+        revoke_key=lambda home: events.append(("revoke", home)),
+        rotate_key=lambda home: events.append(("rotate", home)),
+    )
 
     assert fresh.host_id != first.host_id
     assert fresh.cloned_from == first.host_id
     assert fresh.reidentified is True
-    assert rotated == [tmp_path]
+    assert events == [("revoke", tmp_path), ("rotate", tmp_path)]
     # Persisted, so a restart does not fall back to the shadowed identity.
     assert ensure_host_identity(tmp_path, fingerprint="fp").host_id == fresh.host_id
+
+
+def test_force_reidentify_does_not_rotate_when_relay_revocation_fails(
+    tmp_path: Path,
+):
+    from mship.core.daemon.identity import ensure_host_identity
+
+    first = ensure_host_identity(
+        tmp_path, fingerprint="fp", rotate_key=lambda _home: None
+    )
+    rotated = []
+
+    with pytest.raises(RuntimeError, match="relay unavailable"):
+        force_reidentify(
+            tmp_path,
+            revoke_key=lambda _home: (_ for _ in ()).throw(
+                RuntimeError("relay unavailable")
+            ),
+            rotate_key=rotated.append,
+        )
+
+    assert rotated == []
+    assert ensure_host_identity(tmp_path, fingerprint="fp").host_id == first.host_id

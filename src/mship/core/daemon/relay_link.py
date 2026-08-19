@@ -84,6 +84,68 @@ HTTP_TIMEOUT_S = 10.0
 _STICKY_STATES = ("awaiting-enrollment", "duplicate-identity")
 
 
+def revoke_relay_key(
+    home: Path,
+    relay_cfg,
+    *,
+    post: Callable | None = None,
+    signer: Callable[[bytes], str] | None = None,
+    timeout: float = HTTP_TIMEOUT_S,
+) -> None:
+    """Prove possession of the current key, then remove it from the relay."""
+    key_path = keys.relay_key_path(home)
+    public_path = key_path.with_name(key_path.name + ".pub")
+    if not key_path.exists():
+        if public_path.exists():
+            raise RuntimeError(
+                "cannot revoke relay key: private key is missing while the old "
+                "public key may still be authorized"
+            )
+        return
+    identity = fingerprint(keys.relay_public_key(key_path).strip())
+    send = post if post is not None else _default_post
+    sign = (
+        signer
+        if signer is not None
+        else lambda blob: ssh_sig.sign_blob(
+            blob, key_path=key_path, namespace=host_contract.NAMESPACE
+        )
+    )
+    base = host_contract.enroll_base_url(relay_cfg.host)
+    challenge = send(
+        base + host_contract.CHALLENGE_PATH,
+        json={"key_fingerprint": identity},
+        timeout=timeout,
+    )
+    body = _body(challenge)
+    nonce = body.get("nonce") if body is not None else None
+    if (
+        challenge.status_code == 401
+        and _detail(challenge) == host_contract.UNAPPROVED_KEY_DETAIL
+    ):
+        return
+    if challenge.status_code != 200 or not isinstance(nonce, str) or not nonce:
+        raise RuntimeError(
+            _detail(challenge)
+            or f"relay key revocation challenge failed: HTTP {challenge.status_code}"
+        )
+    payload = host_contract.key_revocation_payload(identity)
+    response = send(
+        base + host_contract.REVOKE_PATH,
+        json={
+            "key_fingerprint": identity,
+            "nonce": nonce,
+            "signature": sign(host_contract.signing_blob(nonce, payload)),
+        },
+        timeout=timeout,
+    )
+    if not 200 <= response.status_code < 300:
+        raise RuntimeError(
+            _detail(response)
+            or f"relay key revocation failed: HTTP {response.status_code}"
+        )
+
+
 def host_subdomain_for(home: Path, host_id: str) -> str:
     """The relay subdomain this host publishes on, derived in ONE place.
 
@@ -143,7 +205,11 @@ class RelayLink:
         self._reidentify = (
             reidentify
             if reidentify is not None
-            else (lambda: force_reidentify(self._home))
+            else (
+                lambda: force_reidentify(
+                    self._home, revoke_key=self._revoke_current_key
+                )
+            )
         )
 
         self.instance_id = mint_instance_id()
@@ -158,9 +224,24 @@ class RelayLink:
         self._last_enroll_at: float | None = None
         self._enroll_repost_interval = host_contract.ENROLL_REPOST_INTERVAL_S
         self._delay = 0.0
-        self._adopt(ensure_host_identity(self._home, fingerprint=machine_fingerprint()))
+        self._adopt(
+            ensure_host_identity(
+                self._home,
+                fingerprint=machine_fingerprint(),
+                revoke_key=self._revoke_current_key,
+            )
+        )
 
     # -- identity + key material -------------------------------------------
+
+    def _revoke_current_key(self, home: Path) -> None:
+        revoke_relay_key(
+            home,
+            self._relay,
+            post=self._post,
+            signer=self._signer,
+            timeout=self._timeout,
+        )
 
     def _adopt(self, ident: HostIdentity) -> None:
         """Take on an identity and everything derived from it. Called again
@@ -280,7 +361,7 @@ class RelayLink:
             self.clock_skew_seconds = (
                 self._clock() - parsedate_to_datetime(raw).timestamp()
             )
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             return
 
     # -- the loop -----------------------------------------------------------
@@ -353,7 +434,13 @@ class RelayLink:
             self._duplicate_streak,
             self.last_error,
         )
-        self._adopt(self._reidentify())
+        try:
+            ident = self._reidentify()
+        except Exception as exc:
+            log.exception("automatic re-identification failed")
+            self.last_error = f"automatic re-identification failed: {exc}"
+            return
+        self._adopt(ident)
         log.warning("re-identified as %s (subdomain %s)", self.host_id, self.subdomain)
         self._duplicate_streak = 0
         self.state = "awaiting-enrollment"
@@ -390,9 +477,18 @@ class RelayLink:
         if not body or not isinstance(body.get("id"), str) or not body["id"]:
             self.last_error = "enroll post failed: invalid response"
             return
+        if body.get("status") == "approved":
+            # The registration refusal is the relay's current allowlist verdict.
+            # An approved enrollment id can be historical if revocation won
+            # after create's locked dedupe read but before this response arrived.
+            # Do not suppress the next re-post: it must create the pending row.
+            self.last_error = (
+                "enroll response referenced a historical approval; retrying"
+            )
+            return
         try:
             ttl = float(body.get("expires_in"))
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             ttl = 0
         if math.isfinite(ttl) and ttl > 0:
             self._enroll_repost_interval = ttl / 3

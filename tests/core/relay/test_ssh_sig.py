@@ -12,13 +12,14 @@ import pytest
 from mship.core.relay.ssh_sig import (
     SignatureError,
     build_allowed_signers,
+    revoke_allowed_key,
     sign_blob,
     verify_blob,
 )
 
 NS = "mship-host-registration"
 PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE01 host-a"
-PUB2 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE02 host-b"
+PUB2 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEFXAMPLE02 host-b"
 
 
 class Recorder:
@@ -170,6 +171,17 @@ def test_build_allowed_signers_skips_what_validate_pubkey_rejects(tmp_path):
 
 def test_build_allowed_signers_on_a_missing_dir_is_empty(tmp_path):
     assert build_allowed_signers(tmp_path / "nope") == ""
+
+
+def test_revoke_allowed_key_removes_every_copy_of_only_that_fingerprint(tmp_path):
+    from mship.core.relay.enroll import fingerprint
+
+    (tmp_path / "a.pub").write_text(PUB + "\n")
+    (tmp_path / "duplicate.pub").write_text(PUB + "\n")
+    (tmp_path / "other.pub").write_text(PUB2 + "\n")
+
+    assert revoke_allowed_key(tmp_path, fingerprint(PUB)) == 2
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["other.pub"]
 
 
 # --- real round trip -------------------------------------------------------

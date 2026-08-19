@@ -295,6 +295,8 @@ def test_initial_spawn_failure_uses_the_supervisor_backoff(tmp_path):
     for _ in range(4):
         clock.advance(1)
         tunnel.tick()
+        assert tunnel.state() == "error"
+        assert "ssh" in tunnel.last_error
     assert attempts == [1_000_000.0]
 
     clock.advance(1)
@@ -654,6 +656,51 @@ def test_reaper_does_not_force_kill_a_reused_pid(fx):
     )
 
     assert signals == [(orphan.pid, signal.SIGTERM)]
+
+
+def test_reaper_does_not_term_a_pid_reused_before_the_first_signal(fx):
+    orphan = _proc(
+        100, 1, f"ssh -N -R {fx.link.subdomain}:80:localhost:8765 relay.example"
+    )
+    replacement = _proc(
+        orphan.pid,
+        1,
+        f"ssh -N -R {fx.link.subdomain}:80:localhost:8765 relay.example",
+        started="replacement",
+    )
+    snapshots = iter(([orphan], [replacement]))
+    opened = []
+    closed = []
+    signals = []
+
+    reaped = reap_orphan_tunnels(
+        fx.link.subdomain,
+        processes=lambda: next(snapshots),
+        pidfd_open=lambda pid: (opened.append(pid), 77)[1],
+        pidfd_signal=lambda fd, sig: signals.append((fd, sig)),
+        close_pidfd=closed.append,
+        process_exists=lambda _pid: True,
+    )
+
+    assert reaped == []
+    assert opened == [orphan.pid]
+    assert closed == [77]
+    assert signals == []
+
+
+def test_reaper_refuses_to_signal_without_atomic_pidfd_support(fx):
+    orphan = _proc(
+        100, 1, f"ssh -N -R {fx.link.subdomain}:80:localhost:8765 relay.example"
+    )
+
+    with pytest.raises(RuntimeError, match="atomic pidfd signaling"):
+        reap_orphan_tunnels(
+            fx.link.subdomain,
+            processes=lambda: [orphan],
+            pidfd_open=lambda _pid: (_ for _ in ()).throw(
+                NotImplementedError("pidfd unavailable")
+            ),
+        )
 
 
 def test_reaper_leaves_other_hosts_tunnels_and_non_tunnels_alone(fx):

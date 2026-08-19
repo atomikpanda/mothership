@@ -25,13 +25,14 @@ class Harness:
     """One enroll app plus the stores behind it, so a test can assert on both
     the HTTP surface and what actually landed on disk."""
 
-    def __init__(self, client, store, directory, fleet, clock, prober):
+    def __init__(self, client, store, directory, fleet, clock, prober, revoked):
         self.client = client
         self.store = store
         self.directory = directory
         self.fleet = fleet
         self.clock = clock
         self.prober = prober
+        self.revoked = revoked
 
 
 class Clock:
@@ -89,11 +90,13 @@ def _harness(tmp_path, cap=50, answers=None, ttl=host_contract.ENROLL_TTL_S):
     store = RequestStore(base, ttl_seconds=ttl, max_pending=cap)
     clock = Clock()
     prober = Prober(answers)
+    revoked = []
     directory = HostDirectory(
         base,
         relay_domain=RELAY,
         allowed_signers=lambda: FP_A,
         probe=prober,
+        revoke_signer=lambda identity: revoked.append(identity),
         verify=_verify,
         clock=clock,
     )
@@ -101,7 +104,9 @@ def _harness(tmp_path, cap=50, answers=None, ttl=host_contract.ENROLL_TTL_S):
     app = build_enroll_app(
         store, relay_domain=RELAY, host_directory=directory, fleet_tokens=fleet
     )
-    return Harness(TestClient(app), store, directory, fleet, clock, prober)
+    return Harness(
+        TestClient(app), store, directory, fleet, clock, prober, revoked
+    )
 
 
 def _challenge(h, identity=FP_A):
@@ -238,6 +243,41 @@ def test_unapproved_identity_cannot_allocate_challenge_storage(tmp_path):
     assert r.json()["detail"] == host_contract.UNAPPROVED_KEY_DETAIL
     assert list((tmp_path / "s" / "challenges").glob("*.json")) == []
 
+
+def test_signed_key_revocation_removes_the_current_relay_signer(tmp_path):
+    h = _harness(tmp_path)
+    nonce = _challenge(h).json()["nonce"]
+    payload = host_contract.key_revocation_payload(FP_A)
+
+    response = h.client.post(
+        host_contract.REVOKE_PATH,
+        json={
+            "key_fingerprint": FP_A,
+            "nonce": nonce,
+            "signature": _sign(nonce, payload),
+        },
+    )
+
+    assert response.status_code == 200
+    assert h.revoked == [FP_A]
+
+
+
+def test_key_revocation_rejects_a_signature_not_made_by_that_key(tmp_path):
+    h = _harness(tmp_path)
+    nonce = _challenge(h).json()["nonce"]
+
+    response = h.client.post(
+        host_contract.REVOKE_PATH,
+        json={
+            "key_fingerprint": FP_A,
+            "nonce": nonce,
+            "signature": "not-a-valid-signature",
+        },
+    )
+
+    assert response.status_code == 401
+    assert h.revoked == []
 
 # ---------------------------------------------------------------------------
 # /hosts/register

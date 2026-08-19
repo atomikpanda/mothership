@@ -66,6 +66,7 @@ def test_the_wire_literals_are_pinned_by_value():
     assert host_contract.HOSTS_PREFIX == "/hosts"
     assert host_contract.CHALLENGE_PATH == "/hosts/challenge"
     assert host_contract.REGISTER_PATH == "/hosts/register"
+    assert host_contract.REVOKE_PATH == "/hosts/revoke"
     assert host_contract.LIST_PATH == "/hosts"
 
 
@@ -77,6 +78,7 @@ def test_every_route_path_lives_under_the_single_hosts_prefix():
         ), path
     assert host_contract.CHALLENGE_PATH in host_contract.ROUTE_PATHS
     assert host_contract.REGISTER_PATH in host_contract.ROUTE_PATHS
+    assert host_contract.REVOKE_PATH in host_contract.ROUTE_PATHS
     assert host_contract.LIST_PATH in host_contract.ROUTE_PATHS
 
 

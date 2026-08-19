@@ -131,17 +131,14 @@ def _build_registry(home: Path):
 def _relay_config(home: Path):
     """This host's `relay:` block as a `RelayConfig`, or None for no relay.
 
-    This loader never raises: an unreadable relay is a host without a tunnel,
-    never a host that refuses to start — the workspaces it serves on the LAN
-    do not depend on one."""
+    Invalid configuration raises instead of impersonating an absent `relay:`
+    block. A configured-but-broken tunnel must be visible as an error or stop
+    startup, never be reported as deliberately disabled.
+    """
     from mship.core.daemon.registry import load_daemon_config
     from mship.core.relay.config import RelayConfig
 
-    try:
-        return RelayConfig.from_mapping(load_daemon_config(home).relay)
-    except Exception:
-        log.exception("relay config unusable — daemon continues without a tunnel")
-        return None
+    return RelayConfig.from_mapping(load_daemon_config(home).relay)
 
 
 def _build_tunnel(home: Path, relay_cfg, serve_cfg):
@@ -317,7 +314,7 @@ def _install_stop_handlers(stop, servers) -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
             loop.add_signal_handler(sig, _request_stop)
-        except NotImplementedError, RuntimeError, ValueError:
+        except (NotImplementedError, RuntimeError, ValueError):
             # Non-POSIX, or not the main thread (tests). Uvicorn's own handlers
             # plus the shutdown path still stop everything.
             log.debug("no asyncio signal handler available for %s", sig)

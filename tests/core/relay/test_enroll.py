@@ -1,4 +1,5 @@
 import json
+import threading
 
 from pathlib import Path
 
@@ -141,6 +142,62 @@ def test_reposting_an_approved_key_returns_its_resolved_request(tmp_path):
     assert store.create(_PUB, "laptop") == rid
     assert store.list_pending() == []
 
+
+def test_removed_approved_key_can_enroll_again(tmp_path):
+    approved = {fingerprint(_PUB)}
+    store = RequestStore(
+        tmp_path / "store",
+        is_approved=lambda key_fingerprint: key_fingerprint in approved,
+    )
+    rid = store.create(_PUB, "laptop")
+    store.approve(rid, tmp_path / "pubkeys")
+    assert store.create(_PUB, "laptop") == rid
+
+    approved.clear()
+    replacement = store.create(_PUB, "laptop")
+
+    assert replacement != rid
+    assert [rec["id"] for rec in store.list_pending()] == [replacement]
+
+
+
+def test_allowlist_dedupe_and_revocation_share_one_store_lock(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+    revoke_started = threading.Event()
+    order = []
+
+    def is_approved(_fingerprint):
+        order.append("dedupe-read")
+        entered.set()
+        release.wait(timeout=1)
+        order.append("dedupe-return")
+        return True
+
+    store = RequestStore(tmp_path / "store", is_approved=is_approved)
+    rid = store.create(_PUB, "laptop")
+    store.approve(rid, tmp_path / "pubkeys")
+    repost = threading.Thread(target=lambda: store.create(_PUB, "laptop"))
+
+    def revoke():
+        revoke_started.set()
+        store.revoke_approved(
+            fingerprint(_PUB),
+            lambda _identity: order.append("revoke"),
+        )
+
+    revocation = threading.Thread(target=revoke)
+    repost.start()
+    assert entered.wait(timeout=1)
+    revocation.start()
+    assert revoke_started.wait(timeout=1)
+    release.set()
+    repost.join(timeout=1)
+    revocation.join(timeout=1)
+    assert not repost.is_alive()
+    assert not revocation.is_alive()
+
+    assert order == ["dedupe-read", "dedupe-return", "revoke"]
 
 # ---------------------------------------------------------------------------
 # Task 2 hardening (security review of commit 5886872)

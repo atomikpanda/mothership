@@ -97,10 +97,22 @@ def _read(path: Path) -> dict | None:
         return None  # corrupt/truncated → re-mint (RegistryStore._load_nolock precedent)
 
 
+def _revoke_relay_key(home: Path) -> None:
+    """Remove the current key from a configured relay before rotating it."""
+    from mship.core.daemon.registry import load_daemon_config
+    from mship.core.relay.config import RelayConfig
+
+    relay = RelayConfig.from_mapping(load_daemon_config(home).relay)
+    if relay is None:
+        return
+    from mship.core.daemon.relay_link import revoke_relay_key
+
+    revoke_relay_key(home, relay)
+
+
 def _rotate_relay_key(home: Path) -> None:
-    """Move the current relay key aside so a re-identified host presents a NEW
-    key: the clone's copied key is still in the relay's `pubkeys/`, so keeping
-    it would let the clone keep authenticating as this host."""
+    """Move the revoked relay key aside so the re-identified host generates and
+    enrolls fresh local key material."""
     from mship.core.relay.keys import relay_key_path
 
     key = relay_key_path(home)
@@ -114,23 +126,24 @@ def force_reidentify(
     home: Path,
     *,
     fingerprint: str | None = None,
+    revoke_key: Callable[[Path], None] = _revoke_relay_key,
     rotate_key: Callable[[Path], None] = _rotate_relay_key,
     now: datetime | None = None,
 ) -> HostIdentity:
-    """Re-identify unconditionally: mint a new `host_id`, record the old one as
-    `cloned_from`, and rotate the relay key so the twin's copy stops working.
+    """Re-identify unconditionally: revoke the old relay key, mint a new
+    `host_id`, record the old one as `cloned_from`, and rotate local key
+    material.
 
-    The single owner of that move. `ensure_host_identity` delegates here when a
-    changed machine fingerprint is what noticed the clone (passing the running
-    machine's `fingerprint`); the daemon calls it directly after repeated
-    `409 duplicate-identity` answers, when the *relay* is what noticed and the
-    local fingerprint still matches; `mship daemon reidentify` calls it for an
-    operator. A headless VM must be able to recover without anyone SSHing in.
+    The single owner of that transition. `ensure_host_identity` delegates here
+    when a changed machine fingerprint is what noticed the clone; the daemon
+    calls it directly after repeated `409 duplicate-identity` answers, when the
+    relay noticed; `mship daemon reidentify` calls it for an operator.
     """
     from mship.core.daemon.paths import host_identity_path
 
     path = host_identity_path(home)
     previous = _read(path) or {}
+    revoke_key(home)
     rotate_key(home)
     ident = HostIdentity(
         host_id=mint_host_id(now),
@@ -148,6 +161,7 @@ def ensure_host_identity(
     *,
     fingerprint: str | None = None,
     on_mismatch: Literal["reidentify", "keep"] = "reidentify",
+    revoke_key: Callable[[Path], None] = _revoke_relay_key,
     rotate_key: Callable[[Path], None] = _rotate_relay_key,
     now: datetime | None = None,
 ) -> HostIdentity:
@@ -200,5 +214,9 @@ def ensure_host_identity(
         return ident
 
     return force_reidentify(
-        home, fingerprint=fingerprint, rotate_key=rotate_key, now=now
+        home,
+        fingerprint=fingerprint,
+        revoke_key=revoke_key,
+        rotate_key=rotate_key,
+        now=now,
     )

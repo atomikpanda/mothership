@@ -55,6 +55,12 @@ class _RegisterBody(BaseModel):
     payload: dict[_Key, _PayloadValue] = Field(max_length=_MAX_PAYLOAD_FIELDS)
 
 
+class _RevokeBody(BaseModel):
+    key_fingerprint: str = Field(max_length=_MAX_STR)
+    nonce: str = Field(max_length=128)
+    signature: str = Field(max_length=8192)
+
+
 # The directory is a PUBLISHED surface: a field added to a stored entry must not
 # auto-appear on every paired phone. `refresh` is here deliberately — fetching it
 # is why the phone reads this route at all — and appears on no other response.
@@ -122,6 +128,24 @@ def build_enroll_app(
         except SignatureRefused as exc:
             raise HTTPException(status_code=401, detail=str(exc))
         return {"nonce": challenge["nonce"], "expires_at": challenge["expires_at"]}
+
+    @app.post(host_contract.REVOKE_PATH)
+    def hosts_revoke(body: _RevokeBody):
+        try:
+            host_directory.revoke_key(
+                body.key_fingerprint,
+                nonce=body.nonce,
+                signature=body.signature,
+            )
+        except (ChallengeRefused, SignatureRefused) as exc:
+            raise HTTPException(status_code=401, detail=str(exc))
+        except VerificationBusy:
+            raise HTTPException(
+                status_code=429,
+                detail="signature verification busy; try later",
+                headers={"Retry-After": "1"},
+            )
+        return {"status": "revoked"}
 
     @app.post(host_contract.REGISTER_PATH)
     def hosts_register(body: _RegisterBody):

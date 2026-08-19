@@ -41,7 +41,13 @@ ENROLL_SUBDOMAIN = "enroll"
 LIST_PATH = HOSTS_PREFIX
 CHALLENGE_PATH = f"{HOSTS_PREFIX}/challenge"
 REGISTER_PATH = f"{HOSTS_PREFIX}/register"
-ROUTE_PATHS: tuple[str, ...] = (LIST_PATH, CHALLENGE_PATH, REGISTER_PATH)
+REVOKE_PATH = f"{HOSTS_PREFIX}/revoke"
+ROUTE_PATHS: tuple[str, ...] = (
+    LIST_PATH,
+    CHALLENGE_PATH,
+    REGISTER_PATH,
+    REVOKE_PATH,
+)
 
 # The pre-existing enrollment route, spelled once: the daemon's relay link, the
 # `mship relay enroll` CLI and the app that serves it must all name it the same.
@@ -110,6 +116,11 @@ def canonical_payload(payload: dict) -> bytes:
         ensure_ascii=False,
         allow_nan=False,
     ).encode("utf-8")
+
+
+def key_revocation_payload(key_fingerprint: str) -> dict:
+    """The exact signed request that authorizes removal of the old relay key."""
+    return {"action": "revoke-key", "key_fingerprint": key_fingerprint}
 
 
 def signing_blob(nonce: str, payload: dict) -> bytes:

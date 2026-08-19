@@ -664,7 +664,9 @@ def test_an_unusable_last_seen_reads_as_offline_not_as_a_crash(tmp_path, bad):
     rec = json.loads(path.read_text())
     rec["last_seen"] = bad
     path.write_text(json.dumps(rec))
-    assert d.list_hosts()[0]["state"] == "offline"
+    listed = d.list_hosts()[0]
+    assert listed["state"] == "offline"
+    assert listed["last_seen"] == 0.0
     assert (
         _register(d, _payload(instance_id="inst-2"))["previous_instance_id"] == "inst-1"
     )

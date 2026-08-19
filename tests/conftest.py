@@ -83,7 +83,7 @@ def _isolate_runtime_dir(monkeypatch, tmp_path: Path):
     real_probe = control.probe_control_socket
 
     def sandboxed_probe(socket_path, **kw):
-        if not str(socket_path).startswith(str(tmp_path)):
+        if not Path(socket_path).resolve().is_relative_to(tmp_path.resolve()):
             return None                     # the real user's daemon: unreachable
         return real_probe(socket_path, **kw)
 

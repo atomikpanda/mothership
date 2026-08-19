@@ -124,3 +124,19 @@ def build_allowed_signers(pubkeys_dir) -> str:
         ktype, body = key.split()[:2]
         lines.append(f"{fingerprint(key)} {ktype} {body}")
     return "".join(f"{line}\n" for line in lines)
+
+
+def revoke_allowed_key(pubkeys_dir, identity: str) -> int:
+    """Remove every allowlist file containing `identity`; return the count."""
+    directory = Path(pubkeys_dir)
+    removed = 0
+    for path in sorted(directory.rglob("*")) if directory.is_dir() else []:
+        try:
+            key = path.read_text().strip()
+        except (OSError, UnicodeError):
+            continue
+        if not validate_pubkey(key) or fingerprint(key) != identity:
+            continue
+        path.unlink()
+        removed += 1
+    return removed

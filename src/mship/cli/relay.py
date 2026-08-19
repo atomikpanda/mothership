@@ -58,7 +58,7 @@ def _enroll_server_impl(*, store_dir, pubkeys_dir, port, host, ttl, relay_domain
     from mship.core.relay.enroll_app import build_enroll_app
     from mship.core.relay.fleet_token import FleetTokenStore
     from mship.core.relay.host_directory import HostDirectory, probe_instance_id
-    from mship.core.relay.ssh_sig import build_allowed_signers
+    from mship.core.relay.ssh_sig import build_allowed_signers, revoke_allowed_key
 
     relay_domain = canonical_relay_host(relay_domain)
     if not relay_domain:
@@ -69,15 +69,31 @@ def _enroll_server_impl(*, store_dir, pubkeys_dir, port, host, ttl, relay_domain
         raise typer.BadParameter(
             "ssh-keygen is required for host registration; install openssh-client"
         )
-    store = RequestStore(Path(store_dir), ttl_seconds=ttl)
+    pubkeys_path = Path(pubkeys_dir)
+    store = RequestStore(
+        Path(store_dir),
+        ttl_seconds=ttl,
+        is_approved=lambda key_fingerprint: any(
+            line.startswith(f"{key_fingerprint} ")
+            for line in build_allowed_signers(pubkeys_path).splitlines()
+        ),
+    )
+
+    def revoke_signer(identity: str):
+        return store.revoke_approved(
+            identity,
+            lambda approved: revoke_allowed_key(pubkeys_path, approved),
+        )
+
     # The signature allowlist IS the sish `pubkeys/` allowlist, re-read per
     # verification: that is what makes signature-auth and tunnel-auth one
     # identity, and what lets an approval take effect without a restart.
     directory = HostDirectory(
         Path(store_dir),
         relay_domain=relay_domain,
-        allowed_signers=lambda: build_allowed_signers(Path(pubkeys_dir)),
+        allowed_signers=lambda: build_allowed_signers(pubkeys_path),
         probe=probe_instance_id,
+        revoke_signer=revoke_signer,
     )
     Output().print(
         f"enroll-server → http://{host}:{port}  (relay: {relay_domain}, "
@@ -615,7 +631,7 @@ def register(parent: typer.Typer, get_container):
             raise typer.Exit(1)
         try:
             rid = r.json()["id"]
-        except ValueError, KeyError:
+        except (ValueError, KeyError):
             out.error("enroll server returned an unexpected response (no request id)")
             raise typer.Exit(1)
         out.print(
@@ -632,7 +648,7 @@ def register(parent: typer.Typer, get_container):
                 try:
                     resp = httpx.get(f"{base}/status/{rid}", timeout=10)
                     st = resp.json().get("status", "pending")
-                except httpx.RequestError, ValueError:  # ValueError covers JSON decode
+                except (httpx.RequestError, ValueError):  # ValueError covers JSON decode
                     time.sleep(3)
                     continue
                 if st == "approved":

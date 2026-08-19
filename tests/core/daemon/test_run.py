@@ -19,7 +19,12 @@ import mship.core.daemon.relay_link as relay_link_mod
 import mship.core.daemon.run as run_mod
 from mship.core.daemon.history import read_history
 from mship.core.daemon.lease import DaemonLease
-from mship.core.daemon.paths import daemon_log_dir, daemon_socket_path, lease_path
+from mship.core.daemon.paths import (
+    daemon_config_path,
+    daemon_log_dir,
+    daemon_socket_path,
+    lease_path,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -598,6 +603,20 @@ def test_no_relay_block_means_no_tunnel(tmp_path):
     home.mkdir()
     assert run_mod._relay_config(home) is None
     assert run_mod._build_tunnel(home, None, SERVE_BLOCK) is None
+
+
+def test_invalid_relay_config_is_not_reported_as_disabled(tmp_path):
+    home = tmp_path / "home"
+    config_path = daemon_config_path(home)
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "relay:\n"
+        "  host: relay.example.com\n"
+        "  ssh_port: not-an-integer\n"
+    )
+
+    with pytest.raises(ValueError, match="relay.ssh_port"):
+        run_mod._relay_config(home)
 
 
 def test_relay_without_a_local_serve_bind_is_an_error(tmp_path):

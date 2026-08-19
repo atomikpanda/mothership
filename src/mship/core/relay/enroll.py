@@ -113,6 +113,7 @@ class RequestStore:
         ttl_seconds: int = ENROLL_TTL_S,
         max_pending: int = 50,
         clock: Callable[[], float] = time.time,
+        is_approved: Callable[[str], bool] | None = None,
     ) -> None:
         self._pending = Path(base_dir) / "pending"
         self._resolved = Path(base_dir) / "resolved"
@@ -122,6 +123,7 @@ class RequestStore:
         self._ttl = ttl_seconds
         self._max_pending = max_pending
         self._clock = clock
+        self._is_approved = is_approved
 
     @property
     def ttl_seconds(self) -> int:
@@ -149,7 +151,7 @@ class RequestStore:
             if "created_at" not in rec:
                 raise ValueError("missing created_at")
             return rec
-        except json.JSONDecodeError, OSError, ValueError:
+        except (json.JSONDecodeError, OSError, ValueError):
             try:
                 p.replace(p.with_suffix(".json.corrupt"))
             except OSError:
@@ -164,11 +166,11 @@ class RequestStore:
                 continue
             try:
                 deadline = float(rec["expires_at"])
-            except KeyError, TypeError, ValueError:
+            except (KeyError, TypeError, ValueError):
                 # Records created before per-request deadlines used the store TTL.
                 try:
                     deadline = float(rec["created_at"]) + self._ttl
-                except KeyError, TypeError, ValueError:
+                except (KeyError, TypeError, ValueError):
                     deadline = math.nan
             expired = not math.isfinite(deadline) or now >= deadline
             if expired:
@@ -214,6 +216,10 @@ class RequestStore:
                     rec is not None
                     and rec.get("status") == "approved"
                     and rec.get("fingerprint") == fp
+                    and (
+                        self._is_approved is None
+                        or self._is_approved(fp)
+                    )
                 ):
                     return rec["id"]
             if len(pending) >= self._max_pending:
@@ -233,6 +239,15 @@ class RequestStore:
                 },
             )
         return rid
+
+    def revoke_approved(
+        self,
+        identity: str,
+        revoke: Callable[[str], object],
+    ) -> object:
+        """Mutate the allowlist under the same lock as enrollment dedupe."""
+        with _locked(self._lock_path):
+            return revoke(identity)
 
     def list_pending(self) -> list[dict]:
         with _locked(self._lock_path):

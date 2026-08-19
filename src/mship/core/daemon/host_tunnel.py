@@ -137,7 +137,7 @@ def _forward_label(cmdline: str) -> str | None:
     tokens = cmdline.split()
     try:
         spec = tokens[tokens.index("-R") + 1]
-    except ValueError, IndexError:
+    except (ValueError, IndexError):
         return None
     return spec.split(":")[0]
 
@@ -169,6 +169,9 @@ def reap_orphan_tunnels(
     processes: Callable[[], Sequence[ProcessInfo]] = list_processes,
     kill: Callable[[int], None] | None = None,
     force_kill: Callable[[int], None] | None = None,
+    pidfd_open: Callable[[int], int] | None = None,
+    pidfd_signal: Callable[[int, int], None] | None = None,
+    close_pidfd: Callable[[int], None] = os.close,
     process_exists: Callable[[int], bool] = _process_exists,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
@@ -186,10 +189,6 @@ def reap_orphan_tunnels(
     an old process still owns the reverse forward. Returns the pids that
     accepted the initial signal.
     """
-    if kill is None:
-        kill = lambda pid: os.kill(pid, signal.SIGTERM)
-    if force_kill is None:
-        force_kill = lambda pid: os.kill(pid, signal.SIGKILL)
 
     def wait_for_exit(processes: list[ProcessInfo]) -> list[ProcessInfo]:
         deadline = clock() + ORPHAN_EXIT_TIMEOUT_S
@@ -202,47 +201,113 @@ def reap_orphan_tunnels(
             live = [process for process in live if process_exists(process.pid)]
         return []
 
+    def same_process(expected: ProcessInfo, current: ProcessInfo | None) -> bool:
+        return (
+            current is not None
+            and current.started == expected.started
+            and current.ppid == 1
+            and _forward_label(current.cmdline) == subdomain
+        )
+
+    def signal_atomically(proc: ProcessInfo, sig: int) -> bool:
+        opener = pidfd_open or getattr(os, "pidfd_open", None)
+        native_sender = getattr(signal, "pidfd_send_signal", None)
+        sender = pidfd_signal or (
+            (lambda fd, signal_number: native_sender(fd, signal_number, None, 0))
+            if native_sender is not None
+            else None
+        )
+        if opener is None or sender is None:
+            raise RuntimeError("atomic pidfd signaling is unavailable")
+        try:
+            fd = opener(proc.pid)
+        except ProcessLookupError:
+            return False
+        except Exception as exc:
+            raise RuntimeError("atomic pidfd signaling is unavailable") from exc
+        try:
+            current = {row.pid: row for row in processes()}.get(proc.pid)
+            if not same_process(proc, current):
+                return False
+            try:
+                sender(fd, sig)
+            except ProcessLookupError:
+                return False
+            return True
+        finally:
+            close_pidfd(fd)
+
+    candidates = [
+        proc
+        for proc in processes()
+        if proc.ppid == 1 and _forward_label(proc.cmdline) == subdomain
+    ]
+    refreshed = (
+        {proc.pid: proc for proc in processes()}
+        if candidates and kill is not None
+        else {}
+    )
     signalled = []
     identities = []
-    for proc in processes():
-        if proc.ppid != 1 or _forward_label(proc.cmdline) != subdomain:
-            continue
-        try:
-            kill(proc.pid)
-        except Exception as exc:
-            if process_exists(proc.pid):
-                raise RuntimeError(
-                    f"could not signal orphan tunnel pid {proc.pid}"
-                ) from exc
+    for proc in candidates:
+        if kill is None:
+            accepted = signal_atomically(proc, signal.SIGTERM)
+        else:
+            current = refreshed.get(proc.pid)
+            if current is None:
+                if process_exists(proc.pid):
+                    raise RuntimeError(
+                        f"could not revalidate orphan tunnel pid {proc.pid}"
+                    )
+                continue
+            if not same_process(proc, current):
+                continue
+            try:
+                kill(proc.pid)
+                accepted = True
+            except Exception as exc:
+                if process_exists(proc.pid):
+                    raise RuntimeError(
+                        f"could not signal orphan tunnel pid {proc.pid}"
+                    ) from exc
+                accepted = False
+        if not accepted:
             continue
         log.warning(
             "signalled orphaned relay tunnel pid=%s holding %s", proc.pid, subdomain
         )
         signalled.append(proc.pid)
         identities.append(proc)
-
     survivors = wait_for_exit(identities)
-    refreshed = {proc.pid: proc for proc in processes()} if survivors else {}
+    refreshed = (
+        {proc.pid: proc for proc in processes()}
+        if survivors and force_kill is not None
+        else {}
+    )
     force_signalled = []
     for proc in survivors:
-        current = refreshed.get(proc.pid)
-        if current is None:
-            if process_exists(proc.pid):
-                raise RuntimeError(f"could not revalidate orphan tunnel pid {proc.pid}")
-            continue
-        if (
-            current.started != proc.started
-            or current.ppid != 1
-            or _forward_label(current.cmdline) != subdomain
-        ):
-            continue
-        try:
-            force_kill(proc.pid)
-        except Exception as exc:
-            if process_exists(proc.pid):
-                raise RuntimeError(
-                    f"could not force-kill orphan tunnel pid {proc.pid}"
-                ) from exc
+        if force_kill is None:
+            accepted = signal_atomically(proc, signal.SIGKILL)
+        else:
+            current = refreshed.get(proc.pid)
+            if current is None:
+                if process_exists(proc.pid):
+                    raise RuntimeError(
+                        f"could not revalidate orphan tunnel pid {proc.pid}"
+                    )
+                continue
+            if not same_process(proc, current):
+                continue
+            try:
+                force_kill(proc.pid)
+                accepted = True
+            except Exception as exc:
+                if process_exists(proc.pid):
+                    raise RuntimeError(
+                        f"could not force-kill orphan tunnel pid {proc.pid}"
+                    ) from exc
+                accepted = False
+        if not accepted:
             continue
         log.warning(
             "force-killed orphaned relay tunnel pid=%s holding %s",
@@ -286,7 +351,7 @@ class HostTunnel:
         self._ever_online = False
         self._ssh_rejected = False  # the ssh log tail says "not approved yet"
         self._contended_with: str | None = None
-        self._failure: str | None = None  # this tick's own fault, if any
+        self._failure: str | None = None  # persists until the failed operation recovers
         self._detail: str | None = None  # the last read-back's explanation
         self._last_readback_at: float | None = None
         # Monotonic: `restart_count` is NOT a respawn signal — a healthy run
@@ -305,7 +370,6 @@ class HostTunnel:
         that cannot respawn must not silence registration (AC7)."""
         if self._stopped:
             return self.state()
-        self._failure = None
         self._guard("tunnel", self._supervise)
         self._guard("registration", self._link.tick)
         self._guard("tunnel", self._redial)
@@ -331,6 +395,13 @@ class HostTunnel:
         except Exception as exc:
             log.exception("%s tick failed", what)
             self._failure = f"{what}: {exc}"
+        else:
+            if (
+                what == "registration"
+                and self._failure is not None
+                and self._failure.startswith("registration:")
+            ):
+                self._failure = None
 
     def _supervise(self) -> None:
         """Respawn a dead child, read back a live one, and tell the link when a
@@ -351,6 +422,12 @@ class HostTunnel:
             # A new child is up, holding a fresh sish route; re-publish the entry
             # now rather than waiting out `REGISTER_INTERVAL_S` (AC2).
             self._link.register_soon()
+        if (
+            sup.is_running()
+            and self._failure is not None
+            and self._failure.startswith("tunnel:")
+        ):
+            self._failure = None
 
     def _redial(self) -> None:
         """Act on the link's verdict: a duplicate identity must not hold a
@@ -374,6 +451,12 @@ class HostTunnel:
             # This tick's `link.tick()` already published the entry for this
             # child, so the initial dial must not also count as a respawn.
             self._spawns_seen = self._supervisor.spawn_count
+            if (
+                self._supervisor.is_running()
+                and self._failure is not None
+                and self._failure.startswith("tunnel:")
+            ):
+                self._failure = None
 
     def _reap(self) -> None:
         """Sweep orphans once per downtime, not once per tick: this shells out to
