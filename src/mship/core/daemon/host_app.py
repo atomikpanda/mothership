@@ -222,6 +222,8 @@ def _default_build_subapp(
     pr_watch_interval: float | None,
     gh_app_id: str | None,
     gh_app_key: str | None,
+    host_id,
+    workspace_id: str,
 ):
     from mship.core.serve import create_app
     from mship.core.spec_store import SPECS_DIRNAME
@@ -240,6 +242,8 @@ def _default_build_subapp(
         gh_app_id=gh_app_id,
         gh_app_key=gh_app_key,
         pr_watch_interval=pr_watch_interval,
+        host_id=host_id,
+        workspace_id=workspace_id,
     )
 
 
@@ -481,6 +485,8 @@ def create_host_app(
                         pr_watch_interval=pr_watch_interval,
                         gh_app_id=gh_app_id,
                         gh_app_key=gh_app_key,
+                        host_id=host_id,
+                        workspace_id=entry.id,
                     ),
                     fp,
                 )

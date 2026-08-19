@@ -80,12 +80,16 @@ def test_install_scan_serve_end_to_end(tmp_path, monkeypatch):
     token = ensure_host_token(home, env={})
     with TestClient(captured["host"]) as client:
         hdrs = {"Authorization": f"Bearer {token}"}
+        host_id = client.get("/health").json()["host_id"]
         ws = client.get("/workspaces", headers=hdrs).json()["workspaces"]
         assert sorted(w["name"] for w in ws) == ["ws-one", "ws-two"]
         for w in ws:
             r = client.get(f"/workspaces/{w['id']}/health", headers=hdrs)
             assert r.status_code == 200
-            assert r.json()["workspace"] == w["name"]
+            body = r.json()
+            assert body["workspace"] == w["name"]
+            assert body["host_id"] == host_id
+            assert body["workspace_id"] == w["id"]
 
     # 4) control app reports the flipped capabilities.
     with TestClient(captured["control"]) as client:
