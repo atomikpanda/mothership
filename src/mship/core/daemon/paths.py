@@ -30,6 +30,34 @@ def daemon_config_path(home: Path) -> Path:
     return daemon_state_dir(home) / "config.yaml"
 
 
+def host_identity_path(home: Path) -> Path:
+    return daemon_state_dir(home) / "host-identity.json"
+
+
+def host_secret_path(home: Path) -> Path:
+    """The per-host root secret (`core.daemon.host_token`). Read-only — creates
+    nothing, so a reporter can check for it without minting one."""
+    return daemon_state_dir(home) / "host-root-secret"
+
+
+def host_tokens_path(home: Path) -> Path:
+    return daemon_state_dir(home) / "host-tokens.json"
+
+
+def host_refresh_path(home: Path) -> Path:
+    return daemon_state_dir(home) / "host-refresh.json"
+
+
+def tunnel_log_path(home: Path) -> Path:
+    """Captured `ssh -R` output for the HOST tunnel (#471).
+
+    Daemon-owned and per-OS-user, deliberately NOT the workspace-scoped
+    `.mothership/relay-tunnel.log` that `mship serve --relay` writes: the daemon
+    dials one tunnel for the machine, not one per workspace, and it must not
+    write into a workspace it happens to have discovered."""
+    return daemon_log_dir(home) / "relay-tunnel.log"
+
+
 def registry_path(home: Path) -> Path:
     return daemon_state_dir(home) / "workspaces.json"
 

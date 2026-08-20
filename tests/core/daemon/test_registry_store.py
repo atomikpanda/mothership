@@ -1,6 +1,7 @@
 """Registry model + flock'd store (#472 Task 1). The two-hosts test is the
 behavioral pin for "no exclusive cross-host ownership": arbitration belongs to
 #473's claims (see WorkspaceEntry docstring), not to registry state."""
+
 import multiprocessing
 import os
 import threading
@@ -26,28 +27,45 @@ NOW = datetime(2026, 8, 17, 1, 0, tzinfo=timezone.utc)
 
 def _entry(id="ws-x", path="/w/a", **kw):
     defaults = dict(
-        id=id, name="a", path=path, config_path=f"{path}/mothership.yaml",
-        first_seen=NOW, last_seen=NOW,
+        id=id,
+        name="a",
+        path=path,
+        config_path=f"{path}/mothership.yaml",
+        first_seen=NOW,
+        last_seen=NOW,
     )
     defaults.update(kw)
     return WorkspaceEntry(**defaults)
 
 
 def test_paths_are_pure(tmp_path: Path):
-    assert daemon_config_path(tmp_path) == tmp_path / ".mothership" / "daemon" / "config.yaml"
-    assert registry_path(tmp_path) == tmp_path / ".mothership" / "daemon" / "workspaces.json"
+    assert (
+        daemon_config_path(tmp_path)
+        == tmp_path / ".mothership" / "daemon" / "config.yaml"
+    )
+    assert (
+        registry_path(tmp_path)
+        == tmp_path / ".mothership" / "daemon" / "workspaces.json"
+    )
 
 
 def test_entry_roundtrip_and_skew_tolerance(tmp_path: Path):
     store = RegistryStore(registry_path(tmp_path))
-    e = _entry(repos=[RepoInfo(name="app", path="app", git_root="root")], runner={"enabled": True})
+    e = _entry(
+        repos=[RepoInfo(name="app", path="app", git_root="root")],
+        runner={"enabled": True},
+    )
     store.mutate(lambda s: s.entries.append(e))
     loaded = store.load()
     assert loaded.entries[0].id == "ws-x"
     assert loaded.entries[0].repos[0].git_root == "root"
     assert loaded.entries[0].runner == {"enabled": True}
     # forward-skew: unknown fields ignored
-    raw = registry_path(tmp_path).read_text().replace('"entries":', '"future_field": 1, "entries":')
+    raw = (
+        registry_path(tmp_path)
+        .read_text()
+        .replace('"entries":', '"future_field": 1, "entries":')
+    )
     registry_path(tmp_path).write_text(raw)
     assert store.load().entries[0].id == "ws-x"
 
@@ -63,8 +81,10 @@ def test_id_is_minted_never_dirname():
 def _mutate_worker(path_str: str, worker: int, rounds: int) -> None:
     store = RegistryStore(Path(path_str))
     for j in range(rounds):
+
         def add(s, worker=worker, j=j):
             s.entries.append(_entry(id=f"ws-{worker}-{j}", path=f"/w/{worker}/{j}"))
+
         store.mutate(add)
 
 
@@ -107,7 +127,10 @@ def test_daemon_config_missing_file_scans_nothing(tmp_path: Path):
 
 
 def test_daemon_config_roundtrip(tmp_path: Path):
-    save_daemon_config(tmp_path, DaemonConfig(scan_roots=["/src"], serve={"host": "127.0.0.1", "port": 47190}))
+    save_daemon_config(
+        tmp_path,
+        DaemonConfig(scan_roots=["/src"], serve={"host": "127.0.0.1", "port": 47190}),
+    )
     cfg = load_daemon_config(tmp_path)
     assert cfg.scan_roots == ["/src"]
     assert cfg.serve == {"host": "127.0.0.1", "port": 47190}
@@ -130,9 +153,7 @@ def test_daemon_config_malformed_yaml_is_a_value_error(tmp_path: Path):
         load_daemon_config(tmp_path)
 
 
-def test_daemon_config_read_error_is_not_treated_as_absent(
-    tmp_path: Path, monkeypatch
-):
+def test_daemon_config_read_error_is_not_treated_as_absent(tmp_path: Path, monkeypatch):
     path = daemon_config_path(tmp_path)
     path.parent.mkdir(parents=True)
     original = b"scan_roots: []\n"
@@ -165,6 +186,45 @@ def test_daemon_config_rejects_invalid_serve_bind(serve):
     with pytest.raises(ValueError, match="serve"):
         DaemonConfig(serve=serve)
 
+
+def test_daemon_config_missing_relay_block_is_tunnel_disabled(tmp_path: Path):
+    """No `relay:` is the ordinary LAN/tailnet host, not a misconfiguration."""
+    assert load_daemon_config(tmp_path).relay is None
+
+
+def test_daemon_config_relay_roundtrip(tmp_path: Path):
+    save_daemon_config(
+        tmp_path,
+        DaemonConfig(relay={"host": "relay.example.com", "ssh_port": 2222}),
+    )
+    assert load_daemon_config(tmp_path).relay == {
+        "host": "relay.example.com",
+        "ssh_port": 2222,
+    }
+
+
+@pytest.mark.parametrize(
+    "relay",
+    [
+        {},
+        {"ssh_port": 2222},
+        {"host": ""},
+        {"host": 123},
+        {"user": "mship"},
+        "relay.example.com",
+    ],
+)
+def test_daemon_config_rejects_relay_block_without_host(relay):
+    """A present-but-hostless block is a typo, never a quiet "tunnel off": the
+    host it was meant to reach would silently never be dialed."""
+    with pytest.raises(ValueError, match="relay"):
+        DaemonConfig(relay=relay)
+
+
+@pytest.mark.parametrize("port", [0, 65536, True, "2222"])
+def test_daemon_config_rejects_invalid_relay_ssh_port(port):
+    with pytest.raises(ValueError, match="relay.ssh_port"):
+        DaemonConfig(relay={"host": "relay.example.com", "ssh_port": port})
 
 
 def test_daemon_config_rejects_negative_max_depth():
@@ -261,9 +321,7 @@ def test_daemon_config_save_is_atomically_visible(tmp_path, monkeypatch):
     assert path.stat().st_mode & 0o777 == 0o600
 
 
-def test_daemon_config_replace_failure_preserves_previous_bytes(
-    tmp_path, monkeypatch
-):
+def test_daemon_config_replace_failure_preserves_previous_bytes(tmp_path, monkeypatch):
     previous = DaemonConfig(scan_roots=["/previous"])
     save_daemon_config(tmp_path, previous)
     path = daemon_config_path(tmp_path)
@@ -274,9 +332,7 @@ def test_daemon_config_replace_failure_preserves_previous_bytes(
 
     monkeypatch.setattr(os, "replace", fail_replace)
     with pytest.raises(OSError, match="replace failed"):
-        save_daemon_config(
-            tmp_path, DaemonConfig(scan_roots=["/replacement"])
-        )
+        save_daemon_config(tmp_path, DaemonConfig(scan_roots=["/replacement"]))
 
     assert path.read_bytes() == previous_bytes
     assert list(path.parent.glob(path.name + ".*")) == []

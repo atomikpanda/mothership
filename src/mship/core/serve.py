@@ -287,6 +287,8 @@ def create_app(
     gh_app_key: str | None = None,
     pair_link: str | None = None,
     pr_watch_interval: float | None = None,
+    host_id=None,
+    workspace_id: str | None = None,
 ):
     """Build the mship serve FastAPI app (read + review/approve write endpoints).
     Sync handlers call the core directly; FastAPI serializes the returns.
@@ -391,7 +393,13 @@ def create_app(
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "workspace": workspace_name}
+        identity = host_id() if callable(host_id) else host_id
+        payload = {"status": "ok", "workspace": workspace_name}
+        if identity is not None:
+            payload["host_id"] = identity
+        if workspace_id is not None:
+            payload["workspace_id"] = workspace_id
+        return payload
 
     def _topology_payload() -> dict:
         """The topology payload. ONE builder, two surfaces: `GET /net/topology`

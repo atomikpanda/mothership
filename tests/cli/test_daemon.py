@@ -2,6 +2,8 @@
 interaction is monkeypatched (`pick_supervisor` → recording fake, the
 `tests/cli/test_relay_enroll_server.py` seam style)."""
 from pathlib import Path
+from click import unstyle
+
 
 import pytest
 import typer
@@ -611,6 +613,94 @@ def test_install_without_serve_leaves_null_bind(cli, tmp_path):
     assert load_daemon_config(tmp_path).serve is None
 
 
+def test_install_seeds_relay_beside_scan_roots_and_serve(cli, tmp_path):
+    from mship.core.daemon.registry import load_daemon_config
+
+    app, fake = cli
+    src = tmp_path / "src"
+    src.mkdir()
+    res = runner.invoke(app, [
+        "daemon", "install",
+        "--scan-root", str(src),
+        "--serve", "127.0.0.1:47190",
+        "--relay", "relay.example.com",
+    ])
+    assert res.exit_code == 0, res.output
+    cfg = load_daemon_config(tmp_path)
+    assert cfg.scan_roots == [str(src)]
+    assert cfg.serve == {"host": "127.0.0.1", "port": 47190}
+    assert cfg.relay == {"host": "relay.example.com"}
+
+
+def test_bare_relay_install_succeeds_when_serve_was_set_earlier(cli, tmp_path):
+    """Incremental provisioning: `--serve` yesterday, `--relay` today. The
+    config MERGES, so validating the flag instead of the merged result would
+    reject the normal path."""
+    from mship.core.daemon.registry import load_daemon_config
+
+    app, fake = cli
+    assert runner.invoke(
+        app, ["daemon", "install", "--serve", "127.0.0.1:47190"]
+    ).exit_code == 0
+
+    res = runner.invoke(app, ["daemon", "install", "--relay", "relay.example.com"])
+
+    assert res.exit_code == 0, res.output
+    cfg = load_daemon_config(tmp_path)
+    assert cfg.relay == {"host": "relay.example.com"}
+    assert cfg.serve == {"host": "127.0.0.1", "port": 47190}
+
+
+def test_install_rejects_relay_when_merged_config_has_no_serve_bind(cli, tmp_path):
+    """A tunnel forwards a local port; with no bind there is nothing to
+    forward, and the host would register itself as reachable and 502."""
+    from mship.core.daemon.registry import load_daemon_config
+
+    app, fake = cli
+    res = runner.invoke(app, ["daemon", "install", "--relay", "relay.example.com"])
+
+    assert res.exit_code == 1
+    assert "--serve" in res.output
+    assert load_daemon_config(tmp_path).relay is None
+    assert not any(call.startswith("install:") for call in fake.calls)
+
+
+@pytest.mark.parametrize("relay", ["", "   "])
+def test_install_rejects_an_empty_relay_host(cli, tmp_path, relay):
+    from mship.core.daemon.registry import load_daemon_config
+
+    app, fake = cli
+    res = runner.invoke(app, [
+        "daemon", "install", "--serve", "127.0.0.1:47190", "--relay", relay,
+    ])
+    assert res.exit_code == 1
+    assert "HOST" in res.output
+    assert load_daemon_config(tmp_path).relay is None
+    assert not any(call.startswith("install:") for call in fake.calls)
+
+
+def test_install_strips_surrounding_whitespace_from_the_relay_host(cli, tmp_path):
+    from mship.core.daemon.registry import load_daemon_config
+
+    app, _fake = cli
+    res = runner.invoke(app, [
+        "daemon", "install", "--serve", "127.0.0.1:47190",
+        "--relay", "  relay.example.com  ",
+    ])
+    assert res.exit_code == 0, res.output
+    assert load_daemon_config(tmp_path).relay == {"host": "relay.example.com"}
+
+
+def test_install_help_documents_that_relay_needs_a_restart(cli):
+    app, _fake = cli
+    res = runner.invoke(app, ["daemon", "install", "--help"])
+    assert res.exit_code == 0
+    # Rich wraps option help across lines inside a box and may emit ANSI
+    # between words on newer Python/Rich combinations.
+    text = " ".join(unstyle(res.output).replace("│", " ").split())
+    assert "a changed relay takes effect on `mship daemon restart`" in text
+
+
 @pytest.mark.parametrize("serve", ["nonsense", "127.0.0.1:0", "127.0.0.1:65536"])
 def test_install_rejects_malformed_serve(cli, serve):
     app, fake = cli
@@ -810,3 +900,152 @@ def test_daemon_command_reports_persisted_github_app_read_error(
     assert res.exit_code == 1
     assert str(app_key_path) in res.output
     assert not any(call.startswith(command) for call in fake.calls)
+
+
+# --- tunnel state + identity recovery on the CLI (#471 Task 9) --------------
+
+TUNNEL_HEALTH = {
+    "status": "ok",
+    "pid": 7,
+    "mship_version": mship.__version__,
+    "protocol": 3,
+    "uptime_s": 5.0,
+    "socket": "/s.sock",
+    "tunnel": {
+        "state": "online",
+        "subdomain": "hst-abc",
+        "public_url": "https://hst-abc.relay.example",
+        "restarts": 0,
+        "last_error": None,
+        "clock_skew_seconds": 3600.0,
+    },
+}
+
+
+def test_status_renders_the_tunnel_block(cli, monkeypatch):
+    app, _ = cli
+    monkeypatch.setattr(daemon_mod, "probe_daemon", lambda **kw: TUNNEL_HEALTH)
+    res = runner.invoke(app, ["daemon", "status"])
+    assert res.exit_code == 0, res.output
+    assert "tunnel: online https://hst-abc.relay.example (0 restarts)" in res.output
+
+
+def test_status_json_carries_the_tunnel_and_skew_first_class(cli, monkeypatch):
+    """AC12: `mship --json daemon status` is what the manual checklist reads a
+    non-zero `clock_skew_seconds` out of — the rendered text is not parseable."""
+    import json as _json
+
+    from mship.cli.output import configure_output, reset_output_settings
+
+    app, _ = cli
+    monkeypatch.setattr(daemon_mod, "probe_daemon", lambda **kw: TUNNEL_HEALTH)
+    configure_output(json=True)
+    try:
+        res = runner.invoke(app, ["daemon", "status"])
+    finally:
+        reset_output_settings()
+    assert res.exit_code == 0, res.output
+    payload = _json.loads(res.output)
+    assert payload["tunnel"] == TUNNEL_HEALTH["tunnel"]
+    assert payload["clock_skew_seconds"] == 3600.0
+
+
+@pytest.fixture
+def no_keygen(monkeypatch, tmp_path):
+    """A relay keypair that appears on demand, so nothing here spawns
+    ssh-keygen (the `test_relay_link.py::_seed_key` discipline)."""
+    from itertools import count
+
+    from mship.core.relay import keys
+
+    minted = count()
+
+    def fake_ensure(home, runner=None):
+        path = keys.relay_key_path(home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            # A DIFFERENT key each time, like ssh-keygen: a rotation that
+            # reproduced the same bytes would leave the twin's copy working.
+            nth = next(minted)
+            path.write_text(f"PRIVATE-{nth}")
+            path.with_name(path.name + ".pub").write_text(
+                "ssh-ed25519 " + f"{nth}".rjust(68, "A") + " mship-relay\n"
+            )
+        return path
+
+    monkeypatch.setattr(keys, "ensure_relay_key", fake_ensure)
+    return fake_ensure
+
+
+def _identity(home: Path) -> dict:
+    import json as _json
+
+    from mship.core.daemon.paths import host_identity_path
+
+    return _json.loads(host_identity_path(home).read_text())
+
+
+def test_reidentify_mints_a_new_id_rotates_the_key_and_asks_for_a_restart(
+    cli, tmp_path, no_keygen
+):
+    """The cloned-VM recovery an operator forces by hand: the twin's copy of the
+    relay key must stop working, so a new id alone is not enough."""
+    from mship.core.daemon.identity import ensure_host_identity
+    from mship.core.relay.keys import relay_key_path
+
+    app, _ = cli
+    no_keygen(tmp_path)
+    original = ensure_host_identity(tmp_path, fingerprint="fp-1")
+    original_key = relay_key_path(tmp_path).read_text()
+
+    res = runner.invoke(app, ["daemon", "reidentify"])
+
+    assert res.exit_code == 0, res.output
+    fresh = _identity(tmp_path)
+    assert fresh["host_id"] != original.host_id
+    assert fresh["cloned_from"] == original.host_id
+    assert relay_key_path(tmp_path).read_text() != original_key
+    assert any(
+        p.name.startswith("relay_ed25519.pre-reidentify-")
+        for p in relay_key_path(tmp_path).parent.iterdir()
+    )
+    assert "restart" in res.output.lower()
+
+
+def test_reidentify_prints_the_new_subdomain(cli, tmp_path, no_keygen):
+    """The operator's next move is `mship relay approve` on the relay host, and
+    the subdomain is how they recognise this host there."""
+    from mship.core.daemon.relay_link import host_subdomain_for
+
+    app, _ = cli
+    no_keygen(tmp_path)
+    res = runner.invoke(app, ["daemon", "reidentify"])
+
+    assert res.exit_code == 0, res.output
+    assert host_subdomain_for(tmp_path, _identity(tmp_path)["host_id"]) in res.output
+
+
+def test_reidentify_keep_identity_adopts_the_fingerprint_without_reminting(
+    cli, tmp_path, no_keygen, monkeypatch
+):
+    """AC4a: the operator asserting 'this IS still the same host' after a
+    re-image — `on_mismatch="keep"`, which nothing else in the product calls."""
+    from mship.core.daemon import identity as identity_mod
+    from mship.core.daemon.identity import ensure_host_identity
+    from mship.core.relay.keys import relay_key_path
+
+    app, _ = cli
+    no_keygen(tmp_path)
+    original = ensure_host_identity(tmp_path, fingerprint="fp-old")
+    original_key = relay_key_path(tmp_path).read_text()
+    monkeypatch.setattr(identity_mod, "machine_fingerprint", lambda *a, **kw: "fp-new")
+
+    res = runner.invoke(app, ["daemon", "reidentify", "--keep-identity"])
+
+    assert res.exit_code == 0, res.output
+    kept = _identity(tmp_path)
+    assert kept["host_id"] == original.host_id
+    assert kept["fingerprint"] == "fp-new"
+    assert relay_key_path(tmp_path).read_text() == original_key
+    assert "fp-new" in res.output
+    assert "restart" in res.output.lower()

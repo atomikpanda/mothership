@@ -172,6 +172,10 @@ def register(parent: typer.Typer, get_container):
             None, "--serve", metavar="HOST:PORT",
             help="Also bind the workspace-addressed HTTP API on HOST:PORT (pre-#471 phone reachability). Without it the daemon is control-socket only.",
         ),
+        relay: str = typer.Option(
+            None, "--relay", metavar="HOST",
+            help="Register this host with the relay at HOST and keep an ssh -R tunnel to it up. Needs a --serve bind (here or from an earlier install). Like --serve, a changed relay takes effect on `mship daemon restart`.",
+        ),
     ):
         """Install + enable the OS-user supervisor unit (systemd --user / launchd)."""
         out = Output()
@@ -213,8 +217,13 @@ def register(parent: typer.Typer, get_container):
                 "persisted — use `mship daemon restart` to apply them"
             )
             raise typer.Exit(1)
+        relay_host = relay.strip() if relay is not None else None
+        if relay is not None and not relay_host:
+            out.error(f"--relay expects HOST, got {relay!r}")
+            raise typer.Exit(1)
+        relay_cfg = {"host": relay_host} if relay_host else None
         merged = None
-        if roots or serve_cfg is not None:
+        if roots or serve_cfg is not None or relay_cfg is not None:
             from mship.core.daemon.registry import save_daemon_config
 
             merged = DaemonConfig(
@@ -222,7 +231,18 @@ def register(parent: typer.Typer, get_container):
                 ignore_globs=previous_cfg.ignore_globs,
                 max_depth=previous_cfg.max_depth,
                 serve=serve_cfg if serve_cfg is not None else previous_cfg.serve,
+                relay=relay_cfg if relay_cfg is not None else previous_cfg.relay,
             )
+            # The MERGED config, not the flag: `--relay` on a host whose
+            # `serve:` an earlier install already set is the normal
+            # incremental-provisioning path, and validating the flag alone
+            # would reject it.
+            if merged.relay is not None and merged.serve is None:
+                out.error(
+                    "--relay needs a local bind to forward: pass --serve HOST:PORT "
+                    "(here or in an earlier install)"
+                )
+                raise typer.Exit(1)
             _validate_scan_roots(merged, out)
 
             # Launchd's bootstrap starts a RunAtLoad job immediately. Persist
@@ -242,7 +262,11 @@ def register(parent: typer.Typer, get_container):
             out.error(str(e))
             raise typer.Exit(1)
         if merged is not None:
-            out.print(f"daemon config seeded: {len(merged.scan_roots)} scan root(s)" + (", serve bind set" if merged.serve else ""))
+            out.print(
+                f"daemon config seeded: {len(merged.scan_roots)} scan root(s)"
+                + (", serve bind set" if merged.serve else "")
+                + (f", relay {merged.relay['host']}" if merged.relay else "")
+            )
         out.print("daemon installed and enabled — start it with `mship daemon start`")
 
     @daemon_app.command("start")
@@ -344,11 +368,51 @@ def register(parent: typer.Typer, get_container):
                     "supervisor": {"state": st.supervisor.state, "detail": st.supervisor.detail},
                     "linger": st.linger,
                     "unclean_starts": st.unclean_starts,
+                    "tunnel": st.tunnel,
+                    "clock_skew_seconds": st.clock_skew_seconds,
                     "lines": st.lines,
                 }
             )
         else:
             out.print(st.render())
+
+    @daemon_app.command("reidentify")
+    def reidentify(
+        keep_identity: bool = typer.Option(
+            False, "--keep-identity",
+            help="This IS the same host: adopt the running machine's fingerprint "
+                 "instead of minting a new identity (after a re-image or a "
+                 "hardware change that tripped the clone check).",
+        ),
+    ):
+        """Mint a new host identity + relay key after a clone (or adopt this
+        machine's fingerprint with --keep-identity)."""
+        from mship.core.daemon.identity import (
+            ensure_host_identity,
+            force_reidentify,
+            machine_fingerprint,
+        )
+        from mship.core.daemon.relay_link import host_subdomain_for
+
+        out = Output()
+        home = Path.home()
+        if keep_identity:
+            ident = ensure_host_identity(
+                home, fingerprint=machine_fingerprint(), on_mismatch="keep"
+            )
+            out.print(
+                f"kept host id {ident.host_id}; adopted machine fingerprint "
+                f"{ident.fingerprint}\n"
+                "run `mship daemon restart` to make a running daemon use it"
+            )
+            return
+        ident = force_reidentify(home)
+        out.print(
+            f"re-identified as {ident.host_id} (was {ident.cloned_from})\n"
+            f"new relay subdomain: {host_subdomain_for(home, ident.host_id)}\n"
+            "the rotated key needs approving again (`mship relay approve <id>` on "
+            "the relay host); run `mship daemon restart` to dial with it"
+        )
 
     @daemon_app.command("logs")
     def logs(n: int = typer.Option(100, "-n", "--lines", help="Lines to show.")):

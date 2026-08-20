@@ -48,7 +48,6 @@ def test_healthy_rendering():
     assert s.compatible is True
     assert s.supervised is True
     rendered = s.render()
-    assert "tunnel: not configured (#471)" in rendered
     assert "workspaces: 2 discovered (1 degraded)" in rendered
     assert "runner: not configured (#473)" in rendered
 
@@ -153,3 +152,87 @@ def test_single_unclean_start_is_not_labeled_crash_loop():
     rendered = s.render()
     assert "crash loop" not in rendered
     assert "unclean starts: 1 in last 10m" in rendered
+
+
+# --- the tunnel, as `mship daemon status` reports it (#471 Task 9) ----------
+
+def _tunnel(**kw) -> dict:
+    """A `/health` tunnel block, as the daemon publishes it per tick."""
+    block = {
+        "state": "online",
+        "subdomain": "hst-abc",
+        "public_url": "https://hst-abc.relay.example",
+        "restarts": 0,
+        "last_error": None,
+        "clock_skew_seconds": None,
+    }
+    block.update(kw)
+    return block
+
+
+@pytest.mark.parametrize(
+    ("block", "line"),
+    [
+        (None, "tunnel: disabled (no relay configured)"),
+        (_tunnel(state="disabled"), "tunnel: disabled (no relay configured)"),
+        (
+            _tunnel(state="awaiting-enrollment"),
+            "tunnel: awaiting relay approval (run 'mship relay approve <id>' on the relay host)",
+        ),
+        (_tunnel(), "tunnel: online https://hst-abc.relay.example (0 restarts)"),
+        (_tunnel(state="contended"), "tunnel: contended — another host holds hst-abc"),
+        (
+            _tunnel(state="duplicate-identity"),
+            "tunnel: rejected (duplicate-identity) — re-identifying automatically; "
+            "'mship daemon reidentify' to force",
+        ),
+        (_tunnel(state="connecting"), "tunnel: connecting https://hst-abc.relay.example"),
+        (
+            _tunnel(state="error", last_error="relay refused: 502"),
+            "tunnel: error — relay refused: 502",
+        ),
+    ],
+)
+def test_tunnel_state_renders_per_state(block, line):
+    s = _status(health={**HEALTH, "tunnel": block})
+    assert line in s.render()
+
+
+def test_tunnel_is_unknown_when_the_daemon_is_not_answering():
+    """The tunnel lives INSIDE the daemon process: with no `/health` there is
+    no tunnel state to report, and reporting `disabled` would be a guess."""
+    assert "tunnel: unknown (daemon not running)" in _status(health=None).render()
+
+
+def test_tunnel_and_skew_are_structured_fields_not_only_text():
+    """AC12: `mship --json daemon status` must carry the tunnel as data."""
+    block = _tunnel(clock_skew_seconds=3600.0)
+    s = _status(health={**HEALTH, "tunnel": block})
+    assert s.tunnel == block
+    assert s.clock_skew_seconds == 3600.0
+    # Reported, never gating: a skewed host still renders as online.
+    assert "tunnel: online" in s.render()
+    assert "clock skew: 3600.0s" in s.render()
+
+
+def test_no_tunnel_means_no_skew_field():
+    s = _status(health={**HEALTH, "tunnel": None})
+    assert s.tunnel is None
+    assert s.clock_skew_seconds is None
+    assert "clock skew" not in s.render()
+
+
+@pytest.mark.parametrize("block", [None, _tunnel(), _tunnel(state="contended")])
+def test_restart_blockers_stay_empty_with_the_tunnel_down_and_live(block):
+    """AC7, pinned so #473 does not accidentally make a tunnel a restart
+    blocker: an ssh child is disposable, an unattended worker is not."""
+    _status(health={**HEALTH, "tunnel": block})
+    assert restart_blockers() == []
+
+
+def test_every_tunnel_state_has_a_line():
+    """The states have one owner (`HostTunnel.state()`); a new one added there
+    must not render as a bare state name here."""
+    from mship.core.daemon.host_tunnel import STATES
+
+    assert set(status_mod._TUNNEL_LINES) == set(STATES)

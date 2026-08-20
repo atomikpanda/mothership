@@ -16,6 +16,21 @@ def build_pair_link(*, url: str, token: str, workspace: str) -> str:
     return f"groundcontrol://add?{query}"
 
 
+def build_relay_account_link(*, relay: str, token: str) -> str:
+    """Build the `groundcontrol://add-relay?…` deep-link the phone scans once.
+
+    Pairs the app with a whole RELAY rather than one workspace: the app derives
+    `https://enroll.<relay>` and reads the host directory from there with the
+    fleet token, so a freshly provisioned host needs no address typed (AC1).
+    Same `quote` encoding as `build_pair_link` — the token round-trips exactly.
+    """
+    query = urllib.parse.urlencode(
+        {"relay": relay, "token": token},
+        quote_via=urllib.parse.quote,
+    )
+    return f"groundcontrol://add-relay?{query}"
+
+
 def parse_pair_link(link: str) -> dict:
     """Parse a groundcontrol://add? deep-link, returning {url, token, workspace}.
 

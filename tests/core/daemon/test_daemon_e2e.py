@@ -61,7 +61,7 @@ def test_install_scan_serve_end_to_end(tmp_path, monkeypatch):
     captured = {}
     monkeypatch.setattr(
         run_mod, "_serve_forever",
-        lambda control_app, socket_path, host_app, serve_cfg: captured.update(
+        lambda control_app, socket_path, host_app, serve_cfg, tunnel: captured.update(
             control=control_app, host=host_app, serve=serve_cfg,
         ),
     )
@@ -80,12 +80,16 @@ def test_install_scan_serve_end_to_end(tmp_path, monkeypatch):
     token = ensure_host_token(home, env={})
     with TestClient(captured["host"]) as client:
         hdrs = {"Authorization": f"Bearer {token}"}
+        host_id = client.get("/health").json()["host_id"]
         ws = client.get("/workspaces", headers=hdrs).json()["workspaces"]
         assert sorted(w["name"] for w in ws) == ["ws-one", "ws-two"]
         for w in ws:
             r = client.get(f"/workspaces/{w['id']}/health", headers=hdrs)
             assert r.status_code == 200
-            assert r.json()["workspace"] == w["name"]
+            body = r.json()
+            assert body["workspace"] == w["name"]
+            assert body["host_id"] == host_id
+            assert body["workspace_id"] == w["id"]
 
     # 4) control app reports the flipped capabilities.
     with TestClient(captured["control"]) as client:
@@ -109,7 +113,7 @@ def test_refresh_rereads_daemon_config(tmp_path, monkeypatch):
     captured = {}
     monkeypatch.setattr(
         run_mod, "_serve_forever",
-        lambda control_app, socket_path, host_app, serve_cfg: captured.update(rescan=True),
+        lambda control_app, socket_path, host_app, serve_cfg, tunnel: captured.update(rescan=True),
     )
     store, rescan, _serve = run_mod._build_registry(home)
     assert sorted(e.name for e in store.load().entries) == ["first"]

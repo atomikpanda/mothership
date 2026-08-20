@@ -40,6 +40,60 @@ def probe_daemon(*, home: Path, env: Mapping[str, str]) -> dict | None:
 
 _LOOP_WINDOW_S = 600
 
+# One line per tunnel state (`host_tunnel.STATES`), keyed by the state the
+# daemon published — the states themselves have exactly one owner
+# (`HostTunnel.state()`), so this table only ever says how to phrase one.
+_TUNNEL_LINES = {
+    "disabled": "tunnel: disabled (no relay configured)",
+    "awaiting-enrollment": (
+        "tunnel: awaiting relay approval "
+        "(run 'mship relay approve <id>' on the relay host)"
+    ),
+    "connecting": "tunnel: connecting {public_url}",
+    "online": "tunnel: online {public_url} ({restarts} restarts)",
+    "contended": "tunnel: contended — another host holds {subdomain}",
+    "duplicate-identity": (
+        "tunnel: rejected (duplicate-identity) — re-identifying automatically; "
+        "'mship daemon reidentify' to force"
+    ),
+    "error": "tunnel: error — {last_error}",
+}
+
+# Below this the sample is measurement noise (one HTTP round trip), not a clock
+# an operator should go looking at.
+_SKEW_REPORT_S = 1.0
+
+
+def _tunnel_lines(health: dict | None, tunnel: dict | None) -> list[str]:
+    """The tunnel's line(s), from the block `/health` published.
+
+    The tunnel lives inside the daemon process, so `/health` is its only
+    reader-visible source: with no answering daemon there is no state to report
+    and `disabled` would be a guess.
+    """
+    if health is None:
+        return ["tunnel: unknown (daemon not running)"]
+    if tunnel is None:
+        return [_TUNNEL_LINES["disabled"]]
+    state = str(tunnel.get("state") or "")
+    template = _TUNNEL_LINES.get(state)
+    lines = [
+        f"tunnel: {state or 'unknown'}"
+        if template is None
+        else template.format(
+            public_url=tunnel.get("public_url") or "?",
+            subdomain=tunnel.get("subdomain") or "?",
+            restarts=tunnel.get("restarts", 0),
+            last_error=tunnel.get("last_error") or "unknown",
+        )
+    ]
+    skew = tunnel.get("clock_skew_seconds")
+    if isinstance(skew, (int, float)) and abs(skew) >= _SKEW_REPORT_S:
+        # Reported, never gating: host tokens are self-issued and
+        # skew-tolerant, so this explains a symptom rather than causing one.
+        lines.append(f"clock skew: {skew}s vs the relay's enroll server")
+    return lines
+
 
 @dataclass(frozen=True)
 class DaemonStatus:
@@ -55,6 +109,10 @@ class DaemonStatus:
     linger: Literal["yes", "no", "unknown"]
     unclean_starts: int
     lease_info: LeaseInfo | None
+    # The `/health` tunnel block verbatim (#471 AC12), so `mship --json daemon
+    # status` carries the tunnel as data rather than as prose to re-parse.
+    tunnel: dict | None = None
+    clock_skew_seconds: float | None = None
     lines: list[str] = field(default_factory=list)
 
     def render(self) -> str:
@@ -106,7 +164,9 @@ def build_status(
         lines.append("warning: linger is OFF — the daemon dies when your last SSH session ends; run `loginctl enable-linger`")
     elif linger == "unknown":
         lines.append("linger: unknown")
-    lines.append("tunnel: not configured (#471)")
+    tunnel = health.get("tunnel") if health else None
+    tunnel = tunnel if isinstance(tunnel, dict) else None
+    lines.extend(_tunnel_lines(health, tunnel))
     if workspaces is None:
         lines.append("workspaces: registry not loaded")
     else:
@@ -127,5 +187,7 @@ def build_status(
         linger=linger,
         unclean_starts=unclean,
         lease_info=lease_info,
+        tunnel=tunnel,
+        clock_skew_seconds=(tunnel or {}).get("clock_skew_seconds"),
         lines=lines,
     )

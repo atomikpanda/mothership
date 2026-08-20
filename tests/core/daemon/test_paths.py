@@ -1,4 +1,5 @@
 """Daemon path derivation is pure: explicit `home` + `env`, no ambient reads."""
+import os
 from pathlib import Path
 
 from mship.core.daemon.paths import (
@@ -7,6 +8,7 @@ from mship.core.daemon.paths import (
     daemon_state_dir,
     lease_path,
     start_history_path,
+    tunnel_log_path,
 )
 
 
@@ -17,6 +19,53 @@ def test_state_dir_and_derivatives(tmp_path: Path):
     assert daemon_log_dir(home) == state / "logs"
     assert lease_path(home) == state / "daemon.lease"
     assert start_history_path(home) == state / "start-history.json"
+    assert tunnel_log_path(home) == state / "logs" / "relay-tunnel.log"
+
+
+def test_tunnel_log_is_never_workspace_scoped(tmp_path: Path):
+    """`mship serve --relay` logs to `<workspace>/.mothership/relay-tunnel.log`;
+    the daemon's tunnel is per-machine and must not write into a workspace it
+    merely discovered."""
+    assert daemon_state_dir(tmp_path) in tunnel_log_path(tmp_path).parents
+
+
+def test_the_suite_cannot_reach_the_real_daemon_socket(tmp_path: Path):
+    """Guard for the autouse `_isolate_runtime_dir` fixture (tests/conftest.py):
+    without it, any test that computes the socket path from the ambient env
+    probes the operator's LIVE daemon on a box where one is running, and
+    'daemon: not running' assertions fail for unrelated reasons."""
+    assert str(tmp_path) in os.environ["XDG_RUNTIME_DIR"]
+    assert not daemon_socket_path(os.environ, tmp_path).exists()
+
+
+def test_the_suite_cannot_reach_the_real_daemon_through_the_lease_either(tmp_path: Path):
+    """The second escape hatch: `probe_daemon` PREFERS the socket recorded in
+    `Path.home()/.mothership/daemon/daemon.lease`, so isolating XDG_RUNTIME_DIR
+    alone still lets a test that reaches the REAL home answer from the
+    operator's live daemon (that is how `test_status_reports_registry_read_
+    error_...` once reported `running: true` with the live pid). Probe the real
+    home for real: on a box with a running mshipd this returns None only
+    because the autouse sandbox refuses sockets outside the test tmp dir."""
+    from pathlib import Path as _Path
+
+    from mship.core.daemon.status import probe_daemon
+
+    assert probe_daemon(home=_Path.home(), env=os.environ) is None
+    assert probe_daemon(home=tmp_path, env=os.environ) is None
+
+
+def test_daemon_probe_sandbox_rejects_a_path_with_only_the_tmp_prefix(tmp_path: Path):
+    from mship.core.daemon import control
+
+    contacted = []
+    outside = tmp_path.parent / f"{tmp_path.name}-live" / "daemon.sock"
+
+    def client_factory(**_kwargs):
+        contacted.append(outside)
+        raise AssertionError("probe escaped the per-test sandbox")
+
+    assert control.probe_control_socket(outside, client_factory=client_factory) is None
+    assert contacted == []
 
 
 def test_socket_prefers_xdg_runtime_dir(tmp_path: Path):

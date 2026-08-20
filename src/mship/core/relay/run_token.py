@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 from mship.core.relay.grants import Scope
+from mship.core.relay.token_clock import is_expired
 
 _ID_RE = re.compile(r"\A[0-9a-f]{1,32}\Z")
 
@@ -72,7 +73,10 @@ def verify_run_token(
         return None
     if not hmac.compare_digest(_hash(secret), rec.get("secret_hash", "")):
         return None
-    if clock() >= rec.get("expires_at", 0):
+    # Expiry semantics (incl. the skew grace) belong to token_clock, not here:
+    # this token is minted on one machine and presented on another, so a bare
+    # `clock() >= expires_at` 401s a live run over a few seconds of NTP drift.
+    if is_expired(rec.get("expires_at", 0), clock()):
         return None
     return RunToken(
         token_id=token_id,

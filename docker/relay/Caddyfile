@@ -18,6 +18,11 @@ enroll.{$RELAY_DOMAIN} {
 		method GET
 		path /status/*
 	}
+	# Host registration + directory (#471). Without this the 404 catch-all below
+	# swallows every /hosts route in production while unit tests stay green.
+	@hosts {
+		path /hosts /hosts/*
+	}
 	handle @enroll {
 		request_body {
 			max_size 4KB
@@ -25,6 +30,12 @@ enroll.{$RELAY_DOMAIN} {
 		reverse_proxy 127.0.0.1:47180
 	}
 	handle @status {
+		reverse_proxy 127.0.0.1:47180
+	}
+	handle @hosts {
+		request_body {
+			max_size 8KB
+		}
 		reverse_proxy 127.0.0.1:47180
 	}
 	handle {

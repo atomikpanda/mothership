@@ -1,21 +1,45 @@
 from __future__ import annotations
 from dataclasses import dataclass
 
+# Spelled once: `from_mapping` raises it, and the daemon config's `relay:`
+# validator (`core/daemon/registry.py`) rejects an empty block with the same
+# sentence, so an operator sees one message whichever end catches the typo.
+RELAY_HOST_REQUIRED = "relay.host is required when a `relay:` block is present"
+RELAY_SSH_PORT_INVALID = "relay.ssh_port must be an integer from 1 to 65535"
+
+
+def canonical_relay_host(host: str) -> str:
+    """The DNS spelling shared by config, directory validation, and pairing."""
+    return host.strip().lower().rstrip(".")
+
+
 @dataclass(frozen=True)
 class RelayConfig:
     host: str
     ssh_port: int = 2222
-    user: str | None = None       # ssh user; None → ssh default
+    user: str | None = None  # ssh user; None → ssh default
+
+    def __post_init__(self) -> None:
+        canonical_host = canonical_relay_host(self.host)
+        if not canonical_host:
+            raise ValueError(RELAY_HOST_REQUIRED)
+        if (
+            isinstance(self.ssh_port, bool)
+            or not isinstance(self.ssh_port, int)
+            or not 1 <= self.ssh_port <= 65535
+        ):
+            raise ValueError(RELAY_SSH_PORT_INVALID)
+        object.__setattr__(self, "host", canonical_host)
 
     @staticmethod
     def from_mapping(data: dict | None) -> "RelayConfig | None":
         if not data:
             return None
         host = data.get("host")
-        if not host:
-            raise ValueError("relay.host is required when a `relay:` block is present")
+        if not isinstance(host, str) or not host.strip():
+            raise ValueError(RELAY_HOST_REQUIRED)
         return RelayConfig(
-            host=host,
-            ssh_port=int(data.get("ssh_port", 2222)),
+            host=host.strip(),
+            ssh_port=data.get("ssh_port", 2222),
             user=data.get("user"),
         )

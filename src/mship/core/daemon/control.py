@@ -8,6 +8,7 @@ the guarded single source of truth (`src/mship/__init__.py`, pinned by
 Filesystem perms on the unix socket are the auth; no bearer token locally.
 Remote traffic stays on the #471 tunnel path.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -21,7 +22,8 @@ from mship.core.daemon.registry import RegistryReadError
 
 # CLI<->daemon control-protocol version; bump on breaking payload changes.
 # 2: capabilities.registry/serve became real + /workspaces endpoints (#472).
-PROTOCOL = 2
+# 3: capabilities.tunnel became real + /health carries a `tunnel` block (#471).
+PROTOCOL = 3
 RESCAN_ERROR_STATUS = 503
 
 _PROBE_TIMEOUT_S = 3.0
@@ -36,6 +38,8 @@ def create_control_app(
     rescan=None,
     after_rescan=None,
     serve_bound: bool = False,
+    tunnel=None,
+    tunnel_state=None,
 ):
     """Tiny closure app factory (the `core/serve.py::create_app` style).
 
@@ -43,14 +47,21 @@ def create_control_app(
     endpoints over the control socket; `rescan()` re-runs discovery+reconcile.
     `after_rescan()` lets the sibling TCP host app stop stale workspace
     lifespans after a control-socket refresh. `serve_bound` reports whether the
-    TCP host app is up (#472).
+    TCP host app is up (#472). `tunnel` is the live `HostTunnel` this daemon
+    dials with, or None when there is no live tunnel lifecycle (#471).
+    `tunnel_state` can independently publish an initialization failure.
+
+    Only the tunnel's PUBLISHED SNAPSHOT is ever read here: ticks mutate it on
+    an executor thread (`run.py::_tunnel_loop`) while requests are served on the
+    loop thread, so reading its live fields would be a torn read.
     """
     from fastapi import FastAPI, HTTPException
 
     app = FastAPI(title="mshipd control", docs_url=None, redoc_url=None)
     serve_state = {"bound": serve_bound}
     app.state.set_serve_bound = lambda bound: serve_state.update(bound=bound)
-
+    if tunnel_state is None and tunnel is not None:
+        tunnel_state = tunnel.snapshot
 
     @app.get("/health")
     def health():
@@ -65,13 +76,17 @@ def create_control_app(
             "socket": socket_path,
             "capabilities": {
                 "serve": serve_state["bound"],  # actual TCP listener lifecycle
-                "tunnel": False,  # #471: relay tunnel registration
+                "tunnel": tunnel is not None,  # #471: relay tunnel registration
                 "registry": store is not None,  # #472: workspace discovery/registry
                 "runner": False,  # #473: unattended worker supervision
             },
+            # State, not capability: `mship daemon status` renders this, and it
+            # is the only reader-visible source — the tunnel lives in-process.
+            "tunnel": tunnel_state() if tunnel_state is not None else None,
         }
 
     if store is not None:
+
         @app.get("/workspaces")
         def workspaces():
             return {
@@ -94,9 +109,7 @@ def create_control_app(
         async def refresh(cleanup_only: bool = False):
             if not cleanup_only and rescan is not None:
                 try:
-                    await asyncio.get_running_loop().run_in_executor(
-                        None, rescan
-                    )
+                    await asyncio.get_running_loop().run_in_executor(None, rescan)
                 except (ValueError, RegistryReadError) as exc:
                     raise HTTPException(
                         status_code=RESCAN_ERROR_STATUS, detail=str(exc)

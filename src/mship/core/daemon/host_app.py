@@ -15,21 +15,34 @@ guarded by a lock.
 Addressing is by ID only — name-in-URL would reintroduce the same-name
 ambiguity the id exists to kill. Degraded/missing ids → 503 with the stored
 reason (matches #471's "workspace unavailable" ladder); unknown ids → 404.
-One host-level token gates everything (the #471 short-lived-token seam).
+
+Auth is tiered (#471): callers present a short-lived host bearer, checked by an
+injected `verify_bearer` — the app never holds the material. The standing
+`ensure_host_token` string survives in two narrow roles: the credential the
+sub-apps verify (rewritten into the forwarded scope, since a sub-app knows
+nothing of host bearers), and a direct/loopback-origin fallback so first-time
+LAN pairing works before any bearer exists (AC9 — never over the relay). The
+guard rides an `APIRouter`, not the app: `POST /host/token` cannot require the
+credential it mints, and `/health` is what the daemon and GC poll to decide
+reachability, so both stay open.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import secrets
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Any, Callable
+from urllib.parse import parse_qs
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from mship.core.daemon.capabilities import runner_block
 from mship.core.daemon.control import RESCAN_ERROR_STATUS
 from mship.core.daemon.registry import RegistryReadError, RegistryStore, WorkspaceEntry
 from mship.core.workspace_context import ContextError
@@ -209,6 +222,8 @@ def _default_build_subapp(
     pr_watch_interval: float | None,
     gh_app_id: str | None,
     gh_app_key: str | None,
+    host_id,
+    workspace_id: str,
 ):
     from mship.core.serve import create_app
     from mship.core.spec_store import SPECS_DIRNAME
@@ -227,11 +242,46 @@ def _default_build_subapp(
         gh_app_id=gh_app_id,
         gh_app_key=gh_app_key,
         pr_watch_interval=pr_watch_interval,
+        host_id=host_id,
+        workspace_id=workspace_id,
     )
 
 
-def _make_host_auth_dependency(token: str):
-    """Accept the host bearer, plus the namespaced UI's token/cookie exchange."""
+_BEARER_PREFIX = "Bearer "
+
+# A relay-borne request arrives through Caddy → sish → the ssh -R tunnel, so it
+# hits this app from loopback exactly like a direct one; the headers the edge
+# stamps are the only honest discriminator. A direct caller who forges one only
+# denies itself the standing-token fallback, so the failure direction is safe.
+_EDGE_HEADERS = ("x-forwarded-for", "x-forwarded-host", "x-forwarded-proto")
+
+
+def _is_relay_borne(request: Request, relay_domain: str | None = None) -> bool:
+    """Two independent witnesses, either of which is enough (fail closed).
+
+    The edge headers are the edge's own testimony, and an edge misconfigured to
+    strip them would silently re-open the standing token to everything that can
+    reach the relay. The `Host` the request was addressed to is the second: our
+    tunnel is only ever addressed under the relay's domain, so a request that
+    names it arrived through the relay whatever the headers say. Matched as a
+    dotted suffix, never a substring — `notrelay.example` is somebody else."""
+    if any(name in request.headers for name in _EDGE_HEADERS):
+        return True
+    if not relay_domain:
+        return False
+    # Host may carry a port, and DNS names are case-insensitive.
+    hostname = request.headers.get("host", "").split(":")[0].strip(".").lower()
+    domain = relay_domain.strip().strip(".").lower()
+    return hostname == domain or hostname.endswith(f".{domain}")
+
+
+def _make_host_auth_dependency(
+    token: str | None,
+    verify_bearer: Callable[[str], bool] | None,
+    relay_domain: str | None = None,
+):
+    """Accept a short-lived host bearer; fall back to the standing token for
+    direct origins only, plus the namespaced UI's token/cookie exchange."""
     import hmac
     import time
 
@@ -239,14 +289,21 @@ def _make_host_auth_dependency(token: str):
 
     from mship.webui import COOKIE_NAME, _cookie_is_valid
 
-    expected = f"Bearer {token}".encode()
+    expected = f"Bearer {token}".encode() if token is not None else b""
 
-    def require_host_token(
+    def require_host_credential(
         request: Request,
         authorization: str | None = Header(default=None),
     ):
-        provided = (authorization or "").encode()
-        if hmac.compare_digest(provided, expected):
+        provided = authorization or ""
+        if verify_bearer is not None and provided.startswith(_BEARER_PREFIX):
+            if verify_bearer(provided[len(_BEARER_PREFIX):]):
+                return
+        if token is None or _is_relay_borne(request, relay_domain):
+            raise HTTPException(
+                status_code=401, detail="missing or invalid bearer token"
+            )
+        if hmac.compare_digest(provided.encode(), expected):
             return
         segments = request.url.path.split("/")
         is_workspace_ui = any(
@@ -266,13 +323,87 @@ def _make_host_auth_dependency(token: str):
             status_code=401, detail="missing or invalid bearer token"
         )
 
-    return require_host_token
+    return require_host_credential
+
+
+# A refresh credential is `<16 hex>.<64 hex>`; the credential and request-body
+# bounds are generous slack over that shape, not a schema. Both are local
+# because this route is unauthenticated by design.
+_MAX_REFRESH_LEN = 512
+_MAX_REFRESH_BODY_BYTES = _MAX_REFRESH_LEN * 2
+
+
+async def _read_refresh_body(request: Request) -> bytes | None:
+    """Read at most the public exchange's hard body cap.
+
+    Returning as soon as a chunk crosses the cap is load-bearing: `Request.body`
+    would continue receiving and buffering an attacker-controlled stream before
+    the credential-length check ever ran.
+    """
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > _MAX_REFRESH_BODY_BYTES:
+            return None
+        body.extend(chunk)
+    return bytes(body)
+
+
+def _presented_refresh(body: bytes, content_type: str = "") -> str | None:
+    """The refresh credential in a `/host/token` body, or None if there isn't
+    one. Every malformed shape collapses to None so the route answers a uniform
+    401 rather than telling an unauthenticated caller which failure occurred."""
+    if content_type.partition(";")[0].strip().lower() == (
+        "application/x-www-form-urlencoded"
+    ):
+        try:
+            fields = parse_qs(
+                body.decode("utf-8"), keep_blank_values=True, max_num_fields=4
+            )
+        except (UnicodeDecodeError, ValueError):
+            return None
+        values = fields.get("refresh", [])
+        credential = values[0] if len(values) == 1 else None
+    else:
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            return None
+        if not isinstance(payload, Mapping):
+            return None
+        credential = payload.get("refresh")
+    if not isinstance(credential, str) or not credential:
+        return None
+    if len(credential) > _MAX_REFRESH_LEN:
+        return None
+    return credential
+
+
+def _with_internal_authorization(
+    headers: list[tuple[bytes, bytes]], token: str | None
+) -> list[tuple[bytes, bytes]]:
+    """Swap the caller's credential for the sub-app's own.
+
+    Sub-apps verify the standing token (`core/serve.py`'s single-string
+    dependency), so forwarding a short-lived host bearer 401s every call — and
+    the caller's credential has no business inside a workspace app anyway.
+    """
+    rewritten = [(k, v) for k, v in headers if k.lower() != b"authorization"]
+    if token is not None:
+        rewritten.append((b"authorization", f"Bearer {token}".encode()))
+    return rewritten
 
 
 def create_host_app(
     store: RegistryStore,
     *,
     auth_token: str | None,
+    verify_bearer: Callable[[str], bool] | None = None,
+    relay_domain: str | None = None,
+    exchange_refresh: Callable[[str], tuple[str, float] | None] | None = None,
+    host_id: str | Callable[[], str | None] | None = None,
+    instance_id: str | Callable[[], str | None] | None = None,
+    host_state: Callable[[], Mapping] | None = None,
+    runner_config: Callable[[], Any] | None = None,
     build_subapp: Callable = _default_build_subapp,
     rescan: Callable | None = None,
     pr_watch_interval: float | None = None,
@@ -284,6 +415,19 @@ def create_host_app(
     `rescan()` (optional) re-runs discovery+reconcile and returns nothing; the
     refresh route calls it before diffing the registry. `build_subapp` is the
     injectable seam for tests.
+
+    Auth material stays outside: `verify_bearer(presented)` decides whether a
+    short-lived host bearer is live, and `exchange_refresh(credential)` returns
+    `(token, expires_in)` for a valid refresh credential (None → 401), which is
+    what `POST /host/token` publishes. Without an exchange the route is not
+    registered at all — a host with no refresh store has nothing to mint.
+    `relay_domain` is the domain of the relay this host tunnels to; it is the
+    second, edge-independent witness `_is_relay_borne` uses to keep the standing
+    token off relay-borne traffic.
+    `host_id`/`instance_id`/`host_state()` are the identity and tunnel state
+    `/health` reports for the daemon's read-back and GC's ladder, and
+    `runner_config()` is the host-level runner block `/health` projects — the
+    seam #473 fills; absent, the host reports no runner.
     """
     from contextlib import asynccontextmanager
 
@@ -306,9 +450,18 @@ def create_host_app(
                     await sub.stop()
                 subapps.clear()
 
-    dependencies = [Depends(_make_host_auth_dependency(auth_token))] if auth_token else []
     app = FastAPI(title="mship host", docs_url=None, redoc_url=None,
-                  openapi_url=None, dependencies=dependencies, lifespan=_lifespan)
+                  openapi_url=None, lifespan=_lifespan)
+    # On a router, NOT the app: `POST /host/token` mints the very credential a
+    # blanket app-level dependency would demand of it, and `/health` is the
+    # unauthenticated reachability probe the daemon and GC both poll.
+    guarded = APIRouter(
+        dependencies=(
+            [Depends(_make_host_auth_dependency(auth_token, verify_bearer, relay_domain))]
+            if (auth_token or verify_bearer)
+            else []
+        )
+    )
 
     def _entries() -> list[WorkspaceEntry]:
         return store.load().entries
@@ -332,6 +485,8 @@ def create_host_app(
                         pr_watch_interval=pr_watch_interval,
                         gh_app_id=gh_app_id,
                         gh_app_key=gh_app_key,
+                        host_id=host_id,
+                        workspace_id=entry.id,
                     ),
                     fp,
                 )
@@ -352,16 +507,52 @@ def create_host_app(
     # in a sibling ASGI app. Expose only the post-rescan cleanup it must await.
     app.state.drop_stale_subapps = _drop_stale
 
+    def _current_identity(value):
+        return value() if callable(value) else value
+
     @app.get("/health")
     def health():
         entries = _entries()
         return {
             "status": "ok",
+            "host_id": _current_identity(host_id),
+            "instance_id": _current_identity(instance_id),
             "workspaces": len([e for e in entries if not e.ignored]),
             "degraded": len([e for e in entries if e.state == "degraded" and not e.ignored]),
+            "tunnel": dict(host_state()) if host_state is not None else {"state": "disabled"},
+            "runner": runner_block(
+                runner_config() if runner_config is not None else None
+            ),
         }
 
-    @app.get("/workspaces")
+    if exchange_refresh is not None:
+        @app.post("/host/token")
+        async def mint_host_token(request: Request):
+            """The bootstrap exchange (AC9): the phone's persisted refresh
+            credential in, a short-lived bearer out — from the host that will
+            verify it, never proxied and never published into the directory.
+
+            The body is read here rather than declared as a model so that a
+            malformed one fails exactly like a wrong credential (401), instead
+            of a 422 that tells an unauthenticated caller which it was.
+            """
+            body = await _read_refresh_body(request)
+            credential = (
+                _presented_refresh(
+                    body, request.headers.get("content-type", "")
+                )
+                if body is not None
+                else None
+            )
+            granted = exchange_refresh(credential) if credential else None
+            if granted is None:
+                raise HTTPException(
+                    status_code=401, detail="invalid or expired refresh credential"
+                )
+            token, expires_in = granted
+            return {"token": token, "expires_in": expires_in}
+
+    @guarded.get("/workspaces")
     def list_workspaces():
         return {
             "workspaces": [
@@ -373,13 +564,14 @@ def create_host_app(
                     "detail": e.detail,
                     "repos": [r.model_dump() for r in e.repos],
                     "runtime": e.runtime.model_dump(),
+                    "runner": runner_block(e.runner),
                 }
                 for e in _entries()
                 if not e.ignored
             ]
         }
 
-    @app.post("/workspaces/refresh")
+    @guarded.post("/workspaces/refresh")
     async def refresh():
         if rescan is not None:
             try:
@@ -391,7 +583,7 @@ def create_host_app(
         await _drop_stale()
         return {"workspaces": len(_entries())}
 
-    @app.api_route(
+    @guarded.api_route(
         "/workspaces/{workspace_id}/{path:path}",
         methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     )
@@ -422,6 +614,9 @@ def create_host_app(
         scope["root_path"] = workspace_root
         scope["path"] = workspace_root + subapp_path
         scope["raw_path"] = scope["path"].encode()
+        scope["headers"] = _with_internal_authorization(
+            scope.get("headers", []), auth_token
+        )
 
         # STREAMED, not buffered: `POST /exec/{verb}` is consumed with
         # iter_raw() to render task output live, and a client disconnect must
@@ -477,4 +672,5 @@ def create_host_app(
             headers={k.decode(): v.decode() for k, v in started.get("headers", [])},
         )
 
+    app.include_router(guarded)
     return app

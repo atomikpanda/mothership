@@ -1,13 +1,18 @@
 from __future__ import annotations
 import base64
+import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
+
+from mship.core.relay.host_contract import ENROLL_TTL_S
 
 
 def _b64decode_strict(body: str) -> bytes:
@@ -63,6 +68,23 @@ def sanitize_label(hostname: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+@contextmanager
+def _locked(lock_path: Path):
+    """Exclusive advisory flock (the `host_auth`/`registry` house pattern).
+
+    flock is per open-file-description, so it serializes threads within the
+    enroll server's request threadpool as well as separate processes.
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.touch(exist_ok=True, mode=0o600)
+    with open(lock_path, "r+") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+
+
 class PendingCapReached(Exception):
     """Too many simultaneously-pending requests."""
 
@@ -88,17 +110,24 @@ class RequestStore:
     def __init__(
         self,
         base_dir,
-        ttl_seconds: int = 1800,
+        ttl_seconds: int = ENROLL_TTL_S,
         max_pending: int = 50,
         clock: Callable[[], float] = time.time,
+        is_approved: Callable[[str], bool] | None = None,
     ) -> None:
         self._pending = Path(base_dir) / "pending"
         self._resolved = Path(base_dir) / "resolved"
+        self._lock_path = Path(base_dir) / "create.lock"
         self._pending.mkdir(parents=True, exist_ok=True)
         self._resolved.mkdir(parents=True, exist_ok=True)
         self._ttl = ttl_seconds
         self._max_pending = max_pending
         self._clock = clock
+        self._is_approved = is_approved
+
+    @property
+    def ttl_seconds(self) -> int:
+        return self._ttl
 
     def _write_atomic(self, path: Path, rec: dict) -> None:
         tmp = path.with_suffix(".json.tmp")
@@ -135,33 +164,22 @@ class RequestStore:
             rec = self._read_rec(p)
             if rec is None:
                 continue
-            if now - rec["created_at"] >= self._ttl:
+            try:
+                created_at = float(rec["created_at"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                created_at = math.nan
+            if not math.isfinite(created_at):
+                self._resolve(p, rec, "expired")
+                continue
+            try:
+                deadline = float(rec["expires_at"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                # Records created before per-request deadlines used the store TTL.
+                deadline = created_at + self._ttl
+            if not math.isfinite(deadline) or now >= deadline:
                 self._resolve(p, rec, "expired")
 
-    def create(self, pubkey: str, hostname: str) -> str:
-        # The store is the security boundary, not just the HTTP layer: self-protect.
-        # validate_pubkey rejects multi-line/CRLF input, so a crafted second line can't
-        # be smuggled in here and later written into the pubkeys allowlist on approve.
-        if not validate_pubkey(pubkey):
-            raise ValueError("invalid pubkey")
-        self._sweep()
-        if len(list(self._pending.glob("*.json"))) >= self._max_pending:
-            raise PendingCapReached()
-        rid = secrets.token_hex(16)
-        self._write_atomic(
-            self._pending / f"{rid}.json",
-            {
-                "id": rid,
-                "pubkey": pubkey.strip(),
-                "hostname": hostname,
-                "fingerprint": fingerprint(pubkey),
-                "created_at": self._clock(),
-                "status": "pending",
-            },
-        )
-        return rid
-
-    def list_pending(self) -> list[dict]:
+    def _list_pending_unlocked(self) -> list[dict]:
         self._sweep()
         out = []
         for p in sorted(self._pending.glob("*.json")):
@@ -170,46 +188,117 @@ class RequestStore:
                 out.append(rec)
         return out
 
+    def create(self, pubkey: str, hostname: str) -> str:
+        # The store is the security boundary, not just the HTTP layer: self-protect.
+        # validate_pubkey rejects multi-line/CRLF input, so a crafted second line can't
+        # be smuggled in here and later written into the pubkeys allowlist on approve.
+        if not validate_pubkey(pubkey):
+            raise ValueError("invalid pubkey")
+        # Every pending-state transition shares this lock. The enrollment app
+        # serves sync endpoints on a threadpool, so create/approve and two
+        # creates can otherwise interleave their scan-then-write operations.
+        with _locked(self._lock_path):
+            pending = self._list_pending_unlocked()
+            # Idempotent per key: keep one request id while the daemon is alive
+            # and renew its relay-stamped TTL on each scheduled re-post.
+            fp = fingerprint(pubkey)
+            for rec in pending:
+                if rec.get("fingerprint") == fp:
+                    renewed = dict(rec)
+                    renewed_at = self._clock()
+                    renewed["created_at"] = renewed_at
+                    renewed["expires_at"] = renewed_at + self._ttl
+                    self._write_atomic(self._pending / f"{rec['id']}.json", renewed)
+                    return rec["id"]
+            # An approval can win the lock immediately before an in-flight
+            # daemon re-post. Return that approved request so the daemon
+            # observes its terminal state instead of recreating it as pending.
+            for p in sorted(self._resolved.glob("*.json")):
+                rec = self._read_rec(p)
+                if (
+                    rec is not None
+                    and rec.get("status") == "approved"
+                    and rec.get("fingerprint") == fp
+                    and (
+                        self._is_approved is None
+                        or self._is_approved(fp)
+                    )
+                ):
+                    return rec["id"]
+            if len(pending) >= self._max_pending:
+                raise PendingCapReached()
+            created_at = self._clock()
+            rid = secrets.token_hex(16)
+            self._write_atomic(
+                self._pending / f"{rid}.json",
+                {
+                    "id": rid,
+                    "pubkey": pubkey.strip(),
+                    "hostname": hostname,
+                    "fingerprint": fp,
+                    "created_at": created_at,
+                    "expires_at": created_at + self._ttl,
+                    "status": "pending",
+                },
+            )
+        return rid
+
+    def revoke_approved(
+        self,
+        identity: str,
+        revoke: Callable[[str], object],
+    ) -> object:
+        """Mutate the allowlist under the same lock as enrollment dedupe."""
+        with _locked(self._lock_path):
+            return revoke(identity)
+
+    def list_pending(self) -> list[dict]:
+        with _locked(self._lock_path):
+            return self._list_pending_unlocked()
+
     def get(self, rid: str) -> str:
         if not _RID_RE.match(rid):
             return "unknown"
-        self._sweep()
-        if (self._pending / f"{rid}.json").exists():
-            return "pending"
-        rec = self._read_rec(self._resolved / f"{rid}.json")
-        return rec.get("status", "unknown") if rec else "unknown"
+        with _locked(self._lock_path):
+            self._sweep()
+            if (self._pending / f"{rid}.json").exists():
+                return "pending"
+            rec = self._read_rec(self._resolved / f"{rid}.json")
+            return rec.get("status", "unknown") if rec else "unknown"
 
     def approve(self, rid: str, pubkeys_dir) -> None:
         if not _RID_RE.match(rid):
             raise NotPending(rid)
-        self._sweep()
-        p = self._pending / f"{rid}.json"
-        if not p.exists():
-            raise NotPending(rid)
-        rec = self._read_rec(p)
-        if rec is None:                       # corrupt/truncated → quarantined, treat as gone
-            raise NotPending(rid)
-        dest = _unique_pub_path(Path(pubkeys_dir), sanitize_label(rec["hostname"]))
-        # Atomic key write: sish re-reads pubkeys/ per connection and must never observe
-        # a half-written key file mid-write.
-        tmp = dest.with_suffix(".pub.tmp")
-        tmp.write_text(rec["pubkey"] + "\n")
-        tmp.replace(dest)
-        self._resolve(p, rec, "approved")
+        with _locked(self._lock_path):
+            self._sweep()
+            p = self._pending / f"{rid}.json"
+            if not p.exists():
+                raise NotPending(rid)
+            rec = self._read_rec(p)
+            if rec is None:
+                raise NotPending(rid)
+            dest = _unique_pub_path(Path(pubkeys_dir), sanitize_label(rec["hostname"]))
+            # Atomic key write: sish re-reads pubkeys/ per connection and must never
+            # observe a half-written key file mid-write.
+            tmp = dest.with_suffix(".pub.tmp")
+            tmp.write_text(rec["pubkey"] + "\n")
+            tmp.replace(dest)
+            self._resolve(p, rec, "approved")
 
     def deny(self, rid: str) -> None:
         if not _RID_RE.match(rid):
             raise NotPending(rid)
-        # Sweep first so denying an already-expired request resolves it as `expired`,
-        # consistent with the other methods.
-        self._sweep()
-        p = self._pending / f"{rid}.json"
-        if not p.exists():
-            raise NotPending(rid)
-        rec = self._read_rec(p)
-        if rec is None:                       # corrupt/truncated → quarantined, treat as gone
-            raise NotPending(rid)
-        self._resolve(p, rec, "denied")
+        with _locked(self._lock_path):
+            # Sweep first so denying an already-expired request resolves it as
+            # `expired`, consistent with the other methods.
+            self._sweep()
+            p = self._pending / f"{rid}.json"
+            if not p.exists():
+                raise NotPending(rid)
+            rec = self._read_rec(p)
+            if rec is None:
+                raise NotPending(rid)
+            self._resolve(p, rec, "denied")
 
 
 # ---------------------------------------------------------------------------

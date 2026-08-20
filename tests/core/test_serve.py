@@ -43,6 +43,26 @@ def test_health(tmp_path):
     assert r.json() == {"status": "ok", "workspace": "test-ws"}
 
 
+def test_health_carries_daemon_workspace_identity_when_provided(tmp_path):
+    state = StateManager(tmp_path / ".mothership")
+    app = create_app(
+        specs_dir=tmp_path / "specs",
+        state_manager=state,
+        log_manager=None,
+        workspace_root=tmp_path,
+        workspace_name="test-ws",
+        host_id="host-a",
+        workspace_id="ws-a",
+    )
+
+    assert TestClient(app).get("/health").json() == {
+        "status": "ok",
+        "workspace": "test-ws",
+        "host_id": "host-a",
+        "workspace_id": "ws-a",
+    }
+
+
 def test_list_specs(tmp_path):
     _seed_spec(tmp_path)
     r = TestClient(_app(tmp_path)).get("/specs")

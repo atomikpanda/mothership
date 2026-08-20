@@ -34,10 +34,15 @@ class FakeSubApp:
         self.name = name
         self.lifespan_started = False
         self.lifespan_stopped = False
+        self.seen_authorization = None
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":  # pragma: no cover - not used via router hack
             return
+        self.seen_authorization = next(
+            (v.decode() for k, v in scope["headers"] if k.lower() == b"authorization"),
+            None,
+        )
         body = f'{{"workspace": "{self.name}", "path": "{scope["path"]}"}}'.encode()
         await send({"type": "http.response.start", "status": 200,
                     "headers": [(b"content-type", b"application/json")]})
@@ -125,11 +130,12 @@ def test_health_count_and_list_distinguish_degraded_from_missing(tmp_path):
     )
 
     with TestClient(app) as client:
-        assert client.get("/health").json() == {
-            "status": "ok",
-            "workspaces": 3,
-            "degraded": 1,
-        }
+        health = client.get("/health").json()
+        assert (health["status"], health["workspaces"], health["degraded"]) == (
+            "ok",
+            3,
+            1,
+        )
         workspaces = client.get("/workspaces").json()["workspaces"]
 
     assert {workspace["state"] for workspace in workspaces} == {
@@ -661,6 +667,417 @@ def test_workspace_config_edit_rebuilds_subapp(tmp_path):
         client.get("/workspaces/ws-e/specs")
 
     assert built == [str(workspace), str(workspace)]
+
+
+### #471 Task 3 — tiered auth, forwarded-header rewrite, identity + runner ###
+
+LIVE_BEARER = "0123456789abcdef.live-secret"
+
+
+@pytest.fixture
+def bearer_app(tmp_path):
+    """Host app in its #471 shape: a short-lived bearer verifier for callers,
+    the standing token repurposed as the internal sub-app credential."""
+    home = tmp_path / "home"
+    store = _seed(home, [_entry("ws-a", "a", tmp_path / "a")])
+    built: dict[str, FakeSubApp] = {}
+
+    def build(entry, **_kwargs):
+        sub = FakeSubApp(entry.name)
+        built[entry.id] = sub
+        return sub
+
+    app = create_host_app(
+        store,
+        auth_token="standing",
+        verify_bearer=lambda presented: presented == LIVE_BEARER,
+        exchange_refresh=lambda refresh: (
+            ("0123456789abcdef.minted", 300) if refresh == "good-refresh" else None
+        ),
+        build_subapp=build,
+    )
+    return app, built
+
+
+def test_short_lived_bearer_authorizes_list_and_forwarded_call(bearer_app):
+    """The forward must rewrite Authorization: the sub-app knows only the
+    standing token, so passing the caller's bearer through 401s every call."""
+    app, built = bearer_app
+    auth = {"Authorization": f"Bearer {LIVE_BEARER}"}
+    with TestClient(app) as client:
+        assert client.get("/workspaces", headers=auth).status_code == 200
+        forwarded = client.get("/workspaces/ws-a/specs", headers=auth)
+
+    assert forwarded.status_code == 200
+    assert built["ws-a"].seen_authorization == "Bearer standing"
+
+
+def test_foreign_bearer_is_rejected_on_the_list_and_the_forward(bearer_app):
+    app, _built = bearer_app
+    auth = {"Authorization": "Bearer 0123456789abcdef.minted-elsewhere"}
+    with TestClient(app) as client:
+        assert client.get("/workspaces", headers=auth).status_code == 401
+        assert client.get("/workspaces/ws-a/specs", headers=auth).status_code == 401
+
+
+def test_real_token_stores_compose_through_the_exchange(tmp_path):
+    """The whole loop over the shipped stores, on a stepped clock: refresh in,
+    bearer out, bearer authorizes, bearer expires, revoked refresh mints no
+    more. Nothing here is stubbed but the wall clock."""
+    from mship.core.daemon.host_auth import RefreshStore
+    from mship.core.daemon.host_token import issue_host_token, verify_host_token
+    from mship.core.relay.token_clock import AnchoredClock
+
+    home = tmp_path / "home"
+    now = {"t": 1_000.0}
+    clock = AnchoredClock(
+        wall=lambda: now["t"], mono=lambda: now["t"], epoch="test-epoch"
+    )
+    refresh_store = RefreshStore(home, clock=lambda: now["t"])
+    refresh = refresh_store.issue_refresh(host_id="hst-1", client="phone")
+
+    def exchange(credential):
+        if refresh_store.verify_refresh(credential) is None:
+            return None
+        return issue_host_token(home, ttl_seconds=300, clock=clock), 300
+
+    store = _seed(home, [_entry("ws-a", "a", tmp_path / "a")])
+    app = create_host_app(
+        store,
+        auth_token="standing",
+        verify_bearer=lambda presented: (
+            verify_host_token(home, presented, clock=clock) is not None
+        ),
+        exchange_refresh=exchange,
+        build_subapp=lambda e, **kw: FakeSubApp(e.name),
+    )
+
+    with TestClient(app) as client:
+        # Flip the last character to one it CANNOT already be: appending a fixed
+        # hex digit leaves the credential unchanged 1 run in 16, and that run
+        # asserts 401 against the genuine credential.
+        tampered = client.post(
+            "/host/token",
+            json={"refresh": refresh[:-1] + ("1" if refresh[-1] == "0" else "0")},
+        )
+        minted = client.post("/host/token", json={"refresh": refresh}).json()
+        auth = {"Authorization": f"Bearer {minted['token']}"}
+        live = client.get("/workspaces", headers=auth)
+        now["t"] += minted["expires_in"] + 1
+        after_expiry = client.get("/workspaces", headers=auth)
+        refresh_store.revoke(host_id="hst-1", client="phone")
+        revoked = client.post("/host/token", json={"refresh": refresh})
+
+    assert tampered.status_code == 401
+    assert live.status_code == 200
+    assert after_expiry.status_code == 401
+    assert revoked.status_code == 401
+
+
+@pytest.mark.parametrize(
+    ("edge_header", "value"),
+    [
+        ("X-Forwarded-For", "203.0.113.7"),
+        ("X-Forwarded-Host", "hst-abc.relay.example"),
+        ("X-Forwarded-Proto", "https"),
+    ],
+)
+def test_standing_token_works_direct_but_never_over_the_relay(
+    bearer_app, edge_header, value
+):
+    """AC9: no standing credential authorizes relay-borne traffic, while
+    first-time LAN/loopback pairing still works. Every header the edge may
+    stamp counts — Caddy sets all three, but only one is needed to give the
+    request away."""
+    app, _built = bearer_app
+    standing = {"Authorization": "Bearer standing"}
+    with TestClient(app) as client:
+        assert client.get("/workspaces", headers=standing).status_code == 200
+        relay_borne = client.get(
+            "/workspaces", headers={**standing, edge_header: value}
+        )
+
+    assert relay_borne.status_code == 401
+
+
+@pytest.fixture
+def relay_domain_app(tmp_path):
+    """The same shape as `bearer_app`, but told which domain the relay serves."""
+    home = tmp_path / "home"
+    store = _seed(home, [_entry("ws-a", "a", tmp_path / "a")])
+    return create_host_app(
+        store,
+        auth_token="standing",
+        verify_bearer=lambda presented: presented == LIVE_BEARER,
+        relay_domain="relay.example",
+        build_subapp=lambda entry, **_kwargs: FakeSubApp(entry.name),
+    )
+
+
+@pytest.mark.parametrize(
+    ("host_header", "expected"),
+    [
+        ("hst-abc.relay.example", 401),      # our subdomain, headers stripped
+        ("HST-ABC.Relay.Example:443", 401),  # DNS is case-insensitive; so is this
+        ("relay.example", 401),              # the relay's own name
+        ("notrelay.example", 200),           # merely ends with the same letters
+        ("192.168.1.5:47190", 200),          # the LAN pairing path (AC9)
+    ],
+)
+def test_relay_host_header_is_relay_borne_even_with_edge_headers_stripped(
+    relay_domain_app, host_header, expected
+):
+    """Defense in depth for AC9: `_EDGE_HEADERS` is the edge's own testimony, so
+    a proxy misconfigured to strip them would silently re-open the standing
+    token to the whole internet. The `Host` the request was addressed to is the
+    second, independent witness — nothing on the LAN reaches this app under the
+    relay's domain."""
+    with TestClient(relay_domain_app) as client:
+        response = client.get(
+            "/workspaces",
+            headers={"Authorization": "Bearer standing", "Host": host_header},
+        )
+
+    assert response.status_code == expected
+
+
+def test_every_guarded_route_401s_without_a_credential(bearer_app):
+    app, _built = bearer_app
+    with TestClient(app) as client:
+        assert client.get("/workspaces").status_code == 401
+        assert client.post("/workspaces/refresh").status_code == 401
+        assert client.get("/workspaces/ws-a/specs").status_code == 401
+
+
+def test_host_token_exchange_needs_no_bearer(bearer_app):
+    """The bootstrap route cannot require the credential it exists to mint."""
+    app, _built = bearer_app
+    with TestClient(app) as client:
+        minted = client.post("/host/token", json={"refresh": "good-refresh"})
+        form_minted = client.post(
+            "/host/token", data={"refresh": "good-refresh"}
+        )
+        rejected = client.post("/host/token", json={"refresh": "revoked-refresh"})
+
+    assert minted.status_code == 200
+    assert minted.json() == {"token": "0123456789abcdef.minted", "expires_in": 300}
+    assert form_minted.status_code == 200
+    assert form_minted.json() == minted.json()
+    assert rejected.status_code == 401
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"refresh": "x" * 4096},   # over the bound
+        {"refresh": ""},           # empty
+        {"refresh": 17},           # wrong type
+        {},                        # missing the field
+        [],                        # not an object
+    ],
+)
+def test_host_token_answers_401_for_every_malformed_body(bearer_app, body):
+    """A 422 here would make the unauthenticated route an oracle separating
+    "malformed" from "wrong" — every failure reads the same."""
+    app, _built = bearer_app
+    with TestClient(app) as client:
+        assert client.post("/host/token", json=body).status_code == 401
+        assert client.post("/host/token", content=b"not json").status_code == 401
+
+
+def test_host_token_stops_reading_as_soon_as_the_body_limit_is_exceeded(
+    bearer_app,
+):
+    """The public exchange must reject the first oversized chunk without
+    requesting the unbounded remainder from the ASGI receive channel."""
+    import asyncio
+
+    app, _built = bearer_app
+
+    async def drive():
+        receive_calls = 0
+        sent = []
+
+        async def receive():
+            nonlocal receive_calls
+            receive_calls += 1
+            if receive_calls > 1:
+                raise AssertionError("oversized request body was still being buffered")
+            return {
+                "type": "http.request",
+                "body": b"x" * 2048,
+                "more_body": True,
+            }
+
+        async def send(message):
+            sent.append(message)
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "path": "/host/token",
+            "raw_path": b"/host/token",
+            "root_path": "",
+            "scheme": "http",
+            "query_string": b"",
+            "headers": [(b"content-type", b"application/json")],
+            "client": ("test", 1),
+            "server": ("test", 80),
+        }
+        async with app.router.lifespan_context(app):
+            await asyncio.wait_for(app(scope, receive, send), timeout=5)
+        return receive_calls, sent
+
+    receive_calls, sent = asyncio.run(drive())
+    response_start = next(
+        message for message in sent if message["type"] == "http.response.start"
+    )
+    assert receive_calls == 1
+    assert response_start["status"] == 401
+
+
+def test_host_token_route_is_absent_without_an_exchange(tmp_path):
+    """No refresh store means nothing to mint: the route does not exist rather
+    than 401ing on a credential this host could never honour."""
+    home = tmp_path / "home"
+    store = _seed(home, [_entry("ws-a", "a", tmp_path / "a")])
+    app = create_host_app(
+        store,
+        auth_token="standing",
+        verify_bearer=lambda _presented: False,
+        build_subapp=lambda e, **kw: FakeSubApp(e.name),
+    )
+
+    with TestClient(app) as client:
+        assert client.post("/host/token", json={"refresh": "x"}).status_code == 404
+
+
+def test_health_needs_no_bearer_and_reports_identity(tmp_path):
+    """The daemon's own read-back and GC's ladder both poll /health, so it
+    stays unauthenticated (and writes nothing — AC11)."""
+    home = tmp_path / "home"
+    store = _seed(home, [_entry("ws-a", "a", tmp_path / "a")])
+    app = create_host_app(
+        store,
+        auth_token="standing",
+        verify_bearer=lambda _presented: False,
+        host_id="hst-20260817-abcd1234",
+        instance_id="0123456789abcdef",
+        host_state=lambda: {"state": "online", "subdomain": "hst-abc"},
+        build_subapp=lambda e, **kw: FakeSubApp(e.name),
+    )
+
+    with TestClient(app) as client:
+        health = client.get("/health")
+
+    assert health.status_code == 200
+    assert health.json() == {
+        "status": "ok",
+        "host_id": "hst-20260817-abcd1234",
+        "instance_id": "0123456789abcdef",
+        "workspaces": 1,
+        "degraded": 0,
+        "tunnel": {"state": "online", "subdomain": "hst-abc"},
+        "runner": {"enabled": False, "state": "disabled"},
+    }
+
+
+def test_health_reports_disabled_tunnel_when_no_relay_is_configured(tmp_path):
+    home = tmp_path / "home"
+    store = _seed(home, [_entry("ws-a", "a", tmp_path / "a")])
+    app = create_host_app(
+        store, auth_token=None, build_subapp=lambda e, **kw: FakeSubApp(e.name)
+    )
+
+    with TestClient(app) as client:
+        health = client.get("/health").json()
+
+    assert health["tunnel"] == {"state": "disabled"}
+    assert health["host_id"] is None and health["instance_id"] is None
+
+
+def test_health_runner_reads_the_injected_host_runner_config(tmp_path):
+    """The host-level runner rides the same projection as a workspace's — this
+    is the seam #473 fills; unwired, the host reports no runner."""
+    home = tmp_path / "home"
+    store = _seed(home, [_entry("ws-a", "a", tmp_path / "a")])
+    app = create_host_app(
+        store,
+        auth_token=None,
+        runner_config=lambda: {"enabled": True, "max_concurrency": 1},
+        build_subapp=lambda e, **kw: FakeSubApp(e.name),
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/health").json()["runner"] == {
+            "enabled": True,
+            "state": "unknown",
+        }
+
+
+@pytest.mark.parametrize(
+    ("raw_runner", "projected"),
+    [
+        ({"enabled": True, "max_concurrency": 2}, {"enabled": True, "state": "unknown"}),
+        ({"enabled": False}, {"enabled": False, "state": "disabled"}),
+        (None, {"enabled": False, "state": "disabled"}),
+    ],
+)
+def test_workspaces_project_runner_and_pass_metarepo_repos_through(
+    tmp_path, raw_runner, projected
+):
+    """AC6: #473's opaque `runner:` block rides this projection (#471 reports
+    unknown, never a state it cannot know). Assumption 1: the metarepo shape
+    passes through the same projection untouched."""
+    from mship.core.daemon.discovery import scan_roots
+    from mship.core.daemon.registry import DaemonConfig
+    from tests.core.daemon.test_discovery import _mk_metarepo
+
+    home = tmp_path / "home"
+    roots = tmp_path / "roots"
+    workspace = _mk_metarepo(roots, "meta")
+    (candidate,) = scan_roots(DaemonConfig(scan_roots=[str(roots)]))
+    entry = _entry("ws-meta", "meta", workspace, repos=candidate.repos, runner=raw_runner)
+    store = _seed(home, [entry])
+    app = create_host_app(
+        store, auth_token=None, build_subapp=lambda e, **kw: FakeSubApp(e.name)
+    )
+
+    with TestClient(app) as client:
+        (listed,) = client.get("/workspaces").json()["workspaces"]
+
+    assert listed["runner"] == projected
+    assert listed["repos"] == [r.model_dump() for r in candidate.repos]
+
+
+def test_workspaces_runner_projection_degrades_a_malformed_block(tmp_path):
+    """A non-dict `runner:` must read as disabled, never 500. Driven off an
+    in-memory state because a persisted one cannot reach the projection at all:
+    `RegistryStore._load_nolock` answers a failed `model_validate` with an
+    EMPTY `RegistryState`, dropping the whole registry rather than one entry."""
+    from mship.core.daemon.registry import RegistryState
+
+    entry = _entry("ws-a", "a", tmp_path / "a")
+    entry.runner = "not-a-block"  # assignment: the constructor would reject it
+
+    class _MemoryStore:
+        def load(self):
+            return RegistryState(entries=[entry])
+
+    app = create_host_app(
+        _MemoryStore(), auth_token=None, build_subapp=lambda e, **kw: FakeSubApp(e.name)
+    )
+
+    with TestClient(app) as client:
+        listed = client.get("/workspaces")
+
+    assert listed.status_code == 200
+    assert listed.json()["workspaces"][0]["runner"] == {
+        "enabled": False,
+        "state": "disabled",
+    }
 
 
 def test_unbuildable_workspace_is_503_not_500(tmp_path):
