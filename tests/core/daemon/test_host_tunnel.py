@@ -361,6 +361,23 @@ def test_a_tunnel_already_up_is_torn_down_when_the_identity_goes_duplicate(fx):
     assert fx.child.terminated == 1
 
 
+def test_active_tunnel_redials_the_new_identity_after_auto_reidentification(fx):
+    assert fx.connect() == "online"
+    old_child = fx.child
+    old_subdomain = fx.link.subdomain
+
+    fx.relay.refuse(409, "identity already registered")
+    for _ in range(RelayLink.DUPLICATE_REIDENTIFY_AFTER):
+        fx.clock.advance(120)
+        fx.tunnel.tick()
+
+    assert old_child.terminated == 1
+    assert len(fx.procs) == 2
+    assert fx.sup.is_running()
+    assert old_subdomain not in " ".join(fx.argvs[-1])
+    assert fx.link.subdomain in " ".join(fx.argvs[-1])
+
+
 # --- AC2: respawn re-registers exactly once ---------------------------------
 
 

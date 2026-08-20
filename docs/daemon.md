@@ -173,7 +173,9 @@ Clock skew is *reported*, never gating: the link samples the enroll server's
 mship daemon install --serve 127.0.0.1:47190 --relay relay.example.com
 mship daemon start
 # then, once, on the relay box:
-mship relay approve <id>
+mship relay approve <id> \
+  --store-dir /path/to/docker/relay/pending-store \
+  --pubkeys-dir /path/to/docker/relay/pubkeys
 ```
 
 `--relay` needs a local bind to forward, from this install or an earlier one

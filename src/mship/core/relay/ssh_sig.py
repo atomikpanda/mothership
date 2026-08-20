@@ -59,7 +59,6 @@ def sign_blob(
         "-f", str(key_path),
         "-n", namespace,
         "-q",
-        "-",                      # read the blob from stdin, always last
     ]
     proc = _run(argv, blob, runner)
     if proc.returncode != 0:

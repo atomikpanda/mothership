@@ -406,8 +406,10 @@ class RelayLink:
             self._duplicate_streak += 1
             if self._duplicate_streak >= self.DUPLICATE_REIDENTIFY_AFTER:
                 self._auto_reidentify(now)
-        elif self.state not in _STICKY_STATES:
-            self.state = "error"
+        else:
+            self._duplicate_streak = 0
+            if self.state not in _STICKY_STATES:
+                self.state = "error"
         self._delay = self._jittered(
             min(
                 RETRY_BASE_S * 2 ** min(self.failure_count - 1, _MAX_EXPONENT),

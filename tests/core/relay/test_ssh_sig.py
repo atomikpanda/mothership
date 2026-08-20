@@ -61,11 +61,10 @@ def test_sign_builds_the_ssh_keygen_sign_argv_and_feeds_the_blob_on_stdin(tmp_pa
     sig = sign_blob(b"payload-bytes", key_path=tmp_path / "k", namespace=NS, runner=rec)
     argv, stdin = rec.calls[0]
     assert argv[:3] == ["ssh-keygen", "-Y", "sign"]
-    # Ordering: every flag carries its own value, and stdin ("-") is last so
-    # the blob is never mistaken for a flag argument.
-    assert argv[argv.index("-f") + 1] == str(tmp_path / "k")
-    assert argv[argv.index("-n") + 1] == NS
-    assert argv[-1] == "-"
+    # With no positional input file, ssh-keygen reads the blob from stdin and
+    # writes the armored signature to stdout. A literal "-" names a file.
+    assert argv[-1] == "-q"
+    assert "-" not in argv
     assert stdin == b"payload-bytes"
     assert sig == "SIG"
 

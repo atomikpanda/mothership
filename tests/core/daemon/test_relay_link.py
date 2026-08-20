@@ -780,6 +780,32 @@ def test_failed_auto_reidentify_keeps_identity_and_uses_registration_backoff(
     assert attempts == [clock()]
 
 
+
+def test_non_duplicate_failure_breaks_the_duplicate_identity_streak(tmp_path: Path):
+    relay = _Relay(register=(409, "duplicate identity"))
+    clock = _Clock()
+    reidentified: list[int] = []
+
+    def reidentify():
+        reidentified.append(1)
+        return HostIdentity(host_id="hst-unexpected", created_at="")
+
+    link = _link(tmp_path, relay, clock, reidentify=reidentify)
+
+    for _ in range(RelayLink.DUPLICATE_REIDENTIFY_AFTER - 1):
+        link.tick()
+        _advance_past(clock, link)
+        relay.transport_error = "relay unreachable"
+        link.tick()
+        relay.transport_error = None
+        _advance_past(clock, link)
+
+    link.tick()
+
+    assert reidentified == []
+    assert link.state == "duplicate-identity"
+
+
 def test_a_success_clears_the_duplicate_counter(tmp_path: Path):
     relay = _Relay(register=(409, "duplicate identity"))
     clock = _Clock()
