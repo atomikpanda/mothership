@@ -112,8 +112,17 @@ class SpecStore:
         self._validate_id(spec.id)
         return self._dir / f"{spec.created_at:%Y-%m-%d}-{spec.id}.md"
 
-    def save(self, spec: Spec) -> Path:
+    def _save_unlocked(self, spec: Spec) -> Path:
+        """Persist a spec while its per-spec lock is already held."""
         return self._storage.write(self.path_for(spec), serialize_spec(spec))
+
+    def save(self, spec: Spec) -> Path:
+        """Persist lifecycle changes without clobbering durable inbox metadata."""
+        with _locked(self._lock_path(spec.id)):
+            current = self.read_strict(spec.id)
+            if current is not None:
+                spec.inbox = current.inbox
+            return self._save_unlocked(spec)
 
     def load(self, path: Path) -> Spec:
         return parse_spec(self._storage.decode_file(Path(path)))
@@ -168,5 +177,5 @@ class SpecStore:
             if spec is None:
                 raise KeyError(spec_id)
             if apply_inbox_action(spec.inbox, action, mutation_id, now):
-                self.save(spec)
+                self._save_unlocked(spec)
             return spec

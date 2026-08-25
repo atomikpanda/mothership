@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
+from threading import Event, Thread
+
 import pytest
 
 from mship.core.spec import AcceptanceCriterion, AcceptanceEvidence, OpenQuestion, Spec
@@ -222,3 +224,58 @@ def test_mutate_inbox_rejects_conflicting_spec_mutation_identity(tmp_path: Path)
 
     with pytest.raises(ValueError):
         store.mutate_inbox(spec.id, "restore", "mutation-1", now.replace(minute=1))
+
+
+def test_stale_lifecycle_save_preserves_current_inbox_metadata(tmp_path: Path):
+    now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
+    store = SpecStore(tmp_path / "specs")
+    spec = _new_spec("alpha")
+    store.save(spec)
+    stale_lifecycle_copy = store.find_by_id(spec.id)
+
+    store.mutate_inbox(spec.id, "archive", "archive-1", now)
+    stale_lifecycle_copy.status = "needs_review"
+    store.save(stale_lifecycle_copy)
+
+    saved = store.find_by_id(spec.id)
+    assert saved.status == "needs_review"
+    assert saved.inbox.manual_archived is True
+    assert saved.inbox.mutation_ids == {"archive-1": "archive"}
+
+
+def test_concurrent_inbox_mutation_cannot_overwrite_lifecycle_save(tmp_path: Path, monkeypatch):
+    """The lifecycle save landing while mutation persistence is pending wins both fields."""
+    now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
+    store = SpecStore(tmp_path / "specs")
+    spec = _new_spec("alpha")
+    store.save(spec)
+    lifecycle_update = store.find_by_id(spec.id)
+    lifecycle_update.status = "needs_review"
+
+    original_write = store._storage.write
+    lifecycle_write_started = Event()
+    lifecycle_writer = Thread(target=lambda: store.save(lifecycle_update))
+    writer_started = False
+
+    def interleave_lifecycle_save(path, text):
+        nonlocal writer_started
+        saved = parse_spec(text)
+        if saved.inbox.manual_archived and not writer_started:
+            writer_started = True
+            lifecycle_writer.start()
+            # Before the lock-safe owner, the lifecycle writer reaches storage here
+            # and the pending inbox write then clobbers its status. With the owner,
+            # it blocks until this write releases the per-spec lock.
+            lifecycle_write_started.wait(timeout=0.2)
+        if saved.status == "needs_review":
+            lifecycle_write_started.set()
+        return original_write(path, text)
+
+    monkeypatch.setattr(store._storage, "write", interleave_lifecycle_save)
+    store.mutate_inbox(spec.id, "archive", "archive-1", now)
+    lifecycle_writer.join()
+
+    saved = store.find_by_id(spec.id)
+    assert saved.status == "needs_review"
+    assert saved.inbox.manual_archived is True
+    assert saved.inbox.mutation_ids == {"archive-1": "archive"}
