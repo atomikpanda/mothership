@@ -14,12 +14,21 @@ from datetime import datetime
 from typing import Callable
 
 
+def _change_at(thread) -> datetime:
+    """Mailbox content or inbox mutation time, whichever is newer."""
+    inbox_mutation = getattr(getattr(thread, "inbox", None), "last_mutated_at", None)
+    return max(thread.updated_at, inbox_mutation or thread.updated_at)
+
+
 def changed_since(threads, since: datetime):
-    """Return (changed, cursor): threads whose updated_at is strictly after
-    `since`, and the high-water cursor = max(updated_at across all threads, since)
-    (so the cursor never moves backwards)."""
-    changed = [t for t in threads if t.updated_at > since]
-    cursor = max([since, *(t.updated_at for t in threads)])
+    """Return changed threads and the monotonic high-water change cursor.
+
+    Inbox mutations are durable mailbox changes but deliberately do not alter
+    ``Thread.updated_at`` (which remains the content ordering timestamp).
+    """
+    change_times = [(thread, _change_at(thread)) for thread in threads]
+    changed = [thread for thread, change_at in change_times if change_at > since]
+    cursor = max([since, *(change_at for _, change_at in change_times)])
     return changed, cursor
 
 
@@ -65,7 +74,8 @@ def wait_for_change(
 ) -> WaitResult:
     """Block until `load_fn()` yields a thread changed since `since` that also
     satisfies `predicate` (default: any change), or `timeout` seconds elapse.
-    The cursor always advances to the latest seen updated_at, even on timeout."""
+    The cursor always advances to the latest content or inbox-mutation change,
+    even on timeout."""
     deadline = now_fn() + timeout
     while True:
         changed, cursor = changed_since(load_fn(), since)

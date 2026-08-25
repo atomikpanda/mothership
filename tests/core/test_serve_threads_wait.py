@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from mship.core.serve import create_app
@@ -65,6 +67,46 @@ def test_wait_applies_inbox_and_search_filters_without_changing_cursor(tmp_path:
     assert [summary["id"] for summary in body["threads"]] == [thread.id]
     assert body["cursor"] == updated_at.isoformat()
 
+
+
+@pytest.mark.parametrize(
+    ("action", "expected_state"),
+    [
+        ("archive", "archived"),
+        ("restore", "active"),
+        ("pin", "active"),
+        ("unpin", "active"),
+    ],
+)
+def test_each_inbox_action_wakes_wait_once_without_changing_content_timestamp(
+    tmp_path: Path, action: str, expected_state: str,
+):
+    client, store = _client(tmp_path)
+    created_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    thread = store.create_thread("inbox mutation", "body", created_at)
+
+    action_response = client.post(
+        f"/threads/{thread.id}/inbox/{action}", json={"mutation_id": f"device-{action}"},
+    )
+    assert action_response.status_code == 200
+    assert action_response.json()["inbox_state"] == expected_state
+    assert store.get(thread.id).updated_at == created_at
+
+    woke = client.get("/threads", params={"wait": 1, "since": created_at.isoformat(), "timeout": 0})
+    assert woke.status_code == 200
+    assert woke.json()["timed_out"] is False
+    assert [summary["id"] for summary in woke.json()["threads"]] == [thread.id]
+    cursor = woke.json()["cursor"]
+
+    retry = client.post(
+        f"/threads/{thread.id}/inbox/{action}", json={"mutation_id": f"device-{action}"},
+    )
+    assert retry.status_code == 200
+    no_second_change = client.get("/threads", params={"wait": 1, "since": cursor, "timeout": 0})
+    assert no_second_change.status_code == 200
+    assert no_second_change.json()["timed_out"] is True
+    assert no_second_change.json()["threads"] == []
+    assert no_second_change.json()["cursor"] == cursor
 
 def test_wait_times_out_with_empty_list(tmp_path: Path):
     client, _ = _client(tmp_path)

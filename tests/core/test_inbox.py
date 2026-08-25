@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from mship.core.inbox import InboxMetadata, classify_spec, classify_thread
+from mship.core.inbox import InboxMetadata, apply_inbox_action, classify_spec, classify_thread
 from mship.core.message import DecisionPayload, Message, Thread
 from mship.core.spec import Spec
 
@@ -194,3 +194,14 @@ def test_unpin_falls_back_to_retained_manual_archive_metadata():
     result = classify_thread(thread, linked=False, linked_terminal=False, now=NOW)
 
     assert (result.state, result.archive_reason) == ("archived", "manual")
+
+
+def test_new_inbox_action_stamps_change_once_and_retry_preserves_it():
+    metadata = InboxMetadata()
+    first = NOW + timedelta(seconds=1)
+
+    assert apply_inbox_action(metadata, "archive", "device-1", first) is True
+    assert metadata.last_mutated_at == first
+
+    assert apply_inbox_action(metadata, "archive", "device-1", first + timedelta(seconds=1)) is False
+    assert metadata.last_mutated_at == first

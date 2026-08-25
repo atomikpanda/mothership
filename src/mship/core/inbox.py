@@ -25,6 +25,7 @@ class InboxMetadata(BaseModel):
     pinned: bool = False
     manual_archived: bool = False
     restored_at: datetime | None = None
+    last_mutated_at: datetime | None = None
     mutation_ids: dict[str, InboxAction] = Field(default_factory=dict)
 
 
@@ -101,4 +102,9 @@ def apply_inbox_action(
         metadata.pinned = True
     else:
         metadata.pinned = False
+    metadata.last_mutated_at = max(
+        now,
+        metadata.last_mutated_at + timedelta(microseconds=1)
+        if metadata.last_mutated_at is not None else now,
+    )
     return True

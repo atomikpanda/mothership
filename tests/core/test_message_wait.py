@@ -22,6 +22,17 @@ def test_changed_since_filters_newer_and_reports_cursor():
     assert cursor == T0 + timedelta(seconds=5)        # high-water mark
 
 
+
+def test_changed_since_uses_newer_inbox_mutation_without_reordering_content():
+    thread = _thread("a", T0)
+    thread.inbox.last_mutated_at = T0 + timedelta(seconds=5)
+
+    changed, cursor = changed_since([thread], T0)
+
+    assert changed == [thread]
+    assert cursor == T0 + timedelta(seconds=5)
+    assert thread.updated_at == T0
+
 def test_changed_since_empty_when_nothing_newer():
     threads = [_thread("a", T0)]
     changed, cursor = changed_since(threads, T0 + timedelta(seconds=10))
