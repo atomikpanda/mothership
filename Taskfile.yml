@@ -15,7 +15,7 @@ tasks:
     desc: Run the test suite (runtime-deps guard, then pytest)
     cmds:
       - task: check-runtime-deps
-      - uv run pytest -q
+      - uv run pytest -q -n auto --dist loadfile
 
   check-runtime-deps:
     desc: Import the CLI with runtime-only deps to catch a dev-only dep used at runtime (MOS-190)
