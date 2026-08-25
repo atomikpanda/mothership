@@ -65,3 +65,16 @@ def test_serve_get_locked_spec_returns_marker_not_error(tmp_path: Path):
     data = resp.json()
     assert data["id"] == "locked-one" and data["locked"] is True
     assert "SECRET" not in resp.text
+
+
+def test_serve_rejects_inbox_mutation_for_locked_spec_without_leaking_content(tmp_path: Path):
+    _write_encrypted_spec(tmp_path)
+    spec_key.keyfile_path(tmp_path).unlink()
+
+    response = _client(tmp_path).post(
+        "/specs/locked-one/inbox/archive", json={"mutation_id": "device-archive"},
+    )
+
+    assert response.status_code == 409
+    assert "locked" in response.json()["detail"]
+    assert "SECRET" not in response.text

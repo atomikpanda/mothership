@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import re
 import tempfile
 import uuid
 from contextlib import contextmanager
@@ -44,16 +45,23 @@ class MessageStore:
         self._dir = Path(messages_dir)
 
     def _path(self, thread_id: str) -> Path:
-        if (not thread_id or "/" in thread_id or "\\" in thread_id
-                or thread_id in (".", "..") or thread_id.startswith(".")):
+        # Thread IDs cross the HTTP boundary, so prove both a strict component
+        # grammar and resolved containment before using one as a filesystem path.
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", thread_id):
             raise ValueError(f"unsafe thread id: {thread_id!r}")
-        return self._dir / f"{thread_id}.json"
+        base = self._dir.resolve()
+        path = (base / f"{thread_id}.json").resolve()
+        if path.parent != base:
+            raise ValueError(f"unsafe thread id: {thread_id!r}")
+        return path
 
     def _lock_path(self, thread_id: str) -> Path:
-        """Per-thread lock file (`<id>.json.lock`). Reuses `_path`'s id validation.
-        Not matched by `list()`'s `*.json` glob, so it stays invisible to reads."""
-        p = self._path(thread_id)
-        return p.with_name(p.name + ".lock")
+        """Per-thread lock file guarded by the same containment proof as data."""
+        path = self._path(thread_id)
+        lock_path = path.with_name(path.name + ".lock").resolve()
+        if lock_path.parent != path.parent:
+            raise ValueError(f"unsafe thread id: {thread_id!r}")
+        return lock_path
 
     def save(self, thread: Thread) -> Path:
         self._dir.mkdir(parents=True, exist_ok=True)
@@ -119,15 +127,16 @@ class MessageStore:
         action: InboxAction,
         mutation_id: str,
         now: datetime,
-    ) -> Thread:
-        """Apply one idempotent inbox mutation without changing thread content."""
+    ) -> tuple[Thread, bool]:
+        """Apply an inbox action and report whether this request changed it."""
         with _locked(self._lock_path(thread_id), fcntl.LOCK_EX):
             thread = self.get(thread_id)
             if thread is None:
                 raise KeyError(thread_id)
-            if apply_inbox_action(thread.inbox, action, mutation_id, now):
+            applied = apply_inbox_action(thread.inbox, action, mutation_id, now)
+            if applied:
                 self.save(thread)
-            return thread
+            return thread, applied
 
     def mark_seen(self, thread_id: str, seen_at: datetime) -> Thread:
         """Advance the operator's read cursor (monotonic — never regresses).

@@ -963,6 +963,21 @@ def test_threads_filter_search_and_mutate_inbox_without_deleting_content(tmp_pat
     assert client.post(f"/threads/{active.id}/inbox/nope", json={"mutation_id": "bad-1"}).status_code == 422
 
 
+def test_thread_inbox_retry_does_not_repeat_task_activity(tmp_path):
+    state, log = _seed_task(tmp_path)
+    now = datetime.now(timezone.utc)
+    thread = MessageStore(tmp_path / ".mothership" / "messages").create_thread(
+        "task thread", "body", now, task_slug="dq",
+    )
+    client = TestClient(_app_with(tmp_path, state, log))
+
+    client.post(f"/threads/{thread.id}/inbox/archive", json={"mutation_id": "device-archive"})
+    first_activity = state.load().tasks["dq"].last_activity_at
+    client.post(f"/threads/{thread.id}/inbox/archive", json={"mutation_id": "device-archive"})
+
+    assert state.load().tasks["dq"].last_activity_at == first_activity
+
+
 
 def test_thread_linked_to_done_work_item_is_archived(tmp_path):
     now = datetime.now(timezone.utc)

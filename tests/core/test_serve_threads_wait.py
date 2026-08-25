@@ -108,6 +108,31 @@ def test_each_inbox_action_wakes_wait_once_without_changing_content_timestamp(
     assert no_second_change.json()["threads"] == []
     assert no_second_change.json()["cursor"] == cursor
 
+
+@pytest.mark.parametrize(
+    ("initial_age", "action", "inbox"),
+    [
+        (timedelta(minutes=1), "archive", "active"),
+        (timedelta(days=8), "restore", "archived"),
+    ],
+)
+def test_wait_reports_removed_ids_when_an_inbox_mutation_leaves_the_filter(
+    tmp_path: Path, initial_age: timedelta, action: str, inbox: str,
+):
+    client, store = _client(tmp_path)
+    updated_at = datetime.now(timezone.utc) - initial_age
+    thread = store.create_thread("filter transition", "body", updated_at)
+    client.post(f"/threads/{thread.id}/inbox/{action}", json={"mutation_id": f"device-{action}"})
+
+    response = client.get("/threads", params={
+        "wait": 1, "since": updated_at.isoformat(), "timeout": 0, "inbox": inbox,
+    })
+
+    assert response.status_code == 200
+    assert response.json()["timed_out"] is False
+    assert response.json()["threads"] == []
+    assert response.json()["removed_ids"] == [thread.id]
+
 def test_wait_times_out_with_empty_list(tmp_path: Path):
     client, _ = _client(tmp_path)
     r = client.get("/threads", params={"wait": 1, "timeout": 0.1})  # since defaults to now

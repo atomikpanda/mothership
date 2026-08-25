@@ -620,14 +620,18 @@ def create_app(
 
     @app.post("/specs/{spec_id}/inbox/{action}")
     def post_spec_inbox_action(spec_id: str, action: InboxAction, body: InboxMutationBody):
+        from mship.core.spec_storage import SpecLocked
+
         now = datetime.now(timezone.utc)
         try:
-            spec = store.mutate_inbox(spec_id, action, body.mutation_id, now)
+            spec, applied = store.mutate_inbox(spec_id, action, body.mutation_id, now)
+        except SpecLocked:
+            raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
         except KeyError:
             raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
-        if spec.task_slug:
+        if applied and spec.task_slug:
             state_manager.record_activity(spec.task_slug, now)
         return _spec_payload(spec, now)
 
@@ -1347,11 +1351,20 @@ def create_app(
             })
         return summaries
 
+    def _matches_thread_filter(
+        summary: dict,
+        inbox: Literal["active", "archived", "all"],
+        q: str | None,
+    ) -> bool:
+        return (
+            _matches_inbox_filter(summary, inbox)
+            and _matches_search(q, summary["subject"], summary["last_message"])
+        )
+
     def _filtered_summaries(threads, inbox: Literal["active", "archived", "all"], q: str | None):
         return [
             summary for summary in _summaries(threads)
-            if (_matches_inbox_filter(summary, inbox)
-                and _matches_search(q, summary["subject"], summary["last_message"]))
+            if _matches_thread_filter(summary, inbox, q)
         ]
 
     @app.get("/threads")
@@ -1376,24 +1389,41 @@ def create_app(
         deadline = _time.monotonic() + timeout
         while True:
             changed, cursor = changed_since(msgs.list(), since_dt)
-            threads = _filtered_summaries(changed, inbox, q)
-            if threads:
-                return {"threads": threads, "cursor": cursor.isoformat(), "timed_out": False}
+            summaries = _summaries(changed)
+            threads = [
+                summary for summary in summaries
+                if _matches_thread_filter(summary, inbox, q)
+            ]
+            # A filtered client must remove items that changed out of its view.
+            # The response keeps `threads` filter-pure; legacy clients ignore the
+            # additive tombstones field, while newer clients remove these ids.
+            removed_ids = [
+                summary["id"] for summary in summaries
+                if not _matches_thread_filter(summary, inbox, q)
+            ]
+            if threads or removed_ids:
+                return {
+                    "threads": threads, "removed_ids": removed_ids,
+                    "cursor": cursor.isoformat(), "timed_out": False,
+                }
             remaining = deadline - _time.monotonic()
             if remaining <= 0:
-                return {"threads": [], "cursor": cursor.isoformat(), "timed_out": True}
+                return {
+                    "threads": [], "removed_ids": [],
+                    "cursor": cursor.isoformat(), "timed_out": True,
+                }
             await asyncio.sleep(min(interval, remaining))
 
     @app.post("/threads/{thread_id}/inbox/{action}")
     def post_thread_inbox_action(thread_id: str, action: InboxAction, body: InboxMutationBody):
         now = datetime.now(timezone.utc)
         try:
-            thread = msgs.mutate_inbox(thread_id, action, body.mutation_id, now)
+            thread, applied = msgs.mutate_inbox(thread_id, action, body.mutation_id, now)
         except KeyError:
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
-        if thread.task_slug:
+        if applied and thread.task_slug:
             state_manager.record_activity(thread.task_slug, now)
         return _thread_payload(thread, now)
 
@@ -1519,7 +1549,7 @@ def create_app(
                 task_slug = wi.task_slugs[0] if wi.task_slugs else None
                 thread = msgs.create_thread(subject=subject, text=body.text, now=now, task_slug=task_slug)
                 workitems.add_thread(item_id, thread.id, now=now)
-                return thread.model_dump(mode="json")
+                return _thread_payload(thread, now)
             try:
                 msgs.append(tid, "human", body.text, now)
             except KeyError:
@@ -1527,7 +1557,7 @@ def create_app(
             t = msgs.get(tid)
             if t is None:
                 raise HTTPException(status_code=404, detail=f"no thread {tid!r}")
-            return t.model_dump(mode="json")
+            return _thread_payload(t, now)
 
     @app.post("/items/{item_id}/unattended")
     def post_item_unattended(item_id: str, body: UnattendedBody):

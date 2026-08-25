@@ -53,11 +53,23 @@ def test_get_missing_is_none(tmp_path):
     assert _store(tmp_path).get("missing") is None
 
 
-def test_unsafe_thread_id_rejected(tmp_path):
-    s = _store(tmp_path)
+@pytest.mark.parametrize(
+    "thread_id", ["../escape", "/tmp/escape", "thread/child", r"thread\child", "%2Fescape"],
+)
+def test_unsafe_thread_id_rejected(tmp_path, thread_id):
     with pytest.raises(ValueError):
-        s._path("../escape")
+        _store(tmp_path)._path(thread_id)
 
+
+def test_thread_path_rejects_symlink_escape(tmp_path):
+    store = _store(tmp_path)
+    store._dir.mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}")
+    (store._dir / "victim.json").symlink_to(outside)
+
+    with pytest.raises(ValueError):
+        store._path("victim")
 
 def test_awaiting_reply_is_serialized(tmp_path):
     # @computed_field: awaiting_reply must appear in model_dump()/JSON, not just as a property.
@@ -185,8 +197,10 @@ def test_mutate_inbox_duplicate_restore_is_a_noop(tmp_path):
     store = _store(tmp_path)
     thread = store.create_thread("x", "body", now)
 
-    store.mutate_inbox(thread.id, "restore", "restore-1", now)
-    store.mutate_inbox(thread.id, "restore", "restore-1", now + timedelta(minutes=1))
+    _, applied = store.mutate_inbox(thread.id, "restore", "restore-1", now)
+    _, retried = store.mutate_inbox(thread.id, "restore", "restore-1", now + timedelta(minutes=1))
+    assert applied is True
+    assert retried is False
 
     saved = store.get(thread.id)
     assert saved.inbox.restored_at == now

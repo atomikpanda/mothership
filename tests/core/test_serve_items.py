@@ -95,6 +95,10 @@ def test_post_item_message_creates_and_links_thread_when_none(tmp_path):
     thread = resp.json()
     assert [m["text"] for m in thread["messages"]] == ["focus on the edge cases"]
     assert thread["subject"] == "Ship the parser"
+    assert thread["work_item_id"] == wi.id
+    assert thread["inbox_state"] == "active"
+    assert thread["archive_reason"] is None
+    assert thread["pinned"] is False
 
     # The work item is now linked to the new thread, so the console can find it.
     relinked = items.get(wi.id)
@@ -113,6 +117,8 @@ def test_post_item_message_appends_to_existing_thread(tmp_path):
     resp = client.post(f"/items/{wi.id}/messages", json={"text": "second"})
     assert resp.status_code == 200
     assert [m["text"] for m in resp.json()["messages"]] == ["first", "second"]
+    assert resp.json()["work_item_id"] == wi.id
+    assert resp.json()["inbox_state"] == "active"
     # No duplicate thread was created.
     assert items.get(wi.id).thread_ids == [thread.id]
 

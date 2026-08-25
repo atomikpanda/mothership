@@ -170,12 +170,13 @@ class SpecStore:
         action: InboxAction,
         mutation_id: str,
         now: datetime,
-    ) -> Spec:
-        """Apply one idempotent inbox mutation without changing the spec lifecycle."""
+    ) -> tuple[Spec, bool]:
+        """Apply an inbox action and report whether this request changed it."""
         with _locked(self._lock_path(spec_id)):
             spec = self.read_strict(spec_id)
             if spec is None:
                 raise KeyError(spec_id)
-            if apply_inbox_action(spec.inbox, action, mutation_id, now):
+            applied = apply_inbox_action(spec.inbox, action, mutation_id, now)
+            if applied:
                 self._save_unlocked(spec)
-            return spec
+            return spec, applied

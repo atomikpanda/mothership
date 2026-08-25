@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from mship.core.serve import create_app
 from mship.core.spec import Spec
 from mship.core.spec_store import SpecStore
-from mship.core.state import StateManager
+from mship.core.state import StateManager, Task, WorkspaceState
 
 
 def _client(tmp_path: Path) -> TestClient:
@@ -66,3 +66,25 @@ def test_spec_inbox_mutations_are_ordered_idempotent_and_non_destructive(tmp_pat
     assert client.post(f"/specs/{active.id}/inbox/archive", json={"mutation_id": " "}).status_code == 422
     assert client.post("/specs/nope/inbox/archive", json={"mutation_id": "missing-1"}).status_code == 404
     assert client.post(f"/specs/{active.id}/inbox/nope", json={"mutation_id": "bad-1"}).status_code == 422
+
+
+def test_spec_inbox_retry_does_not_repeat_task_activity(tmp_path: Path):
+    now = datetime.now(timezone.utc)
+    state = StateManager(tmp_path / ".mothership")
+    state.save(WorkspaceState(tasks={"spec-task": Task(
+        slug="spec-task", description="d", phase="dev", created_at=now,
+        affected_repos=[], branch="feat/spec-task",
+    )}))
+    active, _ = _seed(tmp_path)
+    active.task_slug = "spec-task"
+    SpecStore(tmp_path / "specs").save(active)
+    client = TestClient(create_app(
+        specs_dir=tmp_path / "specs", state_manager=state, log_manager=None,
+        workspace_root=tmp_path, workspace_name="test-ws",
+    ))
+
+    client.post("/specs/active/inbox/archive", json={"mutation_id": "device-archive"})
+    first_activity = state.load().tasks["spec-task"].last_activity_at
+    client.post("/specs/active/inbox/archive", json={"mutation_id": "device-archive"})
+
+    assert state.load().tasks["spec-task"].last_activity_at == first_activity
