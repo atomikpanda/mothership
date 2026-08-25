@@ -10,16 +10,21 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable
+
+
+def _utc(dt: datetime) -> datetime:
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 
 def _change_at(thread, include_inbox: bool) -> datetime:
     """Content time, or inbox time when a caller explicitly opts in."""
+    content_at = _utc(thread.updated_at)
     if not include_inbox:
-        return thread.updated_at
+        return content_at
     inbox_mutation = getattr(getattr(thread, "inbox", None), "last_mutated_at", None)
-    return max(thread.updated_at, inbox_mutation or thread.updated_at)
+    return max(content_at, _utc(inbox_mutation) if inbox_mutation else content_at)
 
 
 def changed_since(threads, since: datetime, *, include_inbox: bool = False):

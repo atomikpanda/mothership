@@ -223,3 +223,10 @@ def test_naive_spec_updated_at_and_restore_are_normalized_at_exact_boundaries():
 
     assert classify_spec(implemented, now=NOW).archive_reason == "implemented"
     assert classify_spec(restored, now=NOW).archive_reason == "lifecycle_archived"
+
+
+def test_naive_last_mutation_timestamp_is_normalized_before_ordering():
+    metadata = InboxMetadata(last_mutated_at=(NOW + timedelta(seconds=1)).replace(tzinfo=None))
+
+    assert apply_inbox_action(metadata, "archive", "device", NOW) is True
+    assert metadata.last_mutated_at.tzinfo == timezone.utc

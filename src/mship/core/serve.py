@@ -1138,12 +1138,11 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         try:
-            existing = store.read_strict(spec.id)
+            created = store.create_if_absent(spec)
         except SpecLocked:
             raise HTTPException(status_code=409, detail=f"spec {spec.id!r} already exists but is locked")
-        if existing is not None:
+        if not created:
             raise HTTPException(status_code=409, detail=f"spec {spec.id!r} already exists")
-        store.save(spec)
         return spec.model_dump(mode="json")
 
     @app.post("/specs/{spec_id}/draft")
@@ -1315,14 +1314,16 @@ def create_app(
 
     def _thread_inbox_links(threads, all_items=None):
         if all_items is None:
+            all_items = workitems.list_tolerant(include_archived=True)
+        from mship.core.spec_store import parse_spec
+
+        specs_by_id = {}
+        for path in _spec_storage.iter_physical():
             try:
-                all_items = list(workitems.list(include_archived=True))
+                spec = parse_spec(_spec_storage.decode_file(path))
             except Exception:
-                all_items = []
-        try:
-            specs_by_id = {spec.id: spec for spec in store.list()}
-        except Exception:
-            specs_by_id = {}
+                continue
+            specs_by_id[spec.id] = spec
         try:
             tasks_by_slug = dict(state_manager.load().tasks)
         except Exception:
@@ -1501,7 +1502,7 @@ def create_app(
         """Enrich a thread with its WorkItem and computed inbox state."""
         data = t.model_dump(mode="json")
         # include_archived=True: this is link ownership resolution, not a user-facing listing.
-        all_items = _safe(lambda: list(workitems.list(include_archived=True)), [])
+        all_items = workitems.list_tolerant(include_archived=True)
         link = _thread_inbox_links([t], all_items)[t.id]
         data["work_item_id"] = link.work_item_id
         classification = classify_thread(

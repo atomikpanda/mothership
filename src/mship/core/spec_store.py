@@ -124,6 +124,14 @@ class SpecStore:
                 spec.inbox = current.inbox
             return self._save_unlocked(spec)
 
+    def create_if_absent(self, spec: Spec) -> bool:
+        """Atomically persist a new spec; False when its id already exists."""
+        with _locked(self._lock_path(spec.id)):
+            if self.read_strict(spec.id) is not None:
+                return False
+            self._save_unlocked(spec)
+            return True
+
     def load(self, path: Path) -> Spec:
         return parse_spec(self._storage.decode_file(Path(path)))
 

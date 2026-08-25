@@ -108,14 +108,15 @@ def apply_inbox_action(
         metadata.manual_archived = True
     elif action == "restore":
         metadata.manual_archived = False
-        metadata.restored_at = now
+        metadata.restored_at = _utc(now)
     elif action == "pin":
         metadata.pinned = True
     else:
         metadata.pinned = False
+    mutation_now = _utc(now)
     metadata.last_mutated_at = max(
-        now,
-        metadata.last_mutated_at + timedelta(microseconds=1)
-        if metadata.last_mutated_at is not None else now,
+        mutation_now,
+        _utc(metadata.last_mutated_at) + timedelta(microseconds=1)
+        if metadata.last_mutated_at is not None else mutation_now,
     )
     return True

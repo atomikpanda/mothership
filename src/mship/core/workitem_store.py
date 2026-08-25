@@ -94,6 +94,20 @@ class WorkItemStore:
             items = [item for item in items if not item.archived]
         return sorted(items, key=lambda w: w.updated_at, reverse=True)
 
+    def list_tolerant(self, include_archived: bool = False) -> list[WorkItem]:
+        """Read healthy work items while allowing unrelated corrupt files to degrade."""
+        if not self._dir.is_dir():
+            return []
+        items: list[WorkItem] = []
+        for path in self._dir.glob("*.json"):
+            try:
+                items.append(WorkItem.model_validate_json(path.read_text()))
+            except Exception:
+                continue
+        if not include_archived:
+            items = [item for item in items if not item.archived]
+        return sorted(items, key=lambda item: item.updated_at, reverse=True)
+
     def create(self, title: str, kind: Kind, workspace: str, now: datetime) -> WorkItem:
         item = WorkItem(id=_new_id(now), title=title, workspace=workspace, kind=kind,
                         created_at=now, updated_at=now)

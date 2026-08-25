@@ -78,14 +78,14 @@ def register(parent: typer.Typer, get_container):
 
         path = store.path_for(spec)
         try:
-            existing = store.read_strict(spec.id)
+            if force:
+                store.save(spec)
+            elif not store.create_if_absent(spec):
+                output.error(f"Spec already exists: {path}\n  Pass --force to overwrite.")
+                raise typer.Exit(1)
         except SpecLocked:
             output.error(f"Spec {spec.id!r} already exists but is locked.")
             raise typer.Exit(1)
-        if existing is not None and not force:
-            output.error(f"Spec already exists: {path}\n  Pass --force to overwrite.")
-            raise typer.Exit(1)
-        store.save(spec)
 
         if output.human_mode:
             output.success(f"Created spec: {path}")
