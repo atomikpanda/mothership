@@ -1,8 +1,47 @@
 """Read-time resolution of a thread's related WorkItem (inverts the WorkItem link graph)."""
 from __future__ import annotations
-
+from dataclasses import dataclass
 from typing import Iterable
 
+from mship.core.view.workitem_index import compute_phase
+
+
+@dataclass(frozen=True)
+class ThreadInboxLink:
+    work_item_id: str | None
+    terminal: bool
+
+
+def index_thread_inbox_links(
+    threads: Iterable,
+    items: Iterable,
+    specs_by_id: dict,
+    tasks_by_slug: dict,
+) -> dict[str, ThreadInboxLink]:
+    """Resolve each thread's WorkItem once and derive whether that owner is done."""
+    try:
+        item_list = list(items)
+        index = _build_link_index(item_list)
+        items_by_id = {item.id: item for item in item_list}
+    except Exception:
+        return {thread.id: ThreadInboxLink(None, False) for thread in threads}
+
+    links: dict[str, ThreadInboxLink] = {}
+    for thread in threads:
+        try:
+            work_item_id = _resolve_from_index(
+                thread.id, thread.spec_id, thread.task_slug, index,
+            )
+            item = items_by_id.get(work_item_id)
+            terminal = item is not None and compute_phase(
+                item,
+                specs_by_id.get(item.spec_id) if item.spec_id else None,
+                [tasks_by_slug[slug] for slug in item.task_slugs if slug in tasks_by_slug],
+            ) == "done"
+            links[thread.id] = ThreadInboxLink(work_item_id, terminal)
+        except Exception:
+            links[thread.id] = ThreadInboxLink(None, False)
+    return links
 
 def _build_link_index(items: Iterable):
     """Build the three reverse lookups (thread_id / spec_id / task_slug -> work_item_id)

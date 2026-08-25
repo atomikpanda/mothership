@@ -49,6 +49,23 @@ def test_wait_returns_changed_when_newer_than_since(tmp_path: Path):
     assert "cursor" in body
 
 
+def test_wait_applies_inbox_and_search_filters_without_changing_cursor(tmp_path: Path):
+    client, store = _client(tmp_path)
+    updated_at = datetime.now(timezone.utc) - timedelta(days=7, seconds=1)
+    thread = store.create_thread("Needle old thread", "body", updated_at)
+    since = (updated_at - timedelta(seconds=1)).isoformat()
+
+    response = client.get("/threads", params={
+        "wait": 1, "since": since, "timeout": 0.1, "inbox": "archived", "q": "needle",
+    })
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["timed_out"] is False
+    assert [summary["id"] for summary in body["threads"]] == [thread.id]
+    assert body["cursor"] == updated_at.isoformat()
+
+
 def test_wait_times_out_with_empty_list(tmp_path: Path):
     client, _ = _client(tmp_path)
     r = client.get("/threads", params={"wait": 1, "timeout": 0.1})  # since defaults to now

@@ -67,7 +67,11 @@ def test_list_specs(tmp_path):
     _seed_spec(tmp_path)
     r = TestClient(_app(tmp_path)).get("/specs")
     assert r.status_code == 200
-    assert r.json() == [{"id": "dq", "title": "Decision queue", "status": "needs_review", "task_slug": "dq", "affected_repos": [], "locked": False}]
+    assert r.json() == [{
+        "id": "dq", "title": "Decision queue", "status": "needs_review",
+        "task_slug": "dq", "affected_repos": [], "locked": False,
+        "inbox_state": "active", "archive_reason": None, "pinned": False,
+    }]
 
 
 def test_get_spec_and_404(tmp_path):
@@ -924,6 +928,60 @@ def test_threads_404s(tmp_path):
     assert client.get("/threads/nope").status_code == 404
     assert client.post("/threads/nope/messages", json={"text": "x"}).status_code == 404
 
+
+def test_threads_filter_search_and_mutate_inbox_without_deleting_content(tmp_path):
+    now = datetime.now(timezone.utc)
+    messages = MessageStore(tmp_path / ".mothership" / "messages")
+    archived = messages.create_thread("Old discussion", "needle in history", now.replace(year=now.year - 1))
+    active = messages.create_thread("Current discussion", "needle today", now)
+    client = TestClient(_app(tmp_path))
+
+    all_threads = client.get("/threads").json()
+    assert {thread["id"] for thread in all_threads} == {archived.id, active.id}
+    assert {thread["inbox_state"] for thread in all_threads} == {"active", "archived"}
+    assert next(thread for thread in all_threads if thread["id"] == archived.id)["archive_reason"] == "inactive_unlinked"
+    assert client.get("/threads", params={"inbox": "active", "q": "needle"}).json()[0]["id"] == active.id
+    assert client.get("/threads", params={"inbox": "archived"}).json()[0]["id"] == archived.id
+    assert client.get("/threads", params={"inbox": "unknown"}).status_code == 422
+
+    first = client.post(
+        f"/threads/{active.id}/inbox/archive", json={"mutation_id": "phone-archive-1"},
+    )
+    retry = client.post(
+        f"/threads/{active.id}/inbox/archive", json={"mutation_id": "phone-archive-1"},
+    )
+    assert first.status_code == retry.status_code == 200
+    assert first.json() == retry.json()
+    assert first.json()["inbox_state"] == "archived"
+    assert client.get(f"/threads/{active.id}").json()["messages"][0]["text"] == "needle today"
+    assert client.get("/threads", params={"inbox": "all", "q": "current"}).json()[0]["id"] == active.id
+    assert client.post(f"/threads/{active.id}/inbox/pin", json={"mutation_id": "desktop-pin-1"}).json()["inbox_state"] == "active"
+    assert client.post(f"/threads/{active.id}/inbox/unpin", json={"mutation_id": "phone-unpin-1"}).json()["inbox_state"] == "archived"
+    assert client.post(f"/threads/{active.id}/inbox/restore", json={"mutation_id": "desktop-restore-1"}).json()["inbox_state"] == "active"
+    assert client.post(f"/threads/{active.id}/inbox/archive", json={"mutation_id": " "}).status_code == 422
+    assert client.post("/threads/nope/inbox/archive", json={"mutation_id": "missing-1"}).status_code == 404
+    assert client.post(f"/threads/{active.id}/inbox/nope", json={"mutation_id": "bad-1"}).status_code == 422
+
+
+
+def test_thread_linked_to_done_work_item_is_archived(tmp_path):
+    now = datetime.now(timezone.utc)
+    SpecStore(tmp_path / "specs").save(Spec(
+        id="implemented", title="Implemented", status="implemented",
+        created_at=now, updated_at=now,
+    ))
+    messages = MessageStore(tmp_path / ".mothership" / "messages")
+    thread = messages.create_thread("Linked", "content", now)
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    item = items.create("Implemented", "feature", "test-ws", now)
+    items.link_spec(item.id, "implemented", now)
+    items.add_thread(item.id, thread.id, now)
+
+    summary = TestClient(_app(tmp_path)).get("/threads", params={"inbox": "archived"}).json()[0]
+
+    assert summary["id"] == thread.id
+    assert summary["inbox_state"] == "archived"
+    assert summary["archive_reason"] == "linked_terminal"
 
 def test_threads_explicit_subject(tmp_path):
     client = TestClient(_app(tmp_path))

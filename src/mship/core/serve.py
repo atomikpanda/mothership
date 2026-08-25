@@ -9,9 +9,9 @@ import time as _time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 # The only fastapi names imported at MODULE scope, and they have to be: this
 # module is `from __future__ import annotations`, so a handler's annotations are
@@ -32,7 +32,8 @@ from mship.core.spec_transition import (
     approve_spec,
     request_changes_spec,
 )
-from mship.core.view.thread_links import index_thread_work_items
+from mship.core.inbox import InboxAction, classify_spec, classify_thread
+from mship.core.view.thread_links import index_thread_inbox_links
 from mship.core.workitem import Phase
 from mship.util.shell import ShellRunner
 
@@ -113,6 +114,17 @@ class CaptureBody(BaseModel):
 
 class SeenBody(BaseModel):
     seen_at: str | None = None
+
+
+class InboxMutationBody(BaseModel):
+    mutation_id: str
+
+    @field_validator("mutation_id")
+    @classmethod
+    def validate_mutation_id(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("mutation_id must not be blank")
+        return value
 
 
 class UnattendedBody(BaseModel):
@@ -525,42 +537,23 @@ def create_app(
 
     from mship.core.spec_review import build_review
 
-    @app.get("/specs")
-    def list_specs():
-        out = []
-        for spec, locked_id, _path in _spec_storage.read_all():
-            if spec is None:
-                # Encrypted spec, no key on this host: surface a LOCKED marker so
-                # Ground Control can show it without ever leaking ciphertext.
-                out.append({
-                    "id": locked_id, "locked": True, "status": "locked",
-                    "title": None, "task_slug": None, "affected_repos": [],
-                })
-            else:
-                out.append({
-                    "id": spec.id, "title": spec.title, "status": spec.status,
-                    "task_slug": spec.task_slug, "affected_repos": spec.affected_repos,
-                    "locked": False,
-                })
-        return out
+    def _matches_inbox_filter(payload: dict, inbox: Literal["active", "archived", "all"]) -> bool:
+        return inbox == "all" or payload["inbox_state"] == inbox
 
-    @app.get("/specs/{spec_id}")
-    def get_spec(spec_id: str):
-        # Resolve via the LOCKED-aware seam (not store.find_by_id, which loads
-        # EVERY file and would raise on a sibling locked spec — making a coexisting
-        # plaintext spec unreachable). A locked match returns a marker (200), not
-        # ciphertext and not a 500.
-        spec = None
-        for candidate, locked_id, _path in _spec_storage.read_all():
-            if candidate is None:
-                if locked_id == spec_id:
-                    return {"id": spec_id, "locked": True, "status": "locked"}
-                continue
-            if candidate.id == spec_id:
-                spec = candidate
-                break
-        if spec is None:
-            raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
+    def _matches_search(query: str | None, *values: str | None) -> bool:
+        if not query:
+            return True
+        needle = query.casefold()
+        return any(needle in (value or "").casefold() for value in values)
+
+    def _stamp_spec_inbox(payload: dict, spec, now: datetime) -> dict:
+        classification = classify_spec(spec, now=now)
+        payload["inbox_state"] = classification.state
+        payload["archive_reason"] = classification.archive_reason
+        payload["pinned"] = spec.inbox.pinned
+        return payload
+
+    def _spec_payload(spec, now: datetime | None = None) -> dict:
         data = spec.model_dump(mode="json")
         data["locked"] = False
         # Resolve the linked WorkItem's kind (feature/bug/chore) so the Queue review cards can show
@@ -573,8 +566,70 @@ def create_app(
                 wi = workitems.get(spec.work_item_id)
                 data["work_item_kind"] = wi.kind if wi is not None else None
             except Exception:
-                data["work_item_kind"] = None
-        return data
+                pass
+        return _stamp_spec_inbox(data, spec, now or datetime.now(timezone.utc))
+
+    @app.get("/specs")
+    def list_specs(
+        inbox: Literal["active", "archived", "all"] = "all",
+        q: str | None = None,
+    ):
+        now = datetime.now(timezone.utc)
+        out = []
+        for spec, locked_id, _path in _spec_storage.read_all():
+            if spec is None:
+                # Encrypted spec, no key on this host: surface a LOCKED marker so
+                # Ground Control can show it without ever leaking ciphertext.
+                payload = {
+                    "id": locked_id, "locked": True, "status": "locked",
+                    "title": None, "task_slug": None, "affected_repos": [],
+                    "inbox_state": "active", "archive_reason": None, "pinned": False,
+                }
+            else:
+                payload = _stamp_spec_inbox({
+                    "id": spec.id, "title": spec.title, "status": spec.status,
+                    "task_slug": spec.task_slug, "affected_repos": spec.affected_repos,
+                    "locked": False,
+                }, spec, now)
+            if (_matches_inbox_filter(payload, inbox)
+                    and _matches_search(q, payload["id"], payload["title"])):
+                out.append(payload)
+        return out
+
+    @app.get("/specs/{spec_id}")
+    def get_spec(spec_id: str):
+        # Resolve via the LOCKED-aware seam (not store.find_by_id, which loads
+        # EVERY file and would raise on a sibling locked spec — making a coexisting
+        # plaintext spec unreachable). A locked match returns a marker (200), not
+        # ciphertext and not a 500.
+        spec = None
+        for candidate, locked_id, _path in _spec_storage.read_all():
+            if candidate is None:
+                if locked_id == spec_id:
+                    return {
+                        "id": spec_id, "locked": True, "status": "locked",
+                        "inbox_state": "active", "archive_reason": None, "pinned": False,
+                    }
+                continue
+            if candidate.id == spec_id:
+                spec = candidate
+                break
+        if spec is None:
+            raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
+        return _spec_payload(spec)
+
+    @app.post("/specs/{spec_id}/inbox/{action}")
+    def post_spec_inbox_action(spec_id: str, action: InboxAction, body: InboxMutationBody):
+        now = datetime.now(timezone.utc)
+        try:
+            spec = store.mutate_inbox(spec_id, action, body.mutation_id, now)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        if spec.task_slug:
+            state_manager.record_activity(spec.task_slug, now)
+        return _spec_payload(spec, now)
 
     @app.get("/specs/{spec_id}/review")
     def get_review(spec_id: str):
@@ -1246,42 +1301,69 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
         return _thread_payload(t)
 
-    def _summaries(threads):
-        threads = list(threads)
-        # Stamp each summary with the single WorkItem that owns the thread (direct thread_ids
-        # membership, else indirect via spec_id/task_slug) so Ground Control can group the
-        # messages surface by work item. Invariant: a thread resolves to AT MOST ONE item.
-        # include_archived=True: link ownership survives archival (mirrors _thread_payload's
-        # resolution). Best-effort — a corrupt WorkItem must never 500 the list, so the store
-        # scan is guarded and index_thread_work_items degrades to None, matching get_spec's
-        # work_item_kind stamping.
+    def _thread_inbox_links(threads, all_items=None):
+        if all_items is None:
+            try:
+                all_items = list(workitems.list(include_archived=True))
+            except Exception:
+                all_items = []
         try:
-            all_items = list(workitems.list(include_archived=True))
+            specs_by_id = {spec.id: spec for spec in store.list()}
         except Exception:
-            all_items = []
-        wi_by_thread = index_thread_work_items(threads, all_items)
+            specs_by_id = {}
+        try:
+            tasks_by_slug = dict(state_manager.load().tasks)
+        except Exception:
+            tasks_by_slug = {}
+        return index_thread_inbox_links(threads, all_items, specs_by_id, tasks_by_slug)
+
+    def _summaries(threads, now: datetime | None = None):
+        threads = list(threads)
+        now = now or datetime.now(timezone.utc)
+        links_by_thread = _thread_inbox_links(threads)
+        summaries = []
+        for thread in threads:
+            link = links_by_thread[thread.id]
+            classification = classify_thread(
+                thread, linked=link.work_item_id is not None,
+                linked_terminal=link.terminal, now=now,
+            )
+            summaries.append({
+                "id": thread.id, "subject": thread.subject,
+                "updated_at": thread.updated_at.isoformat(),
+                "awaiting_reply": thread.awaiting_reply,
+                # Unhandled agent event (e.g. a PR merge) feeds GC's group attention rollup.
+                "awaiting_agent_event": thread.awaiting_agent_event,
+                "needs_you": thread.needs_you,
+                "needs_decision": thread.needs_decision,
+                "unseen": thread.unseen,
+                "agent_seen_at": thread.agent_seen_at.isoformat() if thread.agent_seen_at else None,
+                "last_message": thread.messages[-1].text[:120] if thread.messages else "",
+                "message_count": len(thread.messages),
+                "work_item_id": link.work_item_id,
+                "inbox_state": classification.state,
+                "archive_reason": classification.archive_reason,
+                "pinned": thread.inbox.pinned,
+            })
+        return summaries
+
+    def _filtered_summaries(threads, inbox: Literal["active", "archived", "all"], q: str | None):
         return [
-            {
-                "id": t.id, "subject": t.subject,
-                "updated_at": t.updated_at.isoformat(),
-                "awaiting_reply": t.awaiting_reply,
-                # unhandled agent `event` (e.g. a PR merge) — feeds GC's group attention rollup.
-                "awaiting_agent_event": t.awaiting_agent_event,
-                "needs_you": t.needs_you,
-                "needs_decision": t.needs_decision,
-                "unseen": t.unseen,
-                "agent_seen_at": t.agent_seen_at.isoformat() if t.agent_seen_at else None,
-                "last_message": (t.messages[-1].text[:120] if t.messages else ""),
-                "message_count": len(t.messages),
-                "work_item_id": wi_by_thread.get(t.id),
-            }
-            for t in threads
+            summary for summary in _summaries(threads)
+            if (_matches_inbox_filter(summary, inbox)
+                and _matches_search(q, summary["subject"], summary["last_message"]))
         ]
 
     @app.get("/threads")
-    async def list_threads(wait: int = 0, since: Optional[str] = None, timeout: float = 25.0):
+    async def list_threads(
+        wait: int = 0,
+        since: Optional[str] = None,
+        timeout: float = 25.0,
+        inbox: Literal["active", "archived", "all"] = "all",
+        q: str | None = None,
+    ):
         if not wait:
-            return _summaries(msgs.list())
+            return _filtered_summaries(msgs.list(), inbox, q)
         from mship.core.message_wait import changed_since
         timeout = max(0.0, min(timeout, 30.0))  # cap for the relay idle-read timeout
         try:
@@ -1294,12 +1376,26 @@ def create_app(
         deadline = _time.monotonic() + timeout
         while True:
             changed, cursor = changed_since(msgs.list(), since_dt)
-            if changed:
-                return {"threads": _summaries(changed), "cursor": cursor.isoformat(), "timed_out": False}
+            threads = _filtered_summaries(changed, inbox, q)
+            if threads:
+                return {"threads": threads, "cursor": cursor.isoformat(), "timed_out": False}
             remaining = deadline - _time.monotonic()
             if remaining <= 0:
                 return {"threads": [], "cursor": cursor.isoformat(), "timed_out": True}
             await asyncio.sleep(min(interval, remaining))
+
+    @app.post("/threads/{thread_id}/inbox/{action}")
+    def post_thread_inbox_action(thread_id: str, action: InboxAction, body: InboxMutationBody):
+        now = datetime.now(timezone.utc)
+        try:
+            thread = msgs.mutate_inbox(thread_id, action, body.mutation_id, now)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        if thread.task_slug:
+            state_manager.record_activity(thread.task_slug, now)
+        return _thread_payload(thread, now)
 
     @app.get("/threads/{thread_id}")
     def get_thread(thread_id: str):
@@ -1309,10 +1405,7 @@ def create_app(
         return _thread_payload(t)
 
     # --- work items (phase-aware cockpit spine) ---
-    # `workitems` and `_item_msg_lock` are defined earlier (see comment above
-    # `_lifespan`).
     from mship.core.view.workitem_index import build_workitem_index
-    from mship.core.view.thread_links import resolve_thread_work_item
     from mship.core.view.entity_links import linkify_entities
 
     # Serializes POST /specs/{id}/dispatch. Same threadpool hazard as above: two
@@ -1363,30 +1456,24 @@ def create_app(
             include_archived=True,
         )[0]
 
-    def _thread_payload(t):
-        """Enrich a thread's dumped dict with the WorkItem it's related to (read-time
-        inversion of the WorkItem link graph — see thread_links.resolve_thread_work_item)
-        and auto-linkify native entity refs (wi-/spec/task ids) in agent message text
-        (see entity_links.linkify_entities). Human messages are left untouched — the
-        linkifier only rewrites text the agent produced. Shared by every handler that
-        returns a full thread: GET /threads/{id}, POST /threads, POST /threads/{id}/messages,
-        POST /threads/{id}/seen. The GET /threads list/summary endpoint is unaffected."""
+    def _thread_payload(t, now: datetime | None = None):
+        """Enrich a thread with its WorkItem and computed inbox state."""
         data = t.model_dump(mode="json")
-        # include_archived=True: this is link/ownership resolution (which WorkItem does
-        # this thread belong to?), not a user-facing listing. A thread stays linked to its
-        # WorkItem after that item is archived (MOS-228 T3), so resolving with the default
-        # archived-excluding list() would wrongly report work_item_id=null here. The
-        # user-facing filter still applies at GET /items (_workitem_index above) and
-        # `item list` — only this internal resolution needs the full set.
-        # Best-effort scans (one corrupt/forward-incompatible workitem/spec file must not 500 the
-        # thread read paths — mirrors _summaries' guard; the thread itself still resolves).
-        all_items = _safe(lambda: list(workitems.list(include_archived=True)), [])  # reused below
-        wi_id = resolve_thread_work_item(t.id, t.spec_id, t.task_slug, all_items)
-        data["work_item_id"] = wi_id
-        if wi_id is None:
+        # include_archived=True: this is link ownership resolution, not a user-facing listing.
+        all_items = _safe(lambda: list(workitems.list(include_archived=True)), [])
+        link = _thread_inbox_links([t], all_items)[t.id]
+        data["work_item_id"] = link.work_item_id
+        classification = classify_thread(
+            t, linked=link.work_item_id is not None, linked_terminal=link.terminal,
+            now=now or datetime.now(timezone.utc),
+        )
+        data["inbox_state"] = classification.state
+        data["archive_reason"] = classification.archive_reason
+        data["pinned"] = t.inbox.pinned
+        if link.work_item_id is None:
             data["work_item"] = None
         else:
-            summ = _summarize_item(wi_id)
+            summ = _summarize_item(link.work_item_id)
             data["work_item"] = None if summ is None else {
                 "id": summ.id, "title": summ.title, "kind": summ.kind, "phase": summ.phase,
             }
