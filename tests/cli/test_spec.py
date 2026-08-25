@@ -6,6 +6,9 @@ import pytest
 from typer.testing import CliRunner
 
 from mship.cli import app, container
+from mship.core import spec_key
+from mship.core.spec import Spec
+from mship.core.spec_storage import SpecStorage
 from mship.core.spec_store import SpecStore
 from mship.core.state import StateManager, Task, WorkspaceState
 
@@ -100,6 +103,25 @@ def test_spec_new_refuses_existing(configured_app_with_task: Path):
     assert result.exit_code != 0
     assert "exists" in result.output.lower() or "already" in result.output.lower()
 
+
+
+def test_spec_new_refuses_duplicate_locked_spec(configured_app_with_task: Path):
+    workspace = configured_app_with_task
+    (workspace / "mothership.yaml").write_text(
+        "workspace: test\nrepos: {}\nspec_storage: encrypted\n",
+    )
+    now = datetime.now(timezone.utc)
+    encrypted = SpecStorage(workspace / "specs", mode="encrypted", workspace_root=workspace)
+    SpecStore(workspace / "specs", storage=encrypted).save(Spec(
+        id="locked-spec", title="Locked", status="draft", created_at=now, updated_at=now,
+    ))
+    spec_key.keyfile_path(workspace).unlink()
+    container.config.reset()
+
+    result = runner.invoke(app, ["spec", "new", "--id", "locked-spec", "--title", "Replacement"])
+
+    assert result.exit_code != 0
+    assert "locked" in result.output.lower()
 
 def test_spec_new_force_overwrites(configured_app_with_task: Path):
     runner.invoke(app, ["spec", "new", "--title", "Add labels"])

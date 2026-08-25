@@ -205,3 +205,21 @@ def test_new_inbox_action_stamps_change_once_and_retry_preserves_it():
 
     assert apply_inbox_action(metadata, "archive", "device-1", first + timedelta(seconds=1)) is False
     assert metadata.last_mutated_at == first
+
+
+def test_naive_thread_updated_at_is_normalized_for_exact_inactivity_boundary():
+    thread = _thread(updated_at=(NOW - SEVEN_DAYS).replace(tzinfo=None))
+
+    result = classify_thread(thread, linked=False, linked_terminal=False, now=NOW)
+
+    assert (result.state, result.archive_reason) == ("archived", "inactive_unlinked")
+
+
+def test_naive_spec_updated_at_and_restore_are_normalized_at_exact_boundaries():
+    implemented = _spec(status="implemented", updated_at=(NOW - SEVEN_DAYS).replace(tzinfo=None))
+    restored = _spec(status="archived", inbox=InboxMetadata(
+        restored_at=(NOW - SEVEN_DAYS).replace(tzinfo=None),
+    ))
+
+    assert classify_spec(implemented, now=NOW).archive_reason == "implemented"
+    assert classify_spec(restored, now=NOW).archive_reason == "lifecycle_archived"

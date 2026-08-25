@@ -54,12 +54,18 @@ def test_get_missing_is_none(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "thread_id", ["../escape", "/tmp/escape", "thread/child", r"thread\child", "%2Fescape"],
+    "thread_id", ["../escape", "/tmp/escape", "thread/child", r"thread\child"],
 )
 def test_unsafe_thread_id_rejected(tmp_path, thread_id):
     with pytest.raises(ValueError):
         _store(tmp_path)._path(thread_id)
 
+
+
+
+def test_legacy_safe_thread_id_remains_valid(tmp_path):
+    path = _store(tmp_path)._path("legacy%2Fthread id")
+    assert path.name == "legacy%2Fthread id.json"
 
 def test_thread_path_rejects_symlink_escape(tmp_path):
     store = _store(tmp_path)

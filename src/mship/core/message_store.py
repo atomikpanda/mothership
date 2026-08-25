@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import fcntl
-import re
 import tempfile
 import uuid
 from contextlib import contextmanager
@@ -45,9 +44,10 @@ class MessageStore:
         self._dir = Path(messages_dir)
 
     def _path(self, thread_id: str) -> Path:
-        # Thread IDs cross the HTTP boundary, so prove both a strict component
-        # grammar and resolved containment before using one as a filesystem path.
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", thread_id):
+        # Preserve historical IDs (anything except separators/hidden components)
+        # while proving resolved direct-child containment at the filesystem edge.
+        if (not thread_id or "/" in thread_id or "\\" in thread_id
+                or thread_id in (".", "..") or thread_id.startswith(".")):
             raise ValueError(f"unsafe thread id: {thread_id!r}")
         base = self._dir.resolve()
         path = (base / f"{thread_id}.json").resolve()

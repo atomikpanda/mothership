@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from mship.core import spec_key
@@ -57,6 +58,14 @@ def test_serve_shows_locked_state_without_key(tmp_path: Path):
     assert "gAAAA" not in str(body)
 
 
+@pytest.mark.parametrize("inbox", ["active", "archived"])
+def test_serve_excludes_locked_specs_from_explicit_inbox_filters(tmp_path: Path, inbox: str):
+    _write_encrypted_spec(tmp_path)
+    spec_key.keyfile_path(tmp_path).unlink()
+
+    assert _client(tmp_path).get("/specs", params={"inbox": inbox}).json() == []
+
+
 def test_serve_get_locked_spec_returns_marker_not_error(tmp_path: Path):
     _write_encrypted_spec(tmp_path)
     spec_key.keyfile_path(tmp_path).unlink()
@@ -78,3 +87,13 @@ def test_serve_rejects_inbox_mutation_for_locked_spec_without_leaking_content(tm
     assert response.status_code == 409
     assert "locked" in response.json()["detail"]
     assert "SECRET" not in response.text
+
+
+def test_serve_create_refuses_duplicate_locked_spec_as_conflict(tmp_path: Path):
+    _write_encrypted_spec(tmp_path)
+    spec_key.keyfile_path(tmp_path).unlink()
+
+    response = _client(tmp_path).post("/specs", json={"id": "locked-one", "title": "Replacement"})
+
+    assert response.status_code == 409
+    assert "locked" in response.json()["detail"]

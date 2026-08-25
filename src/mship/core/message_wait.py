@@ -14,19 +14,21 @@ from datetime import datetime
 from typing import Callable
 
 
-def _change_at(thread) -> datetime:
-    """Mailbox content or inbox mutation time, whichever is newer."""
+def _change_at(thread, include_inbox: bool) -> datetime:
+    """Content time, or inbox time when a caller explicitly opts in."""
+    if not include_inbox:
+        return thread.updated_at
     inbox_mutation = getattr(getattr(thread, "inbox", None), "last_mutated_at", None)
     return max(thread.updated_at, inbox_mutation or thread.updated_at)
 
 
-def changed_since(threads, since: datetime):
+def changed_since(threads, since: datetime, *, include_inbox: bool = False):
     """Return changed threads and the monotonic high-water change cursor.
 
-    Inbox mutations are durable mailbox changes but deliberately do not alter
-    ``Thread.updated_at`` (which remains the content ordering timestamp).
+    Agent mailbox waits retain content-only semantics by default. The serve
+    inbox surface opts into durable inbox mutations explicitly.
     """
-    change_times = [(thread, _change_at(thread)) for thread in threads]
+    change_times = [(thread, _change_at(thread, include_inbox)) for thread in threads]
     changed = [thread for thread, change_at in change_times if change_at > since]
     cursor = max([since, *(change_at for _, change_at in change_times)])
     return changed, cursor
@@ -74,8 +76,7 @@ def wait_for_change(
 ) -> WaitResult:
     """Block until `load_fn()` yields a thread changed since `since` that also
     satisfies `predicate` (default: any change), or `timeout` seconds elapse.
-    The cursor always advances to the latest content or inbox-mutation change,
-    even on timeout."""
+    The cursor always advances to the latest selected change, even on timeout."""
     deadline = now_fn() + timeout
     while True:
         changed, cursor = changed_since(load_fn(), since)

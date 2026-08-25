@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
@@ -34,8 +34,16 @@ class InboxClassification(BaseModel):
     archive_reason: InboxArchiveReason | None = None
 
 
+def _utc(dt: datetime) -> datetime:
+    """Interpret legacy naive persisted timestamps as UTC."""
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
 def _restore_is_effective(metadata: InboxMetadata, now: datetime) -> bool:
-    return metadata.restored_at is not None and now - metadata.restored_at < _SEVEN_DAYS
+    return (
+        metadata.restored_at is not None
+        and _utc(now) - _utc(metadata.restored_at) < _SEVEN_DAYS
+    )
 
 
 def classify_thread(
@@ -55,7 +63,7 @@ def classify_thread(
         return InboxClassification(state="active")
     if linked and linked_terminal:
         return InboxClassification(state="archived", archive_reason="linked_terminal")
-    if not linked and now - thread.updated_at >= _SEVEN_DAYS:
+    if not linked and _utc(now) - _utc(thread.updated_at) >= _SEVEN_DAYS:
         return InboxClassification(state="archived", archive_reason="inactive_unlinked")
     return InboxClassification(state="active")
 
@@ -71,7 +79,10 @@ def classify_spec(spec: Spec, *, now: datetime) -> InboxClassification:
         return InboxClassification(state="active")
     if spec.status == "archived":
         return InboxClassification(state="archived", archive_reason="lifecycle_archived")
-    if spec.status == "implemented" and now - spec.updated_at >= _SEVEN_DAYS:
+    if (
+        spec.status == "implemented"
+        and _utc(now) - _utc(spec.updated_at) >= _SEVEN_DAYS
+    ):
         return InboxClassification(state="archived", archive_reason="implemented")
     return InboxClassification(state="active")
 

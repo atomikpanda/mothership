@@ -74,8 +74,15 @@ def register(parent: typer.Typer, get_container):
         except ValueError:
             output.error("Could not derive a spec id from the title; pass --id explicitly.")
             raise typer.Exit(1)
+        from mship.core.spec_storage import SpecLocked
+
         path = store.path_for(spec)
-        if path.exists() and not force:
+        try:
+            existing = store.read_strict(spec.id)
+        except SpecLocked:
+            output.error(f"Spec {spec.id!r} already exists but is locked.")
+            raise typer.Exit(1)
+        if existing is not None and not force:
             output.error(f"Spec already exists: {path}\n  Pass --force to overwrite.")
             raise typer.Exit(1)
         store.save(spec)

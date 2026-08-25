@@ -578,12 +578,14 @@ def create_app(
         out = []
         for spec, locked_id, _path in _spec_storage.read_all():
             if spec is None:
-                # Encrypted spec, no key on this host: surface a LOCKED marker so
-                # Ground Control can show it without ever leaking ciphertext.
+                # Encrypted spec, no key on this host: surface a LOCKED marker only
+                # in the unfiltered view. It has no plaintext metadata to classify.
+                if inbox != "all":
+                    continue
                 payload = {
                     "id": locked_id, "locked": True, "status": "locked",
                     "title": None, "task_slug": None, "affected_repos": [],
-                    "inbox_state": "active", "archive_reason": None, "pinned": False,
+                    "inbox_state": None, "archive_reason": None, "pinned": False,
                 }
             else:
                 payload = _stamp_spec_inbox({
@@ -608,7 +610,7 @@ def create_app(
                 if locked_id == spec_id:
                     return {
                         "id": spec_id, "locked": True, "status": "locked",
-                        "inbox_state": "active", "archive_reason": None, "pinned": False,
+                        "inbox_state": None, "archive_reason": None, "pinned": False,
                     }
                 continue
             if candidate.id == spec_id:
@@ -1125,15 +1127,21 @@ def create_app(
 
     @app.post("/specs")
     def post_create_spec(body: NewSpecBody):
+        from mship.core.spec_storage import SpecLocked
+
         now = datetime.now(timezone.utc)
         try:
             spec = new_spec(
                 body.title, now=now, spec_id=body.id,
                 affected_repos=body.affected_repos, task_slug=body.task_slug,
             )
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        if store.find_by_id(spec.id) is not None:
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        try:
+            existing = store.read_strict(spec.id)
+        except SpecLocked:
+            raise HTTPException(status_code=409, detail=f"spec {spec.id!r} already exists but is locked")
+        if existing is not None:
             raise HTTPException(status_code=409, detail=f"spec {spec.id!r} already exists")
         store.save(spec)
         return spec.model_dump(mode="json")
@@ -1279,12 +1287,12 @@ def create_app(
         now = datetime.now(timezone.utc)
         try:
             msgs.append(thread_id, "human", body.text, now)
-        except KeyError:
+            thread = msgs.get(thread_id)
+        except (KeyError, ValueError):
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
-        t = msgs.get(thread_id)
-        if t is None:
+        if thread is None:
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
-        return _thread_payload(t)
+        return _thread_payload(thread)
 
     @app.post("/threads/{thread_id}/seen")
     def post_seen(thread_id: str, body: SeenBody):
@@ -1300,10 +1308,10 @@ def create_app(
         else:
             seen_dt = datetime.now(timezone.utc)
         try:
-            t = msgs.mark_seen(thread_id, seen_dt)
-        except KeyError:
+            thread = msgs.mark_seen(thread_id, seen_dt)
+        except (KeyError, ValueError):
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
-        return _thread_payload(t)
+        return _thread_payload(thread)
 
     def _thread_inbox_links(threads, all_items=None):
         if all_items is None:
@@ -1388,7 +1396,7 @@ def create_app(
         interval = 1.0
         deadline = _time.monotonic() + timeout
         while True:
-            changed, cursor = changed_since(msgs.list(), since_dt)
+            changed, cursor = changed_since(msgs.list(), since_dt, include_inbox=True)
             summaries = _summaries(changed)
             threads = [
                 summary for summary in summaries
@@ -1429,10 +1437,13 @@ def create_app(
 
     @app.get("/threads/{thread_id}")
     def get_thread(thread_id: str):
-        t = msgs.get(thread_id)
-        if t is None:
+        try:
+            thread = msgs.get(thread_id)
+        except ValueError:
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
-        return _thread_payload(t)
+        if thread is None:
+            raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
+        return _thread_payload(thread)
 
     # --- work items (phase-aware cockpit spine) ---
     from mship.core.view.workitem_index import build_workitem_index
