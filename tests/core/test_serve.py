@@ -939,7 +939,8 @@ def test_threads_404s(tmp_path):
     ],
 )
 def test_unsafe_thread_ids_are_controlled_4xx(tmp_path, method, path, body):
-    response = getattr(TestClient(_app(tmp_path)), method)(path, json=body)
+    client = TestClient(_app(tmp_path))
+    response = client.get(path) if method == "get" else client.post(path, json=body)
     assert 400 <= response.status_code < 500
 
 def test_threads_filter_search_and_mutate_inbox_without_deleting_content(tmp_path):
