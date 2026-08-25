@@ -18,6 +18,9 @@
     },
     "pylsp": {
       "disabled": true
+    },
+    "ty": {
+      "disabled": true
     }
   }
 }
