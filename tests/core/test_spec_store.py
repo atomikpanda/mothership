@@ -140,3 +140,85 @@ def test_path_for_rejects_unsafe_id(tmp_path: Path):
     bad.id = "../escape"
     with pytest.raises(ValueError):
         store.save(bad)
+
+
+def test_mutate_inbox_duplicate_restore_is_a_noop(tmp_path: Path):
+    now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
+    store = SpecStore(tmp_path / "specs")
+    spec = _new_spec("alpha")
+    store.save(spec)
+
+    store.mutate_inbox(spec.id, "restore", "restore-1", now)
+    store.mutate_inbox(spec.id, "restore", "restore-1", now.replace(minute=1))
+
+    saved = store.find_by_id(spec.id)
+    assert saved.inbox.restored_at == now
+    assert saved.inbox.mutation_ids == {"restore-1": "restore"}
+
+
+def test_mutate_inbox_commits_spec_actions_in_order(tmp_path: Path):
+    now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
+    store = SpecStore(tmp_path / "specs")
+    archive_then_restore = _new_spec("one")
+    restore_then_archive = _new_spec("two")
+    store.save(archive_then_restore)
+    store.save(restore_then_archive)
+
+    store.mutate_inbox(archive_then_restore.id, "archive", "archive-1", now)
+    store.mutate_inbox(archive_then_restore.id, "restore", "restore-1", now.replace(minute=1))
+    store.mutate_inbox(restore_then_archive.id, "restore", "restore-2", now)
+    store.mutate_inbox(restore_then_archive.id, "archive", "archive-2", now.replace(minute=1))
+
+    assert store.find_by_id(archive_then_restore.id).inbox.manual_archived is False
+    assert store.find_by_id(restore_then_archive.id).inbox.manual_archived is True
+
+
+def test_mutate_inbox_pin_unpin_preserves_spec_manual_and_restore_metadata(tmp_path: Path):
+    now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
+    store = SpecStore(tmp_path / "specs")
+    spec = _new_spec("alpha")
+    store.save(spec)
+
+    store.mutate_inbox(spec.id, "restore", "restore-1", now)
+    store.mutate_inbox(spec.id, "archive", "archive-1", now.replace(minute=1))
+    store.mutate_inbox(spec.id, "pin", "pin-1", now.replace(minute=2))
+    store.mutate_inbox(spec.id, "unpin", "unpin-1", now.replace(minute=3))
+
+    inbox = store.find_by_id(spec.id).inbox
+    assert inbox.pinned is False
+    assert inbox.manual_archived is True
+    assert inbox.restored_at == now
+
+
+def test_mutate_inbox_does_not_change_spec_domain_content_or_lifecycle(tmp_path: Path):
+    store = SpecStore(tmp_path / "specs")
+    spec = _new_spec("alpha")
+    spec.status = "implemented"
+    store.save(spec)
+    before = spec.model_dump(exclude={"inbox"})
+
+    store.mutate_inbox(spec.id, "archive", "archive-1", datetime(2026, 8, 25, tzinfo=timezone.utc))
+
+    assert store.find_by_id(spec.id).model_dump(exclude={"inbox"}) == before
+
+
+@pytest.mark.parametrize("action", ["unknown", ""])
+def test_mutate_inbox_rejects_unknown_spec_action(tmp_path: Path, action: str):
+    now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
+    store = SpecStore(tmp_path / "specs")
+    spec = _new_spec("alpha")
+    store.save(spec)
+
+    with pytest.raises(ValueError):
+        store.mutate_inbox(spec.id, action, "action-1", now)
+
+
+def test_mutate_inbox_rejects_conflicting_spec_mutation_identity(tmp_path: Path):
+    now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
+    store = SpecStore(tmp_path / "specs")
+    spec = _new_spec("alpha")
+    store.save(spec)
+    store.mutate_inbox(spec.id, "archive", "mutation-1", now)
+
+    with pytest.raises(ValueError):
+        store.mutate_inbox(spec.id, "restore", "mutation-1", now.replace(minute=1))

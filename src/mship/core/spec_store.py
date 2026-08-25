@@ -1,12 +1,31 @@
 from __future__ import annotations
 
-import yaml
+import fcntl
+from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
+
+import yaml
 from pydantic import ValidationError
+
+from mship.core.inbox import InboxAction, apply_inbox_action
+
 
 from mship.core.spec import Spec
 
 SPECS_DIRNAME = "specs"  # canonical name of the workspace-level specs directory
+
+
+@contextmanager
+def _locked(lock_path: Path):
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.touch(exist_ok=True)
+    with open(lock_path, "r+") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 class SpecParseError(Exception):
@@ -73,6 +92,16 @@ class SpecStore:
         (view/actions.py's LogManager) don't restate the convention."""
         return self._storage.workspace_root
 
+    def _validate_id(self, spec_id: str) -> None:
+        if (not spec_id or "/" in spec_id or "\\" in spec_id
+                or spec_id in (".", "..") or spec_id.startswith(".")):
+            raise ValueError(f"unsafe spec id for filename: {spec_id!r}")
+
+    def _lock_path(self, spec_id: str) -> Path:
+        """Per-spec lock that is independent of the storage mode's physical path."""
+        self._validate_id(spec_id)
+        return self._dir / f".{spec_id}.inbox.lock"
+
     def path_for(self, spec: Spec) -> Path:
         """Logical `.md` stem for a spec: `<specs_dir>/<created_at date>-<id>.md`.
 
@@ -80,8 +109,7 @@ class SpecStore:
         the storage layer at write time. Saving again with the same id + creation
         date overwrites the file (this is the intended update mechanism).
         """
-        if not spec.id or "/" in spec.id or "\\" in spec.id or spec.id in (".", "..") or spec.id.startswith("."):
-            raise ValueError(f"unsafe spec id for filename: {spec.id!r}")
+        self._validate_id(spec.id)
         return self._dir / f"{spec.created_at:%Y-%m-%d}-{spec.id}.md"
 
     def save(self, spec: Spec) -> Path:
@@ -126,3 +154,19 @@ class SpecStore:
             if spec_id_from_filename(path) == spec_id:
                 return parse_spec(self._storage.decode_file(path))
         return None
+
+    def mutate_inbox(
+        self,
+        spec_id: str,
+        action: InboxAction,
+        mutation_id: str,
+        now: datetime,
+    ) -> Spec:
+        """Apply one idempotent inbox mutation without changing the spec lifecycle."""
+        with _locked(self._lock_path(spec_id)):
+            spec = self.read_strict(spec_id)
+            if spec is None:
+                raise KeyError(spec_id)
+            if apply_inbox_action(spec.inbox, action, mutation_id, now):
+                self.save(spec)
+            return spec

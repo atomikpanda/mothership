@@ -8,6 +8,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from mship.core.inbox import InboxAction, apply_inbox_action
+
+
 from mship.core.message import DecisionPayload, Message, Thread
 
 
@@ -109,6 +112,22 @@ class MessageStore:
             thread.updated_at = now
             self.save(thread)
             return msg
+
+    def mutate_inbox(
+        self,
+        thread_id: str,
+        action: InboxAction,
+        mutation_id: str,
+        now: datetime,
+    ) -> Thread:
+        """Apply one idempotent inbox mutation without changing thread content."""
+        with _locked(self._lock_path(thread_id), fcntl.LOCK_EX):
+            thread = self.get(thread_id)
+            if thread is None:
+                raise KeyError(thread_id)
+            if apply_inbox_action(thread.inbox, action, mutation_id, now):
+                self.save(thread)
+            return thread
 
     def mark_seen(self, thread_id: str, seen_at: datetime) -> Thread:
         """Advance the operator's read cursor (monotonic — never regresses).

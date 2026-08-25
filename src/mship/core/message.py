@@ -3,7 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, computed_field, model_validator
+from pydantic import BaseModel, Field, computed_field, model_validator
+
+
+from mship.core.inbox import InboxMetadata
 
 
 class DecisionPayload(BaseModel):
@@ -52,6 +55,7 @@ class Thread(BaseModel):
     # Symmetric to `seen_at`; drives Ground Control's "Read" indicator (#345). A human message
     # reads as Read iff `agent_seen_at is not None and agent_seen_at >= message.created_at`.
     agent_seen_at: datetime | None = None
+    inbox: InboxMetadata = Field(default_factory=InboxMetadata)
     messages: list[Message] = []
 
     @computed_field  # serialized into model_dump()/JSON (a plain @property is not)
