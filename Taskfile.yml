@@ -46,9 +46,10 @@ tasks:
         "$tmp/venv/bin/python" -c "import mship.cli"
 
   lint:
-    desc: Static checks (no linter wired yet)
+    desc: Run static analysis
     cmds:
-      - echo "no linter configured"
+      - uv run ruff check .
+      - uv run pyrefly check
 
   run:
     desc: Not applicable for this repo

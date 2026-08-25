@@ -36,12 +36,23 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
 
+[tool.pyrefly]
+preset = "basic"
+search-path = ["src", "."]
+project-includes = ["src", "tests"]
+disable-project-excludes-heuristics = true
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
     "pytest-tmp-files>=0.0.2",
     "pytest-asyncio>=0.23",
     "coverage>=7.13.5",
+    "pyrefly>=1.2.0",
+    "ruff>=0.16.4",
 ]
 docs = [
     "mkdocs-material>=9.5",

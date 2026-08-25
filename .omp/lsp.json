@@ -1,0 +1,23 @@
+{
+  "servers": {
+    "pyrefly": {
+      "command": "pyrefly",
+      "args": ["lsp"],
+      "fileTypes": [".py", ".pyi"],
+      "languageId": "python",
+      "rootMarkers": ["pyproject.toml", "pyrefly.toml", ".git"]
+    },
+    "ruff": {
+      "disabled": false
+    },
+    "pyright": {
+      "disabled": true
+    },
+    "basedpyright": {
+      "disabled": true
+    },
+    "pylsp": {
+      "disabled": true
+    }
+  }
+}
