@@ -200,8 +200,22 @@ def test_mutate_inbox_does_not_change_spec_domain_content_or_lifecycle(tmp_path:
     before = spec.model_dump(exclude={"inbox"})
 
     store.mutate_inbox(spec.id, "archive", "archive-1", datetime(2026, 8, 25, tzinfo=timezone.utc))
-
     assert store.find_by_id(spec.id).model_dump(exclude={"inbox"}) == before
+
+
+
+def test_inbox_mutation_keeps_runtime_lock_out_of_specs_directory(tmp_path: Path):
+    now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
+    specs_dir = tmp_path / "specs"
+    store = SpecStore(specs_dir)
+    spec = _new_spec("alpha")
+    store.save(spec)
+
+    store.mutate_inbox(spec.id, "archive", "archive-1", now)
+
+    assert [path.name for path in specs_dir.iterdir()] == ["2026-06-13-alpha.md"]
+    assert store._lock_path(spec.id) == tmp_path / ".mothership" / "locks" / "specs" / "alpha.lock"
+
 
 
 @pytest.mark.parametrize("action", ["unknown", ""])

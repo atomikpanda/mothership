@@ -59,7 +59,7 @@ def test_migrate_committed_to_local(workspace: Path):
     md = list((workspace / "specs").glob("*.md"))
     assert len(md) == 1 and "Design X" in md[0].read_text()  # still readable locally
     # Untracked + gitignored now.
-    assert "design-x" not in _git(workspace, "ls-files", "specs").stdout
+    assert not any("design-x" in path for path in _git(workspace, "ls-files", "specs").stdout.splitlines())
     check = subprocess.run(
         ["git", "check-ignore", "-q", str(md[0].relative_to(workspace))], cwd=workspace
     )

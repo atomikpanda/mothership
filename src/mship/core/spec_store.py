@@ -98,9 +98,9 @@ class SpecStore:
             raise ValueError(f"unsafe spec id for filename: {spec_id!r}")
 
     def _lock_path(self, spec_id: str) -> Path:
-        """Per-spec lock that is independent of the storage mode's physical path."""
+        """Per-spec runtime lock, outside storage-mode-managed spec artifacts."""
         self._validate_id(spec_id)
-        return self._dir / f".{spec_id}.inbox.lock"
+        return self.workspace_root / ".mothership" / "locks" / "specs" / f"{spec_id}.lock"
 
     def path_for(self, spec: Spec) -> Path:
         """Logical `.md` stem for a spec: `<specs_dir>/<created_at date>-<id>.md`.
