@@ -662,3 +662,6 @@ def test_enroll_no_wait_returns_after_post(tmp_path, monkeypatch):
     )
     assert r.exit_code == 0, r.output
     assert "rid123" in r.output
+    assert "--store-dir <relay-store>" in r.output
+    assert "--pubkeys-dir <relay-pubkeys>" in r.output
+    assert "pgrep -af" in r.output

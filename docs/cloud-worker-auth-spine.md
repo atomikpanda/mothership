@@ -101,11 +101,16 @@ to such secrets makes the attach-at-egress boundary more load-bearing, not less.
 ## 5. Operator setup
 
 ```bash
+RELAY_STORE=/path/to/docker/relay/pending-store
+RELAY_PUBKEYS=/path/to/docker/relay/pubkeys
+
 # 1. Approve the worker's enrollment (existing enroll flow).
-mship relay approve <enrollment-id>
+mship relay approve <enrollment-id> \
+  --store-dir "$RELAY_STORE" --pubkeys-dir "$RELAY_PUBKEYS"
 
 # 2. Set the CEILING — the repos this enrollment may EVER touch.
-mship relay grant <enrollment-id> --provider github-app --repos owner/a,owner/b
+mship relay grant <enrollment-id> --store-dir "$RELAY_STORE" \
+  --provider github-app --repos owner/a,owner/b
 
 # 3. Issue a PER-RUN token (repos ⊆ ceiling, one push branch). Printed ONCE.
 mship relay issue-run-token <enrollment-id> --repos owner/a --push-branch feat/<slug>

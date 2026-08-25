@@ -2,10 +2,9 @@
 
 `mship relay fleet-token` mints the phone's credential and prints the QR that
 carries it; `mship relay hosts` is the owner's view of the same directory the
-phone reads. Both default `--store-dir`/`--pubkeys-dir` exactly as the shipped
-`requests`/`approve` commands do, and `enroll-server` wires the directory from
-those same two directories — the `pubkeys/` allowlist being the one sish
-authenticates against is what makes signature-auth and tunnel-auth one identity.
+phone reads. Every relay-owner command requires the exact `--store-dir` used by
+`enroll-server`; the `pubkeys/` allowlist remains the one sish authenticates
+against, making signature-auth and tunnel-auth one identity.
 """
 
 from __future__ import annotations
@@ -55,6 +54,20 @@ def _token_line(result):
 
 
 # --- fleet-token ------------------------------------------------------------
+
+def test_fleet_token_requires_an_explicit_store_dir(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    res = _run(
+        "fleet-token",
+        "--label",
+        "phone",
+        "--relay-domain",
+        "relay.example.com",
+    )
+    assert res.exit_code != 0
+    assert "--store-dir" in res.output
+    assert "pgrep -af" in res.output
+    assert not (tmp_path / "pending-store").exists()
 
 
 def test_fleet_token_mints_and_prints_the_pairing_link(tmp_path):

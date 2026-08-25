@@ -410,8 +410,11 @@ def register(parent: typer.Typer, get_container):
         out.print(
             f"re-identified as {ident.host_id} (was {ident.cloned_from})\n"
             f"new relay subdomain: {host_subdomain_for(home, ident.host_id)}\n"
-            "the rotated key needs approving again (`mship relay approve <id>` on "
-            "the relay host); run `mship daemon restart` to dial with it"
+            "the rotated key needs approving again on the relay host; inspect "
+            "the live server with:\n"
+            "  pgrep -af 'mship.*relay.*enroll-server'\n"
+            "then run `mship relay approve <id> --store-dir <relay-store> "
+            "--pubkeys-dir <relay-pubkeys>` and `mship daemon restart`"
         )
 
     @daemon_app.command("logs")

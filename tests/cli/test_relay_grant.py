@@ -69,6 +69,30 @@ def test_issue_run_token_within_ceiling_prints_token(tmp_path: Path):
     assert rt is not None and rt.enrollment_id == rid
 
 
+def test_issue_run_token_without_a_grant_points_to_the_relay_store(tmp_path: Path):
+    rid = _approved_enrollment(tmp_path)
+    result = CliRunner().invoke(
+        _app(),
+        [
+            "relay",
+            "issue-run-token",
+            rid,
+            "--repos",
+            "acme/api",
+            "--push-branch",
+            "feat/x",
+            "--grant-store-dir",
+            str(tmp_path / "grants-store"),
+            "--run-token-dir",
+            str(tmp_path / "run-tokens-store"),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "mship relay grant" in result.output
+    assert "--store-dir <relay-store>" in result.output
+    assert "pgrep -af" in result.output
+
+
 def test_issue_run_token_repo_outside_ceiling_fails(tmp_path: Path):
     rid = _approved_enrollment(tmp_path)
     GrantStore(tmp_path / "grants-store").set_grant(

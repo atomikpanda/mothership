@@ -3,8 +3,9 @@ relay's host directory (`GET /hosts`).
 
 The `core.daemon.host_auth.RefreshStore` shape, for the same two reasons:
 
-- **Stable per label.** `mship relay fleet-token --label phone` is the command
-  that prints the QR, and an operator will run it again just to re-display it.
+- **Stable per label.** `mship relay fleet-token --label phone --store-dir
+  <relay-store>` prints the QR, and an operator will run it again just to
+  re-display it.
   A fresh secret on every run would silently unpair the phone that already
   scanned the last one — so the secret is *derived* from a relay root secret
   plus a per-label nonce, and a re-mint recomputes it and writes nothing.

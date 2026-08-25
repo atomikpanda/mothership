@@ -1023,6 +1023,9 @@ def test_reidentify_prints_the_new_subdomain(cli, tmp_path, no_keygen):
 
     assert res.exit_code == 0, res.output
     assert host_subdomain_for(tmp_path, _identity(tmp_path)["host_id"]) in res.output
+    assert "--store-dir <relay-store>" in res.output
+    assert "--pubkeys-dir <relay-pubkeys>" in res.output
+    assert "pgrep -af" in res.output
 
 
 def test_reidentify_keep_identity_adopts_the_fingerprint_without_reminting(

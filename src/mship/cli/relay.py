@@ -21,6 +21,28 @@ from mship.cli.output import Output
 from mship.core.relay.config import canonical_relay_host
 
 
+def _require_store_dir(value: str | None) -> str:
+    if value is None:
+        raise typer.BadParameter(
+            "--store-dir must match the running enroll-server. Inspect its live "
+            "command with `pgrep -af 'mship.*relay.*enroll-server'`."
+        )
+    return value
+
+
+def _required_store_dir():
+    return typer.Option(
+        None,
+        "--store-dir",
+        metavar="PATH",
+        callback=_require_store_dir,
+        help=(
+            "Relay state directory shared with enroll-server. Required so an "
+            "owner command cannot silently use a different store."
+        ),
+    )
+
+
 def enroll_base_url(*, enroll_url, relay_host, config_host):
     """Resolve the enroll endpoint base URL. Precedence:
     explicit --enroll-url  >  --relay-host  >  configured relay.host.
@@ -170,11 +192,7 @@ def register(parent: typer.Typer, get_container):
             "(this server only creates pending requests; "
             "it never writes keys).",
         ),
-        store_dir: str = typer.Option(
-            "./pending-store",
-            "--store-dir",
-            help="Directory for pending enroll request state.",
-        ),
+        store_dir: str = _required_store_dir(),
         port: int = typer.Option(47180, "--port", help="Port to listen on."),
         host: str = typer.Option(
             "127.0.0.1", "--host", help="Interface to bind (loopback; Caddy fronts it)."
@@ -204,11 +222,7 @@ def register(parent: typer.Typer, get_container):
 
     @relay_app.command("requests")
     def requests_cmd(
-        store_dir: str = typer.Option(
-            "./pending-store",
-            "--store-dir",
-            help="Directory for pending enroll request state.",
-        ),
+        store_dir: str = _required_store_dir(),
     ):
         """List pending enroll requests (id · hostname · fingerprint)."""
         from pathlib import Path
@@ -226,11 +240,7 @@ def register(parent: typer.Typer, get_container):
     @relay_app.command("approve")
     def approve_cmd(
         rid: str = typer.Argument(..., help="Request ID to approve."),
-        store_dir: str = typer.Option(
-            "./pending-store",
-            "--store-dir",
-            help="Directory for pending enroll request state.",
-        ),
+        store_dir: str = _required_store_dir(),
         pubkeys_dir: str = typer.Option(
             "./pubkeys",
             "--pubkeys-dir",
@@ -255,11 +265,7 @@ def register(parent: typer.Typer, get_container):
     @relay_app.command("deny")
     def deny_cmd(
         rid: str = typer.Argument(..., help="Request ID to deny."),
-        store_dir: str = typer.Option(
-            "./pending-store",
-            "--store-dir",
-            help="Directory for pending enroll request state.",
-        ),
+        store_dir: str = _required_store_dir(),
     ):
         """Deny a pending request (does not touch the allowlist)."""
         from pathlib import Path
@@ -287,11 +293,7 @@ def register(parent: typer.Typer, get_container):
             "--label",
             help="Nickname for the device this token is for (e.g. phone).",
         ),
-        store_dir: str = typer.Option(
-            "./pending-store",
-            "--store-dir",
-            help="Directory for pending enroll request state.",
-        ),
+        store_dir: str = _required_store_dir(),
         relay_domain: str = typer.Option(
             lambda: os.environ.get("RELAY_DOMAIN", ""),
             "--relay-domain",
@@ -341,11 +343,7 @@ def register(parent: typer.Typer, get_container):
 
     @relay_app.command("hosts")
     def hosts_cmd(
-        store_dir: str = typer.Option(
-            "./pending-store",
-            "--store-dir",
-            help="Directory for pending enroll request state.",
-        ),
+        store_dir: str = _required_store_dir(),
     ):
         """List the relay's host directory (host_id · label · state · last_seen)."""
         import time
@@ -407,11 +405,7 @@ def register(parent: typer.Typer, get_container):
         repos: str = typer.Option(
             ..., "--repos", help="Ceiling repos owner/a,owner/b."
         ),
-        store_dir: str = typer.Option(
-            "./pending-store",
-            "--store-dir",
-            help="Enroll request store (to confirm approval).",
-        ),
+        store_dir: str = _required_store_dir(),
         grant_store_dir: str = typer.Option(
             "./grants-store",
             "--grant-store-dir",
@@ -503,7 +497,10 @@ def register(parent: typer.Typer, get_container):
         )
         if ceiling is None:
             out.error(
-                f"enrollment {rid!r} has no github-app grant; run `mship relay grant` first"
+                f"enrollment {rid!r} has no github-app grant; on the relay host, "
+                "inspect `pgrep -af 'mship.*relay.*enroll-server'`, then run "
+                f"`mship relay grant {rid} --store-dir <relay-store> "
+                "--provider github-app --repos <ceiling-repos>`"
             )
             raise typer.Exit(1)
         try:
@@ -648,7 +645,11 @@ def register(parent: typer.Typer, get_container):
             out.error("enroll server returned an unexpected response (no request id)")
             raise typer.Exit(1)
         out.print(
-            f"requested (id {rid}) — ask the relay owner to run: mship relay approve {rid}"
+            f"requested (id {rid}) — on the relay host, inspect the live "
+            "enroll-server command:\n"
+            "  pgrep -af 'mship.*relay.*enroll-server'\n"
+            f"then run: mship relay approve {rid} --store-dir <relay-store> "
+            "--pubkeys-dir <relay-pubkeys>"
         )
         if not wait:
             return
