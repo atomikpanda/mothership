@@ -34,6 +34,18 @@ def test_health_probe_does_not_follow_relay_redirects():
 
     assert seen == [False]
 
+def test_health_probe_omits_authorization_when_token_is_empty():
+    seen = {}
+
+    def get(*_args, **kwargs):
+        seen["headers"] = kwargs["headers"]
+        return _Resp(200)
+
+    probe = probe_health("https://w-ab12.relay", "", get=get)
+
+    assert probe.ok is True
+    assert not seen["headers"]
+
 
 def test_not_ok_on_401_explains_token():
     ok, detail = verify_relay_reachable("https://w.relay", "tok", get=lambda *a, **k: _Resp(401))

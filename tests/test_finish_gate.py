@@ -29,6 +29,8 @@ def finish_gate_workspace(workspace_with_git: Path):
     state_dir.mkdir(exist_ok=True)
     container.config_path.override(workspace_with_git / "mothership.yaml")
     container.state_dir.override(state_dir)
+    container.config.reset()
+    container.state_manager.reset()
 
     def _default_run(cmd, cwd, env=None):
         if "gh auth status" in cmd:

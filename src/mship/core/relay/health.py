@@ -22,7 +22,7 @@ class HealthProbe:
 
 def probe_health(public_url: str, token: str, *, get: Callable | None = None,
                  timeout: float = 8.0) -> HealthProbe:
-    """Probe `<public_url>/health` with the bearer token. Never raises.
+    """Probe `<public_url>/health`, authenticating only when a token is provided.
 
     The single reachability prober for the codebase: `verify_relay_reachable`
     renders its prose from this, and `mship.core.topology` maps the status code
@@ -35,8 +35,9 @@ def probe_health(public_url: str, token: str, *, get: Callable | None = None,
         import httpx
         get = lambda url, **kw: httpx.get(url, **kw)
     url = public_url.rstrip("/") + "/health"
+    headers = {"Authorization": f"Bearer {token}"} if token else None
     try:
-        r = get(url, headers={"Authorization": f"Bearer {token}"},
+        r = get(url, headers=headers,
                 timeout=timeout, follow_redirects=False)
     except Exception as e:  # transport/DNS/TLS error
         return HealthProbe(ok=False, error=str(e))
