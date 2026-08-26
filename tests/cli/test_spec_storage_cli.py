@@ -44,7 +44,7 @@ def test_spec_new_reports_the_encrypted_physical_path(encrypted_workspace: Path)
 
     assert res.exit_code == 0, res.output
     assert json.loads(res.stdout)["path"].endswith("hidden-plan.md.enc")
-    assert "Back up" in res.stderr
+    assert "BACK THIS FILE UP" in res.stderr
 
 
 def test_spec_show_decrypts_with_key(encrypted_workspace: Path):
