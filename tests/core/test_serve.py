@@ -949,6 +949,7 @@ def test_threads_filter_search_and_mutate_inbox_without_deleting_content(tmp_pat
     archived = messages.create_thread("Old discussion", "needle in history", now.replace(year=now.year - 1))
     messages.append(archived.id, "agent", "resolved", archived.updated_at)
     active = messages.create_thread("Current discussion", "needle today", now)
+    messages.append(active.id, "agent", "needle resolved", now)
     client = TestClient(_app(tmp_path))
 
     all_threads = client.get("/threads").json()

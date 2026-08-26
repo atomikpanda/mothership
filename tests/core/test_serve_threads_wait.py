@@ -89,8 +89,9 @@ def test_each_inbox_action_wakes_wait_once_without_changing_content_timestamp(
     client, store = _client(tmp_path)
     created_at = datetime.now(timezone.utc) - initial_age
     thread = store.create_thread("inbox mutation", "body", created_at)
-    if action == "restore":
+    if action in {"archive", "restore"}:
         store.append(thread.id, "agent", "resolved", created_at)
+    if action == "restore":
         assert client.get("/threads", params={"inbox": "archived"}).json()[0]["id"] == thread.id
     since = created_at
     if setup_action is not None:
