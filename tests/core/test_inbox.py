@@ -230,3 +230,19 @@ def test_naive_last_mutation_timestamp_is_normalized_before_ordering():
 
     assert apply_inbox_action(metadata, "archive", "device", NOW) is True
     assert metadata.last_mutated_at.tzinfo == timezone.utc
+
+
+def test_mutation_ledger_retains_newest_256_and_noops_after_eviction():
+    metadata = InboxMetadata()
+    for i in range(257):
+        action = "archive" if i % 2 == 0 else "restore"
+        assert apply_inbox_action(metadata, action, f"mutation-{i}", NOW + timedelta(seconds=i))
+
+    assert len(metadata.mutation_ids) == 256
+    assert "mutation-0" not in metadata.mutation_ids
+    assert "mutation-1" in metadata.mutation_ids
+    timestamp = metadata.last_mutated_at
+    assert apply_inbox_action(metadata, "archive", "mutation-257", NOW + timedelta(days=1)) is False
+    assert metadata.last_mutated_at == timestamp
+    assert apply_inbox_action(metadata, "restore", "mutation-1", NOW + timedelta(days=1)) is False
+    assert metadata.last_mutated_at == timestamp

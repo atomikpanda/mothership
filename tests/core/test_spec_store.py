@@ -293,3 +293,18 @@ def test_concurrent_inbox_mutation_cannot_overwrite_lifecycle_save(tmp_path: Pat
     assert saved.status == "needs_review"
     assert saved.inbox.manual_archived is True
     assert saved.inbox.mutation_ids == {"archive-1": "archive"}
+
+
+def test_mutate_inbox_resolves_renamed_physical_spec_by_frontmatter_id(tmp_path):
+    store = SpecStore(tmp_path / "specs")
+    spec = _spec()
+    original = store.save(spec)
+    original.rename(original.with_name("renamed.md"))
+
+    mutated, applied = store.mutate_inbox(
+        spec.id, "archive", "device-archive", datetime(2026, 8, 25, tzinfo=timezone.utc),
+    )
+
+    assert applied is True
+    assert mutated.inbox.manual_archived is True
+    assert mutated.status == "needs_review"
