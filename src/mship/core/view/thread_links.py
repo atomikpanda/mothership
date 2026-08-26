@@ -10,6 +10,7 @@ from mship.core.view.workitem_index import compute_phase
 class ThreadInboxLink:
     work_item_id: str | None
     terminal: bool
+    uncertain: bool = False
 
 
 def index_thread_inbox_links(
@@ -17,6 +18,8 @@ def index_thread_inbox_links(
     items: Iterable,
     specs_by_id: dict,
     tasks_by_slug: dict,
+    *,
+    uncertain: bool = False,
 ) -> dict[str, ThreadInboxLink]:
     """Resolve each thread's WorkItem once and derive whether that owner is done."""
     try:
@@ -38,9 +41,11 @@ def index_thread_inbox_links(
                 specs_by_id.get(item.spec_id) if item.spec_id else None,
                 [tasks_by_slug[slug] for slug in item.task_slugs if slug in tasks_by_slug],
             ) == "done"
-            links[thread.id] = ThreadInboxLink(work_item_id, terminal)
+            links[thread.id] = ThreadInboxLink(
+                work_item_id, terminal, uncertain and work_item_id is None,
+            )
         except Exception:
-            links[thread.id] = ThreadInboxLink(None, False)
+            links[thread.id] = ThreadInboxLink(None, False, True)
     return links
 
 def _build_link_index(items: Iterable):

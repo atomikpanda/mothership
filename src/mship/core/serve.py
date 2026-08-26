@@ -1314,7 +1314,9 @@ def create_app(
 
     def _thread_inbox_links(threads, all_items=None):
         if all_items is None:
-            all_items = workitems.list_tolerant(include_archived=True)
+            all_items, uncertain = workitems.list_tolerant_with_uncertainty(include_archived=True)
+        else:
+            uncertain = False
         from mship.core.spec_store import parse_spec
 
         specs_by_id = {}
@@ -1328,7 +1330,9 @@ def create_app(
             tasks_by_slug = dict(state_manager.load().tasks)
         except Exception:
             tasks_by_slug = {}
-        return index_thread_inbox_links(threads, all_items, specs_by_id, tasks_by_slug)
+        return index_thread_inbox_links(
+            threads, all_items, specs_by_id, tasks_by_slug, uncertain=uncertain,
+        )
 
     def _summaries(threads, now: datetime | None = None):
         threads = list(threads)
@@ -1338,7 +1342,7 @@ def create_app(
         for thread in threads:
             link = links_by_thread[thread.id]
             classification = classify_thread(
-                thread, linked=link.work_item_id is not None,
+                thread, linked=link.work_item_id is not None or link.uncertain,
                 linked_terminal=link.terminal, now=now,
             )
             summaries.append({
@@ -1502,12 +1506,11 @@ def create_app(
         """Enrich a thread with its WorkItem and computed inbox state."""
         data = t.model_dump(mode="json")
         # include_archived=True: this is link ownership resolution, not a user-facing listing.
-        all_items = workitems.list_tolerant(include_archived=True)
-        link = _thread_inbox_links([t], all_items)[t.id]
-        data["work_item_id"] = link.work_item_id
+        all_items, uncertain = workitems.list_tolerant_with_uncertainty(include_archived=True)
+        link = _thread_inbox_links([t])[t.id]
         classification = classify_thread(
-            t, linked=link.work_item_id is not None, linked_terminal=link.terminal,
-            now=now or datetime.now(timezone.utc),
+            t, linked=link.work_item_id is not None or link.uncertain,
+            linked_terminal=link.terminal, now=now or datetime.now(timezone.utc),
         )
         data["inbox_state"] = classification.state
         data["archive_reason"] = classification.archive_reason
