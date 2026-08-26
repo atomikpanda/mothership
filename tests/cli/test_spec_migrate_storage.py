@@ -132,7 +132,7 @@ def test_migration_preflight_rejects_malformed_artifact_before_writing(workspace
 
 def test_migration_preflight_rejects_later_duplicate_before_any_write(workspace: Path):
     original = next((workspace / "specs").glob("*-design-x.md"))
-    duplicate = workspace / "specs" / "2026-08-26-design-x.md"
+    duplicate = workspace / "specs" / "2026-08-27-design-x.md"
     duplicate.write_text(original.read_text())
     _set_mode(workspace, "encrypted")
 

@@ -112,7 +112,7 @@ def test_serve_create_reports_encrypted_physical_path(tmp_path: Path):
     ("method", "path", "body"),
     [
         ("get", "/specs/locked-one/review", None),
-        ("post", "/specs/locked-one/question", {"text": "Why?"}),
+        ("post", "/specs/locked-one/questions", {"text": "Why?"}),
     ],
 )
 def test_serve_review_and_write_paths_report_locked_spec_as_conflict(
