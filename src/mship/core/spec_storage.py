@@ -106,7 +106,13 @@ class SpecStorage:
                 if locked is not None:
                     raise SpecLocked(spec_id_from_filename(locked))
                 key = spec_key.load_or_generate_key(self.workspace_root, git=self._git)
-            self._atomic_write_bytes(physical, spec_key.encrypt(key, text))
+            try:
+                encrypted = spec_key.encrypt(key, text)
+            except (UnicodeError, ValueError) as exc:
+                from mship.core.spec_store import SpecParseError
+
+                raise SpecParseError("encrypted spec could not be encoded") from exc
+            self._atomic_write_bytes(physical, encrypted)
         else:
             self._atomic_write_text(physical, text)
             if self.mode == "local":
@@ -124,11 +130,16 @@ class SpecStorage:
                 raise SpecLocked(spec_id_from_filename(path))
             try:
                 return spec_key.decrypt(key, path.read_bytes())
-            except (InvalidToken, UnicodeError) as exc:
+            except (InvalidToken, UnicodeError, ValueError) as exc:
                 from mship.core.spec_store import SpecParseError
 
                 raise SpecParseError("encrypted spec could not be decoded") from exc
-        return path.read_text()
+        try:
+            return path.read_text()
+        except UnicodeError as exc:
+            from mship.core.spec_store import SpecParseError
+
+            raise SpecParseError("plaintext spec could not be decoded") from exc
 
     def read_all(self) -> Iterator[tuple[object | None, str | None, Path]]:
         """Yield (spec_or_None, locked_id_or_None, path) for every spec file.
@@ -147,9 +158,13 @@ class SpecStorage:
             except (OSError, UnicodeError, SpecParseError):
                 continue
             try:
-                yield (parse_spec(text), None, path)
+                spec = parse_spec(text)
             except SpecParseError:
                 continue
+            canonical_id = canonical_spec_id_from_filename(path)
+            if canonical_id is not None and spec.id != canonical_id:
+                continue
+            yield (spec, None, path)
 
     # --- atomic write helpers (mirror SpecStore.save) --------------------
     def _atomic_write_text(self, path: Path, text: str) -> None:

@@ -201,12 +201,9 @@ def test_list_skips_locked_file_and_returns_readable_siblings(tmp_path: Path):
     assert plain.find_by_id("readable-one") is not None
 
 
-def test_read_strict_raises_and_list_skips_locked_but_propagates_malformed(tmp_path: Path):
-    # read_strict must RAISE on a locked OR malformed spec (so `mship spec validate`
-    # can report it). list() only tolerates the LOCKED case (encrypted, no key — an
-    # expected, graceful state); a MALFORMED spec PROPAGATES out of list() so a
-    # corrupt store can't silently vanish a spec from the gate (Greptile #341 —
-    # resolve_bound_spec must fail safe, not return None).
+def test_read_strict_raises_while_tolerant_list_skips_locked_and_malformed(tmp_path: Path):
+    # Strict readers surface unavailable artifacts to lifecycle/API gates. Tolerant
+    # lists preserve readable siblings for CLI/display.
     enc = _store(tmp_path, "encrypted")
     enc.save(_spec())
     (tmp_path / ".mothership" / "spec-key").unlink()     # secret-thing.enc now LOCKED
@@ -214,15 +211,12 @@ def test_read_strict_raises_and_list_skips_locked_but_propagates_malformed(tmp_p
     (tmp_path / SPECS_DIRNAME).mkdir(parents=True, exist_ok=True)
     (tmp_path / SPECS_DIRNAME / "2026-07-22-broken.md").write_text("not a valid spec at all")
     store = _store(tmp_path, "committed")
-    from mship.core.spec_store import SpecParseError
     with pytest.raises(SpecLocked):
         store.read_strict("secret-thing")
     with pytest.raises(SpecParseError):
         store.read_strict("broken")
     assert store.read_strict("nope") is None            # unrelated locked canonical is ignorable
-    # list() skips the locked file but must NOT swallow the malformed one:
-    with pytest.raises(SpecParseError):
-        store.list()
+    assert store.list() == []
 
 def test_local_lifecycle_save_reapplies_gitignore_for_renamed_artifact(tmp_path: Path):
     _git_init(tmp_path)
@@ -330,6 +324,7 @@ def test_invalid_encrypted_token_is_a_controlled_parse_error_and_tolerant_scan_s
 
     assert "not a valid fernet token" not in str(exc.value)
     assert [spec.id for spec, _, _ in encrypted._storage.read_all()] == ["readable"]
+    assert [spec.id for spec in encrypted.list()] == ["readable"]
 
 
 def test_readable_exact_conflicts_with_locked_renamed_artifact(tmp_path: Path):
@@ -382,3 +377,62 @@ def test_canonical_filename_frontmatter_mismatch_conflicts_for_both_ids(tmp_path
         store.read_strict("physical-id")
     with pytest.raises(SpecArtifactConflict):
         store.read_strict("frontmatter-id")
+
+def test_plaintext_invalid_utf8_is_parse_error_and_tolerant_reads_skip_it(tmp_path: Path):
+    specs_dir = tmp_path / SPECS_DIRNAME
+    specs_dir.mkdir()
+    (specs_dir / "2026-07-22-broken.md").write_bytes(b"\xff")
+    readable = _spec()
+    readable.id = "readable"
+    store = _store(tmp_path, "committed")
+    store.save(readable)
+
+    with pytest.raises(SpecParseError):
+        store.read_strict("broken")
+
+    assert [spec.id for spec in store.list()] == ["readable"]
+    assert [spec.id for spec, _, _ in store._storage.read_all()] == ["readable"]
+
+
+def test_malformed_encryption_key_is_parse_error_for_reads_and_writes(tmp_path: Path):
+    encrypted = _store(tmp_path, "encrypted")
+    encrypted.save(_spec())
+    spec_key.keyfile_path(tmp_path).write_bytes(b"malformed-fernet-key")
+
+    with pytest.raises(SpecParseError):
+        encrypted.read_strict("secret-thing")
+    assert encrypted.list() == []
+    assert list(encrypted._storage.read_all()) == []
+
+    another = _spec()
+    another.id = "another"
+    with pytest.raises(SpecParseError):
+        encrypted.save(another)
+
+
+def test_tolerant_scan_skips_canonical_filename_frontmatter_mismatch(tmp_path: Path):
+    mismatched = _spec()
+    mismatched.id = "frontmatter-id"
+    path = tmp_path / SPECS_DIRNAME / "2026-07-22-physical-id.md"
+    path.parent.mkdir()
+    path.write_text(serialize_spec(mismatched))
+
+    assert list(_store(tmp_path, "committed")._storage.read_all()) == []
+
+
+def test_list_fails_closed_on_canonical_mismatch_and_duplicate_ids(tmp_path: Path):
+    mismatched = _spec()
+    mismatched.id = "frontmatter-id"
+    specs_dir = tmp_path / SPECS_DIRNAME
+    specs_dir.mkdir()
+    (specs_dir / "2026-07-22-physical-id.md").write_text(serialize_spec(mismatched))
+    with pytest.raises(SpecArtifactConflict):
+        _store(tmp_path, "committed").list()
+
+    (specs_dir / "2026-07-22-physical-id.md").unlink()
+    duplicate = _spec()
+    duplicate.id = "same-id"
+    (specs_dir / "2026-07-22-same-id.md").write_text(serialize_spec(duplicate))
+    (specs_dir / "2026-07-23-same-id.md").write_text(serialize_spec(duplicate))
+    with pytest.raises(SpecArtifactConflict):
+        _store(tmp_path, "committed").list()

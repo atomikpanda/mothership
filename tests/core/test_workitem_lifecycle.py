@@ -11,8 +11,12 @@ after a clean full merge:
 """
 from datetime import datetime, timezone
 
+import pytest
+
+from mship.core import spec_key
 from mship.core.spec_draft import new_spec
 from mship.core.spec_store import SpecStore
+from mship.core.spec_storage import SpecLocked, SpecStorage
 from mship.core.state import Task, WorkspaceState
 from mship.core.workitem_lifecycle import advance_workitem_on_close
 from mship.core.workitem_store import WorkItemStore
@@ -211,6 +215,23 @@ def test_spec_bound_missing_spec_no_raise(tmp_path):
     _call(tmp_path, t, state)  # no exception
 
     assert store.get(wi.id).phase_override is None
+
+def test_spec_bound_close_raises_for_locked_spec(tmp_path):
+    specs_dir = tmp_path / "specs"
+    encrypted = SpecStore(
+        specs_dir,
+        storage=SpecStorage(specs_dir, mode="encrypted", workspace_root=tmp_path),
+    )
+    spec = new_spec("Feature", now=_now(), task_slug="task-a")
+    spec.status = "approved"
+    encrypted.save(spec)
+    spec_key.keyfile_path(tmp_path).unlink()
+    store, wi = _store_with_item(tmp_path, kind="feature", spec_id=spec.id)
+    store.add_task(wi.id, "task-a", now=_now())
+    task = _task("task-a", wi.id)
+
+    with pytest.raises(SpecLocked):
+        _call(tmp_path, task, WorkspaceState(tasks={"task-a": task}))
 
 
 # --- push-only completion (completed_without_prs) ------------------------------

@@ -142,3 +142,13 @@ def test_stamp_agent_seen_swallows_store_errors():
             raise KeyError(tid)   # e.g. thread deleted mid-flight
 
     stamp_agent_seen(BoomStore(), [_thread("h", T0, role="human")], T0)  # must not raise
+
+
+def test_changed_since_treats_naive_legacy_cursor_as_utc():
+    naive_since = datetime(2026, 6, 30, 12, 0, 0)
+    thread = _thread("a", T0 + timedelta(seconds=1))
+
+    changed, cursor = changed_since([thread], naive_since)
+
+    assert changed == [thread]
+    assert cursor == T0 + timedelta(seconds=1)

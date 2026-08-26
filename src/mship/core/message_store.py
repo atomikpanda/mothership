@@ -4,7 +4,7 @@ import fcntl
 import tempfile
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -86,7 +86,14 @@ class MessageStore:
         if not self._dir.is_dir():
             return []
         threads = [Thread.model_validate_json(p.read_text()) for p in self._dir.glob("*.json")]
-        return sorted(threads, key=lambda t: t.updated_at, reverse=True)
+        return sorted(
+            threads,
+            key=lambda thread: (
+                thread.updated_at.replace(tzinfo=timezone.utc)
+                if thread.updated_at.tzinfo is None else thread.updated_at
+            ),
+            reverse=True,
+        )
 
     def create_thread(self, subject: str, text: str, now: datetime, task_slug: str | None = None) -> Thread:
         tid = _new_id(now)

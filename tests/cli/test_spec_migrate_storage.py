@@ -128,3 +128,35 @@ def test_migration_preflight_rejects_malformed_artifact_before_writing(workspace
     assert "malformed" in result.output.lower()
     assert list((workspace / "specs").glob("*.md.enc")) == []
     assert original.is_file()
+
+
+def test_migration_preflight_rejects_later_duplicate_before_any_write(workspace: Path):
+    original = next((workspace / "specs").glob("*-design-x.md"))
+    duplicate = workspace / "specs" / "2026-08-26-design-x.md"
+    duplicate.write_text(original.read_text())
+    _set_mode(workspace, "encrypted")
+
+    result = runner.invoke(app, ["spec", "migrate-storage"])
+
+    assert result.exit_code != 0
+    assert "multiple physical artifacts" in result.output
+    assert list((workspace / "specs").glob("*.md.enc")) == []
+    assert original.is_file()
+    assert duplicate.is_file()
+
+
+def test_migration_preflight_rejects_canonical_frontmatter_mismatch_before_any_write(
+    workspace: Path,
+):
+    original = next((workspace / "specs").glob("*-design-x.md"))
+    mismatch = workspace / "specs" / "2026-08-26-physical-id.md"
+    mismatch.write_text(original.read_text())
+    _set_mode(workspace, "encrypted")
+
+    result = runner.invoke(app, ["spec", "migrate-storage"])
+
+    assert result.exit_code != 0
+    assert "canonical artifact" in result.output
+    assert list((workspace / "specs").glob("*.md.enc")) == []
+    assert original.is_file()
+    assert mismatch.is_file()

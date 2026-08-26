@@ -106,3 +106,22 @@ def test_serve_create_reports_encrypted_physical_path(tmp_path: Path):
 
     assert response.status_code == 200
     assert response.json()["path"].endswith("new-secret.md.enc")
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("get", "/specs/locked-one/review", None),
+        ("post", "/specs/locked-one/question", {"text": "Why?"}),
+    ],
+)
+def test_serve_review_and_write_paths_report_locked_spec_as_conflict(
+    tmp_path: Path, method: str, path: str, body: dict | None,
+):
+    _write_encrypted_spec(tmp_path)
+    spec_key.keyfile_path(tmp_path).unlink()
+
+    response = _client(tmp_path).request(method, path, json=body)
+
+    assert response.status_code == 409
+    assert "locked" in response.json()["detail"]

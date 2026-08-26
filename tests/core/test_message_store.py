@@ -289,3 +289,14 @@ def test_mutate_inbox_rejects_conflicting_thread_mutation_identity(tmp_path):
 
     with pytest.raises(ValueError):
         store.mutate_inbox(thread.id, "restore", "mutation-1", now + timedelta(minutes=1))
+
+
+def test_list_sorts_mixed_legacy_naive_and_aware_updated_at_as_utc(tmp_path):
+    store = _store(tmp_path)
+    base = datetime(2026, 6, 23, tzinfo=timezone.utc)
+    older = store.create_thread("older", "x", base)
+    newer = store.create_thread("newer", "x", base + timedelta(minutes=1))
+    newer.updated_at = datetime(2026, 6, 23, 0, 1)
+    store.save(newer)
+
+    assert [thread.id for thread in store.list()] == [newer.id, older.id]

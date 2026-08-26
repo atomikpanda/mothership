@@ -33,6 +33,7 @@ def changed_since(threads, since: datetime, *, include_inbox: bool = False):
     Agent mailbox waits retain content-only semantics by default. The serve
     inbox surface opts into durable inbox mutations explicitly.
     """
+    since = _utc(since)
     change_times = [(thread, _change_at(thread, include_inbox)) for thread in threads]
     changed = [thread for thread, change_at in change_times if change_at > since]
     cursor = max([since, *(change_at for _, change_at in change_times)])

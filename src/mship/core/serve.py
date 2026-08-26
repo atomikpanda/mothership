@@ -642,8 +642,12 @@ def create_app(
 
     @app.get("/specs/{spec_id}/review")
     def get_review(spec_id: str):
+        from mship.core.spec_storage import SpecLocked
+
         try:
-            spec = store.find_by_id(spec_id)
+            spec = store.read_strict(spec_id)
+        except SpecLocked:
+            raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
         except SpecParseError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         if spec is None:
@@ -992,8 +996,12 @@ def create_app(
         raise HTTPException(status_code=409, detail=str(exc))
 
     def _load_or_404(spec_id: str):
+        from mship.core.spec_storage import SpecLocked
+
         try:
-            spec = store.find_by_id(spec_id)
+            spec = store.read_strict(spec_id)
+        except SpecLocked:
+            raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
         except SpecParseError as exc:
             _raise_spec_conflict(exc)
         if spec is None:
@@ -1001,9 +1009,13 @@ def create_app(
         return spec
 
     def _save_and_review(spec):
+        from mship.core.spec_storage import SpecLocked
+
         spec.updated_at = datetime.now(timezone.utc)
         try:
             store.save(spec)
+        except SpecLocked:
+            raise HTTPException(status_code=409, detail=f"spec {spec.id!r} is locked")
         except SpecParseError as exc:
             _raise_spec_conflict(exc)
         return build_review(spec)

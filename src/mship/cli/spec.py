@@ -869,7 +869,9 @@ def register(parent: typer.Typer, get_container):
         from mship.core.spec_store import (
             SPECS_DIRNAME, SpecArtifactConflict, SpecStore, parse_spec,
         )
-        from mship.core.spec_storage import SpecLocked, SpecStorage
+        from mship.core.spec_storage import (
+            SpecLocked, SpecStorage, canonical_spec_id_from_filename,
+        )
         from mship.util.git import GitRunner
 
         output = Output()
@@ -886,9 +888,10 @@ def register(parent: typer.Typer, get_container):
         target_storage = SpecStorage(specs_dir, mode=target, workspace_root=workspace_root)
         target_store = SpecStore(specs_dir, storage=target_storage)
         scanned_specs = []
+        preflight_ids: set[str] = set()
         for path in reader.iter_physical():
             try:
-                scanned_specs.append(parse_spec(reader.decode_file(path)))
+                scanned_spec = parse_spec(reader.decode_file(path))
             except SpecLocked as locked:
                 output.error(
                     f"Cannot migrate {locked.spec_id!r}: it is encrypted and no key is present. "
@@ -897,6 +900,27 @@ def register(parent: typer.Typer, get_container):
                 raise typer.Exit(1)
             except Exception as exc:
                 output.error(f"Cannot migrate {path}: malformed or unreadable artifact: {exc}")
+                raise typer.Exit(1)
+            scanned_specs.append(scanned_spec)
+            preflight_ids.add(scanned_spec.id)
+            canonical_id = canonical_spec_id_from_filename(path)
+            if canonical_id is not None:
+                preflight_ids.add(canonical_id)
+
+        # Resolve every parsed and canonical id before the first write. A later
+        # collision must abort the whole migration, never after earlier artifacts
+        # were already re-materialised in the target representation.
+        for spec_id in preflight_ids:
+            try:
+                target_store.read_strict(spec_id)
+            except SpecLocked as locked:
+                output.error(
+                    f"Cannot migrate {locked.spec_id!r}: it is encrypted and no key is present. "
+                    f"Restore `.mothership/spec-key` first."
+                )
+                raise typer.Exit(1)
+            except SpecArtifactConflict as exc:
+                output.error(f"Cannot migrate {spec_id!r}: {exc}")
                 raise typer.Exit(1)
 
         migrated = 0

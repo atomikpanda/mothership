@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from mship.core import spec_key
+from mship.core.spec_storage import SpecLocked, SpecStorage
 from mship.core.spec_draft import new_spec
 from mship.core.spec_store import SpecStore, SPECS_DIRNAME
 from mship.core.state import Task, WorkspaceState, StateManager
@@ -128,6 +130,27 @@ class TestSpecLifecycleOnClose:
             merged_count=1,
             closed_count=0,
         )
+
+    def test_close_raises_for_locked_bound_spec(self, tmp_path):
+        specs_dir = tmp_path / SPECS_DIRNAME
+        encrypted = SpecStore(
+            specs_dir,
+            storage=SpecStorage(specs_dir, mode="encrypted", workspace_root=tmp_path),
+        )
+        spec = new_spec("Feature", now=_NOW, task_slug="mytask")
+        spec.status = "dispatched"
+        encrypted.save(spec)
+        spec_key.keyfile_path(tmp_path).unlink()
+
+        from mship.core.spec_lifecycle import advance_spec_on_close
+
+        with pytest.raises(SpecLocked):
+            advance_spec_on_close(
+                task=_make_task(tmp_path, spec_id=spec.id),
+                specs_dir=specs_dir,
+                merged_count=1,
+                closed_count=0,
+            )
 
 
 class TestSpecImplementedCommand:

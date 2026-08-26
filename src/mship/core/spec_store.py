@@ -247,22 +247,45 @@ class SpecStore:
         return parse_spec(self._storage.decode_file(Path(path)))
 
     def list(self) -> list[Spec]:
-        # Skip LOCKED specs (encrypted, no key — an expected, graceful state) so one
-        # un-decryptable file doesn't block the readable siblings or every routed CLI
-        # op via find_by_id (Greptile #402 "one locked file blocks all"). But do NOT
-        # swallow a corrupt/unreadable store: a malformed spec PROPAGATES so it can't
-        # silently vanish from the list — which would let resolve_bound_spec return
-        # None and finish --require-evidence skip a required check (Greptile #341).
-        # (serve's LOCKED-aware display uses the fully-tolerant read_all; the gate's
-        # list must fail safe on corruption, so it only tolerates the locked case.)
-        from mship.core.spec_storage import SpecLocked
+        """Tolerantly list readable artifacts while preserving identity invariants.
+
+        Decode/parse failures are unavailable artifacts for CLI/display, but an
+        artifact that claims a canonical filename's id differently — or more than
+        one artifact for an id — is a store conflict that lifecycle gates must see.
+        """
+        from mship.core.spec_storage import SpecLocked, canonical_spec_id_from_filename
+
         specs: list[Spec] = []
+        paths_by_id: dict[str, Path] = {}
         for path in self._storage.iter_physical():
+            canonical_id = canonical_spec_id_from_filename(path)
             try:
-                text = self._storage.decode_file(path)
+                spec = parse_spec(self._storage.decode_file(path))
             except SpecLocked:
+                if canonical_id is not None:
+                    existing_path = paths_by_id.get(canonical_id)
+                    if existing_path is not None:
+                        raise SpecArtifactConflict(
+                            f"spec id {canonical_id!r} has multiple physical artifacts: "
+                            f"{existing_path}, {path}"
+                        )
+                    paths_by_id[canonical_id] = path
                 continue
-            specs.append(parse_spec(text))   # SpecParseError / read errors propagate
+            except (OSError, SpecParseError):
+                continue
+            if canonical_id is not None and spec.id != canonical_id:
+                raise SpecArtifactConflict(
+                    f"canonical artifact {path} binds {canonical_id!r}, "
+                    f"not frontmatter id {spec.id!r}"
+                )
+            existing_path = paths_by_id.get(spec.id)
+            if existing_path is not None:
+                raise SpecArtifactConflict(
+                    f"spec id {spec.id!r} has multiple physical artifacts: "
+                    f"{existing_path}, {path}"
+                )
+            paths_by_id[spec.id] = path
+            specs.append(spec)
         return specs
 
     def find_by_id(self, spec_id: str) -> Spec | None:
