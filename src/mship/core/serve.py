@@ -1190,6 +1190,8 @@ def create_app(
 
     @app.post("/specs/{spec_id}/apply")
     def post_apply(spec_id: str, body: ApplyDraftBody):
+        from mship.core.spec_storage import SpecLocked
+
         spec = _load_or_404(spec_id)
         if not body.bypass_status_gate:
             try:
@@ -1205,6 +1207,8 @@ def create_app(
         spec.updated_at = datetime.now(timezone.utc)
         try:
             store.save(spec)
+        except SpecLocked:
+            raise HTTPException(status_code=409, detail=f"spec {spec.id!r} is locked")
         except SpecParseError as exc:
             _raise_spec_conflict(exc)
         return spec.model_dump(mode="json")
@@ -1277,6 +1281,8 @@ def create_app(
         # lands. Re-loading the spec inside the lock (rather than reusing the copy
         # loaded before it) means the second caller sees the first's work_item_id
         # already set and reuses it instead of creating a duplicate WorkItem.
+        from mship.core.spec_storage import SpecLocked
+
         try:
             with _dispatch_lock:
                 spec = _load_or_404(spec_id)
@@ -1303,6 +1309,8 @@ def create_app(
                         "dispatch handoff notify failed (spec=%s task=%s) — "
                         "dispatch itself succeeded", result.spec.id, result.task.slug,
                     )
+        except SpecLocked:
+            raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
         except (DispatchError, SpecParseError) as exc:
             _raise_spec_conflict(exc)
         return {
