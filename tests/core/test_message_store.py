@@ -243,7 +243,7 @@ def test_mutate_inbox_pin_unpin_preserves_thread_manual_and_restore_metadata(tmp
     inbox = store.get(thread.id).inbox
     assert inbox.pinned is False
     assert inbox.manual_archived is True
-    assert inbox.restored_at == now
+    assert inbox.restored_at == now + timedelta(minutes=1)
 
 
 def test_mutate_inbox_does_not_change_thread_domain_content(tmp_path):

@@ -70,20 +70,33 @@ def test_wait_applies_inbox_and_search_filters_without_changing_cursor(tmp_path:
 
 
 @pytest.mark.parametrize(
-    ("action", "expected_state"),
+    ("action", "expected_state", "initial_age", "setup_action"),
     [
-        ("archive", "archived"),
-        ("restore", "active"),
-        ("pin", "active"),
-        ("unpin", "active"),
+        ("archive", "archived", timedelta(minutes=1), None),
+        ("restore", "active", timedelta(days=8), None),
+        ("pin", "active", timedelta(minutes=1), None),
+        ("unpin", "active", timedelta(minutes=1), "pin"),
     ],
 )
 def test_each_inbox_action_wakes_wait_once_without_changing_content_timestamp(
-    tmp_path: Path, action: str, expected_state: str,
+    tmp_path: Path,
+    action: str,
+    expected_state: str,
+    initial_age: timedelta,
+    setup_action: str | None,
 ):
     client, store = _client(tmp_path)
-    created_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    created_at = datetime.now(timezone.utc) - initial_age
     thread = store.create_thread("inbox mutation", "body", created_at)
+    since = created_at
+    if setup_action is not None:
+        setup_response = client.post(
+            f"/threads/{thread.id}/inbox/{setup_action}",
+            json={"mutation_id": f"setup-{setup_action}"},
+        )
+        assert setup_response.status_code == 200
+        since = store.get(thread.id).inbox.last_mutated_at
+        assert since is not None
 
     action_response = client.post(
         f"/threads/{thread.id}/inbox/{action}", json={"mutation_id": f"device-{action}"},
@@ -92,7 +105,7 @@ def test_each_inbox_action_wakes_wait_once_without_changing_content_timestamp(
     assert action_response.json()["inbox_state"] == expected_state
     assert store.get(thread.id).updated_at == created_at
 
-    woke = client.get("/threads", params={"wait": 1, "since": created_at.isoformat(), "timeout": 0})
+    woke = client.get("/threads", params={"wait": 1, "since": since.isoformat(), "timeout": 0})
     assert woke.status_code == 200
     assert woke.json()["timed_out"] is False
     assert [summary["id"] for summary in woke.json()["threads"]] == [thread.id]
@@ -107,6 +120,25 @@ def test_each_inbox_action_wakes_wait_once_without_changing_content_timestamp(
     assert no_second_change.json()["timed_out"] is True
     assert no_second_change.json()["threads"] == []
     assert no_second_change.json()["cursor"] == cursor
+
+
+def test_unpin_noop_does_not_wake_wait(tmp_path: Path):
+    client, store = _client(tmp_path)
+    created_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    thread = store.create_thread("inbox mutation", "body", created_at)
+
+    response = client.post(
+        f"/threads/{thread.id}/inbox/unpin", json={"mutation_id": "device-unpin"},
+    )
+    assert response.status_code == 200
+
+    wait = client.get(
+        "/threads",
+        params={"wait": 1, "since": created_at.isoformat(), "timeout": 0},
+    )
+    assert wait.status_code == 200
+    assert wait.json()["timed_out"] is True
+    assert wait.json()["threads"] == []
 
 
 @pytest.mark.parametrize(

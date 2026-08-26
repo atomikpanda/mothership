@@ -181,15 +181,16 @@ def test_mutate_inbox_pin_unpin_preserves_spec_manual_and_restore_metadata(tmp_p
     spec = _new_spec("alpha")
     store.save(spec)
 
-    store.mutate_inbox(spec.id, "restore", "restore-1", now)
-    store.mutate_inbox(spec.id, "archive", "archive-1", now.replace(minute=1))
-    store.mutate_inbox(spec.id, "pin", "pin-1", now.replace(minute=2))
-    store.mutate_inbox(spec.id, "unpin", "unpin-1", now.replace(minute=3))
+    store.mutate_inbox(spec.id, "archive", "archive-0", now)
+    store.mutate_inbox(spec.id, "restore", "restore-1", now.replace(minute=1))
+    store.mutate_inbox(spec.id, "archive", "archive-1", now.replace(minute=2))
+    store.mutate_inbox(spec.id, "pin", "pin-1", now.replace(minute=3))
+    store.mutate_inbox(spec.id, "unpin", "unpin-1", now.replace(minute=4))
 
     inbox = store.find_by_id(spec.id).inbox
     assert inbox.pinned is False
     assert inbox.manual_archived is True
-    assert inbox.restored_at == now
+    assert inbox.restored_at == now.replace(minute=1)
 
 
 def test_mutate_inbox_does_not_change_spec_domain_content_or_lifecycle(tmp_path: Path):

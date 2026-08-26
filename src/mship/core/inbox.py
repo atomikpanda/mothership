@@ -106,7 +106,6 @@ def apply_inbox_action(
         return False
     if (
         (action == "archive" and metadata.manual_archived)
-        or (action == "restore" and not metadata.manual_archived)
         or (action == "pin" and metadata.pinned)
         or (action == "unpin" and not metadata.pinned)
     ):
