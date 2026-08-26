@@ -161,15 +161,17 @@ class SpecStore:
         return None
 
     def read_strict(self, spec_id: str) -> Spec | None:
-        """Read one logical spec by frontmatter id, preserving LOCKED visibility."""
+        """Read an exact physical ID strictly, then tolerate alias-scan siblings."""
         from mship.core.spec_storage import SpecLocked, spec_id_from_filename
 
-        for path in self._storage.iter_physical():
+        paths = list(self._storage.iter_physical())
+        for path in paths:
+            if spec_id_from_filename(path) == spec_id:
+                return parse_spec(self._storage.decode_file(path))
+        for path in paths:
             try:
                 spec = parse_spec(self._storage.decode_file(path))
-            except SpecLocked:
-                if spec_id_from_filename(path) == spec_id:
-                    raise
+            except (SpecLocked, SpecParseError):
                 continue
             if spec.id == spec_id:
                 return spec
