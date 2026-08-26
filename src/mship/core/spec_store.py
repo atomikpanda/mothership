@@ -192,14 +192,21 @@ class SpecStore:
                 raise KeyError(spec_id)
             result = apply_inbox_action(spec.inbox, action, mutation_id, now)
             if result.persisted:
+                matched = None
                 for path in self._storage.iter_physical():
                     try:
                         if parse_spec(self._storage.decode_file(path)).id == spec_id:
-                            stem = path.with_name(path.name[:-4]) if path.name.endswith(".enc") else path
-                            self._storage.write(stem, serialize_spec(spec))
+                            matched = path
                             break
                     except Exception:
                         continue
-                else:
+                if matched is None:
                     raise KeyError(spec_id)
+                from mship.core.spec_storage import SpecStorage
+
+                mode = "encrypted" if matched.name.endswith(".enc") else "committed"
+                logical = matched.with_name(matched.name[:-4]) if mode == "encrypted" else matched
+                SpecStorage(
+                    self._dir, mode=mode, workspace_root=self._storage.workspace_root,
+                ).write(logical, serialize_spec(spec))
             return spec, result.applied
