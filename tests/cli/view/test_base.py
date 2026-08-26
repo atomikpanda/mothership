@@ -68,4 +68,5 @@ async def test_auto_follow_when_pinned_to_bottom():
         app.content = "\n".join(f"line {i}" for i in range(400)) + "\n"
         app.action_force_refresh()
         await pilot.pause()
+        await pilot.pause()
         assert app.body_scroll_y() > y_end_before, "should auto-follow when pinned to bottom"
