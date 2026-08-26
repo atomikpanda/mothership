@@ -330,7 +330,7 @@ def create_app(
     `get_gh_token`."""
     from fastapi import Depends, FastAPI, HTTPException
 
-    from mship.core.spec_store import SpecStore
+    from mship.core.spec_store import SpecArtifactConflict, SpecStore
     from mship.core.spec_storage import SpecStorage, resolve_mode
     from mship.core.message_store import MessageStore
     from mship.core.workitem_store import WorkItemStore
@@ -629,6 +629,8 @@ def create_app(
             spec, applied = store.mutate_inbox(spec_id, action, body.mutation_id, now)
         except SpecLocked:
             raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
+        except SpecArtifactConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
         except KeyError:
             raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
         except ValueError as exc:
@@ -639,7 +641,10 @@ def create_app(
 
     @app.get("/specs/{spec_id}/review")
     def get_review(spec_id: str):
-        spec = store.find_by_id(spec_id)
+        try:
+            spec = store.find_by_id(spec_id)
+        except SpecArtifactConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
         if spec is None:
             raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
         return build_review(spec)
@@ -981,7 +986,6 @@ def create_app(
         set_prose_verdict,
     )
     from mship.core.spec_questions import add_question, answer_question
-    from mship.core.spec_store import SpecArtifactConflict
 
     def _load_or_404(spec_id: str):
         try:
@@ -1135,7 +1139,6 @@ def create_app(
     @app.post("/specs")
     def post_create_spec(body: NewSpecBody):
         from mship.core.spec_storage import SpecLocked
-        from mship.core.spec_store import SpecArtifactConflict
 
         now = datetime.now(timezone.utc)
         try:

@@ -68,6 +68,23 @@ def test_spec_inbox_mutations_are_ordered_idempotent_and_non_destructive(tmp_pat
     assert client.post(f"/specs/{active.id}/inbox/nope", json={"mutation_id": "bad-1"}).status_code == 422
 
 
+def test_spec_duplicate_artifacts_are_conflicts_for_review_and_inbox(tmp_path: Path):
+    active, _ = _seed(tmp_path)
+    canonical = next((tmp_path / "specs").glob("*-active.md"))
+    (tmp_path / "specs" / "renamed.md").write_bytes(canonical.read_bytes())
+    client = _client(tmp_path)
+
+    for response in (
+        client.get(f"/specs/{active.id}/review"),
+        client.post(
+            f"/specs/{active.id}/inbox/archive",
+            json={"mutation_id": "duplicate-archive"},
+        ),
+    ):
+        assert response.status_code == 409
+        assert "multiple physical artifacts" in response.json()["detail"]
+
+
 def test_spec_state_equivalent_inbox_action_persists_without_task_activity(tmp_path: Path):
     now = datetime.now(timezone.utc)
     state = StateManager(tmp_path / ".mothership")
