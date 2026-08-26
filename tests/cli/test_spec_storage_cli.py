@@ -43,7 +43,8 @@ def test_spec_new_reports_the_encrypted_physical_path(encrypted_workspace: Path)
     res = runner.invoke(app, ["--json", "spec", "new", "--title", "Hidden plan", "--id", "hidden-plan"])
 
     assert res.exit_code == 0, res.output
-    assert json.loads(res.output)["path"].endswith("hidden-plan.md.enc")
+    assert json.loads(res.stdout)["path"].endswith("hidden-plan.md.enc")
+    assert "Back up" in res.stderr
 
 
 def test_spec_show_decrypts_with_key(encrypted_workspace: Path):

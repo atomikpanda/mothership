@@ -149,21 +149,27 @@ class SpecStore:
         from mship.core.spec_storage import SpecLocked, spec_id_from_filename
 
         self._validate_id(spec_id)
+        paths = self._storage.iter_physical()
         matches: list[tuple[Spec, Path]] = []
-        for physical_path in self._storage.iter_physical():
-            filename_id = spec_id_from_filename(physical_path)
-            try:
-                parsed = parse_spec(self._storage.decode_file(physical_path))
-            except SpecLocked:
-                if filename_id == spec_id:
-                    raise
-                continue
-            if filename_id == spec_id and parsed.id != spec_id:
+        exact_paths = [
+            path for path in paths if spec_id_from_filename(path) == spec_id
+        ]
+        for physical_path in exact_paths:
+            parsed = parse_spec(self._storage.decode_file(physical_path))
+            if parsed.id != spec_id:
                 raise SpecArtifactConflict(
                     f"spec id {spec_id!r} collides with {physical_path} "
                     f"whose frontmatter id is {parsed.id!r}"
                 )
-            if filename_id == spec_id or parsed.id == spec_id:
+            matches.append((parsed, physical_path))
+        for physical_path in paths:
+            if physical_path in exact_paths:
+                continue
+            try:
+                parsed = parse_spec(self._storage.decode_file(physical_path))
+            except (SpecLocked, SpecParseError):
+                continue
+            if parsed.id == spec_id:
                 matches.append((parsed, physical_path))
         if len(matches) > 1:
             paths = ", ".join(str(path) for _, path in matches)
