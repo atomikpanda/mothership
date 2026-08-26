@@ -331,7 +331,7 @@ def create_app(
     from fastapi import Depends, FastAPI, HTTPException
 
     from mship.core.spec_store import SpecStore
-    from mship.core.spec_storage import SpecStorage
+    from mship.core.spec_storage import SpecStorage, resolve_mode
     from mship.core.message_store import MessageStore
     from mship.core.workitem_store import WorkItemStore
 
@@ -339,7 +339,7 @@ def create_app(
     # `store` decrypts `.md.enc` with the local key for display; `_spec_storage`
     # exposes read_all() so the list/detail endpoints can render a LOCKED marker
     # (never ciphertext, never a 500) when the key is absent on this host.
-    _spec_mode = getattr(config, "spec_storage", "committed") if config is not None else "committed"
+    _spec_mode = getattr(config, "spec_storage", None) or resolve_mode(workspace_root)
     _spec_storage = SpecStorage(specs_dir, mode=_spec_mode, workspace_root=workspace_root)
     store = SpecStore(specs_dir, storage=_spec_storage)
     pr_manager = PRManager(ShellRunner(), cwd=workspace_root)

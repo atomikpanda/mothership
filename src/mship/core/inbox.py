@@ -67,7 +67,7 @@ def classify_thread(
 ) -> InboxClassification:
     """Classify a thread without changing its inbox or domain state."""
     metadata = thread.inbox
-    if metadata.pinned or thread.needs_you or thread.needs_decision:
+    if metadata.pinned or thread.awaiting_reply or thread.needs_you or thread.needs_decision:
         return InboxClassification(state="active")
     if metadata.manual_archived:
         return InboxClassification(state="archived", archive_reason="manual")

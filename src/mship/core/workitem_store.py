@@ -4,7 +4,7 @@ import fcntl
 import tempfile
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from mship.core.state import StateManager
@@ -109,7 +109,12 @@ class WorkItemStore:
                 uncertain = True
         if not include_archived:
             items = [item for item in items if not item.archived]
-        return sorted(items, key=lambda item: item.updated_at, reverse=True), uncertain
+        return sorted(
+            items,
+            key=lambda item: item.updated_at.replace(tzinfo=timezone.utc)
+            if item.updated_at.tzinfo is None else item.updated_at,
+            reverse=True,
+        ), uncertain
 
     def list_tolerant(self, include_archived: bool = False) -> list[WorkItem]:
         return self.list_tolerant_with_uncertainty(include_archived)[0]
