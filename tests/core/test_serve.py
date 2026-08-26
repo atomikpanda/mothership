@@ -1012,6 +1012,46 @@ def test_thread_linked_to_done_work_item_is_archived(tmp_path):
     assert summary["inbox_state"] == "archived"
     assert summary["archive_reason"] == "linked_terminal"
 
+
+def test_threads_keep_healthy_terminal_link_with_corrupt_work_item(tmp_path):
+    now = datetime.now(timezone.utc)
+    SpecStore(tmp_path / "specs").save(Spec(
+        id="implemented", title="Implemented", status="implemented",
+        created_at=now, updated_at=now,
+    ))
+    messages = MessageStore(tmp_path / ".mothership" / "messages")
+    thread = messages.create_thread("Linked", "content", now)
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    item = items.create("Implemented", "feature", "test-ws", now)
+    items.link_spec(item.id, "implemented", now)
+    items.add_thread(item.id, thread.id, now)
+    (tmp_path / ".mothership" / "workitems" / "corrupt.json").write_text("{")
+
+    response = TestClient(_app(tmp_path)).get("/threads", params={"inbox": "all"})
+
+    assert response.status_code == 200
+    summary = next(summary for summary in response.json() if summary["id"] == thread.id)
+    assert summary["work_item_id"] == item.id
+    assert summary["inbox_state"] == "archived"
+    assert summary["archive_reason"] == "linked_terminal"
+
+
+def test_threads_keep_old_unknown_linkage_active_with_corrupt_work_item(tmp_path):
+    now = datetime.now(timezone.utc)
+    messages = MessageStore(tmp_path / ".mothership" / "messages")
+    thread = messages.create_thread("Old unknown", "content", now.replace(year=now.year - 1))
+    workitems_dir = tmp_path / ".mothership" / "workitems"
+    workitems_dir.mkdir(parents=True)
+    (workitems_dir / "corrupt.json").write_text("{")
+
+    response = TestClient(_app(tmp_path)).get("/threads", params={"inbox": "all"})
+
+    assert response.status_code == 200
+    summary = next(summary for summary in response.json() if summary["id"] == thread.id)
+    assert summary["work_item_id"] is None
+    assert summary["inbox_state"] == "active"
+    assert summary["archive_reason"] is None
+
 def test_threads_explicit_subject(tmp_path):
     client = TestClient(_app(tmp_path))
     t = client.post("/threads", json={"text": "body", "subject": "My subject"}).json()
