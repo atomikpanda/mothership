@@ -157,6 +157,21 @@ def test_mutate_inbox_duplicate_restore_is_a_noop(tmp_path: Path):
     assert saved.inbox.restored_at == now
     assert saved.inbox.mutation_ids == {"restore-1": "restore"}
 
+def test_mutate_inbox_persists_new_state_equivalent_spec_action(tmp_path: Path):
+    now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
+    store = SpecStore(tmp_path / "specs")
+    spec = _new_spec("alpha")
+    store.save(spec)
+
+    _, applied = store.mutate_inbox(spec.id, "unpin", "unpin-1", now)
+
+    assert applied is False
+    saved = SpecStore(tmp_path / "specs").find_by_id(spec.id)
+    assert saved.inbox.mutation_ids == {"unpin-1": "unpin"}
+    assert saved.inbox.last_mutated_at is None
+
+    with pytest.raises(ValueError):
+        SpecStore(tmp_path / "specs").mutate_inbox(spec.id, "archive", "unpin-1", now)
 
 def test_mutate_inbox_commits_spec_actions_in_order(tmp_path: Path):
     now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)

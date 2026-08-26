@@ -196,14 +196,29 @@ def test_unpin_falls_back_to_retained_manual_archive_metadata():
     assert (result.state, result.archive_reason) == ("archived", "manual")
 
 
+def test_inbox_action_result_distinguishes_persistence_from_application():
+    metadata = InboxMetadata(manual_archived=True, last_mutated_at=NOW)
+
+    result = apply_inbox_action(metadata, "archive", "device-1", NOW + timedelta(seconds=1))
+
+    assert result.persisted is True
+    assert result.applied is False
+    assert metadata.mutation_ids == {"device-1": "archive"}
+    assert metadata.last_mutated_at == NOW
+
+
 def test_new_inbox_action_stamps_change_once_and_retry_preserves_it():
     metadata = InboxMetadata()
     first = NOW + timedelta(seconds=1)
 
-    assert apply_inbox_action(metadata, "archive", "device-1", first) is True
+    result = apply_inbox_action(metadata, "archive", "device-1", first)
+    assert result.persisted is True
+    assert result.applied is True
     assert metadata.last_mutated_at == first
 
-    assert apply_inbox_action(metadata, "archive", "device-1", first + timedelta(seconds=1)) is False
+    result = apply_inbox_action(metadata, "archive", "device-1", first + timedelta(seconds=1))
+    assert result.persisted is False
+    assert result.applied is False
     assert metadata.last_mutated_at == first
 
 
@@ -228,21 +243,30 @@ def test_naive_spec_updated_at_and_restore_are_normalized_at_exact_boundaries():
 def test_naive_last_mutation_timestamp_is_normalized_before_ordering():
     metadata = InboxMetadata(last_mutated_at=(NOW + timedelta(seconds=1)).replace(tzinfo=None))
 
-    assert apply_inbox_action(metadata, "archive", "device", NOW) is True
+    result = apply_inbox_action(metadata, "archive", "device", NOW)
+    assert result.applied is True
     assert metadata.last_mutated_at.tzinfo == timezone.utc
 
 
-def test_mutation_ledger_retains_newest_256_and_noops_after_eviction():
+def test_mutation_ledger_retains_newest_256_and_persists_state_equivalent_actions():
     metadata = InboxMetadata()
     for i in range(257):
         action = "archive" if i % 2 == 0 else "restore"
-        assert apply_inbox_action(metadata, action, f"mutation-{i}", NOW + timedelta(seconds=i))
+        assert apply_inbox_action(metadata, action, f"mutation-{i}", NOW + timedelta(seconds=i)).applied
 
     assert len(metadata.mutation_ids) == 256
     assert "mutation-0" not in metadata.mutation_ids
     assert "mutation-1" in metadata.mutation_ids
     timestamp = metadata.last_mutated_at
-    assert apply_inbox_action(metadata, "archive", "mutation-257", NOW + timedelta(days=1)) is False
+
+    duplicate = apply_inbox_action(metadata, "restore", "mutation-1", NOW + timedelta(days=1))
+    assert duplicate.persisted is False
+    assert duplicate.applied is False
     assert metadata.last_mutated_at == timestamp
-    assert apply_inbox_action(metadata, "restore", "mutation-1", NOW + timedelta(days=1)) is False
+
+    no_op = apply_inbox_action(metadata, "archive", "mutation-257", NOW + timedelta(days=1))
+    assert no_op.persisted is True
+    assert no_op.applied is False
+    assert len(metadata.mutation_ids) == 256
+    assert "mutation-1" not in metadata.mutation_ids
     assert metadata.last_mutated_at == timestamp

@@ -1492,7 +1492,7 @@ def create_app(
         wi = workitems.get(item_id)
         if wi is None:
             return None
-        spec = store.find_by_id(wi.spec_id) if wi.spec_id else None
+        spec = _safe(lambda: store.read_strict(wi.spec_id), None) if wi.spec_id else None
         tasks = state_manager.load().tasks
         return build_workitem_index(
             [wi],

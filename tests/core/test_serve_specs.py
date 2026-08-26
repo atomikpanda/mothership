@@ -68,7 +68,7 @@ def test_spec_inbox_mutations_are_ordered_idempotent_and_non_destructive(tmp_pat
     assert client.post(f"/specs/{active.id}/inbox/nope", json={"mutation_id": "bad-1"}).status_code == 422
 
 
-def test_spec_inbox_retry_does_not_repeat_task_activity(tmp_path: Path):
+def test_spec_state_equivalent_inbox_action_persists_without_task_activity(tmp_path: Path):
     now = datetime.now(timezone.utc)
     state = StateManager(tmp_path / ".mothership")
     state.save(WorkspaceState(tasks={"spec-task": Task(
@@ -77,7 +77,8 @@ def test_spec_inbox_retry_does_not_repeat_task_activity(tmp_path: Path):
     )}))
     active, _ = _seed(tmp_path)
     active.task_slug = "spec-task"
-    SpecStore(tmp_path / "specs").save(active)
+    specs = SpecStore(tmp_path / "specs")
+    specs.save(active)
     client = TestClient(create_app(
         specs_dir=tmp_path / "specs", state_manager=state, log_manager=None,
         workspace_root=tmp_path, workspace_name="test-ws",
@@ -85,6 +86,11 @@ def test_spec_inbox_retry_does_not_repeat_task_activity(tmp_path: Path):
 
     client.post("/specs/active/inbox/archive", json={"mutation_id": "device-archive"})
     first_activity = state.load().tasks["spec-task"].last_activity_at
-    client.post("/specs/active/inbox/archive", json={"mutation_id": "device-archive"})
+    first_mutation = specs.find_by_id(active.id).inbox.last_mutated_at
+    response = client.post("/specs/active/inbox/unpin", json={"mutation_id": "device-unpin"})
 
+    assert response.status_code == 200
     assert state.load().tasks["spec-task"].last_activity_at == first_activity
+    saved = specs.find_by_id(active.id)
+    assert saved.inbox.mutation_ids["device-unpin"] == "unpin"
+    assert saved.inbox.last_mutated_at == first_mutation

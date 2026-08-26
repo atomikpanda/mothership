@@ -128,15 +128,15 @@ class MessageStore:
         mutation_id: str,
         now: datetime,
     ) -> tuple[Thread, bool]:
-        """Apply an inbox action and report whether this request changed it."""
+        """Apply an inbox action and report whether it changed inbox state."""
         with _locked(self._lock_path(thread_id), fcntl.LOCK_EX):
             thread = self.get(thread_id)
             if thread is None:
                 raise KeyError(thread_id)
-            applied = apply_inbox_action(thread.inbox, action, mutation_id, now)
-            if applied:
+            result = apply_inbox_action(thread.inbox, action, mutation_id, now)
+            if result.persisted:
                 self.save(thread)
-            return thread, applied
+            return thread, result.applied
 
     def mark_seen(self, thread_id: str, seen_at: datetime) -> Thread:
         """Advance the operator's read cursor (monotonic — never regresses).

@@ -977,19 +977,23 @@ def test_threads_filter_search_and_mutate_inbox_without_deleting_content(tmp_pat
     assert client.post(f"/threads/{active.id}/inbox/nope", json={"mutation_id": "bad-1"}).status_code == 422
 
 
-def test_thread_inbox_retry_does_not_repeat_task_activity(tmp_path):
+def test_thread_state_equivalent_inbox_action_persists_without_task_activity(tmp_path):
     state, log = _seed_task(tmp_path)
     now = datetime.now(timezone.utc)
-    thread = MessageStore(tmp_path / ".mothership" / "messages").create_thread(
-        "task thread", "body", now, task_slug="dq",
-    )
+    messages = MessageStore(tmp_path / ".mothership" / "messages")
+    thread = messages.create_thread("task thread", "body", now, task_slug="dq")
     client = TestClient(_app_with(tmp_path, state, log))
 
     client.post(f"/threads/{thread.id}/inbox/archive", json={"mutation_id": "device-archive"})
     first_activity = state.load().tasks["dq"].last_activity_at
-    client.post(f"/threads/{thread.id}/inbox/archive", json={"mutation_id": "device-archive"})
+    first_mutation = messages.get(thread.id).inbox.last_mutated_at
+    response = client.post(f"/threads/{thread.id}/inbox/unpin", json={"mutation_id": "device-unpin"})
 
+    assert response.status_code == 200
     assert state.load().tasks["dq"].last_activity_at == first_activity
+    saved = messages.get(thread.id)
+    assert saved.inbox.mutation_ids["device-unpin"] == "unpin"
+    assert saved.inbox.last_mutated_at == first_mutation
 
 
 
@@ -1096,10 +1100,30 @@ def test_thread_detail_null_work_item_when_unrelated(tmp_path):
 
     client = TestClient(_app(tmp_path))
     tid = client.post("/threads", json={"text": "hi"}).json()["id"]
-
     body = client.get(f"/threads/{tid}").json()
     assert body["work_item_id"] is None
     assert body["work_item"] is None
+
+
+def test_thread_detail_tolerates_an_unrelated_corrupt_spec(tmp_path):
+    _seed_spec(tmp_path)
+    now = datetime(2026, 7, 8, tzinfo=timezone.utc)
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="Decision queue", kind="feature", workspace="test-ws", now=now)
+    items.link_spec(wi.id, "dq", now=now)
+
+    client = TestClient(_app(tmp_path))
+    tid = client.post("/threads", json={"text": "hi"}).json()["id"]
+    MessageStore(tmp_path / ".mothership" / "messages").link_spec(tid, "dq")
+    (tmp_path / "specs" / "corrupt.md").write_text("{")
+
+    response = client.get(f"/threads/{tid}")
+
+    assert response.status_code == 200
+    assert response.json()["work_item_id"] == wi.id
+    assert response.json()["work_item"] == {
+        "id": wi.id, "title": "Decision queue", "kind": "feature", "phase": "shaping",
+    }
 
 
 def test_thread_detail_resolves_work_item_id_when_archived(tmp_path):

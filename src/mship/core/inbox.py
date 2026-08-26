@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from pydantic import BaseModel, Field
 
@@ -16,6 +16,17 @@ InboxArchiveReason = Literal[
     "manual", "linked_terminal", "inactive_unlinked",
     "implemented", "lifecycle_archived",
 ]
+
+class InboxMutationResult(NamedTuple):
+    """Durability and domain-effect outcomes of an inbox mutation request."""
+
+    persisted: bool
+    applied: bool
+
+
+_DUPLICATE_MUTATION = InboxMutationResult(persisted=False, applied=False)
+_RETAINED_NOOP_MUTATION = InboxMutationResult(persisted=True, applied=False)
+_APPLIED_MUTATION = InboxMutationResult(persisted=True, applied=True)
 
 _SEVEN_DAYS = timedelta(days=7)
 _ACTIONS = frozenset(("archive", "restore", "pin", "unpin"))
@@ -93,8 +104,8 @@ def apply_inbox_action(
     action: InboxAction,
     mutation_id: str,
     now: datetime,
-) -> bool:
-    """Mutate in place; return False for an identical retry."""
+) -> InboxMutationResult:
+    """Mutate inbox metadata and report whether it must persist and was applied."""
     if action not in _ACTIONS:
         raise ValueError(f"unknown inbox action: {action!r}")
     previous = metadata.mutation_ids.get(mutation_id)
@@ -103,16 +114,19 @@ def apply_inbox_action(
             raise ValueError(
                 f"mutation id {mutation_id!r} already used for {previous!r}, not {action!r}"
             )
-        return False
-    if (
+        return _DUPLICATE_MUTATION
+
+    is_state_equivalent = (
         (action == "archive" and metadata.manual_archived)
         or (action == "pin" and metadata.pinned)
         or (action == "unpin" and not metadata.pinned)
-    ):
-        return False
+    )
     metadata.mutation_ids[mutation_id] = action
     while len(metadata.mutation_ids) > _MAX_MUTATION_IDS:
         metadata.mutation_ids.pop(next(iter(metadata.mutation_ids)))
+    if is_state_equivalent:
+        return _RETAINED_NOOP_MUTATION
+
     if action == "archive":
         metadata.manual_archived = True
     elif action == "restore":
@@ -128,4 +142,4 @@ def apply_inbox_action(
         _utc(metadata.last_mutated_at) + timedelta(microseconds=1)
         if metadata.last_mutated_at is not None else mutation_now,
     )
-    return True
+    return _APPLIED_MUTATION

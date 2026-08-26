@@ -131,6 +131,9 @@ def test_unpin_noop_does_not_wake_wait(tmp_path: Path):
         f"/threads/{thread.id}/inbox/unpin", json={"mutation_id": "device-unpin"},
     )
     assert response.status_code == 200
+    saved = store.get(thread.id)
+    assert saved.inbox.mutation_ids == {"device-unpin": "unpin"}
+    assert saved.inbox.last_mutated_at is None
 
     wait = client.get(
         "/threads",

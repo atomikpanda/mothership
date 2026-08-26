@@ -213,6 +213,20 @@ def test_mutate_inbox_duplicate_restore_is_a_noop(tmp_path):
     assert saved.inbox.restored_at == now + timedelta(minutes=1)
     assert saved.inbox.mutation_ids["restore-1"] == "restore"
 
+def test_mutate_inbox_persists_new_state_equivalent_thread_action(tmp_path):
+    now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    thread = store.create_thread("x", "body", now)
+
+    _, applied = store.mutate_inbox(thread.id, "unpin", "unpin-1", now + timedelta(minutes=1))
+
+    assert applied is False
+    saved = _store(tmp_path).get(thread.id)
+    assert saved.inbox.mutation_ids == {"unpin-1": "unpin"}
+    assert saved.inbox.last_mutated_at is None
+    with pytest.raises(ValueError):
+        _store(tmp_path).mutate_inbox(thread.id, "archive", "unpin-1", now + timedelta(minutes=2))
+
 
 def test_mutate_inbox_commits_thread_actions_in_order(tmp_path):
     now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)

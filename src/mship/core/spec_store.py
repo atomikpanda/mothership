@@ -187,13 +187,13 @@ class SpecStore:
         mutation_id: str,
         now: datetime,
     ) -> tuple[Spec, bool]:
-        """Apply an inbox action and report whether this request changed it."""
+        """Apply an inbox action and report whether it changed inbox state."""
         with _locked(self._lock_path(spec_id)):
             spec = self.read_strict(spec_id)
             if spec is None:
                 raise KeyError(spec_id)
-            applied = apply_inbox_action(spec.inbox, action, mutation_id, now)
-            if applied:
+            result = apply_inbox_action(spec.inbox, action, mutation_id, now)
+            if result.persisted:
                 for path in self._storage.iter_physical():
                     try:
                         if parse_spec(self._storage.decode_file(path)).id == spec_id:
@@ -203,4 +203,4 @@ class SpecStore:
                         continue
                 else:
                     raise KeyError(spec_id)
-            return spec, applied
+            return spec, result.applied
