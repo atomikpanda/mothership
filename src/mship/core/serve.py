@@ -1545,7 +1545,7 @@ def create_app(
     def _workitem_index(include_archived: bool = False):
         return build_workitem_index(
             _safe(lambda: workitems.list(include_archived=include_archived), []),
-            _safe(lambda: {s.id: s for s in store.list()}, {}),
+            _safe(lambda: {s.id: s for s in store.list_tolerant()}, {}),
             _safe(lambda: dict(state_manager.load().tasks), {}),
             _safe(lambda: {t.id: t for t in msgs.list()}, {}),
             include_archived=include_archived,
@@ -1561,7 +1561,13 @@ def create_app(
         wi = workitems.get(item_id)
         if wi is None:
             return None
-        spec = _safe(lambda: store.read_strict(wi.spec_id), None) if wi.spec_id else None
+        spec = _safe(
+            lambda: next(
+                (s for s in store.list_tolerant() if s.id == wi.spec_id),
+                None,
+            ),
+            None,
+        ) if wi.spec_id else None
         tasks = state_manager.load().tasks
         return build_workitem_index(
             [wi],
@@ -1593,7 +1599,7 @@ def create_app(
                 "id": summ.id, "title": summ.title, "kind": summ.kind, "phase": summ.phase,
             }
         item_ids = {w.id for w in all_items}
-        spec_ids = _safe(lambda: {s.id for s in store.list()}, set())
+        spec_ids = _safe(lambda: {s.id for s in store.list_tolerant()}, set())
         task_slugs = _safe(lambda: set(state_manager.load().tasks.keys()), set())
         for msg in data.get("messages", []):
             if msg.get("role") == "agent" and msg.get("text"):
