@@ -162,15 +162,24 @@ class SpecStore:
                     f"whose frontmatter id is {parsed.id!r}"
                 )
             matches.append((parsed, physical_path))
+        locked_alias: SpecLocked | None = None
         for physical_path in paths:
             if physical_path in exact_paths:
                 continue
             try:
                 parsed = parse_spec(self._storage.decode_file(physical_path))
-            except (SpecLocked, SpecParseError):
+            except SpecLocked as locked:
+                locked_alias = locked
+                continue
+            except SpecParseError:
                 continue
             if parsed.id == spec_id:
                 matches.append((parsed, physical_path))
+        # A readable exact name proves that a locked legacy alias belongs elsewhere.
+        # Without that proof, ciphertext under a renamed stem has unknowable content;
+        # treating it as absent could generate a replacement key and artifact.
+        if locked_alias is not None and not exact_paths:
+            raise locked_alias
         if len(matches) > 1:
             paths = ", ".join(str(path) for _, path in matches)
             raise SpecArtifactConflict(
@@ -245,7 +254,13 @@ class SpecStore:
         return specs
 
     def find_by_id(self, spec_id: str) -> Spec | None:
-        artifact = self.resolve_artifact(spec_id)
+        """Tolerant compatibility lookup: locked artifacts are unavailable."""
+        from mship.core.spec_storage import SpecLocked
+
+        try:
+            artifact = self.resolve_artifact(spec_id)
+        except SpecLocked:
+            return None
         return artifact.spec if artifact is not None else None
 
     def read_strict(self, spec_id: str) -> Spec | None:

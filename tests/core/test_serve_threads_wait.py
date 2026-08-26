@@ -11,6 +11,8 @@ from mship.core.serve import create_app
 from mship.core.message_store import MessageStore
 from mship.core.state import StateManager
 from mship.core.workitem_store import WorkItemStore
+from mship.core.spec import Spec
+from mship.core.spec_store import SpecStore, serialize_spec
 
 
 def _client(tmp_path: Path, auth_token=None) -> tuple[TestClient, MessageStore]:
@@ -274,3 +276,38 @@ def test_agent_seen_at_exposed_on_list_and_detail(tmp_path: Path):
     store.mark_agent_seen(t.id, now)
     assert client.get("/threads").json()[0]["agent_seen_at"] is not None
     assert client.get(f"/threads/{t.id}").json()["agent_seen_at"] is not None
+
+
+def test_duplicate_spec_ids_keep_only_their_linked_threads_active(tmp_path: Path):
+    """A duplicate spec id must not arbitrarily make its linked thread terminal."""
+    client, messages = _client(tmp_path)
+    now = datetime.now(timezone.utc)
+    items = _workitems(tmp_path)
+    ambiguous_thread = messages.create_thread("ambiguous", "body", now)
+    messages.link_spec(ambiguous_thread.id, "duplicate-spec", now)
+    ambiguous_item = items.create("Ambiguous", "feature", "test-ws", now)
+    items.link_spec(ambiguous_item.id, "duplicate-spec", now)
+
+    healthy_thread = messages.create_thread("healthy", "body", now)
+    messages.link_spec(healthy_thread.id, "healthy-spec", now)
+    healthy_item = items.create("Healthy", "feature", "test-ws", now)
+    items.link_spec(healthy_item.id, "healthy-spec", now)
+
+    specs = SpecStore(tmp_path / "specs")
+    specs.save(Spec(
+        id="duplicate-spec", title="draft", status="draft",
+        created_at=now, updated_at=now,
+    ))
+    duplicate = Spec(
+        id="duplicate-spec", title="implemented copy", status="implemented",
+        created_at=now, updated_at=now,
+    )
+    (tmp_path / "specs" / "z-duplicate.md").write_text(serialize_spec(duplicate))
+    specs.save(Spec(
+        id="healthy-spec", title="implemented", status="implemented",
+        created_at=now, updated_at=now,
+    ))
+
+    summaries = {summary["id"]: summary for summary in client.get("/threads").json()}
+    assert summaries[ambiguous_thread.id]["inbox_state"] == "active"
+    assert summaries[healthy_thread.id]["inbox_state"] == "archived"

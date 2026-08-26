@@ -600,25 +600,26 @@ def create_app(
 
     @app.get("/specs/{spec_id}")
     def get_spec(spec_id: str):
-        # Resolve via the LOCKED-aware seam (not store.find_by_id, which loads
-        # EVERY file and would raise on a sibling locked spec — making a coexisting
-        # plaintext spec unreachable). A locked match returns a marker (200), not
-        # ciphertext and not a 500.
-        spec = None
-        for candidate, locked_id, _path in _spec_storage.read_all():
-            if candidate is None:
-                if locked_id == spec_id:
-                    return {
-                        "id": spec_id, "locked": True, "status": "locked",
-                        "inbox_state": None, "archive_reason": None, "pinned": False,
-                    }
-                continue
-            if candidate.id == spec_id:
-                spec = candidate
-                break
-        if spec is None:
+        # Use the single-artifact resolver rather than the resilient list seam:
+        # detail views must report collisions instead of selecting an arbitrary file.
+        from mship.core.spec_storage import SpecLocked
+
+        try:
+            artifact = store.resolve_artifact(spec_id)
+        except SpecLocked as locked:
+            if locked.spec_id == spec_id:
+                return {
+                    "id": spec_id, "locked": True, "status": "locked",
+                    "inbox_state": None, "archive_reason": None, "pinned": False,
+                }
+            raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is blocked by locked storage")
+        except SpecArtifactConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        if artifact is None:
             raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
-        return _spec_payload(spec)
+        return _spec_payload(artifact.spec)
 
     @app.post("/specs/{spec_id}/inbox/{action}")
     def post_spec_inbox_action(spec_id: str, action: InboxAction, body: InboxMutationBody):
@@ -1333,18 +1334,24 @@ def create_app(
         from mship.core.spec_store import parse_spec
 
         specs_by_id = {}
+        ambiguous_spec_ids = set()
         for path in _spec_storage.iter_physical():
             try:
                 spec = parse_spec(_spec_storage.decode_file(path))
             except Exception:
                 continue
-            specs_by_id[spec.id] = spec
+            if spec.id in specs_by_id:
+                specs_by_id.pop(spec.id)
+                ambiguous_spec_ids.add(spec.id)
+            elif spec.id not in ambiguous_spec_ids:
+                specs_by_id[spec.id] = spec
         try:
             tasks_by_slug = dict(state_manager.load().tasks)
         except Exception:
             tasks_by_slug = {}
         return index_thread_inbox_links(
             threads, all_items, specs_by_id, tasks_by_slug, uncertain=uncertain,
+            ambiguous_spec_ids=frozenset(ambiguous_spec_ids),
         )
 
     def _summaries(threads, now: datetime | None = None):

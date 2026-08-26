@@ -75,6 +75,7 @@ def test_spec_duplicate_artifacts_are_conflicts_for_review_and_inbox(tmp_path: P
     client = _client(tmp_path)
 
     for response in (
+        client.get(f"/specs/{active.id}"),
         client.get(f"/specs/{active.id}/review"),
         client.post(
             f"/specs/{active.id}/inbox/archive",

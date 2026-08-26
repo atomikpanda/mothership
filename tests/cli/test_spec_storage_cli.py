@@ -5,6 +5,7 @@ import pytest
 from typer.testing import CliRunner
 
 from mship.cli import app, container
+from mship.core import spec_key
 
 runner = CliRunner()
 
@@ -75,6 +76,17 @@ def test_spec_validate_under_encrypted(encrypted_workspace: Path):
     # validate found + decoded the ENCRYPTED spec rather than reporting "no spec
     # file" (which is what a raw *.md glob would do against a *.md.enc store).
     assert "No spec file for id" not in res.output
+
+
+def test_spec_show_treats_locked_artifact_as_unavailable(encrypted_workspace: Path):
+    runner.invoke(app, ["spec", "new", "--title", "Hidden plan", "--id", "hidden-plan"])
+    spec_key.keyfile_path(encrypted_workspace).unlink()
+
+    result = runner.invoke(app, ["spec", "show", "hidden-plan"])
+
+    assert result.exit_code != 0
+    assert result.exception is None
+    assert "no spec" in result.output.lower()
 
 
 def test_spec_validate_reports_malformed_not_nameerror(tmp_path: Path):

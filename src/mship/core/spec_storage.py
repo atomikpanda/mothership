@@ -91,7 +91,15 @@ class SpecStorage:
         self.specs_dir.mkdir(parents=True, exist_ok=True)
         physical = self.physical_path(stem)
         if self.mode == "encrypted":
-            key = spec_key.load_or_generate_key(self.workspace_root, git=self._git)
+            key = spec_key.load_key(self.workspace_root)
+            if key is None:
+                locked = next(
+                    (path for path in self.iter_physical() if path.name.endswith(".md.enc")),
+                    None,
+                )
+                if locked is not None:
+                    raise SpecLocked(spec_id_from_filename(locked))
+                key = spec_key.load_or_generate_key(self.workspace_root, git=self._git)
             self._atomic_write_bytes(physical, spec_key.encrypt(key, text))
         else:
             self._atomic_write_text(physical, text)

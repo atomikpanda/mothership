@@ -115,3 +115,16 @@ def test_migration_holds_spec_lock_until_mutation_can_write_target(
     writer.join(timeout=1)
     assert mutation_finished.is_set()
     assert store.find_by_id("design-x").inbox.manual_archived is True
+
+
+def test_migration_preflight_rejects_malformed_artifact_before_writing(workspace: Path):
+    original = next((workspace / "specs").glob("*-design-x.md"))
+    (workspace / "specs" / "z-malformed.md").write_text("not a spec")
+    _set_mode(workspace, "encrypted")
+
+    result = runner.invoke(app, ["spec", "migrate-storage"])
+
+    assert result.exit_code != 0
+    assert "malformed" in result.output.lower()
+    assert list((workspace / "specs").glob("*.md.enc")) == []
+    assert original.is_file()

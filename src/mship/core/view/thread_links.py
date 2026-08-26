@@ -20,6 +20,7 @@ def index_thread_inbox_links(
     tasks_by_slug: dict,
     *,
     uncertain: bool = False,
+    ambiguous_spec_ids: frozenset[str] = frozenset(),
 ) -> dict[str, ThreadInboxLink]:
     """Resolve each thread's WorkItem once and derive whether that owner is done."""
     try:
@@ -36,7 +37,8 @@ def index_thread_inbox_links(
                 thread.id, thread.spec_id, thread.task_slug, index,
             )
             item = items_by_id.get(work_item_id)
-            terminal = item is not None and compute_phase(
+            ambiguous_spec = item is not None and item.spec_id in ambiguous_spec_ids
+            terminal = not ambiguous_spec and item is not None and compute_phase(
                 item,
                 specs_by_id.get(item.spec_id) if item.spec_id else None,
                 [tasks_by_slug[slug] for slug in item.task_slugs if slug in tasks_by_slug],
@@ -44,7 +46,8 @@ def index_thread_inbox_links(
             links[thread.id] = ThreadInboxLink(
                 work_item_id,
                 terminal,
-                uncertain and work_item_id is None
+                ambiguous_spec
+                or (uncertain and work_item_id is None)
                 or (work_item_id is None and bool(thread.spec_id or thread.task_slug)),
             )
         except Exception:

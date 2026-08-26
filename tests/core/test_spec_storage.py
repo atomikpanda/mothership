@@ -250,3 +250,66 @@ def test_encrypted_artifact_does_not_fallback_to_plaintext_under_committed_polic
 
     assert encrypted_path.is_file()
     assert not encrypted_path.with_suffix("").exists()
+
+
+def test_find_by_id_tolerates_locked_exact_artifact_but_read_strict_does_not(tmp_path: Path):
+    store = _store(tmp_path, "encrypted")
+    store.save(_spec())
+    spec_key.keyfile_path(tmp_path).unlink()
+
+    assert store.find_by_id("secret-thing") is None
+    with pytest.raises(SpecLocked):
+        store.read_strict("secret-thing")
+
+
+def test_create_refuses_any_locked_ciphertext_without_creating_a_replacement_key(tmp_path: Path):
+    store = _store(tmp_path, "encrypted")
+    store.save(_spec())
+    spec_key.keyfile_path(tmp_path).unlink()
+    new_spec = _spec()
+    new_spec.id = "different-id"
+
+    with pytest.raises(SpecLocked):
+        store.create_if_absent(new_spec)
+
+    assert spec_key.load_key(tmp_path) is None
+    assert not (tmp_path / SPECS_DIRNAME / "2026-07-22-different-id.md.enc").exists()
+
+
+def test_storage_write_refuses_to_generate_key_when_ciphertext_exists(tmp_path: Path):
+    store = _store(tmp_path, "encrypted")
+    store.save(_spec())
+    spec_key.keyfile_path(tmp_path).unlink()
+    storage = SpecStorage(tmp_path / SPECS_DIRNAME, mode="encrypted", workspace_root=tmp_path)
+
+    with pytest.raises(SpecLocked):
+        storage.write(tmp_path / SPECS_DIRNAME / "2026-07-22-direct.md", "body")
+
+    assert spec_key.load_key(tmp_path) is None
+
+
+def test_create_refuses_unknown_locked_alias_without_creating_a_replacement_key(tmp_path: Path):
+    store = _store(tmp_path, "encrypted")
+    locked_path = store.save(_spec())
+    spec_key.keyfile_path(tmp_path).unlink()
+    locked_path.rename(locked_path.with_name("renamed.md.enc"))
+    new_spec = _spec()
+    new_spec.id = "real-id"
+
+    with pytest.raises(SpecLocked):
+        store.create_if_absent(new_spec)
+
+    assert spec_key.load_key(tmp_path) is None
+    assert not (tmp_path / SPECS_DIRNAME / "2026-07-22-real-id.md.enc").exists()
+
+
+def test_exact_readable_artifact_remains_resolvable_beside_unrelated_locked_sibling(tmp_path: Path):
+    encrypted = _store(tmp_path, "encrypted")
+    encrypted.save(_spec())
+    spec_key.keyfile_path(tmp_path).unlink()
+    readable = _spec()
+    readable.id = "readable"
+    committed = _store(tmp_path, "committed")
+    committed.save(readable)
+
+    assert committed.read_strict("readable").id == "readable"
