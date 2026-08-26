@@ -167,7 +167,10 @@ class SpecStore:
         paths = list(self._storage.iter_physical())
         for path in paths:
             if spec_id_from_filename(path) == spec_id:
-                return parse_spec(self._storage.decode_file(path))
+                spec = parse_spec(self._storage.decode_file(path))
+                if spec.id == spec_id:
+                    return spec
+                break
         for path in paths:
             try:
                 spec = parse_spec(self._storage.decode_file(path))
