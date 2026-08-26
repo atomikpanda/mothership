@@ -183,16 +183,18 @@ def test_no_module_serializes_specs_outside_storage_layer():
 
 def test_list_skips_locked_file_and_returns_readable_siblings(tmp_path: Path):
     # Greptile "One Locked File Blocks All Specs": a locked .md.enc must not abort
-    # list()/find_by_id — the readable plaintext siblings still come back.
+    # list()/find_by_id — an exact readable sibling remains addressable.
     from datetime import datetime, timezone
     from mship.core.spec import Spec
-    enc = _store(tmp_path, "encrypted")
-    enc.save(_spec())                                   # writes a .md.enc + a key
-    (tmp_path / ".mothership" / "spec-key").unlink()    # now that .enc is LOCKED
+
     plain = _store(tmp_path, "committed")
     now = datetime(2026, 7, 22, 10, 0, 0, tzinfo=timezone.utc)
     plain.save(Spec(id="readable-one", title="Readable", status="draft",
                     created_at=now, updated_at=now, body="## Problem\n\nok\n"))
+    enc = _store(tmp_path, "encrypted")
+    enc.save(_spec())                                   # writes a .md.enc + a key
+    (tmp_path / ".mothership" / "spec-key").unlink()    # now that .enc is LOCKED
+
     ids = {s.id for s in plain.list()}
     assert "readable-one" in ids                        # readable sibling survives
     assert "secret-thing" not in ids                    # the locked one is skipped, not crashing
@@ -217,7 +219,8 @@ def test_read_strict_raises_and_list_skips_locked_but_propagates_malformed(tmp_p
         store.read_strict("secret-thing")
     with pytest.raises(SpecParseError):
         store.read_strict("broken")
-    assert store.read_strict("nope") is None            # genuinely-missing id
+    with pytest.raises(SpecLocked):
+        store.read_strict("nope")                       # unknown locked alias is fail-closed
     # list() skips the locked file but must NOT swallow the malformed one:
     with pytest.raises(SpecParseError):
         store.list()
@@ -304,12 +307,12 @@ def test_create_refuses_unknown_locked_alias_without_creating_a_replacement_key(
 
 
 def test_exact_readable_artifact_remains_resolvable_beside_unrelated_locked_sibling(tmp_path: Path):
-    encrypted = _store(tmp_path, "encrypted")
-    encrypted.save(_spec())
-    spec_key.keyfile_path(tmp_path).unlink()
     readable = _spec()
     readable.id = "readable"
     committed = _store(tmp_path, "committed")
     committed.save(readable)
+    encrypted = _store(tmp_path, "encrypted")
+    encrypted.save(_spec())
+    spec_key.keyfile_path(tmp_path).unlink()
 
     assert committed.read_strict("readable").id == "readable"

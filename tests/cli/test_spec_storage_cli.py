@@ -85,7 +85,7 @@ def test_spec_show_treats_locked_artifact_as_unavailable(encrypted_workspace: Pa
     result = runner.invoke(app, ["spec", "show", "hidden-plan"])
 
     assert result.exit_code != 0
-    assert result.exception is None
+    assert "SpecLocked" not in result.output
     assert "no spec" in result.output.lower()
 
 

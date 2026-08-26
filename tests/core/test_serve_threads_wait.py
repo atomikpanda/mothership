@@ -307,6 +307,8 @@ def test_duplicate_spec_ids_keep_only_their_linked_threads_active(tmp_path: Path
         id="healthy-spec", title="implemented", status="implemented",
         created_at=now, updated_at=now,
     ))
+    messages.append(ambiguous_thread.id, "agent", "resolved", now)
+    messages.append(healthy_thread.id, "agent", "resolved", now)
 
     summaries = {summary["id"]: summary for summary in client.get("/threads").json()}
     assert summaries[ambiguous_thread.id]["inbox_state"] == "active"
