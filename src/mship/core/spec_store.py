@@ -168,9 +168,7 @@ class SpecStore:
         for path in paths:
             if spec_id_from_filename(path) == spec_id:
                 spec = parse_spec(self._storage.decode_file(path))
-                if spec.id == spec_id:
-                    return spec
-                break
+                return spec if spec.id == spec_id else None
         for path in paths:
             try:
                 spec = parse_spec(self._storage.decode_file(path))
@@ -197,7 +195,8 @@ class SpecStore:
                 for path in self._storage.iter_physical():
                     try:
                         if parse_spec(self._storage.decode_file(path)).id == spec_id:
-                            self._storage.write(path, serialize_spec(spec))
+                            stem = path.with_name(path.name[:-4]) if path.name.endswith(".enc") else path
+                            self._storage.write(stem, serialize_spec(spec))
                             break
                     except Exception:
                         continue
