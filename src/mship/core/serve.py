@@ -330,7 +330,7 @@ def create_app(
     `get_gh_token`."""
     from fastapi import Depends, FastAPI, HTTPException
 
-    from mship.core.spec_store import SpecArtifactConflict, SpecStore
+    from mship.core.spec_store import SpecParseError, SpecStore
     from mship.core.spec_storage import SpecStorage, resolve_mode
     from mship.core.message_store import MessageStore
     from mship.core.workitem_store import WorkItemStore
@@ -613,7 +613,7 @@ def create_app(
                     "inbox_state": None, "archive_reason": None, "pinned": False,
                 }
             raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is blocked by locked storage")
-        except SpecArtifactConflict as exc:
+        except SpecParseError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
@@ -630,7 +630,7 @@ def create_app(
             spec, applied = store.mutate_inbox(spec_id, action, body.mutation_id, now)
         except SpecLocked:
             raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
-        except SpecArtifactConflict as exc:
+        except SpecParseError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         except KeyError:
             raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
@@ -644,7 +644,7 @@ def create_app(
     def get_review(spec_id: str):
         try:
             spec = store.find_by_id(spec_id)
-        except SpecArtifactConflict as exc:
+        except SpecParseError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         if spec is None:
             raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
@@ -991,7 +991,7 @@ def create_app(
     def _load_or_404(spec_id: str):
         try:
             spec = store.find_by_id(spec_id)
-        except SpecArtifactConflict as exc:
+        except SpecParseError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         if spec is None:
             raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
@@ -1001,7 +1001,7 @@ def create_app(
         spec.updated_at = datetime.now(timezone.utc)
         try:
             store.save(spec)
-        except SpecArtifactConflict as exc:
+        except SpecParseError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         return build_review(spec)
 
@@ -1153,7 +1153,7 @@ def create_app(
             created = store.create_if_absent(spec)
         except SpecLocked:
             raise HTTPException(status_code=409, detail=f"spec {spec.id!r} already exists but is locked")
-        except SpecArtifactConflict as exc:
+        except SpecParseError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         if created is None:
             raise HTTPException(status_code=409, detail=f"spec {spec.id!r} already exists")

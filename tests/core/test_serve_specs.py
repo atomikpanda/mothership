@@ -86,6 +86,27 @@ def test_spec_duplicate_artifacts_are_conflicts_for_review_and_inbox(tmp_path: P
         assert "multiple physical artifacts" in response.json()["detail"]
 
 
+def test_malformed_exact_spec_is_a_controlled_storage_conflict(tmp_path: Path):
+    specs_dir = tmp_path / "specs"
+    specs_dir.mkdir()
+    (specs_dir / f"{datetime.now(timezone.utc):%Y-%m-%d}-malformed.md").write_text(
+        "not a spec"
+    )
+    client = _client(tmp_path)
+
+    for response in (
+        client.get("/specs/malformed"),
+        client.get("/specs/malformed/review"),
+        client.post(
+            "/specs/malformed/inbox/archive",
+            json={"mutation_id": "malformed-archive"},
+        ),
+        client.post("/specs", json={"id": "malformed", "title": "Replacement"}),
+    ):
+        assert response.status_code == 409
+        assert "frontmatter" in response.json()["detail"]
+
+
 def test_spec_state_equivalent_inbox_action_persists_without_task_activity(tmp_path: Path):
     now = datetime.now(timezone.utc)
     state = StateManager(tmp_path / ".mothership")

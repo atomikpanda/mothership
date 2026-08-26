@@ -75,7 +75,7 @@ def register(parent: typer.Typer, get_container):
             output.error("Could not derive a spec id from the title; pass --id explicitly.")
             raise typer.Exit(1)
         from mship.core.spec_storage import SpecLocked
-        from mship.core.spec_store import SpecArtifactConflict
+        from mship.core.spec_store import SpecParseError
 
         try:
             if force:
@@ -88,7 +88,7 @@ def register(parent: typer.Typer, get_container):
         except SpecLocked:
             output.error(f"Spec {spec.id!r} already exists but is locked.")
             raise typer.Exit(1)
-        except SpecArtifactConflict as exc:
+        except SpecParseError as exc:
             output.error(f"Cannot create spec {spec.id!r}: {exc}")
             raise typer.Exit(1)
 
