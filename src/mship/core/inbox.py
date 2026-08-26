@@ -19,6 +19,7 @@ InboxArchiveReason = Literal[
 
 _SEVEN_DAYS = timedelta(days=7)
 _ACTIONS = frozenset(("archive", "restore", "pin", "unpin"))
+_MAX_MUTATION_IDS = 256
 
 
 class InboxMetadata(BaseModel):
@@ -103,7 +104,16 @@ def apply_inbox_action(
                 f"mutation id {mutation_id!r} already used for {previous!r}, not {action!r}"
             )
         return False
+    if (
+        (action == "archive" and metadata.manual_archived)
+        or (action == "restore" and not metadata.manual_archived)
+        or (action == "pin" and metadata.pinned)
+        or (action == "unpin" and not metadata.pinned)
+    ):
+        return False
     metadata.mutation_ids[mutation_id] = action
+    while len(metadata.mutation_ids) > _MAX_MUTATION_IDS:
+        metadata.mutation_ids.pop(next(iter(metadata.mutation_ids)))
     if action == "archive":
         metadata.manual_archived = True
     elif action == "restore":
