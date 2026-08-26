@@ -1508,6 +1508,7 @@ def create_app(
         # include_archived=True: this is link ownership resolution, not a user-facing listing.
         all_items, uncertain = workitems.list_tolerant_with_uncertainty(include_archived=True)
         link = _thread_inbox_links([t])[t.id]
+        data["work_item_id"] = link.work_item_id
         classification = classify_thread(
             t, linked=link.work_item_id is not None or link.uncertain,
             linked_terminal=link.terminal, now=now or datetime.now(timezone.utc),

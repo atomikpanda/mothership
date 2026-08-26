@@ -203,14 +203,15 @@ def test_mutate_inbox_duplicate_restore_is_a_noop(tmp_path):
     store = _store(tmp_path)
     thread = store.create_thread("x", "body", now)
 
-    _, applied = store.mutate_inbox(thread.id, "restore", "restore-1", now)
-    _, retried = store.mutate_inbox(thread.id, "restore", "restore-1", now + timedelta(minutes=1))
+    store.mutate_inbox(thread.id, "archive", "archive-1", now)
+    _, applied = store.mutate_inbox(thread.id, "restore", "restore-1", now + timedelta(minutes=1))
+    _, retried = store.mutate_inbox(thread.id, "restore", "restore-1", now + timedelta(minutes=2))
     assert applied is True
     assert retried is False
 
     saved = store.get(thread.id)
-    assert saved.inbox.restored_at == now
-    assert saved.inbox.mutation_ids == {"restore-1": "restore"}
+    assert saved.inbox.restored_at == now + timedelta(minutes=1)
+    assert saved.inbox.mutation_ids["restore-1"] == "restore"
 
 
 def test_mutate_inbox_commits_thread_actions_in_order(tmp_path):
@@ -233,10 +234,11 @@ def test_mutate_inbox_pin_unpin_preserves_thread_manual_and_restore_metadata(tmp
     store = _store(tmp_path)
     thread = store.create_thread("x", "body", now)
 
-    store.mutate_inbox(thread.id, "restore", "restore-1", now)
-    store.mutate_inbox(thread.id, "archive", "archive-1", now + timedelta(minutes=1))
-    store.mutate_inbox(thread.id, "pin", "pin-1", now + timedelta(minutes=2))
-    store.mutate_inbox(thread.id, "unpin", "unpin-1", now + timedelta(minutes=3))
+    store.mutate_inbox(thread.id, "archive", "archive-0", now)
+    store.mutate_inbox(thread.id, "restore", "restore-1", now + timedelta(minutes=1))
+    store.mutate_inbox(thread.id, "archive", "archive-1", now + timedelta(minutes=2))
+    store.mutate_inbox(thread.id, "pin", "pin-1", now + timedelta(minutes=3))
+    store.mutate_inbox(thread.id, "unpin", "unpin-1", now + timedelta(minutes=4))
 
     inbox = store.get(thread.id).inbox
     assert inbox.pinned is False
