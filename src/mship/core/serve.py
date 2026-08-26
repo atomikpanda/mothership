@@ -331,7 +331,7 @@ def create_app(
     from fastapi import Depends, FastAPI, HTTPException
 
     from mship.core.spec_store import SpecParseError, SpecRepresentationMismatch, SpecStore
-    from mship.core.spec_storage import SpecStorage, resolve_mode
+    from mship.core.spec_storage import SpecLocked, SpecStorage, resolve_mode
     from mship.core.message_store import MessageStore
     from mship.core.workitem_store import WorkItemStore
 
@@ -1105,6 +1105,8 @@ def create_app(
             raise HTTPException(status_code=409, detail="cannot approve: " + "; ".join(e.blockers))
         except InvalidTransition as e:
             raise HTTPException(status_code=409, detail=str(e))
+        except SpecLocked:
+            raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
         except SpecParseError as exc:
             _raise_spec_conflict(exc)
         return build_review(spec)
@@ -1134,6 +1136,8 @@ def create_app(
             request_changes_spec(
                 spec, store, body.reason, log_manager=log_manager, actor="operator",
             )
+        except SpecLocked:
+            raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
         except SpecParseError as exc:
             _raise_spec_conflict(exc)
         return build_review(spec)

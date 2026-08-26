@@ -742,7 +742,7 @@ def register(parent: typer.Typer, get_container):
         """List all specs (TTY: table; non-TTY: JSON envelope)."""
         output = Output()
         store = _spec_store()
-        specs = store.list()
+        specs = store.list_tolerant()
         items = [
             {
                 "id": s.id,

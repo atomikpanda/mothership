@@ -8,7 +8,7 @@ from mship.core import spec_key
 from mship.core.config import WorkspaceConfig
 from mship.core.serve import create_app
 from mship.core.spec import Spec
-from mship.core.spec_storage import SpecStorage
+from mship.core.spec_storage import SpecLocked, SpecStorage
 from mship.core.spec_store import SPECS_DIRNAME, SpecStore
 
 
@@ -125,3 +125,31 @@ def test_serve_review_and_write_paths_report_locked_spec_as_conflict(
 
     assert response.status_code == 409
     assert "locked" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("helper", "path", "body"),
+    [
+        ("approve_spec", "/specs/locked-one/approve", {"bypass_gate": True}),
+        (
+            "request_changes_spec",
+            "/specs/locked-one/request-changes",
+            {"reason": "Needs revision"},
+        ),
+    ],
+)
+def test_transition_save_race_maps_locked_storage_to_conflict(
+    tmp_path: Path, monkeypatch, helper: str, path: str, body: dict,
+):
+    import mship.core.serve as serve
+
+    _write_encrypted_spec(tmp_path)
+
+    def raise_locked(*_args, **_kwargs):
+        raise SpecLocked("locked-one")
+
+    monkeypatch.setattr(serve, helper, raise_locked)
+    response = _client(tmp_path).post(path, json=body)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "spec 'locked-one' is locked"

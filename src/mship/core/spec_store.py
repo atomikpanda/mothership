@@ -167,9 +167,13 @@ class SpecStore:
                 elif canonical_id is None:
                     locked_renamed = physical_path
                 continue
-            except SpecParseError:
+            except SpecParseError as exc:
                 if canonical_id == spec_id:
                     raise
+                if canonical_id is None:
+                    raise SpecArtifactConflict(
+                        f"spec store has an unreadable renamed artifact: {physical_path}"
+                    ) from exc
                 continue
 
             if canonical_id is not None and parsed.id != canonical_id:
@@ -247,11 +251,10 @@ class SpecStore:
         return parse_spec(self._storage.decode_file(Path(path)))
 
     def list(self) -> list[Spec]:
-        """Tolerantly list readable artifacts while preserving identity invariants.
+        """Strictly list artifacts for workflow gates.
 
-        Decode/parse failures are unavailable artifacts for CLI/display, but an
-        artifact that claims a canonical filename's id differently — or more than
-        one artifact for an id — is a store conflict that lifecycle gates must see.
+        Locked, corrupt, conflicting, or duplicate artifacts fail closed. Display
+        callers that must preserve readable siblings use ``list_tolerant``.
         """
         from mship.core.spec_storage import SpecLocked, canonical_spec_id_from_filename
 
@@ -262,18 +265,7 @@ class SpecStore:
             try:
                 spec = parse_spec(self._storage.decode_file(path))
             except SpecLocked:
-                if canonical_id is None:
-                    raise SpecArtifactConflict(
-                        f"spec store has an unreadable renamed artifact: {path}"
-                    )
-                existing_path = paths_by_id.get(canonical_id)
-                if existing_path is not None:
-                    raise SpecArtifactConflict(
-                        f"spec id {canonical_id!r} has multiple physical artifacts: "
-                        f"{existing_path}, {path}"
-                    )
-                paths_by_id[canonical_id] = path
-                continue
+                raise
             if canonical_id is not None and spec.id != canonical_id:
                 raise SpecArtifactConflict(
                     f"canonical artifact {path} binds {canonical_id!r}, "
@@ -288,6 +280,14 @@ class SpecStore:
             paths_by_id[spec.id] = path
             specs.append(spec)
         return specs
+
+    def list_tolerant(self) -> list[Spec]:
+        """List readable, identity-valid specs while omitting unavailable artifacts."""
+        return [
+            spec
+            for spec, _locked_id, _path in self._storage.read_all()
+            if isinstance(spec, Spec)
+        ]
 
     def find_by_id(self, spec_id: str) -> Spec | None:
         """Tolerant compatibility lookup: locked artifacts are unavailable."""

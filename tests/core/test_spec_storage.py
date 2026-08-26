@@ -195,9 +195,10 @@ def test_list_skips_locked_file_and_returns_readable_siblings(tmp_path: Path):
     enc.save(_spec())                                   # writes a .md.enc + a key
     (tmp_path / ".mothership" / "spec-key").unlink()    # now that .enc is LOCKED
 
-    ids = {s.id for s in plain.list()}
-    assert "readable-one" in ids                        # readable sibling survives
-    assert "secret-thing" not in ids                    # the locked one is skipped, not crashing
+    with pytest.raises(SpecLocked):
+        plain.list()
+    ids = {s.id for s in plain.list_tolerant()}
+    assert ids == {"readable-one"}
     assert plain.find_by_id("readable-one") is not None
 
 
@@ -327,6 +328,27 @@ def test_invalid_encrypted_token_is_a_controlled_parse_error_and_tolerant_scan_s
     assert [spec.id for spec, _, _ in encrypted._storage.read_all()] == ["readable"]
     with pytest.raises(SpecParseError):
         encrypted.list()
+
+
+def test_malformed_renamed_artifact_blocks_strict_resolution(tmp_path: Path):
+    store = _store(tmp_path, "committed")
+    readable = _spec()
+    readable.id = "readable"
+    store.save(readable)
+    (tmp_path / SPECS_DIRNAME / "legacy.md").write_text("not a spec")
+
+    with pytest.raises(SpecArtifactConflict, match="unreadable renamed artifact"):
+        store.read_strict("readable")
+
+
+def test_unreadable_exact_artifact_is_a_controlled_parse_error(tmp_path: Path):
+    path = tmp_path / SPECS_DIRNAME / "2026-07-22-broken.md"
+    path.mkdir(parents=True)
+    store = _store(tmp_path, "committed")
+
+    with pytest.raises(SpecParseError, match="plaintext spec could not be decoded"):
+        store.read_strict("broken")
+    assert store.list_tolerant() == []
 
 
 def test_readable_exact_conflicts_with_locked_renamed_artifact(tmp_path: Path):

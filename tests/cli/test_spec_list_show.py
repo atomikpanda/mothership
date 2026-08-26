@@ -89,6 +89,15 @@ class TestSpecList:
         data = json.loads(result.output)
         assert data["specs"] == []
 
+    def test_list_preserves_readable_specs_when_one_artifact_is_malformed(self, tmp_path):
+        _make_store(tmp_path)
+        (tmp_path / "specs" / "2026-01-03-broken.md").write_text("not a spec")
+
+        result = CliRunner().invoke(_app(tmp_path), ["spec", "list"])
+
+        assert result.exit_code == 0, result.output
+        assert len(json.loads(result.output)["specs"]) == 2
+
     def test_list_tty_shows_ids_and_statuses(self, tmp_path):
         """TTY output contains spec ids and statuses."""
         _make_store(tmp_path)

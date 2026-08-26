@@ -130,13 +130,13 @@ class SpecStorage:
                 raise SpecLocked(spec_id_from_filename(path))
             try:
                 return spec_key.decrypt(key, path.read_bytes())
-            except (InvalidToken, UnicodeError, ValueError) as exc:
+            except (InvalidToken, OSError, UnicodeError, ValueError) as exc:
                 from mship.core.spec_store import SpecParseError
 
                 raise SpecParseError("encrypted spec could not be decoded") from exc
         try:
             return path.read_text()
-        except UnicodeError as exc:
+        except (OSError, UnicodeError) as exc:
             from mship.core.spec_store import SpecParseError
 
             raise SpecParseError("plaintext spec could not be decoded") from exc
