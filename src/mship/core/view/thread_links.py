@@ -42,7 +42,10 @@ def index_thread_inbox_links(
                 [tasks_by_slug[slug] for slug in item.task_slugs if slug in tasks_by_slug],
             ) == "done"
             links[thread.id] = ThreadInboxLink(
-                work_item_id, terminal, uncertain and work_item_id is None,
+                work_item_id,
+                terminal,
+                uncertain and work_item_id is None
+                or (work_item_id is None and bool(thread.spec_id or thread.task_slug)),
             )
         except Exception:
             links[thread.id] = ThreadInboxLink(None, False, True)
