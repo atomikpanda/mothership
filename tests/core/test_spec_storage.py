@@ -201,9 +201,9 @@ def test_list_skips_locked_file_and_returns_readable_siblings(tmp_path: Path):
     assert plain.find_by_id("readable-one") is not None
 
 
-def test_read_strict_raises_while_tolerant_list_skips_locked_and_malformed(tmp_path: Path):
-    # Strict readers surface unavailable artifacts to lifecycle/API gates. Tolerant
-    # lists preserve readable siblings for CLI/display.
+def test_read_strict_and_gate_list_surface_malformed_specs_but_skip_locked(tmp_path: Path):
+    # Tolerant storage scans preserve readable siblings for display. SpecStore.list
+    # is also a workflow-gate input, so it skips locked specs but fails on corruption.
     enc = _store(tmp_path, "encrypted")
     enc.save(_spec())
     (tmp_path / ".mothership" / "spec-key").unlink()     # secret-thing.enc now LOCKED
@@ -216,7 +216,8 @@ def test_read_strict_raises_while_tolerant_list_skips_locked_and_malformed(tmp_p
     with pytest.raises(SpecParseError):
         store.read_strict("broken")
     assert store.read_strict("nope") is None            # unrelated locked canonical is ignorable
-    assert store.list() == []
+    with pytest.raises(SpecParseError):
+        store.list()
 
 def test_local_lifecycle_save_reapplies_gitignore_for_renamed_artifact(tmp_path: Path):
     _git_init(tmp_path)
@@ -324,7 +325,8 @@ def test_invalid_encrypted_token_is_a_controlled_parse_error_and_tolerant_scan_s
 
     assert "not a valid fernet token" not in str(exc.value)
     assert [spec.id for spec, _, _ in encrypted._storage.read_all()] == ["readable"]
-    assert [spec.id for spec in encrypted.list()] == ["readable"]
+    with pytest.raises(SpecParseError):
+        encrypted.list()
 
 
 def test_readable_exact_conflicts_with_locked_renamed_artifact(tmp_path: Path):
@@ -378,7 +380,7 @@ def test_canonical_filename_frontmatter_mismatch_conflicts_for_both_ids(tmp_path
     with pytest.raises(SpecArtifactConflict):
         store.read_strict("frontmatter-id")
 
-def test_plaintext_invalid_utf8_is_parse_error_and_tolerant_reads_skip_it(tmp_path: Path):
+def test_plaintext_invalid_utf8_is_parse_error_but_tolerant_storage_scan_skips_it(tmp_path: Path):
     specs_dir = tmp_path / SPECS_DIRNAME
     specs_dir.mkdir()
     (specs_dir / "2026-07-22-broken.md").write_bytes(b"\xff")
@@ -390,7 +392,8 @@ def test_plaintext_invalid_utf8_is_parse_error_and_tolerant_reads_skip_it(tmp_pa
     with pytest.raises(SpecParseError):
         store.read_strict("broken")
 
-    assert [spec.id for spec in store.list()] == ["readable"]
+    with pytest.raises(SpecParseError):
+        store.list()
     assert [spec.id for spec, _, _ in store._storage.read_all()] == ["readable"]
 
 
@@ -401,7 +404,8 @@ def test_malformed_encryption_key_is_parse_error_for_reads_and_writes(tmp_path: 
 
     with pytest.raises(SpecParseError):
         encrypted.read_strict("secret-thing")
-    assert encrypted.list() == []
+    with pytest.raises(SpecParseError):
+        encrypted.list()
     assert list(encrypted._storage.read_all()) == []
 
     another = _spec()

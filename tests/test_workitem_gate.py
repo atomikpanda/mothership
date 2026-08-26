@@ -469,6 +469,35 @@ def test_resolve_bound_spec_explicit_spec_id_bypasses_status_filter(tmp_path):
     assert resolve_bound_spec(task, tmp_path).id == "nr"
 
 
+def test_resolve_bound_spec_propagates_locked_explicit_link(tmp_path):
+    import pytest
+    from mship.core import spec_key
+    from mship.core.spec_storage import SpecLocked, SpecStorage
+
+    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="F", kind="feature", workspace="ws", now=now)
+    encrypted = SpecStore(
+        tmp_path / "specs",
+        storage=SpecStorage(
+            tmp_path / "specs", mode="encrypted", workspace_root=tmp_path,
+        ),
+    )
+    encrypted.save(Spec(
+        id="locked", title="S", status="approved",
+        created_at=now, updated_at=now,
+    ))
+    items.link_spec(wi.id, "locked", now=now)
+    spec_key.keyfile_path(tmp_path).unlink()
+    task = Task(
+        slug="t", description="d", phase="dev", created_at=now,
+        affected_repos=["shared"], branch="feat/t", work_item_id=wi.id,
+    )
+
+    with pytest.raises(SpecLocked):
+        resolve_bound_spec(task, tmp_path)
+
+
 def test_resolve_bound_spec_propagates_corrupt_store_error(tmp_path):
     # Greptile #341: a corrupt/unreadable spec store must NOT be silently turned into
     # None (which would make finish --require-evidence skip the required check).

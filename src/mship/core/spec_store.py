@@ -262,16 +262,17 @@ class SpecStore:
             try:
                 spec = parse_spec(self._storage.decode_file(path))
             except SpecLocked:
-                if canonical_id is not None:
-                    existing_path = paths_by_id.get(canonical_id)
-                    if existing_path is not None:
-                        raise SpecArtifactConflict(
-                            f"spec id {canonical_id!r} has multiple physical artifacts: "
-                            f"{existing_path}, {path}"
-                        )
-                    paths_by_id[canonical_id] = path
-                continue
-            except (OSError, SpecParseError):
+                if canonical_id is None:
+                    raise SpecArtifactConflict(
+                        f"spec store has an unreadable renamed artifact: {path}"
+                    )
+                existing_path = paths_by_id.get(canonical_id)
+                if existing_path is not None:
+                    raise SpecArtifactConflict(
+                        f"spec id {canonical_id!r} has multiple physical artifacts: "
+                        f"{existing_path}, {path}"
+                    )
+                paths_by_id[canonical_id] = path
                 continue
             if canonical_id is not None and spec.id != canonical_id:
                 raise SpecArtifactConflict(

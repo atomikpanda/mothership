@@ -1004,8 +1004,8 @@ def register(app: typer.Typer, get_container):
                 closed_count=closed_count,
                 completed_without_prs=completed_without_prs,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            output.warning(f"spec lifecycle not advanced: {exc}")
 
         # Advance a WorkItem's completion state when its last live task merges+closes.
         # Spec-bound items (incl. features spawned via `spawn --work-item`, whose spec
@@ -1026,8 +1026,8 @@ def register(app: typer.Typer, get_container):
                 closed_count=closed_count,
                 completed_without_prs=completed_without_prs,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            output.warning(f"WorkItem lifecycle not advanced: {exc}")
 
         # Close linked GitHub tracker issues (#386). Fail-open like the
         # advances above: failures warn, the close never blocks on them.

@@ -2548,6 +2548,37 @@ def test_close_push_only_completion_advances_spec_and_workitem(configured_git_ap
     assert "t" not in sm.load().tasks
 
 
+def test_close_warns_when_locked_spec_blocks_lifecycle(configured_git_app):
+    from typer.testing import CliRunner
+    from mship.cli import app as _app
+    from mship.core import spec_key
+    from mship.core.spec_storage import SpecStorage
+    from mship.core.spec_store import SpecStore
+
+    sm, spec_store, _wi_store, _wi_id, spec_id = _seed_pushonly_lifecycle(
+        configured_git_app
+    )
+    spec = spec_store.find_by_id(spec_id)
+    next((configured_git_app / "specs").glob(f"*-{spec_id}.md")).unlink()
+    encrypted_store = SpecStore(
+        configured_git_app / "specs",
+        storage=SpecStorage(
+            configured_git_app / "specs",
+            mode="encrypted",
+            workspace_root=configured_git_app,
+        ),
+    )
+    encrypted_store.save(spec)
+    spec_key.keyfile_path(configured_git_app).unlink()
+
+    result = CliRunner().invoke(_app, ["close", "--yes", "--task", "t"])
+
+    assert result.exit_code == 0, result.output
+    assert "spec lifecycle not advanced" in result.output
+    assert "encrypted and no key is available" in result.output
+    assert "t" not in sm.load().tasks
+
+
 def test_close_abandon_does_not_advance_lifecycle(configured_git_app):
     """--abandon is discarded work: spec and WorkItem stay unadvanced."""
     from typer.testing import CliRunner

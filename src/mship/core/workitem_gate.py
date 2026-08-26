@@ -108,7 +108,7 @@ def resolve_bound_spec(task, workspace_root: Path):
     if wi_id is not None:
         wi = WorkItemStore(Path(workspace_root) / ".mothership" / "workitems").get(wi_id)
         if wi is not None and wi.spec_id:
-            bound = specs.find_by_id(wi.spec_id)
+            bound = specs.read_strict(wi.spec_id)
             if bound is None:
                 raise BoundSpecUnresolved(
                     f"WorkItem {wi_id} links spec {wi.spec_id!r}, but that spec was not "
