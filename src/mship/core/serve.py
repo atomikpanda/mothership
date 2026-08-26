@@ -330,7 +330,7 @@ def create_app(
     `get_gh_token`."""
     from fastapi import Depends, FastAPI, HTTPException
 
-    from mship.core.spec_store import SpecParseError, SpecStore
+    from mship.core.spec_store import SpecParseError, SpecRepresentationMismatch, SpecStore
     from mship.core.spec_storage import SpecStorage, resolve_mode
     from mship.core.message_store import MessageStore
     from mship.core.workitem_store import WorkItemStore
@@ -988,11 +988,14 @@ def create_app(
     )
     from mship.core.spec_questions import add_question, answer_question
 
+    def _raise_spec_conflict(exc: SpecParseError | SpecRepresentationMismatch) -> None:
+        raise HTTPException(status_code=409, detail=str(exc))
+
     def _load_or_404(spec_id: str):
         try:
             spec = store.find_by_id(spec_id)
         except SpecParseError as exc:
-            raise HTTPException(status_code=409, detail=str(exc))
+            _raise_spec_conflict(exc)
         if spec is None:
             raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
         return spec
@@ -1002,7 +1005,7 @@ def create_app(
         try:
             store.save(spec)
         except SpecParseError as exc:
-            raise HTTPException(status_code=409, detail=str(exc))
+            _raise_spec_conflict(exc)
         return build_review(spec)
 
     def _auto_approve_if_ready(spec):
@@ -1090,6 +1093,8 @@ def create_app(
             raise HTTPException(status_code=409, detail="cannot approve: " + "; ".join(e.blockers))
         except InvalidTransition as e:
             raise HTTPException(status_code=409, detail=str(e))
+        except SpecParseError as exc:
+            _raise_spec_conflict(exc)
         return build_review(spec)
 
     @app.post("/specs/{spec_id}/request-changes")
@@ -1113,7 +1118,12 @@ def create_app(
         # its own `record_rejection` call. This also supersedes the old
         # decorative "spec request-changes (api): …" log line — the
         # structured record is the parsed source now.
-        request_changes_spec(spec, store, body.reason, log_manager=log_manager, actor="operator")
+        try:
+            request_changes_spec(
+                spec, store, body.reason, log_manager=log_manager, actor="operator",
+            )
+        except SpecParseError as exc:
+            _raise_spec_conflict(exc)
         return build_review(spec)
 
     @app.post("/specs/{spec_id}/archive")
@@ -1151,10 +1161,12 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc))
         try:
             created = store.create_if_absent(spec)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
         except SpecLocked:
             raise HTTPException(status_code=409, detail=f"spec {spec.id!r} already exists but is locked")
         except SpecParseError as exc:
-            raise HTTPException(status_code=409, detail=str(exc))
+            _raise_spec_conflict(exc)
         if created is None:
             raise HTTPException(status_code=409, detail=f"spec {spec.id!r} already exists")
         return {**spec.model_dump(mode="json"), "path": str(created)}
@@ -1179,7 +1191,10 @@ def create_app(
         spec.status = "needs_review"
         spec.clarification_reason = None
         spec.updated_at = datetime.now(timezone.utc)
-        store.save(spec)
+        try:
+            store.save(spec)
+        except SpecParseError as exc:
+            _raise_spec_conflict(exc)
         return spec.model_dump(mode="json")
 
     @app.post("/capture")
@@ -1276,8 +1291,8 @@ def create_app(
                         "dispatch handoff notify failed (spec=%s task=%s) — "
                         "dispatch itself succeeded", result.spec.id, result.task.slug,
                     )
-        except DispatchError as e:
-            raise HTTPException(status_code=409, detail=str(e))
+        except (DispatchError, SpecParseError) as exc:
+            _raise_spec_conflict(exc)
         return {
             "spec": result.spec.model_dump(mode="json"),
             "task_slug": result.task.slug,
@@ -1331,14 +1346,24 @@ def create_app(
             all_items, uncertain = workitems.list_tolerant_with_uncertainty(include_archived=True)
         else:
             uncertain = False
+        from mship.core.spec_storage import canonical_spec_id_from_filename
         from mship.core.spec_store import parse_spec
 
         specs_by_id = {}
         ambiguous_spec_ids = set()
         for path in _spec_storage.iter_physical():
+            canonical_id = canonical_spec_id_from_filename(path)
             try:
                 spec = parse_spec(_spec_storage.decode_file(path))
             except Exception:
+                if canonical_id is not None:
+                    specs_by_id.pop(canonical_id, None)
+                    ambiguous_spec_ids.add(canonical_id)
+                continue
+            if canonical_id is not None and canonical_id != spec.id:
+                for ambiguous_id in (canonical_id, spec.id):
+                    specs_by_id.pop(ambiguous_id, None)
+                    ambiguous_spec_ids.add(ambiguous_id)
                 continue
             if spec.id in specs_by_id:
                 specs_by_id.pop(spec.id)

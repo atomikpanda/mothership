@@ -629,6 +629,12 @@ def test_post_create_spec_explicit_id(tmp_path):
     assert r.status_code == 200 and r.json()["id"] == "custom"
 
 
+
+def test_post_create_spec_unsafe_id_is_422(tmp_path):
+    response = TestClient(_app(tmp_path)).post("/specs", json={"title": "Anything", "id": "../unsafe"})
+
+    assert response.status_code == 422
+
 def test_post_create_spec_collision_409(tmp_path):
     client = TestClient(_app(tmp_path))
     assert client.post("/specs", json={"title": "Dup"}).status_code == 200
@@ -1018,6 +1024,29 @@ def test_thread_linked_to_done_work_item_is_archived(tmp_path):
     assert summary["id"] == thread.id
     assert summary["inbox_state"] == "archived"
     assert summary["archive_reason"] == "linked_terminal"
+
+
+def test_malformed_canonical_spec_keeps_linked_terminal_thread_active(tmp_path):
+    now = datetime.now(timezone.utc)
+    spec = Spec(
+        id="implemented", title="Implemented", status="implemented",
+        created_at=now, updated_at=now,
+    )
+    path = SpecStore(tmp_path / "specs").save(spec)
+    messages = MessageStore(tmp_path / ".mothership" / "messages")
+    thread = messages.create_thread("Linked", "content", now)
+    messages.append(thread.id, "agent", "resolved", now)
+    messages.link_spec(thread.id, spec.id)
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    item = items.create("Implemented", "feature", "test-ws", now)
+    items.link_spec(item.id, spec.id, now)
+    path.write_text("not a valid spec")
+
+    summary = TestClient(_app(tmp_path)).get("/threads", params={"inbox": "all"}).json()[0]
+
+    assert summary["work_item_id"] == item.id
+    assert summary["inbox_state"] == "active"
+    assert summary["archive_reason"] is None
 
 
 def test_threads_keep_healthy_terminal_link_with_corrupt_work_item(tmp_path):

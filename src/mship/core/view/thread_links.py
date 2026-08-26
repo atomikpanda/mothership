@@ -33,12 +33,12 @@ def index_thread_inbox_links(
     links: dict[str, ThreadInboxLink] = {}
     for thread in threads:
         try:
-            work_item_id = _resolve_from_index(
+            work_item_id, ownership_ambiguous = _resolve_with_ambiguity(
                 thread.id, thread.spec_id, thread.task_slug, index,
             )
             item = items_by_id.get(work_item_id)
             ambiguous_spec = item is not None and item.spec_id in ambiguous_spec_ids
-            terminal = not ambiguous_spec and item is not None and compute_phase(
+            terminal = not ownership_ambiguous and not ambiguous_spec and item is not None and compute_phase(
                 item,
                 specs_by_id.get(item.spec_id) if item.spec_id else None,
                 [tasks_by_slug[slug] for slug in item.task_slugs if slug in tasks_by_slug],
@@ -46,7 +46,8 @@ def index_thread_inbox_links(
             links[thread.id] = ThreadInboxLink(
                 work_item_id,
                 terminal,
-                ambiguous_spec
+                ownership_ambiguous
+                or ambiguous_spec
                 or (uncertain and work_item_id is None)
                 or (work_item_id is None and bool(thread.spec_id or thread.task_slug)),
             )
@@ -55,37 +56,41 @@ def index_thread_inbox_links(
     return links
 
 def _build_link_index(items: Iterable):
-    """Build the three reverse lookups (thread_id / spec_id / task_slug -> work_item_id)
-    once, so a whole thread list can be resolved without re-scanning `items` per thread."""
-    # Per-item guard: a single corrupt/unreadable WorkItem degrades ONLY its own threads (they fall
-    # back to None), not every thread — a coarse whole-index try/except would blank healthy items too.
-    by_thread: dict = {}
-    by_spec: dict = {}
-    by_task: dict = {}
+    """Build reverse owner sets for thread, spec, and task links once per batch."""
+    by_thread: dict[str, set[str]] = {}
+    by_spec: dict[str, set[str]] = {}
+    by_task: dict[str, set[str]] = {}
     for w in items:
         try:
             for tid in w.thread_ids:
-                by_thread[tid] = w.id
+                by_thread.setdefault(tid, set()).add(w.id)
             if w.spec_id:
-                by_spec[w.spec_id] = w.id
+                by_spec.setdefault(w.spec_id, set()).add(w.id)
             for slug in w.task_slugs:
-                by_task[slug] = w.id
+                by_task.setdefault(slug, set()).add(w.id)
         except Exception:
             continue
     return by_thread, by_spec, by_task
 
 
-def _resolve_from_index(thread_id: str, spec_id: str | None, task_slug: str | None, index) -> str | None:
-    """Resolve one thread against a prebuilt index. Precedence: explicit thread_ids link >
-    spec_id > task_slug. Direct membership is exclusive, so this yields AT MOST ONE item."""
+def _resolve_with_ambiguity(
+    thread_id: str, spec_id: str | None, task_slug: str | None, index,
+) -> tuple[str | None, bool]:
+    """Resolve one link at the first applicable precedence, preserving ambiguity."""
     by_thread, by_spec, by_task = index
-    if thread_id in by_thread:
-        return by_thread[thread_id]
-    if spec_id and spec_id in by_spec:
-        return by_spec[spec_id]
-    if task_slug and task_slug in by_task:
-        return by_task[task_slug]
-    return None
+    for key, owners in (
+        (thread_id, by_thread),
+        (spec_id, by_spec),
+        (task_slug, by_task),
+    ):
+        if key and key in owners:
+            matches = owners[key]
+            return (next(iter(matches)), False) if len(matches) == 1 else (None, True)
+    return None, False
+
+
+def _resolve_from_index(thread_id: str, spec_id: str | None, task_slug: str | None, index) -> str | None:
+    return _resolve_with_ambiguity(thread_id, spec_id, task_slug, index)[0]
 
 
 def resolve_thread_work_item(
@@ -98,8 +103,7 @@ def resolve_thread_work_item(
 
     Precedence: explicit thread_ids link > spec_id > task_slug.
     `items` is any iterable of objects with .id/.spec_id/.task_slugs/.thread_ids.
-    A thread resolves to AT MOST ONE WorkItem (direct membership is exclusive; the
-    indirect fallback resolves to exactly one item deterministically).
+    A duplicate owner at the selected precedence is ambiguous and resolves to None.
     """
     return _resolve_from_index(thread_id, spec_id, task_slug, _build_link_index(items))
 

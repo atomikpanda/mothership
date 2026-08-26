@@ -8,7 +8,7 @@ from mship.core import spec_key
 from mship.core.spec import Spec
 from mship.core.spec_storage import SpecLocked, SpecStorage, spec_id_from_filename
 from mship.core.spec_store import (
-    SPECS_DIRNAME, SpecArtifactConflict, SpecStore, serialize_spec,
+    SPECS_DIRNAME, SpecArtifactConflict, SpecParseError, SpecStore, serialize_spec,
 )
 
 
@@ -219,8 +219,7 @@ def test_read_strict_raises_and_list_skips_locked_but_propagates_malformed(tmp_p
         store.read_strict("secret-thing")
     with pytest.raises(SpecParseError):
         store.read_strict("broken")
-    with pytest.raises(SpecLocked):
-        store.read_strict("nope")                       # unknown locked alias is fail-closed
+    assert store.read_strict("nope") is None            # unrelated locked canonical is ignorable
     # list() skips the locked file but must NOT swallow the malformed one:
     with pytest.raises(SpecParseError):
         store.list()
@@ -299,7 +298,7 @@ def test_create_refuses_unknown_locked_alias_without_creating_a_replacement_key(
     new_spec = _spec()
     new_spec.id = "real-id"
 
-    with pytest.raises(SpecLocked):
+    with pytest.raises(SpecArtifactConflict):
         store.create_if_absent(new_spec)
 
     assert spec_key.load_key(tmp_path) is None
@@ -316,3 +315,70 @@ def test_exact_readable_artifact_remains_resolvable_beside_unrelated_locked_sibl
     spec_key.keyfile_path(tmp_path).unlink()
 
     assert committed.read_strict("readable").id == "readable"
+
+
+def test_invalid_encrypted_token_is_a_controlled_parse_error_and_tolerant_scan_skips_it(tmp_path: Path):
+    encrypted = _store(tmp_path, "encrypted")
+    broken = encrypted.save(_spec())
+    broken.write_bytes(b"not a valid fernet token")
+    readable = _spec()
+    readable.id = "readable"
+    _store(tmp_path, "committed").save(readable)
+
+    with pytest.raises(SpecParseError) as exc:
+        encrypted.read_strict("secret-thing")
+
+    assert "not a valid fernet token" not in str(exc.value)
+    assert [spec.id for spec, _, _ in encrypted._storage.read_all()] == ["readable"]
+
+
+def test_readable_exact_conflicts_with_locked_renamed_artifact(tmp_path: Path):
+    committed = _store(tmp_path, "committed")
+    readable = _spec()
+    readable.id = "readable"
+    committed.save(readable)
+    encrypted = _store(tmp_path, "encrypted")
+    locked = encrypted.save(_spec())
+    spec_key.keyfile_path(tmp_path).unlink()
+    locked.rename(locked.with_name("legacy.md.enc"))
+
+    with pytest.raises(SpecArtifactConflict):
+        committed.read_strict("readable")
+
+
+def test_locked_exact_conflicts_with_readable_alias_for_same_id(tmp_path: Path):
+    encrypted = _store(tmp_path, "encrypted")
+    spec = _spec()
+    locked = encrypted.save(spec)
+    locked.with_name("legacy.md").write_text(serialize_spec(spec))
+    spec_key.keyfile_path(tmp_path).unlink()
+
+    with pytest.raises(SpecArtifactConflict):
+        encrypted.read_strict(spec.id)
+
+
+def test_readable_renamed_artifact_ignores_locked_canonical_sibling_for_different_id(tmp_path: Path):
+    readable = _spec()
+    readable.id = "readable"
+    committed = _store(tmp_path, "committed")
+    canonical = committed.save(readable)
+    canonical.rename(canonical.with_name("legacy-readable.md"))
+    encrypted = _store(tmp_path, "encrypted")
+    encrypted.save(_spec())
+    spec_key.keyfile_path(tmp_path).unlink()
+
+    assert committed.read_strict("readable").id == "readable"
+
+
+def test_canonical_filename_frontmatter_mismatch_conflicts_for_both_ids(tmp_path: Path):
+    store = _store(tmp_path, "committed")
+    frontmatter = _spec()
+    frontmatter.id = "frontmatter-id"
+    path = tmp_path / SPECS_DIRNAME / "2026-07-22-physical-id.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(serialize_spec(frontmatter))
+
+    with pytest.raises(SpecArtifactConflict):
+        store.read_strict("physical-id")
+    with pytest.raises(SpecArtifactConflict):
+        store.read_strict("frontmatter-id")

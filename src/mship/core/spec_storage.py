@@ -18,6 +18,7 @@ writer under an encrypted workspace can never accidentally emit plaintext.
 from __future__ import annotations
 
 import re
+from cryptography.fernet import InvalidToken
 import tempfile
 from pathlib import Path
 from typing import Iterator, Literal
@@ -30,7 +31,7 @@ SpecMode = Literal["committed", "local", "encrypted"]
 # Physical encrypted file is `<date>-<id>.md.enc` (the logical stem keeps `.md`).
 ENC_SUFFIX = ".enc"
 
-_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-(?P<id>.+)$")
+_CANONICAL_FILENAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-(?P<id>.+)\.md(?:\.enc)?$")
 
 
 class SpecLocked(Exception):
@@ -41,16 +42,21 @@ class SpecLocked(Exception):
         self.spec_id = spec_id
 
 
+def canonical_spec_id_from_filename(path: Path) -> str | None:
+    """Return a dated artifact's authoritative filename id, if its name is canonical."""
+    match = _CANONICAL_FILENAME_RE.match(Path(path).name)
+    return match.group("id") if match else None
+
+
 def spec_id_from_filename(path: Path) -> str:
-    """`2026-07-22-foo-bar.md[.enc]` -> `foo-bar`. Best-effort: strips the suffix
-    and the leading `YYYY-MM-DD-`, so a locked spec's id is still knowable."""
-    name = path.name
+    """`2026-07-22-foo-bar.md[.enc]` -> `foo-bar`; otherwise return its bare stem."""
+    name = Path(path).name
+    canonical_id = canonical_spec_id_from_filename(path)
+    if canonical_id is not None:
+        return canonical_id
     if name.endswith(ENC_SUFFIX):
         name = name[: -len(ENC_SUFFIX)]
-    if name.endswith(".md"):
-        name = name[: -len(".md")]
-    m = _ID_RE.match(name)
-    return m.group("id") if m else name
+    return name[:-len(".md")] if name.endswith(".md") else name
 
 
 class SpecStorage:
@@ -116,7 +122,12 @@ class SpecStorage:
             key = spec_key.load_key(self.workspace_root)
             if key is None:
                 raise SpecLocked(spec_id_from_filename(path))
-            return spec_key.decrypt(key, path.read_bytes())
+            try:
+                return spec_key.decrypt(key, path.read_bytes())
+            except (InvalidToken, UnicodeError) as exc:
+                from mship.core.spec_store import SpecParseError
+
+                raise SpecParseError("encrypted spec could not be decoded") from exc
         return path.read_text()
 
     def read_all(self) -> Iterator[tuple[object | None, str | None, Path]]:
@@ -133,7 +144,7 @@ class SpecStorage:
             except SpecLocked as locked:
                 yield (None, locked.spec_id, path)
                 continue
-            except (OSError, UnicodeError):
+            except (OSError, UnicodeError, SpecParseError):
                 continue
             try:
                 yield (parse_spec(text), None, path)

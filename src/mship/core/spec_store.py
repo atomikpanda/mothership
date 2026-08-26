@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import fcntl
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -72,10 +73,12 @@ def parse_spec(text: str) -> Spec:
     body = "".join(lines[end + 1:])
     try:
         data = yaml.safe_load(fm_text) or {}
+        if not isinstance(data, Mapping):
+            raise SpecParseError("spec frontmatter must be a mapping")
         return Spec(**data, body=body)
     except yaml.YAMLError as exc:
         raise SpecParseError(f"invalid YAML frontmatter: {exc}") from exc
-    except ValidationError as exc:
+    except (TypeError, ValidationError) as exc:
         raise SpecParseError(f"spec frontmatter failed validation: {exc}") from exc
 
 
@@ -146,40 +149,49 @@ class SpecStore:
 
     def resolve_artifact(self, spec_id: str) -> ResolvedSpecArtifact | None:
         """Resolve exactly one parsed artifact for ``spec_id`` or fail closed."""
-        from mship.core.spec_storage import SpecLocked, spec_id_from_filename
+        from mship.core.spec_storage import (
+            SpecLocked, canonical_spec_id_from_filename,
+        )
 
         self._validate_id(spec_id)
-        paths = self._storage.iter_physical()
         matches: list[tuple[Spec, Path]] = []
-        exact_paths = [
-            path for path in paths if spec_id_from_filename(path) == spec_id
-        ]
-        for physical_path in exact_paths:
-            parsed = parse_spec(self._storage.decode_file(physical_path))
-            if parsed.id != spec_id:
-                raise SpecArtifactConflict(
-                    f"spec id {spec_id!r} collides with {physical_path} "
-                    f"whose frontmatter id is {parsed.id!r}"
-                )
-            matches.append((parsed, physical_path))
-        locked_alias: SpecLocked | None = None
-        for physical_path in paths:
-            if physical_path in exact_paths:
-                continue
+        exact_locked: SpecLocked | None = None
+        locked_renamed: Path | None = None
+        for physical_path in self._storage.iter_physical():
+            canonical_id = canonical_spec_id_from_filename(physical_path)
             try:
                 parsed = parse_spec(self._storage.decode_file(physical_path))
             except SpecLocked as locked:
-                locked_alias = locked
+                if canonical_id == spec_id:
+                    exact_locked = locked
+                elif canonical_id is None:
+                    locked_renamed = physical_path
                 continue
             except SpecParseError:
+                if canonical_id == spec_id:
+                    raise
+                continue
+
+            if canonical_id is not None and parsed.id != canonical_id:
+                if spec_id in (canonical_id, parsed.id):
+                    raise SpecArtifactConflict(
+                        f"canonical artifact {physical_path} binds {canonical_id!r}, "
+                        f"not frontmatter id {parsed.id!r}"
+                    )
                 continue
             if parsed.id == spec_id:
                 matches.append((parsed, physical_path))
-        # A readable exact name proves that a locked legacy alias belongs elsewhere.
-        # Without that proof, ciphertext under a renamed stem has unknowable content;
-        # treating it as absent could generate a replacement key and artifact.
-        if locked_alias is not None and not exact_paths:
-            raise locked_alias
+
+        if locked_renamed is not None:
+            raise SpecArtifactConflict(
+                f"spec id {spec_id!r} has an unreadable renamed artifact: {locked_renamed}"
+            )
+        if exact_locked is not None:
+            if matches:
+                raise SpecArtifactConflict(
+                    f"spec id {spec_id!r} has both locked and readable artifacts"
+                )
+            raise exact_locked
         if len(matches) > 1:
             paths = ", ".join(str(path) for _, path in matches)
             raise SpecArtifactConflict(

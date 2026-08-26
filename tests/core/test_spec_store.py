@@ -94,6 +94,11 @@ def test_invalid_schema_frontmatter_raises_spec_parse_error():
 def test_malformed_yaml_raises_spec_parse_error():
     with pytest.raises(SpecParseError):
         parse_spec("---\nid: [unclosed\n---\nbody\n")
+@pytest.mark.parametrize("frontmatter", ["[]", "a scalar"])
+def test_non_mapping_frontmatter_raises_spec_parse_error(frontmatter: str):
+    with pytest.raises(SpecParseError):
+        parse_spec(f"---\n{frontmatter}\n---\nbody\n")
+
 
 
 def _new_spec(spec_id: str):
