@@ -194,5 +194,13 @@ class SpecStore:
                 raise KeyError(spec_id)
             applied = apply_inbox_action(spec.inbox, action, mutation_id, now)
             if applied:
-                self._save_unlocked(spec)
+                for path in self._storage.iter_physical():
+                    try:
+                        if parse_spec(self._storage.decode_file(path)).id == spec_id:
+                            self._storage.write(path, serialize_spec(spec))
+                            break
+                    except Exception:
+                        continue
+                else:
+                    raise KeyError(spec_id)
             return spec, applied
