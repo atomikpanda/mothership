@@ -981,16 +981,23 @@ def create_app(
         set_prose_verdict,
     )
     from mship.core.spec_questions import add_question, answer_question
+    from mship.core.spec_store import SpecArtifactConflict
 
     def _load_or_404(spec_id: str):
-        spec = store.find_by_id(spec_id)
+        try:
+            spec = store.find_by_id(spec_id)
+        except SpecArtifactConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
         if spec is None:
             raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
         return spec
 
     def _save_and_review(spec):
         spec.updated_at = datetime.now(timezone.utc)
-        store.save(spec)
+        try:
+            store.save(spec)
+        except SpecArtifactConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
         return build_review(spec)
 
     def _auto_approve_if_ready(spec):
@@ -1128,6 +1135,7 @@ def create_app(
     @app.post("/specs")
     def post_create_spec(body: NewSpecBody):
         from mship.core.spec_storage import SpecLocked
+        from mship.core.spec_store import SpecArtifactConflict
 
         now = datetime.now(timezone.utc)
         try:
@@ -1141,9 +1149,11 @@ def create_app(
             created = store.create_if_absent(spec)
         except SpecLocked:
             raise HTTPException(status_code=409, detail=f"spec {spec.id!r} already exists but is locked")
-        if not created:
+        except SpecArtifactConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        if created is None:
             raise HTTPException(status_code=409, detail=f"spec {spec.id!r} already exists")
-        return spec.model_dump(mode="json")
+        return {**spec.model_dump(mode="json"), "path": str(created)}
 
     @app.post("/specs/{spec_id}/draft")
     def post_draft(spec_id: str, body: DraftIntentBody):

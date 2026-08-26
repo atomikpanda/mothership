@@ -6,7 +6,9 @@ from threading import Event, Thread
 import pytest
 
 from mship.core.spec import AcceptanceCriterion, AcceptanceEvidence, OpenQuestion, Spec
-from mship.core.spec_store import SpecParseError, SpecStore, parse_spec, serialize_spec
+from mship.core.spec_store import (
+    SpecArtifactConflict, SpecParseError, SpecStore, parse_spec, serialize_spec,
+)
 from mship.core.spec_storage import SpecStorage
 
 def _spec():
@@ -325,3 +327,52 @@ def test_mutate_inbox_resolves_renamed_physical_spec_by_frontmatter_id(tmp_path)
     assert applied is True
     assert mutated.inbox.manual_archived is True
     assert mutated.status == "needs_review"
+
+def test_lifecycle_save_overwrites_renamed_artifact(tmp_path: Path):
+    store = SpecStore(tmp_path / "specs")
+    spec = _new_spec("alpha")
+    original = store.save(spec)
+    renamed = original.with_name("legacy-alpha.md")
+    original.rename(renamed)
+    spec.status = "needs_review"
+
+    assert store.save(spec) == renamed
+    assert renamed.is_file()
+    assert not original.exists()
+
+
+def test_mutation_fails_closed_when_canonical_and_alias_both_match(tmp_path: Path):
+    store = SpecStore(tmp_path / "specs")
+    spec = _new_spec("alpha")
+    canonical = store.save(spec)
+    canonical.with_name("legacy-alpha.md").write_text(canonical.read_text())
+
+    with pytest.raises(SpecArtifactConflict):
+        store.mutate_inbox(
+            spec.id, "archive", "archive-1", datetime(2026, 8, 25, tzinfo=timezone.utc),
+        )
+
+
+def test_create_rejects_target_filename_collision_with_other_frontmatter(tmp_path: Path):
+    store = SpecStore(tmp_path / "specs")
+    candidate = _new_spec("alpha")
+    collision = _new_spec("other")
+    target = store.path_for(candidate)
+    target.parent.mkdir(parents=True)
+    target.write_text(serialize_spec(collision))
+
+    with pytest.raises(SpecArtifactConflict):
+        store.create_if_absent(candidate)
+
+
+def test_save_propagates_storage_write_failure(tmp_path: Path, monkeypatch):
+    store = SpecStore(tmp_path / "specs")
+    spec = _new_spec("alpha")
+    store.save(spec)
+
+    def fail_write(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(SpecStorage, "write", fail_write)
+    with pytest.raises(OSError, match="disk full"):
+        store.save(spec)

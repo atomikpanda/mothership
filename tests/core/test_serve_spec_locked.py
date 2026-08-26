@@ -97,3 +97,12 @@ def test_serve_create_refuses_duplicate_locked_spec_as_conflict(tmp_path: Path):
 
     assert response.status_code == 409
     assert "locked" in response.json()["detail"]
+
+
+def test_serve_create_reports_encrypted_physical_path(tmp_path: Path):
+    response = _client(tmp_path).post(
+        "/specs", json={"id": "new-secret", "title": "New secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["path"].endswith("new-secret.md.enc")

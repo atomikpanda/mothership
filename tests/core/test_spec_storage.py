@@ -7,7 +7,9 @@ import pytest
 from mship.core import spec_key
 from mship.core.spec import Spec
 from mship.core.spec_storage import SpecLocked, SpecStorage, spec_id_from_filename
-from mship.core.spec_store import SPECS_DIRNAME, SpecStore, serialize_spec
+from mship.core.spec_store import (
+    SPECS_DIRNAME, SpecArtifactConflict, SpecStore, serialize_spec,
+)
 
 
 def _spec():
@@ -62,6 +64,13 @@ def test_encrypted_round_trips_with_key(tmp_path: Path):
     store.save(_spec())
     loaded = store.find_by_id("secret-thing")
     assert "THE-SECRET-MARKER" in loaded.body
+
+
+def test_create_if_absent_returns_encrypted_physical_path(tmp_path: Path):
+    path = _store(tmp_path, "encrypted").create_if_absent(_spec())
+
+    assert path is not None
+    assert path.name == "2026-07-22-secret-thing.md.enc"
 
 
 def test_no_key_holder_cannot_read_encrypted_spec(tmp_path: Path):
@@ -212,3 +221,32 @@ def test_read_strict_raises_and_list_skips_locked_but_propagates_malformed(tmp_p
     # list() skips the locked file but must NOT swallow the malformed one:
     with pytest.raises(SpecParseError):
         store.list()
+
+def test_local_lifecycle_save_reapplies_gitignore_for_renamed_artifact(tmp_path: Path):
+    _git_init(tmp_path)
+    store = _store(tmp_path, "local")
+    spec = _spec()
+    path = store.save(spec)
+    renamed = path.with_name("legacy.md")
+    path.rename(renamed)
+    (tmp_path / ".gitignore").write_text("kept-rule\n")
+    spec.status = "needs_review"
+
+    assert store.save(spec) == renamed
+    assert (tmp_path / ".gitignore").read_text() == "kept-rule\nspecs/*.md\n"
+    assert subprocess.run(
+        ["git", "check-ignore", "-q", str(renamed.relative_to(tmp_path))], cwd=tmp_path,
+    ).returncode == 0
+
+
+def test_encrypted_artifact_does_not_fallback_to_plaintext_under_committed_policy(tmp_path: Path):
+    encrypted = _store(tmp_path, "encrypted")
+    spec = _spec()
+    encrypted_path = encrypted.save(spec)
+    committed = SpecStore(tmp_path / SPECS_DIRNAME)
+
+    with pytest.raises(SpecArtifactConflict):
+        committed.save(spec)
+
+    assert encrypted_path.is_file()
+    assert not encrypted_path.with_suffix("").exists()

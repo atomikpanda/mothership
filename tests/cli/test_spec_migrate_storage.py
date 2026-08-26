@@ -1,10 +1,14 @@
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 from typer.testing import CliRunner
 
 from mship.cli import app, container
+from mship.core.spec_store import SpecStore
+from mship.core.spec_storage import SpecStorage
 
 runner = CliRunner()
 
@@ -75,3 +79,39 @@ def test_migrate_encrypted_back_to_committed(workspace: Path):
     md = list((workspace / "specs").glob("*.md"))
     assert len(md) == 1 and "Design X" in md[0].read_text()
     assert list((workspace / "specs").glob("*.md.enc")) == []  # ciphertext gone
+
+
+def test_migration_holds_spec_lock_until_mutation_can_write_target(
+    workspace: Path, monkeypatch,
+):
+    _set_mode(workspace, "encrypted")
+    store = SpecStore(workspace / "specs")
+    mutation_finished = Event()
+    mutation_started = Event()
+    original_write = SpecStorage.write
+    writer: Thread | None = None
+
+    def mutate() -> None:
+        store.mutate_inbox(
+            "design-x", "archive", "archive-during-migration",
+            datetime(2026, 8, 26, tzinfo=timezone.utc),
+        )
+        mutation_finished.set()
+
+    def interleave_migration(storage, path, text):
+        nonlocal writer
+        if storage.mode == "encrypted" and writer is None:
+            writer = Thread(target=mutate)
+            writer.start()
+            mutation_started.set()
+            assert not mutation_finished.wait(timeout=0.1)
+        return original_write(storage, path, text)
+
+    monkeypatch.setattr(SpecStorage, "write", interleave_migration)
+    res = runner.invoke(app, ["spec", "migrate-storage"])
+    assert res.exit_code == 0, res.output
+    assert mutation_started.is_set()
+    assert writer is not None
+    writer.join(timeout=1)
+    assert mutation_finished.is_set()
+    assert store.find_by_id("design-x").inbox.manual_archived is True

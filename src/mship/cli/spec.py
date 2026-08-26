@@ -75,16 +75,21 @@ def register(parent: typer.Typer, get_container):
             output.error("Could not derive a spec id from the title; pass --id explicitly.")
             raise typer.Exit(1)
         from mship.core.spec_storage import SpecLocked
+        from mship.core.spec_store import SpecArtifactConflict
 
-        path = store.path_for(spec)
         try:
             if force:
-                store.save(spec)
-            elif not store.create_if_absent(spec):
-                output.error(f"Spec already exists: {path}\n  Pass --force to overwrite.")
-                raise typer.Exit(1)
+                path = store.save(spec)
+            else:
+                path = store.create_if_absent(spec)
+                if path is None:
+                    output.error(f"Spec already exists: {store.path_for(spec)}\n  Pass --force to overwrite.")
+                    raise typer.Exit(1)
         except SpecLocked:
             output.error(f"Spec {spec.id!r} already exists but is locked.")
+            raise typer.Exit(1)
+        except SpecArtifactConflict as exc:
+            output.error(f"Cannot create spec {spec.id!r}: {exc}")
             raise typer.Exit(1)
 
         if output.human_mode:
@@ -861,7 +866,7 @@ def register(parent: typer.Typer, get_container):
         local/encrypted, git rm the ciphertext when moving back). Run after editing
         `spec_storage` in mothership.yaml — it reads the target mode from config."""
         from pathlib import Path
-        from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+        from mship.core.spec_store import SPECS_DIRNAME, SpecArtifactConflict, SpecStore
         from mship.core.spec_storage import SpecStorage
         from mship.util.git import GitRunner
 
@@ -879,41 +884,55 @@ def register(parent: typer.Typer, get_container):
         target_store = SpecStore(specs_dir, storage=target_storage)
 
         migrated = 0
-        for spec, locked_id, old_path in reader.read_all():
-            if spec is None:
+        for scanned_spec, locked_id, _ in reader.read_all():
+            if scanned_spec is None:
                 output.error(
                     f"Cannot migrate {locked_id!r}: it is encrypted and no key is present. "
                     f"Restore `.mothership/spec-key` first."
                 )
                 raise typer.Exit(1)
-            new_path = target_store.save(spec)  # writes the target representation
-            # Every git step below FAILS LOUD: a swallowed failure could report a
-            # successful migration while leaving plaintext indexed/tracked (a leak) or
-            # the new representation untracked (a clean/clone loses the migrated spec).
-            # `is_tracked` guards keep it idempotent (re-migrating to the same mode is
-            # a no-op, not a spurious error).
             try:
-                if new_path.resolve() != old_path.resolve():
-                    # Suffix changed (.md <-> .md.enc): the old file must leave BOTH the
-                    # working tree AND the index, or a mode meant to hide it keeps a
-                    # readable/restorable copy.
-                    if git.is_tracked(workspace_root, old_path):
-                        git.rm(workspace_root, old_path, force=True)   # index + working tree
-                    elif old_path.exists():
-                        old_path.unlink()                          # untracked: just the file
-                if target == "committed":
-                    git.remove_from_gitignore(workspace_root, f"{SPECS_DIRNAME}/*.md")
-                    git.add(workspace_root, new_path)              # public + tracked again
-                elif target == "encrypted":
-                    git.add(workspace_root, new_path)              # track the ciphertext
-                elif target == "local":
-                    # committed -> local: same .md path; stop TRACKING it (save() already
-                    # gitignored specs/*.md). Untrack only if currently tracked.
-                    if git.is_tracked(workspace_root, new_path):
-                        git.rm(workspace_root, new_path, cached=True, force=True)
+                # Re-resolve after acquiring the same per-spec lock writers use. The
+                # source read, target write, and old-artifact removal are one critical
+                # section, so an inbox/lifecycle save cannot land in an artifact the
+                # migration then discards.
+                with target_store.locked(scanned_spec.id) as source:
+                    if source is None:
+                        raise SpecArtifactConflict(
+                            f"spec {scanned_spec.id!r} vanished while migration was waiting"
+                        )
+                    spec = source.spec
+                    old_path = source.physical_path
+                    new_path = target_store.save_migrated_unlocked(spec)
+                    # Every git step below FAILS LOUD: a swallowed failure could report a
+                    # successful migration while leaving plaintext indexed/tracked (a leak) or
+                    # the new representation untracked (a clean/clone loses the migrated spec).
+                    # `is_tracked` guards keep it idempotent (re-migrating to the same mode is
+                    # a no-op, not a spurious error).
+                    if new_path.resolve() != old_path.resolve():
+                        # Suffix changed (.md <-> .md.enc): the old file must leave BOTH the
+                        # working tree AND the index, or a mode meant to hide it keeps a
+                        # readable/restorable copy.
+                        if git.is_tracked(workspace_root, old_path):
+                            git.rm(workspace_root, old_path, force=True)   # index + working tree
+                        elif old_path.exists():
+                            old_path.unlink()                          # untracked: just the file
+                    if target == "committed":
+                        git.remove_from_gitignore(workspace_root, f"{SPECS_DIRNAME}/*.md")
+                        git.add(workspace_root, new_path)              # public + tracked again
+                    elif target == "encrypted":
+                        git.add(workspace_root, new_path)              # track the ciphertext
+                    elif target == "local":
+                        # committed -> local: same .md path; stop TRACKING it (save() already
+                        # gitignored specs/*.md). Untrack only if currently tracked.
+                        if git.is_tracked(workspace_root, new_path):
+                            git.rm(workspace_root, new_path, cached=True, force=True)
+            except SpecArtifactConflict as exc:
+                output.error(f"Cannot migrate {scanned_spec.id!r}: {exc}")
+                raise typer.Exit(1)
             except Exception as e:
                 output.error(
-                    f"Migration of {spec.id!r} to {target!r} FAILED at a git step: {e}. "
+                    f"Migration of {scanned_spec.id!r} to {target!r} FAILED at a git step: {e}. "
                     f"The store may be half-migrated — resolve the git state "
                     f"(check `git status` for staged/uncommitted spec changes) and re-run. "
                     f"No migration was reported as complete."
