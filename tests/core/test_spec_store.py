@@ -7,7 +7,7 @@ import pytest
 
 from mship.core.spec import AcceptanceCriterion, AcceptanceEvidence, OpenQuestion, Spec
 from mship.core.spec_store import SpecParseError, SpecStore, parse_spec, serialize_spec
-
+from mship.core.spec_storage import SpecStorage
 
 def _spec():
     now = datetime(2026, 6, 13, 10, 0, 0, tzinfo=timezone.utc)
@@ -282,12 +282,12 @@ def test_concurrent_inbox_mutation_cannot_overwrite_lifecycle_save(tmp_path: Pat
     lifecycle_update = store.find_by_id(spec.id)
     lifecycle_update.status = "needs_review"
 
-    original_write = store._storage.write
+    original_write = SpecStorage.write
     lifecycle_write_started = Event()
     lifecycle_writer = Thread(target=lambda: store.save(lifecycle_update))
     writer_started = False
 
-    def interleave_lifecycle_save(path, text):
+    def interleave_lifecycle_save(storage, path, text):
         nonlocal writer_started
         saved = parse_spec(text)
         if saved.inbox.manual_archived and not writer_started:
@@ -299,11 +299,12 @@ def test_concurrent_inbox_mutation_cannot_overwrite_lifecycle_save(tmp_path: Pat
             lifecycle_write_started.wait(timeout=0.2)
         if saved.status == "needs_review":
             lifecycle_write_started.set()
-        return original_write(path, text)
+        return original_write(storage, path, text)
 
-    monkeypatch.setattr(store._storage, "write", interleave_lifecycle_save)
+    monkeypatch.setattr(SpecStorage, "write", interleave_lifecycle_save)
     store.mutate_inbox(spec.id, "archive", "archive-1", now)
     lifecycle_writer.join()
+    assert lifecycle_write_started.wait(timeout=0.2)
 
     saved = store.find_by_id(spec.id)
     assert saved.status == "needs_review"

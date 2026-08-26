@@ -947,6 +947,7 @@ def test_threads_filter_search_and_mutate_inbox_without_deleting_content(tmp_pat
     now = datetime.now(timezone.utc)
     messages = MessageStore(tmp_path / ".mothership" / "messages")
     archived = messages.create_thread("Old discussion", "needle in history", now.replace(year=now.year - 1))
+    messages.append(archived.id, "agent", "resolved", archived.updated_at)
     active = messages.create_thread("Current discussion", "needle today", now)
     client = TestClient(_app(tmp_path))
 
@@ -1005,6 +1006,7 @@ def test_thread_linked_to_done_work_item_is_archived(tmp_path):
     ))
     messages = MessageStore(tmp_path / ".mothership" / "messages")
     thread = messages.create_thread("Linked", "content", now)
+    messages.append(thread.id, "agent", "resolved", now)
     items = WorkItemStore(tmp_path / ".mothership" / "workitems")
     item = items.create("Implemented", "feature", "test-ws", now)
     items.link_spec(item.id, "implemented", now)
@@ -1025,6 +1027,7 @@ def test_threads_keep_healthy_terminal_link_with_corrupt_work_item(tmp_path):
     ))
     messages = MessageStore(tmp_path / ".mothership" / "messages")
     thread = messages.create_thread("Linked", "content", now)
+    messages.append(thread.id, "agent", "resolved", now)
     items = WorkItemStore(tmp_path / ".mothership" / "workitems")
     item = items.create("Implemented", "feature", "test-ws", now)
     items.link_spec(item.id, "implemented", now)

@@ -55,6 +55,7 @@ def test_wait_applies_inbox_and_search_filters_without_changing_cursor(tmp_path:
     client, store = _client(tmp_path)
     updated_at = datetime.now(timezone.utc) - timedelta(days=7, seconds=1)
     thread = store.create_thread("Needle old thread", "body", updated_at)
+    store.append(thread.id, "agent", "resolved", updated_at)
     since = (updated_at - timedelta(seconds=1)).isoformat()
 
     response = client.get("/threads", params={
@@ -88,6 +89,9 @@ def test_each_inbox_action_wakes_wait_once_without_changing_content_timestamp(
     client, store = _client(tmp_path)
     created_at = datetime.now(timezone.utc) - initial_age
     thread = store.create_thread("inbox mutation", "body", created_at)
+    if action == "restore":
+        store.append(thread.id, "agent", "resolved", created_at)
+        assert client.get("/threads", params={"inbox": "archived"}).json()[0]["id"] == thread.id
     since = created_at
     if setup_action is not None:
         setup_response = client.post(
@@ -157,6 +161,7 @@ def test_wait_reports_removed_ids_when_an_inbox_mutation_leaves_the_filter(
     client, store = _client(tmp_path)
     updated_at = datetime.now(timezone.utc) - initial_age
     thread = store.create_thread("filter transition", "body", updated_at)
+    store.append(thread.id, "agent", "resolved", updated_at)
     client.post(f"/threads/{thread.id}/inbox/{action}", json={"mutation_id": f"device-{action}"})
 
     response = client.get("/threads", params={
