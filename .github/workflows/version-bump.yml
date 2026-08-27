@@ -1,7 +1,7 @@
 name: version-bump
 
 on:
-  pull_request:
+  pull_request_target:
     types: [closed]
 
 permissions:
@@ -55,4 +55,4 @@ jobs:
           git commit -m "chore: bump version to v${{ steps.bump.outputs.new_version }}"
           git tag -a "v${{ steps.bump.outputs.new_version }}" -m "v${{ steps.bump.outputs.new_version }}"
           git push origin main --follow-tags
-          gh workflow run test.yml --ref main
+          gh workflow run test.yml --ref "v${{ steps.bump.outputs.new_version }}"
