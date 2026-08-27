@@ -117,7 +117,7 @@ class SpecStore:
         return self._storage.workspace_root
 
     def _validate_id(self, spec_id: str) -> None:
-        if (not spec_id or "/" in spec_id or "\\" in spec_id
+        if (not spec_id or "\x00" in spec_id or "/" in spec_id or "\\" in spec_id
                 or spec_id in (".", "..") or spec_id.startswith(".")):
             raise ValueError(f"unsafe spec id for filename: {spec_id!r}")
 

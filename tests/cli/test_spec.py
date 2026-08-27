@@ -379,14 +379,15 @@ def test_spec_apply_rejects_invalid_json(configured_app_with_task: Path, tmp_pat
     assert result.exit_code != 0
 
 
+@pytest.mark.parametrize("spec_id", ["../unsafe", "nul\x00unsafe"])
 def test_spec_apply_rejects_unsafe_spec_id_without_traceback(
-    configured_app_with_task: Path, tmp_path: Path,
+    configured_app_with_task: Path, tmp_path: Path, spec_id: str,
 ):
     draft = tmp_path / "draft.json"
     draft.write_text(_draft_json())
 
     result = runner.invoke(
-        app, ["spec", "apply", "../unsafe", "--from-json", str(draft)],
+        app, ["spec", "apply", spec_id, "--from-json", str(draft)],
     )
 
     assert result.exit_code != 0
