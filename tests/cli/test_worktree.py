@@ -152,6 +152,69 @@ def test_spawn_gate_blocks_when_relevant_decision_is_unavailable(
     assert "reconcile unavailable for: relevant" in result.output
 
 
+def test_spawn_requires_work_item_before_reconciling_relevant_tasks(
+    configured_git_app: Path, monkeypatch,
+):
+    """A missing local WorkItem must not be masked by unavailable reconciliation."""
+    from datetime import datetime, timezone
+
+    StateManager(configured_git_app / ".mothership").save(WorkspaceState(tasks={
+        "relevant": Task(
+            slug="relevant", description="relevant", phase="dev",
+            created_at=datetime.now(timezone.utc),
+            affected_repos=["shared"], branch="feat/relevant",
+        ),
+    }))
+
+    reconciled = False
+
+    def reconcile_for_scope(*args, **kwargs):
+        nonlocal reconciled
+        reconciled = True
+        raise RuntimeError("remote unavailable")
+
+    monkeypatch.setattr("mship.core.reconcile.gate.reconcile_now", reconcile_for_scope)
+
+    result = runner.invoke(app, ["spawn", "missing WorkItem", "--repos", "shared"])
+
+    assert result.exit_code != 0
+    assert "spawn requires a WorkItem" in result.output
+    assert not reconciled
+
+
+def test_spawn_rejects_unknown_work_item_before_reconciling_relevant_tasks(
+    configured_git_app: Path, monkeypatch,
+):
+    """An unknown local WorkItem must not be masked by unavailable reconciliation."""
+    from datetime import datetime, timezone
+
+    StateManager(configured_git_app / ".mothership").save(WorkspaceState(tasks={
+        "relevant": Task(
+            slug="relevant", description="relevant", phase="dev",
+            created_at=datetime.now(timezone.utc),
+            affected_repos=["shared"], branch="feat/relevant",
+        ),
+    }))
+
+    reconciled = False
+
+    def reconcile_for_scope(*args, **kwargs):
+        nonlocal reconciled
+        reconciled = True
+        raise RuntimeError("remote unavailable")
+
+    monkeypatch.setattr("mship.core.reconcile.gate.reconcile_now", reconcile_for_scope)
+
+    result = runner.invoke(
+        app,
+        ["spawn", "unknown WorkItem", "--repos", "shared", "--work-item", "missing"],
+    )
+
+    assert result.exit_code != 0
+    assert "WorkItem 'missing' not found" in result.output
+    assert not reconciled
+
+
 def test_finish_gate_allows_empty_decision_map(
     configured_git_app: Path, monkeypatch,
 ):

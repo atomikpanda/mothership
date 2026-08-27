@@ -433,25 +433,15 @@ def register(app: typer.Typer, get_container):
                 f"Run `mship close --yes --abandon --task {effective_slug}` to remove it first, or use a different description."
             )
 
-        _run_gate(
-            get_container,
-            command="spawn",
-            bypass=bypass_reconcile,
-            output=output,
-            only_repos=set(effective_scope),
-        )
-
-        # --- WorkItem gate: every task must be linked to a WorkItem, unless
-        #     --hotfix explicitly overrides it (logged to the bypass log).
+        # --- WorkItem validation: every task must be linked to a WorkItem,
+        #     unless --hotfix explicitly overrides that requirement. Keep these
+        #     deterministic local errors ahead of remote reconciliation.
         #     See spec workitem-mandatory-kind-gated-approval.
-        from mship.core.workitem_gate import log_hotfix
         from mship.core.workitem_store import WorkItemStore
 
         workspace_root = container.config_path().parent
         if work_item is None:
-            if hotfix:
-                log_hotfix(workspace_root, "spawn", effective_slug)
-            else:
+            if not hotfix:
                 output.error(
                     "mship spawn requires a WorkItem: create one with "
                     "`mship item new` and pass --work-item <id> (or --hotfix)"
@@ -462,6 +452,20 @@ def register(app: typer.Typer, get_container):
             if items.get(work_item) is None:
                 output.error(f"WorkItem {work_item!r} not found")
                 raise typer.Exit(code=1)
+
+        _run_gate(
+            get_container,
+            command="spawn",
+            bypass=bypass_reconcile,
+            output=output,
+            only_repos=set(effective_scope),
+        )
+
+        # Record a hotfix bypass only after reconciliation accepts the spawn.
+        if work_item is None:
+            from mship.core.workitem_gate import log_hotfix
+
+            log_hotfix(workspace_root, "spawn", effective_slug)
 
         # Validate --closes refs BEFORE any side effects (#386): a bad ref must
         # fail the spawn while nothing has been created yet.
