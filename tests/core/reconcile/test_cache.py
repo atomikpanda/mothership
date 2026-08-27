@@ -171,3 +171,20 @@ def test_current_scoped_context_requires_each_requested_entry(tmp_path: Path):
         base_context={"selected": ["release"]},
         only_slugs={"selected"},
     ) is None
+
+
+def test_current_scoped_context_requires_results_for_every_requested_entry(tmp_path: Path):
+    cache = ReconcileCache(tmp_path / ".mothership")
+    payload = CachePayload(
+        fetched_at=time.time(),
+        ttl_seconds=300,
+        results={"selected": {"state": "in_sync"}},
+        ignored=[],
+        base_context={"selected": ["main"], "dependency": ["main"]},
+    )
+
+    assert cache.current(
+        payload,
+        base_context={"selected": ["main"], "dependency": ["main"]},
+        only_slugs={"selected", "dependency"},
+    ) is None

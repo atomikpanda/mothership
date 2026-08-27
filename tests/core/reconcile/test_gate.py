@@ -352,10 +352,10 @@ def test_reconcile_now_scoped_fetches_only_selected_task_snapshots(tmp_path: Pat
     assert set(decisions) == {"a"}
 
 
-def test_reconcile_now_scoped_context_miss_fetches_transitive_dependencies(
+def test_reconcile_now_scoped_missing_dependency_cache_result_fetches_dependencies(
     tmp_path: Path,
 ):
-    """A selected context miss must still retain dependency-stale detection."""
+    """A scoped cache hit needs results for the full dependency closure."""
     from mship.core.state import DependencyEdge
 
     created = datetime(2026, 5, 1, tzinfo=timezone.utc)
@@ -364,39 +364,19 @@ def test_reconcile_now_scoped_context_miss_fetches_transitive_dependencies(
     cache.write(CachePayload(
         fetched_at=time.time(),
         ttl_seconds=300,
-        results={
-            "root": {"state": "in_sync"},
-            "a": {"state": "merged", "updated_at": merged.isoformat()},
-            "b": {"state": "in_sync"},
-            "unrelated": {"state": "merged"},
-        },
+        results={"b": {"state": "in_sync"}},
         ignored=[],
-        base_context={
-            "root": ["main"],
-            "a": ["main"],
-            "b": ["old-base"],
-            "unrelated": ["main"],
-        },
+        base_context={"a": ["main"], "b": ["main"]},
     ))
     state = WorkspaceState(tasks={
-        "root": _task("root", created_at=created),
-        "a": _task(
-            "a",
-            created_at=created,
-            finished_at=created,
-            depends_on=[
-                DependencyEdge(upstream_slug="root", created_at=created),
-            ],
-        ),
+        "a": _task("a", created_at=created, finished_at=created),
         "b": _task(
             "b",
             created_at=created,
-            base_branch="new-base",
             depends_on=[
                 DependencyEdge(upstream_slug="a", created_at=created),
             ],
         ),
-        "unrelated": _task("unrelated"),
     })
     calls: list[list[str]] = []
 
@@ -404,14 +384,6 @@ def test_reconcile_now_scoped_context_miss_fetches_transitive_dependencies(
         calls.append(list(branches))
         return (
             {
-                "feat/root": PRSnapshot(
-                    head_ref="feat/root",
-                    state="OPEN",
-                    base_ref="main",
-                    merge_commit=None,
-                    url="https://x/pr/root",
-                    updated_at=created.isoformat(),
-                ),
                 "feat/a": PRSnapshot(
                     head_ref="feat/a",
                     state="MERGED",
@@ -423,18 +395,13 @@ def test_reconcile_now_scoped_context_miss_fetches_transitive_dependencies(
                 "feat/b": PRSnapshot(
                     head_ref="feat/b",
                     state="OPEN",
-                    base_ref="new-base",
+                    base_ref="main",
                     merge_commit=None,
                     url="https://x/pr/b",
                     updated_at=created.isoformat(),
                 ),
             },
             {
-                "feat/root": GitSnapshot(
-                    has_upstream=True,
-                    behind=0,
-                    ahead=0,
-                ),
                 "feat/a": GitSnapshot(has_upstream=True, behind=0, ahead=0),
                 "feat/b": GitSnapshot(has_upstream=True, behind=0, ahead=0),
             },
@@ -447,7 +414,7 @@ def test_reconcile_now_scoped_context_miss_fetches_transitive_dependencies(
         only_slugs={"b"},
     )
 
-    assert calls == [["feat/root", "feat/a", "feat/b"]]
+    assert calls == [["feat/a", "feat/b"]]
     assert set(decisions) == {"b"}
     assert decisions["b"].state == UpstreamState.dependency_stale
 

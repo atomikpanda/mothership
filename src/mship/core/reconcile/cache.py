@@ -114,7 +114,8 @@ class ReconcileCache:
 
         This is deliberately not a TTL gate: fetch failures may fall back to a
         TTL-stale entry, but only when its schema and base context are compatible.
-        Scoped reconciliation only requires matching context for selected tasks.
+        Scoped reconciliation requires matching context and results for the
+        selected tasks and their dependency closure.
         """
         if payload is None or payload.schema_version != SCHEMA_VERSION:
             return None
@@ -126,6 +127,7 @@ class ReconcileCache:
             return None
         if any(
             slug not in payload.base_context
+            or slug not in payload.results
             or slug not in base_context
             or payload.base_context[slug] != base_context[slug]
             for slug in only_slugs
