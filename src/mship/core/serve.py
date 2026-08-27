@@ -1160,10 +1160,6 @@ def create_app(
         # MOS-240: request-changes sends the spec back to the editable `draft`
         # status carrying a non-null clarification_reason (the dropped
         # needs_clarification status is now expressed by that field alone).
-        try:
-            validate_transition(spec.status, "draft")
-        except InvalidTransition as e:
-            raise HTTPException(status_code=409, detail=str(e))
         # #458 P1 class fix: the durable rejection record is now written
         # inside `request_changes_spec` itself (record-then-transition,
         # fail-loud on a write failure), so every caller — CLI, serve, and
@@ -1175,6 +1171,8 @@ def create_app(
             request_changes_spec(
                 spec, store, body.reason, log_manager=log_manager, actor="operator",
             )
+        except InvalidTransition as e:
+            raise HTTPException(status_code=409, detail=str(e))
         except SpecLocked:
             raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
         except SpecParseError as exc:

@@ -55,12 +55,10 @@ def request_changes_by_id(store: SpecStore, spec_id: str | None, reason: str) ->
     reason = (reason or "").strip()
     if not reason:
         return ActionOutcome(False, "Request-changes needs a reason.")
-    # P1 (#458): route the durable rejection record through the same
-    # LogManager convention as the CLI/serve (`<workspace_root>/.mothership/
-    # logs`), so this TUI path (queue/spec/workitem views) can no longer
-    # transition a spec without also logging why — the bug this class fix
-    # closes.
-    log_manager = LogManager(store.workspace_root / ".mothership" / "logs")
+    # P1 (#458): route the durable rejection record through the same canonical
+    # state directory as CLI/serve, so this TUI path (queue/spec/workitem views)
+    # can no longer transition a spec without also logging why.
+    log_manager = LogManager(store.state_dir / "logs")
     try:
         request_changes_spec(spec, store, reason, log_manager=log_manager, actor="operator")
     except (InvalidTransition, SpecRevisionConflict) as e:

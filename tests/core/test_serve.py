@@ -591,6 +591,30 @@ def test_post_request_changes_stale_revision_returns_conflict_without_mutating(
     assert store.find_by_id("dq").model_dump() == newer["state"]
 
 
+def test_post_request_changes_stale_status_returns_revision_conflict(
+    tmp_path, monkeypatch,
+):
+    """The locked owner compares revisions before validating stale status."""
+    _seed_spec(tmp_path)
+    original = SpecStore.read_strict
+
+    def stale_status(self, spec_id):
+        spec = original(self, spec_id)
+        if spec is not None and spec.id == "dq":
+            spec.status = "draft"
+        return spec
+
+    monkeypatch.setattr(SpecStore, "read_strict", stale_status)
+
+    response = TestClient(_app(tmp_path)).post(
+        "/specs/dq/request-changes", json={"reason": "tighten scope"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "spec revision conflict for 'dq'; reload and retry"
+    assert SpecStore(tmp_path / "specs").find_by_id("dq").status == "needs_review"
+
+
 def test_post_request_changes_persists_reason(tmp_path):
     """MOS-215: the reason must land on the persisted spec, not just the
     review payload — verified by reloading via GET /specs/{id}."""

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import subprocess
 from datetime import datetime, timezone
 
 from mship.core.log import LogManager
@@ -122,3 +123,30 @@ def test_request_changes_handles_stale_revision_without_writing_or_changing_the_
     assert out.message == "spec revision conflict for 's1'; reload and retry"
     assert store.find_by_id("s1").model_dump() == newer_state
     assert LogManager(tmp_path / ".mothership" / "logs").read("s1") == []
+
+def test_request_changes_from_linked_worktree_logs_to_main_state(tmp_path):
+    main = tmp_path / "main"
+    main.mkdir()
+    git_env = {
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+        "HOME": "/tmp", "PATH": "/usr/bin:/bin",
+    }
+    subprocess.run(["git", "init", "-b", "main"], cwd=main, check=True,
+                   capture_output=True, env=git_env)
+    (main / "mothership.yaml").write_text("workspace: w\nrepos: {}\n")
+    subprocess.run(["git", "add", "-A"], cwd=main, check=True,
+                   capture_output=True, env=git_env)
+    subprocess.run(["git", "commit", "-m", "c"], cwd=main, check=True,
+                   capture_output=True, env=git_env)
+    linked = tmp_path / "linked"
+    subprocess.run(["git", "worktree", "add", str(linked)], cwd=main, check=True,
+                   capture_output=True, env=git_env)
+
+    store = _store(linked)
+    out = request_changes_by_id(store, "s1", "tighten AC2")
+
+    assert out.ok
+    assert store.state_dir == main / ".mothership"
+    assert [event.action for event in LogManager(main / ".mothership" / "logs").read("s1")] == ["rejected"]
+    assert LogManager(linked / ".mothership" / "logs").read("s1") == []

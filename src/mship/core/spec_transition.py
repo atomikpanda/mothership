@@ -3,8 +3,9 @@
 
 Extracted so the terminal and the phone cannot diverge: every writer performs the
 identical guard (approval_blockers + validate_transition) and the identical atomic
-store write (SpecStore.save = tempfile + os.replace). Callers own only their own
-concerns (HTTP status mapping, CLI output, journal appends, view messaging)."""
+store write (SpecStore.save = tempfile + os.replace). Request-changes also owns its
+durable rejection append and compensates a journal failure before returning it to
+the caller."""
 from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
@@ -108,11 +109,10 @@ def record_rejection(
     and nulled by `approve_spec`), the journal is append-only, so this record
     survives later transitions — the durable, queryable rejection history.
 
-    Must be called BEFORE the status transition at every call site (CLI +
-    serve): if the append raises, the caller must propagate it (fail loud,
-    never swallow — CLAUDE.md) and must not have flipped the spec's status
-    yet, so a write failure leaves a consistent, retryable state instead of a
-    draft-without-record.
+    `request_changes_spec` calls this after persisting the status transition while
+    holding the spec lock. If the append raises, that transition restores the
+    original persisted spec before propagating the journal error, so neither a
+    journal record nor a persisted status can get ahead of the other.
 
     Raises `ValueError` for an empty/whitespace-only `reason` — every durable
     record must carry real reason text.
@@ -142,22 +142,30 @@ def request_changes_spec(
 
     Writes the durable rejection record itself (record_rejection), in this
     order: reject empty/whitespace reason -> verify the current revision ->
-    validate_transition -> durable record -> status flip -> save. Folding the record into
-    transition (rather than leaving it to each caller) is the class fix for
-    #458 P1: the CLI, serve, and the TUI views (core/view/actions.py) all
-    call this one function, so none of them can transition a spec without
-    also logging why — the earlier per-caller convention let the view path
-    (`mship view queue/spec/workitem`) silently skip it.
+    validate_transition -> status flip -> save -> durable record. If that record
+    fails, restore the original persisted snapshot while the same lock is held,
+    then propagate the journal error. Folding the record into transition (rather
+    than leaving it to each caller) is the class fix for #458 P1: the CLI, serve,
+    and the TUI views (core/view/actions.py) all call this one function, so none
+    of them can transition a spec without also logging why — the earlier
+    per-caller convention let the view path (`mship view queue/spec/workitem`)
+    silently skip it.
     """
     if not reason or not reason.strip():
         raise ValueError("reason must not be empty")
     if now is None:
         now = datetime.now(timezone.utc)
     with _locked_current_revision(spec, store) as artifact:
+        assert artifact is not None
+        original_spec = artifact.spec
         validate_transition(spec.status, "draft")
-        if log_manager is not None:
-            record_rejection(log_manager, spec.id, actor, reason, now)
         spec.status = "draft"
         spec.clarification_reason = reason
         spec.updated_at = _transition_timestamp(spec.updated_at, now)
         store.save_while_locked(spec, artifact)
+        if log_manager is not None:
+            try:
+                record_rejection(log_manager, spec.id, actor, reason, now)
+            except Exception:
+                store.save_while_locked(original_spec, artifact)
+                raise

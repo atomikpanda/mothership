@@ -116,6 +116,13 @@ class SpecStore:
         (view/actions.py's LogManager) don't restate the convention."""
         return self._storage.workspace_root
 
+    @property
+    def state_dir(self) -> Path:
+        """The canonical state directory for this workspace's configuration."""
+        from mship.core.workspace_context import _resolve_state_dir
+
+        return _resolve_state_dir(self.workspace_root / "mothership.yaml")
+
     def _validate_id(self, spec_id: str) -> None:
         if (not spec_id or "\x00" in spec_id or "/" in spec_id or "\\" in spec_id
                 or spec_id in (".", "..") or spec_id.startswith(".")):

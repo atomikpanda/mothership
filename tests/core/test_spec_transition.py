@@ -266,6 +266,71 @@ def test_approve_propagates_save_time_storage_failures_and_releases_lock(
     assert acquired.is_set()
     assert not thread.is_alive()
 
+@pytest.mark.parametrize(
+    "failure",
+    [SpecLocked("s1"), OSError("disk full")],
+    ids=["locked", "write-error"],
+)
+def test_request_changes_propagates_save_failures_without_writing_a_rejection(
+    tmp_path, monkeypatch, failure
+):
+    store = SpecStore(tmp_path / "specs")
+    store.save(_reviewable())
+    actor = store.find_by_id("s1")
+    assert actor is not None
+    log = LogManager(tmp_path / "logs")
+
+    def fail_write(*_args):
+        raise failure
+
+    monkeypatch.setattr(store._storage, "write", fail_write)
+
+    with pytest.raises(type(failure)) as raised:
+        request_changes_spec(
+            actor, store, "tighten AC2", log_manager=log, actor="alice"
+        )
+
+    assert raised.value is failure
+    persisted = store.find_by_id("s1")
+    assert persisted is not None
+    assert persisted.status == "needs_review"
+    assert log.read("s1") == []
+
+
+def test_request_changes_rolls_back_the_persisted_spec_when_journal_append_fails(
+    tmp_path, monkeypatch
+):
+    store = SpecStore(tmp_path / "specs")
+    store.save(_reviewable())
+    actor = store.find_by_id("s1")
+    original = store.find_by_id("s1")
+    assert actor is not None
+    assert original is not None
+    log = LogManager(tmp_path / "logs")
+    journal_error = OSError("journal unavailable")
+    status_at_append: list[str] = []
+
+    def fail_append(*_args, **_kwargs):
+        persisted = store.find_by_id("s1")
+        assert persisted is not None
+        status_at_append.append(persisted.status)
+        raise journal_error
+
+    monkeypatch.setattr(log, "append", fail_append)
+
+    with pytest.raises(OSError) as raised:
+        request_changes_spec(
+            actor, store, "tighten AC2", log_manager=log, actor="alice"
+        )
+
+    assert raised.value is journal_error
+    assert status_at_append == ["draft"]
+    persisted = store.find_by_id("s1")
+    assert persisted is not None
+    assert persisted.model_dump() == original.model_dump()
+
+
+
 def test_request_changes_serializes_same_revision_and_logs_only_the_winner(
     tmp_path, monkeypatch
 ):
