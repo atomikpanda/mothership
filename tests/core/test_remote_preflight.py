@@ -431,6 +431,22 @@ def test_one_ref_failing_to_resolve_mid_command_is_refused_not_pinned(tmp_path):
     assert pre.states[0].head_sha is None
 
 
+def test_a_detached_worktree_at_the_task_tip_is_refused_before_origin(tmp_path):
+    """SHA equality cannot substitute for being attached to the task branch."""
+    api = _repo(tmp_path, "api")
+    shell = FakeShell({"api": _clean(
+        head_ref="",
+        pair_output="headsha\nheadsha\n",
+    )})
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert not pre.ok
+    assert [s.blocked_reason for s in pre.blocked] == [WRONG_BRANCH]
+    assert "HEAD is detached, not feat/x" in blocked_message(pre)
+    assert not any("ls-remote" in command for command in shell.commands)
+    assert shell.pushes == []
+
+
 def test_a_detached_worktree_is_refused_and_says_so(tmp_path):
     """Detached is the same finding with no branch name to report: `symbolic-ref
     --quiet` exits non-zero with empty output, which must not read as a match."""
