@@ -208,17 +208,36 @@ def reconcile_now(
         slug: sorted(bases) if bases is not None else None
         for slug, bases in resolved_bases.items()
     }
+    reconciliation_slugs = only_slugs
+    if only_slugs is not None:
+        reconciliation_slugs = set(only_slugs)
+        pending = list(only_slugs)
+        while pending:
+            task = state.tasks.get(pending.pop())
+            if task is None:
+                continue
+            for edge in task.depends_on:
+                if edge.upstream_slug not in reconciliation_slugs:
+                    reconciliation_slugs.add(edge.upstream_slug)
+                    pending.append(edge.upstream_slug)
+    tasks = [
+        task for task in state.tasks.values()
+        if reconciliation_slugs is None or task.slug in reconciliation_slugs
+    ]
 
     # Keep the raw payload only to preserve its ignore list on a fresh write.
     # Every results-consuming path uses the schema/context-compatible payload.
     payload = cache.read()
-    current_payload = cache.current(payload, base_context=base_context)
+    current_payload = cache.current(
+        payload,
+        base_context=base_context,
+        only_slugs=reconciliation_slugs,
+    )
     if current_payload is not None and cache.is_fresh(current_payload):
         return _decisions_from_cache(
             state, current_payload, only_slugs=only_slugs,
         )
 
-    tasks = list(state.tasks.values())
     branches = [task.branch for task in tasks]
     worktrees_by_branch: dict[str, Path] = {}
     for task in tasks:
@@ -249,17 +268,22 @@ def reconcile_now(
         }
         for slug, d in detections.items()
     }
-    cache.write(CachePayload(
-        fetched_at=time.time(),
-        ttl_seconds=ttl_seconds,
-        results=results,
-        ignored=(payload.ignored if payload else []),
-        base_context=base_context,
-    ))
+    if only_slugs is None:
+        cache.write(CachePayload(
+            fetched_at=time.time(),
+            ttl_seconds=ttl_seconds,
+            results=results,
+            ignored=(payload.ignored if payload else []),
+            base_context=base_context,
+        ))
     decisions = {
         slug: _decision_from_detection(slug, d, state)
         for slug, d in detections.items()
     }
+    if current_payload is not None and only_slugs is not None:
+        cached_decisions = _decisions_from_cache(state, current_payload)
+        cached_decisions.update(decisions)
+        decisions = cached_decisions
     decisions = apply_dependency_stale(state, decisions)
     if only_slugs is None:
         return decisions

@@ -59,11 +59,14 @@ def test_reconcile_now_applies_dependency_stale_from_fresh_cache(tmp_path: Path)
         "b": _task("b", created_at=t0,
                    depends_on=[DependencyEdge(upstream_slug="a", created_at=t0)]),
     })
-    # Fresh cache → fetcher must NOT be called; the override still has to apply.
+    # A scoped cache hit still needs the cached upstream to derive b's state,
+    # while returning only the selected task.
     decisions = reconcile_now(
         state, cache=cache,
         fetcher=lambda *_: (_ for _ in ()).throw(AssertionError("should not fetch")),
+        only_slugs={"b"},
     )
+    assert set(decisions) == {"b"}
     assert decisions["b"].state == UpstreamState.dependency_stale
 
 
@@ -296,6 +299,192 @@ def test_reconcile_now_returns_unavailable_on_error_without_cache(tmp_path: Path
         raise FetchError("offline")
     decisions = reconcile_now(state, cache=cache, fetcher=bad_fetcher)
     assert decisions == {}
+
+
+def test_reconcile_now_scoped_fetch_error_uses_selected_compatible_cache(
+    tmp_path: Path,
+):
+    cache = ReconcileCache(tmp_path)
+    cache.write(CachePayload(
+        fetched_at=time.time() - 9999,
+        ttl_seconds=300,
+        results={"a": {"state": "merged", "pr_url": "u", "pr_number": 1, "base": "main"}},
+        ignored=[],
+        base_context={"a": ["main"], "b": ["old-base"]},
+    ))
+    state = WorkspaceState(tasks={"a": _task("a"), "b": _task("b", base_branch="new-base")})
+
+    def bad_fetcher(*_):
+        from mship.core.reconcile.fetch import FetchError
+        raise FetchError("offline")
+
+    decisions = reconcile_now(
+        state,
+        cache=cache,
+        fetcher=bad_fetcher,
+        only_slugs={"a"},
+    )
+
+    assert decisions["a"].state == UpstreamState.merged
+
+
+def test_reconcile_now_scoped_fetches_only_selected_task_snapshots(tmp_path: Path):
+    cache = ReconcileCache(tmp_path)
+    state = WorkspaceState(tasks={"a": _task("a"), "b": _task("b")})
+    calls: list[tuple[list[str], dict[str, Path]]] = []
+
+    def fetcher(branches, worktrees):
+        calls.append((list(branches), dict(worktrees)))
+        return (
+            {"feat/a": PRSnapshot(head_ref="feat/a", state="OPEN", base_ref="main",
+                                  merge_commit=None, url="u", updated_at="z")},
+            {"feat/a": GitSnapshot(has_upstream=True, behind=0, ahead=0)},
+        )
+
+    decisions = reconcile_now(
+        state,
+        cache=cache,
+        fetcher=fetcher,
+        only_slugs={"a"},
+    )
+
+    assert calls == [(["feat/a"], {"feat/a": Path("/tmp/fake/a")})]
+    assert set(decisions) == {"a"}
+
+
+def test_reconcile_now_scoped_context_miss_fetches_transitive_dependencies(
+    tmp_path: Path,
+):
+    """A selected context miss must still retain dependency-stale detection."""
+    from mship.core.state import DependencyEdge
+
+    created = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    merged = datetime(2026, 5, 10, tzinfo=timezone.utc)
+    cache = ReconcileCache(tmp_path)
+    cache.write(CachePayload(
+        fetched_at=time.time(),
+        ttl_seconds=300,
+        results={
+            "root": {"state": "in_sync"},
+            "a": {"state": "merged", "updated_at": merged.isoformat()},
+            "b": {"state": "in_sync"},
+            "unrelated": {"state": "merged"},
+        },
+        ignored=[],
+        base_context={
+            "root": ["main"],
+            "a": ["main"],
+            "b": ["old-base"],
+            "unrelated": ["main"],
+        },
+    ))
+    state = WorkspaceState(tasks={
+        "root": _task("root", created_at=created),
+        "a": _task(
+            "a",
+            created_at=created,
+            finished_at=created,
+            depends_on=[
+                DependencyEdge(upstream_slug="root", created_at=created),
+            ],
+        ),
+        "b": _task(
+            "b",
+            created_at=created,
+            base_branch="new-base",
+            depends_on=[
+                DependencyEdge(upstream_slug="a", created_at=created),
+            ],
+        ),
+        "unrelated": _task("unrelated"),
+    })
+    calls: list[list[str]] = []
+
+    def fetcher(branches, worktrees):
+        calls.append(list(branches))
+        return (
+            {
+                "feat/root": PRSnapshot(
+                    head_ref="feat/root",
+                    state="OPEN",
+                    base_ref="main",
+                    merge_commit=None,
+                    url="https://x/pr/root",
+                    updated_at=created.isoformat(),
+                ),
+                "feat/a": PRSnapshot(
+                    head_ref="feat/a",
+                    state="MERGED",
+                    base_ref="main",
+                    merge_commit="a-merge",
+                    url="https://x/pr/a",
+                    updated_at=merged.isoformat(),
+                ),
+                "feat/b": PRSnapshot(
+                    head_ref="feat/b",
+                    state="OPEN",
+                    base_ref="new-base",
+                    merge_commit=None,
+                    url="https://x/pr/b",
+                    updated_at=created.isoformat(),
+                ),
+            },
+            {
+                "feat/root": GitSnapshot(
+                    has_upstream=True,
+                    behind=0,
+                    ahead=0,
+                ),
+                "feat/a": GitSnapshot(has_upstream=True, behind=0, ahead=0),
+                "feat/b": GitSnapshot(has_upstream=True, behind=0, ahead=0),
+            },
+        )
+
+    decisions = reconcile_now(
+        state,
+        cache=cache,
+        fetcher=fetcher,
+        only_slugs={"b"},
+    )
+
+    assert calls == [["feat/root", "feat/a", "feat/b"]]
+    assert set(decisions) == {"b"}
+    assert decisions["b"].state == UpstreamState.dependency_stale
+
+
+def test_reconcile_now_scoped_fetch_does_not_refresh_unrelated_cache(
+    tmp_path: Path,
+):
+    cache = ReconcileCache(tmp_path)
+    original = CachePayload(
+        fetched_at=time.time() - 9999,
+        ttl_seconds=300,
+        results={
+            "a": {"state": "merged", "pr_url": "u", "pr_number": 1, "base": "main"},
+            "b": {"state": "merged", "pr_url": "u", "pr_number": 2, "base": "main"},
+        },
+        ignored=["b"],
+        base_context={"a": ["main"], "b": ["main"]},
+    )
+    cache.write(original)
+    state = WorkspaceState(tasks={"a": _task("a"), "b": _task("b")})
+
+    decisions = reconcile_now(
+        state,
+        cache=cache,
+        fetcher=lambda *_: (
+            {"feat/a": PRSnapshot(head_ref="feat/a", state="OPEN", base_ref="main",
+                                  merge_commit=None, url="u", updated_at="z")},
+            {"feat/a": GitSnapshot(has_upstream=True, behind=0, ahead=0)},
+        ),
+        only_slugs={"a"},
+    )
+
+    cached = cache.read()
+    assert decisions["a"].state == UpstreamState.in_sync
+    assert cached is not None
+    assert cached.fetched_at == original.fetched_at
+    assert cached.results == original.results
 
 
 def test_should_block_merged_on_finish():
