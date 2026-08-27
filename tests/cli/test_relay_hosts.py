@@ -2,10 +2,9 @@
 
 `mship relay fleet-token` mints the phone's credential and prints the QR that
 carries it; `mship relay hosts` is the owner's view of the same directory the
-phone reads. Both default `--store-dir`/`--pubkeys-dir` exactly as the shipped
-`requests`/`approve` commands do, and `enroll-server` wires the directory from
-those same two directories — the `pubkeys/` allowlist being the one sish
-authenticates against is what makes signature-auth and tunnel-auth one identity.
+phone reads. Every relay-owner command requires the exact `--store-dir` used by
+`enroll-server`; the `pubkeys/` allowlist remains the one sish authenticates
+against, making signature-auth and tunnel-auth one identity.
 """
 
 from __future__ import annotations
@@ -14,6 +13,9 @@ import json
 import re
 import time
 
+from click import unstyle
+
+import pytest
 import typer
 from typer.testing import CliRunner
 
@@ -55,6 +57,114 @@ def _token_line(result):
 
 
 # --- fleet-token ------------------------------------------------------------
+
+def test_fleet_token_requires_an_explicit_store_dir(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    res = _run(
+        "fleet-token",
+        "--label",
+        "phone",
+        "--relay-domain",
+        "relay.example.com",
+    )
+    assert res.exit_code != 0
+    assert "--store-dir" in unstyle(res.output)
+    assert "pgrep -af" in unstyle(res.output)
+    assert not (tmp_path / "pending-store").exists()
+
+
+@pytest.mark.parametrize("store_dir", ["", " \t "], ids=["empty", "whitespace"])
+@pytest.mark.parametrize(
+    ("command", "arguments"),
+    [
+        ("requests", ()),
+        (
+            "fleet-token",
+            ("--label", "phone", "--relay-domain", "relay.example.com"),
+        ),
+    ],
+)
+def test_owner_commands_reject_blank_store_dirs_without_touching_current_dir(
+    monkeypatch, tmp_path, command, arguments, store_dir
+):
+    from mship.core.relay.enroll import RequestStore
+
+    monkeypatch.chdir(tmp_path)
+    request_id = RequestStore(tmp_path).create(
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBodyAAAAAAAAAAAAAAAAAAAA host",
+        "laptop",
+    )
+    before = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    res = _run(command, *arguments, "--store-dir", store_dir)
+
+    assert res.exit_code != 0
+    assert "--store-dir" in unstyle(res.output)
+    assert request_id not in res.output
+    after = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
+@pytest.mark.parametrize(
+    "pubkeys_option",
+    [(), ("--pubkeys-dir", ""), ("--pubkeys-dir", " \t ")],
+    ids=["missing", "empty", "whitespace"],
+)
+def test_approve_requires_an_explicit_nonblank_pubkeys_dir(
+    monkeypatch, tmp_path, pubkeys_option
+):
+    from mship.core.relay.enroll import RequestStore
+
+    current_dir = tmp_path / "current"
+    current_dir.mkdir()
+    store_dir = tmp_path / "store"
+    request_id = RequestStore(store_dir).create(
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBodyAAAAAAAAAAAAAAAAAAAA host",
+        "laptop",
+    )
+    monkeypatch.chdir(current_dir)
+
+    res = _run("approve", request_id, "--store-dir", str(store_dir), *pubkeys_option)
+
+    assert res.exit_code != 0
+    assert "--pubkeys-dir" in unstyle(res.output)
+    assert RequestStore(store_dir).get(request_id) == "pending"
+    assert list(current_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "pubkeys_option",
+    [(), ("--pubkeys-dir", ""), ("--pubkeys-dir", " \t ")],
+    ids=["missing", "empty", "whitespace"],
+)
+def test_enroll_server_requires_an_explicit_nonblank_pubkeys_dir(
+    monkeypatch, tmp_path, pubkeys_option
+):
+    started = []
+    monkeypatch.setattr(
+        relay_mod, "_enroll_server_impl", lambda **kwargs: started.append(kwargs)
+    )
+
+    res = _run(
+        "enroll-server",
+        "--store-dir",
+        str(tmp_path / "store"),
+        "--relay-domain",
+        "relay.example.com",
+        *pubkeys_option,
+    )
+
+    assert res.exit_code != 0
+    assert "--pubkeys-dir" in unstyle(res.output)
+    assert not started
 
 
 def test_fleet_token_mints_and_prints_the_pairing_link(tmp_path):

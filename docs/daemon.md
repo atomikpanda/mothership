@@ -95,7 +95,9 @@ With a relay configured, the daemon does two things beside the servers on the
 same asyncio loop: it keeps an `ssh -R` tunnel to the relay up, and it keeps
 this host's entry in the relay's host directory current. Together they are what
 makes a freshly provisioned VM reachable from the phone with **no address typed
-anywhere** — the phone scans one relay QR and reads the directory.
+anywhere** — the phone scans one relay QR and reads the directory. See
+[Which pairing QR do I need?](relay-hosting.md#which-pairing-qr-do-i-need) for
+the distinction between one-workspace and daemon-fleet pairing.
 
 ### Identity
 
@@ -126,8 +128,9 @@ aside to `<name>.pre-reidentify-<UTC timestamp>` and a new one generated. The
 rotation is the point — the clone still holds a copy of the old private key and
 that key is still in the relay's `pubkeys/`, so keeping it would let the twin go
 on authenticating as this host. The new key is unapproved by construction, so
-the host lands back in the enrollment queue and needs one more
-`mship relay approve <id>` on the relay box.
+the host lands back in the enrollment queue and needs one more approval on the
+relay box: inspect the live enroll-server command, then run `mship relay approve
+<id> --store-dir <relay-store> --pubkeys-dir <relay-pubkeys>`.
 
 ### Tokens
 
@@ -193,7 +196,8 @@ tunnel authenticates with (`ssh-keygen -Y sign`, namespace
 after a failure it backs off from 2s to a 60s cap, jittered **downward** so a
 fleet returning after a relay redeploy does not retry in lockstep.
 
-`mship relay hosts` on the relay box lists the directory; a host that has not
+`mship relay hosts --store-dir <relay-store>` on the relay box lists the
+directory; a host that has not
 re-registered within 240s (three intervals plus a worst-case backoff) reads as
 `offline` there rather than disappearing.
 
@@ -206,7 +210,7 @@ answering, `status` says so rather than guessing:
 | state | what `mship daemon status` prints |
 |---|---|
 | `disabled` | `tunnel: disabled (no relay configured)` |
-| `awaiting-enrollment` | `tunnel: awaiting relay approval (run 'mship relay approve <id>' on the relay host)` |
+| `awaiting-enrollment` | `tunnel: awaiting relay approval (on relay host, inspect \`pgrep -af 'mship.*relay.*enroll-server'\`, then run \`mship relay approve <id> --store-dir <relay-store> --pubkeys-dir <relay-pubkeys>\`)` |
 | `connecting` | `tunnel: connecting <public_url>` |
 | `online` | `tunnel: online <public_url> (<n> restarts)` |
 | `contended` | `tunnel: contended — another host holds <subdomain>` |

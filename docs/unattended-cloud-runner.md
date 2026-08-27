@@ -112,14 +112,19 @@ With **no** App creds the egress-server **fails closed** — every request retur
 ### C. Enroll a worker identity + set its ceiling
 
 ```bash
+RELAY_STORE=/path/to/docker/relay/pending-store
+RELAY_PUBKEYS=/path/to/docker/relay/pubkeys
+
 # The worker device requests access; you approve it (existing enroll flow):
 mship relay enroll          # from the worker device — requests relay access
-mship relay requests        # on the relay host — list pending (id · host · fp)
-mship relay approve <request-id>
+mship relay requests --store-dir "$RELAY_STORE"  # on relay host: pending id/host/fp
+mship relay approve <request-id> \
+  --store-dir "$RELAY_STORE" --pubkeys-dir "$RELAY_PUBKEYS"
 
 # Set the CEILING — the repos this enrollment may EVER touch (superset of any
 # single run's repos):
-mship relay grant <enrollment-id> --provider github-app \
+mship relay grant <enrollment-id> --store-dir "$RELAY_STORE" \
+  --provider github-app \
   --repos owner/workspace-repo,owner/member-a,owner/member-b
 ```
 

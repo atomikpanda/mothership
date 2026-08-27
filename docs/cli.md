@@ -67,14 +67,19 @@ safe-skips foreign links, files, and directories unless `--force` is explicit.
 extension compatibility and recommends `mship skill install --only omp` (plus
 `--force` for foreign content) when repair is needed.
 
-`mship relay` manages the reverse-tunnel relay client keys (for `mship serve --relay`, see [`relay-hosting.md`](relay-hosting.md)):
+`mship relay` manages reverse-tunnel client keys and relay-owner state (for
+`mship serve --relay`, see [`relay-hosting.md`](relay-hosting.md)). Every
+relay-owner command uses the same explicit `<store>` as `enroll-server`:
 
 ```bash
-mship relay setup                                   # generate the relay SSH key (if absent) + print an enroll command
-mship relay enroll                                  # from a NEW device: request relay access (owner approves/denies)
-mship relay enroll-server                           # run the public enroll endpoint on the relay host
-mship relay requests                                # list pending enroll requests (id · hostname · fingerprint)
-mship relay approve <id> | deny <id>                # approve (add key to allowlist) / deny a pending request
+mship relay setup                                             # generate the client relay SSH key
+mship relay enroll                                            # request relay access from a new device
+mship relay enroll-server --store-dir <store> ...             # run the public endpoint on the relay host
+mship relay requests --store-dir <store>                      # list pending enrollment requests
+mship relay approve <id> --store-dir <store> --pubkeys-dir <pubkeys>
+mship relay deny <id> --store-dir <store>
+mship relay fleet-token --label phone --relay-domain <relay> --store-dir <store>
+mship relay hosts --store-dir <store>                         # list the daemon host directory
 ```
 
 ## Work items & specs

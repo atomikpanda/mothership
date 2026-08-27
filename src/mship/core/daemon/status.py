@@ -46,8 +46,10 @@ _LOOP_WINDOW_S = 600
 _TUNNEL_LINES = {
     "disabled": "tunnel: disabled (no relay configured)",
     "awaiting-enrollment": (
-        "tunnel: awaiting relay approval "
-        "(run 'mship relay approve <id>' on the relay host)"
+        "tunnel: awaiting relay approval (on relay host, inspect "
+        "`pgrep -af 'mship.*relay.*enroll-server'`, then run "
+        "`mship relay approve <id> --store-dir <relay-store> "
+        "--pubkeys-dir <relay-pubkeys>`)"
     ),
     "connecting": "tunnel: connecting {public_url}",
     "online": "tunnel: online {public_url} ({restarts} restarts)",

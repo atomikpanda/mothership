@@ -177,7 +177,10 @@ def _tunnel(**kw) -> dict:
         (_tunnel(state="disabled"), "tunnel: disabled (no relay configured)"),
         (
             _tunnel(state="awaiting-enrollment"),
-            "tunnel: awaiting relay approval (run 'mship relay approve <id>' on the relay host)",
+            "tunnel: awaiting relay approval (on relay host, inspect "
+            "`pgrep -af 'mship.*relay.*enroll-server'`, then run "
+            "`mship relay approve <id> --store-dir <relay-store> "
+            "--pubkeys-dir <relay-pubkeys>`)",
         ),
         (_tunnel(), "tunnel: online https://hst-abc.relay.example (0 restarts)"),
         (_tunnel(state="contended"), "tunnel: contended — another host holds hst-abc"),

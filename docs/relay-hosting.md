@@ -18,6 +18,47 @@ internet
 
 ---
 
+## Which pairing QR do I need?
+
+Ground Control accepts two different QR credentials:
+
+| Goal | Command | Run it on |
+|---|---|---|
+| Add one running workspace | `mship pair --relay-host <relay-domain>` | That workspace's host, from its workspace directory |
+| Add every workspace discovered by `mship daemon` | `mship relay fleet-token` | The central relay box |
+
+The daemon/fleet QR must use the same state directory as the running
+`enroll-server`. On the central relay box, inspect the live process rather than
+assuming a working directory or reading a unit file that may not have been
+restarted:
+
+```bash
+pgrep -af 'mship.*relay.*enroll-server'
+```
+
+Copy the absolute `--store-dir` from that command. Supply the relay domain from
+its `--relay-domain` argument when present, or from the `RELAY_DOMAIN` value used
+by the service. Then run the matching CLI as the same operating-system user:
+
+```bash
+mship relay fleet-token \
+  --label <phone-name> \
+  --relay-domain <relay-domain> \
+  --store-dir <absolute-store-dir>
+```
+
+The command prints a `groundcontrol://add-relay?...` link and a terminal QR.
+In Ground Control, open **Settings → Relay account → Add relay account** and
+scan it. Re-running the command with the same label reprints the same
+credential; it does not unpair an existing phone.
+
+The QR is a fleet-wide read credential. Do not share it or send its deep link
+to an external QR generator. A different store can mint a valid-looking QR,
+but the running relay will reject it because it verifies against its own
+`fleet-tokens.json`.
+
+---
+
 ## Prerequisites
 
 | Requirement | Notes |
@@ -155,10 +196,10 @@ mship relay enroll-server \
 
 `--relay-domain` can also be set via the `RELAY_DOMAIN` environment variable. The enroll-server is reached from the internet only through Caddy at `https://enroll.<relay>` — the raw `:47180` port is not accessible externally.
 
-Every owner-side command must receive its applicable `--store-dir` and
-`--pubkeys-dir` explicitly. The examples below use
-`/path/to/docker/relay/pending-store` and `/path/to/docker/relay/pubkeys`;
-substitute the exact values from the running unit's `ExecStart`.
+Every owner-side command requires the exact `--store-dir` used by the running
+enroll-server; commands that write sish keys also need its `--pubkeys-dir`.
+Use absolute paths. See [Which pairing QR do I need?](#which-pairing-qr-do-i-need)
+for the live-process discovery command.
 
 > **Important — keep the enroll-server supervised.** The enroll-server backs Caddy's on-demand TLS `ask` endpoint, which gates cert issuance **and renewal** for every relay subdomain — not just new enrollment requests. If the enroll-server is down, Caddy cannot renew existing certs and will refuse to issue new ones for serve subdomains. Unlike sish and Caddy (which Docker Compose restarts automatically), the enroll-server runs outside the compose stack and **must run under a supervisor so it survives reboots**.
 >
