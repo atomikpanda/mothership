@@ -15,6 +15,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -30,6 +31,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+      - name: Verify lockfile is current
+        run: uv lock --check
       - uses: arduino/setup-task@v2
         with:
           # `task test` is the entry point; the action needs a token to resolve
