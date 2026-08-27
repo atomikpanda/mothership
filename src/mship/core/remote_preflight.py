@@ -159,9 +159,8 @@ _WHY = {
 # collapsing into a command the operator has to rewrite five times by hand.
 _FIX = {
     IN_PROGRESS: [
-        "Finish it or abandon it, then re-run:",
+        "Inspect and finish or abandon the operation Git identifies, then re-run:",
         '  git -C "{path}" status                 # what git is in the middle of',
-        '  git -C "{path}" rebase --abort         # ...or merge/cherry-pick/revert --abort',
     ],
     WRONG_BRANCH: [
         "Check the task's branch back out, then re-run:",
@@ -237,29 +236,48 @@ _UNMERGED_CODES = ("DD", "AU", "UD", "UA", "DU", "AA", "UU")
 # suspended. A `--no-commit` merge leaves MERGE_HEAD with NOTHING unmerged, so
 # the porcelain alone cannot see it — hence the extra look.
 _OPERATIONS = (
-    ("rebase-merge", "a rebase is in progress", "rebase --continue", "rebase --abort"),
+    (
+        "rebase-merge",
+        "a rebase is in progress",
+        ("rebase --continue",),
+        ("rebase --abort",),
+    ),
     (
         "rebase-apply",
         "a rebase or `git am` is in progress",
-        "rebase --continue  # or git am --continue",
-        "rebase --abort     # or git am --abort",
+        ("rebase --continue", "am --continue"),
+        ("rebase --abort", "am --abort"),
     ),
-    ("MERGE_HEAD", "a merge is in progress", "merge --continue", "merge --abort"),
+    (
+        "sequencer",
+        "a cherry-pick or revert sequence is in progress",
+        ("cherry-pick --continue", "revert --continue"),
+        ("cherry-pick --abort", "revert --abort"),
+    ),
+    ("MERGE_HEAD", "a merge is in progress", ("merge --continue",), ("merge --abort",)),
     (
         "CHERRY_PICK_HEAD",
         "a cherry-pick is in progress",
-        "cherry-pick --continue",
-        "cherry-pick --abort",
+        ("cherry-pick --continue",),
+        ("cherry-pick --abort",),
     ),
-    ("REVERT_HEAD", "a revert is in progress", "revert --continue", "revert --abort"),
+    ("REVERT_HEAD", "a revert is in progress", ("revert --continue",), ("revert --abort",)),
+    (
+        "BISECT_LOG",
+        "a bisect is in progress",
+        ("bisect good", "bisect bad"),
+        ("bisect reset",),
+    ),
 )
 
 
-def _operation_in_progress(git_dir: Path) -> tuple[str, str, str] | None:
-    """Description and recovery commands for a suspended git operation."""
-    for marker, description, continue_command, abort_command in _OPERATIONS:
+def _operation_in_progress(
+    git_dir: Path,
+) -> tuple[str, tuple[str, ...], tuple[str, ...]] | None:
+    """Description and complete recovery commands for a suspended git operation."""
+    for marker, description, continue_commands, abort_commands in _OPERATIONS:
         if (git_dir / marker).exists():
-            return description, continue_command, abort_command
+            return description, continue_commands, abort_commands
     return None
 
 
@@ -337,11 +355,17 @@ def _inspect_repo(
     if operation is not None or unmerged:
         detail = "unmerged paths"
         if operation is not None:
-            description, continue_command, abort_command = operation
-            detail = (
-                f"{description}\n"
-                f'continue: git -C "{path}" {continue_command}\n'
-                f'abort: git -C "{path}" {abort_command}'
+            description, continue_commands, abort_commands = operation
+            detail = "\n".join(
+                [description]
+                + [
+                    f'continue: git -C "{path}" {command}'
+                    for command in continue_commands
+                ]
+                + [
+                    f'abort: git -C "{path}" {command}'
+                    for command in abort_commands
+                ]
             )
         if unmerged:
             detail = f"{detail}; unresolved: {', '.join(sorted(unmerged)[:5])}"

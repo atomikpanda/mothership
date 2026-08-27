@@ -1263,21 +1263,52 @@ def test_a_mid_rebase_repo_is_refused_before_anything_is_sent(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize(
-    ("marker", "description", "continue_command", "abort_command"),
+    ("marker", "description", "recovery_commands"),
     [
-        ("rebase-merge", "a rebase is in progress", "rebase --continue", "rebase --abort"),
+        (
+            "rebase-merge",
+            "a rebase is in progress",
+            ("rebase --continue", "rebase --abort"),
+        ),
         (
             "rebase-apply",
             "a rebase or `git am` is in progress",
-            "rebase --continue",
-            "rebase --abort",
+            (
+                "rebase --continue",
+                "am --continue",
+                "rebase --abort",
+                "am --abort",
+            ),
         ),
-        ("MERGE_HEAD", "a merge is in progress", "merge --continue", "merge --abort"),
+        (
+            "MERGE_HEAD",
+            "a merge is in progress",
+            ("merge --continue", "merge --abort"),
+        ),
         (
             "CHERRY_PICK_HEAD",
             "a cherry-pick is in progress",
-            "cherry-pick --continue",
-            "cherry-pick --abort",
+            ("cherry-pick --continue", "cherry-pick --abort"),
+        ),
+        (
+            "REVERT_HEAD",
+            "a revert is in progress",
+            ("revert --continue", "revert --abort"),
+        ),
+        (
+            "sequencer",
+            "a cherry-pick or revert sequence is in progress",
+            (
+                "cherry-pick --continue",
+                "revert --continue",
+                "cherry-pick --abort",
+                "revert --abort",
+            ),
+        ),
+        (
+            "BISECT_LOG",
+            "a bisect is in progress",
+            ("bisect good", "bisect bad", "bisect reset"),
         ),
     ],
 )
@@ -1288,7 +1319,7 @@ def test_a_mid_rebase_repo_is_refused_before_anything_is_sent(tmp_path, monkeypa
     ids=["wrong-branch", "detached"],
 )
 def test_clean_operation_marker_outranks_detached_or_wrong_branch(
-    tmp_path, monkeypatch, marker, description, continue_command, abort_command,
+    tmp_path, monkeypatch, marker, description, recovery_commands,
     linked_worktree, head_ref,
 ):
     """A suspended operation wins over a detached/wrong-branch HEAD, even clean."""
@@ -1301,7 +1332,7 @@ def test_clean_operation_marker_outranks_detached_or_wrong_branch(
     )
     marker_path = git_dir / marker
     marker_path.parent.mkdir(parents=True, exist_ok=True)
-    if marker.startswith("rebase-"):
+    if marker in {"rebase-merge", "rebase-apply", "sequencer"}:
         marker_path.mkdir()
     else:
         marker_path.touch()
@@ -1320,8 +1351,9 @@ def test_clean_operation_marker_outranks_detached_or_wrong_branch(
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert result.exit_code == 1, result.output
         assert description in result.output
-        assert f'git -C "{wts["api"]}" {continue_command}' in result.output
-        assert f'git -C "{wts["api"]}" {abort_command}' in result.output
+        for command in recovery_commands:
+            assert f'git -C "{wts["api"]}" {command}' in result.output
+        assert "# or git" not in result.output
         assert "checkout" not in result.output
         assert shell.pushes == []
         assert recorder == {}

@@ -511,11 +511,8 @@ def test_a_conflicted_repo_is_refused(tmp_path):
     msg = blocked_message(pre)
     assert "merge or rebase in progress in api" in msg
     assert "src/app.py" in msg          # which file, exactly
-    assert "--abort" in msg             # the way out
-    assert (
-        f'git -C "{api}" rebase --abort         '
-        "# ...or merge/cherry-pick/revert --abort"
-    ) in msg
+    assert f'git -C "{api}" status' in msg
+    assert f'git -C "{api}" rebase --abort' not in msg
 
 
 def test_a_mid_rebase_repo_is_refused_ahead_of_the_branch_check(tmp_path):
@@ -551,6 +548,8 @@ def test_a_mid_merge_repo_is_refused_even_with_a_clean_tree(tmp_path):
     assert f'continue: git -C "{api}" merge --continue' in msg
     assert f'abort: git -C "{api}" merge --abort' in msg
 
+    assert f'git -C "{api}" rebase --abort' not in msg
+
 
 def test_a_cherry_pick_in_progress_is_refused(tmp_path):
     api = _repo(tmp_path, "api")
@@ -564,8 +563,10 @@ def test_a_cherry_pick_in_progress_is_refused(tmp_path):
     assert f'continue: git -C "{api}" cherry-pick --continue' in msg
     assert f'abort: git -C "{api}" cherry-pick --abort' in msg
 
+    assert f'git -C "{api}" rebase --abort' not in msg
 
-def test_a_mid_rebase_apply_repo_names_its_precise_recovery_commands(tmp_path):
+
+def test_a_mid_rebase_apply_repo_lists_rebase_and_git_am_recovery_separately(tmp_path):
     api = _repo(tmp_path, "api")
     (api / ".git" / "rebase-apply").mkdir(parents=True)
     shell = FakeShell({"api": _clean(status="", head_ref="")})
@@ -574,8 +575,62 @@ def test_a_mid_rebase_apply_repo_names_its_precise_recovery_commands(tmp_path):
 
     assert [s.blocked_reason for s in pre.blocked] == [IN_PROGRESS]
     msg = blocked_message(pre)
-    assert f'continue: git -C "{api}" rebase --continue  # or git am --continue' in msg
-    assert f'abort: git -C "{api}" rebase --abort     # or git am --abort' in msg
+    assert f'continue: git -C "{api}" rebase --continue' in msg
+    assert f'continue: git -C "{api}" am --continue' in msg
+    assert f'abort: git -C "{api}" rebase --abort' in msg
+    assert f'abort: git -C "{api}" am --abort' in msg
+    assert "# or git am" not in msg
+
+
+def test_clean_sequencer_is_refused_before_wrong_branch_with_both_recoveries(tmp_path):
+    api = _repo(tmp_path, "api")
+    (api / ".git" / "sequencer").mkdir(parents=True)
+    shell = FakeShell({"api": _clean(status="", head_ref="refs/heads/other")})
+
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert [s.blocked_reason for s in pre.blocked] == [IN_PROGRESS]
+    msg = blocked_message(pre)
+    for command in (
+        "cherry-pick --continue",
+        "revert --continue",
+        "cherry-pick --abort",
+        "revert --abort",
+    ):
+        assert f'git -C "{api}" {command}' in msg
+    assert "checkout" not in msg
+    assert f'git -C "{api}" rebase --abort' not in msg
+
+
+def test_active_bisect_log_is_refused_before_wrong_branch_with_recovery(tmp_path):
+    api = _repo(tmp_path, "api")
+    (api / ".git").mkdir(parents=True, exist_ok=True)
+    (api / ".git" / "BISECT_LOG").write_text("git bisect start\n")
+    shell = FakeShell({"api": _clean(status="", head_ref="refs/heads/other")})
+
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert [s.blocked_reason for s in pre.blocked] == [IN_PROGRESS]
+    msg = blocked_message(pre)
+    for command in ("bisect good", "bisect bad", "bisect reset"):
+        assert f'git -C "{api}" {command}' in msg
+    assert "checkout" not in msg
+    assert f'git -C "{api}" rebase --abort' not in msg
+
+
+def test_a_revert_in_progress_does_not_offer_a_rebase_abort(tmp_path):
+    api = _repo(tmp_path, "api")
+    (api / ".git").mkdir(parents=True, exist_ok=True)
+    (api / ".git" / "REVERT_HEAD").write_text("abc\n")
+    shell = FakeShell({"api": _clean(status="")})
+
+    msg = blocked_message(inspect(FakeTask({"api": api}), shell))
+
+    assert f'git -C "{api}" revert --continue' in msg
+    assert f'git -C "{api}" revert --abort' in msg
+    assert f'git -C "{api}" rebase --abort' not in msg
+
+
 
 
 def test_an_unanswerable_git_dir_is_unreadable_not_transferred(tmp_path):
