@@ -134,12 +134,12 @@ def test_write_stamps_current_schema_version_for_freshly_computed_results(tmp_pa
     assert c.is_fresh(got) is True
 
 
-def test_current_scoped_context_ignores_unrequested_entries(tmp_path: Path):
+def test_current_scoped_context_ignores_malformed_unrequested_entries(tmp_path: Path):
     cache = ReconcileCache(tmp_path / ".mothership")
     payload = CachePayload(
         fetched_at=time.time(),
         ttl_seconds=300,
-        results={"selected": {"state": "in_sync"}, "unrelated": {"state": "merged"}},
+        results={"selected": {"state": "in_sync"}, "unrelated": []},
         ignored=[],
         base_context={"selected": ["main"], "unrelated": ["old-base"]},
     )

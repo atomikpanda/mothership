@@ -21,7 +21,7 @@ SCHEMA_VERSION = 2
 class CachePayload:
     fetched_at: float
     ttl_seconds: int
-    results: dict[str, dict]
+    results: dict[str, object]
     ignored: list[str] = field(default_factory=list)
     schema_version: int = SCHEMA_VERSION
     base_context: dict[str, list[str] | None] | None = None

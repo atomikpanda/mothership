@@ -6,8 +6,10 @@ each Decision via should_block() to choose block/warn/allow per command.
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
+
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -145,7 +147,13 @@ def _decision_from_detection(slug: str, det: Detection, state: WorkspaceState) -
     )
 
 
-def _decision_from_cache_entry(slug: str, raw: dict, state: WorkspaceState) -> Decision | None:
+def _decision_from_cache_entry(
+    slug: str,
+    raw: object,
+    state: WorkspaceState,
+) -> Decision | None:
+    if not isinstance(raw, Mapping):
+        return None
     try:
         return Decision(
             slug=slug,
@@ -157,7 +165,7 @@ def _decision_from_cache_entry(slug: str, raw: dict, state: WorkspaceState) -> D
             updated_at=raw.get("updated_at"),
             finished_at=_finished_at_for(slug, state),
         )
-    except (KeyError, ValueError):
+    except (KeyError, TypeError, ValueError):
         return None
 
 
@@ -168,7 +176,8 @@ def _decisions_from_cache(
     only_slugs: set[str] | None = None,
 ) -> dict[str, Decision]:
     out: dict[str, Decision] = {}
-    for slug in state.tasks:
+    slugs = state.tasks if only_slugs is None else only_slugs
+    for slug in slugs:
         raw = payload.results.get(slug)
         if raw is None:
             continue
@@ -226,17 +235,39 @@ def reconcile_now(
     ]
 
     # Keep the raw payload only to preserve its ignore list on a fresh write.
-    # Every results-consuming path uses the schema/context-compatible payload.
+    # Every results-consuming path validates the schema/context-compatible closure.
     payload = cache.read()
     current_payload = cache.current(
         payload,
         base_context=base_context,
         only_slugs=reconciliation_slugs,
     )
-    if current_payload is not None and cache.is_fresh(current_payload):
-        return _decisions_from_cache(
-            state, current_payload, only_slugs=only_slugs,
+    cached_decisions = (
+        _decisions_from_cache(
+            state, current_payload, only_slugs=reconciliation_slugs,
         )
+        if current_payload is not None
+        else None
+    )
+    cache_complete = (
+        reconciliation_slugs is None
+        or (
+            cached_decisions is not None
+            and reconciliation_slugs <= cached_decisions.keys()
+        )
+    )
+    if (
+        current_payload is not None
+        and cache.is_fresh(current_payload)
+        and cache_complete
+    ):
+        if only_slugs is None:
+            return cached_decisions
+        return {
+            slug: decision
+            for slug, decision in cached_decisions.items()
+            if slug in only_slugs
+        }
 
     branches = [task.branch for task in tasks]
     worktrees_by_branch: dict[str, Path] = {}
@@ -247,10 +278,14 @@ def reconcile_now(
     try:
         pr_by_head, git_by_branch = fetcher(branches, worktrees_by_branch)
     except FetchError:
-        if current_payload is not None:
-            return _decisions_from_cache(
-                state, current_payload, only_slugs=only_slugs,
-            )
+        if cached_decisions is not None and cache_complete:
+            if only_slugs is None:
+                return cached_decisions
+            return {
+                slug: decision
+                for slug, decision in cached_decisions.items()
+                if slug in only_slugs
+            }
         return {}
 
     tasks_tuples = [
@@ -280,8 +315,7 @@ def reconcile_now(
         slug: _decision_from_detection(slug, d, state)
         for slug, d in detections.items()
     }
-    if current_payload is not None and only_slugs is not None:
-        cached_decisions = _decisions_from_cache(state, current_payload)
+    if cached_decisions is not None and only_slugs is not None:
         cached_decisions.update(decisions)
         decisions = cached_decisions
     decisions = apply_dependency_stale(state, decisions)

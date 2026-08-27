@@ -352,10 +352,10 @@ def test_reconcile_now_scoped_fetches_only_selected_task_snapshots(tmp_path: Pat
     assert set(decisions) == {"a"}
 
 
-def test_reconcile_now_scoped_missing_dependency_cache_result_fetches_dependencies(
+def test_reconcile_now_scoped_malformed_dependency_cache_result_fetches_dependencies(
     tmp_path: Path,
 ):
-    """A scoped cache hit needs results for the full dependency closure."""
+    """A malformed closure entry cannot bypass fresh reconciliation."""
     from mship.core.state import DependencyEdge
 
     created = datetime(2026, 5, 1, tzinfo=timezone.utc)
@@ -364,7 +364,7 @@ def test_reconcile_now_scoped_missing_dependency_cache_result_fetches_dependenci
     cache.write(CachePayload(
         fetched_at=time.time(),
         ttl_seconds=300,
-        results={"b": {"state": "in_sync"}},
+        results={"a": [], "b": {"state": "in_sync"}},
         ignored=[],
         base_context={"a": ["main"], "b": ["main"]},
     ))
@@ -417,6 +417,62 @@ def test_reconcile_now_scoped_missing_dependency_cache_result_fetches_dependenci
     assert calls == [["feat/a", "feat/b"]]
     assert set(decisions) == {"b"}
     assert decisions["b"].state == UpstreamState.dependency_stale
+
+
+def test_reconcile_now_scoped_fresh_cache_ignores_malformed_unrelated_result(
+    tmp_path: Path,
+):
+    cache = ReconcileCache(tmp_path)
+    cache.write(CachePayload(
+        fetched_at=time.time(),
+        ttl_seconds=300,
+        results={
+            "a": {"state": "merged", "pr_url": "u", "pr_number": 1, "base": "main"},
+            "b": [],
+        },
+        ignored=[],
+        base_context={"a": ["main"], "b": ["main"]},
+    ))
+    state = WorkspaceState(tasks={"a": _task("a"), "b": _task("b")})
+
+    decisions = reconcile_now(
+        state,
+        cache=cache,
+        fetcher=lambda *_: (_ for _ in ()).throw(AssertionError("should not fetch")),
+        only_slugs={"a"},
+    )
+
+    assert decisions["a"].state == UpstreamState.merged
+
+
+def test_reconcile_now_scoped_malformed_cache_fails_closed_after_fetch_error(
+    tmp_path: Path,
+):
+    from mship.core.reconcile.fetch import FetchError
+
+    cache = ReconcileCache(tmp_path)
+    cache.write(CachePayload(
+        fetched_at=time.time(),
+        ttl_seconds=300,
+        results={"a": []},
+        ignored=[],
+        base_context={"a": ["main"]},
+    ))
+    calls: list[list[str]] = []
+
+    def fetcher(branches, worktrees):
+        calls.append(list(branches))
+        raise FetchError("offline")
+
+    decisions = reconcile_now(
+        WorkspaceState(tasks={"a": _task("a")}),
+        cache=cache,
+        fetcher=fetcher,
+        only_slugs={"a"},
+    )
+
+    assert calls == [["feat/a"]]
+    assert decisions == {}
 
 
 def test_reconcile_now_scoped_fetch_does_not_refresh_unrelated_cache(
