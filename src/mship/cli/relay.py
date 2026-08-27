@@ -22,12 +22,30 @@ from mship.core.relay.config import canonical_relay_host
 
 
 def _require_store_dir(value: str | None) -> str:
-    if value is None:
+    if value is None or not value.strip():
         raise typer.BadParameter(
             "--store-dir must match the running enroll-server. Inspect its live "
             "command with `pgrep -af 'mship.*relay.*enroll-server'`."
         )
     return value
+
+
+def _require_pubkeys_dir(value: str | None) -> str:
+    if value is None or not value.strip():
+        raise typer.BadParameter(
+            "--pubkeys-dir must name the sish allowlist directory."
+        )
+    return value
+
+
+def _required_pubkeys_dir():
+    return typer.Option(
+        None,
+        "--pubkeys-dir",
+        metavar="PATH",
+        callback=_require_pubkeys_dir,
+        help="sish pubkeys allowlist directory. Required explicitly.",
+    )
 
 
 def _required_store_dir():
@@ -185,13 +203,7 @@ def register(parent: typer.Typer, get_container):
 
     @relay_app.command("enroll-server")
     def enroll_server(
-        pubkeys_dir: str = typer.Option(
-            "./pubkeys",
-            "--pubkeys-dir",
-            help="Allowlist dir used by 'mship relay approve' "
-            "(this server only creates pending requests; "
-            "it never writes keys).",
-        ),
+        pubkeys_dir: str = _required_pubkeys_dir(),
         store_dir: str = _required_store_dir(),
         port: int = typer.Option(47180, "--port", help="Port to listen on."),
         host: str = typer.Option(
@@ -241,11 +253,7 @@ def register(parent: typer.Typer, get_container):
     def approve_cmd(
         rid: str = typer.Argument(..., help="Request ID to approve."),
         store_dir: str = _required_store_dir(),
-        pubkeys_dir: str = typer.Option(
-            "./pubkeys",
-            "--pubkeys-dir",
-            help="Directory where approved keys are written (sish pubkeys/).",
-        ),
+        pubkeys_dir: str = _required_pubkeys_dir(),
     ):
         """Approve a pending request: add its key to the allowlist (sish picks it up, no restart)."""
         from pathlib import Path
