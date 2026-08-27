@@ -15,8 +15,7 @@ from datetime import datetime, timedelta, timezone
 from mship.core.log import LogManager
 from mship.core.spec import InvalidTransition, Spec, validate_transition
 from mship.core.spec_approve import approval_blockers
-from mship.core.spec_storage import SpecLocked
-from mship.core.spec_store import SpecParseError, SpecStore
+from mship.core.spec_store import SpecStore
 
 __all__ = [
     "ApprovalBlocked",
@@ -76,10 +75,7 @@ def _transition_timestamp(expected_updated_at: datetime, proposed_at: datetime) 
 @contextmanager
 def _locked_current_revision(spec: Spec, store: SpecStore):
     with ExitStack() as stack:
-        try:
-            artifact = stack.enter_context(store.locked(spec.id))
-        except (SpecLocked, SpecParseError) as exc:
-            raise SpecRevisionConflict(spec.id, spec.updated_at, None) from exc
+        artifact = stack.enter_context(store.locked(spec.id))
         _assert_current_revision(spec, artifact.spec if artifact is not None else None)
         yield artifact
 

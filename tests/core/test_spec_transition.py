@@ -11,7 +11,12 @@ from mship.core.inbox import InboxAction
 from mship.core.log import LogManager
 from mship.core.spec import AcceptanceCriterion, InvalidTransition, OpenQuestion, Spec
 from mship.core.spec_storage import SpecLocked, SpecStorage
-from mship.core.spec_store import SpecRepresentationMismatch, SpecStore
+from mship.core.spec_store import (
+    SpecArtifactConflict,
+    SpecParseError,
+    SpecRepresentationMismatch,
+    SpecStore,
+)
 from mship.core.spec_transition import (
     ApprovalBlocked,
     SpecRevisionConflict,
@@ -40,6 +45,20 @@ def _save_newer_revision(store: SpecStore) -> Spec:
     current.updated_at = datetime(2026, 7, 2, tzinfo=timezone.utc)
     store.save(current)
     return current
+
+
+def _assert_spec_lock_released(store: SpecStore, spec_id: str) -> None:
+    acquired = threading.Event()
+
+    def acquire_lock() -> None:
+        with store.locked(spec_id):
+            acquired.set()
+
+    thread = threading.Thread(target=acquire_lock)
+    thread.start()
+    thread.join(timeout=5)
+    assert acquired.is_set()
+    assert not thread.is_alive()
 
 
 def test_approve_rejects_a_stale_loaded_spec_without_mutating_either_revision(tmp_path):
@@ -193,7 +212,41 @@ def test_approve_ignores_canonical_inbox_refresh_without_a_revision_conflict(tmp
     assert persisted.inbox.pinned is True
 
 
-def test_approve_reports_conflict_when_loaded_artifact_becomes_unavailable(tmp_path):
+def test_approve_propagates_malformed_current_artifact_and_releases_lock(tmp_path):
+    store = SpecStore(tmp_path / "specs")
+    store.save(_reviewable())
+    actor = store.find_by_id("s1")
+    assert actor is not None
+    artifact_path = store.path_for(actor)
+    original_text = artifact_path.read_text()
+    artifact_path.write_text("not a spec")
+
+    with pytest.raises(SpecParseError) as raised:
+        approve_spec(actor, store)
+
+    assert type(raised.value) is SpecParseError
+    artifact_path.write_text(original_text)
+    _assert_spec_lock_released(store, actor.id)
+
+
+def test_approve_propagates_duplicate_current_artifact_and_releases_lock(tmp_path):
+    store = SpecStore(tmp_path / "specs")
+    store.save(_reviewable())
+    actor = store.find_by_id("s1")
+    assert actor is not None
+    artifact_path = store.path_for(actor)
+    duplicate_path = artifact_path.with_name(artifact_path.name + ".enc")
+    duplicate_path.write_text(artifact_path.read_text())
+
+    with pytest.raises(SpecArtifactConflict) as raised:
+        approve_spec(actor, store)
+
+    assert type(raised.value) is SpecArtifactConflict
+    duplicate_path.unlink()
+    _assert_spec_lock_released(store, actor.id)
+
+
+def test_approve_propagates_locked_current_artifact_and_releases_lock(tmp_path):
     storage = SpecStorage(
         tmp_path / "specs", mode="encrypted", workspace_root=tmp_path
     )
@@ -201,12 +254,16 @@ def test_approve_reports_conflict_when_loaded_artifact_becomes_unavailable(tmp_p
     store.save(_reviewable())
     actor = store.find_by_id("s1")
     assert actor is not None
-    spec_key.keyfile_path(tmp_path).unlink()
+    key_path = spec_key.keyfile_path(tmp_path)
+    key = key_path.read_bytes()
+    key_path.unlink()
 
-    with pytest.raises(SpecRevisionConflict) as raised:
+    with pytest.raises(SpecLocked) as raised:
         approve_spec(actor, store)
 
-    assert raised.value.current_updated_at is None
+    assert type(raised.value) is SpecLocked
+    key_path.write_bytes(key)
+    _assert_spec_lock_released(store, actor.id)
 
 
 def test_approve_propagates_save_time_representation_mismatch(tmp_path):
