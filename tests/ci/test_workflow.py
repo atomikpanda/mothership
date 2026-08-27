@@ -81,6 +81,40 @@ def test_version_bump_regenerates_and_commits_lockfile():
     assert lock_step["run"].strip() == "uv lock"
     assert "git add pyproject.toml src/mship/__init__.py uv.lock" in commit_step["run"]
 
+def test_version_bump_runs_canonical_suite_before_publishing():
+    steps = next(iter(_load()["jobs"].values()))["steps"]
+    lock_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("name") == "Regenerate lockfile"
+    )
+    task_setup_index, task_setup = next(
+        (index, step)
+        for index, step in enumerate(steps)
+        if step.get("uses") == "arduino/setup-task@v2"
+    )
+    identity_index, identity_step = next(
+        (index, step)
+        for index, step in enumerate(steps)
+        if step.get("name") == "Give git an identity"
+    )
+    suite_index, suite_step = next(
+        (index, step)
+        for index, step in enumerate(steps)
+        if step.get("name") == "Run bumped tree suite"
+    )
+    commit_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("name") == "Commit, tag, and push"
+    )
+
+    assert task_setup["with"]["repo-token"] == "${{ secrets.GITHUB_TOKEN }}"
+    assert 'git config --global user.name "mship ci"' in identity_step["run"]
+    assert 'git config --global user.email "ci@example.invalid"' in identity_step["run"]
+    assert suite_step["run"].strip() == "task test"
+    assert lock_index < task_setup_index < identity_index < suite_index < commit_index
+
 
 def test_pr_workflow_checks_lockfile_before_running_suite():
     steps = next(iter(_load(TEST_WORKFLOW)["jobs"].values()))["steps"]
@@ -109,10 +143,17 @@ def test_version_bump_dispatches_tests_for_new_version_tag_after_pushing():
     commit_step = next(step for step in steps if step.get("name") == "Commit, tag, and push")
     run = commit_step["run"]
     tag = 'git tag -a "v${{ steps.bump.outputs.new_version }}"'
+    commit_sha = 'BUMP_SHA="$(git rev-parse HEAD)"'
     dispatch = 'gh workflow run test.yml --ref "$TAG"'
 
     assert commit_step["env"]["GH_TOKEN"] == "${{ github.token }}"
-    assert run.index(tag) < run.index("git push origin main --follow-tags") < run.index(dispatch)
+    assert (
+        run.index('git commit -m "chore: bump version')
+        < run.index(commit_sha)
+        < run.index(tag)
+        < run.index("git push origin main --follow-tags")
+        < run.index(dispatch)
+    )
     assert "gh workflow run test.yml --ref main" not in run
 
 
@@ -122,7 +163,7 @@ def test_version_bump_waits_for_the_dispatched_tag_ci_run():
     run = commit_step["run"]
     dispatch = 'gh workflow run test.yml --ref "$TAG"'
     lookup = (
-        'gh run list --workflow test.yml --branch "$TAG" --event workflow_dispatch '
+        'gh run list --workflow test.yml --commit "$BUMP_SHA" --event workflow_dispatch '
         "--limit 1 --json databaseId --jq '.[0].databaseId // empty'"
     )
     watch = 'gh run watch "$RUN_ID" --exit-status'
@@ -135,4 +176,5 @@ def test_version_bump_waits_for_the_dispatched_tag_ci_run():
     assert '[ -z "$RUN_ID" ]' in run
     assert "exit 1" in run
     assert watch in run
+    assert '--branch "$TAG"' not in run
     assert run.index(dispatch) < run.index(lookup) < run.index('[ -z "$RUN_ID" ]') < run.index(watch)
