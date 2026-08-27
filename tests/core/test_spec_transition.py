@@ -63,6 +63,49 @@ def test_approve_rejects_a_stale_loaded_spec_without_mutating_either_revision(tm
     assert store.find_by_id("s1").model_dump() == current_before
 
 
+
+def test_approve_rejects_a_stale_review_clearance_before_evaluating_blockers(tmp_path):
+    store = SpecStore(tmp_path / "specs")
+    store.save(
+        _reviewable(open_questions=[OpenQuestion(id="q1", text="?", answer=None)])
+    )
+    stale = store.find_by_id("s1")
+    current = store.find_by_id("s1")
+    assert stale is not None
+    assert current is not None
+    current.open_questions[0].answer = "answered"
+    store.save(current)
+
+    with pytest.raises(SpecRevisionConflict):
+        approve_spec(stale, store)
+
+    persisted = store.find_by_id("s1")
+    assert persisted is not None
+    assert persisted.open_questions[0].answer == "answered"
+    assert persisted.status == "needs_review"
+
+
+def test_request_changes_rejects_a_stale_status_before_evaluating_transition(tmp_path):
+    store = SpecStore(tmp_path / "specs")
+    store.save(_reviewable(status="draft"))
+    stale = store.find_by_id("s1")
+    current = store.find_by_id("s1")
+    assert stale is not None
+    assert current is not None
+    current.status = "needs_review"
+    store.save(current)
+    log = LogManager(tmp_path / "logs")
+
+    with pytest.raises(SpecRevisionConflict):
+        request_changes_spec(
+            stale, store, "tighten AC2", log_manager=log, actor="alice"
+        )
+
+    persisted = store.find_by_id("s1")
+    assert persisted is not None
+    assert persisted.status == "needs_review"
+    assert log.read("s1") == []
+
 def test_request_changes_rejects_a_stale_loaded_spec_without_writing_a_rejection(tmp_path):
     store = SpecStore(tmp_path / "specs")
     store.save(_reviewable())

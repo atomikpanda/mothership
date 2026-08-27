@@ -85,12 +85,12 @@ def _locked_current_revision(spec: Spec, store: SpecStore):
 
 def approve_spec(spec: Spec, store: SpecStore, *, bypass_gate: bool = False) -> None:
     """needs_review -> approved. Raises ApprovalBlocked (gate) or InvalidTransition."""
-    if not bypass_gate:
-        blockers = approval_blockers(spec)
-        if blockers:
-            raise ApprovalBlocked(blockers)
-    validate_transition(spec.status, "approved")
     with _locked_current_revision(spec, store) as artifact:
+        if not bypass_gate:
+            blockers = approval_blockers(spec)
+            if blockers:
+                raise ApprovalBlocked(blockers)
+        validate_transition(spec.status, "approved")
         spec.status = "approved"
         spec.clarification_reason = None
         spec.updated_at = _transition_timestamp(
@@ -141,8 +141,8 @@ def request_changes_spec(
     """needs_review/approved -> draft carrying `reason`. Raises InvalidTransition.
 
     Writes the durable rejection record itself (record_rejection), in this
-    order: reject empty/whitespace reason -> validate_transition -> durable
-    record -> status flip -> save. Folding the record into the shared
+    order: reject empty/whitespace reason -> verify the current revision ->
+    validate_transition -> durable record -> status flip -> save. Folding the record into
     transition (rather than leaving it to each caller) is the class fix for
     #458 P1: the CLI, serve, and the TUI views (core/view/actions.py) all
     call this one function, so none of them can transition a spec without
@@ -151,10 +151,10 @@ def request_changes_spec(
     """
     if not reason or not reason.strip():
         raise ValueError("reason must not be empty")
-    validate_transition(spec.status, "draft")
     if now is None:
         now = datetime.now(timezone.utc)
     with _locked_current_revision(spec, store) as artifact:
+        validate_transition(spec.status, "draft")
         if log_manager is not None:
             record_rejection(log_manager, spec.id, actor, reason, now)
         spec.status = "draft"
