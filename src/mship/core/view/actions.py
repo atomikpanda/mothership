@@ -9,7 +9,12 @@ from dataclasses import dataclass
 from mship.core.log import LogManager
 from mship.core.spec import InvalidTransition
 from mship.core.spec_store import SpecStore
-from mship.core.spec_transition import ApprovalBlocked, approve_spec, request_changes_spec
+from mship.core.spec_transition import (
+    ApprovalBlocked,
+    SpecRevisionConflict,
+    approve_spec,
+    request_changes_spec,
+)
 
 
 @dataclass(frozen=True)
@@ -38,7 +43,7 @@ def approve_spec_by_id(store: SpecStore, spec_id: str | None) -> ActionOutcome:
         approve_spec(spec, store)
     except ApprovalBlocked as e:
         return ActionOutcome(False, f"Cannot approve {spec_id}: {'; '.join(e.blockers)}")
-    except InvalidTransition as e:
+    except (InvalidTransition, SpecRevisionConflict) as e:
         return ActionOutcome(False, str(e))
     return ActionOutcome(True, f"Approved {spec_id}.", new_status="approved")
 
@@ -58,7 +63,7 @@ def request_changes_by_id(store: SpecStore, spec_id: str | None, reason: str) ->
     log_manager = LogManager(store.workspace_root / ".mothership" / "logs")
     try:
         request_changes_spec(spec, store, reason, log_manager=log_manager, actor="operator")
-    except InvalidTransition as e:
+    except (InvalidTransition, SpecRevisionConflict) as e:
         return ActionOutcome(False, str(e))
     except ValueError as e:
         return ActionOutcome(False, str(e))

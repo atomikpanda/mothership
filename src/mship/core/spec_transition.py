@@ -7,17 +7,20 @@ store write (SpecStore.save = tempfile + os.replace). Callers own only their own
 concerns (HTTP status mapping, CLI output, journal appends, view messaging)."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from mship.core.log import LogManager
 from mship.core.spec import InvalidTransition, Spec, validate_transition
 from mship.core.spec_approve import approval_blockers
-from mship.core.spec_store import SpecStore
+from mship.core.spec_storage import SpecLocked
+from mship.core.spec_store import SpecParseError, SpecStore
 
 __all__ = [
     "ApprovalBlocked",
     "InvalidTransition",
+    "SpecRevisionConflict",
     "approve_spec",
     "record_rejection",
     "request_changes_spec",
@@ -32,6 +35,52 @@ class ApprovalBlocked(Exception):
         self.blockers = list(blockers)
 
 
+class SpecRevisionConflict(Exception):
+    """The persisted spec no longer has the revision the caller loaded."""
+
+    def __init__(
+        self,
+        spec_id: str,
+        expected_updated_at: datetime,
+        current_updated_at: datetime | None,
+    ) -> None:
+        super().__init__(f"spec revision conflict for {spec_id!r}; reload and retry")
+        self.spec_id = spec_id
+        self.expected_updated_at = expected_updated_at
+        self.current_updated_at = current_updated_at
+
+
+def _assert_current_revision(spec: Spec, current: Spec | None) -> None:
+    current_updated_at = current.updated_at if current is not None else None
+    if current_updated_at != spec.updated_at:
+        raise SpecRevisionConflict(spec.id, spec.updated_at, current_updated_at)
+
+
+def _transition_timestamp(expected_updated_at: datetime, proposed_at: datetime) -> datetime:
+    """Return a revision timestamp that is strictly newer than the expected one."""
+    if expected_updated_at.tzinfo is None:
+        proposed_at = proposed_at.replace(tzinfo=None)
+    elif proposed_at.tzinfo is None:
+        proposed_at = proposed_at.replace(tzinfo=expected_updated_at.tzinfo)
+    else:
+        proposed_at = proposed_at.astimezone(expected_updated_at.tzinfo)
+    if proposed_at > expected_updated_at:
+        return proposed_at
+    return expected_updated_at + timedelta.resolution
+
+
+@contextmanager
+def _locked_current_revision(spec: Spec, store: SpecStore):
+    try:
+        with store.locked(spec.id) as artifact:
+            _assert_current_revision(
+                spec, artifact.spec if artifact is not None else None
+            )
+            yield artifact
+    except (SpecLocked, SpecParseError) as exc:
+        raise SpecRevisionConflict(spec.id, spec.updated_at, None) from exc
+
+
 def approve_spec(spec: Spec, store: SpecStore, *, bypass_gate: bool = False) -> None:
     """needs_review -> approved. Raises ApprovalBlocked (gate) or InvalidTransition."""
     if not bypass_gate:
@@ -39,10 +88,13 @@ def approve_spec(spec: Spec, store: SpecStore, *, bypass_gate: bool = False) -> 
         if blockers:
             raise ApprovalBlocked(blockers)
     validate_transition(spec.status, "approved")
-    spec.status = "approved"
-    spec.clarification_reason = None
-    spec.updated_at = datetime.now(timezone.utc)
-    store.save(spec)
+    with _locked_current_revision(spec, store) as artifact:
+        spec.status = "approved"
+        spec.clarification_reason = None
+        spec.updated_at = _transition_timestamp(
+            spec.updated_at, datetime.now(timezone.utc)
+        )
+        store.save_while_locked(spec, artifact)
 
 
 def record_rejection(
@@ -100,9 +152,10 @@ def request_changes_spec(
     validate_transition(spec.status, "draft")
     if now is None:
         now = datetime.now(timezone.utc)
-    if log_manager is not None:
-        record_rejection(log_manager, spec.id, actor, reason, now)
-    spec.status = "draft"
-    spec.clarification_reason = reason
-    spec.updated_at = now
-    store.save(spec)
+    with _locked_current_revision(spec, store) as artifact:
+        if log_manager is not None:
+            record_rejection(log_manager, spec.id, actor, reason, now)
+        spec.status = "draft"
+        spec.clarification_reason = reason
+        spec.updated_at = _transition_timestamp(spec.updated_at, now)
+        store.save_while_locked(spec, artifact)

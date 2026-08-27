@@ -1,13 +1,22 @@
 from __future__ import annotations
 import json
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import pytest
 
+from mship.core import spec_key
 from mship.core.log import LogManager
 from mship.core.spec import AcceptanceCriterion, InvalidTransition, OpenQuestion, Spec
+from mship.core.spec_storage import SpecStorage
 from mship.core.spec_store import SpecStore
-from mship.core.spec_transition import ApprovalBlocked, approve_spec, request_changes_spec
+from mship.core.spec_transition import (
+    ApprovalBlocked,
+    SpecRevisionConflict,
+    approve_spec,
+    request_changes_spec,
+)
 
 
 def _dt():
@@ -24,6 +33,152 @@ def _reviewable(**over) -> Spec:
     return Spec(**base)
 
 
+def _save_newer_revision(store: SpecStore) -> Spec:
+    current = store.find_by_id("s1")
+    assert current is not None
+    current.updated_at = datetime(2026, 7, 2, tzinfo=timezone.utc)
+    store.save(current)
+    return current
+
+
+def test_approve_rejects_a_stale_loaded_spec_without_mutating_either_revision(tmp_path):
+    store = SpecStore(tmp_path / "specs")
+    store.save(_reviewable())
+    actor_a = store.find_by_id("s1")
+    assert actor_a is not None
+    actor_b = _save_newer_revision(store)
+    stale_before = actor_a.model_dump()
+    current_before = actor_b.model_dump()
+
+    with pytest.raises(SpecRevisionConflict) as raised:
+        approve_spec(actor_a, store)
+
+    conflict = raised.value
+    assert conflict.spec_id == "s1"
+    assert conflict.expected_updated_at == _dt()
+    assert conflict.current_updated_at == datetime(2026, 7, 2, tzinfo=timezone.utc)
+    assert str(conflict) == "spec revision conflict for 's1'; reload and retry"
+    assert actor_a.model_dump() == stale_before
+    assert store.find_by_id("s1").model_dump() == current_before
+
+
+def test_request_changes_rejects_a_stale_loaded_spec_without_writing_a_rejection(tmp_path):
+    store = SpecStore(tmp_path / "specs")
+    store.save(_reviewable())
+    actor_a = store.find_by_id("s1")
+    assert actor_a is not None
+    actor_b = _save_newer_revision(store)
+    stale_before = actor_a.model_dump()
+    current_before = actor_b.model_dump()
+    log = LogManager(tmp_path / "logs")
+
+    with pytest.raises(SpecRevisionConflict):
+        request_changes_spec(
+            actor_a, store, "tighten AC2", log_manager=log, actor="alice"
+        )
+
+    assert actor_a.model_dump() == stale_before
+    assert store.find_by_id("s1").model_dump() == current_before
+    assert log.read("s1") == []
+
+
+
+def test_approve_reports_conflict_when_loaded_artifact_becomes_unavailable(tmp_path):
+    storage = SpecStorage(
+        tmp_path / "specs", mode="encrypted", workspace_root=tmp_path
+    )
+    store = SpecStore(tmp_path / "specs", storage=storage)
+    store.save(_reviewable())
+    actor = store.find_by_id("s1")
+    assert actor is not None
+    spec_key.keyfile_path(tmp_path).unlink()
+
+    with pytest.raises(SpecRevisionConflict) as raised:
+        approve_spec(actor, store)
+
+    assert raised.value.current_updated_at is None
+
+def test_request_changes_serializes_same_revision_and_logs_only_the_winner(
+    tmp_path, monkeypatch
+):
+    store = SpecStore(tmp_path / "specs")
+    store.save(_reviewable())
+    actor_a = store.find_by_id("s1")
+    actor_b = store.find_by_id("s1")
+    assert actor_a is not None
+    assert actor_b is not None
+    log = LogManager(tmp_path / "logs")
+    write_started = threading.Event()
+    release_write = threading.Event()
+    actor_b_started = threading.Event()
+    release_stale_read = threading.Event()
+    outcomes: list[Exception | None] = []
+    original_locked = store.locked
+    original_resolve_artifact = store.resolve_artifact
+    original_save_unlocked = store._save_unlocked
+
+    @contextmanager
+    def signal_actor_b_lock(spec_id):
+        if threading.current_thread().name == "actor-b":
+            actor_b_started.set()
+        with original_locked(spec_id) as artifact:
+            yield artifact
+
+    def block_actor_b_stale_read(spec_id):
+        artifact = original_resolve_artifact(spec_id)
+        if threading.current_thread().name == "actor-b":
+            actor_b_started.set()
+            assert release_stale_read.wait(timeout=5)
+        return artifact
+
+    def block_actor_a_before_write(spec, artifact=None):
+        if spec is actor_a:
+            write_started.set()
+            assert release_write.wait(timeout=5)
+        return original_save_unlocked(spec, artifact)
+
+    monkeypatch.setattr(store, "locked", signal_actor_b_lock)
+    monkeypatch.setattr(store, "resolve_artifact", block_actor_b_stale_read)
+    monkeypatch.setattr(store, "_save_unlocked", block_actor_a_before_write)
+
+    def transition(spec, actor):
+        try:
+            request_changes_spec(
+                spec, store, "tighten AC2", log_manager=log, actor=actor, now=_dt()
+            )
+        except Exception as exc:
+            outcomes.append(exc)
+        else:
+            outcomes.append(None)
+
+    thread_a = threading.Thread(target=transition, args=(actor_a, "alice"))
+    thread_b = threading.Thread(
+        target=transition, args=(actor_b, "bob"), name="actor-b"
+    )
+    thread_a.start()
+    assert write_started.wait(timeout=5)
+    thread_b.start()
+    assert actor_b_started.wait(timeout=5)
+    release_write.set()
+    release_stale_read.set()
+    thread_a.join(timeout=5)
+    thread_b.join(timeout=5)
+
+    assert not thread_a.is_alive()
+    assert not thread_b.is_alive()
+    assert outcomes.count(None) == 1
+    assert sum(isinstance(outcome, SpecRevisionConflict) for outcome in outcomes) == 1
+    reloaded = store.find_by_id("s1")
+    assert reloaded is not None
+    assert reloaded.clarification_reason == "tighten AC2"
+    assert reloaded.updated_at > _dt()
+    rejected = [event for event in log.read("s1") if event.action == "rejected"]
+    assert len(rejected) == 1
+    assert json.loads(rejected[0].message) == {
+        "actor": "alice",
+        "reason": "tighten AC2",
+    }
+
 def test_approve_transitions_and_persists_via_store(tmp_path):
     store = SpecStore(tmp_path / "specs")
     spec = _reviewable()
@@ -32,6 +187,25 @@ def test_approve_transitions_and_persists_via_store(tmp_path):
     reloaded = store.find_by_id("s1")
     assert reloaded.status == "approved"
     assert reloaded.clarification_reason is None
+    assert reloaded.updated_at > _dt()
+
+def test_approve_advances_a_legacy_naive_persisted_revision(tmp_path):
+    legacy_updated_at = datetime(2026, 7, 1)
+    store = SpecStore(tmp_path / "specs")
+    store.save(_reviewable(updated_at=legacy_updated_at))
+    spec = store.find_by_id("s1")
+    assert spec is not None
+    assert spec.updated_at == legacy_updated_at
+    assert spec.updated_at.tzinfo is None
+
+
+    approve_spec(spec, store)
+
+    reloaded = store.find_by_id("s1")
+    assert reloaded is not None
+    assert reloaded.status == "approved"
+    assert reloaded.updated_at.tzinfo is None
+    assert reloaded.updated_at > legacy_updated_at
 
 
 def test_approve_blocked_by_open_questions_does_not_write(tmp_path):
@@ -53,6 +227,34 @@ def test_request_changes_sends_to_draft_with_reason(tmp_path):
     reloaded = store.find_by_id("s1")
     assert reloaded.status == "draft"
     assert reloaded.clarification_reason == "tighten AC2"
+
+def test_request_changes_advances_a_legacy_naive_persisted_revision(tmp_path):
+    legacy_updated_at = datetime(2026, 7, 1)
+    store = SpecStore(tmp_path / "specs")
+    store.save(_reviewable(updated_at=legacy_updated_at))
+    spec = store.find_by_id("s1")
+    assert spec is not None
+    assert spec.updated_at == legacy_updated_at
+    assert spec.updated_at.tzinfo is None
+
+    log = LogManager(tmp_path / "logs")
+
+    request_changes_spec(
+        spec, store, "tighten AC2", log_manager=log, actor="alice", now=_dt()
+    )
+
+    reloaded = store.find_by_id("s1")
+    assert reloaded is not None
+    assert reloaded.status == "draft"
+    assert reloaded.clarification_reason == "tighten AC2"
+    assert reloaded.updated_at.tzinfo is None
+    assert reloaded.updated_at > legacy_updated_at
+    rejected = [event for event in log.read("s1") if event.action == "rejected"]
+    assert len(rejected) == 1
+    assert json.loads(rejected[0].message) == {
+        "actor": "alice",
+        "reason": "tighten AC2",
+    }
 
 
 def test_request_changes_records_durable_rejection(tmp_path):
