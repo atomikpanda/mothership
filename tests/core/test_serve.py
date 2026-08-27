@@ -9,6 +9,7 @@ from mship.core.serve import create_app
 from mship.core.spec import AcceptanceCriterion, OpenQuestion, Spec
 from mship.core.spec_body import render_body
 from mship.core.spec_store import SpecStore
+from mship.core.spec_storage import SpecStorage
 from mship.core.state import StateManager, Task, WorkspaceState
 from mship.core.log import LogManager
 from mship.core.workitem_store import WorkItemStore
@@ -1041,6 +1042,43 @@ def test_malformed_canonical_spec_keeps_linked_terminal_thread_active(tmp_path):
     item = items.create("Implemented", "feature", "test-ws", now)
     items.link_spec(item.id, spec.id, now)
     path.write_text("not a valid spec")
+
+    summary = TestClient(_app(tmp_path)).get("/threads", params={"inbox": "all"}).json()[0]
+
+    assert summary["work_item_id"] == item.id
+    assert summary["inbox_state"] == "active"
+    assert summary["archive_reason"] is None
+
+
+def test_renamed_locked_spec_alias_keeps_linked_terminal_thread_active(tmp_path):
+    now = datetime.now(timezone.utc)
+    spec = Spec(
+        id="implemented",
+        title="Implemented",
+        status="implemented",
+        created_at=now,
+        updated_at=now,
+    )
+    SpecStore(tmp_path / "specs").save(spec)
+    encrypted_root = tmp_path / "encrypted-source"
+    encrypted_storage = SpecStorage(
+        encrypted_root / "specs",
+        mode="encrypted",
+        workspace_root=encrypted_root,
+    )
+    encrypted_path = SpecStore(
+        encrypted_root / "specs",
+        storage=encrypted_storage,
+    ).save(spec)
+    (tmp_path / "specs" / "legacy.md.enc").write_bytes(encrypted_path.read_bytes())
+
+    messages = MessageStore(tmp_path / ".mothership" / "messages")
+    thread = messages.create_thread("Linked", "content", now)
+    messages.append(thread.id, "agent", "resolved", now)
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    item = items.create("Implemented", "feature", "test-ws", now)
+    items.link_spec(item.id, spec.id, now)
+    items.add_thread(item.id, thread.id, now)
 
     summary = TestClient(_app(tmp_path)).get("/threads", params={"inbox": "all"}).json()[0]
 

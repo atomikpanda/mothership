@@ -1379,6 +1379,7 @@ def create_app(
 
         specs_by_id = {}
         ambiguous_spec_ids = set()
+        unknown_renamed_artifact = False
         for path in _spec_storage.iter_physical():
             canonical_id = canonical_spec_id_from_filename(path)
             try:
@@ -1387,6 +1388,8 @@ def create_app(
                 if canonical_id is not None:
                     specs_by_id.pop(canonical_id, None)
                     ambiguous_spec_ids.add(canonical_id)
+                else:
+                    unknown_renamed_artifact = True
                 continue
             if canonical_id is not None and canonical_id != spec.id:
                 for ambiguous_id in (canonical_id, spec.id):
@@ -1398,6 +1401,8 @@ def create_app(
                 ambiguous_spec_ids.add(spec.id)
             elif spec.id not in ambiguous_spec_ids:
                 specs_by_id[spec.id] = spec
+        if unknown_renamed_artifact:
+            ambiguous_spec_ids.update(specs_by_id)
         try:
             tasks_by_slug = dict(state_manager.load().tasks)
         except Exception:
