@@ -276,7 +276,12 @@ def _operation_in_progress(
 ) -> tuple[str, tuple[str, ...], tuple[str, ...]] | None:
     """Description and complete recovery commands for a suspended git operation."""
     for marker, description, continue_commands, abort_commands in _OPERATIONS:
-        if (git_dir / marker).exists():
+        marker_path = git_dir / marker
+        if (
+            marker == "BISECT_START"
+            and marker_path.is_file()
+            and marker_path.stat().st_size > 0
+        ) or (marker != "BISECT_START" and marker_path.exists()):
             return description, continue_commands, abort_commands
     return None
 
@@ -368,7 +373,7 @@ def _inspect_repo(
                 ]
             )
         if unmerged:
-            detail = f"{detail}; unresolved: {', '.join(sorted(unmerged)[:5])}"
+            detail = f"{detail}\nunresolved: {', '.join(sorted(unmerged)[:5])}"
         return state(blocked=IN_PROGRESS, detail=detail)
 
     # WHAT is being inspected, before WHAT STATE it is in: every verdict below

@@ -1334,6 +1334,8 @@ def test_clean_operation_marker_outranks_detached_or_wrong_branch(
     marker_path.parent.mkdir(parents=True, exist_ok=True)
     if marker in {"rebase-merge", "rebase-apply", "sequencer"}:
         marker_path.mkdir()
+    elif marker == "BISECT_START":
+        marker_path.write_text("start\n")
     else:
         marker_path.touch()
     if marker == "BISECT_START":

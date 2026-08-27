@@ -620,6 +620,37 @@ def test_bisect_is_refused_before_wrong_branch_with_term_agnostic_recovery(tmp_p
     assert f'git -C "{api}" rebase --abort' not in msg
 
 
+def test_bisect_start_is_active_only_when_nonempty(tmp_path):
+    api = _repo(tmp_path, "api")
+    (api / ".git").mkdir(parents=True, exist_ok=True)
+    shell = FakeShell({"api": _clean(status="")})
+
+    (api / ".git" / "BISECT_START").touch()
+    empty = inspect(FakeTask({"api": api}), shell)
+
+    (api / ".git" / "BISECT_START").write_text("start\n")
+    active = inspect(FakeTask({"api": api}), shell)
+
+    assert empty.ok
+    assert empty.blocked == []
+    assert [s.blocked_reason for s in active.blocked] == [IN_PROGRESS]
+
+
+def test_bisect_recovery_commands_remain_copyable_with_unmerged_paths(tmp_path):
+    api = _repo(tmp_path, "api")
+    (api / ".git").mkdir(parents=True, exist_ok=True)
+    (api / ".git" / "BISECT_START").write_text("start\n")
+    shell = FakeShell({"api": _clean(status="UU src/app.py\n")})
+
+    lines = blocked_message(inspect(FakeTask({"api": api}), shell)).splitlines()
+    skip = f'continue: git -C "{api}" bisect skip'
+    reset = f'abort: git -C "{api}" bisect reset'
+
+    assert skip in lines
+    assert reset in lines
+    assert lines[lines.index(reset) + 1] == "unresolved: src/app.py"
+
+
 def test_historical_bisect_log_without_active_state_is_not_refused(tmp_path):
     api = _repo(tmp_path, "api")
     (api / ".git").mkdir(parents=True, exist_ok=True)
