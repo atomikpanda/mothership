@@ -109,8 +109,30 @@ def test_version_bump_dispatches_tests_for_new_version_tag_after_pushing():
     commit_step = next(step for step in steps if step.get("name") == "Commit, tag, and push")
     run = commit_step["run"]
     tag = 'git tag -a "v${{ steps.bump.outputs.new_version }}"'
-    dispatch = 'gh workflow run test.yml --ref "v${{ steps.bump.outputs.new_version }}"'
+    dispatch = 'gh workflow run test.yml --ref "$TAG"'
 
     assert commit_step["env"]["GH_TOKEN"] == "${{ github.token }}"
     assert run.index(tag) < run.index("git push origin main --follow-tags") < run.index(dispatch)
     assert "gh workflow run test.yml --ref main" not in run
+
+
+def test_version_bump_waits_for_the_dispatched_tag_ci_run():
+    steps = next(iter(_load()["jobs"].values()))["steps"]
+    commit_step = next(step for step in steps if step.get("name") == "Commit, tag, and push")
+    run = commit_step["run"]
+    dispatch = 'gh workflow run test.yml --ref "$TAG"'
+    lookup = (
+        'gh run list --workflow test.yml --branch "$TAG" --event workflow_dispatch '
+        "--limit 1 --json databaseId --jq '.[0].databaseId // empty'"
+    )
+    watch = 'gh run watch "$RUN_ID" --exit-status'
+
+    assert 'TAG="v${{ steps.bump.outputs.new_version }}"' in run
+    assert dispatch in run
+    assert lookup in run
+    assert "for attempt in 1 2 3 4 5; do" in run
+    assert 'sleep "$attempt"' in run
+    assert '[ -z "$RUN_ID" ]' in run
+    assert "exit 1" in run
+    assert watch in run
+    assert run.index(dispatch) < run.index(lookup) < run.index('[ -z "$RUN_ID" ]') < run.index(watch)

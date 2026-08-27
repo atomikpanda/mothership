@@ -55,4 +55,21 @@ jobs:
           git commit -m "chore: bump version to v${{ steps.bump.outputs.new_version }}"
           git tag -a "v${{ steps.bump.outputs.new_version }}" -m "v${{ steps.bump.outputs.new_version }}"
           git push origin main --follow-tags
-          gh workflow run test.yml --ref "v${{ steps.bump.outputs.new_version }}"
+          TAG="v${{ steps.bump.outputs.new_version }}"
+          gh workflow run test.yml --ref "$TAG"
+
+          RUN_ID=""
+          for attempt in 1 2 3 4 5; do
+            RUN_ID="$(gh run list --workflow test.yml --branch "$TAG" --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+            if [ -n "$RUN_ID" ]; then
+              break
+            fi
+            sleep "$attempt"
+          done
+
+          if [ -z "$RUN_ID" ]; then
+            echo "Timed out waiting for test.yml workflow_dispatch run on $TAG" >&2
+            exit 1
+          fi
+
+          gh run watch "$RUN_ID" --exit-status
