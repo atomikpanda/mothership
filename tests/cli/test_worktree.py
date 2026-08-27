@@ -40,6 +40,142 @@ def test_spawn(configured_git_app: Path):
     assert "add-labels-to-tasks" in state.tasks
 
 
+
+def test_spawn_gate_ignores_merged_drift_on_disjoint_repo(
+    configured_git_app: Path, monkeypatch,
+):
+    """A merged task in another repo does not block a scoped spawn."""
+    from datetime import datetime, timezone
+    from mship.core.reconcile.detect import UpstreamState
+    from mship.core.reconcile.gate import Decision
+
+    now = datetime.now(timezone.utc)
+    StateManager(configured_git_app / ".mothership").save(WorkspaceState(tasks={
+        "unrelated": Task(
+            slug="unrelated", description="unrelated", phase="dev",
+            created_at=now, affected_repos=["auth-service"], branch="feat/unrelated",
+        ),
+        "shared-task": Task(
+            slug="shared-task", description="shared", phase="dev",
+            created_at=now, affected_repos=["shared"], branch="feat/shared-task",
+        ),
+    }))
+    observed: dict[str, set[str]] = {}
+
+    def reconcile_for_scope(state, **kwargs):
+        observed["only_slugs"] = kwargs["only_slugs"]
+        return {
+            "unrelated": Decision(
+                slug="unrelated", state=UpstreamState.merged,
+                pr_url=None, pr_number=None, base=None,
+                merge_commit=None, updated_at=None,
+            ),
+            "shared-task": Decision(
+                slug="shared-task", state=UpstreamState.in_sync,
+                pr_url=None, pr_number=None, base=None,
+                merge_commit=None, updated_at=None,
+            ),
+        }
+
+    monkeypatch.setattr("mship.core.reconcile.gate.reconcile_now", reconcile_for_scope)
+
+    result = runner.invoke(
+        app, ["spawn", "--hotfix", "scoped spawn", "--repos", "shared"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert observed["only_slugs"] == {"shared-task"}
+
+
+def test_spawn_gate_blocks_merged_drift_on_requested_repo(
+    configured_git_app: Path, monkeypatch,
+):
+    """A merged task in the requested repo still blocks the spawn."""
+    from datetime import datetime, timezone
+    from mship.core.reconcile.detect import UpstreamState
+    from mship.core.reconcile.gate import Decision
+
+    now = datetime.now(timezone.utc)
+    StateManager(configured_git_app / ".mothership").save(WorkspaceState(tasks={
+        "relevant": Task(
+            slug="relevant", description="relevant", phase="dev",
+            created_at=now, affected_repos=["shared"], branch="feat/relevant",
+        ),
+    }))
+
+    def reconcile_for_scope(state, **kwargs):
+        assert kwargs["only_slugs"] == {"relevant"}
+        return {
+            "relevant": Decision(
+                slug="relevant", state=UpstreamState.merged,
+                pr_url=None, pr_number=None, base=None,
+                merge_commit=None, updated_at=None,
+            ),
+        }
+
+    monkeypatch.setattr("mship.core.reconcile.gate.reconcile_now", reconcile_for_scope)
+
+    result = runner.invoke(
+        app, ["spawn", "--hotfix", "blocked spawn", "--repos", "shared"],
+    )
+
+    assert result.exit_code != 0
+    assert "relevant" in result.output
+    assert not (configured_git_app / ".mothership" / "bypass-log.jsonl").exists()
+
+
+def test_spawn_gate_blocks_when_relevant_decision_is_unavailable(
+    configured_git_app: Path, monkeypatch,
+):
+    """A scoped spawn fails closed when it cannot decide a relevant task."""
+    from datetime import datetime, timezone
+
+    StateManager(configured_git_app / ".mothership").save(WorkspaceState(tasks={
+        "relevant": Task(
+            slug="relevant", description="relevant", phase="dev",
+            created_at=datetime.now(timezone.utc),
+            affected_repos=["shared"], branch="feat/relevant",
+        ),
+    }))
+
+    def reconcile_for_scope(state, **kwargs):
+        assert kwargs["only_slugs"] == {"relevant"}
+        return {}
+
+    monkeypatch.setattr("mship.core.reconcile.gate.reconcile_now", reconcile_for_scope)
+
+    result = runner.invoke(
+        app, ["spawn", "--hotfix", "unavailable spawn", "--repos", "shared"],
+    )
+
+    assert result.exit_code != 0
+    assert "reconcile unavailable for: relevant" in result.output
+
+
+def test_finish_gate_allows_empty_decision_map(
+    configured_git_app: Path, monkeypatch,
+):
+    """A finished task proceeds when reconciliation returns no decision."""
+    spawned = runner.invoke(
+        app, ["spawn", "--hotfix", "empty decision", "--repos", "shared"],
+    )
+    assert spawned.exit_code == 0, spawned.output
+
+    monkeypatch.setattr(
+        "mship.core.reconcile.gate.reconcile_now",
+        lambda state, **kwargs: {},
+    )
+
+    result = runner.invoke(
+        app, ["finish", "--hotfix", "--handoff", "--task", "empty-decision"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (
+        configured_git_app / ".mothership" / "handoffs" / "empty-decision.yaml"
+    ).exists()
+
+
 def test_spawn_slug_override(configured_git_app: Path):
     """--slug overrides auto-generated slug. See #59."""
     result = runner.invoke(
@@ -64,12 +200,19 @@ def test_spawn_slug_rejects_invalid_chars(configured_git_app: Path):
         assert result.exit_code != 0, f"expected rejection for slug={bad!r}: {result.output}"
 
 
-def test_spawn_slug_collision_errors(configured_git_app: Path):
-    """Two spawns with the same --slug → second fails with a clear error."""
+def test_spawn_slug_collision_precedes_unavailable_reconciliation(
+    configured_git_app: Path, monkeypatch,
+):
+    """A duplicate slug stays a local error even if reconciliation cannot decide."""
     first = runner.invoke(
         app, ["spawn", "--hotfix", "first", "--repos", "shared", "--slug", "dupe"],
     )
     assert first.exit_code == 0, first.output
+
+    monkeypatch.setattr(
+        "mship.core.reconcile.gate.reconcile_now",
+        lambda state, **kwargs: {},
+    )
     second = runner.invoke(
         app, ["spawn", "--hotfix", "second", "--repos", "shared", "--slug", "dupe"],
     )
@@ -198,7 +341,7 @@ def test_spawn_with_depends_on_persists_edges(configured_git_app: Path):
     result = runner.invoke(
         app,
         ["spawn", "--hotfix", "downstream task", "--repos", "shared", "--slug", "down",
-         "--depends-on", "a", "--skip-setup"],
+         "--depends-on", "a", "--skip-setup", "--bypass-reconcile"],
     )
     assert result.exit_code == 0, result.stderr or result.output
     state = StateManager(configured_git_app / ".mothership").load()
@@ -244,6 +387,33 @@ def test_close_with_no_prs_cancelled_before_finish(configured_git_app):
     # Task was never finished → must use --abandon to close without PRs
     result = r.invoke(_app, ["close", "--yes", "--abandon", "--task", "t"])
     assert result.exit_code == 0, result.output
+    assert "t" not in sm.load().tasks
+
+
+def test_close_gate_warns_and_proceeds_when_reconciler_raises(
+    configured_git_app: Path, monkeypatch,
+):
+    """Unscoped close remains fail-open when reconciliation is unavailable."""
+    from datetime import datetime, timezone
+
+    sm = StateManager(configured_git_app / ".mothership")
+    sm.save(WorkspaceState(tasks={
+        "t": Task(
+            slug="t", description="d", phase="dev",
+            created_at=datetime.now(timezone.utc),
+            affected_repos=["shared"], branch="feat/t",
+        ),
+    }))
+
+    def unavailable(state, **kwargs):
+        raise RuntimeError("network unavailable")
+
+    monkeypatch.setattr("mship.core.reconcile.gate.reconcile_now", unavailable)
+
+    result = runner.invoke(app, ["close", "--yes", "--abandon", "--task", "t"])
+
+    assert result.exit_code == 0, result.output
+    assert "reconcile unavailable: network unavailable; proceeding" in result.output
     assert "t" not in sm.load().tasks
 
 
@@ -802,7 +972,9 @@ def test_close_accepts_positional_slug(configured_git_app: Path):
 def test_close_positional_and_task_flag_conflict(configured_git_app: Path):
     """Conflicting positional + --task values fail loudly."""
     runner.invoke(app, ["spawn", "--hotfix", "conflict a", "--repos", "shared"])
-    runner.invoke(app, ["spawn", "--hotfix", "conflict b", "--repos", "shared"])
+    runner.invoke(
+        app, ["spawn", "--hotfix", "conflict b", "--repos", "shared", "--bypass-reconcile"],
+    )
     result = runner.invoke(
         app, ["close", "conflict-a", "--task", "conflict-b", "-y", "--abandon"],
     )

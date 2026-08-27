@@ -161,7 +161,12 @@ def _decision_from_cache_entry(slug: str, raw: dict, state: WorkspaceState) -> D
         return None
 
 
-def _decisions_from_cache(state: WorkspaceState, payload: CachePayload) -> dict[str, Decision]:
+def _decisions_from_cache(
+    state: WorkspaceState,
+    payload: CachePayload,
+    *,
+    only_slugs: set[str] | None = None,
+) -> dict[str, Decision]:
     out: dict[str, Decision] = {}
     for slug in state.tasks:
         raw = payload.results.get(slug)
@@ -177,7 +182,10 @@ def _decisions_from_cache(state: WorkspaceState, payload: CachePayload) -> dict[
     # cache — the common case, since reconcile shares one 300s cache across spawn/finish/close/
     # precommit — silently drops it and a dependency-stale task reverts to in_sync (finish stops
     # blocking on the stale base).
-    return apply_dependency_stale(state, out)
+    decisions = apply_dependency_stale(state, out)
+    if only_slugs is None:
+        return decisions
+    return {slug: decision for slug, decision in decisions.items() if slug in only_slugs}
 
 
 def reconcile_now(
@@ -190,8 +198,9 @@ def reconcile_now(
     base_inputs_by_slug: dict[
         str, tuple[str | None, dict[str, str]]
     ] | None = None,
+    only_slugs: set[str] | None = None,
 ) -> dict[str, Decision]:
-    """Cache-first; fetch on stale; fall back on error. Never raises."""
+    """Cache-first; fetch on stale; fall back on error for selected tasks."""
     resolved_bases = resolve_task_bases(
         state, config, base_inputs_by_slug=base_inputs_by_slug,
     )
@@ -205,23 +214,29 @@ def reconcile_now(
     payload = cache.read()
     current_payload = cache.current(payload, base_context=base_context)
     if current_payload is not None and cache.is_fresh(current_payload):
-        return _decisions_from_cache(state, current_payload)
+        return _decisions_from_cache(
+            state, current_payload, only_slugs=only_slugs,
+        )
 
-    branches = [t.branch for t in state.tasks.values()]
+    tasks = list(state.tasks.values())
+    branches = [task.branch for task in tasks]
     worktrees_by_branch: dict[str, Path] = {}
-    for t in state.tasks.values():
-        if t.worktrees:
-            worktrees_by_branch[t.branch] = next(iter(t.worktrees.values()))
+    for task in tasks:
+        if task.worktrees:
+            worktrees_by_branch[task.branch] = next(iter(task.worktrees.values()))
 
     try:
         pr_by_head, git_by_branch = fetcher(branches, worktrees_by_branch)
     except FetchError:
         if current_payload is not None:
-            return _decisions_from_cache(state, current_payload)
+            return _decisions_from_cache(
+                state, current_payload, only_slugs=only_slugs,
+            )
         return {}
 
     tasks_tuples = [
-        (t.slug, t.branch, resolved_bases[t.slug]) for t in state.tasks.values()
+        (task.slug, task.branch, resolved_bases[task.slug])
+        for task in tasks
     ]
     detections = detect_many(tasks_tuples, pr_by_head, git_by_branch)
 
@@ -241,5 +256,11 @@ def reconcile_now(
         ignored=(payload.ignored if payload else []),
         base_context=base_context,
     ))
-    decisions = {slug: _decision_from_detection(slug, d, state) for slug, d in detections.items()}
-    return apply_dependency_stale(state, decisions)
+    decisions = {
+        slug: _decision_from_detection(slug, d, state)
+        for slug, d in detections.items()
+    }
+    decisions = apply_dependency_stale(state, decisions)
+    if only_slugs is None:
+        return decisions
+    return {slug: decision for slug, decision in decisions.items() if slug in only_slugs}
