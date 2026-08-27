@@ -13,6 +13,8 @@ import json
 import re
 import time
 
+from click import unstyle
+
 import pytest
 import typer
 from typer.testing import CliRunner
@@ -66,7 +68,7 @@ def test_fleet_token_requires_an_explicit_store_dir(monkeypatch, tmp_path):
         "relay.example.com",
     )
     assert res.exit_code != 0
-    assert "--store-dir" in res.output
+    assert "--store-dir" in unstyle(res.output)
     assert "pgrep -af" in res.output
     assert not (tmp_path / "pending-store").exists()
 
@@ -101,7 +103,7 @@ def test_owner_commands_reject_blank_store_dirs_without_touching_current_dir(
     res = _run(command, *arguments, "--store-dir", store_dir)
 
     assert res.exit_code != 0
-    assert "--store-dir" in res.output
+    assert "--store-dir" in unstyle(res.output)
     assert request_id not in res.output
     after = {
         path.relative_to(tmp_path): path.read_bytes()
@@ -133,7 +135,7 @@ def test_approve_requires_an_explicit_nonblank_pubkeys_dir(
     res = _run("approve", request_id, "--store-dir", str(store_dir), *pubkeys_option)
 
     assert res.exit_code != 0
-    assert "--pubkeys-dir" in res.output
+    assert "--pubkeys-dir" in unstyle(res.output)
     assert RequestStore(store_dir).get(request_id) == "pending"
     assert list(current_dir.iterdir()) == []
 
@@ -161,7 +163,7 @@ def test_enroll_server_requires_an_explicit_nonblank_pubkeys_dir(
     )
 
     assert res.exit_code != 0
-    assert "--pubkeys-dir" in res.output
+    assert "--pubkeys-dir" in unstyle(res.output)
     assert not started
 
 
