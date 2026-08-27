@@ -69,7 +69,7 @@ def test_fleet_token_requires_an_explicit_store_dir(monkeypatch, tmp_path):
     )
     assert res.exit_code != 0
     assert "--store-dir" in unstyle(res.output)
-    assert "pgrep -af" in res.output
+    assert "pgrep -af" in unstyle(res.output)
     assert not (tmp_path / "pending-store").exists()
 
 
