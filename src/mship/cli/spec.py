@@ -787,7 +787,17 @@ def register(parent: typer.Typer, get_container):
         """Show structured detail for a spec (non-TTY: pure JSON)."""
         output = Output()
         store = _spec_store()
-        spec = store.find_by_id(spec_id)
+        from mship.core.spec_storage import SpecLocked
+        from mship.core.spec_store import SpecParseError
+        try:
+            spec = store.read_strict(spec_id)
+        except SpecLocked:
+            spec = None
+        except SpecParseError as exc:
+            output.error(f"Cannot show spec {spec_id!r}: {exc}")
+            raise typer.Exit(1)
+        except ValueError:
+            spec = None
         if spec is None:
             output.error(f"No spec with id {spec_id!r}.")
             raise typer.Exit(1)

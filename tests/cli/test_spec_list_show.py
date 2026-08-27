@@ -148,6 +148,19 @@ class TestSpecShow:
         assert result.exception is not None
         assert result.exception.__class__.__name__ == "SystemExit"
 
+    def test_show_duplicate_id_reports_conflict_without_a_traceback(self, tmp_path):
+        _, ids = _make_store(tmp_path, count=1)
+        original = next((tmp_path / "specs").glob(f"*-{ids[0]}.md"))
+        duplicate = original.with_name(f"2030-01-01-{ids[0]}.md")
+        duplicate.write_text(original.read_text())
+
+        result = CliRunner().invoke(_app(tmp_path), ["spec", "show", ids[0]])
+
+        assert result.exit_code != 0
+        assert "multiple physical artifacts" in result.output
+        assert result.exception is not None
+        assert result.exception.__class__.__name__ == "SystemExit"
+
     def test_show_body_included(self, tmp_path):
         """JSON response includes the spec body."""
         _, ids = _make_store(tmp_path, count=1)

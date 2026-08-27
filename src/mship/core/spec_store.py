@@ -345,7 +345,6 @@ class SpecStore:
             for spec_id, entries in entries_by_id.items()
             if len(entries) == 1 and spec_id not in unavailable_ids
         ]
-
     def list_tolerant(self) -> list[Spec]:
         """List unique readable specs while omitting unavailable logical ids."""
         return [
@@ -360,7 +359,7 @@ class SpecStore:
 
         try:
             artifact = self.resolve_artifact(spec_id)
-        except (SpecLocked, ValueError):
+        except (SpecLocked, SpecParseError, ValueError):
             return None
         return artifact.spec if artifact is not None else None
 
