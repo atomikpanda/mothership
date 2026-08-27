@@ -1014,7 +1014,10 @@ def _repo_git(porcelain: str = "", *, origin: str | None = "headsha",
     }
 
 
-def _git_shell(spec: dict | dict[str, dict], *, push_rc: int = 0):
+def _git_shell(
+    spec: dict | dict[str, dict], *, push_rc: int = 0,
+    git_dirs: dict[str, Path] | None = None,
+):
     """A shell whose git answers are scripted per repo (keyed by the worktree
     directory name), with everything else passing. A bare spec applies to `api`."""
     if "status" in spec:
@@ -1023,6 +1026,7 @@ def _git_shell(spec: dict | dict[str, dict], *, push_rc: int = 0):
     pushes: list[str] = []
     push_envs: list[dict] = []
     touched: set[str] = set()
+    git_dirs = git_dirs or {}
 
     def _run(cmd, cwd=None, env=None, **kw):
         touched.add(Path(cwd).name)
@@ -1034,7 +1038,11 @@ def _git_shell(spec: dict | dict[str, dict], *, push_rc: int = 0):
         if "rev-parse --git-dir" in cmd:
             # `_inspect_repo` looks here for MERGE_HEAD / rebase-merge — a test
             # that wants the in-progress refusal creates the marker itself.
-            return ShellResult(returncode=0, stdout=str(Path(cwd) / ".git"), stderr="")
+            git_dir = git_dirs.get(Path(cwd).name)
+            return ShellResult(
+                returncode=0, stdout=str(git_dir) if git_dir is not None else ".git",
+                stderr="",
+            )
         if "symbolic-ref" in cmd:
             return ShellResult(
                 returncode=0 if s["head_ref"] else 1, stdout=s["head_ref"], stderr="",
@@ -1247,6 +1255,74 @@ def test_a_mid_rebase_repo_is_refused_before_anything_is_sent(tmp_path, monkeypa
         assert result.exit_code == 1, result.output
         assert "merge or rebase in progress in api" in result.output
         assert "--abort" in result.output
+        assert shell.pushes == []
+        assert recorder == {}
+    finally:
+        container.shell.reset_override()
+        _reset()
+
+
+@pytest.mark.parametrize(
+    ("marker", "description", "continue_command", "abort_command"),
+    [
+        ("rebase-merge", "a rebase is in progress", "rebase --continue", "rebase --abort"),
+        (
+            "rebase-apply",
+            "a rebase or `git am` is in progress",
+            "rebase --continue",
+            "rebase --abort",
+        ),
+        ("MERGE_HEAD", "a merge is in progress", "merge --continue", "merge --abort"),
+        (
+            "CHERRY_PICK_HEAD",
+            "a cherry-pick is in progress",
+            "cherry-pick --continue",
+            "cherry-pick --abort",
+        ),
+    ],
+)
+@pytest.mark.parametrize("linked_worktree", [False, True], ids=["normal", "linked"])
+@pytest.mark.parametrize(
+    "head_ref",
+    ["refs/heads/other", ""],
+    ids=["wrong-branch", "detached"],
+)
+def test_clean_operation_marker_outranks_detached_or_wrong_branch(
+    tmp_path, monkeypatch, marker, description, continue_command, abort_command,
+    linked_worktree, head_ref,
+):
+    """A suspended operation wins over a detached/wrong-branch HEAD, even clean."""
+    _write_run_workspace(tmp_path, run_hosts=["role-x"])
+    wts = _seed_task_with_worktree(tmp_path, "t1", "api")
+    git_dir = (
+        tmp_path / ".git-worktrees" / "api"
+        if linked_worktree
+        else wts["api"] / ".git"
+    )
+    marker_path = git_dir / marker
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    if marker.startswith("rebase-"):
+        marker_path.mkdir()
+    else:
+        marker_path.touch()
+    _configure(tmp_path)
+    shell = _git_shell(
+        _repo_git(head_ref=head_ref),
+        git_dirs={"api": git_dir} if linked_worktree else None,
+    )
+    container.shell.override(shell)
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+    recorder: dict = {}
+    try:
+        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+            result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
+        assert result.exit_code == 1, result.output
+        assert description in result.output
+        assert f'git -C "{wts["api"]}" {continue_command}' in result.output
+        assert f'git -C "{wts["api"]}" {abort_command}' in result.output
+        assert "checkout" not in result.output
         assert shell.pushes == []
         assert recorder == {}
     finally:

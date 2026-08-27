@@ -512,6 +512,10 @@ def test_a_conflicted_repo_is_refused(tmp_path):
     assert "merge or rebase in progress in api" in msg
     assert "src/app.py" in msg          # which file, exactly
     assert "--abort" in msg             # the way out
+    assert (
+        f'git -C "{api}" rebase --abort         '
+        "# ...or merge/cherry-pick/revert --abort"
+    ) in msg
 
 
 def test_a_mid_rebase_repo_is_refused_ahead_of_the_branch_check(tmp_path):
@@ -528,6 +532,8 @@ def test_a_mid_rebase_repo_is_refused_ahead_of_the_branch_check(tmp_path):
     assert [s.blocked_reason for s in pre.blocked] == [IN_PROGRESS]
     msg = blocked_message(pre)
     assert "rebase" in msg
+    assert f'continue: git -C "{api}" rebase --continue' in msg
+    assert f'abort: git -C "{api}" rebase --abort' in msg
     assert "checkout" not in msg        # NOT the wrong-branch remedy
 
 
@@ -538,8 +544,12 @@ def test_a_mid_merge_repo_is_refused_even_with_a_clean_tree(tmp_path):
     (api / ".git").mkdir(parents=True, exist_ok=True)
     (api / ".git" / "MERGE_HEAD").write_text("abc\n")
     shell = FakeShell({"api": _clean(status="")})
-    assert [s.blocked_reason for s in inspect(FakeTask({"api": api}), shell).blocked] \
-        == [IN_PROGRESS]
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert [s.blocked_reason for s in pre.blocked] == [IN_PROGRESS]
+    msg = blocked_message(pre)
+    assert f'continue: git -C "{api}" merge --continue' in msg
+    assert f'abort: git -C "{api}" merge --abort' in msg
 
 
 def test_a_cherry_pick_in_progress_is_refused(tmp_path):
@@ -547,8 +557,25 @@ def test_a_cherry_pick_in_progress_is_refused(tmp_path):
     (api / ".git").mkdir(parents=True, exist_ok=True)
     (api / ".git" / "CHERRY_PICK_HEAD").write_text("abc\n")
     shell = FakeShell({"api": _clean(status="")})
-    assert [s.blocked_reason for s in inspect(FakeTask({"api": api}), shell).blocked] \
-        == [IN_PROGRESS]
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert [s.blocked_reason for s in pre.blocked] == [IN_PROGRESS]
+    msg = blocked_message(pre)
+    assert f'continue: git -C "{api}" cherry-pick --continue' in msg
+    assert f'abort: git -C "{api}" cherry-pick --abort' in msg
+
+
+def test_a_mid_rebase_apply_repo_names_its_precise_recovery_commands(tmp_path):
+    api = _repo(tmp_path, "api")
+    (api / ".git" / "rebase-apply").mkdir(parents=True)
+    shell = FakeShell({"api": _clean(status="", head_ref="")})
+
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert [s.blocked_reason for s in pre.blocked] == [IN_PROGRESS]
+    msg = blocked_message(pre)
+    assert f'continue: git -C "{api}" rebase --continue  # or git am --continue' in msg
+    assert f'abort: git -C "{api}" rebase --abort     # or git am --abort' in msg
 
 
 def test_an_unanswerable_git_dir_is_unreadable_not_transferred(tmp_path):

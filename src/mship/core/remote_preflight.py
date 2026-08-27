@@ -237,19 +237,29 @@ _UNMERGED_CODES = ("DD", "AU", "UD", "UA", "DU", "AA", "UU")
 # suspended. A `--no-commit` merge leaves MERGE_HEAD with NOTHING unmerged, so
 # the porcelain alone cannot see it — hence the extra look.
 _OPERATIONS = (
-    ("rebase-merge", "a rebase is in progress"),
-    ("rebase-apply", "a rebase or `git am` is in progress"),
-    ("MERGE_HEAD", "a merge is in progress"),
-    ("CHERRY_PICK_HEAD", "a cherry-pick is in progress"),
-    ("REVERT_HEAD", "a revert is in progress"),
+    ("rebase-merge", "a rebase is in progress", "rebase --continue", "rebase --abort"),
+    (
+        "rebase-apply",
+        "a rebase or `git am` is in progress",
+        "rebase --continue  # or git am --continue",
+        "rebase --abort     # or git am --abort",
+    ),
+    ("MERGE_HEAD", "a merge is in progress", "merge --continue", "merge --abort"),
+    (
+        "CHERRY_PICK_HEAD",
+        "a cherry-pick is in progress",
+        "cherry-pick --continue",
+        "cherry-pick --abort",
+    ),
+    ("REVERT_HEAD", "a revert is in progress", "revert --continue", "revert --abort"),
 )
 
 
-def _operation_in_progress(git_dir: Path) -> str | None:
-    """Which suspended git operation this worktree is in, if any."""
-    for marker, description in _OPERATIONS:
+def _operation_in_progress(git_dir: Path) -> tuple[str, str, str] | None:
+    """Description and recovery commands for a suspended git operation."""
+    for marker, description, continue_command, abort_command in _OPERATIONS:
         if (git_dir / marker).exists():
-            return description
+            return description, continue_command, abort_command
     return None
 
 
@@ -325,7 +335,14 @@ def _inspect_repo(
         git_dir = path / git_dir
     operation = _operation_in_progress(git_dir)
     if operation is not None or unmerged:
-        detail = operation or "unmerged paths"
+        detail = "unmerged paths"
+        if operation is not None:
+            description, continue_command, abort_command = operation
+            detail = (
+                f"{description}\n"
+                f'continue: git -C "{path}" {continue_command}\n'
+                f'abort: git -C "{path}" {abort_command}'
+            )
         if unmerged:
             detail = f"{detail}; unresolved: {', '.join(sorted(unmerged)[:5])}"
         return state(blocked=IN_PROGRESS, detail=detail)
