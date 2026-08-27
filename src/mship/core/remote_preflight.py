@@ -265,7 +265,7 @@ _OPERATIONS = (
     (
         "BISECT_LOG",
         "a bisect is in progress",
-        ("bisect good", "bisect bad"),
+        ("bisect skip",),
         ("bisect reset",),
     ),
 )

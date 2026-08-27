@@ -602,18 +602,22 @@ def test_clean_sequencer_is_refused_before_wrong_branch_with_both_recoveries(tmp
     assert f'git -C "{api}" rebase --abort' not in msg
 
 
-def test_active_bisect_log_is_refused_before_wrong_branch_with_recovery(tmp_path):
+def test_custom_term_bisect_is_refused_before_wrong_branch_with_recovery(tmp_path):
     api = _repo(tmp_path, "api")
     (api / ".git").mkdir(parents=True, exist_ok=True)
-    (api / ".git" / "BISECT_LOG").write_text("git bisect start\n")
+    (api / ".git" / "BISECT_LOG").write_text(
+        "git bisect start --term-old=stable --term-new=broken\n"
+    )
     shell = FakeShell({"api": _clean(status="", head_ref="refs/heads/other")})
 
     pre = inspect(FakeTask({"api": api}), shell)
 
     assert [s.blocked_reason for s in pre.blocked] == [IN_PROGRESS]
     msg = blocked_message(pre)
-    for command in ("bisect good", "bisect bad", "bisect reset"):
+    for command in ("bisect skip", "bisect reset"):
         assert f'git -C "{api}" {command}' in msg
+    assert f'git -C "{api}" bisect good' not in msg
+    assert f'git -C "{api}" bisect bad' not in msg
     assert "checkout" not in msg
     assert f'git -C "{api}" rebase --abort' not in msg
 

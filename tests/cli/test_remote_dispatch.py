@@ -1308,7 +1308,7 @@ def test_a_mid_rebase_repo_is_refused_before_anything_is_sent(tmp_path, monkeypa
         (
             "BISECT_LOG",
             "a bisect is in progress",
-            ("bisect good", "bisect bad", "bisect reset"),
+            ("bisect skip", "bisect reset"),
         ),
     ],
 )
@@ -1353,6 +1353,9 @@ def test_clean_operation_marker_outranks_detached_or_wrong_branch(
         assert description in result.output
         for command in recovery_commands:
             assert f'git -C "{wts["api"]}" {command}' in result.output
+        if marker == "BISECT_LOG":
+            assert f'git -C "{wts["api"]}" bisect good' not in result.output
+            assert f'git -C "{wts["api"]}" bisect bad' not in result.output
         assert "# or git" not in result.output
         assert "checkout" not in result.output
         assert shell.pushes == []
