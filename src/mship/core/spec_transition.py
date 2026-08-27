@@ -7,7 +7,7 @@ store write (SpecStore.save = tempfile + os.replace). Callers own only their own
 concerns (HTTP status mapping, CLI output, journal appends, view messaging)."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -52,7 +52,10 @@ class SpecRevisionConflict(Exception):
 
 def _assert_current_revision(spec: Spec, current: Spec | None) -> None:
     current_updated_at = current.updated_at if current is not None else None
-    if current_updated_at != spec.updated_at:
+    if (
+        current is None
+        or spec.model_dump(exclude={"inbox"}) != current.model_dump(exclude={"inbox"})
+    ):
         raise SpecRevisionConflict(spec.id, spec.updated_at, current_updated_at)
 
 
@@ -71,14 +74,13 @@ def _transition_timestamp(expected_updated_at: datetime, proposed_at: datetime) 
 
 @contextmanager
 def _locked_current_revision(spec: Spec, store: SpecStore):
-    try:
-        with store.locked(spec.id) as artifact:
-            _assert_current_revision(
-                spec, artifact.spec if artifact is not None else None
-            )
-            yield artifact
-    except (SpecLocked, SpecParseError) as exc:
-        raise SpecRevisionConflict(spec.id, spec.updated_at, None) from exc
+    with ExitStack() as stack:
+        try:
+            artifact = stack.enter_context(store.locked(spec.id))
+        except (SpecLocked, SpecParseError) as exc:
+            raise SpecRevisionConflict(spec.id, spec.updated_at, None) from exc
+        _assert_current_revision(spec, artifact.spec if artifact is not None else None)
+        yield artifact
 
 
 def approve_spec(spec: Spec, store: SpecStore, *, bypass_gate: bool = False) -> None:

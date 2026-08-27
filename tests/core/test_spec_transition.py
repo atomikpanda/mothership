@@ -7,10 +7,11 @@ from datetime import datetime, timezone
 import pytest
 
 from mship.core import spec_key
+from mship.core.inbox import InboxAction
 from mship.core.log import LogManager
 from mship.core.spec import AcceptanceCriterion, InvalidTransition, OpenQuestion, Spec
-from mship.core.spec_storage import SpecStorage
-from mship.core.spec_store import SpecStore
+from mship.core.spec_storage import SpecLocked, SpecStorage
+from mship.core.spec_store import SpecRepresentationMismatch, SpecStore
 from mship.core.spec_transition import (
     ApprovalBlocked,
     SpecRevisionConflict,
@@ -83,6 +84,72 @@ def test_request_changes_rejects_a_stale_loaded_spec_without_writing_a_rejection
 
 
 
+def test_approve_rejects_same_timestamp_work_item_mutation_without_losing_association(tmp_path):
+    store = SpecStore(tmp_path / "specs")
+    store.save(_reviewable())
+    stale = store.find_by_id("s1")
+    current = store.find_by_id("s1")
+    assert stale is not None
+    assert current is not None
+    current.work_item_id = "wi-current"
+    store.save(current)
+
+    with pytest.raises(SpecRevisionConflict) as raised:
+        approve_spec(stale, store)
+
+    assert raised.value.expected_updated_at == _dt()
+    assert raised.value.current_updated_at == _dt()
+    persisted = store.find_by_id("s1")
+    assert persisted is not None
+    assert persisted.work_item_id == "wi-current"
+    assert persisted.status == "needs_review"
+
+
+def test_request_changes_rejects_same_timestamp_work_item_mutation_without_losing_association(
+    tmp_path,
+):
+    store = SpecStore(tmp_path / "specs")
+    store.save(_reviewable())
+    stale = store.find_by_id("s1")
+    current = store.find_by_id("s1")
+    assert stale is not None
+    assert current is not None
+    current.work_item_id = "wi-current"
+    store.save(current)
+    log = LogManager(tmp_path / "logs")
+
+    with pytest.raises(SpecRevisionConflict) as raised:
+        request_changes_spec(
+            stale, store, "tighten AC2", log_manager=log, actor="alice"
+        )
+
+    assert raised.value.expected_updated_at == _dt()
+    assert raised.value.current_updated_at == _dt()
+    persisted = store.find_by_id("s1")
+    assert persisted is not None
+    assert persisted.work_item_id == "wi-current"
+    assert persisted.status == "needs_review"
+    assert log.read("s1") == []
+
+
+def test_approve_ignores_canonical_inbox_refresh_without_a_revision_conflict(tmp_path):
+    store = SpecStore(tmp_path / "specs")
+    store.save(_reviewable())
+    stale = store.find_by_id("s1")
+    assert stale is not None
+    inbox_action: InboxAction = "pin"
+    inbox_mutation_id = "inbox-pin-1"
+    inbox_now = datetime(2026, 7, 2, tzinfo=timezone.utc)
+    store.mutate_inbox("s1", inbox_action, inbox_mutation_id, inbox_now)
+
+    approve_spec(stale, store)
+
+    persisted = store.find_by_id("s1")
+    assert persisted is not None
+    assert persisted.status == "approved"
+    assert persisted.inbox.pinned is True
+
+
 def test_approve_reports_conflict_when_loaded_artifact_becomes_unavailable(tmp_path):
     storage = SpecStorage(
         tmp_path / "specs", mode="encrypted", workspace_root=tmp_path
@@ -97,6 +164,64 @@ def test_approve_reports_conflict_when_loaded_artifact_becomes_unavailable(tmp_p
         approve_spec(actor, store)
 
     assert raised.value.current_updated_at is None
+
+
+def test_approve_propagates_save_time_representation_mismatch(tmp_path):
+    plaintext_store = SpecStore(tmp_path / "specs")
+    plaintext_store.save(_reviewable())
+    actor = plaintext_store.find_by_id("s1")
+    assert actor is not None
+    encrypted_store = SpecStore(
+        tmp_path / "specs",
+        storage=SpecStorage(
+            tmp_path / "specs", mode="encrypted", workspace_root=tmp_path
+        ),
+    )
+
+    with pytest.raises(SpecRepresentationMismatch, match="migrate storage"):
+        approve_spec(actor, encrypted_store)
+
+    persisted = plaintext_store.find_by_id("s1")
+    assert persisted is not None
+    assert persisted.status == "needs_review"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [SpecLocked("s1"), OSError("disk full")],
+    ids=["locked", "write-error"],
+)
+def test_approve_propagates_save_time_storage_failures_and_releases_lock(
+    tmp_path, monkeypatch, failure
+):
+    store = SpecStore(tmp_path / "specs")
+    store.save(_reviewable())
+    actor = store.find_by_id("s1")
+    assert actor is not None
+
+    def fail_write(*_args):
+        raise failure
+
+    monkeypatch.setattr(store._storage, "write", fail_write)
+
+    with pytest.raises(type(failure)) as raised:
+        approve_spec(actor, store)
+
+    assert raised.value is failure
+    persisted = store.find_by_id("s1")
+    assert persisted is not None
+    assert persisted.status == "needs_review"
+    acquired = threading.Event()
+
+    def acquire_lock():
+        with store.locked(actor.id):
+            acquired.set()
+
+    thread = threading.Thread(target=acquire_lock)
+    thread.start()
+    thread.join(timeout=5)
+    assert acquired.is_set()
+    assert not thread.is_alive()
 
 def test_request_changes_serializes_same_revision_and_logs_only_the_winner(
     tmp_path, monkeypatch
