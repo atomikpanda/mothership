@@ -7,8 +7,15 @@ import pytest
 import typer
 
 from mship.cli._resolve import resolve_for_command
-from mship.cli.output import Output
+from mship.cli.output import Output, reset_output_settings
 from mship.core.state import Task, WorkspaceState
+
+
+@pytest.fixture(autouse=True)
+def _isolate_output_settings():
+    reset_output_settings()
+    yield
+    reset_output_settings()
 
 
 def _task(slug: str, worktree: Path | None = None) -> Task:
