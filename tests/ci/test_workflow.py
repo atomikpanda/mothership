@@ -138,37 +138,25 @@ def test_test_workflow_supports_explicit_dispatch():
     assert "workflow_dispatch" in on
 
 
-def test_version_bump_dispatches_tests_for_new_version_tag_after_pushing():
+def test_version_bump_verifies_exact_commit_on_temporary_ref_before_promotion():
     steps = next(iter(_load()["jobs"].values()))["steps"]
     commit_step = next(step for step in steps if step.get("name") == "Commit, tag, and push")
     run = commit_step["run"]
-    tag = 'git tag -a "v${{ steps.bump.outputs.new_version }}"'
     commit_sha = 'BUMP_SHA="$(git rev-parse HEAD)"'
-    dispatch = 'gh workflow run test.yml --ref "$TAG"'
-
-    assert commit_step["env"]["GH_TOKEN"] == "${{ github.token }}"
-    assert (
-        run.index('git commit -m "chore: bump version')
-        < run.index(commit_sha)
-        < run.index(tag)
-        < run.index("git push origin main --follow-tags")
-        < run.index(dispatch)
-    )
-    assert "gh workflow run test.yml --ref main" not in run
-
-
-def test_version_bump_waits_for_the_dispatched_tag_ci_run():
-    steps = next(iter(_load()["jobs"].values()))["steps"]
-    commit_step = next(step for step in steps if step.get("name") == "Commit, tag, and push")
-    run = commit_step["run"]
-    dispatch = 'gh workflow run test.yml --ref "$TAG"'
+    verification_branch = 'VERIFY_BRANCH="mship-verify-$BUMP_SHA"'
+    verification_push = 'git push origin "$BUMP_SHA:refs/heads/$VERIFY_BRANCH"'
+    dispatch = 'gh workflow run test.yml --ref "$VERIFY_BRANCH"'
     lookup = (
         'gh run list --workflow test.yml --commit "$BUMP_SHA" --event workflow_dispatch '
         "--limit 1 --json databaseId --jq '.[0].databaseId // empty'"
     )
     watch = 'gh run watch "$RUN_ID" --exit-status'
+    tag = 'git tag -a "$TAG" -m "$TAG"'
+    promote = 'git push --atomic origin "HEAD:main" "refs/tags/$TAG"'
 
-    assert 'TAG="v${{ steps.bump.outputs.new_version }}"' in run
+    assert commit_step["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert verification_branch in run
+    assert verification_push in run
     assert dispatch in run
     assert lookup in run
     assert "for attempt in 1 2 3 4 5; do" in run
@@ -176,5 +164,21 @@ def test_version_bump_waits_for_the_dispatched_tag_ci_run():
     assert '[ -z "$RUN_ID" ]' in run
     assert "exit 1" in run
     assert watch in run
-    assert '--branch "$TAG"' not in run
-    assert run.index(dispatch) < run.index(lookup) < run.index('[ -z "$RUN_ID" ]') < run.index(watch)
+    assert tag in run
+    assert promote in run
+    assert "git push origin main --follow-tags" not in run
+    assert 'git push origin main' not in run
+    assert "git push origin --delete \"$VERIFY_BRANCH\"" in run
+    assert "trap 'status=$?; cleanup_verification_ref; exit \"$status\"' EXIT" in run
+    assert (
+        run.index('git commit -m "chore: bump version')
+        < run.index(commit_sha)
+        < run.index(verification_branch)
+        < run.index(verification_push)
+        < run.index(dispatch)
+        < run.index(lookup)
+        < run.index('[ -z "$RUN_ID" ]')
+        < run.index(watch)
+        < run.index(tag)
+        < run.index(promote)
+    )
