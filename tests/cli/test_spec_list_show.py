@@ -138,6 +138,16 @@ class TestSpecShow:
         result = runner.invoke(app, ["spec", "show", "nonexistent"])
         assert result.exit_code != 0
 
+    def test_show_unsafe_id_reports_missing_without_a_traceback(self, tmp_path):
+        (tmp_path / "specs").mkdir()
+
+        result = CliRunner().invoke(_app(tmp_path), ["spec", "show", ".hidden"])
+
+        assert result.exit_code != 0
+        assert "No spec" in result.output
+        assert result.exception is not None
+        assert result.exception.__class__.__name__ == "SystemExit"
+
     def test_show_body_included(self, tmp_path):
         """JSON response includes the spec body."""
         _, ids = _make_store(tmp_path, count=1)

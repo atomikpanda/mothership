@@ -147,6 +147,42 @@ class SpecStore:
             return physical_path.with_name(physical_path.name[:-4])
         return physical_path
 
+
+    def _canonical_paths_by_id(self) -> dict[str, list[Path]]:
+        from mship.core.spec_storage import canonical_spec_id_from_filename
+
+        paths_by_id: dict[str, list[Path]] = {}
+        for path in self._storage.iter_physical():
+            canonical_id = canonical_spec_id_from_filename(path)
+            if canonical_id is not None:
+                paths_by_id.setdefault(canonical_id, []).append(path)
+        return paths_by_id
+
+    def _tolerant_conflicted_ids(self) -> set[str]:
+        from mship.core.spec_storage import (
+            SpecLocked,
+            canonical_spec_id_from_filename,
+        )
+
+        conflicts = {
+            spec_id
+            for spec_id, paths in self._canonical_paths_by_id().items()
+            if len(paths) > 1
+        }
+        for path in self._storage.iter_physical():
+            canonical_id = canonical_spec_id_from_filename(path)
+            if canonical_id is None:
+                continue
+            try:
+                spec = parse_spec(self._storage.decode_file(path))
+            except SpecLocked:
+                continue
+            except SpecParseError:
+                conflicts.add(canonical_id)
+                continue
+            if spec.id != canonical_id:
+                conflicts.update((canonical_id, spec.id))
+        return conflicts
     def resolve_artifact(self, spec_id: str) -> ResolvedSpecArtifact | None:
         """Resolve exactly one parsed artifact for ``spec_id`` or fail closed."""
         from mship.core.spec_storage import (
@@ -154,6 +190,12 @@ class SpecStore:
         )
 
         self._validate_id(spec_id)
+        canonical_paths = self._canonical_paths_by_id().get(spec_id, [])
+        if len(canonical_paths) > 1:
+            paths = ", ".join(str(path) for path in canonical_paths)
+            raise SpecArtifactConflict(
+                f"spec id {spec_id!r} has multiple physical artifacts: {paths}"
+            )
         matches: list[tuple[Spec, Path]] = []
         exact_locked: SpecLocked | None = None
         locked_renamed: Path | None = None
@@ -258,6 +300,12 @@ class SpecStore:
         """
         from mship.core.spec_storage import SpecLocked, canonical_spec_id_from_filename
 
+        for spec_id, paths in self._canonical_paths_by_id().items():
+            if len(paths) > 1:
+                rendered = ", ".join(str(path) for path in paths)
+                raise SpecArtifactConflict(
+                    f"spec id {spec_id!r} has multiple physical artifacts: {rendered}"
+                )
         specs: list[Spec] = []
         paths_by_id: dict[str, Path] = {}
         for path in self._storage.iter_physical():
@@ -281,11 +329,28 @@ class SpecStore:
             specs.append(spec)
         return specs
 
+    def list_tolerant_entries(self) -> list[tuple[Spec | None, str | None, Path]]:
+        """List one readable-or-locked entry per non-conflicting logical id."""
+        entries_by_id: dict[
+            str,
+            list[tuple[Spec | None, str | None, Path]],
+        ] = {}
+        unavailable_ids = self._tolerant_conflicted_ids()
+        for spec, locked_id, path in self._storage.read_all():
+            logical_id = spec.id if isinstance(spec, Spec) else locked_id
+            if logical_id is not None:
+                entries_by_id.setdefault(logical_id, []).append((spec, locked_id, path))
+        return [
+            entries[0]
+            for spec_id, entries in entries_by_id.items()
+            if len(entries) == 1 and spec_id not in unavailable_ids
+        ]
+
     def list_tolerant(self) -> list[Spec]:
-        """List readable, identity-valid specs while omitting unavailable artifacts."""
+        """List unique readable specs while omitting unavailable logical ids."""
         return [
             spec
-            for spec, _locked_id, _path in self._storage.read_all()
+            for spec, _locked_id, _path in self.list_tolerant_entries()
             if isinstance(spec, Spec)
         ]
 
@@ -295,7 +360,7 @@ class SpecStore:
 
         try:
             artifact = self.resolve_artifact(spec_id)
-        except SpecLocked:
+        except (SpecLocked, ValueError):
             return None
         return artifact.spec if artifact is not None else None
 

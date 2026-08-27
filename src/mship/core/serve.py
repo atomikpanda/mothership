@@ -576,7 +576,7 @@ def create_app(
     ):
         now = datetime.now(timezone.utc)
         out = []
-        for spec, locked_id, _path in _spec_storage.read_all():
+        for spec, locked_id, _path in store.list_tolerant_entries():
             if spec is None:
                 # Encrypted spec, no key on this host: surface a LOCKED marker only
                 # in the unfiltered view. It has no plaintext metadata to classify.
@@ -650,6 +650,8 @@ def create_app(
             raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
         except SpecParseError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
         if spec is None:
             raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
         return build_review(spec)
@@ -1004,6 +1006,8 @@ def create_app(
             raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
         except SpecParseError as exc:
             _raise_spec_conflict(exc)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
         if spec is None:
             raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
         return spec

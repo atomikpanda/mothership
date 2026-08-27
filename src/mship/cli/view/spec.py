@@ -18,6 +18,8 @@ from textual.widgets import Markdown, Static
 from mship.cli.view._base import ViewApp
 from mship.cli.view._modals import RequestChangesModal
 from mship.cli.view._placeholders import placeholder_for
+from mship.core.spec_store import SpecParseError
+from mship.core.spec_storage import SpecLocked
 from mship.core.view.actions import approve_spec_by_id, request_changes_by_id
 from mship.core.task_resolver import (
     AmbiguousTaskError,
@@ -25,7 +27,11 @@ from mship.core.task_resolver import (
     UnknownTaskError,
     resolve_task,
 )
-from mship.core.view.spec_discovery import SpecNotFoundError, find_spec
+from mship.core.view.spec_discovery import (
+    SpecNotFoundError,
+    find_spec,
+    read_spec_source,
+)
 from mship.core.view.web_port import NoFreePortError, pick_port
 
 
@@ -134,12 +140,19 @@ class SpecView(ViewApp):
                 self.call_after_refresh(self._restore_scroll, prev_y, was_at_end)
                 return
             try:
-                source = path.read_text()
-            except OSError:
+                source = read_spec_source(path, self._workspace_root)
+            except SpecLocked as exc:
+                error_msg = f"Spec locked: {exc}"
+                self._last_source = ""
+                self._last_error = error_msg
+                self._markdown.update("")
+                self._error_static.update(error_msg)
+                self.call_after_refresh(self._restore_scroll, prev_y, was_at_end)
+                return
+            except (OSError, SpecParseError):
                 # The spec file can be deleted/renamed/replaced between the provider
                 # resolving it and this read (spec transitions rewrite the file). Show
-                # the hint and keep following — the next tick re-resolves; never raise
-                # out of the timer callback (that would stop the pane refreshing).
+                # the hint and keep following — the next tick re-resolves.
                 self._last_source = follow_hint()
                 self._last_error = ""
                 self._markdown.update(follow_hint())
@@ -186,7 +199,7 @@ class SpecView(ViewApp):
                 task=slug_for_tick,
                 state=state,
             )
-            source = path.read_text()
+            source = read_spec_source(path, self._workspace_root)
             header = self._header_provider() if self._header_provider else None
             if header:
                 source = f"**{header}**\n\n{source}"
@@ -194,6 +207,18 @@ class SpecView(ViewApp):
             self._last_error = ""
             self._markdown.update(source)
             self._error_static.update("")
+        except SpecLocked as e:
+            error_msg = f"Spec locked: {e}"
+            self._last_source = ""
+            self._last_error = error_msg
+            self._markdown.update("")
+            self._error_static.update(error_msg)
+        except SpecParseError as e:
+            error_msg = f"Spec unavailable: {e}"
+            self._last_source = ""
+            self._last_error = error_msg
+            self._markdown.update("")
+            self._error_static.update(error_msg)
         except SpecNotFoundError as e:
             if self._name_or_path is None:
                 body = self._render_task_fallback(slug_for_tick, state, default_error=str(e))
@@ -289,12 +314,16 @@ class SpecView(ViewApp):
             self._refresh_content()
 
 
-def _render_html(spec_path: Path) -> bytes:
+def _render_html(spec_path: Path, workspace_root: Path | None = None) -> bytes:
+    try:
+        source = read_spec_source(spec_path, workspace_root)
+    except (SpecLocked, SpecParseError) as exc:
+        source = f"# Spec unavailable\n\n{exc}\n"
     try:
         from markdown_it import MarkdownIt  # type: ignore
-        body_html = MarkdownIt().render(spec_path.read_text())
+        body_html = MarkdownIt().render(source)
     except ImportError:
-        body_html = f"<pre>{html.escape(spec_path.read_text())}</pre>"
+        body_html = f"<pre>{html.escape(source)}</pre>"
     doc = f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>{html.escape(spec_path.name)}</title>
 <style>body{{font-family:system-ui;max-width:780px;margin:2rem auto;padding:0 1rem;line-height:1.55}}
@@ -304,10 +333,19 @@ pre{{padding:.6em;overflow:auto}}</style>
     return doc.encode("utf-8")
 
 
+def _echo_spec_source(path: Path, workspace_root: Path) -> None:
+    try:
+        typer.echo(read_spec_source(path, workspace_root), nl=False)
+    except (SpecLocked, SpecParseError) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+
 def serve_spec_web(
     spec_path: Path,
     start_port: int = None,
     explicit_port: int | None = None,
+    workspace_root: Path | None = None,
 ) -> tuple[HTTPServer, int, threading.Thread]:
     port = pick_port(
         start=start_port if start_port is not None else 47213,
@@ -316,7 +354,7 @@ def serve_spec_web(
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
-            body = _render_html(spec_path)
+            body = _render_html(spec_path, workspace_root)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -332,9 +370,13 @@ def serve_spec_web(
     return server, port, thread
 
 
-def _serve_web(path: Path, port: int | None) -> None:
+def _serve_web(path: Path, port: int | None, workspace_root: Path) -> None:
     try:
-        server, chosen, _t = serve_spec_web(path, explicit_port=port)
+        server, chosen, _t = serve_spec_web(
+            path,
+            explicit_port=port,
+            workspace_root=workspace_root,
+        )
     except NoFreePortError as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(code=1)
@@ -437,7 +479,7 @@ def register(app: typer.Typer, get_container):
                     from mship.cli.view._follow import follow_hint
                     typer.echo(follow_hint())
                     return
-                typer.echo(path.read_text(), nl=False)
+                _echo_spec_source(path, workspace_root)
                 return
 
             def _header():
@@ -521,7 +563,7 @@ def register(app: typer.Typer, get_container):
             except SpecNotFoundError as e:
                 typer.echo(f"Error: {e}", err=True)
                 raise typer.Exit(code=1)
-            _serve_web(path, port)
+            _serve_web(path, port, workspace_root)
             return
 
         # Non-TTY short-circuit (#124): the SpecView TUI hangs forever when
@@ -536,7 +578,7 @@ def register(app: typer.Typer, get_container):
             except SpecNotFoundError as e:
                 typer.echo(f"Error: {e}", err=True)
                 raise typer.Exit(code=1)
-            typer.echo(path.read_text(), nl=False)
+            _echo_spec_source(path, workspace_root)
             return
 
         header_provider = None

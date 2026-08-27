@@ -259,6 +259,41 @@ def test_find_by_id_tolerates_locked_exact_artifact_but_read_strict_does_not(tmp
     with pytest.raises(SpecLocked):
         store.read_strict("secret-thing")
 
+def test_duplicate_locked_canonical_artifacts_are_a_conflict_without_the_key(
+    tmp_path: Path,
+):
+    store = _store(tmp_path, "encrypted")
+    original = store.save(_spec())
+    duplicate = original.with_name("2026-07-23-secret-thing.md.enc")
+    duplicate.write_bytes(original.read_bytes())
+    spec_key.keyfile_path(tmp_path).unlink()
+
+    with pytest.raises(SpecArtifactConflict, match="multiple physical artifacts") as exc:
+        store.read_strict("secret-thing")
+
+    assert str(original) in str(exc.value)
+    assert str(duplicate) in str(exc.value)
+
+
+def test_unreadable_encryption_key_is_reported_as_locked(
+    tmp_path: Path,
+    monkeypatch,
+):
+    store = _store(tmp_path, "encrypted")
+    store.save(_spec())
+    key_path = spec_key.keyfile_path(tmp_path)
+    read_bytes = Path.read_bytes
+
+    def deny_key_read(path: Path):
+        if path == key_path:
+            raise PermissionError("denied")
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", deny_key_read)
+
+    with pytest.raises(SpecLocked, match="no key is available"):
+        store.read_strict("secret-thing")
+
 
 def test_create_refuses_any_locked_ciphertext_without_creating_a_replacement_key(tmp_path: Path):
     store = _store(tmp_path, "encrypted")
@@ -434,6 +469,38 @@ def test_malformed_encryption_key_is_parse_error_for_reads_and_writes(tmp_path: 
     another.id = "another"
     with pytest.raises(SpecParseError):
         encrypted.save(another)
+
+def test_list_tolerant_omits_duplicate_ids_and_preserves_healthy_specs(
+    tmp_path: Path,
+):
+    store = _store(tmp_path, "committed")
+    duplicate = _spec()
+    duplicate.id = "duplicate"
+    first = store.save(duplicate)
+    first.with_name("2026-07-23-duplicate.md").write_text(first.read_text())
+    healthy = _spec()
+    healthy.id = "healthy"
+    store.save(healthy)
+
+    assert [spec.id for spec in store.list_tolerant()] == ["healthy"]
+
+
+def test_list_tolerant_omits_both_ids_bound_by_a_canonical_mismatch(
+    tmp_path: Path,
+):
+    specs_dir = tmp_path / SPECS_DIRNAME
+    specs_dir.mkdir()
+    mismatched = _spec()
+    mismatched.id = "shared"
+    (specs_dir / "2026-07-22-physical-id.md").write_text(serialize_spec(mismatched))
+    (specs_dir / "2026-07-23-shared.md").write_text(serialize_spec(mismatched))
+    unrelated = _spec()
+    unrelated.id = "unrelated"
+    (specs_dir / "2026-07-24-unrelated.md").write_text(serialize_spec(unrelated))
+
+    assert [spec.id for spec in _store(tmp_path, "committed").list_tolerant()] == [
+        "unrelated",
+    ]
 
 
 def test_tolerant_scan_skips_canonical_filename_frontmatter_mismatch(tmp_path: Path):

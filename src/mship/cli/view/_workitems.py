@@ -20,7 +20,10 @@ def load_workitem_index(container) -> list[WorkItemSummary]:
         state_dir = Path(container.state_dir())
         workspace_root = Path(container.config_path()).parent
         items = WorkItemStore(state_dir / "workitems").list()
-        specs = {s.id: s for s in SpecStore(workspace_root / SPECS_DIRNAME).list()}
+        specs = {
+            spec.id: spec
+            for spec in SpecStore(workspace_root / SPECS_DIRNAME).list_tolerant()
+        }
         tasks = dict(container.state_manager().load().tasks)
     except Exception:
         return []

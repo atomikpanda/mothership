@@ -1,5 +1,5 @@
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, Thread
 
@@ -132,7 +132,8 @@ def test_migration_preflight_rejects_malformed_artifact_before_writing(workspace
 
 def test_migration_preflight_rejects_later_duplicate_before_any_write(workspace: Path):
     original = next((workspace / "specs").glob("*-design-x.md"))
-    duplicate = workspace / "specs" / "2026-08-27-design-x.md"
+    duplicate_date = datetime.fromisoformat(original.name[:10]) + timedelta(days=1)
+    duplicate = workspace / "specs" / f"{duplicate_date:%Y-%m-%d}-design-x.md"
     duplicate.write_text(original.read_text())
     _set_mode(workspace, "encrypted")
 

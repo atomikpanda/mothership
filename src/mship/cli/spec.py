@@ -83,7 +83,13 @@ def register(parent: typer.Typer, get_container):
             else:
                 path = store.create_if_absent(spec)
                 if path is None:
-                    output.error(f"Spec already exists: {store.path_for(spec)}\n  Pass --force to overwrite.")
+                    existing = store.resolve_artifact(spec.id)
+                    existing_path = (
+                        existing.physical_path if existing is not None else store.path_for(spec)
+                    )
+                    output.error(
+                        f"Spec already exists: {existing_path}\n  Pass --force to overwrite."
+                    )
                     raise typer.Exit(1)
         except SpecLocked:
             output.error(f"Spec {spec.id!r} already exists but is locked.")
@@ -386,6 +392,9 @@ def register(parent: typer.Typer, get_container):
             raise typer.Exit(1)
         except SpecParseError as e:
             output.error(f"{spec_id}: invalid spec — {e}")
+            raise typer.Exit(1)
+        except ValueError as e:
+            output.error(str(e))
             raise typer.Exit(1)
         if spec is None:
             output.error(f"No spec file for id {spec_id!r} in {workspace_root / SPECS_DIRNAME}.")

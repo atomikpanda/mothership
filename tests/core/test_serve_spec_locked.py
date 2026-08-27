@@ -57,6 +57,50 @@ def test_serve_shows_locked_state_without_key(tmp_path: Path):
     # No ciphertext leaked into the response.
     assert "gAAAA" not in str(body)
 
+def test_serve_omits_duplicate_readable_spec_ids_but_preserves_healthy_rows(
+    tmp_path: Path,
+):
+    _write_encrypted_spec(tmp_path)
+    specs_dir = tmp_path / SPECS_DIRNAME
+    original = next(specs_dir.glob("*-locked-one.md.enc"))
+    original.with_name("2026-07-23-locked-one.md.enc").write_bytes(original.read_bytes())
+    healthy = Spec(
+        id="healthy",
+        title="Healthy",
+        status="draft",
+        created_at=datetime(2026, 7, 24, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 7, 24, tzinfo=timezone.utc),
+    )
+    storage = SpecStorage(specs_dir, mode="encrypted", workspace_root=tmp_path)
+    SpecStore(specs_dir, storage=storage).save(healthy)
+
+    body = _client(tmp_path).get("/specs").json()
+
+    assert [row["id"] for row in body] == ["healthy"]
+
+
+def test_serve_omits_duplicate_locked_ids_but_preserves_healthy_plaintext(
+    tmp_path: Path,
+):
+    _write_encrypted_spec(tmp_path)
+    specs_dir = tmp_path / SPECS_DIRNAME
+    original = next(specs_dir.glob("*-locked-one.md.enc"))
+    original.with_name("2026-07-23-locked-one.md.enc").write_bytes(original.read_bytes())
+    healthy = Spec(
+        id="healthy",
+        title="Healthy",
+        status="draft",
+        created_at=datetime(2026, 7, 24, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 7, 24, tzinfo=timezone.utc),
+    )
+    plaintext = SpecStorage(specs_dir, mode="committed", workspace_root=tmp_path)
+    SpecStore(specs_dir, storage=plaintext).save(healthy)
+    spec_key.keyfile_path(tmp_path).unlink()
+
+    body = _client(tmp_path).get("/specs").json()
+
+    assert [row["id"] for row in body] == ["healthy"]
+
 
 @pytest.mark.parametrize("inbox", ["active", "archived"])
 def test_serve_excludes_locked_specs_from_explicit_inbox_filters(tmp_path: Path, inbox: str):
@@ -125,6 +169,21 @@ def test_serve_review_and_write_paths_report_locked_spec_as_conflict(
 
     assert response.status_code == 409
     assert "locked" in response.json()["detail"]
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("get", "/specs/.hidden/review", None),
+        ("post", "/specs/.hidden/questions", {"text": "Why?"}),
+    ],
+)
+def test_serve_strict_routes_reject_unsafe_spec_ids_without_a_server_error(
+    tmp_path: Path, method: str, path: str, body: dict | None,
+):
+    response = _client(tmp_path).request(method, path, json=body)
+
+    assert response.status_code == 422
+    assert "unsafe spec id" in response.json()["detail"]
 
 
 @pytest.mark.parametrize(

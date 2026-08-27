@@ -97,7 +97,10 @@ class SpecStorage:
         self.specs_dir.mkdir(parents=True, exist_ok=True)
         physical = self.physical_path(stem)
         if self.mode == "encrypted":
-            key = spec_key.load_key(self.workspace_root)
+            try:
+                key = spec_key.load_key(self.workspace_root)
+            except OSError as exc:
+                raise SpecLocked(spec_id_from_filename(physical)) from exc
             if key is None:
                 locked = next(
                     (path for path in self.iter_physical() if path.name.endswith(".md.enc")),
@@ -125,7 +128,10 @@ class SpecStorage:
         with no key — never returns ciphertext or plaintext-fallback."""
         path = Path(path)
         if path.name.endswith(".md" + ENC_SUFFIX):
-            key = spec_key.load_key(self.workspace_root)
+            try:
+                key = spec_key.load_key(self.workspace_root)
+            except OSError as exc:
+                raise SpecLocked(spec_id_from_filename(path)) from exc
             if key is None:
                 raise SpecLocked(spec_id_from_filename(path))
             try:
