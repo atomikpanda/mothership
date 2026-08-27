@@ -1306,7 +1306,7 @@ def test_a_mid_rebase_repo_is_refused_before_anything_is_sent(tmp_path, monkeypa
             ),
         ),
         (
-            "BISECT_LOG",
+            "BISECT_START",
             "a bisect is in progress",
             ("bisect skip", "bisect reset"),
         ),
@@ -1316,7 +1316,7 @@ def test_a_mid_rebase_repo_is_refused_before_anything_is_sent(tmp_path, monkeypa
 @pytest.mark.parametrize(
     "head_ref",
     ["refs/heads/other", ""],
-    ids=["wrong-branch", "detached"],
+    ids=["wrong-branch", "no-checkout"],
 )
 def test_clean_operation_marker_outranks_detached_or_wrong_branch(
     tmp_path, monkeypatch, marker, description, recovery_commands,
@@ -1336,6 +1336,8 @@ def test_clean_operation_marker_outranks_detached_or_wrong_branch(
         marker_path.mkdir()
     else:
         marker_path.touch()
+    if marker == "BISECT_START":
+        assert not (git_dir / "BISECT_LOG").exists()
     _configure(tmp_path)
     shell = _git_shell(
         _repo_git(head_ref=head_ref),
@@ -1353,9 +1355,14 @@ def test_clean_operation_marker_outranks_detached_or_wrong_branch(
         assert description in result.output
         for command in recovery_commands:
             assert f'git -C "{wts["api"]}" {command}' in result.output
-        if marker == "BISECT_LOG":
+        if marker == "BISECT_START":
             assert f'git -C "{wts["api"]}" bisect good' not in result.output
             assert f'git -C "{wts["api"]}" bisect bad' not in result.output
+        commands = [call.args[0] for call in shell.run.call_args_list]
+        assert not any(
+            command.startswith(("git rev-parse HEAD", "git symbolic-ref", "git ls-remote", "git merge-base"))
+            for command in commands
+        ), commands
         assert "# or git" not in result.output
         assert "checkout" not in result.output
         assert shell.pushes == []

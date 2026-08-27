@@ -263,7 +263,7 @@ _OPERATIONS = (
     ),
     ("REVERT_HEAD", "a revert is in progress", ("revert --continue",), ("revert --abort",)),
     (
-        "BISECT_LOG",
+        "BISECT_START",
         "a bisect is in progress",
         ("bisect skip",),
         ("bisect reset",),
