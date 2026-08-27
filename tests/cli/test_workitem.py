@@ -106,6 +106,28 @@ def test_item_run_next_noop_exit_zero_when_empty(tmp_path):
         _reset()
 
 
+def test_item_run_next_ignores_an_unrelated_locked_spec(tmp_path):
+    _isolate(tmp_path)
+    try:
+        now = datetime(2026, 8, 27, tzinfo=timezone.utc)
+        storage = SpecStorage(tmp_path / "specs", mode="encrypted", workspace_root=tmp_path)
+        SpecStore(tmp_path / "specs", storage=storage).save(Spec(
+            id="locked",
+            title="Locked",
+            status="draft",
+            created_at=now,
+            updated_at=now,
+        ))
+        spec_key.keyfile_path(tmp_path).unlink()
+
+        result = runner.invoke(app, ["--json", "item", "run-next"])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == {"runnable": False}
+    finally:
+        _reset()
+
+
 def test_item_bail_logs_reason_and_releases(tmp_path):
     _isolate(tmp_path)
     origin = _make_origin(tmp_path)
