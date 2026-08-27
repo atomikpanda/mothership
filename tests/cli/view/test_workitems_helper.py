@@ -1,8 +1,11 @@
 from datetime import datetime, timezone
 
+from pathlib import Path
 from mship.cli import container
+from mship.core import spec_key
 from mship.core.spec import Spec
 from mship.core.spec_store import SPECS_DIRNAME, SpecStore
+from mship.core.spec_storage import SpecStorage
 from mship.core.state import StateManager, Task, WorkspaceState
 from mship.core.workitem import WorkItem
 from mship.core.workitem_store import WorkItemStore
@@ -89,5 +92,34 @@ def test_load_workitem_index_survives_broken_message_store(tmp_path, monkeypatch
         assert [s.id for s in index] == ["wi-1"]   # grouping intact despite bad messages
         assert index[0].task_slugs == ["a"]
         assert index[0].spec_id == "spec-1"
+    finally:
+        _teardown()
+
+
+def test_load_workitem_index_preserves_healthy_items_when_an_encrypted_spec_is_locked(
+    tmp_path: Path,
+):
+    _setup(tmp_path)
+    try:
+        locked = Spec(
+            id="locked",
+            title="Locked",
+            status="needs_review",
+            created_at=_now(),
+            updated_at=_now(),
+            body="secret",
+        )
+        storage = SpecStorage(
+            tmp_path / SPECS_DIRNAME,
+            mode="encrypted",
+            workspace_root=tmp_path,
+        )
+        SpecStore(tmp_path / SPECS_DIRNAME, storage=storage).save(locked)
+        spec_key.keyfile_path(tmp_path).unlink()
+
+        index = load_workitem_index(container)
+
+        assert [summary.id for summary in index] == ["wi-1"]
+        assert index[0].phase == "in_flight"
     finally:
         _teardown()

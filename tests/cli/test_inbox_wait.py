@@ -77,6 +77,21 @@ def test_wait_ignores_agent_reply(tmp_path: Path):
         _reset()
 
 
+def test_wait_ignores_inbox_only_mutation_on_an_old_awaiting_thread(tmp_path: Path):
+    cfg, state_dir, store = _bootstrap(tmp_path)
+    created = datetime.now(timezone.utc) - timedelta(minutes=1)
+    thread = store.create_thread("s", "q", created)
+    store.mutate_inbox(thread.id, "archive", "device-archive", created + timedelta(seconds=1))
+    _override(cfg, state_dir)
+    try:
+        result = runner.invoke(app, ["inbox", "wait", "--since", created.isoformat(), "--timeout", "0.1"])
+        payload = json.loads(result.output)
+        assert payload["timed_out"] is True
+        assert payload["threads"] == []
+    finally:
+        _reset()
+
+
 def test_wait_matches_event_thread_even_after_interleaved_human_message(tmp_path: Path):
     # MOS-194 (Greptile finding on PR #307): a dispatch/PR event is a signal FOR
     # THE AGENT. A human posting on the thread afterwards (e.g. a quick "thanks"

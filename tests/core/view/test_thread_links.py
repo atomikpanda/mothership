@@ -1,4 +1,6 @@
-from mship.core.view.thread_links import index_thread_work_items, resolve_thread_work_item
+from mship.core.view.thread_links import (
+    index_thread_inbox_links, index_thread_work_items, resolve_thread_work_item,
+)
 
 
 class _Item:
@@ -85,3 +87,38 @@ def test_corrupt_item_degrades_only_its_own_threads():
     good = _Item("wi-good", thread_ids=["t-good"])
     out = index_thread_work_items([_Thread("t-good"), _Thread("t-orphan")], [good, _Bad()])
     assert out == {"t-good": "wi-good", "t-orphan": None}
+
+
+def test_ambiguous_selected_link_precedence_resolves_to_none():
+    direct = [_Item("wi-a", thread_ids=["t1"]), _Item("wi-b", thread_ids=["t1"])]
+    assert resolve_thread_work_item("t1", "unique-spec", "unique-task", direct) is None
+    assert index_thread_work_items([_Thread("t1", "unique-spec", "unique-task")], direct) == {
+        "t1": None,
+    }
+
+
+def test_ambiguous_spec_or_task_owner_resolves_to_none():
+    assert resolve_thread_work_item(
+        "t1", "shared", None, [_Item("wi-a", spec_id="shared"), _Item("wi-b", spec_id="shared")],
+    ) is None
+    assert resolve_thread_work_item(
+        "t1", None, "shared", [_Item("wi-a", task_slugs=["shared"]), _Item("wi-b", task_slugs=["shared"])],
+    ) is None
+
+
+def test_unique_direct_owner_wins_over_ambiguous_spec_owner():
+    items = [
+        _Item("wi-direct", thread_ids=["t1"]),
+        _Item("wi-a", spec_id="shared"),
+        _Item("wi-b", spec_id="shared"),
+    ]
+    assert resolve_thread_work_item("t1", "shared", None, items) == "wi-direct"
+
+
+def test_ambiguous_selected_owner_is_uncertain_and_nonterminal():
+    items = [_Item("wi-a", thread_ids=["t1"]), _Item("wi-b", thread_ids=["t1"])]
+    link = index_thread_inbox_links([_Thread("t1")], items, {}, {})["t1"]
+
+    assert link.work_item_id is None
+    assert link.terminal is False
+    assert link.uncertain is True

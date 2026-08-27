@@ -4,9 +4,12 @@ import fcntl
 import tempfile
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
+
+from mship.core.inbox import InboxAction, apply_inbox_action
+
 
 from mship.core.message import DecisionPayload, Message, Thread
 
@@ -41,16 +44,24 @@ class MessageStore:
         self._dir = Path(messages_dir)
 
     def _path(self, thread_id: str) -> Path:
+        # Preserve historical IDs (anything except separators/hidden components)
+        # while proving resolved direct-child containment at the filesystem edge.
         if (not thread_id or "/" in thread_id or "\\" in thread_id
                 or thread_id in (".", "..") or thread_id.startswith(".")):
             raise ValueError(f"unsafe thread id: {thread_id!r}")
-        return self._dir / f"{thread_id}.json"
+        base = self._dir.resolve()
+        path = (base / f"{thread_id}.json").resolve()
+        if path.parent != base:
+            raise ValueError(f"unsafe thread id: {thread_id!r}")
+        return path
 
     def _lock_path(self, thread_id: str) -> Path:
-        """Per-thread lock file (`<id>.json.lock`). Reuses `_path`'s id validation.
-        Not matched by `list()`'s `*.json` glob, so it stays invisible to reads."""
-        p = self._path(thread_id)
-        return p.with_name(p.name + ".lock")
+        """Per-thread lock file guarded by the same containment proof as data."""
+        path = self._path(thread_id)
+        lock_path = path.with_name(path.name + ".lock").resolve()
+        if lock_path.parent != path.parent:
+            raise ValueError(f"unsafe thread id: {thread_id!r}")
+        return lock_path
 
     def save(self, thread: Thread) -> Path:
         self._dir.mkdir(parents=True, exist_ok=True)
@@ -75,7 +86,14 @@ class MessageStore:
         if not self._dir.is_dir():
             return []
         threads = [Thread.model_validate_json(p.read_text()) for p in self._dir.glob("*.json")]
-        return sorted(threads, key=lambda t: t.updated_at, reverse=True)
+        return sorted(
+            threads,
+            key=lambda thread: (
+                thread.updated_at.replace(tzinfo=timezone.utc)
+                if thread.updated_at.tzinfo is None else thread.updated_at
+            ),
+            reverse=True,
+        )
 
     def create_thread(self, subject: str, text: str, now: datetime, task_slug: str | None = None) -> Thread:
         tid = _new_id(now)
@@ -109,6 +127,23 @@ class MessageStore:
             thread.updated_at = now
             self.save(thread)
             return msg
+
+    def mutate_inbox(
+        self,
+        thread_id: str,
+        action: InboxAction,
+        mutation_id: str,
+        now: datetime,
+    ) -> tuple[Thread, bool]:
+        """Apply an inbox action and report whether it changed inbox state."""
+        with _locked(self._lock_path(thread_id), fcntl.LOCK_EX):
+            thread = self.get(thread_id)
+            if thread is None:
+                raise KeyError(thread_id)
+            result = apply_inbox_action(thread.inbox, action, mutation_id, now)
+            if result.persisted:
+                self.save(thread)
+            return thread, result.applied
 
     def mark_seen(self, thread_id: str, seen_at: datetime) -> Thread:
         """Advance the operator's read cursor (monotonic — never regresses).

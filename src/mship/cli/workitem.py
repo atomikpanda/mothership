@@ -196,7 +196,7 @@ def register(parent: typer.Typer, get_container) -> None:
         items, specs, state_manager, msgs, _ = _ctx()
         summaries = build_workitem_index(
             items.list(include_archived=all_items),
-            {s.id: s for s in specs.list()},
+            {s.id: s for s in specs.list_tolerant()},
             dict(state_manager.load().tasks),
             {t.id: t for t in msgs.list()},
             # build_workitem_index now also defaults to excluding archived items
@@ -405,7 +405,7 @@ def register(parent: typer.Typer, get_container) -> None:
         state_manager = container.state_manager()
         log_mgr = container.log_manager()
 
-        specs_by_id = {s.id: s for s in specs.list()}
+        specs_by_id = {s.id: s for s in specs.list_tolerant()}
         spec_approved = {sid: (s.status == "approved") for sid, s in specs_by_id.items()}
         run_state = RunStateRepo(_workspace_origin(workspace_root), state_dir / "run-state")
 

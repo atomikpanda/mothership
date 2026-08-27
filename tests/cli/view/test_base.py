@@ -42,20 +42,23 @@ async def test_quit_key():
 
 @pytest.mark.asyncio
 async def test_scroll_position_preserved_across_refresh():
-    app = _CountingView(watch=True, interval=0.05)
+    app = _CountingView(watch=False, interval=0.05)
     app.content = "\n".join(f"line {i}" for i in range(200)) + "\n"
     async with app.run_test() as pilot:
         await pilot.pause()
         app.scroll_body_to(50)
+        await pilot.pause()
         y_before = app.body_scroll_y()
+        assert y_before == 50, "should apply the requested non-bottom position"
         app.content = "\n".join(f"line {i}" for i in range(201)) + "\n"  # grew
-        await pilot.pause(0.15)
+        app.action_force_refresh()
+        await pilot.pause()
         assert app.body_scroll_y() == y_before, "should not yank when user scrolled away"
 
 
 @pytest.mark.asyncio
 async def test_auto_follow_when_pinned_to_bottom():
-    app = _CountingView(watch=True, interval=0.05)
+    app = _CountingView(watch=False, interval=0.05)
     app.content = "\n".join(f"line {i}" for i in range(200)) + "\n"
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -63,5 +66,7 @@ async def test_auto_follow_when_pinned_to_bottom():
         await pilot.pause()
         y_end_before = app.body_scroll_y()
         app.content = "\n".join(f"line {i}" for i in range(400)) + "\n"
-        await pilot.pause(0.15)
-        assert app.body_scroll_y() >= y_end_before, "should auto-follow when pinned to bottom"
+        app.action_force_refresh()
+        await pilot.pause()
+        await pilot.pause()
+        assert app.body_scroll_y() > y_end_before, "should auto-follow when pinned to bottom"

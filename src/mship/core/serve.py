@@ -9,9 +9,9 @@ import time as _time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 # The only fastapi names imported at MODULE scope, and they have to be: this
 # module is `from __future__ import annotations`, so a handler's annotations are
@@ -32,7 +32,8 @@ from mship.core.spec_transition import (
     approve_spec,
     request_changes_spec,
 )
-from mship.core.view.thread_links import index_thread_work_items
+from mship.core.inbox import InboxAction, classify_spec, classify_thread
+from mship.core.view.thread_links import index_thread_inbox_links
 from mship.core.workitem import Phase
 from mship.util.shell import ShellRunner
 
@@ -113,6 +114,17 @@ class CaptureBody(BaseModel):
 
 class SeenBody(BaseModel):
     seen_at: str | None = None
+
+
+class InboxMutationBody(BaseModel):
+    mutation_id: str
+
+    @field_validator("mutation_id")
+    @classmethod
+    def validate_mutation_id(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("mutation_id must not be blank")
+        return value
 
 
 class UnattendedBody(BaseModel):
@@ -318,8 +330,8 @@ def create_app(
     `get_gh_token`."""
     from fastapi import Depends, FastAPI, HTTPException
 
-    from mship.core.spec_store import SpecStore
-    from mship.core.spec_storage import SpecStorage
+    from mship.core.spec_store import SpecParseError, SpecRepresentationMismatch, SpecStore
+    from mship.core.spec_storage import SpecLocked, SpecStorage, resolve_mode
     from mship.core.message_store import MessageStore
     from mship.core.workitem_store import WorkItemStore
 
@@ -327,7 +339,7 @@ def create_app(
     # `store` decrypts `.md.enc` with the local key for display; `_spec_storage`
     # exposes read_all() so the list/detail endpoints can render a LOCKED marker
     # (never ciphertext, never a 500) when the key is absent on this host.
-    _spec_mode = getattr(config, "spec_storage", "committed") if config is not None else "committed"
+    _spec_mode = getattr(config, "spec_storage", None) or resolve_mode(workspace_root)
     _spec_storage = SpecStorage(specs_dir, mode=_spec_mode, workspace_root=workspace_root)
     store = SpecStore(specs_dir, storage=_spec_storage)
     pr_manager = PRManager(ShellRunner(), cwd=workspace_root)
@@ -525,42 +537,23 @@ def create_app(
 
     from mship.core.spec_review import build_review
 
-    @app.get("/specs")
-    def list_specs():
-        out = []
-        for spec, locked_id, _path in _spec_storage.read_all():
-            if spec is None:
-                # Encrypted spec, no key on this host: surface a LOCKED marker so
-                # Ground Control can show it without ever leaking ciphertext.
-                out.append({
-                    "id": locked_id, "locked": True, "status": "locked",
-                    "title": None, "task_slug": None, "affected_repos": [],
-                })
-            else:
-                out.append({
-                    "id": spec.id, "title": spec.title, "status": spec.status,
-                    "task_slug": spec.task_slug, "affected_repos": spec.affected_repos,
-                    "locked": False,
-                })
-        return out
+    def _matches_inbox_filter(payload: dict, inbox: Literal["active", "archived", "all"]) -> bool:
+        return inbox == "all" or payload["inbox_state"] == inbox
 
-    @app.get("/specs/{spec_id}")
-    def get_spec(spec_id: str):
-        # Resolve via the LOCKED-aware seam (not store.find_by_id, which loads
-        # EVERY file and would raise on a sibling locked spec — making a coexisting
-        # plaintext spec unreachable). A locked match returns a marker (200), not
-        # ciphertext and not a 500.
-        spec = None
-        for candidate, locked_id, _path in _spec_storage.read_all():
-            if candidate is None:
-                if locked_id == spec_id:
-                    return {"id": spec_id, "locked": True, "status": "locked"}
-                continue
-            if candidate.id == spec_id:
-                spec = candidate
-                break
-        if spec is None:
-            raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
+    def _matches_search(query: str | None, *values: str | None) -> bool:
+        if not query:
+            return True
+        needle = query.casefold()
+        return any(needle in (value or "").casefold() for value in values)
+
+    def _stamp_spec_inbox(payload: dict, spec, now: datetime) -> dict:
+        classification = classify_spec(spec, now=now)
+        payload["inbox_state"] = classification.state
+        payload["archive_reason"] = classification.archive_reason
+        payload["pinned"] = spec.inbox.pinned
+        return payload
+
+    def _spec_payload(spec, now: datetime | None = None) -> dict:
         data = spec.model_dump(mode="json")
         data["locked"] = False
         # Resolve the linked WorkItem's kind (feature/bug/chore) so the Queue review cards can show
@@ -573,12 +566,92 @@ def create_app(
                 wi = workitems.get(spec.work_item_id)
                 data["work_item_kind"] = wi.kind if wi is not None else None
             except Exception:
-                data["work_item_kind"] = None
-        return data
+                pass
+        return _stamp_spec_inbox(data, spec, now or datetime.now(timezone.utc))
+
+    @app.get("/specs")
+    def list_specs(
+        inbox: Literal["active", "archived", "all"] = "all",
+        q: str | None = None,
+    ):
+        now = datetime.now(timezone.utc)
+        out = []
+        for spec, locked_id, _path in store.list_tolerant_entries():
+            if spec is None:
+                # Encrypted spec, no key on this host: surface a LOCKED marker only
+                # in the unfiltered view. It has no plaintext metadata to classify.
+                if inbox != "all":
+                    continue
+                payload = {
+                    "id": locked_id, "locked": True, "status": "locked",
+                    "title": None, "task_slug": None, "affected_repos": [],
+                    "inbox_state": None, "archive_reason": None, "pinned": False,
+                }
+            else:
+                payload = _stamp_spec_inbox({
+                    "id": spec.id, "title": spec.title, "status": spec.status,
+                    "task_slug": spec.task_slug, "affected_repos": spec.affected_repos,
+                    "locked": False,
+                }, spec, now)
+            if (_matches_inbox_filter(payload, inbox)
+                    and _matches_search(q, payload["id"], payload["title"])):
+                out.append(payload)
+        return out
+
+    @app.get("/specs/{spec_id}")
+    def get_spec(spec_id: str):
+        # Use the single-artifact resolver rather than the resilient list seam:
+        # detail views must report collisions instead of selecting an arbitrary file.
+        from mship.core.spec_storage import SpecLocked
+
+        try:
+            artifact = store.resolve_artifact(spec_id)
+        except SpecLocked as locked:
+            if locked.spec_id == spec_id:
+                return {
+                    "id": spec_id, "locked": True, "status": "locked",
+                    "inbox_state": None, "archive_reason": None, "pinned": False,
+                }
+            raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is blocked by locked storage")
+        except SpecParseError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        if artifact is None:
+            raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
+        return _spec_payload(artifact.spec)
+
+    @app.post("/specs/{spec_id}/inbox/{action}")
+    def post_spec_inbox_action(spec_id: str, action: InboxAction, body: InboxMutationBody):
+        from mship.core.spec_storage import SpecLocked
+
+        now = datetime.now(timezone.utc)
+        try:
+            spec, applied = store.mutate_inbox(spec_id, action, body.mutation_id, now)
+        except SpecLocked:
+            raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
+        except SpecParseError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        if applied and spec.task_slug:
+            state_manager.record_activity(spec.task_slug, now)
+        return _spec_payload(spec, now)
 
     @app.get("/specs/{spec_id}/review")
     def get_review(spec_id: str):
-        spec = store.find_by_id(spec_id)
+        from mship.core.spec_storage import SpecLocked
+
+        try:
+            spec = store.read_strict(spec_id)
+        except SpecLocked:
+            raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
+        except SpecParseError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
         if spec is None:
             raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
         return build_review(spec)
@@ -921,15 +994,34 @@ def create_app(
     )
     from mship.core.spec_questions import add_question, answer_question
 
+    def _raise_spec_conflict(exc: SpecParseError | SpecRepresentationMismatch) -> None:
+        raise HTTPException(status_code=409, detail=str(exc))
+
     def _load_or_404(spec_id: str):
-        spec = store.find_by_id(spec_id)
+        from mship.core.spec_storage import SpecLocked
+
+        try:
+            spec = store.read_strict(spec_id)
+        except SpecLocked:
+            raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
+        except SpecParseError as exc:
+            _raise_spec_conflict(exc)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
         if spec is None:
             raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
         return spec
 
     def _save_and_review(spec):
+        from mship.core.spec_storage import SpecLocked
+
         spec.updated_at = datetime.now(timezone.utc)
-        store.save(spec)
+        try:
+            store.save(spec)
+        except SpecLocked:
+            raise HTTPException(status_code=409, detail=f"spec {spec.id!r} is locked")
+        except SpecParseError as exc:
+            _raise_spec_conflict(exc)
         return build_review(spec)
 
     def _auto_approve_if_ready(spec):
@@ -1017,6 +1109,10 @@ def create_app(
             raise HTTPException(status_code=409, detail="cannot approve: " + "; ".join(e.blockers))
         except InvalidTransition as e:
             raise HTTPException(status_code=409, detail=str(e))
+        except SpecLocked:
+            raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
+        except SpecParseError as exc:
+            _raise_spec_conflict(exc)
         return build_review(spec)
 
     @app.post("/specs/{spec_id}/request-changes")
@@ -1040,7 +1136,14 @@ def create_app(
         # its own `record_rejection` call. This also supersedes the old
         # decorative "spec request-changes (api): …" log line — the
         # structured record is the parsed source now.
-        request_changes_spec(spec, store, body.reason, log_manager=log_manager, actor="operator")
+        try:
+            request_changes_spec(
+                spec, store, body.reason, log_manager=log_manager, actor="operator",
+            )
+        except SpecLocked:
+            raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
+        except SpecParseError as exc:
+            _raise_spec_conflict(exc)
         return build_review(spec)
 
     @app.post("/specs/{spec_id}/archive")
@@ -1066,18 +1169,27 @@ def create_app(
 
     @app.post("/specs")
     def post_create_spec(body: NewSpecBody):
+        from mship.core.spec_storage import SpecLocked
+
         now = datetime.now(timezone.utc)
         try:
             spec = new_spec(
                 body.title, now=now, spec_id=body.id,
                 affected_repos=body.affected_repos, task_slug=body.task_slug,
             )
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        if store.find_by_id(spec.id) is not None:
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        try:
+            created = store.create_if_absent(spec)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        except SpecLocked:
+            raise HTTPException(status_code=409, detail=f"spec {spec.id!r} already exists but is locked")
+        except SpecParseError as exc:
+            _raise_spec_conflict(exc)
+        if created is None:
             raise HTTPException(status_code=409, detail=f"spec {spec.id!r} already exists")
-        store.save(spec)
-        return spec.model_dump(mode="json")
+        return {**spec.model_dump(mode="json"), "path": str(created)}
 
     @app.post("/specs/{spec_id}/draft")
     def post_draft(spec_id: str, body: DraftIntentBody):
@@ -1086,6 +1198,8 @@ def create_app(
 
     @app.post("/specs/{spec_id}/apply")
     def post_apply(spec_id: str, body: ApplyDraftBody):
+        from mship.core.spec_storage import SpecLocked
+
         spec = _load_or_404(spec_id)
         if not body.bypass_status_gate:
             try:
@@ -1099,7 +1213,12 @@ def create_app(
         spec.status = "needs_review"
         spec.clarification_reason = None
         spec.updated_at = datetime.now(timezone.utc)
-        store.save(spec)
+        try:
+            store.save(spec)
+        except SpecLocked:
+            raise HTTPException(status_code=409, detail=f"spec {spec.id!r} is locked")
+        except SpecParseError as exc:
+            _raise_spec_conflict(exc)
         return spec.model_dump(mode="json")
 
     @app.post("/capture")
@@ -1170,6 +1289,8 @@ def create_app(
         # lands. Re-loading the spec inside the lock (rather than reusing the copy
         # loaded before it) means the second caller sees the first's work_item_id
         # already set and reuses it instead of creating a duplicate WorkItem.
+        from mship.core.spec_storage import SpecLocked
+
         try:
             with _dispatch_lock:
                 spec = _load_or_404(spec_id)
@@ -1196,8 +1317,10 @@ def create_app(
                         "dispatch handoff notify failed (spec=%s task=%s) — "
                         "dispatch itself succeeded", result.spec.id, result.task.slug,
                     )
-        except DispatchError as e:
-            raise HTTPException(status_code=409, detail=str(e))
+        except SpecLocked:
+            raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
+        except (DispatchError, SpecParseError) as exc:
+            _raise_spec_conflict(exc)
         return {
             "spec": result.spec.model_dump(mode="json"),
             "task_slug": result.task.slug,
@@ -1220,12 +1343,12 @@ def create_app(
         now = datetime.now(timezone.utc)
         try:
             msgs.append(thread_id, "human", body.text, now)
-        except KeyError:
+            thread = msgs.get(thread_id)
+        except (KeyError, ValueError):
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
-        t = msgs.get(thread_id)
-        if t is None:
+        if thread is None:
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
-        return _thread_payload(t)
+        return _thread_payload(thread)
 
     @app.post("/threads/{thread_id}/seen")
     def post_seen(thread_id: str, body: SeenBody):
@@ -1241,47 +1364,110 @@ def create_app(
         else:
             seen_dt = datetime.now(timezone.utc)
         try:
-            t = msgs.mark_seen(thread_id, seen_dt)
-        except KeyError:
+            thread = msgs.mark_seen(thread_id, seen_dt)
+        except (KeyError, ValueError):
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
-        return _thread_payload(t)
+        return _thread_payload(thread)
 
-    def _summaries(threads):
-        threads = list(threads)
-        # Stamp each summary with the single WorkItem that owns the thread (direct thread_ids
-        # membership, else indirect via spec_id/task_slug) so Ground Control can group the
-        # messages surface by work item. Invariant: a thread resolves to AT MOST ONE item.
-        # include_archived=True: link ownership survives archival (mirrors _thread_payload's
-        # resolution). Best-effort — a corrupt WorkItem must never 500 the list, so the store
-        # scan is guarded and index_thread_work_items degrades to None, matching get_spec's
-        # work_item_kind stamping.
+    def _thread_inbox_links(threads, all_items=None):
+        if all_items is None:
+            all_items, uncertain = workitems.list_tolerant_with_uncertainty(include_archived=True)
+        else:
+            uncertain = False
+        from mship.core.spec_storage import canonical_spec_id_from_filename
+        from mship.core.spec_store import parse_spec
+
+        specs_by_id = {}
+        ambiguous_spec_ids = set()
+        unknown_renamed_artifact = False
+        for path in _spec_storage.iter_physical():
+            canonical_id = canonical_spec_id_from_filename(path)
+            try:
+                spec = parse_spec(_spec_storage.decode_file(path))
+            except Exception:
+                if canonical_id is not None:
+                    specs_by_id.pop(canonical_id, None)
+                    ambiguous_spec_ids.add(canonical_id)
+                else:
+                    unknown_renamed_artifact = True
+                continue
+            if canonical_id is not None and canonical_id != spec.id:
+                for ambiguous_id in (canonical_id, spec.id):
+                    specs_by_id.pop(ambiguous_id, None)
+                    ambiguous_spec_ids.add(ambiguous_id)
+                continue
+            if spec.id in specs_by_id:
+                specs_by_id.pop(spec.id)
+                ambiguous_spec_ids.add(spec.id)
+            elif spec.id not in ambiguous_spec_ids:
+                specs_by_id[spec.id] = spec
+        if unknown_renamed_artifact:
+            ambiguous_spec_ids.update(specs_by_id)
         try:
-            all_items = list(workitems.list(include_archived=True))
+            tasks_by_slug = dict(state_manager.load().tasks)
         except Exception:
-            all_items = []
-        wi_by_thread = index_thread_work_items(threads, all_items)
+            tasks_by_slug = {}
+        return index_thread_inbox_links(
+            threads, all_items, specs_by_id, tasks_by_slug, uncertain=uncertain,
+            ambiguous_spec_ids=frozenset(ambiguous_spec_ids),
+        )
+
+    def _summaries(threads, now: datetime | None = None):
+        threads = list(threads)
+        now = now or datetime.now(timezone.utc)
+        links_by_thread = _thread_inbox_links(threads)
+        summaries = []
+        for thread in threads:
+            link = links_by_thread[thread.id]
+            classification = classify_thread(
+                thread, linked=link.work_item_id is not None or link.uncertain,
+                linked_terminal=link.terminal, now=now,
+            )
+            summaries.append({
+                "id": thread.id, "subject": thread.subject,
+                "updated_at": thread.updated_at.isoformat(),
+                "awaiting_reply": thread.awaiting_reply,
+                # Unhandled agent event (e.g. a PR merge) feeds GC's group attention rollup.
+                "awaiting_agent_event": thread.awaiting_agent_event,
+                "needs_you": thread.needs_you,
+                "needs_decision": thread.needs_decision,
+                "unseen": thread.unseen,
+                "agent_seen_at": thread.agent_seen_at.isoformat() if thread.agent_seen_at else None,
+                "last_message": thread.messages[-1].text[:120] if thread.messages else "",
+                "message_count": len(thread.messages),
+                "work_item_id": link.work_item_id,
+                "inbox_state": classification.state,
+                "archive_reason": classification.archive_reason,
+                "pinned": thread.inbox.pinned,
+            })
+        return summaries
+
+    def _matches_thread_filter(
+        summary: dict,
+        inbox: Literal["active", "archived", "all"],
+        q: str | None,
+    ) -> bool:
+        return (
+            _matches_inbox_filter(summary, inbox)
+            and _matches_search(q, summary["subject"], summary["last_message"])
+        )
+
+    def _filtered_summaries(threads, inbox: Literal["active", "archived", "all"], q: str | None):
         return [
-            {
-                "id": t.id, "subject": t.subject,
-                "updated_at": t.updated_at.isoformat(),
-                "awaiting_reply": t.awaiting_reply,
-                # unhandled agent `event` (e.g. a PR merge) — feeds GC's group attention rollup.
-                "awaiting_agent_event": t.awaiting_agent_event,
-                "needs_you": t.needs_you,
-                "needs_decision": t.needs_decision,
-                "unseen": t.unseen,
-                "agent_seen_at": t.agent_seen_at.isoformat() if t.agent_seen_at else None,
-                "last_message": (t.messages[-1].text[:120] if t.messages else ""),
-                "message_count": len(t.messages),
-                "work_item_id": wi_by_thread.get(t.id),
-            }
-            for t in threads
+            summary for summary in _summaries(threads)
+            if _matches_thread_filter(summary, inbox, q)
         ]
 
     @app.get("/threads")
-    async def list_threads(wait: int = 0, since: Optional[str] = None, timeout: float = 25.0):
+    async def list_threads(
+        wait: int = 0,
+        since: Optional[str] = None,
+        timeout: float = 25.0,
+        inbox: Literal["active", "archived", "all"] = "all",
+        q: str | None = None,
+    ):
         if not wait:
-            return _summaries(msgs.list())
+            return _filtered_summaries(msgs.list(), inbox, q)
         from mship.core.message_wait import changed_since
         timeout = max(0.0, min(timeout, 30.0))  # cap for the relay idle-read timeout
         try:
@@ -1293,26 +1479,57 @@ def create_app(
         interval = 1.0
         deadline = _time.monotonic() + timeout
         while True:
-            changed, cursor = changed_since(msgs.list(), since_dt)
-            if changed:
-                return {"threads": _summaries(changed), "cursor": cursor.isoformat(), "timed_out": False}
+            changed, cursor = changed_since(msgs.list(), since_dt, include_inbox=True)
+            summaries = _summaries(changed)
+            threads = [
+                summary for summary in summaries
+                if _matches_thread_filter(summary, inbox, q)
+            ]
+            # A filtered client must remove items that changed out of its view.
+            # The response keeps `threads` filter-pure; legacy clients ignore the
+            # additive tombstones field, while newer clients remove these ids.
+            removed_ids = [
+                summary["id"] for summary in summaries
+                if not _matches_thread_filter(summary, inbox, q)
+            ]
+            if threads or removed_ids:
+                return {
+                    "threads": threads, "removed_ids": removed_ids,
+                    "cursor": cursor.isoformat(), "timed_out": False,
+                }
             remaining = deadline - _time.monotonic()
             if remaining <= 0:
-                return {"threads": [], "cursor": cursor.isoformat(), "timed_out": True}
+                return {
+                    "threads": [], "removed_ids": [],
+                    "cursor": cursor.isoformat(), "timed_out": True,
+                }
             await asyncio.sleep(min(interval, remaining))
+
+    @app.post("/threads/{thread_id}/inbox/{action}")
+    def post_thread_inbox_action(thread_id: str, action: InboxAction, body: InboxMutationBody):
+        now = datetime.now(timezone.utc)
+        try:
+            thread, applied = msgs.mutate_inbox(thread_id, action, body.mutation_id, now)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        if applied and thread.task_slug:
+            state_manager.record_activity(thread.task_slug, now)
+        return _thread_payload(thread, now)
 
     @app.get("/threads/{thread_id}")
     def get_thread(thread_id: str):
-        t = msgs.get(thread_id)
-        if t is None:
+        try:
+            thread = msgs.get(thread_id)
+        except ValueError:
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
-        return _thread_payload(t)
+        if thread is None:
+            raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
+        return _thread_payload(thread)
 
     # --- work items (phase-aware cockpit spine) ---
-    # `workitems` and `_item_msg_lock` are defined earlier (see comment above
-    # `_lifespan`).
     from mship.core.view.workitem_index import build_workitem_index
-    from mship.core.view.thread_links import resolve_thread_work_item
     from mship.core.view.entity_links import linkify_entities
 
     # Serializes POST /specs/{id}/dispatch. Same threadpool hazard as above: two
@@ -1337,7 +1554,7 @@ def create_app(
     def _workitem_index(include_archived: bool = False):
         return build_workitem_index(
             _safe(lambda: workitems.list(include_archived=include_archived), []),
-            _safe(lambda: {s.id: s for s in store.list()}, {}),
+            _safe(lambda: {s.id: s for s in store.list_tolerant()}, {}),
             _safe(lambda: dict(state_manager.load().tasks), {}),
             _safe(lambda: {t.id: t for t in msgs.list()}, {}),
             include_archived=include_archived,
@@ -1353,7 +1570,13 @@ def create_app(
         wi = workitems.get(item_id)
         if wi is None:
             return None
-        spec = store.find_by_id(wi.spec_id) if wi.spec_id else None
+        spec = _safe(
+            lambda: next(
+                (s for s in store.list_tolerant() if s.id == wi.spec_id),
+                None,
+            ),
+            None,
+        ) if wi.spec_id else None
         tasks = state_manager.load().tasks
         return build_workitem_index(
             [wi],
@@ -1363,35 +1586,29 @@ def create_app(
             include_archived=True,
         )[0]
 
-    def _thread_payload(t):
-        """Enrich a thread's dumped dict with the WorkItem it's related to (read-time
-        inversion of the WorkItem link graph — see thread_links.resolve_thread_work_item)
-        and auto-linkify native entity refs (wi-/spec/task ids) in agent message text
-        (see entity_links.linkify_entities). Human messages are left untouched — the
-        linkifier only rewrites text the agent produced. Shared by every handler that
-        returns a full thread: GET /threads/{id}, POST /threads, POST /threads/{id}/messages,
-        POST /threads/{id}/seen. The GET /threads list/summary endpoint is unaffected."""
+    def _thread_payload(t, now: datetime | None = None):
+        """Enrich a thread with its WorkItem and computed inbox state."""
         data = t.model_dump(mode="json")
-        # include_archived=True: this is link/ownership resolution (which WorkItem does
-        # this thread belong to?), not a user-facing listing. A thread stays linked to its
-        # WorkItem after that item is archived (MOS-228 T3), so resolving with the default
-        # archived-excluding list() would wrongly report work_item_id=null here. The
-        # user-facing filter still applies at GET /items (_workitem_index above) and
-        # `item list` — only this internal resolution needs the full set.
-        # Best-effort scans (one corrupt/forward-incompatible workitem/spec file must not 500 the
-        # thread read paths — mirrors _summaries' guard; the thread itself still resolves).
-        all_items = _safe(lambda: list(workitems.list(include_archived=True)), [])  # reused below
-        wi_id = resolve_thread_work_item(t.id, t.spec_id, t.task_slug, all_items)
-        data["work_item_id"] = wi_id
-        if wi_id is None:
+        # include_archived=True: this is link ownership resolution, not a user-facing listing.
+        all_items, uncertain = workitems.list_tolerant_with_uncertainty(include_archived=True)
+        link = _thread_inbox_links([t])[t.id]
+        data["work_item_id"] = link.work_item_id
+        classification = classify_thread(
+            t, linked=link.work_item_id is not None or link.uncertain,
+            linked_terminal=link.terminal, now=now or datetime.now(timezone.utc),
+        )
+        data["inbox_state"] = classification.state
+        data["archive_reason"] = classification.archive_reason
+        data["pinned"] = t.inbox.pinned
+        if link.work_item_id is None:
             data["work_item"] = None
         else:
-            summ = _summarize_item(wi_id)
+            summ = _summarize_item(link.work_item_id)
             data["work_item"] = None if summ is None else {
                 "id": summ.id, "title": summ.title, "kind": summ.kind, "phase": summ.phase,
             }
         item_ids = {w.id for w in all_items}
-        spec_ids = _safe(lambda: {s.id for s in store.list()}, set())
+        spec_ids = _safe(lambda: {s.id for s in store.list_tolerant()}, set())
         task_slugs = _safe(lambda: set(state_manager.load().tasks.keys()), set())
         for msg in data.get("messages", []):
             if msg.get("role") == "agent" and msg.get("text"):
@@ -1432,7 +1649,7 @@ def create_app(
                 task_slug = wi.task_slugs[0] if wi.task_slugs else None
                 thread = msgs.create_thread(subject=subject, text=body.text, now=now, task_slug=task_slug)
                 workitems.add_thread(item_id, thread.id, now=now)
-                return thread.model_dump(mode="json")
+                return _thread_payload(thread, now)
             try:
                 msgs.append(tid, "human", body.text, now)
             except KeyError:
@@ -1440,7 +1657,7 @@ def create_app(
             t = msgs.get(tid)
             if t is None:
                 raise HTTPException(status_code=404, detail=f"no thread {tid!r}")
-            return t.model_dump(mode="json")
+            return _thread_payload(t, now)
 
     @app.post("/items/{item_id}/unattended")
     def post_item_unattended(item_id: str, body: UnattendedBody):

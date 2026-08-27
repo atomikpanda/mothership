@@ -4,7 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from mship.cli.view.spec import SpecView, serve_spec_web
+from mship.cli.view.spec import SpecView, _render_html, serve_spec_web
+from mship.core.spec import Spec
+from mship.core.spec_storage import SpecStorage
+from mship.core.spec_store import SpecStore
 
 
 @pytest.mark.asyncio
@@ -19,6 +22,88 @@ async def test_spec_view_renders_markdown(tmp_path: Path):
         assert "Body text" in view.rendered_text()
 
 
+@pytest.mark.asyncio
+async def test_spec_view_decrypts_an_encrypted_path_provider(tmp_path: Path):
+    from datetime import datetime, timezone
+
+    spec = Spec(
+        id="encrypted",
+        title="Encrypted",
+        status="draft",
+        created_at=datetime(2026, 8, 27, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 8, 27, tzinfo=timezone.utc),
+        body="## Problem\n\nDECRYPTED-BODY\n",
+    )
+    specs_dir = tmp_path / "docs" / "superpowers" / "specs"
+    storage = SpecStorage(specs_dir, mode="encrypted", workspace_root=tmp_path)
+    path = SpecStore(specs_dir, storage=storage).save(spec)
+    view = SpecView(
+        workspace_root=tmp_path,
+        name_or_path=None,
+        watch=False,
+        interval=1.0,
+        path_provider=lambda: path,
+    )
+
+    async with view.run_test() as pilot:
+        await pilot.pause()
+
+        assert "DECRYPTED-BODY" in view.rendered_text()
+        assert "gAAAA" not in view.rendered_text()
+
+
+
+@pytest.mark.asyncio
+async def test_spec_view_reports_malformed_encrypted_content_without_crashing(
+    tmp_path: Path,
+):
+    from datetime import datetime, timezone
+
+    spec = Spec(
+        id="broken",
+        title="Broken",
+        status="draft",
+        created_at=datetime(2026, 8, 27, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 8, 27, tzinfo=timezone.utc),
+    )
+    specs_dir = tmp_path / "specs"
+    storage = SpecStorage(specs_dir, mode="encrypted", workspace_root=tmp_path)
+    path = SpecStore(specs_dir, storage=storage).save(spec)
+    path.write_bytes(b"invalid-fernet-token")
+    view = SpecView(
+        workspace_root=tmp_path,
+        name_or_path=str(path),
+        watch=False,
+        interval=1.0,
+    )
+
+    async with view.run_test() as pilot:
+        await pilot.pause()
+
+        assert "encrypted spec could not be decoded" in view.rendered_text()
+
+
+def test_spec_web_reports_malformed_encrypted_content_without_ciphertext(
+    tmp_path: Path,
+):
+    from datetime import datetime, timezone
+
+    spec = Spec(
+        id="broken-web",
+        title="Broken web",
+        status="draft",
+        created_at=datetime(2026, 8, 27, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 8, 27, tzinfo=timezone.utc),
+    )
+    specs_dir = tmp_path / "specs"
+    storage = SpecStorage(specs_dir, mode="encrypted", workspace_root=tmp_path)
+    path = SpecStore(specs_dir, storage=storage).save(spec)
+    path.write_bytes(b"invalid-fernet-token")
+
+    rendered = _render_html(path, workspace_root=tmp_path).decode()
+
+    assert "encrypted spec could not be decoded" in rendered
+    assert "invalid-fernet-token" not in rendered
 @pytest.mark.asyncio
 async def test_spec_view_missing_spec(tmp_path: Path):
     view = SpecView(workspace_root=tmp_path, name_or_path="nope", watch=False, interval=1.0)

@@ -9,6 +9,7 @@ from mship.core.serve import create_app
 from mship.core.spec import AcceptanceCriterion, OpenQuestion, Spec
 from mship.core.spec_body import render_body
 from mship.core.spec_store import SpecStore
+from mship.core.spec_storage import SpecStorage
 from mship.core.state import StateManager, Task, WorkspaceState
 from mship.core.log import LogManager
 from mship.core.workitem_store import WorkItemStore
@@ -67,7 +68,11 @@ def test_list_specs(tmp_path):
     _seed_spec(tmp_path)
     r = TestClient(_app(tmp_path)).get("/specs")
     assert r.status_code == 200
-    assert r.json() == [{"id": "dq", "title": "Decision queue", "status": "needs_review", "task_slug": "dq", "affected_repos": [], "locked": False}]
+    assert r.json() == [{
+        "id": "dq", "title": "Decision queue", "status": "needs_review",
+        "task_slug": "dq", "affected_repos": [], "locked": False,
+        "inbox_state": "active", "archive_reason": None, "pinned": False,
+    }]
 
 
 def test_get_spec_and_404(tmp_path):
@@ -625,6 +630,12 @@ def test_post_create_spec_explicit_id(tmp_path):
     assert r.status_code == 200 and r.json()["id"] == "custom"
 
 
+
+def test_post_create_spec_unsafe_id_is_422(tmp_path):
+    response = TestClient(_app(tmp_path)).post("/specs", json={"title": "Anything", "id": "../unsafe"})
+
+    assert response.status_code == 422
+
 def test_post_create_spec_collision_409(tmp_path):
     client = TestClient(_app(tmp_path))
     assert client.post("/specs", json={"title": "Dup"}).status_code == 200
@@ -925,6 +936,197 @@ def test_threads_404s(tmp_path):
     assert client.post("/threads/nope/messages", json={"text": "x"}).status_code == 404
 
 
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("get", "/threads/.hidden", None),
+        ("post", "/threads/.hidden/messages", {"text": "x"}),
+        ("post", "/threads/.hidden/seen", {}),
+    ],
+)
+def test_unsafe_thread_ids_are_controlled_4xx(tmp_path, method, path, body):
+    client = TestClient(_app(tmp_path))
+    response = client.get(path) if method == "get" else client.post(path, json=body)
+    assert 400 <= response.status_code < 500
+
+def test_threads_filter_search_and_mutate_inbox_without_deleting_content(tmp_path):
+    now = datetime.now(timezone.utc)
+    messages = MessageStore(tmp_path / ".mothership" / "messages")
+    archived = messages.create_thread("Old discussion", "needle in history", now.replace(year=now.year - 1))
+    messages.append(archived.id, "agent", "resolved", archived.updated_at)
+    active = messages.create_thread("Current discussion", "needle today", now)
+    messages.append(active.id, "agent", "needle resolved", now)
+    client = TestClient(_app(tmp_path))
+
+    all_threads = client.get("/threads").json()
+    assert {thread["id"] for thread in all_threads} == {archived.id, active.id}
+    assert {thread["inbox_state"] for thread in all_threads} == {"active", "archived"}
+    assert next(thread for thread in all_threads if thread["id"] == archived.id)["archive_reason"] == "inactive_unlinked"
+    assert client.get("/threads", params={"inbox": "active", "q": "needle"}).json()[0]["id"] == active.id
+    assert client.get("/threads", params={"inbox": "archived"}).json()[0]["id"] == archived.id
+    assert client.get("/threads", params={"inbox": "unknown"}).status_code == 422
+
+    first = client.post(
+        f"/threads/{active.id}/inbox/archive", json={"mutation_id": "phone-archive-1"},
+    )
+    retry = client.post(
+        f"/threads/{active.id}/inbox/archive", json={"mutation_id": "phone-archive-1"},
+    )
+    assert first.status_code == retry.status_code == 200
+    assert first.json() == retry.json()
+    assert first.json()["inbox_state"] == "archived"
+    assert client.get(f"/threads/{active.id}").json()["messages"][0]["text"] == "needle today"
+    assert client.get("/threads", params={"inbox": "all", "q": "current"}).json()[0]["id"] == active.id
+    assert client.post(f"/threads/{active.id}/inbox/pin", json={"mutation_id": "desktop-pin-1"}).json()["inbox_state"] == "active"
+    assert client.post(f"/threads/{active.id}/inbox/unpin", json={"mutation_id": "phone-unpin-1"}).json()["inbox_state"] == "archived"
+    assert client.post(f"/threads/{active.id}/inbox/restore", json={"mutation_id": "desktop-restore-1"}).json()["inbox_state"] == "active"
+    assert client.post(f"/threads/{active.id}/inbox/archive", json={"mutation_id": " "}).status_code == 422
+    assert client.post("/threads/nope/inbox/archive", json={"mutation_id": "missing-1"}).status_code == 404
+    assert client.post(f"/threads/{active.id}/inbox/nope", json={"mutation_id": "bad-1"}).status_code == 422
+
+
+def test_thread_state_equivalent_inbox_action_persists_without_task_activity(tmp_path):
+    state, log = _seed_task(tmp_path)
+    now = datetime.now(timezone.utc)
+    messages = MessageStore(tmp_path / ".mothership" / "messages")
+    thread = messages.create_thread("task thread", "body", now, task_slug="dq")
+    client = TestClient(_app_with(tmp_path, state, log))
+
+    client.post(f"/threads/{thread.id}/inbox/archive", json={"mutation_id": "device-archive"})
+    first_activity = state.load().tasks["dq"].last_activity_at
+    first_mutation = messages.get(thread.id).inbox.last_mutated_at
+    response = client.post(f"/threads/{thread.id}/inbox/unpin", json={"mutation_id": "device-unpin"})
+
+    assert response.status_code == 200
+    assert state.load().tasks["dq"].last_activity_at == first_activity
+    saved = messages.get(thread.id)
+    assert saved.inbox.mutation_ids["device-unpin"] == "unpin"
+    assert saved.inbox.last_mutated_at == first_mutation
+
+
+
+def test_thread_linked_to_done_work_item_is_archived(tmp_path):
+    now = datetime.now(timezone.utc)
+    SpecStore(tmp_path / "specs").save(Spec(
+        id="implemented", title="Implemented", status="implemented",
+        created_at=now, updated_at=now,
+    ))
+    messages = MessageStore(tmp_path / ".mothership" / "messages")
+    thread = messages.create_thread("Linked", "content", now)
+    messages.append(thread.id, "agent", "resolved", now)
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    item = items.create("Implemented", "feature", "test-ws", now)
+    items.link_spec(item.id, "implemented", now)
+    items.add_thread(item.id, thread.id, now)
+
+    summary = TestClient(_app(tmp_path)).get("/threads", params={"inbox": "archived"}).json()[0]
+
+    assert summary["id"] == thread.id
+    assert summary["inbox_state"] == "archived"
+    assert summary["archive_reason"] == "linked_terminal"
+
+
+def test_malformed_canonical_spec_keeps_linked_terminal_thread_active(tmp_path):
+    now = datetime.now(timezone.utc)
+    spec = Spec(
+        id="implemented", title="Implemented", status="implemented",
+        created_at=now, updated_at=now,
+    )
+    path = SpecStore(tmp_path / "specs").save(spec)
+    messages = MessageStore(tmp_path / ".mothership" / "messages")
+    thread = messages.create_thread("Linked", "content", now)
+    messages.append(thread.id, "agent", "resolved", now)
+    messages.link_spec(thread.id, spec.id)
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    item = items.create("Implemented", "feature", "test-ws", now)
+    items.link_spec(item.id, spec.id, now)
+    path.write_text("not a valid spec")
+
+    summary = TestClient(_app(tmp_path)).get("/threads", params={"inbox": "all"}).json()[0]
+
+    assert summary["work_item_id"] == item.id
+    assert summary["inbox_state"] == "active"
+    assert summary["archive_reason"] is None
+
+
+def test_renamed_locked_spec_alias_keeps_linked_terminal_thread_active(tmp_path):
+    now = datetime.now(timezone.utc)
+    spec = Spec(
+        id="implemented",
+        title="Implemented",
+        status="implemented",
+        created_at=now,
+        updated_at=now,
+    )
+    SpecStore(tmp_path / "specs").save(spec)
+    encrypted_root = tmp_path / "encrypted-source"
+    encrypted_storage = SpecStorage(
+        encrypted_root / "specs",
+        mode="encrypted",
+        workspace_root=encrypted_root,
+    )
+    encrypted_path = SpecStore(
+        encrypted_root / "specs",
+        storage=encrypted_storage,
+    ).save(spec)
+    (tmp_path / "specs" / "legacy.md.enc").write_bytes(encrypted_path.read_bytes())
+
+    messages = MessageStore(tmp_path / ".mothership" / "messages")
+    thread = messages.create_thread("Linked", "content", now)
+    messages.append(thread.id, "agent", "resolved", now)
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    item = items.create("Implemented", "feature", "test-ws", now)
+    items.link_spec(item.id, spec.id, now)
+    items.add_thread(item.id, thread.id, now)
+
+    summary = TestClient(_app(tmp_path)).get("/threads", params={"inbox": "all"}).json()[0]
+
+    assert summary["work_item_id"] == item.id
+    assert summary["inbox_state"] == "active"
+    assert summary["archive_reason"] is None
+
+
+def test_threads_keep_healthy_terminal_link_with_corrupt_work_item(tmp_path):
+    now = datetime.now(timezone.utc)
+    SpecStore(tmp_path / "specs").save(Spec(
+        id="implemented", title="Implemented", status="implemented",
+        created_at=now, updated_at=now,
+    ))
+    messages = MessageStore(tmp_path / ".mothership" / "messages")
+    thread = messages.create_thread("Linked", "content", now)
+    messages.append(thread.id, "agent", "resolved", now)
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    item = items.create("Implemented", "feature", "test-ws", now)
+    items.link_spec(item.id, "implemented", now)
+    items.add_thread(item.id, thread.id, now)
+    (tmp_path / ".mothership" / "workitems" / "corrupt.json").write_text("{")
+
+    response = TestClient(_app(tmp_path)).get("/threads", params={"inbox": "all"})
+
+    assert response.status_code == 200
+    summary = next(summary for summary in response.json() if summary["id"] == thread.id)
+    assert summary["work_item_id"] == item.id
+    assert summary["inbox_state"] == "archived"
+    assert summary["archive_reason"] == "linked_terminal"
+
+
+def test_threads_keep_old_unknown_linkage_active_with_corrupt_work_item(tmp_path):
+    now = datetime.now(timezone.utc)
+    messages = MessageStore(tmp_path / ".mothership" / "messages")
+    thread = messages.create_thread("Old unknown", "content", now.replace(year=now.year - 1))
+    workitems_dir = tmp_path / ".mothership" / "workitems"
+    workitems_dir.mkdir(parents=True)
+    (workitems_dir / "corrupt.json").write_text("{")
+
+    response = TestClient(_app(tmp_path)).get("/threads", params={"inbox": "all"})
+
+    assert response.status_code == 200
+    summary = next(summary for summary in response.json() if summary["id"] == thread.id)
+    assert summary["work_item_id"] is None
+    assert summary["inbox_state"] == "active"
+    assert summary["archive_reason"] is None
+
 def test_threads_explicit_subject(tmp_path):
     client = TestClient(_app(tmp_path))
     t = client.post("/threads", json={"text": "body", "subject": "My subject"}).json()
@@ -969,10 +1171,30 @@ def test_thread_detail_null_work_item_when_unrelated(tmp_path):
 
     client = TestClient(_app(tmp_path))
     tid = client.post("/threads", json={"text": "hi"}).json()["id"]
-
     body = client.get(f"/threads/{tid}").json()
     assert body["work_item_id"] is None
     assert body["work_item"] is None
+
+
+def test_thread_detail_tolerates_an_unrelated_corrupt_spec(tmp_path):
+    _seed_spec(tmp_path)
+    now = datetime(2026, 7, 8, tzinfo=timezone.utc)
+    items = WorkItemStore(tmp_path / ".mothership" / "workitems")
+    wi = items.create(title="Decision queue", kind="feature", workspace="test-ws", now=now)
+    items.link_spec(wi.id, "dq", now=now)
+
+    client = TestClient(_app(tmp_path))
+    tid = client.post("/threads", json={"text": "hi"}).json()["id"]
+    MessageStore(tmp_path / ".mothership" / "messages").link_spec(tid, "dq")
+    (tmp_path / "specs" / "corrupt.md").write_text("{")
+
+    response = client.get(f"/threads/{tid}")
+
+    assert response.status_code == 200
+    assert response.json()["work_item_id"] == wi.id
+    assert response.json()["work_item"] == {
+        "id": wi.id, "title": "Decision queue", "kind": "feature", "phase": "shaping",
+    }
 
 
 def test_thread_detail_resolves_work_item_id_when_archived(tmp_path):

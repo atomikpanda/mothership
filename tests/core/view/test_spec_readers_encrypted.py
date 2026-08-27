@@ -5,11 +5,17 @@ parse error (spec-storage-visibility-policy ac2)."""
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from mship.core import spec_key
 from mship.core.spec import Spec
-from mship.core.spec_storage import SpecStorage
+from mship.core.spec_storage import SpecLocked, SpecStorage
 from mship.core.spec_store import SPECS_DIRNAME, SpecStore
-from mship.core.view.spec_discovery import _find_in_specs_dir
+from mship.core.view.spec_discovery import (
+    _find_in_specs_dir,
+    find_spec,
+    read_spec_source,
+)
 from mship.core.view.spec_selection import scan_canonical_specs
 
 
@@ -47,3 +53,18 @@ def test_find_in_specs_dir_finds_encrypted_by_task_slug(tmp_path: Path):
     _write_encrypted(tmp_path, "enc-three", task_slug="my-task")
     found = _find_in_specs_dir(tmp_path, task_slug="my-task")
     assert found is not None and found.name.endswith(".md.enc")
+
+
+def test_default_discovery_reads_encrypted_specs_and_reports_locked_without_key(
+    tmp_path: Path,
+):
+    _write_encrypted(tmp_path, "enc-default")
+
+    found = find_spec(tmp_path, None)
+
+    assert found.name.endswith(".md.enc")
+    assert "ENCRYPTED-BODY" in read_spec_source(found)
+
+    spec_key.keyfile_path(tmp_path).unlink()
+    with pytest.raises(SpecLocked):
+        read_spec_source(found)

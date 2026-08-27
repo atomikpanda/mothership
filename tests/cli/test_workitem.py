@@ -6,10 +6,12 @@ from types import SimpleNamespace
 from typer.testing import CliRunner
 
 from mship.cli import app, container
+from mship.core import spec_key
 from mship.cli.workitem import _branch_state_for, _probe_ref_names
 from mship.core.run_state import RunStateRepo
 from mship.core.spec import Spec
 from mship.core.spec_store import SpecStore
+from mship.core.spec_storage import SpecStorage
 from mship.core.state import StateManager, Task, WorkspaceState
 
 runner = CliRunner()
@@ -100,6 +102,28 @@ def test_item_run_next_noop_exit_zero_when_empty(tmp_path):
         res = runner.invoke(app, ["--json", "item", "run-next"])
         assert res.exit_code == 0, res.output
         assert json.loads(res.output) == {"runnable": False}
+    finally:
+        _reset()
+
+
+def test_item_run_next_ignores_an_unrelated_locked_spec(tmp_path):
+    _isolate(tmp_path)
+    try:
+        now = datetime(2026, 8, 27, tzinfo=timezone.utc)
+        storage = SpecStorage(tmp_path / "specs", mode="encrypted", workspace_root=tmp_path)
+        SpecStore(tmp_path / "specs", storage=storage).save(Spec(
+            id="locked",
+            title="Locked",
+            status="draft",
+            created_at=now,
+            updated_at=now,
+        ))
+        spec_key.keyfile_path(tmp_path).unlink()
+
+        result = runner.invoke(app, ["--json", "item", "run-next"])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == {"runnable": False}
     finally:
         _reset()
 
@@ -308,6 +332,30 @@ def test_new_then_list_roundtrip(tmp_path):
         container.config_path.reset_override()
         container.state_dir.reset_override()
         container.config.reset()
+
+
+def test_item_list_preserves_healthy_items_when_an_encrypted_spec_is_locked(tmp_path):
+    _isolate(tmp_path)
+    try:
+        created = runner.invoke(app, ["item", "new", "Healthy item", "--kind", "chore"])
+        assert created.exit_code == 0, created.output
+        now = datetime(2026, 8, 27, tzinfo=timezone.utc)
+        storage = SpecStorage(tmp_path / "specs", mode="encrypted", workspace_root=tmp_path)
+        SpecStore(tmp_path / "specs", storage=storage).save(Spec(
+            id="locked",
+            title="Locked",
+            status="draft",
+            created_at=now,
+            updated_at=now,
+        ))
+        spec_key.keyfile_path(tmp_path).unlink()
+
+        result = runner.invoke(app, ["--json", "item", "list"])
+
+        assert result.exit_code == 0, result.output
+        assert [row["title"] for row in json.loads(result.output)] == ["Healthy item"]
+    finally:
+        _reset()
 
 
 def test_new_with_invalid_kind_errors_cleanly(tmp_path):

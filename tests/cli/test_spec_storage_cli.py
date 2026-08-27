@@ -5,6 +5,7 @@ import pytest
 from typer.testing import CliRunner
 
 from mship.cli import app, container
+from mship.core import spec_key
 
 runner = CliRunner()
 
@@ -39,6 +40,14 @@ def test_spec_new_under_encrypted_writes_ciphertext(encrypted_workspace: Path):
     assert list((encrypted_workspace / "specs").glob("*.md")) == []
 
 
+def test_spec_new_reports_the_encrypted_physical_path(encrypted_workspace: Path):
+    res = runner.invoke(app, ["--json", "spec", "new", "--title", "Hidden plan", "--id", "hidden-plan"])
+
+    assert res.exit_code == 0, res.output
+    assert json.loads(res.stdout)["path"].endswith("hidden-plan.md.enc")
+    assert "BACK THIS FILE UP" in res.stderr
+
+
 def test_spec_show_decrypts_with_key(encrypted_workspace: Path):
     runner.invoke(app, ["spec", "new", "--title", "Hidden plan", "--id", "hidden-plan"])
     res = runner.invoke(app, ["--json", "spec", "show", "hidden-plan"])
@@ -67,6 +76,17 @@ def test_spec_validate_under_encrypted(encrypted_workspace: Path):
     # validate found + decoded the ENCRYPTED spec rather than reporting "no spec
     # file" (which is what a raw *.md glob would do against a *.md.enc store).
     assert "No spec file for id" not in res.output
+
+
+def test_spec_show_treats_locked_artifact_as_unavailable(encrypted_workspace: Path):
+    runner.invoke(app, ["spec", "new", "--title", "Hidden plan", "--id", "hidden-plan"])
+    spec_key.keyfile_path(encrypted_workspace).unlink()
+
+    result = runner.invoke(app, ["spec", "show", "hidden-plan"])
+
+    assert result.exit_code != 0
+    assert "SpecLocked" not in result.output
+    assert "no spec" in result.output.lower()
 
 
 def test_spec_validate_reports_malformed_not_nameerror(tmp_path: Path):

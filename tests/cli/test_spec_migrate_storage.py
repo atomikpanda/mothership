@@ -1,10 +1,14 @@
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 from typer.testing import CliRunner
 
 from mship.cli import app, container
+from mship.core.spec_store import SpecStore
+from mship.core.spec_storage import SpecStorage
 
 runner = CliRunner()
 
@@ -59,7 +63,7 @@ def test_migrate_committed_to_local(workspace: Path):
     md = list((workspace / "specs").glob("*.md"))
     assert len(md) == 1 and "Design X" in md[0].read_text()  # still readable locally
     # Untracked + gitignored now.
-    assert "design-x" not in _git(workspace, "ls-files", "specs").stdout
+    assert not any("design-x" in path for path in _git(workspace, "ls-files", "specs").stdout.splitlines())
     check = subprocess.run(
         ["git", "check-ignore", "-q", str(md[0].relative_to(workspace))], cwd=workspace
     )
@@ -75,3 +79,85 @@ def test_migrate_encrypted_back_to_committed(workspace: Path):
     md = list((workspace / "specs").glob("*.md"))
     assert len(md) == 1 and "Design X" in md[0].read_text()
     assert list((workspace / "specs").glob("*.md.enc")) == []  # ciphertext gone
+
+
+def test_migration_holds_spec_lock_until_mutation_can_write_target(
+    workspace: Path, monkeypatch,
+):
+    _set_mode(workspace, "encrypted")
+    store = SpecStore(workspace / "specs")
+    mutation_finished = Event()
+    mutation_started = Event()
+    original_write = SpecStorage.write
+    writer: Thread | None = None
+
+    def mutate() -> None:
+        store.mutate_inbox(
+            "design-x", "archive", "archive-during-migration",
+            datetime(2026, 8, 26, tzinfo=timezone.utc),
+        )
+        mutation_finished.set()
+
+    def interleave_migration(storage, path, text):
+        nonlocal writer
+        if storage.mode == "encrypted" and writer is None:
+            writer = Thread(target=mutate)
+            writer.start()
+            mutation_started.set()
+            assert not mutation_finished.wait(timeout=0.1)
+        return original_write(storage, path, text)
+
+    monkeypatch.setattr(SpecStorage, "write", interleave_migration)
+    res = runner.invoke(app, ["spec", "migrate-storage"])
+    assert res.exit_code == 0, res.output
+    assert mutation_started.is_set()
+    assert writer is not None
+    writer.join(timeout=1)
+    assert mutation_finished.is_set()
+    assert store.find_by_id("design-x").inbox.manual_archived is True
+
+
+def test_migration_preflight_rejects_malformed_artifact_before_writing(workspace: Path):
+    original = next((workspace / "specs").glob("*-design-x.md"))
+    (workspace / "specs" / "z-malformed.md").write_text("not a spec")
+    _set_mode(workspace, "encrypted")
+
+    result = runner.invoke(app, ["spec", "migrate-storage"])
+
+    assert result.exit_code != 0
+    assert "malformed" in result.output.lower()
+    assert list((workspace / "specs").glob("*.md.enc")) == []
+    assert original.is_file()
+
+
+def test_migration_preflight_rejects_later_duplicate_before_any_write(workspace: Path):
+    original = next((workspace / "specs").glob("*-design-x.md"))
+    duplicate_date = datetime.fromisoformat(original.name[:10]) + timedelta(days=1)
+    duplicate = workspace / "specs" / f"{duplicate_date:%Y-%m-%d}-design-x.md"
+    duplicate.write_text(original.read_text())
+    _set_mode(workspace, "encrypted")
+
+    result = runner.invoke(app, ["spec", "migrate-storage"])
+
+    assert result.exit_code != 0
+    assert "multiple physical artifacts" in result.output
+    assert list((workspace / "specs").glob("*.md.enc")) == []
+    assert original.is_file()
+    assert duplicate.is_file()
+
+
+def test_migration_preflight_rejects_canonical_frontmatter_mismatch_before_any_write(
+    workspace: Path,
+):
+    original = next((workspace / "specs").glob("*-design-x.md"))
+    mismatch = workspace / "specs" / "2026-08-26-physical-id.md"
+    mismatch.write_text(original.read_text())
+    _set_mode(workspace, "encrypted")
+
+    result = runner.invoke(app, ["spec", "migrate-storage"])
+
+    assert result.exit_code != 0
+    assert "canonical artifact" in result.output
+    assert list((workspace / "specs").glob("*.md.enc")) == []
+    assert original.is_file()
+    assert mismatch.is_file()

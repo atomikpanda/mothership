@@ -36,7 +36,7 @@ def advance_spec_on_close(
     from mship.core.spec_store import SpecStore
 
     store = SpecStore(specs_dir)
-    spec = store.find_by_id(task.spec_id)
+    spec = store.read_strict(task.spec_id)
     if spec is None or spec.status != "dispatched":
         return
 

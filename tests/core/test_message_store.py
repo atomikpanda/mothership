@@ -53,11 +53,29 @@ def test_get_missing_is_none(tmp_path):
     assert _store(tmp_path).get("missing") is None
 
 
-def test_unsafe_thread_id_rejected(tmp_path):
-    s = _store(tmp_path)
+@pytest.mark.parametrize(
+    "thread_id", ["../escape", "/tmp/escape", "thread/child", r"thread\child"],
+)
+def test_unsafe_thread_id_rejected(tmp_path, thread_id):
     with pytest.raises(ValueError):
-        s._path("../escape")
+        _store(tmp_path)._path(thread_id)
 
+
+
+
+def test_legacy_safe_thread_id_remains_valid(tmp_path):
+    path = _store(tmp_path)._path("legacy%2Fthread id")
+    assert path.name == "legacy%2Fthread id.json"
+
+def test_thread_path_rejects_symlink_escape(tmp_path):
+    store = _store(tmp_path)
+    store._dir.mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}")
+    (store._dir / "victim.json").symlink_to(outside)
+
+    with pytest.raises(ValueError):
+        store._path("victim")
 
 def test_awaiting_reply_is_serialized(tmp_path):
     # @computed_field: awaiting_reply must appear in model_dump()/JSON, not just as a property.
@@ -178,3 +196,107 @@ def test_append_decision_roundtrips(tmp_path):
     assert got.messages[-1].kind == "decision"
     assert got.messages[-1].decision.options == ["a", "b"]
     assert got.needs_decision is True
+
+
+def test_mutate_inbox_duplicate_restore_is_a_noop(tmp_path):
+    now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    thread = store.create_thread("x", "body", now)
+
+    store.mutate_inbox(thread.id, "archive", "archive-1", now)
+    _, applied = store.mutate_inbox(thread.id, "restore", "restore-1", now + timedelta(minutes=1))
+    _, retried = store.mutate_inbox(thread.id, "restore", "restore-1", now + timedelta(minutes=2))
+    assert applied is True
+    assert retried is False
+
+    saved = store.get(thread.id)
+    assert saved.inbox.restored_at == now + timedelta(minutes=1)
+    assert saved.inbox.mutation_ids["restore-1"] == "restore"
+
+def test_mutate_inbox_persists_new_state_equivalent_thread_action(tmp_path):
+    now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    thread = store.create_thread("x", "body", now)
+
+    _, applied = store.mutate_inbox(thread.id, "unpin", "unpin-1", now + timedelta(minutes=1))
+
+    assert applied is False
+    saved = _store(tmp_path).get(thread.id)
+    assert saved.inbox.mutation_ids == {"unpin-1": "unpin"}
+    assert saved.inbox.last_mutated_at is None
+    with pytest.raises(ValueError):
+        _store(tmp_path).mutate_inbox(thread.id, "archive", "unpin-1", now + timedelta(minutes=2))
+
+
+def test_mutate_inbox_commits_thread_actions_in_order(tmp_path):
+    now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    archive_then_restore = store.create_thread("one", "body", now)
+    restore_then_archive = store.create_thread("two", "body", now)
+
+    store.mutate_inbox(archive_then_restore.id, "archive", "archive-1", now)
+    store.mutate_inbox(archive_then_restore.id, "restore", "restore-1", now + timedelta(minutes=1))
+    store.mutate_inbox(restore_then_archive.id, "restore", "restore-2", now)
+    store.mutate_inbox(restore_then_archive.id, "archive", "archive-2", now + timedelta(minutes=1))
+
+    assert store.get(archive_then_restore.id).inbox.manual_archived is False
+    assert store.get(restore_then_archive.id).inbox.manual_archived is True
+
+
+def test_mutate_inbox_pin_unpin_preserves_thread_manual_and_restore_metadata(tmp_path):
+    now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    thread = store.create_thread("x", "body", now)
+
+    store.mutate_inbox(thread.id, "archive", "archive-0", now)
+    store.mutate_inbox(thread.id, "restore", "restore-1", now + timedelta(minutes=1))
+    store.mutate_inbox(thread.id, "archive", "archive-1", now + timedelta(minutes=2))
+    store.mutate_inbox(thread.id, "pin", "pin-1", now + timedelta(minutes=3))
+    store.mutate_inbox(thread.id, "unpin", "unpin-1", now + timedelta(minutes=4))
+
+    inbox = store.get(thread.id).inbox
+    assert inbox.pinned is False
+    assert inbox.manual_archived is True
+    assert inbox.restored_at == now + timedelta(minutes=1)
+
+
+def test_mutate_inbox_does_not_change_thread_domain_content(tmp_path):
+    now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    thread = store.create_thread("subject", "body", now)
+    before = thread.model_dump(exclude={"inbox"})
+
+    store.mutate_inbox(thread.id, "archive", "archive-1", now + timedelta(minutes=1))
+
+    assert store.get(thread.id).model_dump(exclude={"inbox"}) == before
+
+
+@pytest.mark.parametrize("action", ["unknown", ""])
+def test_mutate_inbox_rejects_unknown_thread_action(tmp_path, action):
+    now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    thread = store.create_thread("x", "body", now)
+
+    with pytest.raises(ValueError):
+        store.mutate_inbox(thread.id, action, "action-1", now)
+
+
+def test_mutate_inbox_rejects_conflicting_thread_mutation_identity(tmp_path):
+    now = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    thread = store.create_thread("x", "body", now)
+    store.mutate_inbox(thread.id, "archive", "mutation-1", now)
+
+    with pytest.raises(ValueError):
+        store.mutate_inbox(thread.id, "restore", "mutation-1", now + timedelta(minutes=1))
+
+
+def test_list_sorts_mixed_legacy_naive_and_aware_updated_at_as_utc(tmp_path):
+    store = _store(tmp_path)
+    base = datetime(2026, 6, 23, tzinfo=timezone.utc)
+    older = store.create_thread("older", "x", base)
+    newer = store.create_thread("newer", "x", base + timedelta(minutes=1))
+    newer.updated_at = datetime(2026, 6, 23, 0, 1)
+    store.save(newer)
+
+    assert [thread.id for thread in store.list()] == [newer.id, older.id]

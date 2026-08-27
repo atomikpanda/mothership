@@ -3,7 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
+
+
+from mship.core.inbox import InboxMetadata
 
 
 # MOS-240: collapsed status vocabulary (was 8: captured/drafting/needs_review/
@@ -70,6 +73,7 @@ class Spec(BaseModel):
     work_item_id: str | None = None
     clarification_reason: str | None = None
     prose_verdicts: dict[str, ProseVerdict] = {}
+    inbox: InboxMetadata = Field(default_factory=InboxMetadata)
 
     @model_validator(mode="before")
     @classmethod

@@ -22,6 +22,27 @@ def test_changed_since_filters_newer_and_reports_cursor():
     assert cursor == T0 + timedelta(seconds=5)        # high-water mark
 
 
+
+def test_changed_since_can_include_newer_inbox_mutation_without_reordering_content():
+    thread = _thread("a", T0)
+    thread.inbox.last_mutated_at = T0 + timedelta(seconds=5)
+
+    changed, cursor = changed_since([thread], T0, include_inbox=True)
+
+    assert changed == [thread]
+    assert cursor == T0 + timedelta(seconds=5)
+    assert thread.updated_at == T0
+
+
+def test_changed_since_ignores_inbox_only_change_by_default():
+    thread = _thread("a", T0)
+    thread.inbox.last_mutated_at = T0 + timedelta(seconds=5)
+
+    changed, cursor = changed_since([thread], T0)
+
+    assert changed == []
+    assert cursor == T0
+
 def test_changed_since_empty_when_nothing_newer():
     threads = [_thread("a", T0)]
     changed, cursor = changed_since(threads, T0 + timedelta(seconds=10))
@@ -121,3 +142,13 @@ def test_stamp_agent_seen_swallows_store_errors():
             raise KeyError(tid)   # e.g. thread deleted mid-flight
 
     stamp_agent_seen(BoomStore(), [_thread("h", T0, role="human")], T0)  # must not raise
+
+
+def test_changed_since_treats_naive_legacy_cursor_as_utc():
+    naive_since = datetime(2026, 6, 30, 12, 0, 0)
+    thread = _thread("a", T0 + timedelta(seconds=1))
+
+    changed, cursor = changed_since([thread], naive_since)
+
+    assert changed == [thread]
+    assert cursor == T0 + timedelta(seconds=1)

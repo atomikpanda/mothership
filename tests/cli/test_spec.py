@@ -6,6 +6,9 @@ import pytest
 from typer.testing import CliRunner
 
 from mship.cli import app, container
+from mship.core import spec_key
+from mship.core.spec import Spec
+from mship.core.spec_storage import SpecStorage
 from mship.core.spec_store import SpecStore
 from mship.core.state import StateManager, Task, WorkspaceState
 
@@ -100,6 +103,53 @@ def test_spec_new_refuses_existing(configured_app_with_task: Path):
     assert result.exit_code != 0
     assert "exists" in result.output.lower() or "already" in result.output.lower()
 
+
+
+def test_spec_new_refuses_duplicate_locked_spec(configured_app_with_task: Path):
+    workspace = configured_app_with_task
+    (workspace / "mothership.yaml").write_text(
+        "workspace: test\nrepos: {}\nspec_storage: encrypted\n",
+    )
+    now = datetime.now(timezone.utc)
+    encrypted = SpecStorage(workspace / "specs", mode="encrypted", workspace_root=workspace)
+    SpecStore(workspace / "specs", storage=encrypted).save(Spec(
+        id="locked-spec", title="Locked", status="draft", created_at=now, updated_at=now,
+    ))
+    spec_key.keyfile_path(workspace).unlink()
+    container.config.reset()
+
+    result = runner.invoke(app, ["spec", "new", "--id", "locked-spec", "--title", "Replacement"])
+
+    assert result.exit_code != 0
+    assert "locked" in result.output.lower()
+
+
+def test_spec_new_duplicate_reports_the_existing_encrypted_artifact(
+    configured_app_with_task: Path,
+):
+    workspace = configured_app_with_task
+    (workspace / "mothership.yaml").write_text(
+        "workspace: test\nrepos: {}\nspec_storage: encrypted\n",
+    )
+    created = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    encrypted = SpecStorage(workspace / "specs", mode="encrypted", workspace_root=workspace)
+    existing = SpecStore(workspace / "specs", storage=encrypted).save(Spec(
+        id="existing-spec",
+        title="Existing",
+        status="draft",
+        created_at=created,
+        updated_at=created,
+    ))
+    container.config.reset()
+
+    result = runner.invoke(
+        app,
+        ["spec", "new", "--id", "existing-spec", "--title", "Replacement"],
+    )
+
+    assert result.exit_code != 0
+    assert str(existing) in result.output
+    assert existing.name.endswith(".md.enc")
 
 def test_spec_new_force_overwrites(configured_app_with_task: Path):
     runner.invoke(app, ["spec", "new", "--title", "Add labels"])
@@ -344,6 +394,16 @@ def test_spec_validate_flags_missing_section(configured_app_with_task: Path):
 def test_spec_validate_unknown_id_errors(configured_app_with_task: Path):
     result = runner.invoke(app, ["spec", "validate", "nope"])
     assert result.exit_code != 0
+
+def test_spec_validate_unsafe_id_is_a_controlled_cli_error(
+    configured_app_with_task: Path,
+):
+    result = runner.invoke(app, ["spec", "validate", ".hidden"])
+
+    assert result.exit_code != 0
+    assert "unsafe spec id" in result.output
+    assert result.exception is not None
+    assert result.exception.__class__.__name__ == "SystemExit"
 
 
 def test_spec_apply_rejects_malformed_json(configured_app_with_task: Path, tmp_path):

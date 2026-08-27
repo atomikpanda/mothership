@@ -89,6 +89,15 @@ class TestSpecList:
         data = json.loads(result.output)
         assert data["specs"] == []
 
+    def test_list_preserves_readable_specs_when_one_artifact_is_malformed(self, tmp_path):
+        _make_store(tmp_path)
+        (tmp_path / "specs" / "2026-01-03-broken.md").write_text("not a spec")
+
+        result = CliRunner().invoke(_app(tmp_path), ["spec", "list"])
+
+        assert result.exit_code == 0, result.output
+        assert len(json.loads(result.output)["specs"]) == 2
+
     def test_list_tty_shows_ids_and_statuses(self, tmp_path):
         """TTY output contains spec ids and statuses."""
         _make_store(tmp_path)
@@ -128,6 +137,29 @@ class TestSpecShow:
         runner = CliRunner()
         result = runner.invoke(app, ["spec", "show", "nonexistent"])
         assert result.exit_code != 0
+
+    def test_show_unsafe_id_reports_missing_without_a_traceback(self, tmp_path):
+        (tmp_path / "specs").mkdir()
+
+        result = CliRunner().invoke(_app(tmp_path), ["spec", "show", ".hidden"])
+
+        assert result.exit_code != 0
+        assert "No spec" in result.output
+        assert result.exception is not None
+        assert result.exception.__class__.__name__ == "SystemExit"
+
+    def test_show_duplicate_id_reports_conflict_without_a_traceback(self, tmp_path):
+        _, ids = _make_store(tmp_path, count=1)
+        original = next((tmp_path / "specs").glob(f"*-{ids[0]}.md"))
+        duplicate = original.with_name(f"2030-01-01-{ids[0]}.md")
+        duplicate.write_text(original.read_text())
+
+        result = CliRunner().invoke(_app(tmp_path), ["spec", "show", ids[0]])
+
+        assert result.exit_code != 0
+        assert "multiple physical artifacts" in result.output
+        assert result.exception is not None
+        assert result.exception.__class__.__name__ == "SystemExit"
 
     def test_show_body_included(self, tmp_path):
         """JSON response includes the spec body."""

@@ -42,6 +42,14 @@ def _find_in_specs_dir(workspace_root: Path, *, spec_id=None, task_slug=None):
             return path
     return None
 
+def read_spec_source(path: Path, workspace_root: Path | None = None) -> str:
+    """Read plaintext from a discovered spec path without leaking ciphertext."""
+    from mship.core.spec_storage import SpecStorage
+
+    path = Path(path)
+    root = Path(workspace_root) if workspace_root is not None else path.parent.parent
+    return SpecStorage(path.parent, workspace_root=root).decode_file(path)
+
 
 def blessed_spec_path(workspace_root: Path, slug: str) -> Path:
     return workspace_root / BLESSED_TASK_SPEC_DIR / slug / "SPEC.md"
@@ -137,7 +145,13 @@ def _newest_across(roots: list[Path], task: str | None) -> Path:
     candidates: list[Path] = []
     for root in roots:
         if root.is_dir():
-            candidates.extend(p for p in root.iterdir() if p.is_file() and p.suffix == ".md")
+            candidates.extend(
+                path
+                for path in root.iterdir()
+                if path.is_file() and (
+                    path.name.endswith(".md") or path.name.endswith(".md.enc")
+                )
+            )
     if not candidates:
         where = f"task {task!r}" if task else f"{roots[0] if roots else '?'}"
         raise SpecNotFoundError(f"No specs found in {where}")
@@ -148,7 +162,13 @@ def _available_msg(roots: list[Path]) -> str:
     names: set[str] = set()
     for r in roots:
         if r.is_dir():
-            names.update(p.name for p in r.iterdir() if p.is_file() and p.suffix == ".md")
+            names.update(
+                path.name
+                for path in r.iterdir()
+                if path.is_file() and (
+                    path.name.endswith(".md") or path.name.endswith(".md.enc")
+                )
+            )
     if not names:
         return ""
     shown = sorted(names)[:5]

@@ -81,7 +81,7 @@ def advance_workitem_on_close(
         from mship.core.spec_store import SpecStore
 
         sstore = SpecStore(specs_dir)
-        spec = sstore.find_by_id(item.spec_id)
+        spec = sstore.read_strict(item.spec_id)
         if spec is not None and spec.status in ("approved", "dispatched"):
             now = datetime.now(timezone.utc)
             spec.status = "implemented"

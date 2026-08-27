@@ -10,16 +10,33 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable
 
 
-def changed_since(threads, since: datetime):
-    """Return (changed, cursor): threads whose updated_at is strictly after
-    `since`, and the high-water cursor = max(updated_at across all threads, since)
-    (so the cursor never moves backwards)."""
-    changed = [t for t in threads if t.updated_at > since]
-    cursor = max([since, *(t.updated_at for t in threads)])
+def _utc(dt: datetime) -> datetime:
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
+def _change_at(thread, include_inbox: bool) -> datetime:
+    """Content time, or inbox time when a caller explicitly opts in."""
+    content_at = _utc(thread.updated_at)
+    if not include_inbox:
+        return content_at
+    inbox_mutation = getattr(getattr(thread, "inbox", None), "last_mutated_at", None)
+    return max(content_at, _utc(inbox_mutation) if inbox_mutation else content_at)
+
+
+def changed_since(threads, since: datetime, *, include_inbox: bool = False):
+    """Return changed threads and the monotonic high-water change cursor.
+
+    Agent mailbox waits retain content-only semantics by default. The serve
+    inbox surface opts into durable inbox mutations explicitly.
+    """
+    since = _utc(since)
+    change_times = [(thread, _change_at(thread, include_inbox)) for thread in threads]
+    changed = [thread for thread, change_at in change_times if change_at > since]
+    cursor = max([since, *(change_at for _, change_at in change_times)])
     return changed, cursor
 
 
@@ -65,7 +82,7 @@ def wait_for_change(
 ) -> WaitResult:
     """Block until `load_fn()` yields a thread changed since `since` that also
     satisfies `predicate` (default: any change), or `timeout` seconds elapse.
-    The cursor always advances to the latest seen updated_at, even on timeout."""
+    The cursor always advances to the latest selected change, even on timeout."""
     deadline = now_fn() + timeout
     while True:
         changed, cursor = changed_since(load_fn(), since)

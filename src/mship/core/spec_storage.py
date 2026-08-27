@@ -18,6 +18,7 @@ writer under an encrypted workspace can never accidentally emit plaintext.
 from __future__ import annotations
 
 import re
+from cryptography.fernet import InvalidToken
 import tempfile
 from pathlib import Path
 from typing import Iterator, Literal
@@ -30,7 +31,7 @@ SpecMode = Literal["committed", "local", "encrypted"]
 # Physical encrypted file is `<date>-<id>.md.enc` (the logical stem keeps `.md`).
 ENC_SUFFIX = ".enc"
 
-_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-(?P<id>.+)$")
+_CANONICAL_FILENAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-(?P<id>.+)\.md(?:\.enc)?$")
 
 
 class SpecLocked(Exception):
@@ -41,16 +42,21 @@ class SpecLocked(Exception):
         self.spec_id = spec_id
 
 
+def canonical_spec_id_from_filename(path: Path) -> str | None:
+    """Return a dated artifact's authoritative filename id, if its name is canonical."""
+    match = _CANONICAL_FILENAME_RE.match(Path(path).name)
+    return match.group("id") if match else None
+
+
 def spec_id_from_filename(path: Path) -> str:
-    """`2026-07-22-foo-bar.md[.enc]` -> `foo-bar`. Best-effort: strips the suffix
-    and the leading `YYYY-MM-DD-`, so a locked spec's id is still knowable."""
-    name = path.name
+    """`2026-07-22-foo-bar.md[.enc]` -> `foo-bar`; otherwise return its bare stem."""
+    name = Path(path).name
+    canonical_id = canonical_spec_id_from_filename(path)
+    if canonical_id is not None:
+        return canonical_id
     if name.endswith(ENC_SUFFIX):
         name = name[: -len(ENC_SUFFIX)]
-    if name.endswith(".md"):
-        name = name[: -len(".md")]
-    m = _ID_RE.match(name)
-    return m.group("id") if m else name
+    return name[:-len(".md")] if name.endswith(".md") else name
 
 
 class SpecStorage:
@@ -91,8 +97,25 @@ class SpecStorage:
         self.specs_dir.mkdir(parents=True, exist_ok=True)
         physical = self.physical_path(stem)
         if self.mode == "encrypted":
-            key = spec_key.load_or_generate_key(self.workspace_root, git=self._git)
-            self._atomic_write_bytes(physical, spec_key.encrypt(key, text))
+            try:
+                key = spec_key.load_key(self.workspace_root)
+            except OSError as exc:
+                raise SpecLocked(spec_id_from_filename(physical)) from exc
+            if key is None:
+                locked = next(
+                    (path for path in self.iter_physical() if path.name.endswith(".md.enc")),
+                    None,
+                )
+                if locked is not None:
+                    raise SpecLocked(spec_id_from_filename(locked))
+                key = spec_key.load_or_generate_key(self.workspace_root, git=self._git)
+            try:
+                encrypted = spec_key.encrypt(key, text)
+            except (UnicodeError, ValueError) as exc:
+                from mship.core.spec_store import SpecParseError
+
+                raise SpecParseError("encrypted spec could not be encoded") from exc
+            self._atomic_write_bytes(physical, encrypted)
         else:
             self._atomic_write_text(physical, text)
             if self.mode == "local":
@@ -105,11 +128,24 @@ class SpecStorage:
         with no key — never returns ciphertext or plaintext-fallback."""
         path = Path(path)
         if path.name.endswith(".md" + ENC_SUFFIX):
-            key = spec_key.load_key(self.workspace_root)
+            try:
+                key = spec_key.load_key(self.workspace_root)
+            except OSError as exc:
+                raise SpecLocked(spec_id_from_filename(path)) from exc
             if key is None:
                 raise SpecLocked(spec_id_from_filename(path))
-            return spec_key.decrypt(key, path.read_bytes())
-        return path.read_text()
+            try:
+                return spec_key.decrypt(key, path.read_bytes())
+            except (InvalidToken, OSError, UnicodeError, ValueError) as exc:
+                from mship.core.spec_store import SpecParseError
+
+                raise SpecParseError("encrypted spec could not be decoded") from exc
+        try:
+            return path.read_text()
+        except (OSError, UnicodeError) as exc:
+            from mship.core.spec_store import SpecParseError
+
+            raise SpecParseError("plaintext spec could not be decoded") from exc
 
     def read_all(self) -> Iterator[tuple[object | None, str | None, Path]]:
         """Yield (spec_or_None, locked_id_or_None, path) for every spec file.
@@ -125,12 +161,16 @@ class SpecStorage:
             except SpecLocked as locked:
                 yield (None, locked.spec_id, path)
                 continue
-            except (OSError, UnicodeError):
+            except (OSError, UnicodeError, SpecParseError):
                 continue
             try:
-                yield (parse_spec(text), None, path)
+                spec = parse_spec(text)
             except SpecParseError:
                 continue
+            canonical_id = canonical_spec_id_from_filename(path)
+            if canonical_id is not None and spec.id != canonical_id:
+                continue
+            yield (spec, None, path)
 
     # --- atomic write helpers (mirror SpecStore.save) --------------------
     def _atomic_write_text(self, path: Path, text: str) -> None:
