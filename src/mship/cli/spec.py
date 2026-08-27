@@ -97,6 +97,9 @@ def register(parent: typer.Typer, get_container):
         except SpecParseError as exc:
             output.error(f"Cannot create spec {spec.id!r}: {exc}")
             raise typer.Exit(1)
+        except ValueError as exc:
+            output.error(f"Cannot create spec {spec.id!r}: {exc}")
+            raise typer.Exit(1)
 
         if output.human_mode:
             output.success(f"Created spec: {path}")

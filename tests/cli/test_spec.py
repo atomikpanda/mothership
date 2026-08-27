@@ -158,6 +158,20 @@ def test_spec_new_force_overwrites(configured_app_with_task: Path):
     assert result.exit_code == 0, result.output
 
 
+@pytest.mark.parametrize("args", [[], ["--force"]], ids=["ordinary", "force"])
+def test_spec_new_rejects_nul_id_without_traceback(
+    configured_app_with_task: Path,
+    args: list[str],
+):
+    result = runner.invoke(
+        app,
+        ["spec", "new", "--title", "Unsafe", "--id", "unsafe\x00id", *args],
+    )
+
+    assert result.exit_code != 0
+    assert "unsafe spec id" in result.output.lower()
+    assert "traceback" not in result.output.lower()
+
 def test_spec_new_unknown_task_errors(configured_app_with_task: Path):
     result = runner.invoke(app, ["spec", "new", "--task", "nope"])
     assert result.exit_code != 0

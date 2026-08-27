@@ -106,6 +106,17 @@ def test_unresolvable_ref_is_404_not_403(tmp_path: Path, bad: str):
     assert r.status_code == 404, r.text
 
 
+@pytest.mark.parametrize("path_template", [
+    "/specs/dq%00/evidence/{ref}/blob",
+    "/specs/dq/evidence/{ref}%00/blob",
+])
+def test_url_encoded_nul_in_evidence_path_is_404(tmp_path: Path, path_template: str):
+    _seed_spec(tmp_path)
+    ref = _seed_evidence(tmp_path)
+    r = _client(tmp_path).get(path_template.format(ref=ref), headers=AUTH)
+    assert r.status_code == 404, r.text
+
+
 def test_traversing_spec_id_is_404(tmp_path: Path):
     """Two distinct shapes, both 404 — the second is the one that reaches us.
 
