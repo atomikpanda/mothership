@@ -275,12 +275,18 @@ class SpecStore:
         """Write the configured representation while ``locked(spec.id)`` is held."""
         return self._storage.write(self.path_for(spec), serialize_spec(spec))
 
+    def save_while_locked(
+        self, spec: Spec, artifact: ResolvedSpecArtifact | None,
+    ) -> Path:
+        """Persist while ``locked(spec.id)`` is held, preserving durable inbox data."""
+        if artifact is not None:
+            spec.inbox = artifact.spec.inbox
+        return self._save_unlocked(spec, artifact)
+
     def save(self, spec: Spec) -> Path:
         """Persist lifecycle changes without clobbering durable inbox metadata."""
         with self.locked(spec.id) as artifact:
-            if artifact is not None:
-                spec.inbox = artifact.spec.inbox
-            return self._save_unlocked(spec, artifact)
+            return self.save_while_locked(spec, artifact)
 
     def create_if_absent(self, spec: Spec) -> Path | None:
         """Atomically create a spec and return its actual physical path."""

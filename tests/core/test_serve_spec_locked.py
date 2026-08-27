@@ -174,7 +174,34 @@ def test_serve_review_and_write_paths_report_locked_spec_as_conflict(
     ("method", "path", "body"),
     [
         ("get", "/specs/.hidden/review", None),
+        (
+            "post",
+            "/specs/.hidden/verdict",
+            {"criterion_id": "ac-1", "verdict": "approved"},
+        ),
+        (
+            "post",
+            "/specs/.hidden/prose-verdict",
+            {"section_id": "problem", "verdict": "approved"},
+        ),
+        (
+            "post",
+            "/specs/.hidden/evidence",
+            {"criterion_id": "ac-1", "ref": "test:tests/core/test_serve_spec_locked.py"},
+        ),
+        (
+            "post",
+            "/specs/.hidden/apply",
+            {
+                "draft": {
+                    "problem": "Problem",
+                    "user_story": "User story",
+                    "approach": "Approach",
+                },
+            },
+        ),
         ("post", "/specs/.hidden/questions", {"text": "Why?"}),
+        ("post", "/specs/.hidden/questions/q-1/answer", {"answer": "Because."}),
     ],
 )
 def test_serve_strict_routes_reject_unsafe_spec_ids_without_a_server_error(

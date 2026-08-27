@@ -1,6 +1,7 @@
 """Tests for `mship spec new` (#126, #145)."""
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 from typer.testing import CliRunner
@@ -378,6 +379,20 @@ def test_spec_apply_rejects_invalid_json(configured_app_with_task: Path, tmp_pat
     assert result.exit_code != 0
 
 
+def test_spec_apply_rejects_unsafe_spec_id_without_traceback(
+    configured_app_with_task: Path, tmp_path: Path,
+):
+    draft = tmp_path / "draft.json"
+    draft.write_text(_draft_json())
+
+    result = runner.invoke(
+        app, ["spec", "apply", "../unsafe", "--from-json", str(draft)],
+    )
+
+    assert result.exit_code != 0
+    assert "unsafe spec id" in result.output
+    assert "Traceback" not in result.output
+
 def test_spec_apply_refuses_wrong_status(configured_app_with_task: Path, tmp_path):
     runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
     jf = tmp_path / "draft.json"; jf.write_text(_draft_json())
@@ -556,6 +571,385 @@ def test_spec_apply_discard_review_preserves_unreviewed_criterion_evidence(
         "test-runs/1",
     ]
 
+
+def test_spec_apply_preserves_unchanged_review_state_and_answers(
+    configured_app_with_task: Path, tmp_path: Path,
+):
+    runner.invoke(app, ["spec", "new", "--task", "add-labels"])
+    draft = tmp_path / "draft.json"
+    draft.write_text(_draft_json())
+    assert runner.invoke(
+        app, ["spec", "apply", "add-labels", "--from-json", str(draft)],
+    ).exit_code == 0
+    assert runner.invoke(
+        app, ["spec", "verdict", "add-labels", "ac1", "approved"],
+    ).exit_code == 0
+    assert runner.invoke(
+        app, ["spec", "evidence", "add-labels", "ac1", "test-runs/1"],
+    ).exit_code == 0
+    assert runner.invoke(
+        app, ["spec", "verdict", "add-labels", "problem", "flagged"],
+    ).exit_code == 0
+    assert runner.invoke(
+        app, ["spec", "answer", "add-labels", "q1", "Keep Android support"],
+    ).exit_code == 0
+    store = _store(configured_app_with_task)
+    spec = store.find_by_id("add-labels")
+    assert spec is not None
+    spec.acceptance_criteria[0].comment = "criterion review"
+    spec.prose_verdicts["problem"].comment = "prose review"
+    store.save(spec)
+
+    result = runner.invoke(
+        app,
+        [
+            "spec", "apply", "add-labels", "--from-json", str(draft),
+            "--bypass-status-gate",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "review_state_discarded" not in _json.loads(result.output)
+    persisted = store.find_by_id("add-labels")
+    assert persisted is not None
+    assert persisted.acceptance_criteria[0].verdict == "approved"
+    assert persisted.acceptance_criteria[0].comment == "criterion review"
+    assert [evidence.ref for evidence in persisted.acceptance_criteria[0].evidence] == [
+        "test-runs/1",
+    ]
+    assert persisted.prose_verdicts["problem"].verdict == "flagged"
+    assert persisted.prose_verdicts["problem"].comment == "prose review"
+    assert persisted.open_questions[0].answer == "Keep Android support"
+
+
+def test_spec_apply_refuses_to_discard_an_answered_question(
+    configured_app_with_task: Path, tmp_path: Path,
+):
+    runner.invoke(app, ["spec", "new", "--task", "add-labels"])
+    initial = tmp_path / "initial.json"
+    initial.write_text(_draft_json())
+    assert runner.invoke(
+        app, ["spec", "apply", "add-labels", "--from-json", str(initial)],
+    ).exit_code == 0
+    assert runner.invoke(
+        app, ["spec", "answer", "add-labels", "q1", "Keep Android support"],
+    ).exit_code == 0
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text(_json.dumps({
+        **_json.loads(_draft_json()),
+        "open_questions": ["Should we support iOS?"],
+    }))
+
+    refused = runner.invoke(
+        app,
+        [
+            "spec", "apply", "add-labels", "--from-json", str(replacement),
+            "--bypass-status-gate",
+        ],
+    )
+
+    assert refused.exit_code != 0
+    assert "1 review unit" in refused.output
+    assert "discard-review" in refused.output
+    preserved = _store(configured_app_with_task).find_by_id("add-labels")
+    assert preserved is not None
+    assert preserved.open_questions[0].answer == "Keep Android support"
+
+    discarded = runner.invoke(
+        app,
+        [
+            "spec", "apply", "add-labels", "--from-json", str(replacement),
+            "--bypass-status-gate", "--discard-review",
+        ],
+    )
+
+    assert discarded.exit_code == 0, discarded.output
+    payload = _json.loads(discarded.output)
+    assert payload["discarded_review_count"] == 1
+    assert "Should we support iOS?" not in discarded.output
+    replaced = _store(configured_app_with_task).find_by_id("add-labels")
+    assert replaced is not None
+    assert replaced.open_questions[0].answer is None
+
+
+def test_spec_verdict_does_not_overwrite_an_apply_from_a_stale_snapshot(
+    configured_app_with_task: Path, tmp_path: Path, monkeypatch,
+):
+    runner.invoke(app, ["spec", "new", "--task", "add-labels"])
+    initial = tmp_path / "initial.json"
+    initial.write_text(_draft_json(["old criterion"]))
+    assert runner.invoke(
+        app, ["spec", "apply", "add-labels", "--from-json", str(initial)],
+    ).exit_code == 0
+    assert runner.invoke(
+        app, ["spec", "verdict", "add-labels", "ac1", "approved"],
+    ).exit_code == 0
+    store = _store(configured_app_with_task)
+    stale_spec = store.find_by_id("add-labels")
+    assert stale_spec is not None
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text(_draft_json(["new criterion"]))
+
+    original_save_while_locked = SpecStore.save_while_locked
+    apply_ready_to_persist = Event()
+    allow_apply_to_persist = Event()
+
+    def pause_apply_persistence(self, spec, artifact):
+        if (
+            spec.id == "add-labels"
+            and spec.acceptance_criteria[0].text == "new criterion"
+        ):
+            apply_ready_to_persist.set()
+            assert allow_apply_to_persist.wait(timeout=5)
+        return original_save_while_locked(self, spec, artifact)
+
+    monkeypatch.setattr(SpecStore, "save_while_locked", pause_apply_persistence)
+
+    from typer.main import get_command
+
+    callbacks = get_command(app).commands["spec"].commands
+    apply_callback = callbacks["apply"].callback
+    verdict_callback = callbacks["verdict"].callback
+    assert apply_callback is not None
+    assert verdict_callback is not None
+
+    apply_result = {}
+
+    def apply_draft():
+        try:
+            apply_callback(
+                spec_id="add-labels",
+                from_json=str(replacement),
+                from_file=None,
+                bypass_status_gate=True,
+                discard_review=True,
+            )
+        except BaseException as exc:
+            apply_result["error"] = exc
+
+    apply_thread = Thread(target=apply_draft)
+    apply_thread.start()
+    assert apply_ready_to_persist.wait(timeout=5)
+
+    original_find_by_id = SpecStore.find_by_id
+
+    def stale_find_by_id(self, spec_id):
+        if spec_id == "add-labels":
+            return stale_spec.model_copy(deep=True)
+        return original_find_by_id(self, spec_id)
+
+    monkeypatch.setattr(SpecStore, "find_by_id", stale_find_by_id)
+    verdict_result = {}
+
+    def record_verdict():
+        try:
+            verdict_callback(
+                spec_id="add-labels",
+                criterion_id="ac1",
+                verdict_value="approved",
+            )
+        except BaseException as exc:
+            verdict_result["error"] = exc
+
+    verdict_thread = Thread(target=record_verdict)
+    verdict_thread.start()
+    allow_apply_to_persist.set()
+    apply_thread.join(timeout=5)
+    verdict_thread.join(timeout=5)
+
+    assert not apply_thread.is_alive()
+    assert not verdict_thread.is_alive()
+    assert "error" not in apply_result
+    assert "error" not in verdict_result
+    persisted = original_find_by_id(store, "add-labels")
+    assert persisted is not None
+    assert persisted.acceptance_criteria[0].text == "new criterion"
+    assert persisted.acceptance_criteria[0].verdict == "approved"
+
+
+def test_spec_ask_does_not_overwrite_an_apply_from_a_stale_snapshot(
+    configured_app_with_task: Path, tmp_path: Path, monkeypatch,
+):
+    from threading import current_thread
+    from typer.main import get_command
+
+    runner.invoke(app, ["spec", "new", "--task", "add-labels"])
+    initial = tmp_path / "initial.json"
+    initial.write_text(_draft_json(["old criterion"]))
+    assert runner.invoke(
+        app, ["spec", "apply", "add-labels", "--from-json", str(initial)],
+    ).exit_code == 0
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text(_draft_json(["new criterion"]))
+
+    original_save_while_locked = SpecStore.save_while_locked
+    apply_ready_to_persist = Event()
+    allow_apply_to_persist = Event()
+
+    def pause_apply_persistence(self, spec, artifact):
+        if (
+            spec.id == "add-labels"
+            and spec.acceptance_criteria[0].text == "new criterion"
+        ):
+            apply_ready_to_persist.set()
+            assert allow_apply_to_persist.wait(timeout=5)
+        return original_save_while_locked(self, spec, artifact)
+
+    monkeypatch.setattr(SpecStore, "save_while_locked", pause_apply_persistence)
+
+    callbacks = get_command(app).commands["spec"].commands
+    apply_callback = callbacks["apply"].callback
+    ask_callback = callbacks["ask"].callback
+    assert apply_callback is not None
+    assert ask_callback is not None
+
+    apply_result = {}
+
+    def apply_draft():
+        try:
+            apply_callback(
+                spec_id="add-labels",
+                from_json=str(replacement),
+                from_file=None,
+                bypass_status_gate=True,
+                discard_review=True,
+            )
+        except BaseException as exc:
+            apply_result["error"] = exc
+
+    apply_thread = Thread(target=apply_draft)
+    apply_thread.start()
+    assert apply_ready_to_persist.wait(timeout=5)
+
+    original_locked = SpecStore.locked
+    ask_waiting_for_lock = Event()
+
+    def detect_ask_lock(self, spec_id):
+        if current_thread().name == "ask-writer":
+            ask_waiting_for_lock.set()
+        return original_locked(self, spec_id)
+
+    monkeypatch.setattr(SpecStore, "locked", detect_ask_lock)
+    ask_result = {}
+
+    def ask_question():
+        try:
+            ask_callback(
+                spec_id="add-labels",
+                text="Should we support tablets?",
+            )
+        except BaseException as exc:
+            ask_result["error"] = exc
+
+    ask_thread = Thread(target=ask_question, name="ask-writer")
+    ask_thread.start()
+    assert ask_waiting_for_lock.wait(timeout=5)
+    allow_apply_to_persist.set()
+    apply_thread.join(timeout=5)
+    ask_thread.join(timeout=5)
+
+    assert not apply_thread.is_alive()
+    assert not ask_thread.is_alive()
+    assert "error" not in apply_result
+    assert "error" not in ask_result
+    persisted = _store(configured_app_with_task).find_by_id("add-labels")
+    assert persisted is not None
+    assert persisted.acceptance_criteria[0].text == "new criterion"
+    assert [question.text for question in persisted.open_questions] == [
+        "Android?", "Should we support tablets?",
+    ]
+
+
+def test_spec_answer_does_not_overwrite_an_apply_from_a_stale_snapshot(
+    configured_app_with_task: Path, tmp_path: Path, monkeypatch,
+):
+    from threading import current_thread
+    from typer.main import get_command
+
+    runner.invoke(app, ["spec", "new", "--task", "add-labels"])
+    initial = tmp_path / "initial.json"
+    initial.write_text(_draft_json(["old criterion"]))
+    assert runner.invoke(
+        app, ["spec", "apply", "add-labels", "--from-json", str(initial)],
+    ).exit_code == 0
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text(_draft_json(["new criterion"]))
+
+    original_save_while_locked = SpecStore.save_while_locked
+    apply_ready_to_persist = Event()
+    allow_apply_to_persist = Event()
+
+    def pause_apply_persistence(self, spec, artifact):
+        if (
+            spec.id == "add-labels"
+            and spec.acceptance_criteria[0].text == "new criterion"
+        ):
+            apply_ready_to_persist.set()
+            assert allow_apply_to_persist.wait(timeout=5)
+        return original_save_while_locked(self, spec, artifact)
+
+    monkeypatch.setattr(SpecStore, "save_while_locked", pause_apply_persistence)
+
+    callbacks = get_command(app).commands["spec"].commands
+    apply_callback = callbacks["apply"].callback
+    answer_callback = callbacks["answer"].callback
+    assert apply_callback is not None
+    assert answer_callback is not None
+
+    apply_result = {}
+
+    def apply_draft():
+        try:
+            apply_callback(
+                spec_id="add-labels",
+                from_json=str(replacement),
+                from_file=None,
+                bypass_status_gate=True,
+                discard_review=True,
+            )
+        except BaseException as exc:
+            apply_result["error"] = exc
+
+    apply_thread = Thread(target=apply_draft)
+    apply_thread.start()
+    assert apply_ready_to_persist.wait(timeout=5)
+
+    original_locked = SpecStore.locked
+    answer_waiting_for_lock = Event()
+
+    def detect_answer_lock(self, spec_id):
+        if current_thread().name == "answer-writer":
+            answer_waiting_for_lock.set()
+        return original_locked(self, spec_id)
+
+    monkeypatch.setattr(SpecStore, "locked", detect_answer_lock)
+    answer_result = {}
+
+    def answer_question():
+        try:
+            answer_callback(
+                spec_id="add-labels",
+                q_id="q1",
+                answer_text="yes",
+            )
+        except BaseException as exc:
+            answer_result["error"] = exc
+
+    answer_thread = Thread(target=answer_question, name="answer-writer")
+    answer_thread.start()
+    assert answer_waiting_for_lock.wait(timeout=5)
+    allow_apply_to_persist.set()
+    apply_thread.join(timeout=5)
+    answer_thread.join(timeout=5)
+
+    assert not apply_thread.is_alive()
+    assert not answer_thread.is_alive()
+    assert "error" not in apply_result
+    assert "error" not in answer_result
+    persisted = _store(configured_app_with_task).find_by_id("add-labels")
+    assert persisted is not None
+    assert persisted.acceptance_criteria[0].text == "new criterion"
+    assert persisted.open_questions[0].answer == "yes"
 # --- spec validate (#146) ---
 
 
