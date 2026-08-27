@@ -331,13 +331,32 @@ def test_spec_draft_unknown_id_errors(configured_app_with_task: Path):
 import json as _json
 
 
-def _draft_json() -> str:
+def _draft_json(acceptance_criteria: list[str] | None = None) -> str:
     return _json.dumps({
         "problem": "P", "user_story": "U", "approach": "A",
-        "acceptance_criteria": ["view questions"], "open_questions": ["Android?"],
-        "non_goals": ["chat"], "risks": [], "affected_repos": ["mothership"],
+        "acceptance_criteria": acceptance_criteria or ["view questions"],
+        "open_questions": ["Android?"], "non_goals": ["chat"], "risks": [],
+        "affected_repos": ["mothership"],
     })
 
+
+def _apply_reviewed_spec(workspace: Path, tmp_path: Path) -> Path:
+    runner.invoke(app, ["spec", "new", "--task", "add-labels"])
+    draft = tmp_path / "draft.json"
+    draft.write_text(_draft_json(["view questions", "sync status"]))
+    assert runner.invoke(
+        app, ["spec", "apply", "add-labels", "--from-json", str(draft)],
+    ).exit_code == 0
+    assert runner.invoke(
+        app, ["spec", "verdict", "add-labels", "ac1", "approved"],
+    ).exit_code == 0
+    assert runner.invoke(
+        app, ["spec", "verdict", "add-labels", "ac2", "flagged"],
+    ).exit_code == 0
+    store = _store(workspace)
+    spec = store.find_by_id("add-labels")
+    assert spec is not None
+    return store.path_for(spec)
 
 def test_spec_apply_merges_and_advances_status(configured_app_with_task: Path, tmp_path):
     runner.invoke(app, ["spec", "new", "--title", "Decision queue", "--id", "dq"])
@@ -368,6 +387,174 @@ def test_spec_apply_refuses_wrong_status(configured_app_with_task: Path, tmp_pat
     forced = runner.invoke(app, ["spec", "apply", "dq", "--from-json", str(jf), "--bypass-status-gate"])
     assert forced.exit_code == 0, forced.output
 
+
+def test_spec_apply_refuses_reviewed_spec_without_discarding_review(
+    configured_app_with_task: Path, tmp_path: Path,
+):
+    artifact = _apply_reviewed_spec(configured_app_with_task, tmp_path)
+    before = artifact.read_bytes()
+    activity_before = StateManager(
+        configured_app_with_task / ".mothership",
+    ).load().tasks["add-labels"].last_activity_at
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text(_draft_json(["new criterion"]))
+
+    ordinary = runner.invoke(
+        app, ["spec", "apply", "add-labels", "--from-json", str(replacement)],
+    )
+    assert ordinary.exit_code != 0
+    assert "2 review units" in ordinary.output
+    assert "discard-review" in ordinary.output
+    assert artifact.read_bytes() == before
+    assert StateManager(
+        configured_app_with_task / ".mothership",
+    ).load().tasks["add-labels"].last_activity_at == activity_before
+
+    bypassed = runner.invoke(
+        app,
+        [
+            "spec", "apply", "add-labels", "--from-json", str(replacement),
+            "--bypass-status-gate",
+        ],
+    )
+    assert bypassed.exit_code != 0
+    assert "2 review units" in bypassed.output
+    assert "discard-review" in bypassed.output
+    assert artifact.read_bytes() == before
+    assert StateManager(
+        configured_app_with_task / ".mothership",
+    ).load().tasks["add-labels"].last_activity_at == activity_before
+
+
+def test_spec_apply_refuses_reviewed_prose_without_discarding_review(
+    configured_app_with_task: Path, tmp_path: Path,
+):
+    runner.invoke(app, ["spec", "new", "--task", "add-labels"])
+    initial = tmp_path / "initial.json"
+    initial.write_text(_draft_json())
+    assert runner.invoke(
+        app, ["spec", "apply", "add-labels", "--from-json", str(initial)],
+    ).exit_code == 0
+    assert runner.invoke(
+        app, ["spec", "verdict", "add-labels", "problem", "approved"],
+    ).exit_code == 0
+    store = _store(configured_app_with_task)
+    spec = store.find_by_id("add-labels")
+    assert spec is not None
+    assert [criterion.verdict for criterion in spec.acceptance_criteria] == ["unreviewed"]
+    artifact = store.path_for(spec)
+    before = artifact.read_bytes()
+    activity_before = StateManager(
+        configured_app_with_task / ".mothership",
+    ).load().tasks["add-labels"].last_activity_at
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text(_json.dumps({
+        **_json.loads(_draft_json()),
+        "problem": "Replacement problem",
+    }))
+
+    ordinary = runner.invoke(
+        app, ["spec", "apply", "add-labels", "--from-json", str(replacement)],
+    )
+    assert ordinary.exit_code != 0
+    assert "1 review unit" in ordinary.output
+    assert "discard-review" in ordinary.output
+    assert artifact.read_bytes() == before
+    assert StateManager(
+        configured_app_with_task / ".mothership",
+    ).load().tasks["add-labels"].last_activity_at == activity_before
+
+    bypassed = runner.invoke(
+        app,
+        [
+            "spec", "apply", "add-labels", "--from-json", str(replacement),
+            "--bypass-status-gate",
+        ],
+    )
+    assert bypassed.exit_code != 0
+    assert "1 review unit" in bypassed.output
+    assert "discard-review" in bypassed.output
+    assert artifact.read_bytes() == before
+    assert StateManager(
+        configured_app_with_task / ".mothership",
+    ).load().tasks["add-labels"].last_activity_at == activity_before
+
+    discarded = runner.invoke(
+        app,
+        [
+            "spec", "apply", "add-labels", "--from-json", str(replacement),
+            "--bypass-status-gate", "--discard-review",
+        ],
+    )
+    assert discarded.exit_code == 0, discarded.output
+    payload = _json.loads(discarded.output)
+    assert payload["discarded_review_count"] == 1
+    assert "Replacement problem" not in discarded.output
+    spec = store.find_by_id("add-labels")
+    assert spec is not None
+    assert spec.prose_verdicts == {}
+
+
+def test_spec_apply_discard_review_resets_replaced_json_criteria(
+    configured_app_with_task: Path, tmp_path: Path,
+):
+    _apply_reviewed_spec(configured_app_with_task, tmp_path)
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text(_draft_json(["new criterion"]))
+
+    result = runner.invoke(
+        app,
+        [
+            "spec", "apply", "add-labels", "--from-json", str(replacement),
+            "--bypass-status-gate", "--discard-review",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _json.loads(result.output)
+    assert payload["review_state_discarded"] is True
+    assert payload["discarded_review_count"] == 2
+    assert "new criterion" not in result.output
+    spec = _store(configured_app_with_task).find_by_id("add-labels")
+    assert [c.verdict for c in spec.acceptance_criteria] == ["unreviewed"]
+
+
+def test_spec_apply_discard_review_preserves_unreviewed_criterion_evidence(
+    configured_app_with_task: Path, tmp_path: Path,
+):
+    runner.invoke(app, ["spec", "new", "--task", "add-labels"])
+    initial = tmp_path / "initial.json"
+    initial.write_text(_draft_json(["replace criterion", "keep criterion"]))
+    assert runner.invoke(
+        app, ["spec", "apply", "add-labels", "--from-json", str(initial)],
+    ).exit_code == 0
+    assert runner.invoke(
+        app, ["spec", "verdict", "add-labels", "ac1", "approved"],
+    ).exit_code == 0
+    assert runner.invoke(
+        app, ["spec", "evidence", "add-labels", "ac2", "test-runs/1"],
+    ).exit_code == 0
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text(_draft_json(["replacement criterion", "keep criterion"]))
+
+    result = runner.invoke(
+        app,
+        [
+            "spec", "apply", "add-labels", "--from-json", str(replacement),
+            "--bypass-status-gate", "--discard-review",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _json.loads(result.output)
+    assert payload["discarded_review_count"] == 1
+    spec = _store(configured_app_with_task).find_by_id("add-labels")
+    assert [criterion.verdict for criterion in spec.acceptance_criteria] == [
+        "unreviewed", "unreviewed",
+    ]
+    assert [evidence.ref for evidence in spec.acceptance_criteria[1].evidence] == [
+        "test-runs/1",
+    ]
 
 # --- spec validate (#146) ---
 
@@ -1050,6 +1237,32 @@ def test_spec_apply_stamps_bound_task_activity(configured_app_with_task: Path, t
 
 
 # --- spec apply --from-file (#298 item 1) ---
+
+
+def test_spec_apply_discard_review_reports_human_markdown_result(
+    configured_app_with_task: Path, tmp_path: Path, monkeypatch,
+):
+    from mship.cli.output import Output
+
+    monkeypatch.setattr(Output, "is_tty", property(lambda self: True))
+    _apply_reviewed_spec(configured_app_with_task, tmp_path)
+    replacement = tmp_path / "replacement.md"
+    replacement.write_text(_draft_md())
+
+    result = runner.invoke(
+        app,
+        [
+            "spec", "apply", "add-labels", "--from-file", str(replacement),
+            "--bypass-status-gate", "--discard-review",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "review state was discarded for 1 review unit" in result.output.lower()
+    assert "view questions" not in result.output
+    assert "sync status" not in result.output
+    spec = _store(configured_app_with_task).find_by_id("add-labels")
+    assert [c.verdict for c in spec.acceptance_criteria] == ["approved"]
 
 
 def _draft_md() -> str:

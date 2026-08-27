@@ -152,6 +152,11 @@ def register(parent: typer.Typer, get_container):
         from_json: Optional[str] = typer.Option(None, "--from-json", help="Path to the draft JSON, or - for stdin."),
         from_file: Optional[str] = typer.Option(None, "--from-file", help="Path to a rendered spec markdown file, or - for stdin."),
         bypass_status_gate: bool = typer.Option(False, "--bypass-status-gate", help="Apply regardless of current status."),
+        discard_review: bool = typer.Option(
+            False,
+            "--discard-review",
+            help="Discard reviewed verdict state that applying would replace.",
+        ),
     ):
         """Ingest a drafted spec, render the body, set fields, advance to needs_review.
 
@@ -210,12 +215,45 @@ def register(parent: typer.Typer, get_container):
             output.error(f"No spec with id {spec_id!r}.")
             raise typer.Exit(1)
 
+        reviewed_unit_count = sum(
+            criterion.verdict != "unreviewed"
+            for criterion in spec.acceptance_criteria
+        ) + sum(
+            verdict.verdict != "unreviewed"
+            for verdict in spec.prose_verdicts.values()
+        )
+        if reviewed_unit_count:
+            planned_spec = spec.model_copy(deep=True)
+            apply_draft(planned_spec, draft)
+            discarded_review_count = reviewed_unit_count - (
+                sum(
+                    criterion.verdict != "unreviewed"
+                    for criterion in planned_spec.acceptance_criteria
+                ) + sum(
+                    verdict.verdict != "unreviewed"
+                    for verdict in planned_spec.prose_verdicts.values()
+                )
+            )
+        else:
+            discarded_review_count = 0
+        if discarded_review_count and not discard_review:
+            unit_noun = "unit" if discarded_review_count == 1 else "units"
+            output.error(
+                f"Cannot apply draft: review state for {discarded_review_count} review "
+                f"{unit_noun} would be discarded. "
+                "Re-run with --discard-review to continue."
+            )
+            raise typer.Exit(1)
+
         if not bypass_status_gate:
             try:
                 validate_transition(spec.status, "needs_review")
             except InvalidTransition as e:
                 output.error(f"{e}. Use --bypass-status-gate to override.")
                 raise typer.Exit(1)
+
+        # `apply_draft` drops verdicts whose source units changed while preserving
+        # evidence and review state on unchanged acceptance criteria.
 
         # MOS-215/MOS-240: applying a (re)drafted spec supersedes any pending
         # request-changes, so clear the reason — a freshly applied draft carries
@@ -232,9 +270,20 @@ def register(parent: typer.Typer, get_container):
             container.state_manager().record_activity(spec.task_slug)
 
         if output.human_mode:
-            output.success(f"Applied draft → {spec.status}: {path}")
+            if discarded_review_count:
+                unit_noun = "unit" if discarded_review_count == 1 else "units"
+                output.success(
+                    f"Applied draft → {spec.status}; review state was discarded for "
+                    f"{discarded_review_count} review {unit_noun}: {path}"
+                )
+            else:
+                output.success(f"Applied draft → {spec.status}: {path}")
         else:
-            output.json({"id": spec.id, "status": spec.status, "path": str(path)})
+            payload = {"id": spec.id, "status": spec.status, "path": str(path)}
+            if discarded_review_count:
+                payload["review_state_discarded"] = True
+                payload["discarded_review_count"] = discarded_review_count
+            output.json(payload)
 
     @spec_app.command("review")
     def review(
