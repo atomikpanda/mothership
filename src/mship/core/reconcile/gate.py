@@ -249,12 +249,14 @@ def reconcile_now(
         if current_payload is not None
         else None
     )
+    required_slugs = (
+        state.tasks.keys()
+        if reconciliation_slugs is None
+        else reconciliation_slugs
+    )
     cache_complete = (
-        reconciliation_slugs is None
-        or (
-            cached_decisions is not None
-            and reconciliation_slugs <= cached_decisions.keys()
-        )
+        cached_decisions is not None
+        and required_slugs <= cached_decisions.keys()
     )
     if (
         current_payload is not None

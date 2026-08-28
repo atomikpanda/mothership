@@ -34,6 +34,54 @@ def test_reconcile_now_uses_fresh_cache(tmp_path: Path):
     assert decisions["a"].state == UpstreamState.merged
 
 
+def test_reconcile_now_refetches_when_fresh_full_cache_entry_is_missing(
+    tmp_path: Path,
+):
+    cache = ReconcileCache(tmp_path)
+    cache.write(CachePayload(
+        fetched_at=time.time(), ttl_seconds=300,
+        results={"a": {"state": "merged"}},
+        ignored=[],
+        base_context={"a": ["main"], "b": ["main"]},
+    ))
+    state = WorkspaceState(tasks={"a": _task("a"), "b": _task("b")})
+    calls: list[list[str]] = []
+
+    def bad_fetcher(branches, _):
+        calls.append(list(branches))
+        from mship.core.reconcile.fetch import FetchError
+        raise FetchError("offline")
+
+    decisions = reconcile_now(state, cache=cache, fetcher=bad_fetcher)
+
+    assert calls == [["feat/a", "feat/b"]]
+    assert decisions == {}
+
+
+def test_reconcile_now_refetches_when_fresh_full_cache_entry_is_malformed(
+    tmp_path: Path,
+):
+    cache = ReconcileCache(tmp_path)
+    cache.write(CachePayload(
+        fetched_at=time.time(), ttl_seconds=300,
+        results={"a": {"state": "merged"}, "b": []},
+        ignored=[],
+        base_context={"a": ["main"], "b": ["main"]},
+    ))
+    state = WorkspaceState(tasks={"a": _task("a"), "b": _task("b")})
+    calls: list[list[str]] = []
+
+    def bad_fetcher(branches, _):
+        calls.append(list(branches))
+        from mship.core.reconcile.fetch import FetchError
+        raise FetchError("offline")
+
+    decisions = reconcile_now(state, cache=cache, fetcher=bad_fetcher)
+
+    assert calls == [["feat/a", "feat/b"]]
+    assert decisions == {}
+
+
 def test_reconcile_now_applies_dependency_stale_from_fresh_cache(tmp_path: Path):
     # #104 regression: dependency_stale is derived from LIVE task state (depends_on edges + the
     # upstream's merge state), so it must apply on the cache-hit path too — not only the fresh fetch.
