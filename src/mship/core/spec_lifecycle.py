@@ -36,10 +36,10 @@ def advance_spec_on_close(
     from mship.core.spec_store import SpecStore
 
     store = SpecStore(specs_dir)
-    spec = store.read_strict(task.spec_id)
-    if spec is None or spec.status != "dispatched":
-        return
-
-    spec.status = "implemented"
-    spec.updated_at = datetime.now(timezone.utc)
-    store.save(spec)
+    with store.locked(task.spec_id) as artifact:
+        if artifact is None or artifact.spec.status != "dispatched":
+            return
+        spec = artifact.spec
+        spec.status = "implemented"
+        spec.updated_at = datetime.now(timezone.utc)
+        store.save_while_locked(spec, artifact)

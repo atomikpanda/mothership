@@ -1731,16 +1731,20 @@ def register(app: typer.Typer, get_container):
                 _al_commits.extend(
                     commits_since_base(shell, _al_path, _al_base, task.branch)
                 )
-            _al_links = compute_evidence_links(
-                bound_spec, _al_commits, passing_test_run_refs(task),
-            )
-            if _al_links:
-                for _al_link in _al_links:
-                    set_criterion_evidence(
-                        bound_spec, _al_link.criterion_id, _al_link.kind, _al_link.ref,
+            _al_store = SpecStore(workspace_root / SPECS_DIRNAME)
+            with _al_store.locked(bound_spec.id) as _al_artifact:
+                if _al_artifact is not None:
+                    bound_spec = _al_artifact.spec
+                    _al_links = compute_evidence_links(
+                        bound_spec, _al_commits, passing_test_run_refs(task),
                     )
-                bound_spec.updated_at = _dt_al.now(_tz_al.utc)
-                SpecStore(workspace_root / SPECS_DIRNAME).save(bound_spec)
+                    if _al_links:
+                        for _al_link in _al_links:
+                            set_criterion_evidence(
+                                bound_spec, _al_link.criterion_id, _al_link.kind, _al_link.ref,
+                            )
+                        bound_spec.updated_at = _dt_al.now(_tz_al.utc)
+                        _al_store.save_while_locked(bound_spec, _al_artifact)
 
         # The acceptance-criteria PR-body section is rendered PER REPO, because
         # under `published` evidence storage rendering it also publishes the

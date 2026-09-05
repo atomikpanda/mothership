@@ -2,9 +2,9 @@
 (core/serve.py), the CLI (cli/spec.py), and the views (core/view/actions.py).
 
 Extracted so the terminal and the phone cannot diverge: every writer performs the
-identical guard (approval_blockers + validate_transition) and the identical atomic
-store write (SpecStore.save = tempfile + os.replace). Callers own only their own
-concerns (HTTP status mapping, CLI output, journal appends, view messaging)."""
+identical guard and reloads, mutates, and persists under the same per-spec lock
+as draft apply. Callers own only their own concerns (HTTP status mapping, CLI
+output, and view messaging)."""
 from __future__ import annotations
 
 import json
@@ -32,17 +32,22 @@ class ApprovalBlocked(Exception):
         self.blockers = list(blockers)
 
 
-def approve_spec(spec: Spec, store: SpecStore, *, bypass_gate: bool = False) -> None:
-    """needs_review -> approved. Raises ApprovalBlocked (gate) or InvalidTransition."""
-    if not bypass_gate:
-        blockers = approval_blockers(spec)
-        if blockers:
-            raise ApprovalBlocked(blockers)
-    validate_transition(spec.status, "approved")
-    spec.status = "approved"
-    spec.clarification_reason = None
-    spec.updated_at = datetime.now(timezone.utc)
-    store.save(spec)
+def approve_spec(spec: Spec, store: SpecStore, *, bypass_gate: bool = False) -> Spec:
+    """Approve the current revision under the same lock as draft apply."""
+    with store.locked(spec.id) as artifact:
+        if artifact is None:
+            raise ValueError(f"No spec with id {spec.id!r}.")
+        current = artifact.spec
+        if not bypass_gate:
+            blockers = approval_blockers(current)
+            if blockers:
+                raise ApprovalBlocked(blockers)
+        validate_transition(current.status, "approved")
+        current.status = "approved"
+        current.clarification_reason = None
+        current.updated_at = datetime.now(timezone.utc)
+        store.save_while_locked(current, artifact)
+        return current
 
 
 def record_rejection(
@@ -83,26 +88,25 @@ def request_changes_spec(
     log_manager: LogManager | None,
     actor: str,
     now: datetime | None = None,
-) -> None:
-    """needs_review/approved -> draft carrying `reason`. Raises InvalidTransition.
+) -> Spec:
+    """Return the current spec to draft under the same lock as draft apply.
 
-    Writes the durable rejection record itself (record_rejection), in this
-    order: reject empty/whitespace reason -> validate_transition -> durable
-    record -> status flip -> save. Folding the record into the shared
-    transition (rather than leaving it to each caller) is the class fix for
-    #458 P1: the CLI, serve, and the TUI views (core/view/actions.py) all
-    call this one function, so none of them can transition a spec without
-    also logging why — the earlier per-caller convention let the view path
-    (`mship view queue/spec/workitem`) silently skip it.
+    The durable rejection record is appended before the in-lock status write, so
+    an append failure leaves the persisted spec unchanged.
     """
     if not reason or not reason.strip():
         raise ValueError("reason must not be empty")
-    validate_transition(spec.status, "draft")
     if now is None:
         now = datetime.now(timezone.utc)
-    if log_manager is not None:
-        record_rejection(log_manager, spec.id, actor, reason, now)
-    spec.status = "draft"
-    spec.clarification_reason = reason
-    spec.updated_at = now
-    store.save(spec)
+    with store.locked(spec.id) as artifact:
+        if artifact is None:
+            raise ValueError(f"No spec with id {spec.id!r}.")
+        current = artifact.spec
+        validate_transition(current.status, "draft")
+        if log_manager is not None:
+            record_rejection(log_manager, current.id, actor, reason, now)
+        current.status = "draft"
+        current.clarification_reason = reason
+        current.updated_at = now
+        store.save_while_locked(current, artifact)
+        return current
