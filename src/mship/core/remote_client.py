@@ -282,7 +282,11 @@ def exec_remote(
     url = f"{conn.url}/exec/{verb}"
 
     try:
-        with httpx.Client(transport=transport) as client:
+        # Builds and live apps may be silent indefinitely; silence is not a
+        # disconnected host. Keep connection/write/pool timeouts bounded.
+        with httpx.Client(
+            transport=transport, timeout=httpx.Timeout(5.0, read=None),
+        ) as client:
             with client.stream("POST", url, headers=headers, json=body) as resp:
                 if resp.status_code >= 400:
                     resp.read()

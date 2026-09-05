@@ -23,8 +23,11 @@ from __future__ import annotations
 import io
 import json
 import tarfile
+import time
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from threading import Thread
 from unittest.mock import MagicMock
 
 import httpx
@@ -255,6 +258,45 @@ def test_exec_remote_503_surfaces_not_bootstrapped_message():
         )
     msg = str(exc_info.value)
     assert "not bootstrapped" in msg
+
+
+def test_exec_remote_survives_quiet_build_then_returns_remote_result():
+    """A real socket must survive more than HTTPX's default five idle seconds."""
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.send_header(NONCE_HEADER, NONCE)
+            self.end_headers()
+            self.wfile.write(b"building\n")
+            self.wfile.flush()
+            time.sleep(6)
+            try:
+                self.wfile.write(_frame(["build failed\n"], exit_code=7))
+                self.wfile.flush()
+            except BrokenPipeError:
+                # The unfixed client disconnects before the build finishes.
+                pass
+
+        def log_message(self, *_args):
+            pass
+
+    with HTTPServer(("127.0.0.1", 0), Handler) as server:
+        worker = Thread(target=server.handle_request, daemon=True)
+        worker.start()
+        printed = []
+        try:
+            code = remote_client.exec_remote(
+                verb="run",
+                conn=RunHostConnection(
+                    url=f"http://127.0.0.1:{server.server_port}", token="test",
+                ),
+                task="quiet-build", repos=["app"], print_fn=printed.append,
+            )
+        finally:
+            worker.join(timeout=10)
+    assert code == 7
+    assert printed == ["building", "build failed"]
 
 
 def test_exec_remote_stream_without_exit_sentinel_raises():
