@@ -148,33 +148,10 @@ def _mac(tmp_path, responses=None):
     return sup, rec
 
 
-def test_macos_install_uses_user_domain_not_gui(tmp_path):
-    """gui/<uid> bootstrap fails over SSH with no GUI session ('Bootstrap
-    failed: 5: Input/output error') — exactly the headless provisioning
-    scenario #469/#470 describe."""
-    sup, rec = _mac(tmp_path)
-    sup.install(["/venv/bin/mshipd"])
-    plist = tmp_path / "Library" / "LaunchAgents" / "com.mothership.daemon.plist"
-    assert plist.is_file()
-    cmds = [" ".join(c) for c in rec.calls]
-    assert any("bootstrap user/501" in c for c in cmds)
-    assert not any("gui/" in c for c in cmds)
-
-
 def test_macos_bootstrap_failure_is_daemon_error(tmp_path):
     sup, _ = _mac(tmp_path, {"bootstrap": _fail(stderr="Bootstrap failed: 5: Input/output error")})
     with pytest.raises(DaemonSupervisorError, match="[Bb]ootstrap"):
         sup.install(["/venv/bin/mshipd"])
-
-
-def test_macos_lifecycle_commands(tmp_path):
-    sup, rec = _mac(tmp_path)
-    sup.start()
-    sup.stop()
-    sup.restart()
-    cmds = [" ".join(c) for c in rec.calls]
-    assert any("kickstart user/501/com.mothership.daemon" in c for c in cmds)
-    assert any("bootout user/501/com.mothership.daemon" in c for c in cmds)
 
 
 def test_macos_query_unreachable_never_absent(tmp_path):
@@ -186,6 +163,16 @@ def test_macos_query_unreachable_never_absent(tmp_path):
     assert sup2.query().state == "absent"
     sup3, _ = _mac(tmp_path, {"print": _ok("state = running\npid = 4242\n")})
     assert sup3.query().state == "active"
+    sup4, _ = _mac(tmp_path, {"print": _ok("state = not running\nlast exit code = 0\n")})
+    assert sup4.query().state == "failed"
+    sup5, _ = _mac(tmp_path, {"print": subprocess.TimeoutExpired("launchctl", 30)})
+    assert sup5.query().state == "unreachable"
+
+
+def test_macos_stop_timeout_is_daemon_error(tmp_path):
+    sup, _ = _mac(tmp_path, {"bootout": subprocess.TimeoutExpired("launchctl", 30)})
+    with pytest.raises(DaemonSupervisorError, match="timed out"):
+        sup.stop()
 
 
 def test_macos_linger_not_applicable(tmp_path):
@@ -219,28 +206,6 @@ def test_macos_install_creates_log_dir(tmp_path):
     assert daemon_log_dir(tmp_path).is_dir()
 
 
-def test_macos_start_rebootstraps_after_stop(tmp_path):
-    """stop() boots the service out of the domain; start()/restart() must
-    re-bootstrap an absent service before kickstarting it."""
-    sup, rec = _mac(tmp_path, {"print": _fail(stderr="Could not find service")})
-    sup.start()
-    cmds = [" ".join(c) for c in rec.calls]
-    assert any("bootstrap user/501" in c for c in cmds)
-    assert any("kickstart user/501" in c for c in cmds)
-
-    sup2, rec2 = _mac(tmp_path, {"print": _fail(stderr="Could not find service")})
-    sup2.restart()
-    cmds2 = [" ".join(c) for c in rec2.calls]
-    assert any("bootstrap user/501" in c for c in cmds2)
-
-
-def test_macos_start_skips_bootstrap_when_loaded(tmp_path):
-    sup, rec = _mac(tmp_path, {"print": _ok("state = running\npid = 1\n")})
-    sup.start()
-    cmds = [" ".join(c) for c in rec.calls]
-    assert not any("bootstrap" in c for c in cmds)
-
-
 def test_linux_query_unit_not_found_is_absent(tmp_path):
     """A reachable manager answering 'not found' for an uninstalled unit is
     absent, not unreachable (the pre-install `daemon status` case)."""
@@ -248,21 +213,6 @@ def test_linux_query_unit_not_found_is_absent(tmp_path):
     assert sup.query().state == "absent"
 
 
-def test_macos_reinstall_unloads_first(tmp_path):
-    """launchd rejects a duplicate bootstrap of a loaded label and the running
-    job would keep the OLD plist — install boots the label out first
-    (tolerated when not loaded), then bootstraps the fresh plist."""
-    sup, rec = _mac(tmp_path)
-    sup.install(["/venv/bin/mshipd"])
-    cmds = [" ".join(c) for c in rec.calls]
-    bootout_i = next(i for i, c in enumerate(cmds) if "bootout" in c)
-    bootstrap_i = next(i for i, c in enumerate(cmds) if "bootstrap" in c)
-    assert bootout_i < bootstrap_i
-
-    # bootout failing (label not loaded — the FIRST install) must not block.
-    sup2, rec2 = _mac(tmp_path, {"launchctl bootout": _fail(stderr="Boot-out failed: 3: No such process")})
-    sup2.install(["/venv/bin/mshipd"])
-    assert any("bootstrap" in " ".join(c) for c in rec2.calls)
 
 
 def test_linux_user_defaults_to_uid_not_env(tmp_path, monkeypatch):

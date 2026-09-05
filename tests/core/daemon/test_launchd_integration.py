@@ -1,4 +1,5 @@
 """Real macOS launchd lifecycle, isolated from the operator's daemon and home."""
+
 import os
 import subprocess
 import sys
@@ -14,7 +15,9 @@ from mship.core.daemon import units as units_mod
 from mship.core.daemon.control import probe_control_socket
 from mship.core.daemon.paths import daemon_socket_path
 
-pytestmark = pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS launchd")
+pytestmark = pytest.mark.skipif(
+    sys.platform != "darwin", reason="requires macOS launchd"
+)
 
 
 def _wait_for(condition, supervisor):
@@ -24,8 +27,10 @@ def _wait_for(condition, supervisor):
         if result:
             return result
         time.sleep(0.1)
-    pytest.fail(f"launchd condition timed out: {supervisor.query()}\n"
-                + "\n".join(supervisor.logs_tail(30)))
+    pytest.fail(
+        f"launchd condition timed out: {supervisor.query()}\n"
+        + "\n".join(supervisor.logs_tail(30))
+    )
 
 
 @pytest.fixture
@@ -39,17 +44,28 @@ def launchd_daemon(monkeypatch):
         env = {"HOME": str(home), "XDG_RUNTIME_DIR": str(home / "runtime")}
         socket = daemon_socket_path(env, home)
         supervisor = supervisor_mod.LaunchdSupervisor(home=home)
-        assert supervisor.available(), "macOS CI must provide a reachable user launchd domain"
+        assert supervisor.available(), (
+            "macOS CI must provide a reachable user launchd domain"
+        )
         argv = [
-            "/usr/bin/env", "-i", f"HOME={home}",
-            f"XDG_RUNTIME_DIR={env['XDG_RUNTIME_DIR']}", "PATH=/usr/bin:/bin",
-            sys.executable, "-m", "mship.core.daemon",
+            "/usr/bin/env",
+            "-i",
+            f"HOME={home}",
+            f"XDG_RUNTIME_DIR={env['XDG_RUNTIME_DIR']}",
+            "PATH=/usr/bin:/bin",
+            sys.executable,
+            "-m",
+            "mship.core.daemon",
         ]
         target = f"user/{os.getuid()}/{label}"
         try:
             yield supervisor, socket, argv, target
         finally:
-            subprocess.run(["launchctl", "bootout", target], capture_output=True, timeout=15)
+            subprocess.run(
+                ["launchctl", "bootout", "--wait", target],
+                capture_output=True,
+                timeout=15,
+            )
             _wait_for(lambda: probe_control_socket(socket) is None, supervisor)
 
 
