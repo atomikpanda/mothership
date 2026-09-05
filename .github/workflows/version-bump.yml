@@ -1,11 +1,12 @@
 name: version-bump
 
 on:
-  pull_request:
+  pull_request_target:
     types: [closed]
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: version-bump-main
@@ -28,6 +29,8 @@ jobs:
         with:
           python-version: "3.x"
 
+      - uses: astral-sh/setup-uv@v5
+
       - name: Compute and apply version bump
         id: bump
         env:
@@ -39,11 +42,57 @@ jobs:
           NEW_VERSION="$(python -m mship.ci.version_bump --labels "$PR_LABELS")"
           echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
 
+      - name: Regenerate lockfile
+        run: uv lock
+
+      - uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Give git an identity
+        run: |
+          git config --global user.name "mship ci"
+          git config --global user.email "ci@example.invalid"
+          git config --global init.defaultBranch main
+
+      - name: Run bumped tree suite
+        run: task test
+
       - name: Commit, tag, and push
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml src/mship/__init__.py
-          git commit -m "[skip ci] chore: bump version to v${{ steps.bump.outputs.new_version }}"
-          git tag -a "v${{ steps.bump.outputs.new_version }}" -m "v${{ steps.bump.outputs.new_version }}"
-          git push origin main --follow-tags
+          git add pyproject.toml src/mship/__init__.py uv.lock
+          git commit -m "chore: bump version to v${{ steps.bump.outputs.new_version }}"
+          BUMP_SHA="$(git rev-parse HEAD)"
+          # This non-main branch is dispatch-only: test.yml's push trigger cannot
+          # start a competing run for it.
+          VERIFY_BRANCH="mship-verify-$BUMP_SHA"
+          cleanup_verification_ref() {
+            git push origin --delete "$VERIFY_BRANCH" || echo "Warning: failed to delete $VERIFY_BRANCH" >&2
+          }
+          trap 'status=$?; cleanup_verification_ref; exit "$status"' EXIT
+
+          git push origin "$BUMP_SHA:refs/heads/$VERIFY_BRANCH"
+          gh workflow run test.yml --ref "$VERIFY_BRANCH"
+
+          RUN_ID=""
+          for attempt in 1 2 3 4 5; do
+            RUN_ID="$(gh run list --workflow test.yml --commit "$BUMP_SHA" --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+            if [ -n "$RUN_ID" ]; then
+              break
+            fi
+            sleep "$attempt"
+          done
+
+          if [ -z "$RUN_ID" ]; then
+            echo "Timed out waiting for test.yml workflow_dispatch run on $BUMP_SHA" >&2
+            exit 1
+          fi
+
+          gh run watch "$RUN_ID" --exit-status
+          TAG="v${{ steps.bump.outputs.new_version }}"
+          git tag -a "$TAG" -m "$TAG"
+          git push --atomic origin "HEAD:main" "refs/tags/$TAG"

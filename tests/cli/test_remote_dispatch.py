@@ -1003,18 +1003,22 @@ def _seed_task_with_worktree(ws: Path, slug: str, *repos: str) -> dict[str, Path
 def _repo_git(porcelain: str = "", *, origin: str | None = "headsha",
               head: str = "headsha", contains: list[str] = [],
               status_rc: int = 0, status_err: str = "",
-              head_ref: str = "refs/heads/feat/t1") -> dict:
+              head_ref: str = "refs/heads/feat/t1",
+              pair_output: str | None = None) -> dict:
     """One repo's scripted git answers. Defaults to clean, on the task's branch,
     and in sync with origin (`origin` None = the branch is not on origin at
     all; `head_ref` "" = a detached HEAD)."""
     return {
         "status": porcelain, "status_rc": status_rc, "status_err": status_err,
         "origin": origin, "head": head, "contains": contains,
-        "head_ref": head_ref,
+        "head_ref": head_ref, "pair_output": pair_output,
     }
 
 
-def _git_shell(spec: dict | dict[str, dict], *, push_rc: int = 0):
+def _git_shell(
+    spec: dict | dict[str, dict], *, push_rc: int = 0,
+    git_dirs: dict[str, Path] | None = None,
+):
     """A shell whose git answers are scripted per repo (keyed by the worktree
     directory name), with everything else passing. A bare spec applies to `api`."""
     if "status" in spec:
@@ -1023,6 +1027,7 @@ def _git_shell(spec: dict | dict[str, dict], *, push_rc: int = 0):
     pushes: list[str] = []
     push_envs: list[dict] = []
     touched: set[str] = set()
+    git_dirs = git_dirs or {}
 
     def _run(cmd, cwd=None, env=None, **kw):
         touched.add(Path(cwd).name)
@@ -1034,7 +1039,11 @@ def _git_shell(spec: dict | dict[str, dict], *, push_rc: int = 0):
         if "rev-parse --git-dir" in cmd:
             # `_inspect_repo` looks here for MERGE_HEAD / rebase-merge — a test
             # that wants the in-progress refusal creates the marker itself.
-            return ShellResult(returncode=0, stdout=str(Path(cwd) / ".git"), stderr="")
+            git_dir = git_dirs.get(Path(cwd).name)
+            return ShellResult(
+                returncode=0, stdout=str(git_dir) if git_dir is not None else ".git",
+                stderr="",
+            )
         if "symbolic-ref" in cmd:
             return ShellResult(
                 returncode=0 if s["head_ref"] else 1, stdout=s["head_ref"], stderr="",
@@ -1043,12 +1052,14 @@ def _git_shell(spec: dict | dict[str, dict], *, push_rc: int = 0):
             out = "" if s["origin"] is None else f"{s['origin']}\trefs/heads/feat/t1\n"
             return ShellResult(returncode=0, stdout=out, stderr="")
         if "rev-parse HEAD" in cmd and "refs/heads/" in cmd:
-            # The atomic branch-identity + sha read `_inspect_repo` makes: one
-            # call answering both "which branch is HEAD on" and "what sha is
-            # it at" from the same process. `head_ref` decides whether the
-            # branch-ref half of the pair agrees with `head` (HEAD really is
-            # on the named branch) or reports a distinct sha (it is not).
+            # `_inspect_repo` separately verifies symbolic attachment, then
+            # compares HEAD and the task ref in one combined read. `head_ref`
+            # decides whether the branch-ref half agrees with `head`; a test
+            # can override that pair to model a torn read or detached HEAD at
+            # the branch tip.
             target_ref = cmd.rsplit("refs/heads/", 1)[-1].strip("'\"")
+            if s["pair_output"] is not None:
+                return ShellResult(returncode=0, stdout=s["pair_output"], stderr="")
             branch_sha = (
                 s["head"] if s["head_ref"] == f"refs/heads/{target_ref}"
                 else "otherbranchsha"
@@ -1254,6 +1265,118 @@ def test_a_mid_rebase_repo_is_refused_before_anything_is_sent(tmp_path, monkeypa
         _reset()
 
 
+@pytest.mark.parametrize(
+    ("marker", "description", "recovery_commands"),
+    [
+        (
+            "rebase-merge",
+            "a rebase is in progress",
+            ("rebase --continue", "rebase --abort"),
+        ),
+        (
+            "rebase-apply",
+            "a rebase or `git am` is in progress",
+            (
+                "rebase --continue",
+                "am --continue",
+                "rebase --abort",
+                "am --abort",
+            ),
+        ),
+        (
+            "MERGE_HEAD",
+            "a merge is in progress",
+            ("merge --continue", "merge --abort"),
+        ),
+        (
+            "CHERRY_PICK_HEAD",
+            "a cherry-pick is in progress",
+            ("cherry-pick --continue", "cherry-pick --abort"),
+        ),
+        (
+            "REVERT_HEAD",
+            "a revert is in progress",
+            ("revert --continue", "revert --abort"),
+        ),
+        (
+            "sequencer",
+            "a cherry-pick or revert sequence is in progress",
+            (
+                "cherry-pick --continue",
+                "revert --continue",
+                "cherry-pick --abort",
+                "revert --abort",
+            ),
+        ),
+        (
+            "BISECT_START",
+            "a bisect is in progress",
+            ("bisect skip", "bisect reset"),
+        ),
+    ],
+)
+@pytest.mark.parametrize("linked_worktree", [False, True], ids=["normal", "linked"])
+@pytest.mark.parametrize(
+    "head_ref",
+    ["refs/heads/other", ""],
+    ids=["wrong-branch", "no-checkout"],
+)
+def test_clean_operation_marker_outranks_detached_or_wrong_branch(
+    tmp_path, monkeypatch, marker, description, recovery_commands,
+    linked_worktree, head_ref,
+):
+    """A suspended operation wins over a detached/wrong-branch HEAD, even clean."""
+    _write_run_workspace(tmp_path, run_hosts=["role-x"])
+    wts = _seed_task_with_worktree(tmp_path, "t1", "api")
+    git_dir = (
+        tmp_path / ".git-worktrees" / "api"
+        if linked_worktree
+        else wts["api"] / ".git"
+    )
+    marker_path = git_dir / marker
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    if marker in {"rebase-merge", "rebase-apply", "sequencer"}:
+        marker_path.mkdir()
+    elif marker == "BISECT_START":
+        marker_path.write_text("start\n")
+    else:
+        marker_path.touch()
+    if marker == "BISECT_START":
+        assert not (git_dir / "BISECT_LOG").exists()
+    _configure(tmp_path)
+    shell = _git_shell(
+        _repo_git(head_ref=head_ref),
+        git_dirs={"api": git_dir} if linked_worktree else None,
+    )
+    container.shell.override(shell)
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+    recorder: dict = {}
+    try:
+        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+            result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
+        assert result.exit_code == 1, result.output
+        assert description in result.output
+        for command in recovery_commands:
+            assert f'git -C "{wts["api"]}" {command}' in result.output
+        if marker == "BISECT_START":
+            assert f'git -C "{wts["api"]}" bisect good' not in result.output
+            assert f'git -C "{wts["api"]}" bisect bad' not in result.output
+        commands = [call.args[0] for call in shell.run.call_args_list]
+        assert not any(
+            command.startswith(("git rev-parse HEAD", "git symbolic-ref", "git ls-remote", "git merge-base"))
+            for command in commands
+        ), commands
+        assert "# or git" not in result.output
+        assert "checkout" not in result.output
+        assert shell.pushes == []
+        assert recorder == {}
+    finally:
+        container.shell.reset_override()
+        _reset()
+
+
 def test_remote_run_pushes_a_clean_unpushed_branch_then_dispatches(tmp_path, monkeypatch):
     """The case that fails outright today — nothing pushes before `mship finish`."""
     _write_run_workspace(tmp_path, run_hosts=["role-x"])
@@ -1417,6 +1540,35 @@ def test_a_worktree_not_on_the_task_branch_is_not_dispatched(tmp_path, monkeypat
         assert "worktree is not on the task's branch in api" in result.output
         assert "HEAD is main, not feat/t1" in result.output
         assert shell.pushes == []        # nothing published for an unverified HEAD
+        assert recorder == {}
+    finally:
+        container.shell.reset_override()
+        _reset()
+
+
+def test_a_detached_worktree_at_the_task_tip_is_not_dispatched(tmp_path, monkeypatch):
+    """A matching SHA does not establish that the worktree is on task t1's branch."""
+    _write_run_workspace(tmp_path, run_hosts=["role-x"])
+    _seed_task_with_worktree(tmp_path, "t1", "api")
+    _configure(tmp_path)
+    shell = _git_shell(_repo_git(
+        head_ref="",
+        pair_output="headsha\nheadsha\n",
+    ))
+    container.shell.override(shell)
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+    recorder: dict = {}
+    try:
+        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+            result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
+        assert result.exit_code == 1, result.output
+        assert "worktree is not on the task's branch in api" in result.output
+        assert "HEAD is detached, not feat/t1" in result.output
+        commands = [call.args[0] for call in shell.run.call_args_list]
+        assert not any("ls-remote" in command for command in commands)
+        assert shell.pushes == []
         assert recorder == {}
     finally:
         container.shell.reset_override()

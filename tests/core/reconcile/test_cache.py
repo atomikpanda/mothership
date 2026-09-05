@@ -132,3 +132,59 @@ def test_write_stamps_current_schema_version_for_freshly_computed_results(tmp_pa
     got = c.read()
     assert got is not None
     assert c.is_fresh(got) is True
+
+
+def test_current_scoped_context_ignores_malformed_unrequested_entries(tmp_path: Path):
+    cache = ReconcileCache(tmp_path / ".mothership")
+    payload = CachePayload(
+        fetched_at=time.time(),
+        ttl_seconds=300,
+        results={"selected": {"state": "in_sync"}, "unrelated": []},
+        ignored=[],
+        base_context={"selected": ["main"], "unrelated": ["old-base"]},
+    )
+
+    assert cache.current(
+        payload,
+        base_context={"selected": ["main"], "unrelated": ["new-base"]},
+        only_slugs={"selected"},
+    ) is payload
+
+
+def test_current_scoped_context_requires_each_requested_entry(tmp_path: Path):
+    cache = ReconcileCache(tmp_path / ".mothership")
+    payload = CachePayload(
+        fetched_at=time.time(),
+        ttl_seconds=300,
+        results={"selected": {"state": "in_sync"}},
+        ignored=[],
+        base_context={"selected": ["main"]},
+    )
+
+    assert cache.current(
+        payload,
+        base_context={"selected": ["main"], "missing": ["main"]},
+        only_slugs={"missing"},
+    ) is None
+    assert cache.current(
+        payload,
+        base_context={"selected": ["release"]},
+        only_slugs={"selected"},
+    ) is None
+
+
+def test_current_scoped_context_requires_results_for_every_requested_entry(tmp_path: Path):
+    cache = ReconcileCache(tmp_path / ".mothership")
+    payload = CachePayload(
+        fetched_at=time.time(),
+        ttl_seconds=300,
+        results={"selected": {"state": "in_sync"}},
+        ignored=[],
+        base_context={"selected": ["main"], "dependency": ["main"]},
+    )
+
+    assert cache.current(
+        payload,
+        base_context={"selected": ["main"], "dependency": ["main"]},
+        only_slugs={"selected", "dependency"},
+    ) is None
