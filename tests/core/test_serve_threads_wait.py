@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -183,6 +185,39 @@ def test_wait_times_out_with_empty_list(tmp_path: Path):
     body = r.json()
     assert body["timed_out"] is True
     assert body["threads"] == []
+
+
+@pytest.mark.parametrize("wait", [0, 1])
+def test_health_remains_available_during_mailbox_read(tmp_path: Path, monkeypatch, wait):
+    client, store = _client(tmp_path)
+    thread = store.create_thread("Pending question", "Help", datetime.now(timezone.utc))
+    entered = Event()
+    release = Event()
+    read_timed_out = Event()
+    original_list = MessageStore.list
+
+    def blocked_list(self):
+        entered.set()
+        if not release.wait(3):
+            read_timed_out.set()
+        return original_list(self)
+
+    monkeypatch.setattr(MessageStore, "list", blocked_list)
+    with client, ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(
+            client.get, "/threads", params={"wait": wait, "since": PAST, "timeout": 0},
+        )
+        try:
+            assert entered.wait(3)
+            health = client.get("/health")
+            assert health.status_code == 200
+            assert not read_timed_out.is_set(), "Mailbox read blocked the health endpoint"
+        finally:
+            release.set()
+        response = pending.result(timeout=3)
+        assert response.status_code == 200
+        threads = response.json()["threads"] if wait else response.json()
+        assert [summary["id"] for summary in threads] == [thread.id]
 
 
 def test_wait_requires_auth(tmp_path: Path):

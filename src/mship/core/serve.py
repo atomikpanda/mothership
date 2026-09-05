@@ -1458,6 +1458,8 @@ def create_app(
 
     def _summaries(threads, now: datetime | None = None):
         threads = list(threads)
+        if not threads:
+            return []
         now = now or datetime.now(timezone.utc)
         links_by_thread = _thread_inbox_links(threads)
         summaries = []
@@ -1511,7 +1513,9 @@ def create_app(
         q: str | None = None,
     ):
         if not wait:
-            return _filtered_summaries(msgs.list(), inbox, q)
+            return await asyncio.to_thread(
+                lambda: _filtered_summaries(msgs.list(), inbox, q)
+            )
         from mship.core.message_wait import changed_since
         timeout = max(0.0, min(timeout, 30.0))  # cap for the relay idle-read timeout
         try:
@@ -1520,11 +1524,15 @@ def create_app(
             raise HTTPException(status_code=422, detail=f"invalid since value: {since!r}")
         if since_dt.tzinfo is None:
             since_dt = since_dt.replace(tzinfo=timezone.utc)
+
+        def read_updates():
+            changed, cursor = changed_since(msgs.list(), since_dt, include_inbox=True)
+            return _summaries(changed), cursor
+
         interval = 1.0
         deadline = _time.monotonic() + timeout
         while True:
-            changed, cursor = changed_since(msgs.list(), since_dt, include_inbox=True)
-            summaries = _summaries(changed)
+            summaries, cursor = await asyncio.to_thread(read_updates)
             threads = [
                 summary for summary in summaries
                 if _matches_thread_filter(summary, inbox, q)
