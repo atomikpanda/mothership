@@ -568,7 +568,7 @@ wheels = [
 
 [[package]]
 name = "mothership"
-version = "0.5.65"
+version = "0.5.66"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
