@@ -6,7 +6,9 @@ each Decision via should_block() to choose block/warn/allow per command.
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Literal
@@ -145,25 +147,57 @@ def _decision_from_detection(slug: str, det: Detection, state: WorkspaceState) -
     )
 
 
-def _decision_from_cache_entry(slug: str, raw: dict, state: WorkspaceState) -> Decision | None:
-    try:
-        return Decision(
-            slug=slug,
-            state=UpstreamState(raw["state"]),
-            pr_url=raw.get("pr_url"),
-            pr_number=raw.get("pr_number"),
-            base=raw.get("base"),
-            merge_commit=raw.get("merge_commit"),
-            updated_at=raw.get("updated_at"),
-            finished_at=_finished_at_for(slug, state),
-        )
-    except (KeyError, ValueError):
+def _valid_merged_timestamp(value: object) -> str | None:
+    """Return an aware ISO-8601 merge timestamp, or None for malformed input."""
+    if not isinstance(value, str):
         return None
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        return None
+    return value
 
 
-def _decisions_from_cache(state: WorkspaceState, payload: CachePayload) -> dict[str, Decision]:
+def _decision_from_cache_entry(
+    slug: str,
+    raw: object,
+    state: WorkspaceState,
+) -> Decision | None:
+    if not isinstance(raw, Mapping):
+        return None
+    try:
+        upstream_state = UpstreamState(raw["state"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    updated_at = raw.get("updated_at")
+    if (
+        upstream_state is UpstreamState.merged
+        and _valid_merged_timestamp(updated_at) is None
+    ):
+        return None
+    return Decision(
+        slug=slug,
+        state=upstream_state,
+        pr_url=raw.get("pr_url"),
+        pr_number=raw.get("pr_number"),
+        base=raw.get("base"),
+        merge_commit=raw.get("merge_commit"),
+        updated_at=updated_at,
+        finished_at=_finished_at_for(slug, state),
+    )
+
+
+def _decisions_from_cache(
+    state: WorkspaceState,
+    payload: CachePayload,
+    *,
+    only_slugs: set[str] | None = None,
+) -> dict[str, Decision]:
     out: dict[str, Decision] = {}
-    for slug in state.tasks:
+    slugs = state.tasks if only_slugs is None else only_slugs
+    for slug in slugs:
         raw = payload.results.get(slug)
         if raw is None:
             continue
@@ -177,7 +211,10 @@ def _decisions_from_cache(state: WorkspaceState, payload: CachePayload) -> dict[
     # cache — the common case, since reconcile shares one 300s cache across spawn/finish/close/
     # precommit — silently drops it and a dependency-stale task reverts to in_sync (finish stops
     # blocking on the stale base).
-    return apply_dependency_stale(state, out)
+    decisions = apply_dependency_stale(state, out)
+    if only_slugs is None:
+        return decisions
+    return {slug: decision for slug, decision in decisions.items() if slug in only_slugs}
 
 
 def reconcile_now(
@@ -190,8 +227,9 @@ def reconcile_now(
     base_inputs_by_slug: dict[
         str, tuple[str | None, dict[str, str]]
     ] | None = None,
+    only_slugs: set[str] | None = None,
 ) -> dict[str, Decision]:
-    """Cache-first; fetch on stale; fall back on error. Never raises."""
+    """Cache-first; fetch on stale; fall back on error for selected tasks."""
     resolved_bases = resolve_task_bases(
         state, config, base_inputs_by_slug=base_inputs_by_slug,
     )
@@ -199,29 +237,82 @@ def reconcile_now(
         slug: sorted(bases) if bases is not None else None
         for slug, bases in resolved_bases.items()
     }
+    reconciliation_slugs = only_slugs
+    if only_slugs is not None:
+        reconciliation_slugs = set(only_slugs)
+        pending = list(only_slugs)
+        while pending:
+            task = state.tasks.get(pending.pop())
+            if task is None:
+                continue
+            for edge in task.depends_on:
+                if edge.upstream_slug not in reconciliation_slugs:
+                    reconciliation_slugs.add(edge.upstream_slug)
+                    pending.append(edge.upstream_slug)
+    tasks = [
+        task for task in state.tasks.values()
+        if reconciliation_slugs is None or task.slug in reconciliation_slugs
+    ]
 
     # Keep the raw payload only to preserve its ignore list on a fresh write.
-    # Every results-consuming path uses the schema/context-compatible payload.
+    # Every results-consuming path validates the schema/context-compatible closure.
     payload = cache.read()
-    current_payload = cache.current(payload, base_context=base_context)
-    if current_payload is not None and cache.is_fresh(current_payload):
-        return _decisions_from_cache(state, current_payload)
+    current_payload = cache.current(
+        payload,
+        base_context=base_context,
+        only_slugs=reconciliation_slugs,
+    )
+    cached_decisions = (
+        _decisions_from_cache(
+            state, current_payload, only_slugs=reconciliation_slugs,
+        )
+        if current_payload is not None
+        else None
+    )
+    required_slugs = (
+        state.tasks.keys()
+        if reconciliation_slugs is None
+        else reconciliation_slugs
+    )
+    cache_complete = (
+        cached_decisions is not None
+        and required_slugs <= cached_decisions.keys()
+    )
+    if (
+        current_payload is not None
+        and cache.is_fresh(current_payload)
+        and cache_complete
+    ):
+        if only_slugs is None:
+            return cached_decisions
+        return {
+            slug: decision
+            for slug, decision in cached_decisions.items()
+            if slug in only_slugs
+        }
 
-    branches = [t.branch for t in state.tasks.values()]
+    branches = [task.branch for task in tasks]
     worktrees_by_branch: dict[str, Path] = {}
-    for t in state.tasks.values():
-        if t.worktrees:
-            worktrees_by_branch[t.branch] = next(iter(t.worktrees.values()))
+    for task in tasks:
+        if task.worktrees:
+            worktrees_by_branch[task.branch] = next(iter(task.worktrees.values()))
 
     try:
         pr_by_head, git_by_branch = fetcher(branches, worktrees_by_branch)
     except FetchError:
-        if current_payload is not None:
-            return _decisions_from_cache(state, current_payload)
+        if cached_decisions is not None and cache_complete:
+            if only_slugs is None:
+                return cached_decisions
+            return {
+                slug: decision
+                for slug, decision in cached_decisions.items()
+                if slug in only_slugs
+            }
         return {}
 
     tasks_tuples = [
-        (t.slug, t.branch, resolved_bases[t.slug]) for t in state.tasks.values()
+        (task.slug, task.branch, resolved_bases[task.slug])
+        for task in tasks
     ]
     detections = detect_many(tasks_tuples, pr_by_head, git_by_branch)
 
@@ -234,12 +325,22 @@ def reconcile_now(
         }
         for slug, d in detections.items()
     }
-    cache.write(CachePayload(
-        fetched_at=time.time(),
-        ttl_seconds=ttl_seconds,
-        results=results,
-        ignored=(payload.ignored if payload else []),
-        base_context=base_context,
-    ))
-    decisions = {slug: _decision_from_detection(slug, d, state) for slug, d in detections.items()}
-    return apply_dependency_stale(state, decisions)
+    if only_slugs is None:
+        cache.write(CachePayload(
+            fetched_at=time.time(),
+            ttl_seconds=ttl_seconds,
+            results=results,
+            ignored=(payload.ignored if payload else []),
+            base_context=base_context,
+        ))
+    decisions = {
+        slug: _decision_from_detection(slug, d, state)
+        for slug, d in detections.items()
+    }
+    if cached_decisions is not None and only_slugs is not None:
+        cached_decisions.update(decisions)
+        decisions = cached_decisions
+    decisions = apply_dependency_stale(state, decisions)
+    if only_slugs is None:
+        return decisions
+    return {slug: decision for slug, decision in decisions.items() if slug in only_slugs}

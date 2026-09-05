@@ -30,14 +30,15 @@ def _run_gate(
     bypass: bool,
     output,
     only_slug: str | None = None,
+    only_repos: set[str] | None = None,
     cli_base: str | None = None,
     base_map: dict[str, str] | None = None,
 ) -> None:
     """Run the upstream reconciler; exit(1) on block, print warnings on warn.
 
-    `only_slug`, when given, scopes the gate to that single task — drift on
-    an unrelated task must not block this one (#455 Part 2; mirrors the
-    per-task scoping the precommit gate in cli/internal.py already does).
+    `only_slug`, when given, scopes the gate to that single task. `only_repos`
+    scopes it to persisted tasks that touch any requested repository, which is
+    how spawn excludes unrelated task drift without inventing a future slug.
     """
     if bypass:
         return
@@ -58,25 +59,63 @@ def _run_gate(
             collect_git_snapshots(worktrees_by_branch),
         )
 
-    try:
-        base_inputs = (
-            {only_slug: (cli_base, base_map or {})}
-            if only_slug is not None
-            else None
-        )
-        decisions = reconcile_now(
-            state,
-            cache=cache,
-            fetcher=_fetcher,
-            config=config,
-            base_inputs_by_slug=base_inputs,
-        )
-    except Exception as e:  # noqa: BLE001 — never fail closed
-        output.warning(f"reconcile unavailable: {e}; proceeding")
-        return
+    if only_repos is not None:
+        scoped_slugs = {
+            task.slug
+            for task in state.tasks.values()
+            if any(repo in only_repos for repo in task.affected_repos)
+        }
+        if only_slug is not None:
+            scoped_slugs.intersection_update({only_slug})
+        if not scoped_slugs:
+            return
+        try:
+            decisions = reconcile_now(
+                state,
+                cache=cache,
+                fetcher=_fetcher,
+                config=config,
+                only_slugs=scoped_slugs,
+            )
+        except Exception as e:  # noqa: BLE001 — scoped spawns fail closed
+            output.error(f"reconcile unavailable: {e}")
+            raise typer.Exit(code=1)
 
-    if only_slug is not None:
-        decisions = {slug: d for slug, d in decisions.items() if slug == only_slug}
+        decisions = {
+            slug: decision
+            for slug, decision in decisions.items()
+            if slug in scoped_slugs
+        }
+        unavailable = scoped_slugs.difference(decisions)
+        if unavailable:
+            output.error(
+                "reconcile unavailable for: " + ", ".join(sorted(unavailable))
+            )
+            raise typer.Exit(code=1)
+    else:
+        try:
+            base_inputs = (
+                {only_slug: (cli_base, base_map or {})}
+                if only_slug is not None
+                else None
+            )
+            decisions = reconcile_now(
+                state,
+                cache=cache,
+                fetcher=_fetcher,
+                config=config,
+                base_inputs_by_slug=base_inputs,
+            )
+        except Exception as e:  # noqa: BLE001 — preserve fail-open callers
+            output.warning(f"reconcile unavailable: {e}; proceeding")
+            return
+
+        if only_slug is not None:
+            decisions = {
+                slug: decision
+                for slug, decision in decisions.items()
+                if slug == only_slug
+            }
 
     ignored = cache.read_ignores()
     blockers: list[str] = []
@@ -322,52 +361,7 @@ def register(app: typer.Typer, get_container):
                 )
                 raise typer.Exit(code=1)
 
-        _run_gate(get_container, command="spawn", bypass=bypass_reconcile, output=output)
-
-        # --- WorkItem gate: every task must be linked to a WorkItem, unless
-        #     --hotfix explicitly overrides it (logged to the bypass log).
-        #     See spec workitem-mandatory-kind-gated-approval.
-        from mship.core.workitem_gate import log_hotfix
-        from mship.core.workitem_store import WorkItemStore
-        from mship.util.slug import slugify as _slugify
-
-        workspace_root = container.config_path().parent
-        if work_item is None:
-            if hotfix:
-                effective_slug = slug if slug is not None else _slugify(description)
-                log_hotfix(workspace_root, "spawn", effective_slug)
-            else:
-                output.error(
-                    "mship spawn requires a WorkItem: create one with "
-                    "`mship item new` and pass --work-item <id> (or --hotfix)"
-                )
-                raise typer.Exit(code=1)
-        else:
-            items = WorkItemStore(workspace_root / ".mothership" / "workitems")
-            if items.get(work_item) is None:
-                output.error(f"WorkItem {work_item!r} not found")
-                raise typer.Exit(code=1)
-
-        # Validate --closes refs BEFORE any side effects (#386): a bad ref must
-        # fail the spawn while nothing has been created yet.
-        closes_canonical: list[str] = []
-        if closes:
-            if work_item is None:
-                output.error("--closes requires --work-item (issues are linked to the WorkItem)")
-                raise typer.Exit(code=1)
-            from mship.core.issue_link import default_issue_slug
-            from mship.core.issue_refs import IssueRefError, normalize_issue_ref
-            _slug_default = default_issue_slug(container.config().repos.values())
-            try:
-                closes_canonical = [normalize_issue_ref(c, default_slug=_slug_default)
-                                    for c in closes]
-            except IssueRefError as e:
-                output.error(str(e))
-                raise typer.Exit(code=1)
-
-        wt_mgr = container.worktree_manager()
         config = container.config()
-        shell = container.shell()
 
         user_passed_repos = repos is not None
         repo_list = repos.split(",") if repos else None
@@ -426,7 +420,74 @@ def register(app: typer.Typer, get_container):
                 )
                 raise typer.Exit(code=1)
 
-        audit_names = repo_list if repo_list else list(config.repos.keys())
+        # A duplicate task slug is a deterministic local error. Preserve its
+        # precedence over reconciliation, which may require unavailable remote
+        # repository decisions; WorktreeManager.spawn repeats this check under
+        # its state lock to prevent concurrent spawns from racing.
+        from mship.util.slug import slugify
+
+        effective_slug = slug if slug is not None else slugify(description)
+        if effective_slug in container.state_manager().load().tasks:
+            raise ValueError(
+                f"Task '{effective_slug}' already exists. "
+                f"Run `mship close --yes --abandon --task {effective_slug}` to remove it first, or use a different description."
+            )
+
+        # --- WorkItem validation: every task must be linked to a WorkItem,
+        #     unless --hotfix explicitly overrides that requirement. Keep these
+        #     deterministic local errors ahead of remote reconciliation.
+        #     See spec workitem-mandatory-kind-gated-approval.
+        from mship.core.workitem_store import WorkItemStore
+
+        workspace_root = container.config_path().parent
+        if work_item is None:
+            if not hotfix:
+                output.error(
+                    "mship spawn requires a WorkItem: create one with "
+                    "`mship item new` and pass --work-item <id> (or --hotfix)"
+                )
+                raise typer.Exit(code=1)
+        else:
+            items = WorkItemStore(workspace_root / ".mothership" / "workitems")
+            if items.get(work_item) is None:
+                output.error(f"WorkItem {work_item!r} not found")
+                raise typer.Exit(code=1)
+
+        _run_gate(
+            get_container,
+            command="spawn",
+            bypass=bypass_reconcile,
+            output=output,
+            only_repos=set(effective_scope),
+        )
+
+        # Record a hotfix bypass only after reconciliation accepts the spawn.
+        if work_item is None:
+            from mship.core.workitem_gate import log_hotfix
+
+            log_hotfix(workspace_root, "spawn", effective_slug)
+
+        # Validate --closes refs BEFORE any side effects (#386): a bad ref must
+        # fail the spawn while nothing has been created yet.
+        closes_canonical: list[str] = []
+        if closes:
+            if work_item is None:
+                output.error("--closes requires --work-item (issues are linked to the WorkItem)")
+                raise typer.Exit(code=1)
+            from mship.core.issue_link import default_issue_slug
+            from mship.core.issue_refs import IssueRefError, normalize_issue_ref
+            _slug_default = default_issue_slug(config.repos.values())
+            try:
+                closes_canonical = [normalize_issue_ref(c, default_slug=_slug_default)
+                                    for c in closes]
+            except IssueRefError as e:
+                output.error(str(e))
+                raise typer.Exit(code=1)
+
+        wt_mgr = container.worktree_manager()
+        shell = container.shell()
+
+        audit_names = effective_scope
 
         from mship.core.audit_gate import collect_known_worktree_paths
         try:
@@ -506,7 +567,6 @@ def register(app: typer.Typer, get_container):
         from datetime import datetime, timezone
         from mship.core.state import DependencyEdge
         from mship.core.task_graph import find_cycle
-        from mship.util.slug import slugify
 
         dep_edges: list[DependencyEdge] = []
         if depends_on:

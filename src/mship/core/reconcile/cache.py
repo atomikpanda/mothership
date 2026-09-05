@@ -21,7 +21,7 @@ SCHEMA_VERSION = 2
 class CachePayload:
     fetched_at: float
     ttl_seconds: int
-    results: dict[str, dict]
+    results: dict[str, object]
     ignored: list[str] = field(default_factory=list)
     schema_version: int = SCHEMA_VERSION
     base_context: dict[str, list[str] | None] | None = None
@@ -108,16 +108,29 @@ class ReconcileCache:
         payload: CachePayload | None,
         *,
         base_context: dict[str, list[str] | None],
+        only_slugs: set[str] | None = None,
     ) -> CachePayload | None:
         """Drop results produced under another schema or resolved-base context.
 
         This is deliberately not a TTL gate: fetch failures may fall back to a
         TTL-stale entry, but only when its schema and base context are compatible.
+        Scoped reconciliation requires matching context and results for the
+        selected tasks and their dependency closure.
         """
-        if (
-            payload is None
-            or payload.schema_version != SCHEMA_VERSION
-            or payload.base_context != base_context
+        if payload is None or payload.schema_version != SCHEMA_VERSION:
+            return None
+        if only_slugs is None:
+            if payload.base_context != base_context:
+                return None
+            return payload
+        if payload.base_context is None:
+            return None
+        if any(
+            slug not in payload.base_context
+            or slug not in payload.results
+            or slug not in base_context
+            or payload.base_context[slug] != base_context[slug]
+            for slug in only_slugs
         ):
             return None
         return payload
