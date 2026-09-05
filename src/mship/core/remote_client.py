@@ -282,11 +282,9 @@ def exec_remote(
     url = f"{conn.url}/exec/{verb}"
 
     try:
-        # Builds and live apps may be silent indefinitely; silence is not a
-        # disconnected host. Keep connection/write/pool timeouts bounded.
-        with httpx.Client(
-            transport=transport, timeout=httpx.Timeout(5.0, read=None),
-        ) as client:
+        # Keep response headers and HTTP error bodies bounded by HTTPX's
+        # default five-second timeout; only a valid execution body may be idle.
+        with httpx.Client(transport=transport) as client:
             with client.stream("POST", url, headers=headers, json=body) as resp:
                 if resp.status_code >= 400:
                     resp.read()
@@ -302,6 +300,9 @@ def exec_remote(
                         f"cannot authenticate the exit-code/artifact framing "
                         f"(is the remote running a current mship serve?)"
                     )
+                # HTTPX/httpcore consult the request's timeout extension when
+                # starting the response-body iterator, after headers arrive.
+                resp.request.extensions["timeout"]["read"] = None
                 reader = _ChunkReader(resp.iter_raw())
                 return _drive(
                     reader, nonce=nonce,

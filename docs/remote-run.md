@@ -21,10 +21,12 @@ Your local box (the operator) then treats that URL+token as a **run-host role** 
 - Output streams back live (not a final blob) and the remote task's exit code becomes your local process's exit code.
 - For `capture`, produced artifacts (`screen.png`, `layout.*`) are pulled home automatically.
 
-The execution stream has no read-idle timeout: a quiet compiler or running app
-must not be mistaken for an unreachable host. Connection establishment, writes,
-and pool acquisition retain five-second timeouts. There is no overall run
-deadline; interrupt the command when you want to stop waiting.
+The client imposes no read-idle timeout on a valid execution response body:
+a quiet compiler or running app must not trigger HTTPX's default five-second
+read timeout. Response headers, HTTP error bodies, connection establishment,
+writes, and pool acquisition retain five-second timeouts. There is no overall
+client run deadline; interrupt the command when you want to stop waiting.
+This does not disable timeouts imposed by a proxy or relay on the route.
 
 Without `--remote`, nothing changes — `mship run/capture/build` behave exactly as before.
 

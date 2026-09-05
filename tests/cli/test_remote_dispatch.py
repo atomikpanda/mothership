@@ -27,7 +27,7 @@ import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 from unittest.mock import MagicMock
 
 import httpx
@@ -297,6 +297,40 @@ def test_exec_remote_survives_quiet_build_then_returns_remote_result():
             worker.join(timeout=10)
     assert code == 7
     assert printed == ["building", "build failed"]
+
+
+def test_exec_remote_bounds_stalled_error_body():
+    """An HTTP error body is not a live execution stream and must time out."""
+    release = Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(503)
+            self.send_header("Content-Length", "100")
+            self.end_headers()
+            self.wfile.flush()
+            release.wait(timeout=7)
+
+        def log_message(self, *_args):
+            pass
+
+    with HTTPServer(("127.0.0.1", 0), Handler) as server:
+        worker = Thread(target=server.handle_request, daemon=True)
+        worker.start()
+        try:
+            with pytest.raises(remote_client.RemoteExecError) as exc_info:
+                remote_client.exec_remote(
+                    verb="run",
+                    conn=RunHostConnection(
+                        url=f"http://127.0.0.1:{server.server_port}", token="test",
+                    ),
+                    task="stalled-error", repos=["app"], print_fn=lambda _: None,
+                )
+        finally:
+            release.set()
+            worker.join(timeout=10)
+    assert isinstance(exc_info.value.__cause__, httpx.ReadTimeout)
 
 
 def test_exec_remote_stream_without_exit_sentinel_raises():
