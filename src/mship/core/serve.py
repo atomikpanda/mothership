@@ -29,6 +29,7 @@ from mship.core.pr_watcher import PrWatcher
 from mship.core.spec import SpecDraft
 from mship.core.spec_transition import (
     ApprovalBlocked,
+    SpecRevisionConflict,
     approve_spec,
     request_changes_spec,
 )
@@ -1150,6 +1151,8 @@ def create_app(
             raise HTTPException(status_code=409, detail="cannot approve: " + "; ".join(e.blockers))
         except InvalidTransition as e:
             raise HTTPException(status_code=409, detail=str(e))
+        except SpecRevisionConflict as e:
+            raise HTTPException(status_code=409, detail=str(e))
         except SpecLocked:
             raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
         except SpecParseError as exc:
@@ -1175,6 +1178,8 @@ def create_app(
             raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
         except SpecParseError as exc:
             _raise_spec_conflict(exc)
+        except SpecRevisionConflict as e:
+            raise HTTPException(status_code=409, detail=str(e))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
         return build_review(spec)

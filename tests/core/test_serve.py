@@ -1,7 +1,7 @@
 from contextlib import contextmanager
 from threading import Event, Thread
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -525,12 +525,94 @@ def test_post_approve_bypass(tmp_path):
     assert r.status_code == 200 and r.json()["status"] == "approved"
 
 
+def test_post_approve_stale_revision_returns_conflict_without_mutating(tmp_path, monkeypatch):
+    import mship.core.serve as serve_mod
+
+    _seed_spec(tmp_path)
+    store = SpecStore(tmp_path / "specs")
+    newer = {}
+    original = serve_mod.approve_spec
+
+    def stale(spec, store, *, bypass_gate=False):
+        current = store.find_by_id(spec.id)
+        current.updated_at = spec.updated_at + timedelta(seconds=1)
+        store.save(current)
+        newer["state"] = current.model_dump()
+        return original(spec, store, bypass_gate=bypass_gate)
+
+    monkeypatch.setattr(serve_mod, "approve_spec", stale)
+
+    response = TestClient(_app(tmp_path)).post(
+        "/specs/dq/approve", json={"bypass_gate": True},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "spec revision conflict for 'dq'; reload and retry"
+    assert "Traceback" not in response.text
+    assert store.find_by_id("dq").model_dump() == newer["state"]
+
+
 def test_post_request_changes(tmp_path):
     _seed_spec(tmp_path)
     client = TestClient(_app(tmp_path))
     r = client.post("/specs/dq/request-changes", json={"reason": "tighten scope"})
     # MOS-240: request-changes -> editable `draft` status carrying the reason.
     assert r.status_code == 200 and r.json()["status"] == "draft"
+
+
+def test_post_request_changes_stale_revision_returns_conflict_without_mutating(
+    tmp_path, monkeypatch,
+):
+    import mship.core.serve as serve_mod
+
+    _seed_spec(tmp_path)
+    store = SpecStore(tmp_path / "specs")
+    newer = {}
+    original = serve_mod.request_changes_spec
+
+    def stale(spec, store, reason, *, log_manager, actor, now=None):
+        current = store.find_by_id(spec.id)
+        current.updated_at = spec.updated_at + timedelta(seconds=1)
+        store.save(current)
+        newer["state"] = current.model_dump()
+        return original(
+            spec, store, reason, log_manager=log_manager, actor=actor, now=now,
+        )
+
+    monkeypatch.setattr(serve_mod, "request_changes_spec", stale)
+
+    response = TestClient(_app(tmp_path)).post(
+        "/specs/dq/request-changes", json={"reason": "tighten scope"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "spec revision conflict for 'dq'; reload and retry"
+    assert "Traceback" not in response.text
+    assert store.find_by_id("dq").model_dump() == newer["state"]
+
+
+def test_post_request_changes_stale_status_returns_revision_conflict(
+    tmp_path, monkeypatch,
+):
+    """The locked owner compares revisions before validating stale status."""
+    _seed_spec(tmp_path)
+    original = SpecStore.read_strict
+
+    def stale_status(self, spec_id):
+        spec = original(self, spec_id)
+        if spec is not None and spec.id == "dq":
+            spec.status = "draft"
+        return spec
+
+    monkeypatch.setattr(SpecStore, "read_strict", stale_status)
+
+    response = TestClient(_app(tmp_path)).post(
+        "/specs/dq/request-changes", json={"reason": "tighten scope"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "spec revision conflict for 'dq'; reload and retry"
+    assert SpecStore(tmp_path / "specs").find_by_id("dq").status == "needs_review"
 
 
 def test_post_request_changes_persists_reason(tmp_path):

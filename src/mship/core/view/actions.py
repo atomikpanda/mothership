@@ -9,7 +9,12 @@ from dataclasses import dataclass
 from mship.core.log import LogManager
 from mship.core.spec import InvalidTransition
 from mship.core.spec_store import SpecStore
-from mship.core.spec_transition import ApprovalBlocked, approve_spec, request_changes_spec
+from mship.core.spec_transition import (
+    ApprovalBlocked,
+    SpecRevisionConflict,
+    approve_spec,
+    request_changes_spec,
+)
 
 
 @dataclass(frozen=True)
@@ -38,7 +43,7 @@ def approve_spec_by_id(store: SpecStore, spec_id: str | None) -> ActionOutcome:
         approve_spec(spec, store)
     except ApprovalBlocked as e:
         return ActionOutcome(False, f"Cannot approve {spec_id}: {'; '.join(e.blockers)}")
-    except InvalidTransition as e:
+    except (InvalidTransition, SpecRevisionConflict) as e:
         return ActionOutcome(False, str(e))
     except ValueError as e:
         return ActionOutcome(False, str(e))
@@ -52,15 +57,13 @@ def request_changes_by_id(store: SpecStore, spec_id: str | None, reason: str) ->
     reason = (reason or "").strip()
     if not reason:
         return ActionOutcome(False, "Request-changes needs a reason.")
-    # P1 (#458): route the durable rejection record through the same
-    # LogManager convention as the CLI/serve (`<workspace_root>/.mothership/
-    # logs`), so this TUI path (queue/spec/workitem views) can no longer
-    # transition a spec without also logging why — the bug this class fix
-    # closes.
-    log_manager = LogManager(store.workspace_root / ".mothership" / "logs")
+    # P1 (#458): route the durable rejection record through the same canonical
+    # state directory as CLI/serve, so this TUI path (queue/spec/workitem views)
+    # can no longer transition a spec without also logging why.
+    log_manager = LogManager(store.state_dir / "logs")
     try:
         request_changes_spec(spec, store, reason, log_manager=log_manager, actor="operator")
-    except InvalidTransition as e:
+    except (InvalidTransition, SpecRevisionConflict) as e:
         return ActionOutcome(False, str(e))
     except ValueError as e:
         return ActionOutcome(False, str(e))

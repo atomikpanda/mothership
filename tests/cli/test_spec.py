@@ -1,5 +1,5 @@
 """Tests for `mship spec new` (#126, #145)."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, Thread
 
@@ -1233,6 +1233,60 @@ def test_spec_approve_rejected_from_wrong_status(configured_app_with_task: Path,
     again = runner.invoke(app, ["spec", "approve", "dq"])      # approved -> approved illegal
     assert again.exit_code != 0
 
+
+
+def test_spec_approve_stale_revision_fails_cleanly(
+    configured_app_with_task: Path, tmp_path, monkeypatch,
+):
+    import mship.core.spec_transition as st
+    _apply_dq(tmp_path)
+    runner.invoke(app, ["spec", "verdict", "dq", "ac1", "approved"])
+    runner.invoke(app, ["spec", "answer", "dq", "q1", "yes"])
+
+
+    original = st.approve_spec
+
+    def stale(spec, store, *, bypass_gate=False):
+        current = store.find_by_id(spec.id)
+        current.updated_at = spec.updated_at + timedelta(seconds=1)
+        store.save(current)
+        return original(spec, store, bypass_gate=bypass_gate)
+
+    monkeypatch.setattr(st, "approve_spec", stale)
+
+    result = runner.invoke(app, ["spec", "approve", "dq"])
+
+    assert result.exit_code != 0
+    assert "reload and retry" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_spec_request_changes_stale_revision_fails_cleanly(
+    configured_app_with_task: Path, tmp_path, monkeypatch,
+):
+    import mship.core.spec_transition as st
+    _apply_dq(tmp_path)
+
+
+    original = st.request_changes_spec
+
+    def stale(spec, store, reason, *, log_manager, actor, now=None):
+        current = store.find_by_id(spec.id)
+        current.updated_at = spec.updated_at + timedelta(seconds=1)
+        store.save(current)
+        return original(
+            spec, store, reason, log_manager=log_manager, actor=actor, now=now,
+        )
+
+    monkeypatch.setattr(st, "request_changes_spec", stale)
+
+    result = runner.invoke(
+        app, ["spec", "request-changes", "dq", "--reason", "tighten scope"],
+    )
+
+    assert result.exit_code != 0
+    assert "reload and retry" in result.output
+    assert "Traceback" not in result.output
 
 def test_spec_request_changes(configured_app_with_task: Path, tmp_path):
     _apply_dq(tmp_path)

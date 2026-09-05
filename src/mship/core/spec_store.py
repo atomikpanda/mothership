@@ -116,6 +116,13 @@ class SpecStore:
         (view/actions.py's LogManager) don't restate the convention."""
         return self._storage.workspace_root
 
+    @property
+    def state_dir(self) -> Path:
+        """The canonical state directory for this workspace's configuration."""
+        from mship.core.workspace_context import _resolve_state_dir
+
+        return _resolve_state_dir(self.workspace_root / "mothership.yaml")
+
     def _validate_id(self, spec_id: str) -> None:
         if (not spec_id or "\x00" in spec_id or "/" in spec_id or "\\" in spec_id
                 or spec_id in (".", "..") or spec_id.startswith(".")):
@@ -270,6 +277,14 @@ class SpecStore:
                 )
             return self._storage.write(artifact.logical_path, serialize_spec(spec))
         return self._storage.write(self.path_for(spec), serialize_spec(spec))
+
+    def save_while_locked(
+        self, spec: Spec, artifact: ResolvedSpecArtifact | None,
+    ) -> Path:
+        """Persist while ``locked(spec.id)`` is held, preserving canonical inbox data."""
+        if artifact is not None:
+            spec.inbox = artifact.spec.inbox
+        return self._save_unlocked(spec, artifact)
 
     def save_migrated_unlocked(self, spec: Spec) -> Path:
         """Write the configured representation while ``locked(spec.id)`` is held."""

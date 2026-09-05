@@ -548,7 +548,11 @@ def register(parent: typer.Typer, get_container):
     ):
         """Approve a spec (gate: all criteria approved + all questions answered)."""
         from mship.core.spec import InvalidTransition
-        from mship.core.spec_transition import ApprovalBlocked, approve_spec
+        from mship.core.spec_transition import (
+            ApprovalBlocked,
+            SpecRevisionConflict,
+            approve_spec,
+        )
         output = Output()
         store = _spec_store()
         spec = store.find_by_id(spec_id)
@@ -563,7 +567,7 @@ def register(parent: typer.Typer, get_container):
         except InvalidTransition as e:
             output.error(str(e))
             raise typer.Exit(1)
-        except ValueError as e:
+        except (SpecRevisionConflict, ValueError) as e:
             output.error(str(e))
             raise typer.Exit(1)
         path = store.path_for(spec)
@@ -727,7 +731,7 @@ def register(parent: typer.Typer, get_container):
         import os
 
         from mship.core.spec import InvalidTransition
-        from mship.core.spec_transition import request_changes_spec
+        from mship.core.spec_transition import SpecRevisionConflict, request_changes_spec
         output = Output()
         container = get_container()
         store = _spec_store()
@@ -753,6 +757,9 @@ def register(parent: typer.Typer, get_container):
             output.error(str(e))
             raise typer.Exit(1)
         except InvalidTransition as e:
+            output.error(str(e))
+            raise typer.Exit(1)
+        except SpecRevisionConflict as e:
             output.error(str(e))
             raise typer.Exit(1)
         if output.human_mode:
