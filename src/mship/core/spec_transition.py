@@ -80,8 +80,8 @@ def _locked_current_revision(spec: Spec, store: SpecStore):
         yield artifact
 
 
-def approve_spec(spec: Spec, store: SpecStore, *, bypass_gate: bool = False) -> None:
-    """needs_review -> approved. Raises ApprovalBlocked (gate) or InvalidTransition."""
+def approve_spec(spec: Spec, store: SpecStore, *, bypass_gate: bool = False) -> Spec:
+    """Approve and return the spec, rejecting stale revisions under its lock."""
     with _locked_current_revision(spec, store) as artifact:
         if not bypass_gate:
             blockers = approval_blockers(spec)
@@ -94,6 +94,7 @@ def approve_spec(spec: Spec, store: SpecStore, *, bypass_gate: bool = False) -> 
             spec.updated_at, datetime.now(timezone.utc)
         )
         store.save_while_locked(spec, artifact)
+        return spec
 
 
 def record_rejection(
@@ -133,8 +134,8 @@ def request_changes_spec(
     log_manager: LogManager | None,
     actor: str,
     now: datetime | None = None,
-) -> None:
-    """needs_review/approved -> draft carrying `reason`. Raises InvalidTransition.
+) -> Spec:
+    """Return the spec to draft, rejecting stale revisions under its lock.
 
     Writes the durable rejection record itself (record_rejection), in this
     order: reject empty/whitespace reason -> verify the current revision ->
@@ -165,3 +166,4 @@ def request_changes_spec(
             except Exception:
                 store.save_while_locked(original_spec, artifact)
                 raise
+        return spec

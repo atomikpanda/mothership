@@ -23,6 +23,7 @@ from mship.core.spec_transition import (
     approve_spec,
     request_changes_spec,
 )
+from mship.core.spec_draft import SpecDraft, apply_draft_transaction
 
 
 def _dt():
@@ -498,6 +499,34 @@ def test_approve_advances_a_legacy_naive_persisted_revision(tmp_path):
     assert reloaded.updated_at > legacy_updated_at
 
 
+
+def test_approve_does_not_restore_a_snapshot_stale_after_apply(tmp_path):
+    store = SpecStore(tmp_path / "specs")
+    store.save(_reviewable())
+    stale = store.find_by_id("s1")
+    assert stale is not None
+
+    apply_draft_transaction(
+        store,
+        "s1",
+        SpecDraft(
+            problem="New problem",
+            user_story="New story",
+            approach="New approach",
+            acceptance_criteria=["replacement"],
+        ),
+        bypass_status_gate=True,
+        discard_review=True,
+    )
+    with pytest.raises(SpecRevisionConflict):
+        approve_spec(stale, store, bypass_gate=True)
+
+    persisted = store.find_by_id("s1")
+    assert persisted is not None
+    assert persisted.status == "needs_review"
+    assert persisted.acceptance_criteria[0].text == "replacement"
+    assert "New approach" in persisted.body
+
 def test_approve_blocked_by_open_questions_does_not_write(tmp_path):
     store = SpecStore(tmp_path / "specs")
     spec = _reviewable(open_questions=[OpenQuestion(id="q1", text="?", answer=None)])
@@ -507,6 +536,36 @@ def test_approve_blocked_by_open_questions_does_not_write(tmp_path):
     assert "q1" in "; ".join(e.value.blockers)
     assert store.find_by_id("s1").status == "needs_review"
 
+
+
+def test_request_changes_does_not_restore_a_snapshot_stale_after_apply(tmp_path):
+    store = SpecStore(tmp_path / "specs")
+    store.save(_reviewable())
+    stale = store.find_by_id("s1")
+    assert stale is not None
+    log = LogManager(tmp_path / "logs")
+
+    apply_draft_transaction(
+        store,
+        "s1",
+        SpecDraft(
+            problem="New problem",
+            user_story="New story",
+            approach="New approach",
+            acceptance_criteria=["replacement"],
+        ),
+        bypass_status_gate=True,
+        discard_review=True,
+    )
+    with pytest.raises(SpecRevisionConflict):
+        request_changes_spec(stale, store, "tighten scope", log_manager=log, actor="alice")
+
+    persisted = store.find_by_id("s1")
+    assert persisted is not None
+    assert persisted.status == "needs_review"
+    assert persisted.acceptance_criteria[0].text == "replacement"
+    assert "New approach" in persisted.body
+    assert log.read("s1") == []
 
 def test_request_changes_sends_to_draft_with_reason(tmp_path):
     store = SpecStore(tmp_path / "specs")

@@ -1015,16 +1015,25 @@ def create_app(
         return spec
 
 
-    def _save_and_review(spec):
+    def _archive_and_review(spec_id: str):
+        """Transition to archived from the current artifact under its spec lock."""
         from mship.core.spec_storage import SpecLocked
 
-        spec.updated_at = datetime.now(timezone.utc)
         try:
-            store.save(spec)
+            with store.locked(spec_id) as artifact:
+                if artifact is None:
+                    raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
+                spec = artifact.spec
+                validate_transition(spec.status, "archived")
+                spec.status = "archived"
+                spec.updated_at = datetime.now(timezone.utc)
+                store.save_while_locked(spec, artifact)
         except SpecLocked:
-            raise HTTPException(status_code=409, detail=f"spec {spec.id!r} is locked")
+            raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
         except SpecParseError as exc:
             _raise_spec_conflict(exc)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
         return build_review(spec)
 
     def _mutate_review(spec_id: str, mutate, *, auto_approve: bool = False):
@@ -1137,7 +1146,7 @@ def create_app(
             # success, not a spurious approved->approved 409.
             return build_review(spec)
         try:
-            approve_spec(spec, store, bypass_gate=body.bypass_gate)
+            spec = approve_spec(spec, store, bypass_gate=body.bypass_gate)
         except ApprovalBlocked as e:
             raise HTTPException(status_code=409, detail="cannot approve: " + "; ".join(e.blockers))
         except InvalidTransition as e:
@@ -1148,27 +1157,19 @@ def create_app(
             raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
         except SpecParseError as exc:
             _raise_spec_conflict(exc)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
         return build_review(spec)
 
     @app.post("/specs/{spec_id}/request-changes")
     def post_request_changes(spec_id: str, body: ReasonBody):
         spec = _load_or_404(spec_id)
-        # #447 review: every durable rejection record must carry real reason
-        # text — reject empty/whitespace before anything is written.
+        # Every durable rejection record must carry real reason text; reject it
+        # before the shared locked transition performs any write.
         if not body.reason or not body.reason.strip():
             raise HTTPException(status_code=400, detail="reason must not be empty")
-        # MOS-240: request-changes sends the spec back to the editable `draft`
-        # status carrying a non-null clarification_reason (the dropped
-        # needs_clarification status is now expressed by that field alone).
-        # #458 P1 class fix: the durable rejection record is now written
-        # inside `request_changes_spec` itself (record-then-transition,
-        # fail-loud on a write failure), so every caller — CLI, serve, and
-        # the TUI views — gets it automatically instead of each remembering
-        # its own `record_rejection` call. This also supersedes the old
-        # decorative "spec request-changes (api): …" log line — the
-        # structured record is the parsed source now.
         try:
-            request_changes_spec(
+            spec = request_changes_spec(
                 spec, store, body.reason, log_manager=log_manager, actor="operator",
             )
         except InvalidTransition as e:
@@ -1179,6 +1180,8 @@ def create_app(
             _raise_spec_conflict(exc)
         except SpecRevisionConflict as e:
             raise HTTPException(status_code=409, detail=str(e))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
         return build_review(spec)
 
     @app.post("/specs/{spec_id}/archive")
@@ -1188,15 +1191,12 @@ def create_app(
         already-archived spec is rejected (409).
 
         Finding 4: returns the same fuller review payload as approve/request-changes
-        (via `_save_and_review`) rather than a bare `{id,status}`, so a client cache
-        isn't degraded on the round-trip."""
-        spec = _load_or_404(spec_id)
+        rather than a bare `{id,status}`, so a client cache isn't degraded on the
+        round-trip."""
         try:
-            validate_transition(spec.status, "archived")
+            return _archive_and_review(spec_id)
         except InvalidTransition as e:
             raise HTTPException(status_code=409, detail=str(e))
-        spec.status = "archived"
-        return _save_and_review(spec)
 
     # --- capture-write endpoints (B3): the phone Capture path over HTTP ---
 

@@ -39,6 +39,33 @@ def test_spec_with_task_becomes_one_feature_item(tmp_path):
     assert state.load().tasks["alpha"].work_item_id == wi.id
 
 
+def test_migration_preserves_an_apply_after_listing(tmp_path, monkeypatch):
+    from mship.core.spec_draft import SpecDraft, apply_draft_transaction
+
+    specs, state, msgs, items = _setup(tmp_path)
+    specs.save(Spec(id="alpha", title="Alpha", status="draft",
+                    created_at=_now(), updated_at=_now(), body="Old draft"))
+    original_list = specs.list
+
+    def list_before_apply():
+        snapshot = original_list()
+        monkeypatch.setattr(specs, "list", original_list)
+        apply_draft_transaction(
+            specs, "alpha",
+            SpecDraft(problem="Updated problem", user_story="Updated story",
+                      approach="Updated approach"),
+        )
+        return snapshot
+
+    monkeypatch.setattr(specs, "list", list_before_apply)
+    created = wrap_existing(items, specs, state, msgs, now=_now(), workspace="testws")
+
+    persisted = specs.find_by_id("alpha")
+    assert persisted.status == "needs_review"
+    assert "Updated approach" in persisted.body
+    assert persisted.work_item_id == created[0]
+
+
 def test_orphan_task_becomes_chore_item(tmp_path):
     specs, state, msgs, items = _setup(tmp_path)
     state.save(WorkspaceState(tasks={"bugfix": Task(

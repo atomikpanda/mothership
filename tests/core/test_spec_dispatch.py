@@ -6,6 +6,7 @@ import pytest
 from mship.core.spec import AcceptanceCriterion, Spec
 from mship.core.spec_body import render_body
 from mship.core.spec_store import SpecStore
+from mship.core.spec_draft import SpecDraft, apply_draft_transaction
 from mship.core.state import StateManager, Task, WorkspaceState
 from mship.core.spec_dispatch import DispatchError, build_dispatch_handoff, dispatch_spec
 from mship.core.workitem_store import WorkItemStore
@@ -160,6 +161,36 @@ def test_dispatch_spec_requires_approved(tmp_path):
             workitems=items, workspace=WORKSPACE,
         )
 
+
+
+def test_dispatch_does_not_restore_a_snapshot_stale_after_apply(tmp_path):
+    sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
+    sm.save(WorkspaceState(tasks={"dq": _task()}))
+    stale = _approved_spec()
+    store.save(stale)
+
+    apply_draft_transaction(
+        store,
+        stale.id,
+        SpecDraft(
+            problem="New problem",
+            user_story="New story",
+            approach="New approach",
+        ),
+        bypass_status_gate=True,
+        discard_review=True,
+    )
+
+    with pytest.raises(DispatchError):
+        dispatch_spec(
+            stale, state_manager=sm, store=store, spawn_fn=lambda s: None, now=NOW,
+            workitems=items, workspace=WORKSPACE,
+        )
+
+    persisted = store.find_by_id(stale.id)
+    assert persisted is not None
+    assert persisted.status == "needs_review"
+    assert "New approach" in persisted.body
 
 def test_dispatch_spec_auto_spawn_requires_affected_repos(tmp_path):
     sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)

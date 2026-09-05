@@ -81,16 +81,18 @@ def advance_workitem_on_close(
         from mship.core.spec_store import SpecStore
 
         sstore = SpecStore(specs_dir)
-        spec = sstore.read_strict(item.spec_id)
-        if spec is not None and spec.status in ("approved", "dispatched"):
+        with sstore.locked(item.spec_id) as artifact:
+            if artifact is None or artifact.spec.status not in ("approved", "dispatched"):
+                return
+            spec = artifact.spec
             now = datetime.now(timezone.utc)
             spec.status = "implemented"
             spec.updated_at = now
-            sstore.save(spec)
-            # Bubble the freshly-done WorkItem to the top of list()'s updated_at-desc
-            # view too (mirrors the spec-less phase_override bump below). The override
-            # stays None — the spec drives `done`; this only refreshes updated_at.
-            store.set_phase_override(wid, None, now=now)
+            sstore.save_while_locked(spec, artifact)
+        # Bubble the freshly-done WorkItem to the top of list()'s updated_at-desc
+        # view too (mirrors the spec-less phase_override bump below). The override
+        # stays None — the spec drives `done`; this only refreshes updated_at.
+        store.set_phase_override(wid, None, now=now)
         return
 
     # Spec-less: stamp done directly. The updated_at bump (mirrors

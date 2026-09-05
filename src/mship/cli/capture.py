@@ -60,28 +60,33 @@ def _attach_evidence(
         workspace_root = Path(container.config_path()).parent
         mode = resolve_evidence_mode(container.config())
         store = SpecStore(workspace_root / "specs")
-        spec = store.find_by_id(target.spec_id)
-        if spec is None:
-            output.warning(f"could not attach evidence: no spec {target.spec_id!r}")
-            return
-        crit = next((c for c in spec.acceptance_criteria if c.id == target.criterion_id), None)
-        if crit is None:
-            output.warning(
-                f"could not attach evidence: {target.spec_id!r} has no criterion "
-                f"{target.criterion_id!r}"
-            )
-            return
-        note_where = provenance_note(worktree, container.shell())
-        for a in artifacts:
-            ref = store_artifact(workspace_root, target.spec_id, a.path, mode=mode)
-            crit.evidence.append(
-                AcceptanceEvidence(
-                    kind="artifact",
-                    ref=ref,
-                    note=f"{a.kind} · {platform or 'default'} · {note_where}",
+        # Load, mutate, and save under the same per-spec lock. Capturing an
+        # artifact can take long enough for an apply to replace the draft; saving
+        # a pre-lock snapshot after that replacement would otherwise restore the
+        # old body and review state.
+        with store.locked(target.spec_id) as artifact:
+            if artifact is None:
+                output.warning(f"could not attach evidence: no spec {target.spec_id!r}")
+                return
+            spec = artifact.spec
+            crit = next((c for c in spec.acceptance_criteria if c.id == target.criterion_id), None)
+            if crit is None:
+                output.warning(
+                    f"could not attach evidence: {target.spec_id!r} has no criterion "
+                    f"{target.criterion_id!r}"
                 )
-            )
-        store.save(spec)
+                return
+            note_where = provenance_note(worktree, container.shell())
+            for a in artifacts:
+                ref = store_artifact(workspace_root, target.spec_id, a.path, mode=mode)
+                crit.evidence.append(
+                    AcceptanceEvidence(
+                        kind="artifact",
+                        ref=ref,
+                        note=f"{a.kind} · {platform or 'default'} · {note_where}",
+                    )
+                )
+            store.save_while_locked(spec, artifact)
         # human_mode only: `success` writes to STDOUT, which in JSON mode already
         # carries the capture payload — a confirmation line there would corrupt
         # it for `| jq`. Warnings above are safe (they go to stderr in JSON mode).

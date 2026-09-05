@@ -19,21 +19,23 @@ def wrap_existing(items: WorkItemStore, specs: SpecStore, state: StateManager,
     task_by_slug = dict(state_now.tasks)
 
     # 1) Specs -> feature items (carrying their linked task).
-    for spec in specs.list():
-        if spec.work_item_id:
-            continue
-        wi = items.create(title=spec.title, kind="feature", workspace=workspace, now=now)
-        created.append(wi.id)
-        items.link_spec(wi.id, spec.id, now=now)
-        spec.work_item_id = wi.id
-        specs.save(spec)
-        if spec.task_slug and spec.task_slug in task_by_slug:
-            items.add_task(wi.id, spec.task_slug, now=now)
+    for candidate in specs.list():
+        with specs.locked(candidate.id) as artifact:
+            if artifact is None or artifact.spec.work_item_id:
+                continue
+            spec = artifact.spec
+            wi = items.create(title=spec.title, kind="feature", workspace=workspace, now=now)
+            created.append(wi.id)
+            items.link_spec(wi.id, spec.id, now=now)
+            spec.work_item_id = wi.id
+            specs.save_while_locked(spec, artifact)
+            if spec.task_slug and spec.task_slug in task_by_slug:
+                items.add_task(wi.id, spec.task_slug, now=now)
 
-            def _set(s, _slug=spec.task_slug, _wid=wi.id):
-                if _slug in s.tasks:
-                    s.tasks[_slug].work_item_id = _wid
-            state.mutate(_set)
+                def _set(s, _slug=spec.task_slug, _wid=wi.id):
+                    if _slug in s.tasks:
+                        s.tasks[_slug].work_item_id = _wid
+                state.mutate(_set)
 
     # 2) Orphan tasks (no work_item_id yet) -> attach to an existing item, or
     # else get a feature/chore item of their own. A task's spec_id (or a

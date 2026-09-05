@@ -10,8 +10,10 @@ capture into a bad exit code.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Event, Thread, current_thread
 
 import pytest
 from typer.testing import CliRunner
@@ -185,3 +187,70 @@ def test_malformed_evidence_target_is_actionable(workspace_with_spec: Path):
     assert "could not attach evidence" in result.output
     assert "<spec-id>:<criterion-id>" in result.output
     assert _criterion(workspace_with_spec).evidence == []
+
+def test_capture_evidence_does_not_restore_stale_spec_after_apply(
+    workspace_with_spec: Path, monkeypatch,
+):
+    """A capture that starts before apply must not save its pre-apply snapshot."""
+    from mship.core.spec_draft import SpecDraft, apply_draft_transaction
+
+    apply_started = Event()
+    capture_locked = Event()
+    apply_result: dict[str, object] = {}
+    original_locked = SpecStore.locked
+
+    @contextmanager
+    def record_capture_lock(self, spec_id):
+        if current_thread().name == "MainThread":
+            capture_locked.set()
+        with original_locked(self, spec_id) as artifact:
+            yield artifact
+
+    def apply_replacement() -> None:
+        apply_started.set()
+        try:
+            apply_draft_transaction(
+                SpecStore(workspace_with_spec / "specs"),
+                "dq",
+                SpecDraft(
+                    problem="New problem",
+                    user_story="New story",
+                    approach="New approach",
+                    acceptance_criteria=["replacement criterion"],
+                ),
+                bypass_status_gate=True,
+                discard_review=True,
+            )
+        except BaseException as exc:
+            apply_result["error"] = exc
+
+    def start_apply(*_args, **_kwargs) -> str:
+        thread = Thread(target=apply_replacement)
+        apply_result["thread"] = thread
+        thread.start()
+        assert apply_started.wait(timeout=5)
+        # Before the lock fix this blocks until apply has persisted the
+        # replacement, forcing the stale capture save to run afterward. With
+        # the fix capture already holds the lock, so let it release it instead.
+        if not capture_locked.is_set():
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+        return "capture.png"
+
+    monkeypatch.setattr(SpecStore, "locked", record_capture_lock)
+    monkeypatch.setattr("mship.core.evidence_store.store_artifact", start_apply)
+    result = runner.invoke(
+        app, ["capture", "--task", "t", "--repo", "app", "--evidence", "dq:ac1"]
+    )
+    assert result.exit_code == 0, result.output
+    assert capture_locked.is_set()
+    thread = apply_result["thread"]
+    assert isinstance(thread, Thread)
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert "error" not in apply_result
+
+    persisted = SpecStore(workspace_with_spec / "specs").find_by_id("dq")
+    assert persisted is not None
+    assert persisted.acceptance_criteria[0].text == "replacement criterion"
+    assert "New approach" in persisted.body

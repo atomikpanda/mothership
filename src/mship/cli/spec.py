@@ -560,14 +560,14 @@ def register(parent: typer.Typer, get_container):
             output.error(f"No spec with id {spec_id!r}.")
             raise typer.Exit(1)
         try:
-            approve_spec(spec, store, bypass_gate=bypass_gate)
+            spec = approve_spec(spec, store, bypass_gate=bypass_gate)
         except ApprovalBlocked as e:
             output.error("Cannot approve — " + "; ".join(e.blockers) + ". Use --bypass-gate to override.")
             raise typer.Exit(1)
         except InvalidTransition as e:
             output.error(str(e))
             raise typer.Exit(1)
-        except SpecRevisionConflict as e:
+        except (SpecRevisionConflict, ValueError) as e:
             output.error(str(e))
             raise typer.Exit(1)
         path = store.path_for(spec)
@@ -691,6 +691,7 @@ def register(parent: typer.Typer, get_container):
         except DispatchError as e:
             output.error(str(e))
             raise typer.Exit(1)
+        spec = result.spec
 
         if closes_canonical and spec.work_item_id:
             # Fail-open: dispatch already completed, so a linking failure must
@@ -747,7 +748,7 @@ def register(parent: typer.Typer, get_container):
         # "spec request-changes: …" log line — the structured record is the
         # parsed source now.
         try:
-            request_changes_spec(
+            spec = request_changes_spec(
                 spec, store, reason,
                 log_manager=container.log_manager(),
                 actor=os.environ.get("USER") or "unknown",
@@ -929,24 +930,36 @@ def register(parent: typer.Typer, get_container):
             output.json(data)
 
     def _simple_transition(target_status: str, spec_id: str) -> None:
-        """Shared logic for implemented/archive: validate transition and save."""
+        """Transition the current spec under its per-spec lock."""
         from datetime import datetime, timezone
         from mship.core.spec import InvalidTransition, validate_transition
+        from mship.core.spec_storage import SpecLocked
+        from mship.core.spec_store import SpecParseError
 
         output = Output()
         store = _spec_store()
-        spec = store.find_by_id(spec_id)
-        if spec is None:
-            output.error(f"No spec with id {spec_id!r}.")
-            raise typer.Exit(1)
         try:
-            validate_transition(spec.status, target_status)
+            with store.locked(spec_id) as artifact:
+                if artifact is None:
+                    output.error(f"No spec with id {spec_id!r}.")
+                    raise typer.Exit(1)
+                spec = artifact.spec
+                validate_transition(spec.status, target_status)
+                spec.status = target_status
+                spec.updated_at = datetime.now(timezone.utc)
+                store.save_while_locked(spec, artifact)
         except InvalidTransition as e:
             output.error(str(e))
             raise typer.Exit(1)
-        spec.status = target_status
-        spec.updated_at = datetime.now(timezone.utc)
-        store.save(spec)
+        except SpecLocked as exc:
+            output.error(f"Cannot update spec {spec_id!r}: {exc}")
+            raise typer.Exit(1)
+        except SpecParseError as exc:
+            output.error(f"Cannot update spec {spec_id!r}: {exc}")
+            raise typer.Exit(1)
+        except ValueError as exc:
+            output.error(str(exc))
+            raise typer.Exit(1)
         if output.human_mode:
             output.success(f"Spec {spec.id} → {target_status}")
         else:
