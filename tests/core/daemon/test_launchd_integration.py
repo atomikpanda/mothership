@@ -67,6 +67,7 @@ def launchd_daemon(monkeypatch):
                 timeout=15,
             )
             _wait_for(lambda: probe_control_socket(socket) is None, supervisor)
+            assert supervisor.query().state == "absent", "test LaunchAgent was not unloaded"
 
 
 def _healthy(socket, previous_pid=None):
