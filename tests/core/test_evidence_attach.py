@@ -111,3 +111,5 @@ def test_provenance_note_unknown_revision_skips_branch_check(tmp_path):
     note = provenance_note(tmp_path, shell)
     assert note == "at unknown"
     assert not any("branch" in c for c in shell.commands)
+
+

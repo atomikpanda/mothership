@@ -136,6 +136,100 @@ def test_abort_removes_worktrees(worktree_deps):
     state = state_mgr.load()
     assert "to-abort" not in state.tasks
 
+def test_abort_retains_linked_delivery_metadata_for_item_summary(worktree_deps):
+    from mship.core.view.workitem_index import build_workitem_index
+    from mship.core.workitem_store import WorkItemStore
+
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    store = WorkItemStore(state_mgr.state_dir / "workitems")
+    item = store.create("delivery", "chore", "ws", datetime.now(timezone.utc))
+    store.set_phase_override(item.id, "review")
+    manager = WorktreeManager(config, graph, state_mgr, git, shell, log)
+
+    for slug, url in (
+        ("first", "https://github.example/shared/pull/1"),
+        ("second", "https://github.example/shared/pull/2"),
+    ):
+        manager.spawn(slug, repos=["shared"], slug=slug, workspace_root=workspace,
+                      work_item_id=item.id)
+        state_mgr.mutate(
+            lambda state, slug=slug, url=url: state.tasks[slug].pr_urls.update({"shared": url})
+        )
+        manager.abort(slug)
+
+    summary = build_workitem_index([store.get(item.id)], {}, state_mgr.load().tasks, {})[0]
+
+    assert summary.phase == "review"
+    assert summary.affected_repos == ["shared"]
+    assert summary.pr_urls == [
+        "https://github.example/shared/pull/1",
+        "https://github.example/shared/pull/2",
+    ]
+
+
+
+def test_abort_refuses_metadata_changed_after_retention(worktree_deps, monkeypatch):
+    from mship.core.workitem_lifecycle import (
+        TaskMetadataRetentionConflictError,
+        retain_workitem_metadata_on_teardown,
+    )
+    from mship.core.workitem_store import WorkItemStore
+
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    store = WorkItemStore(state_mgr.state_dir / "workitems")
+    item = store.create("delivery", "chore", "ws", datetime.now(timezone.utc))
+    updated_item = store.create("updated delivery", "chore", "ws", datetime.now(timezone.utc))
+    manager = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    manager.spawn("racing delivery", repos=["shared"], workspace_root=workspace,
+                  work_item_id=item.id)
+
+    def retain_then_update(*, task, workitems_dir):
+        retained = retain_workitem_metadata_on_teardown(
+            task=task, workitems_dir=workitems_dir,
+        )
+        state_mgr.mutate(
+            lambda state: (
+                setattr(state.tasks[task.slug], "work_item_id", updated_item.id),
+                state.tasks[task.slug].affected_repos.append("api-gateway"),
+                state.tasks[task.slug].pr_urls.update(
+                    {"api-gateway": "https://github.example/api/pull/2"},
+                ),
+            ),
+        )
+        return retained
+
+    monkeypatch.setattr(
+        "mship.core.workitem_lifecycle.retain_workitem_metadata_on_teardown",
+        retain_then_update,
+    )
+
+    with pytest.raises(TaskMetadataRetentionConflictError, match="Retry"):
+        manager.abort("racing-delivery")
+
+    live_task = state_mgr.load().tasks["racing-delivery"]
+    assert live_task.affected_repos == ["shared", "api-gateway"]
+    assert live_task.pr_urls == {"api-gateway": "https://github.example/api/pull/2"}
+    assert live_task.work_item_id == updated_item.id
+
+
+def test_abort_retains_no_pr_task_without_inventing_a_pr(worktree_deps):
+    from mship.core.view.workitem_index import build_workitem_index
+    from mship.core.workitem_store import WorkItemStore
+
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    store = WorkItemStore(state_mgr.state_dir / "workitems")
+    item = store.create("no pull request", "chore", "ws", datetime.now(timezone.utc))
+    manager = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    manager.spawn("no pull request", repos=["shared"], workspace_root=workspace,
+                  work_item_id=item.id)
+
+    manager.abort("no-pull-request")
+
+    summary = build_workitem_index([store.get(item.id)], {}, state_mgr.load().tasks, {})[0]
+    assert summary.affected_repos == ["shared"]
+    assert summary.pr_urls == []
+
+
 
 def test_spawn_runs_setup_task(worktree_deps, monkeypatch):
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps

@@ -168,6 +168,33 @@ class WorkItemStore:
                     s.tasks[_slug].work_item_id = _wid
             state.mutate(_set)
 
+    def retain_task_metadata(self, task) -> bool:
+        """Persist a linked task's observed repos and PR URLs before task removal.
+
+        The exclusive item lock makes repeated close/prune paths merge rather
+        than overwrite retained metadata. Any write failure propagates so the
+        caller can keep the task state, which remains the last source of truth.
+        Returns False only when the linked WorkItem no longer exists.
+        """
+        item_id = getattr(task, "work_item_id", None)
+        if not item_id:
+            return True
+        repos = list(getattr(task, "affected_repos", []) or [])
+        pr_urls = list((getattr(task, "pr_urls", {}) or {}).values())
+        with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
+            item = self.get(item_id)
+            if item is None:
+                return False
+            retained_repos = list(dict.fromkeys([*item.affected_repos, *repos]))
+            retained_pr_urls = list(dict.fromkeys([*item.pr_urls, *pr_urls]))
+            if retained_repos == item.affected_repos and retained_pr_urls == item.pr_urls:
+                return True
+            item.affected_repos = retained_repos
+            item.pr_urls = retained_pr_urls
+            item.updated_at = datetime.now(timezone.utc)
+            self.save(item)
+            return True
+
     def _thread_owner(self, thread_id: str, exclude: str) -> str | None:
         """Id of a WorkItem (other than `exclude`) whose thread_ids contains `thread_id`, else None.
         Scans archived items too — an archived item still holds its threads in stored data, so it

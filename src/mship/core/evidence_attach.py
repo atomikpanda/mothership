@@ -70,3 +70,17 @@ def provenance_note(worktree: Path, shell) -> str:
     if markers:
         return f"at {sha} ({', '.join(markers)})"
     return f"at {sha}"
+
+
+def remote_provenance_note(source_preparation: str) -> str:
+    """Describe a remote capture without claiming the image ran local HEAD.
+
+    The client can prove only that source preparation completed before it sent
+    the capture request. A capture target may observe an already-running app,
+    so neither source transfer nor a remote checkout proves that binary was
+    rebuilt from the prepared source.
+    """
+    return (
+        f"captured on remote run host; {source_preparation}; "
+        "remote checkout and running binary provenance not verified"
+    )

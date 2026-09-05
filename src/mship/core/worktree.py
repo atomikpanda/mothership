@@ -842,9 +842,28 @@ class WorktreeManager:
             except Exception:
                 pass
 
-        # Only update state after all cleanup attempts
+        # State is the final copy of task delivery metadata. Persist it before
+        # removing the task so a failed WorkItem write cannot silently lose it.
+        # Item locks stay outside StateManager.mutate's state.lock.
+        from mship.core.workitem_lifecycle import (
+            require_retained_task_metadata,
+            retain_workitem_metadata_on_teardown,
+        )
+
+        retained = retain_workitem_metadata_on_teardown(
+            task=task,
+            workitems_dir=self._state_manager.state_dir / "workitems",
+        )
+
+        # Only update state after all cleanup attempts. A task metadata update
+        # that raced the retention write must remain available for a retry.
         def _abort(s):
-            s.tasks.pop(task_slug, None)
+            live_task = s.tasks.get(task_slug)
+            if live_task is None:
+                return
+            require_retained_task_metadata(live_task, retained)
+            del s.tasks[task_slug]
+
         self._state_manager.mutate(_abort)
 
     def list_worktrees(self) -> dict[str, dict[str, Path]]:

@@ -504,8 +504,13 @@ def _write_capture_workspace(ws: Path, *, run_hosts: list[str], platforms: list[
         "    type: service\n"
         f"    capture:\n      platforms: {plat}\n"
     )
-    wt = ws / "wt"
-    wt.mkdir(exist_ok=True)
+    # Shared remote preflight addresses its shell calls to the task worktree,
+    # whose basename must match this fixture's scripted repository key.
+    wt = ws / ".worktrees" / "t1" / "app"
+    wt.mkdir(parents=True)
+    (wt / "Taskfile.yml").write_text(
+        "version: '3'\ntasks:\n  capture:\n    cmds:\n      - echo ok\n"
+    )
     return wt
 
 
@@ -689,7 +694,9 @@ def test_cli_capture_remote_extracts_artifacts_into_exact_local_captures_path(tm
     counterpart's `/captures/t/` assertion."""
     wt = _write_capture_workspace(tmp_path, run_hosts=["role-x"], platforms=["android"])
     _seed_task(tmp_path, slug="t1", repos=["app"], worktrees={"app": str(wt)})
-    mock_shell = _configure(tmp_path)
+    _configure(tmp_path)
+    shell = _git_shell({"app": _repo_git()})
+    container.shell.override(shell)
     RunHostStore(tmp_path / ".mothership").set(
         "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
     )
@@ -725,40 +732,26 @@ def test_cli_capture_remote_extracts_artifacts_into_exact_local_captures_path(tm
         assert '"resolved_task"' in result.output
 
         # The local capture target never ran.
-        mock_shell.run_task.assert_not_called()
+        shell.run_task.assert_not_called()
     finally:
         _reset()
 
 
-def test_cli_capture_remote_with_evidence_attaches_artifact_indistinguishably_from_local(
+def test_cli_capture_remote_with_evidence_attaches_artifact_with_remote_provenance(
     tmp_path, monkeypatch,
 ):
-    """ac15 (specs/2026-07-26-artifact-evidence-on-phone.md): `mship capture --remote
-    --evidence` must attach evidence from artifacts produced on the mapped run
-    host indistinguishably from a local capture. `_attach_evidence`
-    (cli/capture.py) is wired into the `--remote` branch AFTER `exec_remote`
-    returns, once the extracted artifacts are re-discovered locally as
-    `landed` — this proves that wiring actually runs and produces the same
-    criterion.evidence shape (kind=artifact, content-hashed `.png` ref, a
-    provenance note) that
-    test_capture_evidence.py::test_evidence_attaches_to_the_named_criterion
-    asserts for the LOCAL path."""
+    """Remote evidence records the sent snapshot, not its parent or binary.
+
+    The attachment happens after the extracted artifacts are rediscovered
+    locally. Its provenance identifies the exact throwaway ref sent before
+    capture, while retaining the disclaimer that neither a remote checkout nor
+    source transfer proves the running image came from that source.
+    """
     wt = _write_capture_workspace(tmp_path, run_hosts=["role-x"], platforms=["android"])
     _seed_task(tmp_path, slug="t1", repos=["app"], worktrees={"app": str(wt)})
-    mock_shell = _configure(tmp_path)
-
-    # provenance_note() shells out through the same container.shell() the
-    # remote path already uses — always against the LOCAL, task-bound
-    # worktree `wt` (the remote only supplies the artifact bytes).
-    def _fake_run(command, cwd=None, **kwargs):
-        assert isinstance(command, str), "ShellRunner.run takes a command string"
-        if command.startswith("git rev-parse"):
-            return ShellResult(returncode=0, stdout="abc1234\n", stderr="")
-        if command.startswith("git branch"):
-            return ShellResult(returncode=0, stdout="* main\n", stderr="")
-        return ShellResult(returncode=0, stdout="", stderr="")  # git status: clean
-
-    mock_shell.run.side_effect = _fake_run
+    _configure(tmp_path)
+    shell = _git_shell({"app": _repo_git(" M screen.dart\n?? scratch.txt\n")})
+    container.shell.override(shell)
 
     now = datetime(2026, 7, 25, tzinfo=timezone.utc)
     SpecStore(tmp_path / "specs").save(Spec(
@@ -787,15 +780,24 @@ def test_cli_capture_remote_with_evidence_attaches_artifact_indistinguishably_fr
         crit = spec.acceptance_criteria[0]
         assert len(crit.evidence) == 1
         ev = crit.evidence[0]
-        # Same shape a LOCAL --evidence capture produces.
+        # A remote image is not silently labeled as the local worktree HEAD:
+        # source preparation and the running binary have separate guarantees.
         assert ev.kind == "artifact"
         assert ev.ref.endswith(".png")
-        assert "at " in (ev.note or "")
-
+        note = ev.note or ""
+        assert "captured on remote run host" in note
+        assert (
+            "exact working-tree snapshot "
+            "(app@synth2222 via refs/mship/run/t1/app (a throwaway run ref)) "
+            "was sent to the run host"
+        ) in note
+        assert "headsha" not in note
+        assert "running binary provenance not verified" in note
+        assert "· at " not in note
         stored = tmp_path / ".mothership" / "evidence" / "dq" / ev.ref
         assert stored.read_bytes() == b"PNGDATA"
 
-        mock_shell.run_task.assert_not_called()  # the local capture target never ran
+        shell.run_task.assert_not_called()  # the local capture target never ran
     finally:
         _reset()
 
@@ -809,7 +811,9 @@ def test_cli_capture_remote_exit0_but_no_artifact_is_hard_error(tmp_path, monkey
     same no-artifact message."""
     wt = _write_capture_workspace(tmp_path, run_hosts=["role-x"], platforms=["android"])
     _seed_task(tmp_path, slug="t1", repos=["app"], worktrees={"app": str(wt)})
-    mock_shell = _configure(tmp_path)
+    _configure(tmp_path)
+    shell = _git_shell({"app": _repo_git()})
+    container.shell.override(shell)
     RunHostStore(tmp_path / ".mothership").set(
         "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
     )
@@ -823,7 +827,168 @@ def test_cli_capture_remote_exit0_but_no_artifact_is_hard_error(tmp_path, monkey
         assert result.exit_code != 0, result.output
         assert "no recognized artifact" in result.output.lower()
         assert "Traceback" not in (result.output or "")
-        mock_shell.run_task.assert_not_called()
+        shell.run_task.assert_not_called()
+    finally:
+        _reset()
+
+@pytest.mark.parametrize(
+    ("case", "remove_worktree", "diagnostic"),
+    [
+        ("wrong-branch", False, "worktree is not on the task's branch"),
+        ("missing-worktree", True, "missing worktree"),
+        ("origin-ahead", False, "unpulled commits on origin"),
+    ],
+)
+def test_cli_capture_remote_refuses_unprepared_source(
+    tmp_path, monkeypatch, case, remove_worktree, diagnostic,
+):
+    """Capture shares run/build's refusal path and never reaches the host."""
+    wt = _write_capture_workspace(tmp_path, run_hosts=["role-x"], platforms=["android"])
+    _seed_task(tmp_path, slug="t1", repos=["app"], worktrees={"app": str(wt)})
+    if remove_worktree:
+        (wt / "Taskfile.yml").unlink()
+        wt.rmdir()
+    repo_state = {
+        "wrong-branch": _repo_git(head_ref="refs/heads/main"),
+        "missing-worktree": _repo_git(),
+        "origin-ahead": _repo_git(origin="newer", head="old"),
+    }[case]
+    _configure(tmp_path)
+    container.shell.override(_git_shell({"app": repo_state}))
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+    recorder: dict = {}
+
+    try:
+        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+            result = runner.invoke(
+                app, ["capture", "--task", "t1", "--repo", "app", "--remote=role-x"]
+            )
+        assert result.exit_code == 1, result.output
+        assert diagnostic in result.output
+        assert recorder == {}
+    finally:
+        _reset()
+
+
+def test_cli_capture_remote_transfers_dirty_snapshot_before_dispatch(tmp_path, monkeypatch):
+    """Dirty capture sends the exact snapshot to the run host, never origin."""
+    wt = _write_capture_workspace(tmp_path, run_hosts=["role-x"], platforms=["android"])
+    _seed_task(tmp_path, slug="t1", repos=["app"], worktrees={"app": str(wt)})
+    _configure(tmp_path)
+    shell = _git_shell({"app": _repo_git(" M screen.dart\n?? scratch.txt\n")})
+    container.shell.override(shell)
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+    recorder: dict = {}
+    body = _frame([], exit_code=0, artifact_tar=_make_tar({"screen.png": b"PNGDATA"}))
+
+    try:
+        with _ClientPatch(monkeypatch, _recording_handler(recorder, body)):
+            result = runner.invoke(
+                app, ["capture", "--task", "t1", "--repo", "app", "--remote=role-x"]
+            )
+        assert result.exit_code == 0, result.output
+        assert len(shell.pushes) == 1
+        assert "synth2222:refs/mship/run/t1/app" in shell.pushes[0]
+        assert "http://remote.example/git/app" in shell.pushes[0]
+        assert "origin" not in shell.pushes[0]
+        assert recorder["json"]["run_ref_repos"] == ["app"]
+    finally:
+        _reset()
+
+def test_cli_capture_remote_aborts_when_dirty_snapshot_transfer_fails(tmp_path, monkeypatch):
+    """A failed scratch-ref push must not capture against an older remote tree."""
+    wt = _write_capture_workspace(tmp_path, run_hosts=["role-x"], platforms=["android"])
+    _seed_task(tmp_path, slug="t1", repos=["app"], worktrees={"app": str(wt)})
+    _configure(tmp_path)
+    container.shell.override(
+        _git_shell({"app": _repo_git(" M screen.dart\n")}, push_rc=1)
+    )
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+    recorder: dict = {}
+
+    try:
+        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+            result = runner.invoke(
+                app, ["capture", "--task", "t1", "--repo", "app", "--remote=role-x"]
+            )
+        assert result.exit_code == 1, result.output
+        assert "run host" in result.output and "denied" in result.output
+        assert recorder == {}
+    finally:
+        _reset()
+
+def test_cli_capture_remote_uses_git_root_for_dirty_child(tmp_path, monkeypatch):
+    """A capture of a git-root child transfers its parent tree under the parent."""
+    taskfile = "version: '3'\ntasks:\n  capture:\n    cmds:\n      - echo capture\n"
+    (tmp_path / "mono" / "pkg").mkdir(parents=True)
+    (tmp_path / "mono" / "Taskfile.yml").write_text(taskfile)
+    (tmp_path / "mono" / "pkg" / "Taskfile.yml").write_text(taskfile)
+    (tmp_path / "mothership.yaml").write_text(
+        "workspace: t\n"
+        "run_hosts: [role-x]\n"
+        "repos:\n"
+        "  mono:\n    path: ./mono\n    type: service\n"
+        "  pkg:\n    path: pkg\n    type: service\n    git_root: mono\n"
+    )
+    wt_mono = tmp_path / ".worktrees" / "t1" / "mono"
+    wt_pkg = wt_mono / "pkg"
+    wt_pkg.mkdir(parents=True)
+    (wt_mono / "Taskfile.yml").write_text(taskfile)
+    (wt_pkg / "Taskfile.yml").write_text(taskfile)
+    _seed_task(
+        tmp_path, slug="t1", repos=["mono", "pkg"],
+        worktrees={"mono": str(wt_mono), "pkg": str(wt_pkg)},
+    )
+    _configure(tmp_path)
+    shell = _git_shell({"mono": _repo_git(), "pkg": _repo_git(" M screen.dart\n")})
+    container.shell.override(shell)
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+    recorder: dict = {}
+    body = _frame([], exit_code=0, artifact_tar=_make_tar({"screen.png": b"PNGDATA"}))
+
+    try:
+        with _ClientPatch(monkeypatch, _recording_handler(recorder, body)):
+            result = runner.invoke(
+                app, ["capture", "--task", "t1", "--repo", "pkg", "--remote=role-x"]
+            )
+        assert result.exit_code == 0, result.output
+        assert "synth2222:refs/mship/run/t1/mono" in shell.pushes[0]
+        assert recorder["json"]["repos"] == ["pkg"]
+        assert recorder["json"]["run_ref_repos"] == ["mono"]
+    finally:
+        _reset()
+
+
+def test_cli_capture_remote_scopes_preflight_to_the_selected_repo(tmp_path, monkeypatch):
+    """A capture of api cannot inspect or transfer unrelated web work."""
+    _write_run_workspace(tmp_path, run_hosts=["role-x"], repos=["api", "web"])
+    _seed_task_with_worktree(tmp_path, "t1", "api", "web")
+    _configure(tmp_path)
+    shell = _git_shell({"api": _repo_git(), "web": _repo_git(" M unrelated.py\n")})
+    container.shell.override(shell)
+    RunHostStore(tmp_path / ".mothership").set(
+        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
+    )
+    recorder: dict = {}
+    body = _frame([], exit_code=0, artifact_tar=_make_tar({"screen.png": b"PNGDATA"}))
+
+    try:
+        with _ClientPatch(monkeypatch, _recording_handler(recorder, body)):
+            result = runner.invoke(
+                app, ["capture", "--task", "t1", "--repo", "api", "--remote=role-x"]
+            )
+        assert result.exit_code == 0, result.output
+        assert recorder["json"]["repos"] == ["api"]
+        assert "run_ref_repos" not in recorder["json"]
+        assert shell.touched == {"api"}
     finally:
         _reset()
 
@@ -942,9 +1107,7 @@ def test_cli_run_remote_not_bootstrapped_is_clean_error_not_traceback(tmp_path, 
 
 
 def test_cli_capture_remote_unmapped_role_is_clean_error_not_traceback(tmp_path, monkeypatch):
-    """The same RunHostError surfacing exercised for run/build above must
-    also hold for capture, which resolves the role via its own inline block
-    in cli/capture.py rather than the shared `_run_remote` helper."""
+    """Capture surfaces the shared dispatcher's role-resolution error cleanly."""
     wt = _write_capture_workspace(tmp_path, run_hosts=["role-x"], platforms=["android"])
     _seed_task(tmp_path, slug="t1", repos=["app"], worktrees={"app": str(wt)})
     _configure(tmp_path)

@@ -14,6 +14,7 @@ def test_workitem_defaults_and_roundtrip():
                   kind="feature", created_at=_now(), updated_at=_now())
     assert wi.spec_id is None
     assert wi.task_slugs == [] and wi.thread_ids == [] and wi.external_links == []
+    assert wi.affected_repos == [] and wi.pr_urls == []
     assert wi.phase_override is None
     restored = WorkItem.model_validate_json(wi.model_dump_json())
     assert restored == wi

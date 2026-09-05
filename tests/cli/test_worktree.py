@@ -2349,6 +2349,84 @@ def test_close_cascade_removes_downstream(configured_git_app: Path):
     state = sm.load()
     assert state.tasks == {}
 
+def test_close_cascade_retains_downstream_task_metadata(configured_git_app: Path):
+    from datetime import datetime, timezone
+    from mship.core.workitem_store import WorkItemStore
+
+    state = _seed_ab_tasks(configured_git_app)
+    store = WorkItemStore(configured_git_app / ".mothership" / "workitems")
+    item = store.create("downstream", "chore", "ws", datetime.now(timezone.utc))
+    store.set_phase_override(item.id, "review")
+    store.add_task(item.id, "b")
+    state.mutate(
+        lambda s: (
+            setattr(s.tasks["b"], "work_item_id", item.id),
+            s.tasks["b"].pr_urls.update(
+                {"shared": "https://github.example/shared/pull/2"}
+            ),
+        )
+    )
+
+    result = runner.invoke(app, ["close", "a", "--yes", "--skip-pr-check", "--cascade"])
+
+    assert result.exit_code == 0, result.output
+    retained = store.get(item.id)
+    assert retained.phase_override == "review"
+    assert retained.affected_repos == ["shared"]
+    assert retained.pr_urls == ["https://github.example/shared/pull/2"]
+
+
+def test_close_cascade_refuses_metadata_changed_after_retention(
+    configured_git_app: Path, monkeypatch,
+):
+    from datetime import datetime, timezone
+    from mship.core.workitem_lifecycle import retain_workitem_metadata_on_teardown
+    from mship.core.workitem_store import WorkItemStore
+
+    state = _seed_ab_tasks(configured_git_app)
+    store = WorkItemStore(configured_git_app / ".mothership" / "workitems")
+    item = store.create("downstream", "chore", "ws", datetime.now(timezone.utc))
+    store.add_task(item.id, "b")
+    state.mutate(
+        lambda s: (
+            setattr(s.tasks["b"], "work_item_id", item.id),
+            s.tasks["b"].pr_urls.update(
+                {"shared": "https://github.example/shared/pull/2"},
+            ),
+        ),
+    )
+
+    def retain_then_update(*, task, workitems_dir):
+        retained = retain_workitem_metadata_on_teardown(
+            task=task, workitems_dir=workitems_dir,
+        )
+        if task.slug == "b":
+            state.mutate(
+                lambda s: (
+                    s.tasks["b"].affected_repos.append("api-gateway"),
+                    s.tasks["b"].pr_urls.update(
+                        {"api-gateway": "https://github.example/api/pull/3"},
+                    ),
+                ),
+            )
+        return retained
+
+    monkeypatch.setattr(
+        "mship.core.workitem_lifecycle.retain_workitem_metadata_on_teardown",
+        retain_then_update,
+    )
+
+    result = runner.invoke(app, ["close", "a", "--yes", "--skip-pr-check", "--cascade"])
+
+    assert result.exit_code != 0
+    assert "Retry the operation" in result.output
+    live_task = state.load().tasks["b"]
+    assert live_task.affected_repos == ["shared", "api-gateway"]
+    assert live_task.pr_urls == {
+        "shared": "https://github.example/shared/pull/2",
+        "api-gateway": "https://github.example/api/pull/3",
+    }
+
 
 def test_close_cascade_removes_downstream_sdd_records(configured_git_app: Path):
     """--cascade also removes the downstream task's sdd records, not just its state."""
