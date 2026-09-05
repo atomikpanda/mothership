@@ -131,7 +131,7 @@ def _seed_merged_cache(
                 "pr_number": 1,
                 "base": "main",
                 "merge_commit": "abc123",
-                "updated_at": None,
+                "updated_at": "2026-05-10T00:00:00Z",
             }
         },
         ignored=[],

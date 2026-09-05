@@ -8,8 +8,8 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
-
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -147,6 +147,19 @@ def _decision_from_detection(slug: str, det: Detection, state: WorkspaceState) -
     )
 
 
+def _valid_merged_timestamp(value: object) -> str | None:
+    """Return an aware ISO-8601 merge timestamp, or None for malformed input."""
+    if not isinstance(value, str):
+        return None
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        return None
+    return value
+
+
 def _decision_from_cache_entry(
     slug: str,
     raw: object,
@@ -155,18 +168,25 @@ def _decision_from_cache_entry(
     if not isinstance(raw, Mapping):
         return None
     try:
-        return Decision(
-            slug=slug,
-            state=UpstreamState(raw["state"]),
-            pr_url=raw.get("pr_url"),
-            pr_number=raw.get("pr_number"),
-            base=raw.get("base"),
-            merge_commit=raw.get("merge_commit"),
-            updated_at=raw.get("updated_at"),
-            finished_at=_finished_at_for(slug, state),
-        )
+        upstream_state = UpstreamState(raw["state"])
     except (KeyError, TypeError, ValueError):
         return None
+    updated_at = raw.get("updated_at")
+    if (
+        upstream_state is UpstreamState.merged
+        and _valid_merged_timestamp(updated_at) is None
+    ):
+        return None
+    return Decision(
+        slug=slug,
+        state=upstream_state,
+        pr_url=raw.get("pr_url"),
+        pr_number=raw.get("pr_number"),
+        base=raw.get("base"),
+        merge_commit=raw.get("merge_commit"),
+        updated_at=updated_at,
+        finished_at=_finished_at_for(slug, state),
+    )
 
 
 def _decisions_from_cache(
