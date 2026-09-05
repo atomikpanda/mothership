@@ -124,6 +124,35 @@ def test_prune_retains_linked_task_metadata_before_last_worktree_removal(prune_d
 
 
 
+
+def test_prune_retains_metadata_for_forward_only_workitem_link(prune_deps):
+    from mship.core.workitem_store import WorkItemStore
+
+    config, state_mgr, git, _workspace = prune_deps
+    store = WorkItemStore(state_mgr.state_dir / "workitems")
+    item = store.create("forward-only", "chore", "ws", datetime.now(timezone.utc))
+    task = Task(
+        slug="forward-only",
+        description="Forward-only task",
+        phase="dev",
+        created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
+        affected_repos=["shared"],
+        branch="feat/forward-only",
+        worktrees={"shared": Path("/tmp/nonexistent/forward-only")},
+        pr_urls={"shared": "https://github.example/shared/pull/1"},
+    )
+    store.add_task(item.id, task.slug)
+    state_mgr.save(WorkspaceState(tasks={task.slug: task}))
+
+    manager = PruneManager(config, state_mgr, git)
+    manager.prune(manager.scan())
+
+    assert task.slug not in state_mgr.load().tasks
+    persisted = store.get(item.id)
+    assert persisted.affected_repos == ["shared"]
+    assert persisted.pr_urls == ["https://github.example/shared/pull/1"]
+
+
 def test_prune_refuses_metadata_changed_after_retention(prune_deps, monkeypatch):
     from mship.core.workitem_lifecycle import (
         TaskMetadataRetentionConflictError,

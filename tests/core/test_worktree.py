@@ -168,6 +168,38 @@ def test_abort_retains_linked_delivery_metadata_for_item_summary(worktree_deps):
 
 
 
+
+def test_abort_retains_metadata_for_forward_only_workitem_link(worktree_deps):
+    from mship.core.workitem_store import WorkItemStore
+
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    store = WorkItemStore(state_mgr.state_dir / "workitems")
+    item = store.create("forward-only delivery", "chore", "ws", datetime.now(timezone.utc))
+    manager = WorktreeManager(config, graph, state_mgr, git, shell, log)
+    manager.spawn(
+        "forward-only delivery",
+        repos=["shared"],
+        slug="forward-only-delivery",
+        workspace_root=workspace,
+        work_item_id=item.id,
+    )
+    state_mgr.mutate(
+        lambda state: (
+            setattr(state.tasks["forward-only-delivery"], "work_item_id", None),
+            state.tasks["forward-only-delivery"].pr_urls.update(
+                {"shared": "https://github.example/shared/pull/1"},
+            ),
+        ),
+    )
+
+    manager.abort("forward-only-delivery")
+
+    assert "forward-only-delivery" not in state_mgr.load().tasks
+    persisted = store.get(item.id)
+    assert persisted.affected_repos == ["shared"]
+    assert persisted.pr_urls == ["https://github.example/shared/pull/1"]
+
+
 def test_abort_refuses_metadata_changed_after_retention(worktree_deps, monkeypatch):
     from mship.core.workitem_lifecycle import (
         TaskMetadataRetentionConflictError,

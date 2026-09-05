@@ -1170,31 +1170,31 @@ def register(app: typer.Typer, get_container):
                 retain_workitem_metadata_on_teardown,
             )
 
-            workitems_dir = Path(container.state_dir()) / "workitems"
-            retained_by_slug = {}
-            state_before_cascade = state_mgr.load()
-            for d_slug in downstream:
-                downstream_task = state_before_cascade.tasks.get(d_slug)
-                if downstream_task is not None:
-                    retained_by_slug[d_slug] = retain_workitem_metadata_on_teardown(
-                        task=downstream_task,
-                        workitems_dir=workitems_dir,
-                    )
-
-            def _cascade(s):
-                tasks_to_remove = []
-                for d_slug in downstream:
-                    downstream_task = s.tasks.get(d_slug)
-                    if downstream_task is None:
-                        continue
-                    require_retained_task_metadata(
-                        downstream_task, retained_by_slug.get(d_slug),
-                    )
-                    tasks_to_remove.append(d_slug)
-                for d_slug in tasks_to_remove:
-                    del s.tasks[d_slug]
-
             try:
+                workitems_dir = Path(container.state_dir()) / "workitems"
+                retained_by_slug = {}
+                state_before_cascade = state_mgr.load()
+                for d_slug in downstream:
+                    downstream_task = state_before_cascade.tasks.get(d_slug)
+                    if downstream_task is not None:
+                        retained_by_slug[d_slug] = retain_workitem_metadata_on_teardown(
+                            task=downstream_task,
+                            workitems_dir=workitems_dir,
+                        )
+
+                def _cascade(s):
+                    tasks_to_remove = []
+                    for d_slug in downstream:
+                        downstream_task = s.tasks.get(d_slug)
+                        if downstream_task is None:
+                            continue
+                        require_retained_task_metadata(
+                            downstream_task, retained_by_slug.get(d_slug),
+                        )
+                        tasks_to_remove.append(d_slug)
+                    for d_slug in tasks_to_remove:
+                        del s.tasks[d_slug]
+
                 state_mgr.mutate(_cascade)
             except TaskMetadataRetentionConflictError as e:
                 output.error(str(e))

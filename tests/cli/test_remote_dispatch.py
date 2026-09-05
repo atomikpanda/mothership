@@ -11,8 +11,8 @@ Two layers:
   - The CLI wiring (`mship run/build/capture --remote[=role]`) via
     `typer.testing.CliRunner`, with `httpx.Client` monkeypatched to a
     MockTransport-backed client so no real network/relay is involved. This
-    proves: role resolution -> POST with the bearer token, live stdout
-    rendering, exit-code mirroring, the capture artifact landing at the
+    proves: role resolution -> POST with the bearer token, live progress
+    rendering on stderr, exit-code mirroring, the capture artifact landing at the
     EXACT local path `cli/capture.py` already uses, a clean (non-traceback)
     error for an unresolvable role, and — the critical regression guard —
     that OMITTING --remote never touches `remote_client`/httpx at all and
@@ -702,14 +702,21 @@ def test_cli_capture_remote_extracts_artifacts_into_exact_local_captures_path(tm
     )
     recorder: dict = {}
     tar_bytes = _make_tar({"screen.png": b"PNGDATA", "layout.json": b'{"a": 1}'})
-    body = _frame(["captured\n"], exit_code=0, artifact_tar=tar_bytes)
+    body = _frame(["remote task progress\n"], exit_code=0, artifact_tar=tar_bytes)
 
     try:
         with _ClientPatch(monkeypatch, _recording_handler(recorder, body)):
             result = runner.invoke(
-                app, ["capture", "--task", "t1", "--repo", "app", "--remote=role-x"]
+                app, [
+                    "--json", "capture", "--task", "t1", "--repo", "app",
+                    "--remote=role-x",
+                ],
             )
         assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["artifacts"][0]["kind"] == "image"
+        assert "remote task progress" not in result.stdout
+        assert "remote task progress" in result.stderr
         assert recorder["url"] == "http://remote.example/exec/capture"
         assert recorder["json"] == {
             "task": "t1", "repos": ["app"], "kind": "all", "platform": "android",
@@ -734,6 +741,9 @@ def test_cli_capture_remote_extracts_artifacts_into_exact_local_captures_path(tm
         # The local capture target never ran.
         shell.run_task.assert_not_called()
     finally:
+        from mship.cli.output import reset_output_settings
+
+        reset_output_settings()
         _reset()
 
 

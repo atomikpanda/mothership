@@ -99,3 +99,15 @@ def test_breadcrumb_suppressed_on_non_tty():
     output.breadcrumb("→ task: foo")
     assert out.getvalue() == ""
     assert err.getvalue() == ""
+
+
+def test_progress_preserves_literal_remote_output_on_stderr():
+    out, err = _TTYStream(), _TTYStream()
+    output = Output(
+        stream=out, err_stream=err,
+        force_json=False, force_quiet=False, force_no_color=True,
+    )
+    line = "capture [/not-markup] [bold]raw[/bold]"
+    output.progress(line)
+    assert err.getvalue() == line + "\n"
+    assert out.getvalue() == ""

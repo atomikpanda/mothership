@@ -2420,12 +2420,29 @@ def test_close_cascade_refuses_metadata_changed_after_retention(
 
     assert result.exit_code != 0
     assert "Retry the operation" in result.output
+    assert isinstance(result.exception, SystemExit)
+    assert "Traceback" not in result.output
     live_task = state.load().tasks["b"]
     assert live_task.affected_repos == ["shared", "api-gateway"]
     assert live_task.pr_urls == {
         "shared": "https://github.example/shared/pull/2",
         "api-gateway": "https://github.example/api/pull/3",
     }
+
+
+def test_close_cascade_retention_conflict_is_clean_error(
+    configured_git_app: Path,
+):
+    state = _seed_ab_tasks(configured_git_app)
+    state.mutate(lambda s: setattr(s.tasks["b"], "work_item_id", "missing-item"))
+
+    result = runner.invoke(app, ["close", "a", "--yes", "--skip-pr-check", "--cascade"])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    assert "Retry the operation" in result.output
+    assert "Traceback" not in result.output
+    assert "b" in state.load().tasks
 
 
 def test_close_cascade_removes_downstream_sdd_records(configured_git_app: Path):

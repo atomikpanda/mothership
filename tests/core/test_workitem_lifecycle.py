@@ -18,7 +18,12 @@ from mship.core.spec_draft import new_spec
 from mship.core.spec_store import SpecStore
 from mship.core.spec_storage import SpecLocked, SpecStorage
 from mship.core.state import Task, WorkspaceState
-from mship.core.workitem_lifecycle import advance_workitem_on_close
+from mship.core.workitem_lifecycle import (
+    TaskMetadataRetentionConflictError,
+    advance_workitem_on_close,
+    require_retained_task_metadata,
+    retain_workitem_metadata_on_teardown,
+)
 from mship.core.workitem_store import WorkItemStore
 
 
@@ -263,3 +268,50 @@ def test_no_completion_flag_and_no_merge_stays_unadvanced(tmp_path):
     _call(tmp_path, t, state, merged_count=0)
 
     assert store.get(wi.id).phase_override is None
+
+
+# --- delivery metadata retention ----------------------------------------------
+
+@pytest.mark.parametrize(
+    ("reverse_item_id", "archived"),
+    [
+        pytest.param(None, False, id="forward-only"),
+        pytest.param("wi-stale", True, id="stale-reverse-archived-forward"),
+    ],
+)
+def test_teardown_retains_metadata_from_authoritative_forward_link(
+    tmp_path, reverse_item_id, archived,
+):
+    store, item = _store_with_item(tmp_path)
+    store.add_task(item.id, "task-a", now=_now())
+    if archived:
+        store.archive(item.id, now=_now())
+    task = _task("task-a", reverse_item_id)
+    task.affected_repos = ["api"]
+    task.pr_urls = {"api": "https://github.example/api/pull/1"}
+
+    retained = retain_workitem_metadata_on_teardown(
+        task=task, workitems_dir=tmp_path / "workitems",
+    )
+
+    require_retained_task_metadata(task, retained)
+    persisted = store.get(item.id)
+    assert persisted.affected_repos == ["api"]
+    assert persisted.pr_urls == ["https://github.example/api/pull/1"]
+
+
+def test_teardown_refuses_ambiguous_forward_links(tmp_path):
+    store, first = _store_with_item(tmp_path)
+    second = store.create(title="other", kind="chore", workspace="ws", now=_now())
+    store.add_task(first.id, "task-a", now=_now())
+    store.add_task(second.id, "task-a", now=_now())
+    task = _task("task-a", None)
+    task.affected_repos = ["api"]
+
+    with pytest.raises(TaskMetadataRetentionConflictError, match="ambiguous"):
+        retain_workitem_metadata_on_teardown(
+            task=task, workitems_dir=tmp_path / "workitems",
+        )
+
+    assert store.get(first.id).affected_repos == []
+    assert store.get(second.id).affected_repos == []

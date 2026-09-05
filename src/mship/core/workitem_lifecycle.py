@@ -42,16 +42,37 @@ def _task_metadata(task) -> RetainedTaskMetadata:
 
 
 def retain_workitem_metadata_on_teardown(*, task, workitems_dir: Path) -> RetainedTaskMetadata:
-    """Persist a task's delivery metadata before it leaves transient state."""
+    """Persist a task's delivery metadata before it leaves transient state.
+
+    A WorkItem's forward ``task_slugs`` link is durable enough to guard archive,
+    so it is authoritative when the task-side link is absent or stale. Resolve
+    that relationship before taking an item lock; state mutation callers invoke
+    this helper before acquiring state.lock.
+    """
     retained = _task_metadata(task)
-    if not retained.work_item_id:
+
+    from mship.core.workitem_store import TaskLinkAmbiguousError, WorkItemStore
+
+    store = WorkItemStore(workitems_dir)
+    try:
+        item_id = store.resolve_task_workitem_id(task.slug, retained.work_item_id)
+    except TaskLinkAmbiguousError as exc:
+        raise TaskMetadataRetentionConflictError(
+            task.slug, f"forward WorkItem link is ambiguous ({', '.join(exc.item_ids)})",
+        ) from exc
+
+    if not item_id:
         return retained
 
-    from mship.core.workitem_store import WorkItemStore
-
-    if not WorkItemStore(workitems_dir).retain_task_metadata(task):
+    try:
+        retained_successfully = store.retain_task_metadata(task, item_id=item_id)
+    except ValueError as exc:
         raise TaskMetadataRetentionConflictError(
-            task.slug, f"linked work item {retained.work_item_id!r} is unavailable",
+            task.slug, f"linked work item {item_id!r} is unavailable",
+        ) from exc
+    if not retained_successfully:
+        raise TaskMetadataRetentionConflictError(
+            task.slug, f"linked work item {item_id!r} is unavailable",
         )
     return retained
 

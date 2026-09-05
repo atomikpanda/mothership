@@ -18,7 +18,7 @@ Your local box (the operator) then treats that URL+token as a **run-host role** 
 
 - The remote **materializes the task's branch** — `git fetch` + a worktree at `.worktrees/<task>/<repo>`, mirroring the local worktree layout. Remote execution always operates on a task's branch; there's no ad-hoc remote run (the remote needs a branch to check out).
 - The remote runs the repo's go-task target (`run`/`capture`/`build`) with the **same env-var contract** as a local run.
-- Output streams back live (not a final blob) and the remote task's exit code becomes your local process's exit code.
+- Output streams back live on stderr (not a final blob), leaving structured command results on stdout parseable. `--quiet` suppresses progress; the remote task's exit code becomes your local process's exit code.
 - For `capture`, produced artifacts (`screen.png`, `layout.*`) are pulled home automatically.
 
 The client imposes no read-idle timeout on a valid execution response body:

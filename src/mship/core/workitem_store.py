@@ -10,7 +10,7 @@ from pathlib import Path
 from mship.core.state import StateManager
 from mship.core.workitem import ExternalLink, Kind, Phase, WorkItem
 
-__all__ = ["WorkItemStore", "ThreadAlreadyLinkedError"]
+__all__ = ["TaskLinkAmbiguousError", "ThreadAlreadyLinkedError", "WorkItemStore"]
 
 
 def _new_id(now: datetime) -> str:
@@ -33,6 +33,17 @@ def _locked(lock_path: Path, mode: int):
             yield
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
+
+
+class TaskLinkAmbiguousError(RuntimeError):
+    """Raised when a task's forward link belongs to multiple WorkItems."""
+
+    def __init__(self, task_slug: str, item_ids: list[str]) -> None:
+        self.task_slug = task_slug
+        self.item_ids = item_ids
+        super().__init__(
+            f"task {task_slug!r} is linked to multiple work items: {', '.join(item_ids)}",
+        )
 
 
 class ThreadAlreadyLinkedError(Exception):
@@ -168,7 +179,28 @@ class WorkItemStore:
                     s.tasks[_slug].work_item_id = _wid
             state.mutate(_set)
 
-    def retain_task_metadata(self, task) -> bool:
+    def resolve_task_workitem_id(
+        self, task_slug: str, reverse_item_id: str | None,
+    ) -> str | None:
+        """Return a task's authoritative WorkItem id, preferring its forward link.
+
+        WorkItem.task_slugs is the durable association used by archive guards.
+        A unique forward link therefore repairs a missing or stale task-side
+        work_item_id. Archived items participate too: archiving hides an item
+        from the default list, but must not discard its retained delivery data.
+        Multiple forward owners are unsafe to choose between and fail closed.
+        """
+        forward_ids = sorted(
+            item.id
+            for item in self.list(include_archived=True)
+            if task_slug in item.task_slugs
+        )
+        if len(forward_ids) > 1:
+            raise TaskLinkAmbiguousError(task_slug, forward_ids)
+        return forward_ids[0] if forward_ids else reverse_item_id
+
+
+    def retain_task_metadata(self, task, *, item_id: str | None = None) -> bool:
         """Persist a linked task's observed repos and PR URLs before task removal.
 
         The exclusive item lock makes repeated close/prune paths merge rather
@@ -176,7 +208,7 @@ class WorkItemStore:
         caller can keep the task state, which remains the last source of truth.
         Returns False only when the linked WorkItem no longer exists.
         """
-        item_id = getattr(task, "work_item_id", None)
+        item_id = item_id if item_id is not None else getattr(task, "work_item_id", None)
         if not item_id:
             return True
         repos = list(getattr(task, "affected_repos", []) or [])

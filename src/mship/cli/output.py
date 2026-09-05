@@ -189,6 +189,15 @@ class Output:
             # payload's `warnings` field. (MOS-177)
             self._err_stream.write(f"WARNING: {message}\n")
 
+    def progress(self, message: str) -> None:
+        """Render live task progress without contaminating structured stdout."""
+        if self.quiet:
+            return
+        if self.human_mode:
+            self._err_console.print(message, markup=False, highlight=False)
+        else:
+            self._err_stream.write(f"{message}\n")
+
     def error(self, message: str) -> None:
         # Errors are never suppressed by --quiet.
         if self.human_mode:

@@ -244,7 +244,7 @@ def _run_remote(
         return exec_remote(
             verb=verb, conn=conn, task=task_obj.slug, repos=target_repos,
             platform=platform, kind=kind, captures_dir_for=captures_dir_for,
-            run_ref_repos=run_ref_repos,
+            run_ref_repos=run_ref_repos, print_fn=output.progress,
         )
     except RemoteExecError as e:
         output.error(str(e))
