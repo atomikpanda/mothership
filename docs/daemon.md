@@ -83,11 +83,30 @@ per merge).
 
 ## macOS caveats
 
-- The LaunchAgent is bootstrapped in the `user/<uid>` domain so provisioning
-  works over SSH with no GUI session (`gui/<uid>` fails there with
-  "Bootstrap failed: 5: Input/output error").
-- Reboot-survival on a headless Mac requires a login session (enable
-  auto-login); a system-domain LaunchDaemon is out of scope for v1.
+- The LaunchAgent pairs the `user/<uid>` domain with
+  `LimitLoadToSessionType=Background`. Without that plist key, launchd defaults
+  to the Aqua session type and rejects user-domain bootstrap with error 5.
+  This works from SSH without requiring the GUI domain.
+- `stop` waits for launchd to finish bootout before returning; launchctl
+  commands have a 30-second deadline. A loaded but stopped job is reported as
+  failed, not absent, so `start` and `restart` kickstart it rather than trying
+  to bootstrap a duplicate service.
+- If an earlier installation was manually bootstrapped into `gui/<uid>`,
+  unload that specific job with
+  `launchctl bootout --wait gui/$(id -u)/com.mothership.daemon`, then run the
+  updated `mship daemon install` and `mship daemon start`. Preserve the existing
+  daemon config and credentials; no re-pairing is needed.
+- This is a per-user LaunchAgent, not a system LaunchDaemon. Do not assume
+  pre-login availability after a reboot, and do not enable automatic login
+  merely to hide an untested lifecycle assumption.
+
+`task test:daemon` runs the daemon suite. On macOS it also boots real,
+uniquely named launchd services running `mshipd` with temporary homes and
+control sockets, exercises install/start/stop/restart/reinstall, crash recovery,
+and recovery after a clean exit, then unloads the services. The same target
+runs in the dedicated macOS CI job. These tests do not log out or reboot the
+machine; those disruptive transitions require a separate operator-observed
+check.
 
 ## Tunnel registration (#471)
 

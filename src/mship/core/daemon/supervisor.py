@@ -252,12 +252,12 @@ class LaunchdSupervisor(_BaseSupervisor):
         return f"user/{self._uid}/{LAUNCHD_LABEL}"
 
     def _launchctl(self, *args: str) -> subprocess.CompletedProcess:
-        return self._run(["launchctl", *args])
+        return self._run(["launchctl", *args], timeout=30)
 
     def _checked(self, *args: str) -> subprocess.CompletedProcess:
         try:
             r = self._launchctl(*args)
-        except OSError as e:
+        except (OSError, subprocess.TimeoutExpired) as e:
             raise DaemonSupervisorError(f"launchctl {' '.join(args)} failed: {e}; {_RUN_FALLBACK}") from e
         if r.returncode != 0:
             raise DaemonSupervisorError(
@@ -280,13 +280,10 @@ class LaunchdSupervisor(_BaseSupervisor):
         log_dir = daemon_log_dir(self._home)
         log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         plist_path.write_text(render_launchd_plist(argv, log_dir))
-        # Re-install: launchd rejects a duplicate bootstrap of a loaded label,
-        # and the running job would keep the OLD plist. Boot the label out
-        # first (tolerated when not loaded), then bootstrap the new plist.
-        try:
-            self._launchctl("bootout", self._target)
-        except OSError:
-            pass
+        # Re-install must finish unloading the old job before bootstrapping
+        # its replacement. An unloaded service needs no bootout.
+        if self.query().state != "absent":
+            self.stop()
         # user/<uid>, never gui/<uid>: bootstrap must work over SSH with no GUI
         # session (the headless provisioning path).
         self._checked("bootstrap", f"user/{self._uid}", str(plist_path))
@@ -300,7 +297,7 @@ class LaunchdSupervisor(_BaseSupervisor):
         self._checked("kickstart", self._target)
 
     def stop(self) -> None:
-        self._checked("bootout", self._target)
+        self._checked("bootout", "--wait", self._target)
 
     def restart(self) -> None:
         if self.query().state == "absent":  # same unloaded-target class as start()
@@ -310,7 +307,7 @@ class LaunchdSupervisor(_BaseSupervisor):
     def query(self) -> SupervisorState:
         try:
             r = self._launchctl("print", self._target)
-        except OSError as e:
+        except (OSError, subprocess.TimeoutExpired) as e:
             return SupervisorState("unreachable", str(e))
         if r.returncode != 0:
             err = (r.stderr or "") + (r.stdout or "")
@@ -319,7 +316,7 @@ class LaunchdSupervisor(_BaseSupervisor):
             return SupervisorState("unreachable", err.strip())
         if "state = running" in r.stdout:
             return SupervisorState("active")
-        return SupervisorState("absent", "loaded but not running")
+        return SupervisorState("failed", "loaded but not running")
 
     def linger_state(self) -> Literal["yes", "no", "unknown"]:
         return "unknown"  # not applicable on macOS

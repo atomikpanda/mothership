@@ -54,3 +54,22 @@ jobs:
           git config --global init.defaultBranch main
       - name: Run the suite
         run: task test
+
+  macos-daemon:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Verify lockfile is current
+        run: uv lock --check
+      - uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Give git an identity
+        run: |
+          git config --global user.name "mship ci"
+          git config --global user.email "ci@example.invalid"
+          git config --global init.defaultBranch main
+      - name: Exercise daemon and native launchd lifecycle
+        run: task test:daemon

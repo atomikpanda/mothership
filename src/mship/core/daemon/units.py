@@ -123,6 +123,8 @@ def render_launchd_plist(argv: list[str], log_dir: Path) -> str:
         {
             "Label": LAUNCHD_LABEL,
             "ProgramArguments": list(argv),
+            # Match user/<uid>; the default Aqua session requires gui/<uid>.
+            "LimitLoadToSessionType": "Background",
             "RunAtLoad": True,
             "KeepAlive": {"SuccessfulExit": False},
             "ThrottleInterval": 5,

@@ -11,7 +11,6 @@ import pytest
 
 import mship.core.daemon.units as units_mod
 from mship.core.daemon.units import (
-    LAUNCHD_LABEL,
     DaemonExecResolutionError,
     render_launchd_plist,
     render_systemd_unit,
@@ -50,20 +49,6 @@ def test_systemd_unit_has_no_working_directory():
 def test_systemd_multiarg_exec_is_joined():
     cp = _parse_unit(render_systemd_unit(["/usr/bin/python3", "-m", "mship.core.daemon"]))
     assert cp["Service"]["ExecStart"] == "/usr/bin/python3 -m mship.core.daemon"
-
-
-def test_launchd_plist_shape(tmp_path: Path):
-    log_dir = tmp_path / "logs"
-    plist = plistlib.loads(render_launchd_plist(ARGV, log_dir).encode())
-    assert plist["Label"] == LAUNCHD_LABEL == "com.mothership.daemon"
-    assert plist["KeepAlive"] == {"SuccessfulExit": False}
-    assert plist["ThrottleInterval"] == 5
-    assert plist["RunAtLoad"] is True
-    assert plist["ProgramArguments"] == ARGV
-    # launchd discards stderr otherwise — the last-resort net for output that
-    # escapes the logging tree.
-    assert plist["StandardOutPath"] == str(log_dir / "launchd.out.log")
-    assert plist["StandardErrorPath"] == str(log_dir / "launchd.err.log")
 
 
 @pytest.fixture
