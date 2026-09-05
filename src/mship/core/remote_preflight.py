@@ -159,9 +159,8 @@ _WHY = {
 # collapsing into a command the operator has to rewrite five times by hand.
 _FIX = {
     IN_PROGRESS: [
-        "Finish it or abandon it, then re-run:",
+        "Inspect and finish or abandon the operation Git identifies, then re-run:",
         '  git -C "{path}" status                 # what git is in the middle of',
-        '  git -C "{path}" rebase --abort         # ...or merge/cherry-pick/revert --abort',
     ],
     WRONG_BRANCH: [
         "Check the task's branch back out, then re-run:",
@@ -237,19 +236,53 @@ _UNMERGED_CODES = ("DD", "AU", "UD", "UA", "DU", "AA", "UU")
 # suspended. A `--no-commit` merge leaves MERGE_HEAD with NOTHING unmerged, so
 # the porcelain alone cannot see it — hence the extra look.
 _OPERATIONS = (
-    ("rebase-merge", "a rebase is in progress"),
-    ("rebase-apply", "a rebase or `git am` is in progress"),
-    ("MERGE_HEAD", "a merge is in progress"),
-    ("CHERRY_PICK_HEAD", "a cherry-pick is in progress"),
-    ("REVERT_HEAD", "a revert is in progress"),
+    (
+        "rebase-merge",
+        "a rebase is in progress",
+        ("rebase --continue",),
+        ("rebase --abort",),
+    ),
+    (
+        "rebase-apply",
+        "a rebase or `git am` is in progress",
+        ("rebase --continue", "am --continue"),
+        ("rebase --abort", "am --abort"),
+    ),
+    (
+        "sequencer",
+        "a cherry-pick or revert sequence is in progress",
+        ("cherry-pick --continue", "revert --continue"),
+        ("cherry-pick --abort", "revert --abort"),
+    ),
+    ("MERGE_HEAD", "a merge is in progress", ("merge --continue",), ("merge --abort",)),
+    (
+        "CHERRY_PICK_HEAD",
+        "a cherry-pick is in progress",
+        ("cherry-pick --continue",),
+        ("cherry-pick --abort",),
+    ),
+    ("REVERT_HEAD", "a revert is in progress", ("revert --continue",), ("revert --abort",)),
+    (
+        "BISECT_START",
+        "a bisect is in progress",
+        ("bisect skip",),
+        ("bisect reset",),
+    ),
 )
 
 
-def _operation_in_progress(git_dir: Path) -> str | None:
-    """Which suspended git operation this worktree is in, if any."""
-    for marker, description in _OPERATIONS:
-        if (git_dir / marker).exists():
-            return description
+def _operation_in_progress(
+    git_dir: Path,
+) -> tuple[str, tuple[str, ...], tuple[str, ...]] | None:
+    """Description and complete recovery commands for a suspended git operation."""
+    for marker, description, continue_commands, abort_commands in _OPERATIONS:
+        marker_path = git_dir / marker
+        if (
+            marker == "BISECT_START"
+            and marker_path.is_file()
+            and marker_path.stat().st_size > 0
+        ) or (marker != "BISECT_START" and marker_path.exists()):
+            return description, continue_commands, abort_commands
     return None
 
 
@@ -325,9 +358,22 @@ def _inspect_repo(
         git_dir = path / git_dir
     operation = _operation_in_progress(git_dir)
     if operation is not None or unmerged:
-        detail = operation or "unmerged paths"
+        detail = "unmerged paths"
+        if operation is not None:
+            description, continue_commands, abort_commands = operation
+            detail = "\n".join(
+                [description]
+                + [
+                    f'continue: git -C "{path}" {command}'
+                    for command in continue_commands
+                ]
+                + [
+                    f'abort: git -C "{path}" {command}'
+                    for command in abort_commands
+                ]
+            )
         if unmerged:
-            detail = f"{detail}; unresolved: {', '.join(sorted(unmerged)[:5])}"
+            detail = f"{detail}\nunresolved: {', '.join(sorted(unmerged)[:5])}"
         return state(blocked=IN_PROGRESS, detail=detail)
 
     # WHAT is being inspected, before WHAT STATE it is in: every verdict below
@@ -336,45 +382,29 @@ def _inspect_repo(
     # published. Asked after `git status` because a path that is not a git
     # worktree at all is UNREADABLE, not "on the wrong branch".
     #
-    # Branch identity and the sha to carry forward used to be two separate git
-    # invocations — a `symbolic-ref` to name the checked-out branch, then a
-    # `rev-parse HEAD` to capture the sha — with a window between them: a `git
-    # checkout` landing in that window verifies branch A and then captures a
-    # sha that belongs to branch B, so every check past this point reasons
-    # about a commit that was never on the branch it validated. Two subprocess
-    # calls cannot be made atomic against an outside writer, so instead they
-    # are made self-verifying: a SINGLE `git rev-parse HEAD refs/heads/<branch>`
-    # reads both shas out of the same process. If they agree, HEAD was at that
-    # branch's tip at this instant — exactly the invariant every check below
-    # assumes. If they disagree (including one of them failing to resolve at
-    # all — a detached HEAD, no local ref by this name, an unborn branch),
-    # HEAD is not on the task's branch, which is already a refusal. That
-    # subsumes the old `symbolic-ref` check entirely: the two values could
-    # never come out equal without HEAD being ON refs/heads/<branch>.
-    #
-    # One process is not one instant, though: git still resolves HEAD and
-    # then refs/heads/<branch> as two sequential reads within this single
-    # command, so a ref mutating in THAT window (a concurrent commit, or a
-    # force-checkout that also moves the branch) is a torn read too, not just
-    # the two-command case above. It needs no separate handling because the
-    # same equality check already covers it: either the mutation lands
-    # outside the window and both reads see one consistent value, or it lands
-    # inside and the two reads disagree — which is the WRONG_BRANCH refusal
-    # already taken above. There is no interleaving where the two agree on a
-    # sha that was never actually the branch's tip at some consistent instant.
+    # `rev-parse HEAD refs/heads/<branch>` can certify that two names resolved
+    # to the same commit, but not that HEAD is attached to the branch: a
+    # detached HEAD at the task branch's tip returns the same pair. Establish
+    # the symbolic identity first, before any origin query or delivery command.
     ref = f"refs/heads/{branch}"
+    head_ref = shell.run("git symbolic-ref --quiet HEAD", cwd=path)
+    checked_ref = (head_ref.stdout or "").strip()
+    checked_out = checked_ref.removeprefix("refs/heads/")
+    if head_ref.returncode != 0 or checked_ref != ref:
+        return state(
+            blocked=WRONG_BRANCH,
+            detail=f"HEAD is {checked_out or 'detached'}, not {branch}",
+        )
+
+    # The symbolic name is not enough to safely carry a commit forward: a
+    # branch can move while git resolves HEAD and its direct ref. Keep the
+    # combined read and require the two shas to agree, refusing a torn read
+    # rather than pinning a commit that was not the task branch's tip.
     pair = shell.run(f"git rev-parse HEAD {shlex.quote(ref)}", cwd=path)
     out = (pair.stdout or "").splitlines()
     head_sha = out[0].strip() if out else ""
     branch_tip = out[1].strip() if len(out) > 1 else ""
     if pair.returncode != 0 or not head_sha or head_sha != branch_tip:
-        # `symbolic-ref` is asked here ONLY to name what IS checked out, for
-        # the refusal message — it plays no part in the decision above, so its
-        # being a second, unsynchronized read does not reopen the race: the
-        # run is already refused, and no `head_sha` is ever produced for this
-        # repo.
-        head_ref = shell.run("git symbolic-ref --quiet HEAD", cwd=path)
-        checked_out = (head_ref.stdout or "").strip().removeprefix("refs/heads/")
         return state(
             blocked=WRONG_BRANCH,
             detail=f"HEAD is {checked_out or 'detached'}, not {branch}",

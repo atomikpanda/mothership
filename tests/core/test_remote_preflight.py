@@ -431,6 +431,22 @@ def test_one_ref_failing_to_resolve_mid_command_is_refused_not_pinned(tmp_path):
     assert pre.states[0].head_sha is None
 
 
+def test_a_detached_worktree_at_the_task_tip_is_refused_before_origin(tmp_path):
+    """SHA equality cannot substitute for being attached to the task branch."""
+    api = _repo(tmp_path, "api")
+    shell = FakeShell({"api": _clean(
+        head_ref="",
+        pair_output="headsha\nheadsha\n",
+    )})
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert not pre.ok
+    assert [s.blocked_reason for s in pre.blocked] == [WRONG_BRANCH]
+    assert "HEAD is detached, not feat/x" in blocked_message(pre)
+    assert not any("ls-remote" in command for command in shell.commands)
+    assert shell.pushes == []
+
+
 def test_a_detached_worktree_is_refused_and_says_so(tmp_path):
     """Detached is the same finding with no branch name to report: `symbolic-ref
     --quiet` exits non-zero with empty output, which must not read as a match."""
@@ -511,7 +527,8 @@ def test_a_conflicted_repo_is_refused(tmp_path):
     msg = blocked_message(pre)
     assert "merge or rebase in progress in api" in msg
     assert "src/app.py" in msg          # which file, exactly
-    assert "--abort" in msg             # the way out
+    assert f'git -C "{api}" status' in msg
+    assert f'git -C "{api}" rebase --abort' not in msg
 
 
 def test_a_mid_rebase_repo_is_refused_ahead_of_the_branch_check(tmp_path):
@@ -528,6 +545,8 @@ def test_a_mid_rebase_repo_is_refused_ahead_of_the_branch_check(tmp_path):
     assert [s.blocked_reason for s in pre.blocked] == [IN_PROGRESS]
     msg = blocked_message(pre)
     assert "rebase" in msg
+    assert f'continue: git -C "{api}" rebase --continue' in msg
+    assert f'abort: git -C "{api}" rebase --abort' in msg
     assert "checkout" not in msg        # NOT the wrong-branch remedy
 
 
@@ -538,8 +557,14 @@ def test_a_mid_merge_repo_is_refused_even_with_a_clean_tree(tmp_path):
     (api / ".git").mkdir(parents=True, exist_ok=True)
     (api / ".git" / "MERGE_HEAD").write_text("abc\n")
     shell = FakeShell({"api": _clean(status="")})
-    assert [s.blocked_reason for s in inspect(FakeTask({"api": api}), shell).blocked] \
-        == [IN_PROGRESS]
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert [s.blocked_reason for s in pre.blocked] == [IN_PROGRESS]
+    msg = blocked_message(pre)
+    assert f'continue: git -C "{api}" merge --continue' in msg
+    assert f'abort: git -C "{api}" merge --abort' in msg
+
+    assert f'git -C "{api}" rebase --abort' not in msg
 
 
 def test_a_cherry_pick_in_progress_is_refused(tmp_path):
@@ -547,8 +572,126 @@ def test_a_cherry_pick_in_progress_is_refused(tmp_path):
     (api / ".git").mkdir(parents=True, exist_ok=True)
     (api / ".git" / "CHERRY_PICK_HEAD").write_text("abc\n")
     shell = FakeShell({"api": _clean(status="")})
-    assert [s.blocked_reason for s in inspect(FakeTask({"api": api}), shell).blocked] \
-        == [IN_PROGRESS]
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert [s.blocked_reason for s in pre.blocked] == [IN_PROGRESS]
+    msg = blocked_message(pre)
+    assert f'continue: git -C "{api}" cherry-pick --continue' in msg
+    assert f'abort: git -C "{api}" cherry-pick --abort' in msg
+
+    assert f'git -C "{api}" rebase --abort' not in msg
+
+
+def test_a_mid_rebase_apply_repo_lists_rebase_and_git_am_recovery_separately(tmp_path):
+    api = _repo(tmp_path, "api")
+    (api / ".git" / "rebase-apply").mkdir(parents=True)
+    shell = FakeShell({"api": _clean(status="", head_ref="")})
+
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert [s.blocked_reason for s in pre.blocked] == [IN_PROGRESS]
+    msg = blocked_message(pre)
+    assert f'continue: git -C "{api}" rebase --continue' in msg
+    assert f'continue: git -C "{api}" am --continue' in msg
+    assert f'abort: git -C "{api}" rebase --abort' in msg
+    assert f'abort: git -C "{api}" am --abort' in msg
+    assert "# or git am" not in msg
+
+
+def test_clean_sequencer_is_refused_before_wrong_branch_with_both_recoveries(tmp_path):
+    api = _repo(tmp_path, "api")
+    (api / ".git" / "sequencer").mkdir(parents=True)
+    shell = FakeShell({"api": _clean(status="", head_ref="refs/heads/other")})
+
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert [s.blocked_reason for s in pre.blocked] == [IN_PROGRESS]
+    msg = blocked_message(pre)
+    for command in (
+        "cherry-pick --continue",
+        "revert --continue",
+        "cherry-pick --abort",
+        "revert --abort",
+    ):
+        assert f'git -C "{api}" {command}' in msg
+    assert "checkout" not in msg
+    assert f'git -C "{api}" rebase --abort' not in msg
+
+
+def test_bisect_is_refused_before_wrong_branch_with_term_agnostic_recovery(tmp_path):
+    api = _repo(tmp_path, "api")
+    (api / ".git").mkdir(parents=True, exist_ok=True)
+    (api / ".git" / "BISECT_START").write_text("start\n")
+    shell = FakeShell({"api": _clean(status="", head_ref="refs/heads/other")})
+
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert [s.blocked_reason for s in pre.blocked] == [IN_PROGRESS]
+    msg = blocked_message(pre)
+    for command in ("bisect skip", "bisect reset"):
+        assert f'git -C "{api}" {command}' in msg
+    assert f'git -C "{api}" bisect good' not in msg
+    assert f'git -C "{api}" bisect bad' not in msg
+    assert "checkout" not in msg
+    assert f'git -C "{api}" rebase --abort' not in msg
+
+
+def test_bisect_start_is_active_only_when_nonempty(tmp_path):
+    api = _repo(tmp_path, "api")
+    (api / ".git").mkdir(parents=True, exist_ok=True)
+    shell = FakeShell({"api": _clean(status="")})
+
+    (api / ".git" / "BISECT_START").touch()
+    empty = inspect(FakeTask({"api": api}), shell)
+
+    (api / ".git" / "BISECT_START").write_text("start\n")
+    active = inspect(FakeTask({"api": api}), shell)
+
+    assert empty.ok
+    assert empty.blocked == []
+    assert [s.blocked_reason for s in active.blocked] == [IN_PROGRESS]
+
+
+def test_bisect_recovery_commands_remain_copyable_with_unmerged_paths(tmp_path):
+    api = _repo(tmp_path, "api")
+    (api / ".git").mkdir(parents=True, exist_ok=True)
+    (api / ".git" / "BISECT_START").write_text("start\n")
+    shell = FakeShell({"api": _clean(status="UU src/app.py\n")})
+
+    lines = blocked_message(inspect(FakeTask({"api": api}), shell)).splitlines()
+    skip = f'continue: git -C "{api}" bisect skip'
+    reset = f'abort: git -C "{api}" bisect reset'
+
+    assert skip in lines
+    assert reset in lines
+    assert lines[lines.index(reset) + 1] == "unresolved: src/app.py"
+
+
+def test_historical_bisect_log_without_active_state_is_not_refused(tmp_path):
+    api = _repo(tmp_path, "api")
+    (api / ".git").mkdir(parents=True, exist_ok=True)
+    (api / ".git" / "BISECT_LOG").write_text("git bisect start --term-old=stable --term-new=broken\n")
+    shell = FakeShell({"api": _clean(status="")})
+
+    pre = inspect(FakeTask({"api": api}), shell)
+
+    assert pre.ok
+    assert pre.blocked == []
+
+
+def test_a_revert_in_progress_does_not_offer_a_rebase_abort(tmp_path):
+    api = _repo(tmp_path, "api")
+    (api / ".git").mkdir(parents=True, exist_ok=True)
+    (api / ".git" / "REVERT_HEAD").write_text("abc\n")
+    shell = FakeShell({"api": _clean(status="")})
+
+    msg = blocked_message(inspect(FakeTask({"api": api}), shell))
+
+    assert f'git -C "{api}" revert --continue' in msg
+    assert f'git -C "{api}" revert --abort' in msg
+    assert f'git -C "{api}" rebase --abort' not in msg
+
+
 
 
 def test_an_unanswerable_git_dir_is_unreadable_not_transferred(tmp_path):
