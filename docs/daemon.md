@@ -302,6 +302,10 @@ The daemon discovers workspaces instead of being told about them: at startup
 (and on explicit refresh) it scans the configured **scan roots** for
 `mothership.yaml` and serves every healthy one.
 
+Mailbox polling reads its disk-backed snapshots outside the daemon's event
+loop so a slow inbox read does not stall host health or other workspaces.
+When no threads changed, it skips the spec/work-item index entirely.
+
 ```bash
 mship daemon install --scan-root ~/src --scan-root ~/work --serve 127.0.0.1:47190
 ```
