@@ -97,6 +97,9 @@ def register(parent: typer.Typer, get_container):
         except SpecParseError as exc:
             output.error(f"Cannot create spec {spec.id!r}: {exc}")
             raise typer.Exit(1)
+        except ValueError as exc:
+            output.error(f"Cannot create spec {spec.id!r}: {exc}")
+            raise typer.Exit(1)
 
         if output.human_mode:
             output.success(f"Created spec: {path}")
@@ -152,6 +155,11 @@ def register(parent: typer.Typer, get_container):
         from_json: Optional[str] = typer.Option(None, "--from-json", help="Path to the draft JSON, or - for stdin."),
         from_file: Optional[str] = typer.Option(None, "--from-file", help="Path to a rendered spec markdown file, or - for stdin."),
         bypass_status_gate: bool = typer.Option(False, "--bypass-status-gate", help="Apply regardless of current status."),
+        discard_review: bool = typer.Option(
+            False,
+            "--discard-review",
+            help="Discard reviewed verdict state that applying would replace.",
+        ),
     ):
         """Ingest a drafted spec, render the body, set fields, advance to needs_review.
 
@@ -164,11 +172,15 @@ def register(parent: typer.Typer, get_container):
         """
         import json
         import sys
-        from datetime import datetime, timezone
         from pathlib import Path
         from pydantic import ValidationError
-        from mship.core.spec import SpecDraft, InvalidTransition, validate_transition
-        from mship.core.spec_draft import apply_draft, parse_spec_markdown
+        from mship.core.spec import InvalidTransition, SpecDraft
+        from mship.core.spec_draft import (
+            MissingSpec, ReviewDiscardRequired, apply_draft_transaction,
+            parse_spec_markdown,
+        )
+        from mship.core.spec_storage import SpecLocked
+        from mship.core.spec_store import SpecParseError
 
         output = Output()
 
@@ -205,36 +217,57 @@ def register(parent: typer.Typer, get_container):
 
         container = get_container()
         store = _spec_store()
-        spec = store.find_by_id(spec_id)
-        if spec is None:
-            output.error(f"No spec with id {spec_id!r}.")
+        try:
+            result = apply_draft_transaction(
+                store,
+                spec_id,
+                draft,
+                bypass_status_gate=bypass_status_gate,
+                discard_review=discard_review,
+            )
+        except ReviewDiscardRequired as exc:
+            output.error(str(exc))
             raise typer.Exit(1)
-
-        if not bypass_status_gate:
-            try:
-                validate_transition(spec.status, "needs_review")
-            except InvalidTransition as e:
-                output.error(f"{e}. Use --bypass-status-gate to override.")
-                raise typer.Exit(1)
-
-        # MOS-215/MOS-240: applying a (re)drafted spec supersedes any pending
-        # request-changes, so clear the reason — a freshly applied draft carries
-        # no outstanding clarification ask. (A brand-new draft has none anyway.)
-        apply_draft(spec, draft)
-        spec.status = "needs_review"
-        spec.clarification_reason = None
-        spec.updated_at = datetime.now(timezone.utc)
-        path = store.save(spec)
+        except InvalidTransition as exc:
+            output.error(f"{exc}. Use --bypass-status-gate to override.")
+            raise typer.Exit(1)
+        except ValueError as exc:
+            output.error(str(exc))
+            raise typer.Exit(1)
+        except SpecLocked as exc:
+            output.error(f"Cannot apply draft for spec {spec_id!r}: {exc}")
+            raise typer.Exit(1)
+        except SpecParseError as exc:
+            output.error(f"Cannot apply draft for spec {spec_id!r}: {exc}")
+            raise typer.Exit(1)
+        if isinstance(result, MissingSpec):
+            output.error(f"No spec with id {result.spec_id!r}.")
+            raise typer.Exit(1)
 
         # Agent-agnostic activity heartbeat: applying a drafted spec is task work.
         # No-ops when the spec's bound task_slug isn't (yet) a live task.
-        if spec.task_slug:
-            container.state_manager().record_activity(spec.task_slug)
+        if result.spec.task_slug:
+            container.state_manager().record_activity(result.spec.task_slug)
 
         if output.human_mode:
-            output.success(f"Applied draft → {spec.status}: {path}")
+            if result.discarded_review_count:
+                unit_noun = "unit" if result.discarded_review_count == 1 else "units"
+                output.success(
+                    f"Applied draft → {result.spec.status}; review state was discarded for "
+                    f"{result.discarded_review_count} review {unit_noun}: {result.path}"
+                )
+            else:
+                output.success(f"Applied draft → {result.spec.status}: {result.path}")
         else:
-            output.json({"id": spec.id, "status": spec.status, "path": str(path)})
+            payload = {
+                "id": result.spec.id,
+                "status": result.spec.status,
+                "path": str(result.path),
+            }
+            if result.discarded_review_count:
+                payload["review_state_discarded"] = True
+                payload["discarded_review_count"] = result.discarded_review_count
+            output.json(payload)
 
     @spec_app.command("review")
     def review(
@@ -292,37 +325,46 @@ def register(parent: typer.Typer, get_container):
         from mship.core.spec_review import (
             PROSE_UNIT_IDS, set_criterion_verdict, set_prose_verdict,
         )
+        from mship.core.spec_storage import SpecLocked
+        from mship.core.spec_store import SpecParseError
 
         output = Output()
         store = _spec_store()
-        spec = store.find_by_id(spec_id)
-        if spec is None:
-            output.error(f"No spec with id {spec_id!r}.")
-            raise typer.Exit(1)
-
-        # Route on the unit id: prose sections (PROSE_UNIT_IDS) get a prose
-        # verdict; anything else goes down the unchanged AC path. An id that is
-        # neither errors listing BOTH vocabularies — the core setters each only
-        # know their own.
-        ac_ids = [c.id for c in spec.acceptance_criteria]
         try:
-            if criterion_id in PROSE_UNIT_IDS:
-                set_prose_verdict(spec, criterion_id, verdict_value)
-            elif criterion_id in ac_ids:
-                set_criterion_verdict(spec, criterion_id, verdict_value)
-            else:
-                output.error(
-                    f"no acceptance criterion or prose section {criterion_id!r}; "
-                    f"acceptance criteria: {', '.join(ac_ids) or '(none)'}; "
-                    f"prose sections: {', '.join(sorted(PROSE_UNIT_IDS))}"
-                )
-                raise typer.Exit(1)
-        except ValueError as e:
-            output.error(str(e))
-            raise typer.Exit(1)
+            with store.locked(spec_id) as artifact:
+                if artifact is None:
+                    output.error(f"No spec with id {spec_id!r}.")
+                    raise typer.Exit(1)
+                spec = artifact.spec.model_copy(deep=True)
 
-        spec.updated_at = datetime.now(timezone.utc)
-        path = store.save(spec)
+                # Route on the unit id: prose sections (PROSE_UNIT_IDS) get a prose
+                # verdict; anything else goes down the unchanged AC path. An id that is
+                # neither errors listing BOTH vocabularies — the core setters each only
+                # know their own.
+                ac_ids = [c.id for c in spec.acceptance_criteria]
+                if criterion_id in PROSE_UNIT_IDS:
+                    set_prose_verdict(spec, criterion_id, verdict_value)
+                elif criterion_id in ac_ids:
+                    set_criterion_verdict(spec, criterion_id, verdict_value)
+                else:
+                    output.error(
+                        f"no acceptance criterion or prose section {criterion_id!r}; "
+                        f"acceptance criteria: {', '.join(ac_ids) or '(none)'}; "
+                        f"prose sections: {', '.join(sorted(PROSE_UNIT_IDS))}"
+                    )
+                    raise typer.Exit(1)
+
+                spec.updated_at = datetime.now(timezone.utc)
+                path = store.save_while_locked(spec, artifact)
+        except ValueError as exc:
+            output.error(str(exc))
+            raise typer.Exit(1)
+        except SpecLocked as exc:
+            output.error(f"Cannot update spec {spec_id!r}: {exc}")
+            raise typer.Exit(1)
+        except SpecParseError as exc:
+            output.error(f"Cannot update spec {spec_id!r}: {exc}")
+            raise typer.Exit(1)
         if output.human_mode:
             output.success(f"{criterion_id} → {verdict_value}: {path}")
         else:
@@ -343,23 +385,30 @@ def register(parent: typer.Typer, get_container):
         """Attach an evidence entry to one acceptance criterion (no status change)."""
         from datetime import datetime, timezone
         from mship.core.spec_review import infer_evidence_kind, set_criterion_evidence
+        from mship.core.spec_storage import SpecLocked
+        from mship.core.spec_store import SpecParseError
 
         output = Output()
         store = _spec_store()
-        spec = store.find_by_id(spec_id)
-        if spec is None:
-            output.error(f"No spec with id {spec_id!r}.")
-            raise typer.Exit(1)
-
         resolved_kind = kind or infer_evidence_kind(ref)
         try:
-            set_criterion_evidence(spec, criterion_id, resolved_kind, ref, note)
-        except ValueError as e:
-            output.error(str(e))
+            with store.locked(spec_id) as artifact:
+                if artifact is None:
+                    output.error(f"No spec with id {spec_id!r}.")
+                    raise typer.Exit(1)
+                spec = artifact.spec.model_copy(deep=True)
+                set_criterion_evidence(spec, criterion_id, resolved_kind, ref, note)
+                spec.updated_at = datetime.now(timezone.utc)
+                path = store.save_while_locked(spec, artifact)
+        except ValueError as exc:
+            output.error(str(exc))
             raise typer.Exit(1)
-
-        spec.updated_at = datetime.now(timezone.utc)
-        path = store.save(spec)
+        except SpecLocked as exc:
+            output.error(f"Cannot update spec {spec_id!r}: {exc}")
+            raise typer.Exit(1)
+        except SpecParseError as exc:
+            output.error(f"Cannot update spec {spec_id!r}: {exc}")
+            raise typer.Exit(1)
         if output.human_mode:
             output.success(f"{criterion_id} += {resolved_kind}:{ref}: {path}")
         else:
@@ -431,13 +480,29 @@ def register(parent: typer.Typer, get_container):
         """Add an open question to a spec."""
         from datetime import datetime, timezone
         from mship.core.spec_questions import add_question
+        from mship.core.spec_storage import SpecLocked
+        from mship.core.spec_store import SpecParseError
+
         output = Output()
         store = _spec_store()
-        spec = store.find_by_id(spec_id)
-        if spec is None:
-            output.error(f"No spec with id {spec_id!r}."); raise typer.Exit(1)
-        q = add_question(spec, text)
-        spec.updated_at = datetime.now(timezone.utc); store.save(spec)
+        try:
+            with store.locked(spec_id) as artifact:
+                if artifact is None:
+                    output.error(f"No spec with id {spec_id!r}.")
+                    raise typer.Exit(1)
+                spec = artifact.spec.model_copy(deep=True)
+                q = add_question(spec, text)
+                spec.updated_at = datetime.now(timezone.utc)
+                store.save_while_locked(spec, artifact)
+        except ValueError as exc:
+            output.error(str(exc))
+            raise typer.Exit(1)
+        except SpecLocked as exc:
+            output.error(f"Cannot update spec {spec_id!r}: {exc}")
+            raise typer.Exit(1)
+        except SpecParseError as exc:
+            output.error(f"Cannot update spec {spec_id!r}: {exc}")
+            raise typer.Exit(1)
         if output.human_mode:
             output.success(f"Added {q.id}: {text}")
         else:
@@ -448,16 +513,29 @@ def register(parent: typer.Typer, get_container):
         """Answer an open question (does not change status)."""
         from datetime import datetime, timezone
         from mship.core.spec_questions import answer_question
+        from mship.core.spec_storage import SpecLocked
+        from mship.core.spec_store import SpecParseError
+
         output = Output()
         store = _spec_store()
-        spec = store.find_by_id(spec_id)
-        if spec is None:
-            output.error(f"No spec with id {spec_id!r}."); raise typer.Exit(1)
         try:
-            answer_question(spec, q_id, answer_text)
-        except ValueError as e:
-            output.error(str(e)); raise typer.Exit(1)
-        spec.updated_at = datetime.now(timezone.utc); store.save(spec)
+            with store.locked(spec_id) as artifact:
+                if artifact is None:
+                    output.error(f"No spec with id {spec_id!r}.")
+                    raise typer.Exit(1)
+                spec = artifact.spec.model_copy(deep=True)
+                answer_question(spec, q_id, answer_text)
+                spec.updated_at = datetime.now(timezone.utc)
+                store.save_while_locked(spec, artifact)
+        except ValueError as exc:
+            output.error(str(exc))
+            raise typer.Exit(1)
+        except SpecLocked as exc:
+            output.error(f"Cannot update spec {spec_id!r}: {exc}")
+            raise typer.Exit(1)
+        except SpecParseError as exc:
+            output.error(f"Cannot update spec {spec_id!r}: {exc}")
+            raise typer.Exit(1)
         if output.human_mode:
             output.success(f"{q_id} answered.")
         else:
@@ -478,11 +556,14 @@ def register(parent: typer.Typer, get_container):
             output.error(f"No spec with id {spec_id!r}.")
             raise typer.Exit(1)
         try:
-            approve_spec(spec, store, bypass_gate=bypass_gate)
+            spec = approve_spec(spec, store, bypass_gate=bypass_gate)
         except ApprovalBlocked as e:
             output.error("Cannot approve — " + "; ".join(e.blockers) + ". Use --bypass-gate to override.")
             raise typer.Exit(1)
         except InvalidTransition as e:
+            output.error(str(e))
+            raise typer.Exit(1)
+        except ValueError as e:
             output.error(str(e))
             raise typer.Exit(1)
         path = store.path_for(spec)
@@ -606,6 +687,7 @@ def register(parent: typer.Typer, get_container):
         except DispatchError as e:
             output.error(str(e))
             raise typer.Exit(1)
+        spec = result.spec
 
         if closes_canonical and spec.work_item_id:
             # Fail-open: dispatch already completed, so a linking failure must
@@ -662,7 +744,7 @@ def register(parent: typer.Typer, get_container):
         # "spec request-changes: …" log line — the structured record is the
         # parsed source now.
         try:
-            request_changes_spec(
+            spec = request_changes_spec(
                 spec, store, reason,
                 log_manager=container.log_manager(),
                 actor=os.environ.get("USER") or "unknown",
@@ -841,24 +923,36 @@ def register(parent: typer.Typer, get_container):
             output.json(data)
 
     def _simple_transition(target_status: str, spec_id: str) -> None:
-        """Shared logic for implemented/archive: validate transition and save."""
+        """Transition the current spec under its per-spec lock."""
         from datetime import datetime, timezone
         from mship.core.spec import InvalidTransition, validate_transition
+        from mship.core.spec_storage import SpecLocked
+        from mship.core.spec_store import SpecParseError
 
         output = Output()
         store = _spec_store()
-        spec = store.find_by_id(spec_id)
-        if spec is None:
-            output.error(f"No spec with id {spec_id!r}.")
-            raise typer.Exit(1)
         try:
-            validate_transition(spec.status, target_status)
+            with store.locked(spec_id) as artifact:
+                if artifact is None:
+                    output.error(f"No spec with id {spec_id!r}.")
+                    raise typer.Exit(1)
+                spec = artifact.spec
+                validate_transition(spec.status, target_status)
+                spec.status = target_status
+                spec.updated_at = datetime.now(timezone.utc)
+                store.save_while_locked(spec, artifact)
         except InvalidTransition as e:
             output.error(str(e))
             raise typer.Exit(1)
-        spec.status = target_status
-        spec.updated_at = datetime.now(timezone.utc)
-        store.save(spec)
+        except SpecLocked as exc:
+            output.error(f"Cannot update spec {spec_id!r}: {exc}")
+            raise typer.Exit(1)
+        except SpecParseError as exc:
+            output.error(f"Cannot update spec {spec_id!r}: {exc}")
+            raise typer.Exit(1)
+        except ValueError as exc:
+            output.error(str(exc))
+            raise typer.Exit(1)
         if output.human_mode:
             output.success(f"Spec {spec.id} → {target_status}")
         else:

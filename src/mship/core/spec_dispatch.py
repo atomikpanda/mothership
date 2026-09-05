@@ -135,6 +135,39 @@ def dispatch_spec(
     workspace_root: Path | None = None,
     docs_dir: str = "docs",
 ) -> DispatchResult:
+    """Dispatch the current spec without saving a pre-lock snapshot."""
+    with store.locked(spec.id) as artifact:
+        if artifact is None:
+            raise DispatchError(f"spec {spec.id!r} no longer exists")
+        return _dispatch_current(
+            artifact.spec,
+            state_manager=state_manager,
+            store=store,
+            artifact=artifact,
+            spawn_fn=spawn_fn,
+            now=now,
+            workitems=workitems,
+            workspace=workspace,
+            task_slug=task_slug,
+            workspace_root=workspace_root,
+            docs_dir=docs_dir,
+        )
+
+
+def _dispatch_current(
+    spec: Spec,
+    *,
+    state_manager,
+    store,
+    artifact,
+    spawn_fn: Callable[[Spec], Task],
+    now: datetime,
+    workitems,
+    workspace: str,
+    task_slug: str | None = None,
+    workspace_root: Path | None = None,
+    docs_dir: str = "docs",
+) -> DispatchResult:
     """Bind an approved (or already-dispatched) spec to a task.
 
     Task selection, in order:
@@ -229,7 +262,7 @@ def dispatch_spec(
     spec.status = "dispatched"
     spec.task_slug = chosen_slug
     spec.updated_at = now
-    store.save(spec)
+    store.save_while_locked(spec, artifact)
 
     # Point the handoff at the task's implementation plan when one resolves (the
     # WorkItem's linked `plan_path` wins, else the docs/plans convention) so the

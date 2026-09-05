@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 
-from mship.core.spec import AcceptanceCriterion, BodySection, OpenQuestion, Spec, SpecDraft
+from mship.core.spec import (
+    AcceptanceCriterion, BodySection, OpenQuestion, Spec, SpecDraft, validate_transition,
+)
 from mship.core.spec_body import parse_body_sections, render_body
+from mship.core.spec_store import SpecStore
 from mship.util.slug import slugify
 
 
@@ -89,6 +94,84 @@ or pipe it directly:
 
     cat draft.json | mship spec apply {spec_id} --from-json -
 """
+
+
+@dataclass(frozen=True)
+class MissingSpec:
+    """The requested spec id had no current artifact to apply."""
+
+    spec_id: str
+
+
+class ReviewDiscardRequired(Exception):
+    """Applying would remove protected review metadata without authorization."""
+
+    def __init__(self, discarded_review_count: int) -> None:
+        self.discarded_review_count = discarded_review_count
+        unit_noun = "unit" if discarded_review_count == 1 else "units"
+        super().__init__(
+            f"Cannot apply draft: review state for {discarded_review_count} review "
+            f"{unit_noun} would be discarded. Re-run with --discard-review to continue."
+        )
+
+
+@dataclass(frozen=True)
+class ApplyDraftResult:
+    spec: Spec
+    path: Path
+    discarded_review_count: int
+
+
+def _protected_review_unit_count(spec: Spec) -> int:
+    return (
+        sum(
+            criterion.verdict != "unreviewed"
+            or bool(criterion.comment)
+            or bool(criterion.evidence)
+            for criterion in spec.acceptance_criteria
+        )
+        + sum(
+            verdict.verdict != "unreviewed" or bool(verdict.comment)
+            for verdict in spec.prose_verdicts.values()
+        )
+        + sum(question.answer is not None for question in spec.open_questions)
+    )
+
+
+def apply_draft_transaction(
+    store: SpecStore,
+    spec_id: str,
+    draft: SpecDraft,
+    *,
+    bypass_status_gate: bool = False,
+    discard_review: bool = False,
+    now: datetime | None = None,
+) -> ApplyDraftResult | MissingSpec:
+    """Atomically apply a draft and persist its lifecycle transition."""
+    with store.locked(spec_id) as artifact:
+        if artifact is None:
+            return MissingSpec(spec_id=spec_id)
+
+        applied = artifact.spec.model_copy(deep=True)
+        apply_draft(applied, draft)
+        discarded_review_count = (
+            _protected_review_unit_count(artifact.spec)
+            - _protected_review_unit_count(applied)
+        )
+        if discarded_review_count and not discard_review:
+            raise ReviewDiscardRequired(discarded_review_count)
+        if not bypass_status_gate:
+            validate_transition(applied.status, "needs_review")
+
+        applied.status = "needs_review"
+        applied.clarification_reason = None
+        applied.updated_at = now or datetime.now(timezone.utc)
+        path = store.save_while_locked(applied, artifact)
+        return ApplyDraftResult(
+            spec=applied,
+            path=path,
+            discarded_review_count=discarded_review_count,
+        )
 
 
 def apply_draft(spec: Spec, draft: SpecDraft) -> Spec:
@@ -176,14 +259,35 @@ def apply_draft(spec: Spec, draft: SpecDraft) -> Spec:
         if prior is not None:
             new_acs.append(AcceptanceCriterion(
                 id=ac_id, text=t, verdict=prior.verdict,
-                evidence=list(prior.evidence),
+                evidence=list(prior.evidence), comment=prior.comment,
             ))
         else:
             new_acs.append(AcceptanceCriterion(id=ac_id, text=t))
     spec.acceptance_criteria = new_acs
+
+    prior_questions = list(spec.open_questions)
+    consumed_questions = [False] * len(prior_questions)
+    matched_questions: list[OpenQuestion | None] = [None] * len(draft.open_questions)
+    for i, text in enumerate(draft.open_questions):
+        question_id = f"q{i + 1}"
+        for j, prior in enumerate(prior_questions):
+            if not consumed_questions[j] and prior.id == question_id and prior.text == text:
+                matched_questions[i], consumed_questions[j] = prior, True
+                break
+    for i, text in enumerate(draft.open_questions):
+        if matched_questions[i] is not None:
+            continue
+        for j, prior in enumerate(prior_questions):
+            if not consumed_questions[j] and prior.text == text:
+                matched_questions[i], consumed_questions[j] = prior, True
+                break
     spec.open_questions = [
-        OpenQuestion(id=f"q{i + 1}", text=t)
-        for i, t in enumerate(draft.open_questions)
+        OpenQuestion(
+            id=f"q{i + 1}",
+            text=text,
+            answer=prior.answer if prior is not None else None,
+        )
+        for i, (text, prior) in enumerate(zip(draft.open_questions, matched_questions))
     ]
     return spec
 

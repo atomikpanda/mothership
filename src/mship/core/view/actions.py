@@ -40,6 +40,8 @@ def approve_spec_by_id(store: SpecStore, spec_id: str | None) -> ActionOutcome:
         return ActionOutcome(False, f"Cannot approve {spec_id}: {'; '.join(e.blockers)}")
     except InvalidTransition as e:
         return ActionOutcome(False, str(e))
+    except ValueError as e:
+        return ActionOutcome(False, str(e))
     return ActionOutcome(True, f"Approved {spec_id}.", new_status="approved")
 
 

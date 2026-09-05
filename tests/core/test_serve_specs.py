@@ -1,7 +1,8 @@
+from fastapi.testclient import TestClient
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-from fastapi.testclient import TestClient
+from threading import Event, Thread, current_thread
 
 from mship.core.serve import create_app
 from mship.core.spec import Spec
@@ -133,3 +134,61 @@ def test_spec_state_equivalent_inbox_action_persists_without_task_activity(tmp_p
     saved = specs.find_by_id(active.id)
     assert saved.inbox.mutation_ids["device-unpin"] == "unpin"
     assert saved.inbox.last_mutated_at == first_mutation
+
+def test_archive_uses_the_post_apply_spec_instead_of_a_stale_snapshot(
+    tmp_path: Path, monkeypatch,
+):
+    from mship.core.spec_draft import SpecDraft, apply_draft_transaction
+
+    now = datetime.now(timezone.utc)
+    store = SpecStore(tmp_path / "specs")
+    store.save(Spec(
+        id="transition", title="Transition", status="approved",
+        created_at=now, updated_at=now,
+        acceptance_criteria=[],
+        body="## Problem\n\nOld\n",
+    ))
+    archive_waiting = Event()
+    allow_archive = Event()
+    original_locked = SpecStore.locked
+
+    @contextmanager
+    def pause_archive_lock(self, spec_id):
+        if current_thread().name != "MainThread":
+            archive_waiting.set()
+            assert allow_archive.wait(timeout=5)
+        with original_locked(self, spec_id) as artifact:
+            yield artifact
+
+    monkeypatch.setattr(SpecStore, "locked", pause_archive_lock)
+    client = _client(tmp_path)
+    archive_result: dict[str, object] = {}
+
+    def archive() -> None:
+        archive_result["response"] = client.post("/specs/transition/archive")
+
+    archive_thread = Thread(target=archive, name="archive-writer")
+    archive_thread.start()
+    assert archive_waiting.wait(timeout=5)
+
+    applied = apply_draft_transaction(
+        store,
+        "transition",
+        SpecDraft(
+            problem="New problem",
+            user_story="New story",
+            approach="New approach",
+        ),
+        bypass_status_gate=True,
+    )
+    assert applied.spec.id == "transition"
+    allow_archive.set()
+    archive_thread.join(timeout=5)
+    assert not archive_thread.is_alive()
+
+    response = archive_result["response"]
+    assert response.status_code == 200
+    persisted = store.find_by_id("transition")
+    assert persisted is not None
+    assert persisted.status == "archived"
+    assert "New approach" in persisted.body

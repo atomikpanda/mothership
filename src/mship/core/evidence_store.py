@@ -252,6 +252,9 @@ def resolve_ref(workspace_root: Path, spec_id: str, ref: str) -> Path:
     if Path(_logical_ref(ref)).suffix.lower() not in CONTENT_TYPES:
         raise BadEvidenceRef(f"unsupported evidence extension in {ref!r}")
 
+    if "\0" in spec_id:
+        raise BadEvidenceRef(f"malformed spec id {spec_id!r}")
+
     store_root = Path(os.path.realpath(evidence_root(workspace_root)))
     root = Path(os.path.realpath(evidence_dir(workspace_root, spec_id)))
     # realpath normalises `..` away, so a spec id like `../other-spec` lands

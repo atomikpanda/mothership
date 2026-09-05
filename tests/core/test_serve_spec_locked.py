@@ -170,17 +170,47 @@ def test_serve_review_and_write_paths_report_locked_spec_as_conflict(
     assert response.status_code == 409
     assert "locked" in response.json()["detail"]
 
+@pytest.mark.parametrize("spec_id", [".hidden", "%00"])
 @pytest.mark.parametrize(
     ("method", "path", "body"),
     [
-        ("get", "/specs/.hidden/review", None),
-        ("post", "/specs/.hidden/questions", {"text": "Why?"}),
+        ("get", "/specs/{spec_id}/review", None),
+        (
+            "post",
+            "/specs/{spec_id}/verdict",
+            {"criterion_id": "ac-1", "verdict": "approved"},
+        ),
+        (
+            "post",
+            "/specs/{spec_id}/prose-verdict",
+            {"section_id": "problem", "verdict": "approved"},
+        ),
+        (
+            "post",
+            "/specs/{spec_id}/evidence",
+            {"criterion_id": "ac-1", "ref": "test:tests/core/test_serve_spec_locked.py"},
+        ),
+        (
+            "post",
+            "/specs/{spec_id}/apply",
+            {
+                "draft": {
+                    "problem": "Problem",
+                    "user_story": "User story",
+                    "approach": "Approach",
+                },
+            },
+        ),
+        ("post", "/specs/{spec_id}/questions", {"text": "Why?"}),
+        ("post", "/specs/{spec_id}/questions/q-1/answer", {"answer": "Because."}),
     ],
 )
 def test_serve_strict_routes_reject_unsafe_spec_ids_without_a_server_error(
-    tmp_path: Path, method: str, path: str, body: dict | None,
+    tmp_path: Path, spec_id: str, method: str, path: str, body: dict | None,
 ):
-    response = _client(tmp_path).request(method, path, json=body)
+    response = _client(tmp_path).request(
+        method, path.format(spec_id=spec_id), json=body,
+    )
 
     assert response.status_code == 422
     assert "unsafe spec id" in response.json()["detail"]

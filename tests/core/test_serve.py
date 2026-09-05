@@ -1,3 +1,6 @@
+from contextlib import contextmanager
+from threading import Event, Thread
+
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -685,14 +688,152 @@ def test_post_apply_unknown_spec_404(tmp_path):
     assert r.status_code == 404
 
 
-def test_post_apply_illegal_transition_409_and_bypass(tmp_path):
-    _seed_spec(tmp_path)   # status needs_review already
+def test_post_apply_refuses_invalid_transition_without_mutating_spec(tmp_path):
+    _seed_spec(tmp_path)
     client = TestClient(_app(tmp_path))
-    draft = {"draft": {"problem": "P", "user_story": "U", "approach": "A"}}
-    assert client.post("/specs/dq/apply", json=draft).status_code == 409      # needs_review → needs_review illegal
-    ok = client.post("/specs/dq/apply", json={**draft, "bypass_status_gate": True})
-    assert ok.status_code == 200 and ok.json()["status"] == "needs_review"
+    before = SpecStore(tmp_path / "specs").find_by_id("dq")
+    assert before is not None
 
+    response = client.post("/specs/dq/apply", json={"draft": {
+        "problem": "replacement", "user_story": "U", "approach": "A",
+        "acceptance_criteria": ["replacement"],
+    }})
+
+    assert response.status_code == 409
+    assert "traceback" not in response.text.lower()
+    after = SpecStore(tmp_path / "specs").find_by_id("dq")
+    assert after is not None
+    assert after.model_dump(mode="json") == before.model_dump(mode="json")
+
+
+def test_post_apply_bypass_still_refuses_review_discard_without_mutation(tmp_path):
+    _seed_spec(tmp_path)
+    client = TestClient(_app(tmp_path))
+    before = SpecStore(tmp_path / "specs").find_by_id("dq")
+    assert before is not None
+
+    response = client.post("/specs/dq/apply", json={
+        "draft": {
+            "problem": "replacement", "user_story": "U", "approach": "A",
+            "acceptance_criteria": ["replacement"],
+        },
+        "bypass_status_gate": True,
+    })
+
+    assert response.status_code == 409
+    assert "discard" in response.json()["detail"]
+    assert "traceback" not in response.text.lower()
+    after = SpecStore(tmp_path / "specs").find_by_id("dq")
+    assert after is not None
+    assert after.model_dump(mode="json") == before.model_dump(mode="json")
+
+
+def test_post_apply_discard_review_reports_redacted_discard_state(tmp_path):
+    _seed_spec(tmp_path)
+    client = TestClient(_app(tmp_path))
+
+    response = client.post("/specs/dq/apply", json={
+        "draft": {
+            "problem": "replacement", "user_story": "U", "approach": "A",
+            "acceptance_criteria": ["replacement"],
+        },
+        "bypass_status_gate": True,
+        "discard_review": True,
+    })
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "needs_review"
+    assert response.json()["review_state_discarded"] is True
+    assert response.json()["discarded_review_count"] == 1
+
+
+def test_post_apply_preserves_unchanged_review_comment_and_answer(tmp_path):
+    _seed_spec(tmp_path)
+    store = SpecStore(tmp_path / "specs")
+    spec = store.find_by_id("dq")
+    assert spec is not None
+    spec.acceptance_criteria[0].comment = "clear enough"
+    spec.open_questions[0].answer = "yes"
+    store.save(spec)
+    client = TestClient(_app(tmp_path))
+
+    response = client.post("/specs/dq/apply", json={
+        "draft": {
+            "problem": "the problem", "user_story": "as a user", "approach": "the approach",
+            "acceptance_criteria": ["view questions"],
+            "open_questions": ["Mobile too?"],
+        },
+        "bypass_status_gate": True,
+    })
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["review_state_discarded"] is False
+    assert body["discarded_review_count"] == 0
+    assert body["acceptance_criteria"][0]["comment"] == "clear enough"
+    assert body["open_questions"][0]["answer"] == "yes"
+
+
+def test_review_write_waits_for_atomic_apply_and_uses_fresh_spec(tmp_path, monkeypatch):
+    _seed_spec(tmp_path)
+    app = _app(tmp_path)
+    review_started = Event()
+    review_request_active = Event()
+    review_lock_acquired = Event()
+    review_responses = []
+    reviewer: Thread | None = None
+    original_locked = SpecStore.locked
+    original_save_while_locked = SpecStore.save_while_locked
+
+    @contextmanager
+    def track_reviewer_lock(self, spec_id):
+        is_reviewer = review_request_active.is_set()
+        if is_reviewer:
+            review_started.set()
+        with original_locked(self, spec_id) as artifact:
+            if is_reviewer:
+                review_lock_acquired.set()
+            yield artifact
+
+    def post_review():
+        review_request_active.set()
+        response = TestClient(app).post(
+            "/specs/dq/verdict",
+            json={"criterion_id": "ac1", "verdict": "approved", "comment": "late review"},
+        )
+        review_responses.append(response)
+
+    def pause_apply_save(self, spec, artifact):
+        nonlocal reviewer
+        if reviewer is None:
+            reviewer = Thread(target=post_review, name="api-reviewer")
+            reviewer.start()
+            assert review_started.wait(timeout=1)
+            assert not review_lock_acquired.wait(timeout=0.1)
+        return original_save_while_locked(self, spec, artifact)
+
+    monkeypatch.setattr(SpecStore, "locked", track_reviewer_lock)
+    monkeypatch.setattr(SpecStore, "save_while_locked", pause_apply_save)
+
+    response = TestClient(app).post("/specs/dq/apply", json={
+        "draft": {
+            "problem": "replacement", "user_story": "as a user", "approach": "the approach",
+            "acceptance_criteria": ["view questions"],
+            "open_questions": ["Mobile too?"],
+        },
+        "bypass_status_gate": True,
+    })
+
+    assert response.status_code == 200
+    assert reviewer is not None
+    reviewer.join(timeout=1)
+    assert not reviewer.is_alive()
+    assert review_lock_acquired.is_set()
+    assert review_responses[0].status_code == 200
+    persisted = SpecStore(tmp_path / "specs").find_by_id("dq")
+    assert persisted is not None
+    assert persisted.acceptance_criteria[0].comment == "late review"
+    assert persisted.body == render_body("replacement", "as a user", "the approach")
 
 def test_post_apply_revising_clears_clarification_reason(tmp_path):
     """MOS-215/MOS-240: applying a revised draft to a spec that was sent back
@@ -1414,23 +1555,3 @@ def test_get_task_serializes_activity_fields(tmp_path):
     assert body["phase_entered_at"].startswith("2026-07-13T12:00:00")
 
 
-def test_approve_endpoint_uses_shared_transition(tmp_path, monkeypatch):
-    called = {}
-    import mship.core.serve as serve_mod
-
-    def spy(spec, store, *, bypass_gate=False):
-        called["hit"] = (spec.id, bypass_gate)
-        spec.status = "approved"
-        spec.clarification_reason = None
-        store.save(spec)
-    monkeypatch.setattr(serve_mod, "approve_spec", spy, raising=False)
-
-    now = datetime(2026, 6, 14, tzinfo=timezone.utc)
-    SpecStore(tmp_path / "specs").save(Spec(
-        id="ready", title="ready", status="needs_review", created_at=now, updated_at=now,
-        body=render_body("p", "u", "a"),
-        acceptance_criteria=[AcceptanceCriterion(id="ac1", text="x", verdict="approved")],
-        open_questions=[]))
-    r = TestClient(_app(tmp_path)).post("/specs/ready/approve", json={})
-    assert r.status_code == 200 and r.json()["status"] == "approved"
-    assert called["hit"] == ("ready", False)

@@ -1,4 +1,28 @@
-from mship.core.spec_draft import build_draft_prompt
+from datetime import datetime, timezone
+from threading import Event, Thread
+
+import pytest
+
+from mship.core.spec import (
+    AcceptanceCriterion,
+    AcceptanceEvidence,
+    OpenQuestion,
+    Spec,
+    SpecDraft,
+)
+from mship.core.spec_body import validate_body_structure
+from mship.core.spec_draft import (
+    MissingSpec,
+    ReviewDiscardRequired,
+    SPEC_BODY_TEMPLATE,
+    apply_draft,
+    apply_draft_transaction,
+    build_draft_prompt,
+    new_spec,
+)
+from mship.core.spec_store import SpecStore
+
+
 
 
 def test_build_draft_prompt_contains_intent_schema_and_apply():
@@ -9,18 +33,6 @@ def test_build_draft_prompt_contains_intent_schema_and_apply():
     assert "open_questions" in prompt
     assert "mship spec apply decision-queue --from-json" in prompt  # how to apply
     assert "only" in prompt.lower()                         # "output only JSON"
-
-
-from datetime import datetime, timezone
-
-from mship.core.spec import (
-    AcceptanceCriterion,
-    AcceptanceEvidence,
-    Spec,
-    SpecDraft,
-)
-from mship.core.spec_draft import apply_draft
-from mship.core.spec_body import validate_body_structure
 
 
 def _spec():
@@ -61,6 +73,45 @@ def test_apply_draft_preserves_evidence_and_verdict_for_unchanged_ac():
     out = apply_draft(spec, draft)
     assert out.acceptance_criteria[0].verdict == "approved"     # preserved
     assert out.acceptance_criteria[0].evidence == [AcceptanceEvidence(kind="test", ref="test-runs/5")]
+
+
+def test_apply_draft_preserves_comment_for_unchanged_criterion():
+    spec = _spec()
+    spec.acceptance_criteria = [
+        AcceptanceCriterion(
+            id="ac1", text="view questions", verdict="approved", comment="reviewed",
+        ),
+    ]
+
+    out = apply_draft(
+        spec,
+        SpecDraft(
+            problem="P", user_story="U", approach="A",
+            acceptance_criteria=["view questions"],
+        ),
+    )
+
+    assert out.acceptance_criteria[0].comment == "reviewed"
+
+
+def test_apply_draft_preserves_answered_questions_once_per_duplicate_text():
+    spec = _spec()
+    spec.open_questions = [
+        OpenQuestion(id="q1", text="Who owns this?", answer="Platform"),
+        OpenQuestion(id="q2", text="Who owns this?", answer="Infrastructure"),
+    ]
+
+    out = apply_draft(
+        spec,
+        SpecDraft(
+            problem="P", user_story="U", approach="A",
+            open_questions=["Who owns this?", "Who owns this?", "Who owns this?"],
+        ),
+    )
+
+    assert [question.answer for question in out.open_questions] == [
+        "Platform", "Infrastructure", None,
+    ]
 
 
 def test_apply_draft_preserves_prose_verdicts_for_unchanged_sections():
@@ -244,9 +295,6 @@ def test_apply_draft_insert_plus_collision_tiebreak_is_positional_and_lossless()
     assert all_refs == ["E2"]
 
 
-import pytest
-
-from mship.core.spec_draft import new_spec, SPEC_BODY_TEMPLATE
 
 
 def test_new_spec_defaults_id_from_title():
@@ -295,3 +343,245 @@ def test_apply_draft_renders_additional_sections():
 
 def test_build_draft_prompt_mentions_additional_sections():
     assert "additional_sections" in build_draft_prompt("x", "intent")
+
+
+def test_apply_draft_transaction_returns_missing_spec(tmp_path):
+    result = apply_draft_transaction(
+        SpecStore(tmp_path / "specs"),
+        "missing",
+        SpecDraft(problem="P", user_story="U", approach="A"),
+    )
+
+    assert result == MissingSpec(spec_id="missing")
+
+
+@pytest.mark.parametrize("bypass_status_gate", [False, True])
+def test_apply_draft_transaction_refuses_review_loss_without_discard(
+    tmp_path, bypass_status_gate,
+):
+    store = SpecStore(tmp_path / "specs")
+    spec = _spec()
+    spec.status = "needs_review"
+    spec.acceptance_criteria = [
+        AcceptanceCriterion(id="ac1", text="old", verdict="approved"),
+    ]
+    spec.open_questions = [OpenQuestion(id="q1", text="Why?", answer="Because.")]
+    store.save(spec)
+
+    with pytest.raises(ReviewDiscardRequired) as raised:
+        apply_draft_transaction(
+            store,
+            spec.id,
+            SpecDraft(
+                problem="P", user_story="U", approach="A",
+                acceptance_criteria=["new"],
+                open_questions=["Different question?"],
+            ),
+            bypass_status_gate=bypass_status_gate,
+        )
+
+    assert raised.value.discarded_review_count == 2
+    persisted = store.find_by_id(spec.id)
+    assert persisted is not None
+    assert persisted.acceptance_criteria[0].text == "old"
+    assert persisted.open_questions[0].answer == "Because."
+
+
+def test_apply_draft_transaction_refuses_lost_unreviewed_criterion_evidence(tmp_path):
+    store = SpecStore(tmp_path / "specs")
+    spec = _spec()
+    spec.acceptance_criteria = [
+        AcceptanceCriterion(
+            id="ac1", text="old",
+            evidence=[AcceptanceEvidence(kind="test", ref="test-runs/1")],
+        ),
+    ]
+    store.save(spec)
+
+    with pytest.raises(ReviewDiscardRequired) as raised:
+        apply_draft_transaction(
+            store,
+            spec.id,
+            SpecDraft(
+                problem="P", user_story="U", approach="A",
+                acceptance_criteria=["new"],
+            ),
+        )
+
+    assert raised.value.discarded_review_count == 1
+
+
+def test_apply_draft_transaction_refuses_lost_unreviewed_criterion_comment(tmp_path):
+    store = SpecStore(tmp_path / "specs")
+    spec = _spec()
+    spec.acceptance_criteria = [
+        AcceptanceCriterion(id="ac1", text="old", comment="Needs discussion."),
+    ]
+    store.save(spec)
+
+    with pytest.raises(ReviewDiscardRequired) as raised:
+        apply_draft_transaction(
+            store,
+            spec.id,
+            SpecDraft(
+                problem="P", user_story="U", approach="A",
+                acceptance_criteria=["new"],
+            ),
+        )
+
+    assert raised.value.discarded_review_count == 1
+
+
+def test_apply_draft_transaction_refuses_lost_unreviewed_prose_comment(tmp_path):
+    from mship.core.spec import ProseVerdict
+    from mship.core.spec_body import render_body
+
+    store = SpecStore(tmp_path / "specs")
+    spec = _spec()
+    spec.body = render_body("P", "U", "old approach")
+    spec.prose_verdicts = {
+        "approach": ProseVerdict(comment="Needs discussion."),
+    }
+    store.save(spec)
+
+    with pytest.raises(ReviewDiscardRequired) as raised:
+        apply_draft_transaction(
+            store,
+            spec.id,
+            SpecDraft(problem="P", user_story="U", approach="new approach"),
+        )
+
+    assert raised.value.discarded_review_count == 1
+
+
+
+def test_apply_draft_transaction_persists_unchanged_review_state(tmp_path):
+    store = SpecStore(tmp_path / "specs")
+    spec = _spec()
+    spec.acceptance_criteria = [
+        AcceptanceCriterion(
+            id="ac1", text="keep", verdict="approved", comment="reviewed",
+            evidence=[AcceptanceEvidence(kind="test", ref="test-runs/1")],
+        ),
+    ]
+    spec.open_questions = [OpenQuestion(id="q1", text="Why?", answer="Because.")]
+    store.save(spec)
+    now = datetime(2026, 8, 27, tzinfo=timezone.utc)
+
+    result = apply_draft_transaction(
+        store,
+        spec.id,
+        SpecDraft(
+            problem="P", user_story="U", approach="A",
+            acceptance_criteria=["keep"],
+            open_questions=["Why?"],
+        ),
+        now=now,
+    )
+
+    assert result.discarded_review_count == 0
+    assert result.spec.updated_at == now
+    assert result.spec.status == "needs_review"
+    assert result.spec.acceptance_criteria[0].comment == "reviewed"
+    assert result.spec.open_questions[0].answer == "Because."
+    assert result.path == store.path_for(result.spec)
+
+
+def test_apply_draft_transaction_discards_only_replaced_review_units(tmp_path):
+    from mship.core.spec import ProseVerdict
+    from mship.core.spec_body import render_body
+
+    store = SpecStore(tmp_path / "specs")
+    spec = _spec()
+    spec.body = render_body("P", "U", "old approach")
+    spec.acceptance_criteria = [
+        AcceptanceCriterion(
+            id="ac1", text="keep", verdict="approved", comment="kept",
+            evidence=[AcceptanceEvidence(kind="test", ref="test-runs/1")],
+        ),
+        AcceptanceCriterion(id="ac2", text="replace", verdict="flagged"),
+    ]
+    spec.prose_verdicts = {
+        "problem": ProseVerdict(verdict="approved", comment="still applies"),
+        "approach": ProseVerdict(verdict="flagged"),
+    }
+    spec.open_questions = [
+        OpenQuestion(id="q1", text="Keep?", answer="Yes."),
+        OpenQuestion(id="q2", text="Replace?", answer="No."),
+    ]
+    store.save(spec)
+
+    result = apply_draft_transaction(
+        store,
+        spec.id,
+        SpecDraft(
+            problem="P", user_story="U", approach="new approach",
+            acceptance_criteria=["keep", "replacement"],
+            open_questions=["Keep?", "Replacement?"],
+        ),
+        discard_review=True,
+    )
+
+    assert result.discarded_review_count == 3
+    kept_criterion = result.spec.acceptance_criteria[0]
+    assert kept_criterion.verdict == "approved"
+    assert kept_criterion.comment == "kept"
+    assert kept_criterion.evidence == [
+        AcceptanceEvidence(kind="test", ref="test-runs/1"),
+    ]
+    assert result.spec.prose_verdicts == {
+        "problem": ProseVerdict(verdict="approved", comment="still applies"),
+    }
+    assert [question.answer for question in result.spec.open_questions] == ["Yes.", None]
+
+
+def test_apply_draft_transaction_keeps_lock_through_loss_check_and_save(
+    tmp_path, monkeypatch,
+):
+    store = SpecStore(tmp_path / "specs")
+    spec = _spec()
+    spec.acceptance_criteria = [
+        AcceptanceCriterion(id="ac1", text="keep", verdict="approved"),
+    ]
+    store.save(spec)
+    review_attempted = Event()
+    review_acquired = Event()
+    original_save = store.save_while_locked
+    reviewer: Thread | None = None
+
+    def record_review():
+        review_attempted.set()
+        with store.locked(spec.id) as artifact:
+            assert artifact is not None
+            review_acquired.set()
+            artifact.spec.acceptance_criteria[0].comment = "late review"
+            original_save(artifact.spec, artifact)
+
+    def save_after_review_attempt(applied, artifact):
+        nonlocal reviewer
+        reviewer = Thread(target=record_review)
+        reviewer.start()
+        assert review_attempted.wait(timeout=1)
+        assert not review_acquired.wait(timeout=0.1)
+        return original_save(applied, artifact)
+
+    monkeypatch.setattr(store, "save_while_locked", save_after_review_attempt)
+
+    result = apply_draft_transaction(
+        store,
+        spec.id,
+        SpecDraft(
+            problem="P", user_story="U", approach="A",
+            acceptance_criteria=["keep"],
+        ),
+    )
+    assert reviewer is not None
+    reviewer.join(timeout=1)
+
+    assert not reviewer.is_alive()
+    assert review_attempted.is_set()
+    assert review_acquired.is_set()
+    assert result.spec.acceptance_criteria[0].comment is None
+    persisted = store.find_by_id(spec.id)
+    assert persisted is not None
+    assert persisted.acceptance_criteria[0].comment == "late review"

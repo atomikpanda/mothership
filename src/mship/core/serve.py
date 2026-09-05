@@ -79,6 +79,7 @@ class DraftIntentBody(BaseModel):
 class ApplyDraftBody(BaseModel):
     draft: SpecDraft
     bypass_status_gate: bool = False
+    discard_review: bool = False
 
 
 class QuestionBody(BaseModel):
@@ -1012,14 +1013,46 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
         return spec
 
-    def _save_and_review(spec):
+
+    def _archive_and_review(spec_id: str):
+        """Transition to archived from the current artifact under its spec lock."""
         from mship.core.spec_storage import SpecLocked
 
-        spec.updated_at = datetime.now(timezone.utc)
         try:
-            store.save(spec)
+            with store.locked(spec_id) as artifact:
+                if artifact is None:
+                    raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
+                spec = artifact.spec
+                validate_transition(spec.status, "archived")
+                spec.status = "archived"
+                spec.updated_at = datetime.now(timezone.utc)
+                store.save_while_locked(spec, artifact)
         except SpecLocked:
-            raise HTTPException(status_code=409, detail=f"spec {spec.id!r} is locked")
+            raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
+        except SpecParseError as exc:
+            _raise_spec_conflict(exc)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        return build_review(spec)
+
+    def _mutate_review(spec_id: str, mutate, *, auto_approve: bool = False):
+        """Load, mutate, and persist one review write under the spec's lock."""
+        try:
+            store._validate_id(spec_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        try:
+            with store.locked(spec_id) as artifact:
+                if artifact is None:
+                    raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
+                spec = artifact.spec
+                mutate(spec)
+                if auto_approve:
+                    _auto_approve_if_ready(spec)
+                spec.updated_at = datetime.now(timezone.utc)
+                store.save_while_locked(spec, artifact)
+        except SpecLocked:
+            raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
         except SpecParseError as exc:
             _raise_spec_conflict(exc)
         return build_review(spec)
@@ -1044,49 +1077,57 @@ def create_app(
 
     @app.post("/specs/{spec_id}/verdict")
     def post_verdict(spec_id: str, body: VerdictBody):
-        spec = _load_or_404(spec_id)
         try:
-            set_criterion_verdict(spec, body.criterion_id, body.verdict, body.comment)
+            return _mutate_review(
+                spec_id,
+                lambda spec: set_criterion_verdict(
+                    spec, body.criterion_id, body.verdict, body.comment,
+                ),
+                auto_approve=True,
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        _auto_approve_if_ready(spec)
-        return _save_and_review(spec)
 
     @app.post("/specs/{spec_id}/prose-verdict")
     def post_prose_verdict(spec_id: str, body: ProseVerdictBody):
-        spec = _load_or_404(spec_id)
         try:
-            set_prose_verdict(spec, body.section_id, body.verdict, body.comment)
+            return _mutate_review(
+                spec_id,
+                lambda spec: set_prose_verdict(
+                    spec, body.section_id, body.verdict, body.comment,
+                ),
+                auto_approve=True,
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        _auto_approve_if_ready(spec)
-        return _save_and_review(spec)
 
     @app.post("/specs/{spec_id}/evidence")
     def post_evidence(spec_id: str, body: EvidenceBody):
-        spec = _load_or_404(spec_id)
         kind = body.kind or infer_evidence_kind(body.ref)
         try:
-            set_criterion_evidence(spec, body.criterion_id, kind, body.ref, body.note)
+            return _mutate_review(
+                spec_id,
+                lambda spec: set_criterion_evidence(
+                    spec, body.criterion_id, kind, body.ref, body.note,
+                ),
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        return _save_and_review(spec)
 
     @app.post("/specs/{spec_id}/questions")
     def post_question(spec_id: str, body: QuestionBody):
-        spec = _load_or_404(spec_id)
-        add_question(spec, body.text)
-        return _save_and_review(spec)
+        return _mutate_review(spec_id, lambda spec: add_question(spec, body.text))
 
     @app.post("/specs/{spec_id}/questions/{qid}/answer")
     def post_answer(spec_id: str, qid: str, body: AnswerBody):
-        spec = _load_or_404(spec_id)
         try:
-            answer_question(spec, qid, body.answer)
+            return _mutate_review(
+                spec_id,
+                lambda spec: answer_question(spec, qid, body.answer),
+                auto_approve=True,
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        _auto_approve_if_ready(spec)
-        return _save_and_review(spec)
 
     # InvalidTransition/validate_transition stay imported here for the archive +
     # apply endpoints below; the explicit approve/request-changes transitions now
@@ -1104,7 +1145,7 @@ def create_app(
             # success, not a spurious approved->approved 409.
             return build_review(spec)
         try:
-            approve_spec(spec, store, bypass_gate=body.bypass_gate)
+            spec = approve_spec(spec, store, bypass_gate=body.bypass_gate)
         except ApprovalBlocked as e:
             raise HTTPException(status_code=409, detail="cannot approve: " + "; ".join(e.blockers))
         except InvalidTransition as e:
@@ -1113,37 +1154,29 @@ def create_app(
             raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
         except SpecParseError as exc:
             _raise_spec_conflict(exc)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
         return build_review(spec)
 
     @app.post("/specs/{spec_id}/request-changes")
     def post_request_changes(spec_id: str, body: ReasonBody):
         spec = _load_or_404(spec_id)
-        # #447 review: every durable rejection record must carry real reason
-        # text — reject empty/whitespace before anything is written.
+        # Every durable rejection record must carry real reason text; reject it
+        # before the shared locked transition performs any write.
         if not body.reason or not body.reason.strip():
             raise HTTPException(status_code=400, detail="reason must not be empty")
-        # MOS-240: request-changes sends the spec back to the editable `draft`
-        # status carrying a non-null clarification_reason (the dropped
-        # needs_clarification status is now expressed by that field alone).
         try:
-            validate_transition(spec.status, "draft")
-        except InvalidTransition as e:
-            raise HTTPException(status_code=409, detail=str(e))
-        # #458 P1 class fix: the durable rejection record is now written
-        # inside `request_changes_spec` itself (record-then-transition,
-        # fail-loud on a write failure), so every caller — CLI, serve, and
-        # the TUI views — gets it automatically instead of each remembering
-        # its own `record_rejection` call. This also supersedes the old
-        # decorative "spec request-changes (api): …" log line — the
-        # structured record is the parsed source now.
-        try:
-            request_changes_spec(
+            spec = request_changes_spec(
                 spec, store, body.reason, log_manager=log_manager, actor="operator",
             )
+        except InvalidTransition as e:
+            raise HTTPException(status_code=409, detail=str(e))
         except SpecLocked:
             raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
         except SpecParseError as exc:
             _raise_spec_conflict(exc)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
         return build_review(spec)
 
     @app.post("/specs/{spec_id}/archive")
@@ -1153,19 +1186,19 @@ def create_app(
         already-archived spec is rejected (409).
 
         Finding 4: returns the same fuller review payload as approve/request-changes
-        (via `_save_and_review`) rather than a bare `{id,status}`, so a client cache
-        isn't degraded on the round-trip."""
-        spec = _load_or_404(spec_id)
+        rather than a bare `{id,status}`, so a client cache isn't degraded on the
+        round-trip."""
         try:
-            validate_transition(spec.status, "archived")
+            return _archive_and_review(spec_id)
         except InvalidTransition as e:
             raise HTTPException(status_code=409, detail=str(e))
-        spec.status = "archived"
-        return _save_and_review(spec)
 
     # --- capture-write endpoints (B3): the phone Capture path over HTTP ---
 
-    from mship.core.spec_draft import apply_draft, build_draft_prompt, new_spec
+    from mship.core.spec_draft import (
+        MissingSpec, ReviewDiscardRequired, apply_draft_transaction,
+        build_draft_prompt, new_spec,
+    )
 
     @app.post("/specs")
     def post_create_spec(body: NewSpecBody):
@@ -1198,28 +1231,34 @@ def create_app(
 
     @app.post("/specs/{spec_id}/apply")
     def post_apply(spec_id: str, body: ApplyDraftBody):
-        from mship.core.spec_storage import SpecLocked
-
-        spec = _load_or_404(spec_id)
-        if not body.bypass_status_gate:
-            try:
-                validate_transition(spec.status, "needs_review")
-            except InvalidTransition as e:
-                raise HTTPException(status_code=409, detail=str(e))
-        # MOS-215/MOS-240: applying a (re)drafted spec supersedes any pending
-        # request-changes, so clear the reason — a freshly applied draft carries
-        # no outstanding clarification ask. (A brand-new draft has none anyway.)
-        apply_draft(spec, body.draft)
-        spec.status = "needs_review"
-        spec.clarification_reason = None
-        spec.updated_at = datetime.now(timezone.utc)
         try:
-            store.save(spec)
+            store._validate_id(spec_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+        try:
+            result = apply_draft_transaction(
+                store,
+                spec_id,
+                body.draft,
+                bypass_status_gate=body.bypass_status_gate,
+                discard_review=body.discard_review,
+            )
+        except ReviewDiscardRequired as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except InvalidTransition as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
         except SpecLocked:
-            raise HTTPException(status_code=409, detail=f"spec {spec.id!r} is locked")
+            raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
         except SpecParseError as exc:
             _raise_spec_conflict(exc)
-        return spec.model_dump(mode="json")
+        if isinstance(result, MissingSpec):
+            raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
+        return {
+            **result.spec.model_dump(mode="json"),
+            "review_state_discarded": bool(result.discarded_review_count),
+            "discarded_review_count": result.discarded_review_count,
+        }
 
     @app.post("/capture")
     def post_capture(body: CaptureBody):

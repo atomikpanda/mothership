@@ -50,6 +50,24 @@ def test_refuses_a_ref_with_a_trailing_newline(tmp_path):
         resolve_ref(tmp_path, "s", ref + "\n")
 
 
+@pytest.mark.parametrize(
+    ("spec_id", "ref_suffix"),
+    [("s\0", ""), ("s", "\0")],
+)
+def test_refuses_embedded_nul_in_paths_before_realpath(
+    tmp_path, monkeypatch, spec_id, ref_suffix
+):
+    """NUL belongs to the request boundary, not the OS path API."""
+    ref = _stored(tmp_path)
+
+    def realpath_called(path):
+        pytest.fail(f"unexpected realpath for {path!r}")
+
+    monkeypatch.setattr(os.path, "realpath", realpath_called)
+    with pytest.raises(BadEvidenceRef):
+        resolve_ref(tmp_path, spec_id, ref + ref_suffix)
+
+
 def test_refuses_a_symlink_pointing_out_of_the_store(tmp_path):
     _stored(tmp_path)
     secret = tmp_path / "secret.png"; secret.write_bytes(b"nope")
