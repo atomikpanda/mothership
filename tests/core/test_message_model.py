@@ -52,6 +52,31 @@ def test_needs_you_clears_after_human_reply():
     t = _thread(_m("human", 0), _m("agent", 1, kind="needs_you"), _m("human", 2))
     assert t.needs_you is False
 
+def test_explicit_resolution_clears_actionable_prefix_only():
+    t = _thread(
+        _m("human", 0),
+        _m("agent", 1, kind="needs_you"),
+        _dm(
+            "agent", "decision", "m2", DecisionPayload(options=["Approve", "Wait"]),
+            t=(BASE + timedelta(minutes=2)).isoformat(),
+        ),
+        _m("agent", 3, kind="needs_you"),
+    )
+    t.resolved_through_message_id = "m2"
+
+    assert t.needs_decision is False
+    assert t.needs_you is True
+
+
+def test_legacy_thread_preserves_unresolved_attention():
+    legacy = _thread(_m("human", 0), _m("agent", 1, kind="needs_you")).model_dump()
+    legacy.pop("resolved_through_message_id")
+    legacy.pop("resolved_at")
+
+    restored = Thread.model_validate(legacy)
+
+    assert restored.needs_you is True
+
 
 def test_unseen_true_when_agent_newer_than_seen_cursor():
     t = _thread(_m("human", 0), _m("agent", 1), seen_at=None)

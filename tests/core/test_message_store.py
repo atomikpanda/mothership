@@ -130,6 +130,61 @@ def test_append_needs_you_kind_flags_thread(tmp_path):
     assert got.messages[-1].kind == "needs_you"
     assert got.needs_you is True
 
+def test_resolve_through_completed_closeout_is_idempotent_and_keeps_content_time(tmp_path):
+    base = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    thread = store.create_thread("closeout", "start", base)
+    store.append(thread.id, "agent", "please review", base, kind="needs_you")
+    closeout = store.append(thread.id, "agent", "PR merged", base, kind="event")
+
+    resolved = store.resolve_through(thread.id, closeout.id, base + timedelta(minutes=1))
+    persisted = store.get(thread.id)
+    retried = store.resolve_through(thread.id, closeout.id, base + timedelta(minutes=2))
+
+    assert persisted.resolved_through_message_id == closeout.id
+    assert persisted.resolved_at == base + timedelta(minutes=1)
+    assert persisted.updated_at == base
+    assert persisted.needs_you is False
+    assert persisted.awaiting_agent_event is True
+    assert [message.id for message in persisted.messages] == [message.id for message in resolved.messages]
+    assert retried.model_dump(mode="json") == persisted.model_dump(mode="json")
+
+
+def test_stale_resolve_does_not_clear_newer_equal_timestamp_prompt(tmp_path):
+    base = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    thread = store.create_thread("closeout", "start", base)
+    store.append(thread.id, "agent", "old request", base, kind="needs_you")
+    loaded_through = store.append(thread.id, "agent", "merged", base, kind="event")
+    newer_prompt = store.append(thread.id, "agent", "new request", base, kind="needs_you")
+
+    resolved = store.resolve_through(thread.id, loaded_through.id, base + timedelta(minutes=1))
+
+    assert resolved.resolved_through_message_id == loaded_through.id
+    assert resolved.needs_you is True
+    assert resolved.messages[-1].id == newer_prompt.id
+    with pytest.raises(ValueError):
+        other = store.create_thread("other", "body", base)
+        store.resolve_through(thread.id, other.messages[0].id, base + timedelta(minutes=2))
+
+
+def test_later_resolution_remains_poll_visible_when_request_clocks_reorder(tmp_path):
+    from mship.core.message_wait import changed_since
+
+    base = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
+    store = _store(tmp_path)
+    thread = store.create_thread("requests", "start", base)
+    first = store.append(thread.id, "agent", "first", base, kind="needs_you")
+    second = store.append(thread.id, "agent", "second", base, kind="needs_you")
+    prior = store.resolve_through(thread.id, first.id, base + timedelta(minutes=2))
+
+    store.resolve_through(thread.id, second.id, base + timedelta(minutes=1))
+    changed, cursor = changed_since(store.list(), prior.resolved_at, include_inbox=True)
+
+    assert [item.id for item in changed] == [thread.id]
+    assert changed[0].needs_you is False
+    assert cursor > prior.resolved_at
+
 
 def test_mark_seen_advances_cursor_and_clears_unseen(tmp_path):
     from datetime import timedelta

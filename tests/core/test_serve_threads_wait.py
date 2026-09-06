@@ -178,6 +178,32 @@ def test_wait_reports_removed_ids_when_an_inbox_mutation_leaves_the_filter(
     assert response.json()["threads"] == []
     assert response.json()["removed_ids"] == [thread.id]
 
+
+def test_resolve_moves_old_attention_thread_to_archived_and_wakes_active_wait(tmp_path: Path):
+    client, store = _client(tmp_path)
+    created_at = datetime.now(timezone.utc) - timedelta(days=8)
+    thread = store.create_thread("completed", "body", created_at)
+    prompt = store.append(thread.id, "agent", "review this", created_at, kind="needs_you")
+    assert [summary["id"] for summary in client.get("/threads", params={"inbox": "active"}).json()] == [thread.id]
+    since = datetime.now(timezone.utc)
+
+    resolved = client.post(
+        f"/threads/{thread.id}/resolve", json={"through_message_id": prompt.id},
+    )
+    woke = client.get("/threads", params={
+        "wait": 1, "since": since.isoformat(), "timeout": 0, "inbox": "active",
+    })
+
+    assert resolved.status_code == 200
+    assert resolved.json()["inbox_state"] == "archived"
+    assert resolved.json()["archive_reason"] == "inactive_unlinked"
+    assert client.get("/threads", params={"inbox": "active"}).json() == []
+    assert [summary["id"] for summary in client.get("/threads", params={"inbox": "archived"}).json()] == [thread.id]
+    assert woke.status_code == 200
+    assert woke.json()["timed_out"] is False
+    assert woke.json()["threads"] == []
+    assert woke.json()["removed_ids"] == [thread.id]
+
 def test_wait_times_out_with_empty_list(tmp_path: Path):
     client, _ = _client(tmp_path)
     r = client.get("/threads", params={"wait": 1, "timeout": 0.1})  # since defaults to now

@@ -4,7 +4,7 @@ import fcntl
 import tempfile
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -155,6 +155,43 @@ class MessageStore:
                 raise KeyError(thread_id)
             if thread.seen_at is None or seen_at > thread.seen_at:
                 thread.seen_at = seen_at
+                self.save(thread)
+            return thread
+
+    def resolve_through(self, thread_id: str, through_message_id: str, now: datetime) -> Thread:
+        """Durably advance the explicit operator completion cursor by append order.
+
+        Resolution is intentionally not a content update: it neither appends a
+        message nor changes `updated_at`. `resolved_at` exists solely to make this
+        attention-state mutation visible to serve-side long polling.
+        """
+        with _locked(self._lock_path(thread_id), fcntl.LOCK_EX):
+            thread = self.get(thread_id)
+            if thread is None:
+                raise KeyError(thread_id)
+            try:
+                target_index = next(
+                    index for index, message in enumerate(thread.messages)
+                    if message.id == through_message_id
+                )
+            except StopIteration as exc:
+                raise ValueError(
+                    f"message {through_message_id!r} does not belong to thread {thread_id!r}"
+                ) from exc
+            current_index = next(
+                (
+                    index for index, message in enumerate(thread.messages)
+                    if message.id == thread.resolved_through_message_id
+                ),
+                -1,
+            )
+            if target_index > current_index:
+                thread.resolved_through_message_id = through_message_id
+                thread.resolved_at = max(
+                    now,
+                    thread.resolved_at + timedelta(microseconds=1)
+                    if thread.resolved_at is not None else now,
+                )
                 self.save(thread)
             return thread
 

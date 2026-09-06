@@ -1514,6 +1514,48 @@ def test_post_seen_marks_thread_and_clears_unseen(tmp_path):
     assert r.status_code == 200
     assert next(x for x in client.get("/threads").json() if x["id"] == t.id)["unseen"] is False
 
+def test_post_resolve_is_distinct_from_seen_and_returns_authoritative_thread(tmp_path):
+    base = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
+    store = MessageStore(tmp_path / ".mothership" / "messages")
+    thread = store.create_thread("closeout", "start", base)
+    prompt = store.append(thread.id, "agent", "please review", base, kind="needs_you")
+    client = TestClient(_app(tmp_path))
+
+    read = client.post(
+        f"/threads/{thread.id}/seen",
+        json={"seen_at": (base + timedelta(minutes=1)).isoformat()},
+    )
+    done = client.post(f"/threads/{thread.id}/resolve", json={"through_message_id": prompt.id})
+
+    assert read.status_code == done.status_code == 200
+    assert read.json()["needs_you"] is True
+    assert done.json()["resolved_through_message_id"] == prompt.id
+    assert done.json()["needs_you"] is False
+    assert done.json()["needs_decision"] is False
+    assert datetime.fromisoformat(done.json()["updated_at"]) == base
+    assert len(done.json()["messages"]) == 2
+    assert store.get(thread.id).resolved_through_message_id == prompt.id
+
+
+def test_post_resolve_rejects_unknown_message_and_missing_thread(tmp_path):
+    base = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
+    store = MessageStore(tmp_path / ".mothership" / "messages")
+    first = store.create_thread("first", "start", base)
+    second = store.create_thread("second", "other", base)
+    client = TestClient(_app(tmp_path))
+
+    assert client.post(
+        f"/threads/{first.id}/resolve", json={"through_message_id": "missing"},
+    ).status_code == 422
+    assert client.post(
+        f"/threads/{first.id}/resolve",
+        json={"through_message_id": second.messages[0].id},
+    ).status_code == 422
+    assert client.post(
+        "/threads/missing/resolve", json={"through_message_id": first.messages[0].id},
+    ).status_code == 404
+    assert client.post(f"/threads/{first.id}/resolve", json={"through_message_id": " "}).status_code == 422
+
 
 def test_post_seen_unknown_thread_404(tmp_path):
     client = TestClient(_app(tmp_path))

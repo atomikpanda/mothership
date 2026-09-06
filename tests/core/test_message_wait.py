@@ -34,6 +34,17 @@ def test_changed_since_can_include_newer_inbox_mutation_without_reordering_conte
     assert thread.updated_at == T0
 
 
+def test_changed_since_can_include_resolution_without_reordering_content():
+    thread = _thread("a", T0)
+    thread.resolved_at = T0 + timedelta(seconds=5)
+
+    changed, cursor = changed_since([thread], T0, include_inbox=True)
+
+    assert changed == [thread]
+    assert cursor == T0 + timedelta(seconds=5)
+    assert thread.updated_at == T0
+
+
 def test_changed_since_ignores_inbox_only_change_by_default():
     thread = _thread("a", T0)
     thread.inbox.last_mutated_at = T0 + timedelta(seconds=5)

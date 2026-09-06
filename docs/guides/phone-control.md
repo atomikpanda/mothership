@@ -43,6 +43,10 @@ per workspace — the app is multi-workspace.
 - **Chat with the agent.** Every work item has its threads; messages are
   durable, so the agent answers when it wakes even if it wasn't running when
   you wrote.
+- **Close completed conversations.** Mark a finished thread **Done** to clear
+  its older action and decision cards without sending a message or waking an
+  agent. Opening a thread marks it read but does not resolve its requests.
+  Any later request still returns to your attention.
 - **Watch progress.** Work items show their phase (inbox → shaping → ready →
   in flight → review → done) as the linked spec, tasks, and PRs advance.
 - **Review and merge PRs.** Merged PRs flow back as events — the agent sees the

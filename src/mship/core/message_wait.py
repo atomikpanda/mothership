@@ -19,19 +19,24 @@ def _utc(dt: datetime) -> datetime:
 
 
 def _change_at(thread, include_inbox: bool) -> datetime:
-    """Content time, or inbox time when a caller explicitly opts in."""
+    """Content time, or a durable phone-visible metadata mutation when enabled."""
     content_at = _utc(thread.updated_at)
     if not include_inbox:
         return content_at
     inbox_mutation = getattr(getattr(thread, "inbox", None), "last_mutated_at", None)
-    return max(content_at, _utc(inbox_mutation) if inbox_mutation else content_at)
+    resolution = getattr(thread, "resolved_at", None)
+    return max(
+        content_at,
+        _utc(inbox_mutation) if inbox_mutation else content_at,
+        _utc(resolution) if resolution else content_at,
+    )
 
 
 def changed_since(threads, since: datetime, *, include_inbox: bool = False):
     """Return changed threads and the monotonic high-water change cursor.
 
     Agent mailbox waits retain content-only semantics by default. The serve
-    inbox surface opts into durable inbox mutations explicitly.
+    inbox surface opts into durable inbox and completion mutations explicitly.
     """
     since = _utc(since)
     change_times = [(thread, _change_at(thread, include_inbox)) for thread in threads]
