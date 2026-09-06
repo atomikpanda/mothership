@@ -11,7 +11,9 @@
 # egress-server, like enroll-server, runs as a host process, not a compose service.
 services:
   sish:
-    image: antoniomika/sish:latest
+    # Build the pinned SSH dependency fix on fresh installs and upgrades alike.
+    build: .
+    pull_policy: build
     restart: unless-stopped
     ports:
       - "2222:2222"               # SSH (clients open reverse tunnels here)
