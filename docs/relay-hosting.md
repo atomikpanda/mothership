@@ -63,7 +63,7 @@ but the running relay will reject it because it verifies against its own
 
 | Requirement | Notes |
 |---|---|
-| A VPS (Debian 12 or Ubuntu 22.04+) | 1 CPU / 512 MB RAM is sufficient. A $5/month cloud instance (Hetzner, DigitalOcean, Vultr, etc.) works. |
+| A VPS (Debian 12 or Ubuntu 22.04+) | Runtime needs are small, but bootstrap now compiles the relay locally. Allow additional RAM and several GB of free disk for the Go compiler, dependencies, and build cache; a 512 MB instance may need swap or a larger build host. |
 | A domain you control | Example: `relay.example.com`. You only need a subdomain — the relay does not take over the root domain. |
 | SSH access to the VPS as root (or a sudo user) | To run the bootstrap script and open ports. |
 | OpenSSH client tools on the VPS | `ssh-keygen` verifies signed host registrations. On Debian/Ubuntu: `apt install openssh-client`. |
@@ -136,12 +136,34 @@ What the script does:
 1. Installs Docker Engine if it is not already present (via `https://get.docker.com`).
 2. Creates the data directories `docker/relay/pubkeys/`, `docker/relay/keys/`, `docker/relay/caddy-data/`, and `docker/relay/caddy-config/`.
 3. Prints a reminder to add client public keys before tunnels will be accepted.
-4. Starts the sish and Caddy containers with `docker compose up -d`.
+4. Builds the pinned, patched sish image and starts it alongside Caddy with `docker compose up -d --build`. Docker provides the Go toolchain; no host Go installation is needed.
 
 The compose file (`docker/relay/docker-compose.yml`) starts two services:
 
-- **sish** — `--https=false`, HTTP on internal `127.0.0.1:8080`, SSH on `:2222`. Mounts `./pubkeys` (read-only key allowlist) and `./keys` (sish host key).
+- **sish** — built from the checked-in `docker/relay/Dockerfile`, not pulled from `antoniomika/sish:latest`. Uses `--https=false`, HTTP on internal `127.0.0.1:8080`, SSH on `:2222`. Mounts `./pubkeys` (read-only key allowlist) and `./keys` (sish host key).
 - **caddy** — `network_mode: host` so it can bind `:80`/`:443` directly and reach the sish and enroll-server loopback addresses. Mounts `./Caddyfile`, `./caddy-data`, and `./caddy-config`.
+
+### Pinned relay build and upgrades
+
+The default build uses sish **v2.23.0** at commit
+`7a53da3d988b809782175f9e62a7066e5a7dad31`, with
+`golang.org/x/crypto` upgraded to **v0.53.0**. The upstream v2.23.0 image
+contains v0.52.0, whose SSH keepalive request can spin forever after a
+connection closes ([Go issue #79717](https://github.com/golang/go/issues/79717)).
+Restarting only clears the accumulated spinning goroutines; it does not fix
+the installed binary. Do not work around this by disabling keepalives or
+idle-connection reaping.
+
+The Dockerfile pins the Go builder image and verifies the upstream source
+archive checksum. Every build runs `checks/ssh-close.go` against the selected
+dependency graph: a request on a closed SSH connection must return an error
+within a bounded time. `.dockerignore` excludes all runtime state and secrets
+from the build context. Compose's `pull_policy: build` makes this the default
+for ordinary `docker compose up` as well as the bootstrap script; there is no
+machine-local override to copy to a new relay.
+
+Use the [upgrade procedure](#upgrading) below to deploy the fixed build from
+the original checkout while preserving the relay's identity and state.
 
 ### Idle-connection reaping
 
@@ -425,7 +447,7 @@ registration (within a minute) publishes freshly derived ones.
 
 ## Configuration Reference
 
-The relay is configured entirely through environment variables passed to `docker compose`. The bootstrap script sets them; you can also export them in a `.env` file alongside `docker-compose.yml`:
+The relay is configured through environment variables passed to `docker compose`. The bootstrap script passes them to its startup invocation but **does not persist them**. For later commands, export the same values again, or save them in `docker/relay/.env` and explicitly pass `--env-file docker/relay/.env` to Compose.
 
 | Variable | Required | Example | Description |
 |---|---|---|---|
@@ -445,15 +467,35 @@ The `mship relay enroll-server` command also respects `RELAY_DOMAIN` if `--relay
 
 ## Upgrading
 
-sish and Caddy both use the `latest` tag. To update:
+sish is built from the source and dependency versions pinned in the checked-in
+Dockerfile; `docker compose pull` cannot upgrade it. Update the original
+deployment checkout, then rebuild and recreate only sish:
 
 ```bash
 cd /path/to/mothership
-docker compose -f docker/relay/docker-compose.yml pull
-docker compose -f docker/relay/docker-compose.yml up -d
+git pull --ff-only
+# Use this relay's original bootstrap values, not a new domain.
+export RELAY_DOMAIN=relay.example.com
+export ACME_EMAIL=you@example.com
+docker compose -f docker/relay/docker-compose.yml up -d --build --no-deps sish
+docker compose -f docker/relay/docker-compose.yml exec sish /app/app --version
 ```
 
-Data directories (`keys/`, `pubkeys/`, `caddy-data/`, `caddy-config/`) are mounted volumes and survive the upgrade.
+The version should be `v2.23.0-mship-crypto0.53.0`. Recreating sish briefly
+disconnects tunnels; clients must reconnect. This does not recreate Caddy or
+the enroll-server. Never deploy from an empty worktree's relay directory: it
+would use a different key allowlist and generate a different SSH host key.
+
+Caddy uses the `caddy:2` image. To update it separately, in the same shell:
+
+```bash
+docker compose -f docker/relay/docker-compose.yml pull caddy
+docker compose -f docker/relay/docker-compose.yml up -d --no-deps caddy
+```
+
+Existing `.env`, keys, allowlist, enrollment store, and Caddy data remain in
+the original deployment directory. The mounted data directories survive
+container recreation.
 
 ---
 

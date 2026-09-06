@@ -16,9 +16,9 @@ fi
 HERE="$(cd "$(dirname "$0")/../docker/relay" && pwd)"
 mkdir -p "$HERE/pubkeys" "$HERE/keys" "$HERE/caddy-data" "$HERE/caddy-config"
 echo "[bootstrap] add client public keys to $HERE/pubkeys/ (one file per key), then:"
-echo "  RELAY_DOMAIN=$RELAY_DOMAIN ACME_EMAIL=$ACME_EMAIL docker compose -f $HERE/docker-compose.yml up -d"
+echo "  RELAY_DOMAIN=$RELAY_DOMAIN ACME_EMAIL=$ACME_EMAIL docker compose -f $HERE/docker-compose.yml up -d --build"
 echo "[bootstrap] DNS: point  *.$RELAY_DOMAIN  A record at this host's public IP."
-RELAY_DOMAIN="$RELAY_DOMAIN" ACME_EMAIL="$ACME_EMAIL" docker compose -f "$HERE/docker-compose.yml" up -d
+RELAY_DOMAIN="$RELAY_DOMAIN" ACME_EMAIL="$ACME_EMAIL" docker compose -f "$HERE/docker-compose.yml" up -d --build
 # Supervise the enroll-server: it backs Caddy's on-demand TLS `ask`, so it gates
 # cert issuance/renewal for EVERY relay subdomain, not just enrollment — keep it up.
 # Run it as the user who owns the relay dir (the operator who also runs

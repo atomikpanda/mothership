@@ -1,0 +1,5 @@
+# Only build inputs; never send keys, enrollment state, or Caddy data to Docker.
+*
+!Dockerfile
+!checks/
+!checks/ssh-close.go
