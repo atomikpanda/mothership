@@ -18,6 +18,21 @@ and coffee-shop Wi-Fi don't matter. You can use a self-hosted relay
 ([Relay hosting](../relay-hosting.md)); serving over a tailnet works too
 ([Serve over Tailscale](../mship-serve-tailscale.md)).
 
+### Upgrading mailbox writers
+
+Mailbox thread files are read-modify-written. Before using a release that adds
+phone-visible mailbox fields such as **Done**, install the new `mship` version
+and restart every long-lived mailbox writer for that workspace — including
+`mship serve` and any running agent, worker, or inbox process that can write
+`.mothership/messages`. Fresh CLI invocations started after the upgrade use the
+new version.
+
+Do not leave an older mailbox-writing process running during the rollout: its
+older `Thread` model ignores fields it does not know, so a later write can
+discard a newer resolution cursor. A configuration change in the new binary
+cannot protect data from an already-running older binary; upgrade and restart
+all writers first.
+
 ## 2. Pair the phone
 
 ```bash
@@ -43,6 +58,10 @@ per workspace — the app is multi-workspace.
 - **Chat with the agent.** Every work item has its threads; messages are
   durable, so the agent answers when it wakes even if it wasn't running when
   you wrote.
+- **Close completed conversations.** Mark a finished thread **Done** to clear
+  its older action and decision cards without sending a message or waking an
+  agent. Opening a thread marks it read but does not resolve its requests.
+  Any later request still returns to your attention.
 - **Watch progress.** Work items show their phase (inbox → shaping → ready →
   in flight → review → done) as the linked spec, tasks, and PRs advance.
 - **Review and merge PRs.** Merged PRs flow back as events — the agent sees the

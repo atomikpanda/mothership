@@ -118,6 +118,18 @@ class SeenBody(BaseModel):
     seen_at: str | None = None
 
 
+class ResolveThreadBody(BaseModel):
+    through_message_id: str
+
+    @field_validator("through_message_id")
+    @classmethod
+    def validate_through_message_id(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("through_message_id must not be blank")
+        return value
+
+
+
 class InboxMutationBody(BaseModel):
     mutation_id: str
 
@@ -1412,6 +1424,17 @@ def create_app(
         except (KeyError, ValueError):
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
         return _thread_payload(thread)
+
+    @app.post("/threads/{thread_id}/resolve")
+    def post_resolve_thread(thread_id: str, body: ResolveThreadBody):
+        now = datetime.now(timezone.utc)
+        try:
+            thread = msgs.resolve_through(thread_id, body.through_message_id, now)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        return _thread_payload(thread, now)
 
     def _thread_inbox_links(threads, all_items=None):
         if all_items is None:

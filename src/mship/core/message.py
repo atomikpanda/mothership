@@ -55,6 +55,12 @@ class Thread(BaseModel):
     # Symmetric to `seen_at`; drives Ground Control's "Read" indicator (#345). A human message
     # reads as Read iff `agent_seen_at is not None and agent_seen_at >= message.created_at`.
     agent_seen_at: datetime | None = None
+    # Explicit operator completion cursor. It identifies a message by append order,
+    # never by timestamp, so equal-timestamp messages remain unambiguous.
+    resolved_through_message_id: str | None = None
+    # Separate durable change time for long-poll clients. Completion changes attention
+    # state but deliberately must not reorder the thread by changing `updated_at`.
+    resolved_at: datetime | None = None
     inbox: InboxMetadata = Field(default_factory=InboxMetadata)
     messages: list[Message] = []
 
@@ -64,32 +70,33 @@ class Thread(BaseModel):
         """A thread needs an agent iff its latest message is from a human."""
         return bool(self.messages) and self.messages[-1].role == "human"
 
+    def _unanswered_after(self) -> int:
+        """Return the append index after both human and explicit resolution cursors."""
+        last_human = -1
+        resolved = -1
+        for i, message in enumerate(self.messages):
+            if message.role == "human":
+                last_human = i
+            if message.id == self.resolved_through_message_id:
+                resolved = i
+        return max(last_human, resolved)
+
     @computed_field
     @property
     def needs_you(self) -> bool:
-        """True iff an agent message marked needs_you is unanswered — i.e. newer
-        than the operator's last human message. Survives a follow-up plain note."""
-        last_human = -1
-        for i, m in enumerate(self.messages):
-            if m.role == "human":
-                last_human = i
+        """True iff a needs-you message remains after either resolution cursor."""
         return any(
-            m.role == "agent" and m.kind == "needs_you"
-            for m in self.messages[last_human + 1:]
+            message.role == "agent" and message.kind == "needs_you"
+            for message in self.messages[self._unanswered_after() + 1:]
         )
 
     @computed_field
     @property
     def needs_decision(self) -> bool:
-        """True iff an unanswered agent message with kind=decision exists after the
-        operator's last human message (mirrors needs_you)."""
-        last_human = -1
-        for i, m in enumerate(self.messages):
-            if m.role == "human":
-                last_human = i
+        """True iff a decision remains after either resolution cursor."""
         return any(
-            m.role == "agent" and m.kind == "decision"
-            for m in self.messages[last_human + 1:]
+            message.role == "agent" and message.kind == "decision"
+            for message in self.messages[self._unanswered_after() + 1:]
         )
 
     @computed_field

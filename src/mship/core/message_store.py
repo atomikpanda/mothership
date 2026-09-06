@@ -4,7 +4,7 @@ import fcntl
 import tempfile
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -17,6 +17,22 @@ from mship.core.message import DecisionPayload, Message, Thread
 def _new_id(now: datetime) -> str:
     """Sortable, collision-free id: a timestamp prefix + short uuid."""
     return f"{now:%Y%m%d%H%M%S}-{uuid.uuid4().hex[:8]}"
+
+
+def _utc(timestamp: datetime) -> datetime:
+    """Normalize legacy naive timestamps before comparing mailbox cursors."""
+    return timestamp.replace(tzinfo=timezone.utc) if timestamp.tzinfo is None else timestamp
+
+
+def _phone_visible_at(thread: Thread) -> datetime:
+    """Match the high-water timestamp used by phone long-polling."""
+    timestamps = (
+        thread.updated_at,
+        thread.inbox.last_mutated_at,
+        thread.resolved_at,
+    )
+    return max(_utc(timestamp) for timestamp in timestamps if timestamp is not None)
+
 
 
 @contextmanager
@@ -155,6 +171,48 @@ class MessageStore:
                 raise KeyError(thread_id)
             if thread.seen_at is None or seen_at > thread.seen_at:
                 thread.seen_at = seen_at
+                self.save(thread)
+            return thread
+
+    def resolve_through(self, thread_id: str, through_message_id: str, now: datetime) -> Thread:
+        """Durably advance the explicit operator completion cursor by append order.
+
+        Resolution is intentionally not a content update: it neither appends a
+        message nor changes `updated_at`. `resolved_at` exists solely to make this
+        attention-state mutation visible to serve-side long polling.
+        """
+        with _locked(self._lock_path(thread_id), fcntl.LOCK_EX):
+            thread = self.get(thread_id)
+            if thread is None:
+                raise KeyError(thread_id)
+            try:
+                target_index = next(
+                    index for index, message in enumerate(thread.messages)
+                    if message.id == through_message_id
+                )
+            except StopIteration as exc:
+                raise ValueError(
+                    f"message {through_message_id!r} does not belong to thread {thread_id!r}"
+                ) from exc
+            current_index = next(
+                (
+                    index for index, message in enumerate(thread.messages)
+                    if message.id == thread.resolved_through_message_id
+                ),
+                -1,
+            )
+            if target_index > current_index:
+                thread.resolved_through_message_id = through_message_id
+                # Phone polling has one mailbox-wide cursor: a previously observed
+                # change on another thread must not hide this acknowledgement.
+                phone_high_water = max(
+                    (_phone_visible_at(candidate) for candidate in self.list()),
+                    default=_phone_visible_at(thread),
+                )
+                thread.resolved_at = max(
+                    _utc(now),
+                    phone_high_water + timedelta(microseconds=1),
+                )
                 self.save(thread)
             return thread
 
