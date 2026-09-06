@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Iterable
 
 from mship.core.message import Thread
 from mship.core.spec import Spec
@@ -100,6 +101,13 @@ class WorkItemSummary:
     unattended: bool = False
     active_phase: str | None = None
     active_last_activity_at: datetime | None = None
+    affected_repos: list[str] = field(default_factory=list)
+    pr_urls: list[str] = field(default_factory=list)
+
+
+def _distinct(values: Iterable[str]) -> list[str]:
+    """Preserve linked-task order while dropping repeated metadata values."""
+    return list(dict.fromkeys(values))
 
 
 def _active_task(tasks: list[Task]) -> Task | None:
@@ -136,6 +144,14 @@ def _summarize(
         unattended=item.unattended,
         active_phase=active.phase if active else None,
         active_last_activity_at=active.last_activity_at if active else None,
+        affected_repos=_distinct([
+            *item.affected_repos,
+            *(repo for task in tasks for repo in task.affected_repos),
+        ]),
+        pr_urls=_distinct([
+            *item.pr_urls,
+            *(url for task in tasks for url in task.pr_urls.values()),
+        ]),
     )
 
 

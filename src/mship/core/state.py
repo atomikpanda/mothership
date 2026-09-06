@@ -86,6 +86,11 @@ class StateManager:
         self._state_dir = state_dir
         self._state_file = state_dir / "state.yaml"
 
+    @property
+    def state_dir(self) -> Path:
+        """Canonical state directory shared by this workspace's stores."""
+        return self._state_dir
+
     def _load_nolock(self) -> WorkspaceState:
         if not self._state_file.exists():
             return WorkspaceState()

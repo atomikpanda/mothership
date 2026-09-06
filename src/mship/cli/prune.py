@@ -38,7 +38,13 @@ def register(app: typer.Typer, get_container):
                 })
             return
 
-        count = prune_mgr.prune(orphans)
+        from mship.core.workitem_lifecycle import TaskMetadataRetentionConflictError
+
+        try:
+            count = prune_mgr.prune(orphans)
+        except TaskMetadataRetentionConflictError as e:
+            output.error(str(e))
+            raise typer.Exit(code=1)
         if output.human_mode:
             output.success(f"Pruned {count} item(s)")
         else:

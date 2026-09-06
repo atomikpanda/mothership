@@ -25,6 +25,7 @@ def build_review(spec: Spec) -> dict:
     return {
         "id": spec.id,
         "status": spec.status,
+        "updated_at": spec.updated_at.isoformat(),
         "clarification_reason": spec.clarification_reason,
         "acceptance_criteria": [
             {

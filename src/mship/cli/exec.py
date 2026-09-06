@@ -1,4 +1,6 @@
 import os
+from collections.abc import Callable
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -83,10 +85,14 @@ def _run_remote(
     config,
     container,
     output: Output,
+    platform: str | None = None,
+    kind: str = "all",
+    captures_dir_for: Path | None = None,
+    on_prepared: Callable[[str], None] | None = None,
 ) -> int:
-    """Shared `--remote` dispatch for `run`/`build`: resolve the run-host
-    role to a connection, POST to the remote's `/exec/{verb}`, and return the
-    remote task's exit code (mirrored by the caller as `raise
+    """Shared `--remote` dispatch for `run`/`build`/`capture`: resolve the
+    run-host role to a connection, POST to the remote's `/exec/{verb}`, and
+    return the remote task's exit code (mirrored by the caller as `raise
     typer.Exit(code)`).
 
     `task_obj` is the caller's already-resolved `Task` (`None` when nothing
@@ -108,6 +114,12 @@ def _run_remote(
     task is active, but that fallback has no branch for the remote to check out,
     so `--remote` without a resolvable task is a clean, actionable CLI error
     rather than a confusing remote-side failure.
+
+    A caller may supply capture-specific `platform`, `kind`, and
+    `captures_dir_for` arguments, plus `on_prepared` to receive a conservative
+    description of the source preflight completed before dispatch. This keeps
+    capture on the same preparation path as run/build without making it infer
+    source provenance from the local worktree after a remote capture.
 
     A `RunHostError` (unknown/ambiguous/unmapped role) or `RemoteExecError`
     (remote unreachable) surfaces as `output.error(...)` + `typer.Exit(1)` —
@@ -165,6 +177,12 @@ def _run_remote(
     # re-read of HEAD: it is the same guarantee `remote_preflight.push` makes
     # for the origin path, applied to the snapshot's parent.
     run_ref_repos: list[str] = []
+    # Only capture asks for source-preparation provenance. Keep the snapshot
+    # identities only in that case so run/build retain their existing work.
+    prepared_snapshots: list[tuple[str, str, str]] | None = (
+        [] if on_prepared is not None else None
+    )
+
     for state in pre.dirty:
         try:
             sha = run_transfer.synthesize_commit(
@@ -178,6 +196,11 @@ def _run_remote(
             output.error(str(e))
             raise typer.Exit(code=1)
         run_ref_repos.append(state.git_repo)
+        if prepared_snapshots is not None:
+            # This is deliberately recorded only after `push_run_ref` succeeds:
+            # it identifies the snapshot actually sent, rather than its parent
+            # HEAD or an unverified attempted transfer.
+            prepared_snapshots.append((state.git_repo, sha, ref))
         # Name it as throwaway (spec ac13): an operator who sees a bare sha will
         # reasonably try to `git show` it and find it attached to nothing.
         output.breadcrumb(
@@ -201,10 +224,27 @@ def _run_remote(
             f"pushed {repo_name}{suffix} so the run host sees your commits"
         )
 
+    if on_prepared is not None:
+        if prepared_snapshots:
+            snapshots = ", ".join(
+                f"{repo}@{sha[:12]} via {ref} (a throwaway run ref)"
+                for repo, sha, ref in prepared_snapshots
+            )
+            on_prepared(
+                f"an exact working-tree snapshot ({snapshots}) was sent to the run host"
+            )
+        else:
+            states = [s for s in pre.states if s.repo in target_repos]
+            commits = ", ".join(
+                f"{s.repo}@{(s.head_sha or 'unknown')[:12]}" for s in states
+            )
+            on_prepared(f"task source {commits} was verified before remote dispatch")
+
     try:
         return exec_remote(
             verb=verb, conn=conn, task=task_obj.slug, repos=target_repos,
-            run_ref_repos=run_ref_repos,
+            platform=platform, kind=kind, captures_dir_for=captures_dir_for,
+            run_ref_repos=run_ref_repos, print_fn=output.progress,
         )
     except RemoteExecError as e:
         output.error(str(e))

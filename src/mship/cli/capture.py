@@ -42,7 +42,8 @@ class _RemoteFlagCommand(TyperCommand):
 
 
 def _attach_evidence(
-    *, artifacts, evidence: str, container, output, worktree: Path, platform: str | None
+    *, artifacts, evidence: str, container, output, worktree: Path, platform: str | None,
+    provenance: str | None = None,
 ) -> None:
     """Promote captured artifacts into acceptance-criterion evidence.
 
@@ -76,7 +77,7 @@ def _attach_evidence(
                     f"{target.criterion_id!r}"
                 )
                 return
-            note_where = provenance_note(worktree, container.shell())
+            note_where = provenance or provenance_note(worktree, container.shell())
             for a in artifacts:
                 ref = store_artifact(workspace_root, target.spec_id, a.path, mode=mode)
                 crit.evidence.append(
@@ -207,8 +208,8 @@ def register(app: typer.Typer, get_container):
             out_dir = workspace_root / ".mothership" / "captures" / out_bucket / f"{ts}-{label}"
 
         if remote is not None:
-            from mship.core.remote_client import RemoteExecError, exec_remote
-            from mship.core.run_host import RunHostError, RunHostStore, resolve_run_host
+            from mship.cli.exec import _run_remote
+            from mship.core.evidence_attach import remote_provenance_note
 
             # Remote execution always materializes the task's branch on the
             # remote — there's no ad-hoc remote capture (an ad-hoc capture
@@ -222,22 +223,18 @@ def register(app: typer.Typer, get_container):
                 )
                 raise typer.Exit(code=1)
 
-            role = remote or None
-            store = RunHostStore(container.state_dir())
-            try:
-                conn = resolve_run_host(role, repo=repo_cfg, config=config, store=store)
-            except RunHostError as e:
-                output.error(str(e))
-                raise typer.Exit(code=1)
+            remote_note: str | None = None
 
-            try:
-                code = exec_remote(
-                    verb="capture", conn=conn, task=t.slug, repos=[resolved_repo],
-                    platform=resolved_platform, kind=kind, captures_dir_for=out_dir,
-                )
-            except RemoteExecError as e:
-                output.error(str(e))
-                raise typer.Exit(code=1)
+            def record_preparation(source_preparation: str) -> None:
+                nonlocal remote_note
+                remote_note = remote_provenance_note(source_preparation)
+
+            code = _run_remote(
+                verb="capture", remote_role=remote, task_obj=t,
+                target_repos=[resolved_repo], config=config, container=container,
+                output=output, platform=resolved_platform, kind=kind,
+                captures_dir_for=out_dir, on_prepared=record_preparation,
+            )
 
             # On success, emit the SAME confirmation a local capture does
             # (respecting --json), pointing at the local landing path where
@@ -272,6 +269,9 @@ def register(app: typer.Typer, get_container):
                     _attach_evidence(
                         artifacts=landed, evidence=evidence, container=container,
                         output=output, worktree=worktree, platform=resolved_platform,
+                        provenance=remote_note or remote_provenance_note(
+                            "source preparation was not recorded"
+                        ),
                     )
             raise typer.Exit(code=code)
 

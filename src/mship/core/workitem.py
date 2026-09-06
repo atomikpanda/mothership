@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 Kind = Literal["feature", "bug", "chore", "question"]
 Phase = Literal["inbox", "shaping", "ready", "in_flight", "review", "done"]
@@ -45,3 +45,7 @@ class WorkItem(BaseModel):
     # Soft, reversible archive: excluded from list() by default. Missing on legacy
     # (pre-archive) JSON files, which pydantic defaults to False on load.
     archived: bool = False
+    # Task state is transient and is removed on close/prune. Retain only the
+    # observed delivery metadata needed to keep a completed item's summary useful.
+    affected_repos: list[str] = Field(default_factory=list)
+    pr_urls: list[str] = Field(default_factory=list)

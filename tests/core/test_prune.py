@@ -97,6 +97,108 @@ def test_prune_removes_state_orphan(prune_deps):
     assert state.tasks == {}
 
 
+def test_prune_retains_linked_task_metadata_before_last_worktree_removal(prune_deps):
+    from mship.core.view.workitem_index import build_workitem_index
+    from mship.core.workitem_store import WorkItemStore
+
+    config, state_mgr, git, _workspace = prune_deps
+    store = WorkItemStore(state_mgr.state_dir / "workitems")
+    item = store.create("pruned", "chore", "ws", datetime.now(timezone.utc))
+    task = Task(
+        slug="ghost", description="Ghost task", phase="dev",
+        created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
+        affected_repos=["shared"], branch="feat/ghost",
+        worktrees={"shared": Path("/tmp/nonexistent/worktree")},
+        pr_urls={"shared": "https://github.example/shared/pull/1"},
+        work_item_id=item.id,
+    )
+    store.add_task(item.id, task.slug)
+    state_mgr.save(WorkspaceState(tasks={task.slug: task}))
+
+    manager = PruneManager(config, state_mgr, git)
+    manager.prune(manager.scan())
+
+    summary = build_workitem_index([store.get(item.id)], {}, state_mgr.load().tasks, {})[0]
+    assert summary.affected_repos == ["shared"]
+    assert summary.pr_urls == ["https://github.example/shared/pull/1"]
+
+
+
+
+def test_prune_retains_metadata_for_forward_only_workitem_link(prune_deps):
+    from mship.core.workitem_store import WorkItemStore
+
+    config, state_mgr, git, _workspace = prune_deps
+    store = WorkItemStore(state_mgr.state_dir / "workitems")
+    item = store.create("forward-only", "chore", "ws", datetime.now(timezone.utc))
+    task = Task(
+        slug="forward-only",
+        description="Forward-only task",
+        phase="dev",
+        created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
+        affected_repos=["shared"],
+        branch="feat/forward-only",
+        worktrees={"shared": Path("/tmp/nonexistent/forward-only")},
+        pr_urls={"shared": "https://github.example/shared/pull/1"},
+    )
+    store.add_task(item.id, task.slug)
+    state_mgr.save(WorkspaceState(tasks={task.slug: task}))
+
+    manager = PruneManager(config, state_mgr, git)
+    manager.prune(manager.scan())
+
+    assert task.slug not in state_mgr.load().tasks
+    persisted = store.get(item.id)
+    assert persisted.affected_repos == ["shared"]
+    assert persisted.pr_urls == ["https://github.example/shared/pull/1"]
+
+
+def test_prune_refuses_metadata_changed_after_retention(prune_deps, monkeypatch):
+    from mship.core.workitem_lifecycle import (
+        TaskMetadataRetentionConflictError,
+        retain_workitem_metadata_on_teardown,
+    )
+    from mship.core.workitem_store import WorkItemStore
+
+    config, state_mgr, git, _workspace = prune_deps
+    store = WorkItemStore(state_mgr.state_dir / "workitems")
+    item = store.create("pruned", "chore", "ws", datetime.now(timezone.utc))
+    task = Task(
+        slug="ghost", description="Ghost task", phase="dev",
+        created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
+        affected_repos=["shared"], branch="feat/ghost",
+        worktrees={"shared": Path("/tmp/nonexistent/worktree")},
+        work_item_id=item.id,
+    )
+    state_mgr.save(WorkspaceState(tasks={task.slug: task}))
+    manager = PruneManager(config, state_mgr, git)
+
+    def retain_then_update(*, task, workitems_dir):
+        retained = retain_workitem_metadata_on_teardown(
+            task=task, workitems_dir=workitems_dir,
+        )
+        state_mgr.mutate(
+            lambda state: (
+                state.tasks[task.slug].affected_repos.append("api-gateway"),
+                state.tasks[task.slug].pr_urls.update(
+                    {"api-gateway": "https://github.example/api/pull/2"},
+                ),
+            ),
+        )
+        return retained
+
+    monkeypatch.setattr(
+        "mship.core.workitem_lifecycle.retain_workitem_metadata_on_teardown",
+        retain_then_update,
+    )
+
+    with pytest.raises(TaskMetadataRetentionConflictError, match="Retry"):
+        manager.prune(manager.scan())
+
+    live_task = state_mgr.load().tasks["ghost"]
+    assert live_task.affected_repos == ["shared", "api-gateway"]
+    assert live_task.pr_urls == {"api-gateway": "https://github.example/api/pull/2"}
+
 def test_prune_partial_missing_keeps_task(prune_deps):
     """If only one worktree is missing, remove the entry but keep the task."""
     config, state_mgr, git, workspace = prune_deps

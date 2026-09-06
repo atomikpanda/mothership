@@ -123,23 +123,66 @@ class PruneManager:
                         shutil.rmtree(orphan.path, ignore_errors=True)
                 pruned += 1
 
-        # Phase 2: clean up state entries pointing to nonexistent worktrees
+        # Retain metadata before entering the state lock. WorkItemStore's item
+        # lock must never be taken while holding state.lock, and a persistence
+        # failure must leave state (the last copy) untouched.
+        from mship.core.workitem_lifecycle import (
+            require_retained_task_metadata,
+            retain_workitem_metadata_on_teardown,
+        )
+
+        state_before_cleanup = self._state_manager.load()
+        retained_by_slug = {}
+        workitems_dir = self._state_manager.state_dir / "workitems"
+        for task in state_before_cleanup.tasks.values():
+            remaining = {
+                repo: path
+                for repo, path in task.worktrees.items()
+                if not any(
+                    orphan.reason == "not_on_disk"
+                    and orphan.repo == repo
+                    and not Path(path).exists()
+                    for orphan in orphans
+                )
+            }
+            if task.worktrees and not remaining:
+                retained_by_slug[task.slug] = retain_workitem_metadata_on_teardown(
+                    task=task, workitems_dir=workitems_dir,
+                )
+
+        # Phase 2: clean up state entries pointing to nonexistent worktrees.
+        # Validate every task that will be deleted before mutating state, so a
+        # concurrent metadata update leaves the entire source snapshot intact.
         def _cleanup(state):
             nonlocal pruned
-            for orphan in orphans:
-                if orphan.reason != "not_on_disk":
+            cleanup_actions = []
+            for task_slug, task in state.tasks.items():
+                missing_repos = [
+                    repo
+                    for repo, path in task.worktrees.items()
+                    if any(
+                        orphan.reason == "not_on_disk"
+                        and orphan.repo == repo
+                        and not Path(path).exists()
+                        for orphan in orphans
+                    )
+                ]
+                if not missing_repos:
                     continue
-                for task_slug, task in list(state.tasks.items()):
-                    if orphan.repo in task.worktrees:
-                        wt_path = task.worktrees[orphan.repo]
-                        if not Path(wt_path).exists():
-                            # Remove just the worktree entry, not the entire task
-                            del task.worktrees[orphan.repo]
-                            pruned += 1
-                            # If task has no worktrees left, remove the task
-                            if not task.worktrees:
-                                del state.tasks[task_slug]
-                            break
+                removes_task = len(missing_repos) == len(task.worktrees)
+                if removes_task:
+                    require_retained_task_metadata(
+                        task, retained_by_slug.get(task_slug),
+                    )
+                cleanup_actions.append((task_slug, missing_repos, removes_task))
+
+            for task_slug, missing_repos, removes_task in cleanup_actions:
+                task = state.tasks[task_slug]
+                for repo in missing_repos:
+                    del task.worktrees[repo]
+                    pruned += 1
+                if removes_task:
+                    del state.tasks[task_slug]
 
         self._state_manager.mutate(_cleanup)
 

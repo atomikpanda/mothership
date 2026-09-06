@@ -9,8 +9,93 @@ case a spec can't cover at all.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+@dataclass(frozen=True)
+class RetainedTaskMetadata:
+    """Delivery metadata persisted before transient task teardown."""
+
+    work_item_id: str | None
+    affected_repos: frozenset[str]
+    pr_urls: frozenset[str]
+
+
+class TaskMetadataRetentionConflictError(RuntimeError):
+    """Raised when task delivery metadata changes after retention."""
+
+    def __init__(self, task_slug: str, reason: str) -> None:
+        super().__init__(
+            f"Refusing to remove task '{task_slug}': {reason}. "
+            "Retry the operation so the latest delivery metadata is retained."
+        )
+
+
+def _task_metadata(task) -> RetainedTaskMetadata:
+    return RetainedTaskMetadata(
+        work_item_id=getattr(task, "work_item_id", None),
+        affected_repos=frozenset(getattr(task, "affected_repos", []) or []),
+        pr_urls=frozenset((getattr(task, "pr_urls", {}) or {}).values()),
+    )
+
+
+def retain_workitem_metadata_on_teardown(*, task, workitems_dir: Path) -> RetainedTaskMetadata:
+    """Persist a task's delivery metadata before it leaves transient state.
+
+    A WorkItem's forward ``task_slugs`` link is durable enough to guard archive,
+    so it is authoritative when the task-side link is absent or stale. Resolve
+    that relationship before taking an item lock; state mutation callers invoke
+    this helper before acquiring state.lock.
+    """
+    retained = _task_metadata(task)
+
+    from mship.core.workitem_store import TaskLinkAmbiguousError, WorkItemStore
+
+    store = WorkItemStore(workitems_dir)
+    try:
+        item_id = store.resolve_task_workitem_id(task.slug, retained.work_item_id)
+    except TaskLinkAmbiguousError as exc:
+        raise TaskMetadataRetentionConflictError(
+            task.slug, f"forward WorkItem link is ambiguous ({', '.join(exc.item_ids)})",
+        ) from exc
+
+    if not item_id:
+        return retained
+
+    try:
+        retained_successfully = store.retain_task_metadata(task, item_id=item_id)
+    except ValueError as exc:
+        raise TaskMetadataRetentionConflictError(
+            task.slug, f"linked work item {item_id!r} is unavailable",
+        ) from exc
+    if not retained_successfully:
+        raise TaskMetadataRetentionConflictError(
+            task.slug, f"linked work item {item_id!r} is unavailable",
+        )
+    return retained
+
+
+def require_retained_task_metadata(
+    task, retained: RetainedTaskMetadata | None,
+) -> None:
+    """Refuse teardown unless the live task's delivery metadata was retained."""
+    if retained is None:
+        raise TaskMetadataRetentionConflictError(
+            task.slug, "no durable metadata snapshot was recorded",
+        )
+
+    current = _task_metadata(task)
+    if (
+        current.work_item_id != retained.work_item_id
+        or not current.affected_repos.issubset(retained.affected_repos)
+        or not current.pr_urls.issubset(retained.pr_urls)
+    ):
+        raise TaskMetadataRetentionConflictError(
+            task.slug,
+            "its delivery metadata changed after it was retained",
+        )
 
 
 def advance_workitem_on_close(

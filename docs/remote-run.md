@@ -18,7 +18,7 @@ Your local box (the operator) then treats that URL+token as a **run-host role** 
 
 - The remote **materializes the task's branch** — `git fetch` + a worktree at `.worktrees/<task>/<repo>`, mirroring the local worktree layout. Remote execution always operates on a task's branch; there's no ad-hoc remote run (the remote needs a branch to check out).
 - The remote runs the repo's go-task target (`run`/`capture`/`build`) with the **same env-var contract** as a local run.
-- Output streams back live (not a final blob) and the remote task's exit code becomes your local process's exit code.
+- Output streams back live on stderr (not a final blob), leaving structured command results on stdout parseable. `--quiet` suppresses progress; the remote task's exit code becomes your local process's exit code.
 - For `capture`, produced artifacts (`screen.png`, `layout.*`) are pulled home automatically.
 
 The client imposes no read-idle timeout on a valid execution response body:
@@ -109,9 +109,11 @@ These are deliberately out of scope for the first cut. Know them before you lean
 
 ## What travels to the run host
 
-`--remote` runs the code you are looking at, **including work you have not
-committed**. Before dispatching, mship reads every repo the task touches and
-takes one of three paths per repo:
+`run --remote` and `build --remote` prepare the source you are looking at,
+**including work you have not committed**. `capture --remote` shares their
+source preflight and transfer path, but observes an already-running app.
+Before dispatching, mship inspects each selected repo and takes one of three
+paths:
 
 - **Working tree differs from HEAD** — tracked edits, untracked files, or both →
   mship builds a commit from your working tree and pushes it **straight to the
@@ -182,6 +184,22 @@ need the run host to materialize an immutable revision instead of resolving a
 branch at fetch time. The **dirty path already does exactly that**: it
 materializes a specific commit from a ref nothing else writes, with no fetch at
 all. The clean path does not.
+
+### Capture provenance
+
+Remote capture uses the same repo-scoped preflight as remote run/build.
+An unsafe checkout or failed source transfer stops the command before capture
+is dispatched; a `git_root` child uses its canonical repository for transfer.
+
+Capture does **not** rebuild or relaunch the app. Preparing source therefore
+does not prove which binary is visible on the device. Run the app first when
+you need a fresh build.
+
+Attached remote evidence records source preparation separately from device
+provenance. For dirty trees it names the synthesized snapshot SHA and throwaway
+ref, not the parent HEAD. It explicitly states that the remote checkout and
+running binary provenance were not verified; it does not label a remote image
+as a local clean-HEAD capture.
 
 ### Dependencies are derived there, not copied
 

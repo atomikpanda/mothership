@@ -1140,12 +1140,16 @@ def register(app: typer.Typer, get_container):
             pass
 
         wt_mgr = container.worktree_manager()
+        from mship.core.workitem_lifecycle import TaskMetadataRetentionConflictError
         from mship.core.worktree import WorktreeDirtyError
         try:
             wt_mgr.abort(task_slug, force=force)  # core method retains the name; only CLI verb changed
         except WorktreeDirtyError as e:
             output.error(str(e))
             output.error("Resolve the changes (commit/push), or re-run `mship close --force` to discard them.")
+            raise typer.Exit(code=1)
+        except TaskMetadataRetentionConflictError as e:
+            output.error(str(e))
             raise typer.Exit(code=1)
 
         if downstream and detach_downstream:
@@ -1157,10 +1161,44 @@ def register(app: typer.Typer, get_container):
                     t.depends_on = [e for e in t.depends_on if e.upstream_slug != task.slug]
             state_mgr.mutate(_detach)
         elif downstream and cascade:
-            def _cascade(s):
+            # Cascaded tasks are removed directly rather than through
+            # WorktreeManager.abort, so retain their observed delivery metadata
+            # before dropping their only live state copy. Never take item locks
+            # while StateManager.mutate holds state.lock.
+            from mship.core.workitem_lifecycle import (
+                require_retained_task_metadata,
+                retain_workitem_metadata_on_teardown,
+            )
+
+            try:
+                workitems_dir = Path(container.state_dir()) / "workitems"
+                retained_by_slug = {}
+                state_before_cascade = state_mgr.load()
                 for d_slug in downstream:
-                    s.tasks.pop(d_slug, None)
-            state_mgr.mutate(_cascade)
+                    downstream_task = state_before_cascade.tasks.get(d_slug)
+                    if downstream_task is not None:
+                        retained_by_slug[d_slug] = retain_workitem_metadata_on_teardown(
+                            task=downstream_task,
+                            workitems_dir=workitems_dir,
+                        )
+
+                def _cascade(s):
+                    tasks_to_remove = []
+                    for d_slug in downstream:
+                        downstream_task = s.tasks.get(d_slug)
+                        if downstream_task is None:
+                            continue
+                        require_retained_task_metadata(
+                            downstream_task, retained_by_slug.get(d_slug),
+                        )
+                        tasks_to_remove.append(d_slug)
+                    for d_slug in tasks_to_remove:
+                        del s.tasks[d_slug]
+
+                state_mgr.mutate(_cascade)
+            except TaskMetadataRetentionConflictError as e:
+                output.error(str(e))
+                raise typer.Exit(code=1)
 
         log_mgr.append(task_slug, log_msg)
         try:

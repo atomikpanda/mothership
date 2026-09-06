@@ -218,6 +218,72 @@ def test_build_index_tolerates_missing_children():
     assert s.attention.total_tasks == 0
 
 
+def test_summary_aggregates_linked_task_repos_and_prs_without_mutation():
+    first_repos = ["mothership", "ground-control"]
+    first_prs = {
+        "mothership": "https://github.example/mship/pull/1",
+        "ground-control": "https://github.example/gc/pull/2",
+    }
+    second_repos = ["ground-control", "mothership"]
+    second_prs = {"mothership": "https://github.example/mship/pull/3"}
+    first = Task(
+        slug="first", description="first", phase="review", created_at=_now(),
+        affected_repos=first_repos, branch="first", pr_urls=first_prs,
+    )
+    second = Task(
+        slug="second", description="second", phase="review", created_at=_now(),
+        affected_repos=second_repos, branch="second", pr_urls=second_prs,
+    )
+
+    summary = build_workitem_index(
+        [_wi(task_slugs=["first", "second", "missing"])],
+        {}, {"first": first, "second": second}, {},
+    )[0]
+
+    assert summary.affected_repos == ["mothership", "ground-control"]
+    assert summary.pr_urls == [
+        "https://github.example/mship/pull/1",
+        "https://github.example/gc/pull/2",
+        "https://github.example/mship/pull/3",
+    ]
+    assert first_repos == ["mothership", "ground-control"]
+    assert first_prs == {
+        "mothership": "https://github.example/mship/pull/1",
+        "ground-control": "https://github.example/gc/pull/2",
+    }
+    assert second_repos == ["ground-control", "mothership"]
+    assert second_prs == {"mothership": "https://github.example/mship/pull/3"}
+
+def test_summary_merges_retained_metadata_with_live_task_urls():
+    live = Task(
+        slug="live", description="live", phase="review", created_at=_now(),
+        affected_repos=["ground-control"], branch="live",
+        pr_urls={"ground-control": "https://github.example/gc/pull/2"},
+    )
+
+    summary = build_workitem_index(
+        [_wi(
+            task_slugs=["gone", "live"],
+            affected_repos=["mothership", "ground-control"],
+            pr_urls=["https://github.example/mship/pull/1"],
+        )],
+        {}, {"live": live}, {},
+    )[0]
+
+    assert summary.affected_repos == ["mothership", "ground-control"]
+    assert summary.pr_urls == [
+        "https://github.example/mship/pull/1",
+        "https://github.example/gc/pull/2",
+    ]
+
+
+
+def test_summary_has_no_metadata_when_linked_tasks_are_missing():
+    summary = build_workitem_index([_wi(task_slugs=["missing"])], {}, {}, {})[0]
+    assert summary.affected_repos == []
+    assert summary.pr_urls == []
+
+
 def test_build_index_populates_unattended_true():
     item = _wi(id="wi-u", unattended=True)
     s = build_workitem_index([item], {}, {}, {})[0]
