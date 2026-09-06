@@ -162,18 +162,8 @@ from the build context. Compose's `pull_policy: build` makes this the default
 for ordinary `docker compose up` as well as the bootstrap script; there is no
 machine-local override to copy to a new relay.
 
-To upgrade an existing relay after updating this checkout, run from the
-**original deployment checkout**, retaining its `.env`, keys, and state:
-
-```bash
-docker compose -f docker/relay/docker-compose.yml up -d --build --no-deps sish
-docker compose -f docker/relay/docker-compose.yml exec sish /app/app --version
-```
-
-The version should be `v2.23.0-mship-crypto0.53.0`. Recreating sish briefly
-disconnects tunnels; clients must reconnect. Caddy and enrollment state are
-not recreated. Never deploy from an empty worktree's relay directory: that
-would use a different key allowlist and generate a different SSH host key.
+Use the [upgrade procedure](#upgrading) below to deploy the fixed build from
+the original checkout while preserving the relay's identity and state.
 
 ### Idle-connection reaping
 
@@ -457,7 +447,7 @@ registration (within a minute) publishes freshly derived ones.
 
 ## Configuration Reference
 
-The relay is configured entirely through environment variables passed to `docker compose`. The bootstrap script sets them; you can also export them in a `.env` file alongside `docker-compose.yml`:
+The relay is configured through environment variables passed to `docker compose`. The bootstrap script passes them to its startup invocation but **does not persist them**. For later commands, export the same values again, or save them in `docker/relay/.env` and explicitly pass `--env-file docker/relay/.env` to Compose.
 
 | Variable | Required | Example | Description |
 |---|---|---|---|
@@ -477,15 +467,35 @@ The `mship relay enroll-server` command also respects `RELAY_DOMAIN` if `--relay
 
 ## Upgrading
 
-sish and Caddy both use the `latest` tag. To update:
+sish is built from the source and dependency versions pinned in the checked-in
+Dockerfile; `docker compose pull` cannot upgrade it. Update the original
+deployment checkout, then rebuild and recreate only sish:
 
 ```bash
 cd /path/to/mothership
-docker compose -f docker/relay/docker-compose.yml pull
-docker compose -f docker/relay/docker-compose.yml up -d
+git pull --ff-only
+# Use this relay's original bootstrap values, not a new domain.
+export RELAY_DOMAIN=relay.example.com
+export ACME_EMAIL=you@example.com
+docker compose -f docker/relay/docker-compose.yml up -d --build --no-deps sish
+docker compose -f docker/relay/docker-compose.yml exec sish /app/app --version
 ```
 
-Data directories (`keys/`, `pubkeys/`, `caddy-data/`, `caddy-config/`) are mounted volumes and survive the upgrade.
+The version should be `v2.23.0-mship-crypto0.53.0`. Recreating sish briefly
+disconnects tunnels; clients must reconnect. This does not recreate Caddy or
+the enroll-server. Never deploy from an empty worktree's relay directory: it
+would use a different key allowlist and generate a different SSH host key.
+
+Caddy uses the `caddy:2` image. To update it separately, in the same shell:
+
+```bash
+docker compose -f docker/relay/docker-compose.yml pull caddy
+docker compose -f docker/relay/docker-compose.yml up -d --no-deps caddy
+```
+
+Existing `.env`, keys, allowlist, enrollment store, and Caddy data remain in
+the original deployment directory. The mounted data directories survive
+container recreation.
 
 ---
 
