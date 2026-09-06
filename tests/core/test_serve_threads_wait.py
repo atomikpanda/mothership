@@ -205,14 +205,21 @@ def test_resolve_moves_old_attention_thread_to_archived_and_wakes_active_wait(tm
     assert woke.json()["removed_ids"] == [thread.id]
 
 
-def test_resolve_with_reordered_clock_wakes_after_prior_phone_cursor(tmp_path: Path):
+@pytest.mark.parametrize("cursor_on_other_thread", [False, True])
+def test_resolve_with_reordered_clock_wakes_after_prior_phone_cursor(
+    tmp_path: Path, cursor_on_other_thread: bool,
+):
     client, store = _client(tmp_path)
     base = datetime.now(timezone.utc) - timedelta(days=1)
     content_at = datetime.now(timezone.utc) + timedelta(hours=1)
     inbox_at = content_at + timedelta(minutes=1)
     thread = store.create_thread("completed", "body", base)
     prompt = store.append(thread.id, "agent", "review this", content_at, kind="needs_you")
-    store.mutate_inbox(thread.id, "pin", "pin-1", inbox_at)
+    cursor_thread = (
+        store.create_thread("other conversation", "body", base)
+        if cursor_on_other_thread else thread
+    )
+    store.mutate_inbox(cursor_thread.id, "pin", "pin-1", inbox_at)
 
     resolved = client.post(
         f"/threads/{thread.id}/resolve", json={"through_message_id": prompt.id},

@@ -203,12 +203,15 @@ class MessageStore:
             )
             if target_index > current_index:
                 thread.resolved_through_message_id = through_message_id
-                # A resolve can arrive behind a content or inbox mutation the phone
-                # already observed. Advance beyond that entire long-poll high-water
-                # mark so its strictly-greater cursor sees this attention update.
+                # Phone polling has one mailbox-wide cursor: a previously observed
+                # change on another thread must not hide this acknowledgement.
+                phone_high_water = max(
+                    (_phone_visible_at(candidate) for candidate in self.list()),
+                    default=_phone_visible_at(thread),
+                )
                 thread.resolved_at = max(
                     _utc(now),
-                    _phone_visible_at(thread) + timedelta(microseconds=1),
+                    phone_high_water + timedelta(microseconds=1),
                 )
                 self.save(thread)
             return thread
