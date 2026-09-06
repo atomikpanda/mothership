@@ -18,6 +18,21 @@ and coffee-shop Wi-Fi don't matter. You can use a self-hosted relay
 ([Relay hosting](../relay-hosting.md)); serving over a tailnet works too
 ([Serve over Tailscale](../mship-serve-tailscale.md)).
 
+### Upgrading mailbox writers
+
+Mailbox thread files are read-modify-written. Before using a release that adds
+phone-visible mailbox fields such as **Done**, install the new `mship` version
+and restart every long-lived mailbox writer for that workspace — including
+`mship serve` and any running agent, worker, or inbox process that can write
+`.mothership/messages`. Fresh CLI invocations started after the upgrade use the
+new version.
+
+Do not leave an older mailbox-writing process running during the rollout: its
+older `Thread` model ignores fields it does not know, so a later write can
+discard a newer resolution cursor. A configuration change in the new binary
+cannot protect data from an already-running older binary; upgrade and restart
+all writers first.
+
 ## 2. Pair the phone
 
 ```bash

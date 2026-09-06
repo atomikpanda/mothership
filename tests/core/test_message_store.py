@@ -186,6 +186,33 @@ def test_later_resolution_remains_poll_visible_when_request_clocks_reorder(tmp_p
     assert cursor > prior.resolved_at
 
 
+
+def test_resolution_advances_past_phone_visible_high_water_without_agent_wake(tmp_path):
+    from mship.core.message_wait import changed_since
+
+    base = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
+    content_at = base + timedelta(minutes=3)
+    inbox_at = base + timedelta(minutes=4)
+    store = _store(tmp_path)
+    thread = store.create_thread("requests", "start", base)
+    prompt = store.append(thread.id, "agent", "review this", content_at, kind="needs_you")
+    store.mutate_inbox(thread.id, "pin", "pin-1", inbox_at)
+
+    resolved = store.resolve_through(thread.id, prompt.id, base + timedelta(minutes=1))
+    retried = store.resolve_through(thread.id, prompt.id, base + timedelta(minutes=5))
+    agent_changed, agent_cursor = changed_since(store.list(), content_at)
+    phone_changed, phone_cursor = changed_since(store.list(), inbox_at, include_inbox=True)
+
+    assert resolved.updated_at == content_at
+    assert resolved.inbox.last_mutated_at == inbox_at
+    assert [message.id for message in resolved.messages] == [thread.messages[0].id, prompt.id]
+    assert resolved.needs_you is False
+    assert retried.model_dump(mode="json") == resolved.model_dump(mode="json")
+    assert agent_changed == []
+    assert agent_cursor == content_at
+    assert [item.id for item in phone_changed] == [thread.id]
+    assert phone_cursor == resolved.resolved_at
+
 def test_mark_seen_advances_cursor_and_clears_unseen(tmp_path):
     from datetime import timedelta
     base = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)

@@ -204,6 +204,29 @@ def test_resolve_moves_old_attention_thread_to_archived_and_wakes_active_wait(tm
     assert woke.json()["threads"] == []
     assert woke.json()["removed_ids"] == [thread.id]
 
+
+def test_resolve_with_reordered_clock_wakes_after_prior_phone_cursor(tmp_path: Path):
+    client, store = _client(tmp_path)
+    base = datetime.now(timezone.utc) - timedelta(days=1)
+    content_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    inbox_at = content_at + timedelta(minutes=1)
+    thread = store.create_thread("completed", "body", base)
+    prompt = store.append(thread.id, "agent", "review this", content_at, kind="needs_you")
+    store.mutate_inbox(thread.id, "pin", "pin-1", inbox_at)
+
+    resolved = client.post(
+        f"/threads/{thread.id}/resolve", json={"through_message_id": prompt.id},
+    )
+    woke = client.get("/threads", params={
+        "wait": 1, "since": inbox_at.isoformat(), "timeout": 0,
+    })
+
+    assert resolved.status_code == 200
+    assert store.get(thread.id).updated_at == content_at
+    assert woke.status_code == 200
+    assert woke.json()["timed_out"] is False
+    assert [summary["id"] for summary in woke.json()["threads"]] == [thread.id]
+
 def test_wait_times_out_with_empty_list(tmp_path: Path):
     client, _ = _client(tmp_path)
     r = client.get("/threads", params={"wait": 1, "timeout": 0.1})  # since defaults to now

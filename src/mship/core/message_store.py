@@ -19,6 +19,22 @@ def _new_id(now: datetime) -> str:
     return f"{now:%Y%m%d%H%M%S}-{uuid.uuid4().hex[:8]}"
 
 
+def _utc(timestamp: datetime) -> datetime:
+    """Normalize legacy naive timestamps before comparing mailbox cursors."""
+    return timestamp.replace(tzinfo=timezone.utc) if timestamp.tzinfo is None else timestamp
+
+
+def _phone_visible_at(thread: Thread) -> datetime:
+    """Match the high-water timestamp used by phone long-polling."""
+    timestamps = (
+        thread.updated_at,
+        thread.inbox.last_mutated_at,
+        thread.resolved_at,
+    )
+    return max(_utc(timestamp) for timestamp in timestamps if timestamp is not None)
+
+
+
 @contextmanager
 def _locked(lock_path: Path, mode: int):
     """Advisory flock on `lock_path` (mirrors state.py's `_locked`).
@@ -187,10 +203,12 @@ class MessageStore:
             )
             if target_index > current_index:
                 thread.resolved_through_message_id = through_message_id
+                # A resolve can arrive behind a content or inbox mutation the phone
+                # already observed. Advance beyond that entire long-poll high-water
+                # mark so its strictly-greater cursor sees this attention update.
                 thread.resolved_at = max(
-                    now,
-                    thread.resolved_at + timedelta(microseconds=1)
-                    if thread.resolved_at is not None else now,
+                    _utc(now),
+                    _phone_visible_at(thread) + timedelta(microseconds=1),
                 )
                 self.save(thread)
             return thread
