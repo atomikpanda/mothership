@@ -56,11 +56,11 @@ def register(app: typer.Typer, get_container):
                 if result.returncode == 0 and result.stdout.strip():
                     snapshot[dep_name] = result.stdout.strip()
 
-            def _apply(s):
-                s.tasks[t.slug].active_repo = target
-                s.tasks[t.slug].last_switched_at_sha[target] = snapshot
+            def _apply(task):
+                task.active_repo = target
+                task.last_switched_at_sha[target] = snapshot
 
-            state_mgr.mutate(_apply)
+            state_mgr.mutate_task(t.slug, _apply)
 
         handoff = build_handoff(config, state_mgr.load(), shell, log_mgr, repo=target, task_slug=t.slug)
 

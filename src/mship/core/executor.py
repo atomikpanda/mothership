@@ -352,14 +352,17 @@ class RepoExecutor:
                         pre_skips.append(self._make_skip_result(m, "test"))
             if pre_skips:
                 if task_slug:
-                    def _record_pre_skips(s, _results=pre_skips, _slug=task_slug):
-                        task = s.tasks.get(_slug)
-                        if task is None:
-                            return
+                    def _record_pre_skips(task, _results=pre_skips):
                         now = datetime.now(timezone.utc)
                         for rr in _results:
                             task.test_results[rr.repo] = TestResult(status="skip", at=now)
-                    self._state_manager.mutate(_record_pre_skips)
+                    try:
+                        self._state_manager.mutate_task(
+                            task_slug,
+                            _record_pre_skips,
+                        )
+                    except KeyError:
+                        pass
                 result.results.extend(pre_skips)
             repos = run_repos
 
@@ -456,10 +459,7 @@ class RepoExecutor:
 
             # Batch-save test results for this tier
             if task_slug and canonical_task == "test":
-                def _apply_test_results(s, _results=tier_results, _slug=task_slug):
-                    task = s.tasks.get(_slug)
-                    if task is None:
-                        return
+                def _apply_test_results(task, _results=tier_results):
                     now = datetime.now(timezone.utc)
                     for repo_result in _results:
                         if repo_result.skipped:
@@ -472,7 +472,13 @@ class RepoExecutor:
                             status=status,
                             at=now,
                         )
-                self._state_manager.mutate(_apply_test_results)
+                try:
+                    self._state_manager.mutate_task(
+                        task_slug,
+                        _apply_test_results,
+                    )
+                except KeyError:
+                    pass
 
             # Fail-fast between tiers
             tier_success = all(r.success for r in tier_results)

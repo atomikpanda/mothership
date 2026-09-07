@@ -419,13 +419,17 @@ def register(parent: typer.Typer, get_container) -> None:
 
         def mark_blocked(item, reason):
             stamp = now()
+            live_slugs = [
+                slug for slug in item.task_slugs if slug in snapshot.tasks
+            ]
 
-            def _apply(s):
-                for slug in item.task_slugs:
-                    if slug in s.tasks:
-                        s.tasks[slug].blocked_reason = reason
-                        s.tasks[slug].blocked_at = stamp
-            state_manager.mutate(_apply)
+            def _apply(tasks):
+                for task in tasks.values():
+                    task.blocked_reason = reason
+                    task.blocked_at = stamp
+
+            if live_slugs:
+                state_manager.mutate_tasks(live_slugs, _apply)
 
         def push_branch(item):
             """Push the item's task branch to origin from each existing worktree, so

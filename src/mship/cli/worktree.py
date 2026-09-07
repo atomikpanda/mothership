@@ -1153,13 +1153,11 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=1)
 
         if downstream and detach_downstream:
-            def _detach(s):
-                for d_slug in downstream:
-                    t = s.tasks.get(d_slug)
-                    if t is None:
-                        continue
+            def _detach(tasks):
+                for t in tasks.values():
                     t.depends_on = [e for e in t.depends_on if e.upstream_slug != task.slug]
-            state_mgr.mutate(_detach)
+
+            state_mgr.mutate_tasks(downstream, _detach)
         elif downstream and cascade:
             # Cascaded tasks are removed directly rather than through
             # WorktreeManager.abort, so retain their observed delivery metadata
@@ -1182,20 +1180,14 @@ def register(app: typer.Typer, get_container):
                             workitems_dir=workitems_dir,
                         )
 
-                def _cascade(s):
-                    tasks_to_remove = []
-                    for d_slug in downstream:
-                        downstream_task = s.tasks.get(d_slug)
-                        if downstream_task is None:
-                            continue
+                def _cascade(tasks):
+                    for d_slug, downstream_task in list(tasks.items()):
                         require_retained_task_metadata(
                             downstream_task, retained_by_slug.get(d_slug),
                         )
-                        tasks_to_remove.append(d_slug)
-                    for d_slug in tasks_to_remove:
-                        del s.tasks[d_slug]
+                        del tasks[d_slug]
 
-                state_mgr.mutate(_cascade)
+                state_mgr.mutate_tasks(retained_by_slug, _cascade)
             except TaskMetadataRetentionConflictError as e:
                 output.error(str(e))
                 raise typer.Exit(code=1)
@@ -1612,10 +1604,10 @@ def register(app: typer.Typer, get_container):
             if task.finished_at is None:
                 now = _dt.now(_tz.utc)
 
-                def _stamp_push_only(s):
-                    s.tasks[t.slug].finished_at = now
+                def _stamp_push_only(task):
+                    task.finished_at = now
 
-                state_mgr.mutate(_stamp_push_only)
+                state_mgr.mutate_task(t.slug, _stamp_push_only)
                 task.finished_at = now
 
             if output.is_tty:
@@ -2051,10 +2043,10 @@ def register(app: typer.Typer, get_container):
                     raise typer.Exit(code=1)
 
             # Store URL on every group member (crash-safe: single state mutation).
-            def _record_group(s, members=list(group.members), u=pr_url):
+            def _record_group(task, members=list(group.members), u=pr_url):
                 for name in members:
-                    s.tasks[t.slug].pr_urls[name] = u
-            state_mgr.mutate(_record_group)
+                    task.pr_urls[name] = u
+            state_mgr.mutate_task(t.slug, _record_group)
             for name in group.members:
                 task.pr_urls[name] = pr_url
 
@@ -2139,10 +2131,10 @@ def register(app: typer.Typer, get_container):
         if task.finished_at is None or force:
             now = _dt.now(_tz.utc)
 
-            def _stamp_finished(s):
-                s.tasks[t.slug].finished_at = now
+            def _stamp_finished(task):
+                task.finished_at = now
 
-            state_mgr.mutate(_stamp_finished)
+            state_mgr.mutate_task(t.slug, _stamp_finished)
             task.finished_at = now
 
         if output.is_tty:

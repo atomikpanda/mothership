@@ -189,8 +189,7 @@ class PhaseManager:
                         f"failed: {hr.error}"
                     )
 
-        def _apply(s):
-            t = s.tasks[task_slug]
+        def _apply(t):
             if blocked_force_unblock:
                 t.blocked_reason = None
                 t.blocked_at = None
@@ -200,7 +199,7 @@ class PhaseManager:
             # Agent-agnostic activity heartbeat: a phase transition is task work.
             t.last_activity_at = now
 
-        self._state_manager.mutate(_apply)
+        self._state_manager.mutate_task(task_slug, _apply)
 
         # Journal entries happen outside the mutate — LogManager writes a
         # separate file, not mship state.
