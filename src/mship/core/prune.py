@@ -1,5 +1,6 @@
 import shutil
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from mship.core.config import WorkspaceConfig
@@ -123,68 +124,39 @@ class PruneManager:
                         shutil.rmtree(orphan.path, ignore_errors=True)
                 pruned += 1
 
-        # Retain metadata before entering the state lock. WorkItemStore's item
-        # lock must never be taken while holding state.lock, and a persistence
-        # failure must leave state (the last copy) untouched.
-        from mship.core.workitem_lifecycle import (
-            require_retained_task_metadata,
-            retain_workitem_metadata_on_teardown,
-        )
-
+        # Filesystem observations remain outside SQL. Each Task snapshot is
+        # compared after the write transaction begins, so a concurrent update
+        # is rejected instead of being overwritten by stale prune results.
         state_before_cleanup = self._state_manager.load()
-        retained_by_slug = {}
-        workitems_dir = self._state_manager.state_dir / "workitems"
+        missing_by_slug: dict[str, list[str]] = {}
         for task in state_before_cleanup.tasks.values():
-            remaining = {
-                repo: path
+            missing = [
+                repo
                 for repo, path in task.worktrees.items()
-                if not any(
+                if any(
                     orphan.reason == "not_on_disk"
                     and orphan.repo == repo
                     and not Path(path).exists()
                     for orphan in orphans
                 )
-            }
-            if task.worktrees and not remaining:
-                retained_by_slug[task.slug] = retain_workitem_metadata_on_teardown(
-                    task=task, workitems_dir=workitems_dir,
-                )
+            ]
+            if missing:
+                missing_by_slug[task.slug] = missing
 
-        # Phase 2: clean up state entries pointing to nonexistent worktrees.
-        # Validate every task that will be deleted before mutating state, so a
-        # concurrent metadata update leaves the entire source snapshot intact.
-        def _cleanup(state):
-            nonlocal pruned
-            cleanup_actions = []
-            for task_slug, task in state.tasks.items():
-                missing_repos = [
-                    repo
-                    for repo, path in task.worktrees.items()
-                    if any(
-                        orphan.reason == "not_on_disk"
-                        and orphan.repo == repo
-                        and not Path(path).exists()
-                        for orphan in orphans
-                    )
-                ]
-                if not missing_repos:
-                    continue
-                removes_task = len(missing_repos) == len(task.worktrees)
-                if removes_task:
-                    require_retained_task_metadata(
-                        task, retained_by_slug.get(task_slug),
-                    )
-                cleanup_actions.append((task_slug, missing_repos, removes_task))
+        # Phase 2: remove stale mappings and, when the final mapping leaves,
+        # retain delivery metadata on the WorkItem in the same transaction that
+        # deletes the transient Task row.
+        from mship.core.persistence.lifecycle_repository import LifecycleRepository
 
-            for task_slug, missing_repos, removes_task in cleanup_actions:
-                task = state.tasks[task_slug]
-                for repo in missing_repos:
-                    del task.worktrees[repo]
-                    pruned += 1
-                if removes_task:
-                    del state.tasks[task_slug]
-
-        self._state_manager.mutate(_cleanup)
+        lifecycle = LifecycleRepository(self._state_manager.workspace_store)
+        for task_slug, missing_repos in missing_by_slug.items():
+            lifecycle.retain_and_prune_task_repos(
+                task_slug,
+                missing_repos,
+                now=datetime.now(timezone.utc),
+                expected_task=state_before_cleanup.tasks[task_slug],
+            )
+            pruned += len(missing_repos)
 
         # Run git worktree prune per repo
         for repo_config in self._config.repos.values():

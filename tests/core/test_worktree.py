@@ -201,10 +201,10 @@ def test_abort_retains_metadata_for_forward_only_workitem_link(worktree_deps):
 
 
 def test_abort_refuses_metadata_changed_after_retention(worktree_deps, monkeypatch):
-    from mship.core.workitem_lifecycle import (
-        TaskMetadataRetentionConflictError,
-        retain_workitem_metadata_on_teardown,
+    from mship.core.persistence.lifecycle_repository import (
+        LifecycleRepository,
     )
+    from mship.core.workitem_lifecycle import TaskMetadataRetentionConflictError
     from mship.core.workitem_store import WorkItemStore
 
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
@@ -215,24 +215,30 @@ def test_abort_refuses_metadata_changed_after_retention(worktree_deps, monkeypat
     manager.spawn("racing delivery", repos=["shared"], workspace_root=workspace,
                   work_item_id=item.id)
 
-    def retain_then_update(*, task, workitems_dir):
-        retained = retain_workitem_metadata_on_teardown(
-            task=task, workitems_dir=workitems_dir,
-        )
-        state_mgr.mutate(
-            lambda state: (
-                setattr(state.tasks[task.slug], "work_item_id", updated_item.id),
-                state.tasks[task.slug].affected_repos.append("api-gateway"),
-                state.tasks[task.slug].pr_urls.update(
+    original = LifecycleRepository.retain_and_delete_task
+
+    def update_then_retain(self, task_slug, *, now, expected_task=None):
+        state_mgr.mutate_task(
+            task_slug,
+            lambda task: (
+                setattr(task, "work_item_id", updated_item.id),
+                task.affected_repos.append("api-gateway"),
+                task.pr_urls.update(
                     {"api-gateway": "https://github.example/api/pull/2"},
                 ),
             ),
         )
-        return retained
+        return original(
+            self,
+            task_slug,
+            now=now,
+            expected_task=expected_task,
+        )
 
     monkeypatch.setattr(
-        "mship.core.workitem_lifecycle.retain_workitem_metadata_on_teardown",
-        retain_then_update,
+        LifecycleRepository,
+        "retain_and_delete_task",
+        update_then_retain,
     )
 
     with pytest.raises(TaskMetadataRetentionConflictError, match="Retry"):

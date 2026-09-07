@@ -39,7 +39,7 @@ def _sm(tmp_path) -> StateManager:
 
 
 def _items(tmp_path) -> WorkItemStore:
-    return WorkItemStore(tmp_path / "workitems")
+    return WorkItemStore(tmp_path / ".mothership" / "workitems")
 
 
 def _task(slug="dq", repos=("mothership",)) -> Task:
@@ -102,6 +102,81 @@ def test_dispatch_spec_handoff_reminds_write_plan_when_none(tmp_path):
         workitems=items, workspace=WORKSPACE, workspace_root=tmp_path,
     )
     assert "writing-plans" in result.handoff
+
+
+def test_dispatch_spec_retry_reuses_workitem_after_final_spec_save_failure(
+    tmp_path, monkeypatch,
+):
+    sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
+    sm.save(WorkspaceState(tasks={"dq": _task()}))
+    store.save(_approved_spec())
+    original_save = store.save_while_locked
+
+    def fail_final_save(spec, artifact):
+        if spec.status == "dispatched":
+            raise OSError("injected final save failure")
+        return original_save(spec, artifact)
+
+    monkeypatch.setattr(store, "save_while_locked", fail_final_save)
+    with pytest.raises(OSError, match="final save failure"):
+        dispatch_spec(
+            store.find_by_id("dq"), state_manager=sm, store=store,
+            spawn_fn=lambda s: None, now=NOW, workitems=items,
+            workspace=WORKSPACE,
+        )
+
+    persisted = store.find_by_id("dq")
+    assert persisted.status == "approved"
+    assert persisted.work_item_id is not None
+    assert sm.load().tasks["dq"].work_item_id == persisted.work_item_id
+    assert len(items.list()) == 1
+
+    monkeypatch.setattr(store, "save_while_locked", original_save)
+    result = dispatch_spec(
+        persisted, state_manager=sm, store=store,
+        spawn_fn=lambda s: None, now=NOW, workitems=items,
+        workspace=WORKSPACE,
+    )
+
+    assert result.spec.status == "dispatched"
+    assert len(items.list()) == 1
+
+
+def test_dispatch_spec_retry_recovers_workitem_after_first_spec_save_failure(
+    tmp_path, monkeypatch,
+):
+    sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
+    sm.save(WorkspaceState(tasks={"dq": _task()}))
+    store.save(_approved_spec())
+    original_save = store.save_while_locked
+
+    def fail_first_save(spec, artifact):
+        monkeypatch.setattr(store, "save_while_locked", original_save)
+        raise OSError("injected first save failure")
+
+    monkeypatch.setattr(store, "save_while_locked", fail_first_save)
+    with pytest.raises(OSError, match="first save failure"):
+        dispatch_spec(
+            store.find_by_id("dq"), state_manager=sm, store=store,
+            spawn_fn=lambda s: None, now=NOW, workitems=items,
+            workspace=WORKSPACE,
+        )
+
+    persisted = store.find_by_id("dq")
+    assert persisted.work_item_id is None
+    assert sm.load().tasks["dq"].work_item_id is None
+    orphan = items.list()[0]
+    assert orphan.spec_id == "dq"
+
+    result = dispatch_spec(
+        persisted, state_manager=sm, store=store,
+        spawn_fn=lambda s: None, now=NOW, workitems=items,
+        workspace=WORKSPACE,
+    )
+
+    assert result.spec.status == "dispatched"
+    assert result.spec.work_item_id == orphan.id
+    assert len(items.list()) == 1
 
 
 def test_dispatch_spec_binds_existing_task_without_spawning(tmp_path):

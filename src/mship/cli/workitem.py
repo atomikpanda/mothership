@@ -251,7 +251,13 @@ def register(parent: typer.Typer, get_container) -> None:
     def link_task(item_id: str, task_slug: str):
         items, _, state_manager, _, _ = _ctx()
         _guard(items, item_id)
-        items.add_task(item_id, task_slug, now=datetime.now(timezone.utc), state=state_manager)
+        from mship.core.persistence.lifecycle_repository import LifecycleRepository
+
+        LifecycleRepository(state_manager.workspace_store).link_task(
+            item_id,
+            task_slug,
+            now=datetime.now(timezone.utc),
+        )
         typer.echo(f"linked task {task_slug} -> {item_id}")
 
     @item_app.command("link-issue")

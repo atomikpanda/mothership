@@ -30,12 +30,12 @@ def wrap_existing(items: WorkItemStore, specs: SpecStore, state: StateManager,
             spec.work_item_id = wi.id
             specs.save_while_locked(spec, artifact)
             if spec.task_slug and spec.task_slug in task_by_slug:
-                items.add_task(wi.id, spec.task_slug, now=now)
-
-                def _set(s, _slug=spec.task_slug, _wid=wi.id):
-                    if _slug in s.tasks:
-                        s.tasks[_slug].work_item_id = _wid
-                state.mutate(_set)
+                items.add_task(
+                    wi.id,
+                    spec.task_slug,
+                    now=now,
+                    state=state,
+                )
 
     # 2) Orphan tasks (no work_item_id yet) -> attach to an existing item, or
     # else get a feature/chore item of their own. A task's spec_id (or a
@@ -70,12 +70,7 @@ def wrap_existing(items: WorkItemStore, specs: SpecStore, state: StateManager,
                               workspace=workspace, now=now)
             created.append(wi.id)
             wi_id = wi.id
-        items.add_task(wi_id, slug, now=now)
-
-        def _set(s, _slug=slug, _wid=wi_id):
-            if _slug in s.tasks:
-                s.tasks[_slug].work_item_id = _wid
-        state.mutate(_set)
+        items.add_task(wi_id, slug, now=now, state=state)
 
     # 3) Threads -> attach to the item their spec/task already belongs to.
     all_items = items.list()

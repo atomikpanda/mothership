@@ -1159,35 +1159,24 @@ def register(app: typer.Typer, get_container):
 
             state_mgr.mutate_tasks(downstream, _detach)
         elif downstream and cascade:
-            # Cascaded tasks are removed directly rather than through
-            # WorktreeManager.abort, so retain their observed delivery metadata
-            # before dropping their only live state copy. Never take item locks
-            # while StateManager.mutate holds state.lock.
-            from mship.core.workitem_lifecycle import (
-                require_retained_task_metadata,
-                retain_workitem_metadata_on_teardown,
+            from datetime import datetime as _dt_cascade, timezone as _tz_cascade
+
+            from mship.core.persistence.lifecycle_repository import (
+                LifecycleRepository,
             )
 
             try:
-                workitems_dir = Path(container.state_dir()) / "workitems"
-                retained_by_slug = {}
                 state_before_cascade = state_mgr.load()
-                for d_slug in downstream:
-                    downstream_task = state_before_cascade.tasks.get(d_slug)
-                    if downstream_task is not None:
-                        retained_by_slug[d_slug] = retain_workitem_metadata_on_teardown(
-                            task=downstream_task,
-                            workitems_dir=workitems_dir,
-                        )
-
-                def _cascade(tasks):
-                    for d_slug, downstream_task in list(tasks.items()):
-                        require_retained_task_metadata(
-                            downstream_task, retained_by_slug.get(d_slug),
-                        )
-                        del tasks[d_slug]
-
-                state_mgr.mutate_tasks(retained_by_slug, _cascade)
+                lifecycle = LifecycleRepository(state_mgr.workspace_store)
+                expected_downstream = {
+                    d_slug: state_before_cascade.tasks[d_slug]
+                    for d_slug in downstream
+                    if d_slug in state_before_cascade.tasks
+                }
+                lifecycle.retain_and_delete_tasks(
+                    expected_downstream,
+                    now=_dt_cascade.now(_tz_cascade.utc),
+                )
             except TaskMetadataRetentionConflictError as e:
                 output.error(str(e))
                 raise typer.Exit(code=1)
@@ -1381,6 +1370,10 @@ def register(app: typer.Typer, get_container):
         resolved_finish = resolve_for_command("finish", state, task, output)
         t = resolved_finish.task
         task = t
+
+        from mship.core.persistence.lifecycle_repository import LifecycleRepository
+
+        lifecycle = LifecycleRepository(state_mgr.workspace_store)
 
         # Scoped to this task only — drift on another, unrelated task must not
         # block this one's finish (#455 Part 2).
@@ -2042,13 +2035,15 @@ def register(app: typer.Typer, get_container):
                     output.error(f"{group.rep_name}: {e}")
                     raise typer.Exit(code=1)
 
-            # Store URL on every group member (crash-safe: single state mutation).
-            def _record_group(task, members=list(group.members), u=pr_url):
-                for name in members:
-                    task.pr_urls[name] = u
-            state_mgr.mutate_task(t.slug, _record_group)
-            for name in group.members:
-                task.pr_urls[name] = pr_url
+            # GitHub work is complete before SQL begins. Mirror the URL to the
+            # Task and its WorkItem in one short transaction.
+            from datetime import datetime as _dt_pr, timezone as _tz_pr
+
+            task = lifecycle.record_pr_urls(
+                t.slug,
+                {name: pr_url for name in group.members},
+                now=_dt_pr.now(_tz_pr.utc),
+            )
 
             pr_list.append({
                 "repo": group.rep_name,

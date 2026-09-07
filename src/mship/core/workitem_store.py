@@ -229,6 +229,21 @@ class WorkItemStore:
         state: StateManager | None = None,
     ) -> None:
         self._path(item_id)
+        if state is not None:
+            if state.state_dir.resolve() != self._store.state_dir.resolve():
+                raise ValueError(
+                    "Task and WorkItem stores belong to different workspaces"
+                )
+            from mship.core.persistence.lifecycle_repository import (
+                LifecycleRepository,
+            )
+
+            LifecycleRepository(self._store).link_task(
+                item_id,
+                task_slug,
+                now=now or datetime.now(timezone.utc),
+            )
+            return
         with self._store.write(immediate=True) as transaction:
             item = transaction.workitems.get(transaction.connection, item_id)
             if item is None:
@@ -252,12 +267,6 @@ class WorkItemStore:
             if now is not None:
                 item.updated_at = now
             transaction.workitems.replace(transaction.connection, item)
-        if state is not None:
-            def _set(current, slug=task_slug, work_item_id=item_id):
-                if slug in current.tasks:
-                    current.tasks[slug].work_item_id = work_item_id
-
-            state.mutate(_set)
 
     def resolve_task_workitem_id(
         self,

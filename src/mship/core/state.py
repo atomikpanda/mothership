@@ -85,6 +85,11 @@ class StateManager:
         """Canonical state directory shared by this workspace's stores."""
         return self._store.state_dir
 
+    @property
+    def workspace_store(self) -> WorkspaceStore:
+        """Shared transaction boundary for cross-entity lifecycle operations."""
+        return self._store
+
     def load(self) -> WorkspaceState:
         return self._store.load_state()
 
