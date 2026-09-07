@@ -319,7 +319,7 @@ def test_task_depends_on_defaults_empty(tmp_path):
 
 
 def test_dependency_edge_roundtrip(tmp_path):
-    """DependencyEdge serializes and deserializes through state.yaml."""
+    """DependencyEdge serializes and deserializes through active storage."""
     from mship.core.state import StateManager, Task, WorkspaceState, DependencyEdge
     from datetime import datetime, timezone
 
@@ -331,13 +331,39 @@ def test_dependency_edge_roundtrip(tmp_path):
         affected_repos=["r"], branch="feat/b",
         depends_on=[DependencyEdge(upstream_slug="a", created_at=now)],
     )
-    sm.save(WorkspaceState(tasks={"b": t}))
+    upstream = Task(
+        slug="a", description="upstream", phase="dev",
+        created_at=now,
+        affected_repos=["r"], branch="feat/a",
+    )
+    sm.save(WorkspaceState(tasks={"a": upstream, "b": t}))
 
     loaded = sm.load()
     assert "b" in loaded.tasks
     edges = loaded.tasks["b"].depends_on
     assert len(edges) == 1
     assert edges[0].upstream_slug == "a"
+
+
+def test_save_orders_dependency_upstreams_before_downstreams(tmp_path):
+    from mship.core.state import StateManager, Task, WorkspaceState, DependencyEdge
+    from datetime import datetime, timezone
+
+    manager = StateManager(tmp_path / ".mothership")
+    now = datetime.now(timezone.utc)
+    upstream = Task(
+        slug="a", description="upstream", phase="dev", created_at=now,
+        affected_repos=["r"], branch="feat/a",
+    )
+    downstream = Task(
+        slug="b", description="downstream", phase="dev", created_at=now,
+        affected_repos=["r"], branch="feat/b",
+        depends_on=[DependencyEdge(upstream_slug="a", created_at=now)],
+    )
+
+    manager.save(WorkspaceState(tasks={"b": downstream, "a": upstream}))
+
+    assert list(manager.load().tasks) == ["a", "b"]
 
 
 def test_legacy_state_without_depends_on_loads_clean(tmp_path):

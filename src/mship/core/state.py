@@ -1,14 +1,13 @@
-import tempfile
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Callable, Literal
 
-import yaml
 from pydantic import BaseModel, ConfigDict
 
-import fcntl
-from contextlib import contextmanager
-from typing import Callable
+if TYPE_CHECKING:
+    from mship.core.persistence.workspace_store import WorkspaceStore
 
 
 class TestResult(BaseModel):
@@ -61,82 +60,84 @@ class WorkspaceState(BaseModel):
     tasks: dict[str, Task] = {}
 
 
-@contextmanager
-def _locked(state_dir: Path, mode: int):
-    """Advisory lock on `<state_dir>/state.lock`.
-
-    mode: fcntl.LOCK_SH (shared read) or fcntl.LOCK_EX (exclusive write).
-    Released when the context exits.
-    """
-    lock_path = state_dir / "state.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path.touch(exist_ok=True)
-    with open(lock_path, "r+") as lf:
-        fcntl.flock(lf, mode)
-        try:
-            yield
-        finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
-
-
 class StateManager:
-    """Read/write .mothership/state.yaml with atomic writes + flock."""
+    """Compatibility facade over legacy state.yaml and transactional SQLite."""
 
-    def __init__(self, state_dir: Path) -> None:
-        self._state_dir = state_dir
-        self._state_file = state_dir / "state.yaml"
+    def __init__(
+        self,
+        state_dir: Path | None = None,
+        *,
+        workspace_store: WorkspaceStore | None = None,
+    ) -> None:
+        if workspace_store is None:
+            if state_dir is None:
+                raise TypeError("state_dir is required when workspace_store is omitted")
+            from mship.core.persistence.workspace_store import WorkspaceStore
+
+            workspace_store = WorkspaceStore(state_dir)
+        self._store = workspace_store
 
     @property
     def state_dir(self) -> Path:
         """Canonical state directory shared by this workspace's stores."""
-        return self._state_dir
-
-    def _load_nolock(self) -> WorkspaceState:
-        if not self._state_file.exists():
-            return WorkspaceState()
-        with open(self._state_file) as f:
-            raw = yaml.safe_load(f)
-        if raw is None:
-            return WorkspaceState()
-        return WorkspaceState(**raw)
-
-    def _save_nolock(self, state: WorkspaceState) -> None:
-        self._state_dir.mkdir(parents=True, exist_ok=True)
-        data = state.model_dump(mode="json")
-        for task in data.get("tasks", {}).values():
-            task["worktrees"] = {
-                k: str(v) for k, v in task.get("worktrees", {}).items()
-            }
-            if "passive_repos" in task:
-                task["passive_repos"] = sorted(task["passive_repos"])
-        fd, tmp_path = tempfile.mkstemp(
-            dir=self._state_dir, suffix=".yaml.tmp"
-        )
-        try:
-            with open(fd, "w") as f:
-                yaml.dump(data, f, default_flow_style=False, sort_keys=False)
-            Path(tmp_path).replace(self._state_file)
-        except Exception:
-            Path(tmp_path).unlink(missing_ok=True)
-            raise
+        return self._store.state_dir
 
     def load(self) -> WorkspaceState:
-        with _locked(self._state_dir, fcntl.LOCK_SH):
-            return self._load_nolock()
+        return self._store.load_state()
 
     def save(self, state: WorkspaceState) -> None:
-        with _locked(self._state_dir, fcntl.LOCK_EX):
-            self._save_nolock(state)
+        with self._store.write(immediate=True) as transaction:
+            self._persist_state(transaction, state)
 
-    def mutate(self, fn: "Callable[[WorkspaceState], None]") -> WorkspaceState:
-        """Read-modify-write under one exclusive lock. No lost updates."""
-        with _locked(self._state_dir, fcntl.LOCK_EX):
-            state = self._load_nolock()
+    def mutate(self, fn: Callable[[WorkspaceState], None]) -> WorkspaceState:
+        """Read-modify-write in one immediate transaction. No lost updates."""
+        with self._store.write(immediate=True) as transaction:
+            state = WorkspaceState(tasks=transaction.tasks.list(transaction.connection))
             fn(state)
-            self._save_nolock(state)
+            self._persist_state(transaction, state)
             return state
 
-    def record_activity(self, slug: str, now: "datetime | None" = None) -> None:
+    @staticmethod
+    def _persist_state(transaction, state: WorkspaceState) -> None:
+        existing = transaction.tasks.list(transaction.connection)
+        for slug in existing.keys() - state.tasks.keys():
+            transaction.tasks.delete(transaction.connection, slug)
+        for slug in StateManager._dependency_order(state.tasks):
+            task = state.tasks[slug]
+            previous = existing.get(slug)
+            if previous is None:
+                transaction.tasks.insert(transaction.connection, task)
+            elif previous != task:
+                transaction.tasks.replace(transaction.connection, task)
+
+    @staticmethod
+    def _dependency_order(tasks: dict[str, Task]) -> list[str]:
+        for key, task in tasks.items():
+            if key != task.slug:
+                raise ValueError(
+                    f"task mapping key {key!r} does not match slug {task.slug!r}"
+                )
+
+        pending = set(tasks)
+        ordered: list[str] = []
+        while pending:
+            ready = sorted(
+                slug
+                for slug in pending
+                if all(
+                    edge.upstream_slug not in pending
+                    for edge in tasks[slug].depends_on
+                )
+            )
+            if not ready:
+                raise ValueError(
+                    "task dependency cycle: " + ", ".join(sorted(pending))
+                )
+            ordered.extend(ready)
+            pending.difference_update(ready)
+        return ordered
+
+    def record_activity(self, slug: str, now: datetime | None = None) -> None:
         """Stamp `last_activity_at` on a task — the agent-agnostic activity heartbeat.
 
         Cheap: one field write under the same exclusive lock as any other

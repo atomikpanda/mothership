@@ -25,6 +25,7 @@ from mship.core.workitem_lifecycle import (
     retain_workitem_metadata_on_teardown,
 )
 from mship.core.workitem_store import WorkItemStore
+from mship.core.workitem import WorkItem
 
 
 def _now():
@@ -301,10 +302,19 @@ def test_teardown_retains_metadata_from_authoritative_forward_link(
 
 
 def test_teardown_refuses_ambiguous_forward_links(tmp_path):
-    store, first = _store_with_item(tmp_path)
-    second = store.create(title="other", kind="chore", workspace="ws", now=_now())
-    store.add_task(first.id, "task-a", now=_now())
-    store.add_task(second.id, "task-a", now=_now())
+    workitems_dir = tmp_path / "workitems"
+    workitems_dir.mkdir()
+    first = WorkItem(
+        id="wi-first", title="first", kind="chore", workspace="ws",
+        created_at=_now(), updated_at=_now(), task_slugs=["task-a"],
+    )
+    second = WorkItem(
+        id="wi-second", title="second", kind="chore", workspace="ws",
+        created_at=_now(), updated_at=_now(), task_slugs=["task-a"],
+    )
+    for item in (first, second):
+        (workitems_dir / f"{item.id}.json").write_text(item.model_dump_json())
+    store = WorkItemStore(workitems_dir)
     task = _task("task-a", None)
     task.affected_repos = ["api"]
 

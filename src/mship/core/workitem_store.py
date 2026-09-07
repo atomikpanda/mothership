@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-import fcntl
-import tempfile
 import uuid
-from contextlib import contextmanager
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
+from mship.core.persistence.backend import (
+    StorageBackend,
+    get_legacy_workitem,
+    list_legacy_workitems,
+)
+from mship.core.persistence.workspace_store import WorkspaceStore
 from mship.core.state import StateManager
 from mship.core.workitem import ExternalLink, Kind, Phase, WorkItem
 
@@ -15,24 +19,6 @@ __all__ = ["TaskLinkAmbiguousError", "ThreadAlreadyLinkedError", "WorkItemStore"
 
 def _new_id(now: datetime) -> str:
     return f"wi-{now:%Y%m%d%H%M%S}-{uuid.uuid4().hex[:8]}"
-
-
-@contextmanager
-def _locked(lock_path: Path, mode: int):
-    """Advisory flock on `lock_path` (mirrors state.py's `_locked`).
-
-    mode: fcntl.LOCK_SH (shared read) or fcntl.LOCK_EX (exclusive write).
-    Released when the context exits. A per-item lock file lets writers to
-    DIFFERENT items proceed in parallel; only same-item writers serialize.
-    """
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path.touch(exist_ok=True)
-    with open(lock_path, "r+") as lf:
-        fcntl.flock(lf, mode)
-        try:
-            yield
-        finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 class TaskLinkAmbiguousError(RuntimeError):
@@ -47,149 +33,237 @@ class TaskLinkAmbiguousError(RuntimeError):
 
 
 class ThreadAlreadyLinkedError(Exception):
-    """Raised when linking a thread to a WorkItem that another WorkItem already owns.
-
-    Threads are single-owner: the thread->WorkItem resolver (view/thread_links) assumes a thread
-    appears in at most one item's `thread_ids`, so the write side refuses dual membership rather than
-    silently creating an ambiguous link.
-    """
+    """Raised when a thread already belongs to another WorkItem."""
 
     def __init__(self, thread_id: str, owner_id: str) -> None:
         self.thread_id = thread_id
         self.owner_id = owner_id
-        super().__init__(f"thread {thread_id!r} is already linked to work item {owner_id!r}")
+        super().__init__(
+            f"thread {thread_id!r} is already linked to work item {owner_id!r}"
+        )
 
 
 class WorkItemStore:
-    """Filesystem registry for work items: one JSON file per item."""
+    """Compatibility facade over legacy JSON and transactional SQLite."""
 
-    def __init__(self, workitems_dir: Path) -> None:
+    def __init__(
+        self,
+        workitems_dir: Path,
+        *,
+        workspace_store: WorkspaceStore | None = None,
+    ) -> None:
         self._dir = Path(workitems_dir)
+        self._store = workspace_store or WorkspaceStore(self._dir.parent)
 
     def _path(self, item_id: str) -> Path:
-        if (not item_id or "/" in item_id or "\\" in item_id
-                or item_id in (".", "..") or item_id.startswith(".")):
+        if (
+            not item_id
+            or "/" in item_id
+            or "\\" in item_id
+            or item_id in (".", "..")
+            or item_id.startswith(".")
+        ):
             raise ValueError(f"unsafe work item id: {item_id!r}")
         return self._dir / f"{item_id}.json"
 
-    def _lock_path(self, item_id: str) -> Path:
-        """Per-item lock file (`<id>.json.lock`). Reuses `_path`'s id validation.
-        Not matched by `list()`'s `*.json` glob, so it stays invisible to reads."""
-        p = self._path(item_id)
-        return p.with_name(p.name + ".lock")
-
     def save(self, item: WorkItem) -> Path:
-        self._dir.mkdir(parents=True, exist_ok=True)
-        path = self._path(item.id)
-        fd, tmp = tempfile.mkstemp(dir=self._dir, suffix=".json.tmp")
-        try:
-            with open(fd, "w") as f:
-                f.write(item.model_dump_json(indent=2))
-            Path(tmp).replace(path)
-        except Exception:
-            Path(tmp).unlink(missing_ok=True)
-            raise
-        return path
+        self._path(item.id)
+        with self._store.write(immediate=True) as transaction:
+            existing = transaction.workitems.get(transaction.connection, item.id)
+            self._validate_ownership(
+                item,
+                transaction.workitems.list(
+                    transaction.connection,
+                    include_archived=True,
+                ),
+            )
+            if existing is None:
+                transaction.workitems.insert(transaction.connection, item)
+            else:
+                transaction.workitems.replace(transaction.connection, item)
+        return self._store.database.path
+
+    @staticmethod
+    def _validate_ownership(
+        item: WorkItem,
+        candidates: list[WorkItem],
+    ) -> None:
+        others = [candidate for candidate in candidates if candidate.id != item.id]
+        for task_slug in item.task_slugs:
+            owner = next(
+                (
+                    candidate.id
+                    for candidate in others
+                    if task_slug in candidate.task_slugs
+                ),
+                None,
+            )
+            if owner is not None:
+                raise TaskLinkAmbiguousError(
+                    task_slug,
+                    sorted([owner, item.id]),
+                )
+        for thread_id in item.thread_ids:
+            owner = next(
+                (
+                    candidate.id
+                    for candidate in others
+                    if thread_id in candidate.thread_ids
+                ),
+                None,
+            )
+            if owner is not None:
+                raise ThreadAlreadyLinkedError(thread_id, owner)
 
     def get(self, item_id: str) -> WorkItem | None:
-        path = self._path(item_id)
-        if not path.is_file():
+        self._path(item_id)
+        backend = self._store.backend
+        if backend is StorageBackend.EMPTY:
             return None
-        return WorkItem.model_validate_json(path.read_text())
+        if backend is StorageBackend.LEGACY:
+            return get_legacy_workitem(self._dir, item_id)
+        with self._store.read() as transaction:
+            return transaction.workitems.get(transaction.connection, item_id)
 
     def list(self, include_archived: bool = False) -> list[WorkItem]:
-        if not self._dir.is_dir():
+        backend = self._store.backend
+        if backend is StorageBackend.EMPTY:
             return []
-        items = [WorkItem.model_validate_json(p.read_text()) for p in self._dir.glob("*.json")]
-        if not include_archived:
-            items = [item for item in items if not item.archived]
-        return sorted(items, key=lambda w: w.updated_at, reverse=True)
+        if backend is StorageBackend.LEGACY:
+            return list_legacy_workitems(
+                self._dir,
+                include_archived=include_archived,
+            )[0]
+        with self._store.read() as transaction:
+            return transaction.workitems.list(
+                transaction.connection,
+                include_archived=include_archived,
+            )
 
     def list_tolerant_with_uncertainty(
-        self, include_archived: bool = False,
+        self,
+        include_archived: bool = False,
     ) -> tuple[list[WorkItem], bool]:
-        """Read healthy items and report whether any artifact was unreadable."""
-        if not self._dir.is_dir():
+        backend = self._store.backend
+        if backend is StorageBackend.EMPTY:
             return [], False
-        items: list[WorkItem] = []
-        uncertain = False
-        for path in self._dir.glob("*.json"):
-            try:
-                items.append(WorkItem.model_validate_json(path.read_text()))
-            except Exception:
-                uncertain = True
-        if not include_archived:
-            items = [item for item in items if not item.archived]
-        return sorted(
-            items,
-            key=lambda item: item.updated_at.replace(tzinfo=timezone.utc)
-            if item.updated_at.tzinfo is None else item.updated_at,
-            reverse=True,
-        ), uncertain
+        if backend is StorageBackend.LEGACY:
+            return list_legacy_workitems(
+                self._dir,
+                include_archived=include_archived,
+                tolerant=True,
+            )
+        with self._store.read() as transaction:
+            return transaction.workitems.list_tolerant_with_uncertainty(
+                transaction.connection,
+                include_archived=include_archived,
+            )
 
     def list_tolerant(self, include_archived: bool = False) -> list[WorkItem]:
         return self.list_tolerant_with_uncertainty(include_archived)[0]
 
-    def create(self, title: str, kind: Kind, workspace: str, now: datetime) -> WorkItem:
-        item = WorkItem(id=_new_id(now), title=title, workspace=workspace, kind=kind,
-                        created_at=now, updated_at=now)
+    def create(
+        self,
+        title: str,
+        kind: Kind,
+        workspace: str,
+        now: datetime,
+    ) -> WorkItem:
+        item = WorkItem(
+            id=_new_id(now),
+            title=title,
+            workspace=workspace,
+            kind=kind,
+            created_at=now,
+            updated_at=now,
+        )
         self.save(item)
         return item
 
-    def _mutate(self, item_id: str, now: datetime | None) -> WorkItem:
-        item = self.get(item_id)
-        if item is None:
-            raise KeyError(item_id)
-        if now is not None:
-            item.updated_at = now
-        return item
+    def _mutate_item(
+        self,
+        item_id: str,
+        now: datetime | None,
+        fn: Callable[[WorkItem], None],
+    ) -> WorkItem:
+        self._path(item_id)
+        with self._store.write(immediate=True) as transaction:
+            item = transaction.workitems.get(transaction.connection, item_id)
+            if item is None:
+                raise KeyError(item_id)
+            fn(item)
+            if now is not None:
+                item.updated_at = now
+            transaction.workitems.replace(transaction.connection, item)
+            return item
 
-    def link_spec(self, item_id: str, spec_id: str, now: datetime | None = None) -> None:
-        with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
-            item = self._mutate(item_id, now)
-            item.spec_id = spec_id
-            self.save(item)
+    def link_spec(
+        self,
+        item_id: str,
+        spec_id: str,
+        now: datetime | None = None,
+    ) -> None:
+        self._mutate_item(
+            item_id,
+            now,
+            lambda item: setattr(item, "spec_id", spec_id),
+        )
 
-    def link_plan(self, item_id: str, plan_path: str, now: datetime | None = None) -> None:
-        with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
-            item = self._mutate(item_id, now)
-            item.plan_path = plan_path
-            self.save(item)
+    def link_plan(
+        self,
+        item_id: str,
+        plan_path: str,
+        now: datetime | None = None,
+    ) -> None:
+        self._mutate_item(
+            item_id,
+            now,
+            lambda item: setattr(item, "plan_path", plan_path),
+        )
 
-    def add_task(self, item_id: str, task_slug: str, now: datetime | None = None,
-                state: StateManager | None = None) -> None:
-        # Exclusive lock spans get+append+save so concurrent add_task calls to the
-        # same item can't clobber each other's task_slugs (MOS-233).
-        with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
-            item = self.get(item_id)
+    def add_task(
+        self,
+        item_id: str,
+        task_slug: str,
+        now: datetime | None = None,
+        state: StateManager | None = None,
+    ) -> None:
+        self._path(item_id)
+        with self._store.write(immediate=True) as transaction:
+            item = transaction.workitems.get(transaction.connection, item_id)
             if item is None:
                 raise KeyError(item_id)
             if task_slug in item.task_slugs:
                 return
+            owner_ids = [
+                candidate.id
+                for candidate in transaction.workitems.list(
+                    transaction.connection,
+                    include_archived=True,
+                )
+                if task_slug in candidate.task_slugs
+            ]
+            if owner_ids:
+                raise TaskLinkAmbiguousError(
+                    task_slug,
+                    sorted([*owner_ids, item_id]),
+                )
             item.task_slugs.append(task_slug)
             if now is not None:
                 item.updated_at = now
-            self.save(item)
+            transaction.workitems.replace(transaction.connection, item)
         if state is not None:
-            # Reverse link: task.work_item_id, mirroring workitem_migrate.wrap_existing's
-            # pass-2 mutation (workitem_migrate.py:46-49). StateManager.mutate takes its
-            # own state.lock, so keep it outside this item lock to avoid lock coupling.
-            def _set(s, _slug=task_slug, _wid=item_id):
-                if _slug in s.tasks:
-                    s.tasks[_slug].work_item_id = _wid
+            def _set(current, slug=task_slug, work_item_id=item_id):
+                if slug in current.tasks:
+                    current.tasks[slug].work_item_id = work_item_id
+
             state.mutate(_set)
 
     def resolve_task_workitem_id(
-        self, task_slug: str, reverse_item_id: str | None,
+        self,
+        task_slug: str,
+        reverse_item_id: str | None,
     ) -> str | None:
-        """Return a task's authoritative WorkItem id, preferring its forward link.
-
-        WorkItem.task_slugs is the durable association used by archive guards.
-        A unique forward link therefore repairs a missing or stale task-side
-        work_item_id. Archived items participate too: archiving hides an item
-        from the default list, but must not discard its retained delivery data.
-        Multiple forward owners are unsafe to choose between and fail closed.
-        """
         forward_ids = sorted(
             item.id
             for item in self.list(include_archived=True)
@@ -199,104 +273,114 @@ class WorkItemStore:
             raise TaskLinkAmbiguousError(task_slug, forward_ids)
         return forward_ids[0] if forward_ids else reverse_item_id
 
-
     def retain_task_metadata(self, task, *, item_id: str | None = None) -> bool:
-        """Persist a linked task's observed repos and PR URLs before task removal.
-
-        The exclusive item lock makes repeated close/prune paths merge rather
-        than overwrite retained metadata. Any write failure propagates so the
-        caller can keep the task state, which remains the last source of truth.
-        Returns False only when the linked WorkItem no longer exists.
-        """
         item_id = item_id if item_id is not None else getattr(task, "work_item_id", None)
         if not item_id:
             return True
+        self._path(item_id)
         repos = list(getattr(task, "affected_repos", []) or [])
         pr_urls = list((getattr(task, "pr_urls", {}) or {}).values())
-        with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
-            item = self.get(item_id)
+        with self._store.write(immediate=True) as transaction:
+            item = transaction.workitems.get(transaction.connection, item_id)
             if item is None:
                 return False
             retained_repos = list(dict.fromkeys([*item.affected_repos, *repos]))
             retained_pr_urls = list(dict.fromkeys([*item.pr_urls, *pr_urls]))
-            if retained_repos == item.affected_repos and retained_pr_urls == item.pr_urls:
+            if (
+                retained_repos == item.affected_repos
+                and retained_pr_urls == item.pr_urls
+            ):
                 return True
             item.affected_repos = retained_repos
             item.pr_urls = retained_pr_urls
             item.updated_at = datetime.now(timezone.utc)
-            self.save(item)
+            transaction.workitems.replace(transaction.connection, item)
             return True
 
     def _thread_owner(self, thread_id: str, exclude: str) -> str | None:
-        """Id of a WorkItem (other than `exclude`) whose thread_ids contains `thread_id`, else None.
-        Scans archived items too — an archived item still holds its threads in stored data, so it
-        still counts as the thread's owner for the single-owner invariant."""
-        for w in self.list(include_archived=True):
-            if w.id != exclude and thread_id in w.thread_ids:
-                return w.id
+        for item in self.list(include_archived=True):
+            if item.id != exclude and thread_id in item.thread_ids:
+                return item.id
         return None
 
-    def _thread_link_lock_path(self) -> Path:
-        """Store-wide lock serializing all `add_thread` calls. The per-item locks let writers to
-        DIFFERENT items run in parallel, so the cross-item ownership scan + append would otherwise
-        race (two concurrent adds of the same thread to different items could both see "no owner"
-        and both save → dual membership). Held around the scan+append so the exclusivity check is
-        atomic. Starts with '.', so `list()`'s `*.json` glob never reads it."""
-        return self._dir / ".thread-link.lock"
+    def add_thread(
+        self,
+        item_id: str,
+        thread_id: str,
+        now: datetime | None = None,
+    ) -> None:
+        self._path(item_id)
+        with self._store.write(immediate=True) as transaction:
+            item = transaction.workitems.get(transaction.connection, item_id)
+            if item is None:
+                raise KeyError(item_id)
+            if thread_id in item.thread_ids:
+                return
+            owner = next(
+                (
+                    candidate.id
+                    for candidate in transaction.workitems.list(
+                        transaction.connection,
+                        include_archived=True,
+                    )
+                    if candidate.id != item_id
+                    and thread_id in candidate.thread_ids
+                ),
+                None,
+            )
+            if owner is not None:
+                raise ThreadAlreadyLinkedError(thread_id, owner)
+            item.thread_ids.append(thread_id)
+            if now is not None:
+                item.updated_at = now
+            transaction.workitems.replace(transaction.connection, item)
 
-    def add_thread(self, item_id: str, thread_id: str, now: datetime | None = None) -> None:
-        # Outer store-wide lock makes the ownership scan + append atomic ACROSS items; inner per-item
-        # lock keeps this item's read-modify-write atomic against other same-item writers. Ordering is
-        # always store-lock → item-lock (other methods take only the item lock), so no deadlock cycle.
-        with _locked(self._thread_link_lock_path(), fcntl.LOCK_EX):
-            with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
-                item = self.get(item_id)
-                if item is None:
-                    raise KeyError(item_id)
-                if thread_id in item.thread_ids:
-                    return  # already ours — idempotent no-op
-                # Exclusive membership: a thread belongs to at most one WorkItem (the resolver assumes
-                # a single owner). If another item holds it, refuse rather than create dual membership.
-                owner = self._thread_owner(thread_id, exclude=item_id)
-                if owner is not None:
-                    raise ThreadAlreadyLinkedError(thread_id, owner)
-                item.thread_ids.append(thread_id)
-                if now is not None:
-                    item.updated_at = now
-                self.save(item)
+    def add_external_link(
+        self,
+        item_id: str,
+        link: ExternalLink,
+        now: datetime | None = None,
+    ) -> None:
+        self._mutate_item(
+            item_id,
+            now,
+            lambda item: item.external_links.append(link),
+        )
 
-    def add_external_link(self, item_id: str, link: ExternalLink, now: datetime | None = None) -> None:
-        with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
-            item = self._mutate(item_id, now)
-            item.external_links.append(link)
-            self.save(item)
+    def set_phase_override(
+        self,
+        item_id: str,
+        phase: Phase | None,
+        now: datetime | None = None,
+    ) -> None:
+        self._mutate_item(
+            item_id,
+            now,
+            lambda item: setattr(item, "phase_override", phase),
+        )
 
-    def set_phase_override(self, item_id: str, phase: Phase | None, now: datetime | None = None) -> None:
-        """Set the manual phase override, or clear it (return to derived phase) when
-        `phase` is None. Raises KeyError if the item does not exist."""
-        with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
-            item = self._mutate(item_id, now)
-            item.phase_override = phase
-            self.save(item)
-
-    def set_unattended(self, item_id: str, on: bool, now: datetime | None = None) -> None:
-        with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
-            item = self._mutate(item_id, now)
-            item.unattended = on
-            self.save(item)
+    def set_unattended(
+        self,
+        item_id: str,
+        on: bool,
+        now: datetime | None = None,
+    ) -> None:
+        self._mutate_item(
+            item_id,
+            now,
+            lambda item: setattr(item, "unattended", on),
+        )
 
     def archive(self, item_id: str, now: datetime | None = None) -> None:
-        """Soft-delete: mark the item archived so it's excluded from list() by
-        default. Raises KeyError if the item does not exist."""
-        with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
-            item = self._mutate(item_id, now)
-            item.archived = True
-            self.save(item)
+        self._mutate_item(
+            item_id,
+            now,
+            lambda item: setattr(item, "archived", True),
+        )
 
     def unarchive(self, item_id: str, now: datetime | None = None) -> None:
-        """Reverse of archive(): clear the archived flag. Raises KeyError if the
-        item does not exist."""
-        with _locked(self._lock_path(item_id), fcntl.LOCK_EX):
-            item = self._mutate(item_id, now)
-            item.archived = False
-            self.save(item)
+        self._mutate_item(
+            item_id,
+            now,
+            lambda item: setattr(item, "archived", False),
+        )

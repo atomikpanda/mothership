@@ -7,7 +7,10 @@ from mship.core.config import WorkspaceConfig
 from mship.core.executor import RepoExecutor
 from mship.core.graph import DependencyGraph
 from mship.core.phase import PhaseManager
+from mship.core.persistence.database import WorkspaceDatabase
+from mship.core.persistence.workspace_store import WorkspaceStore
 from mship.core.state import StateManager
+from mship.core.workitem_store import WorkItemStore
 from mship.core.worktree import WorktreeManager
 
 
@@ -34,6 +37,24 @@ def test_container_wires_state_manager(workspace: Path):
     container.state_dir.override(workspace / ".mothership")
     mgr = container.state_manager()
     assert isinstance(mgr, StateManager)
+
+
+def test_container_shares_one_workspace_store(workspace: Path):
+    container = Container()
+    container.config_path.override(workspace / "mothership.yaml")
+    container.state_dir.override(workspace / ".mothership")
+
+    database = container.workspace_database()
+    store = container.workspace_store()
+    state = container.state_manager()
+    items = container.workitem_store()
+
+    assert isinstance(database, WorkspaceDatabase)
+    assert isinstance(store, WorkspaceStore)
+    assert isinstance(items, WorkItemStore)
+    assert store.database is database
+    assert state._store is store
+    assert items._store is store
 
 
 def test_container_wires_executor(workspace: Path):

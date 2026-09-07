@@ -8,6 +8,7 @@ from mship.core.log import LogManager
 from mship.core.phase import FinishedTaskError, PhaseManager, PhaseTransition, SpecGateError
 from mship.core.state import StateManager, Task, TestResult, WorkspaceState
 from mship.core.workitem_store import WorkItemStore
+from tests.persistence_helpers import corrupt_workitem
 
 
 @pytest.fixture
@@ -560,9 +561,7 @@ def test_plan_to_dev_corrupt_workitem_store_raises_clean_spec_gate_error(tmp_pat
         title="add thing", kind="feature", workspace="test",
         now=datetime(2026, 4, 10, tzinfo=timezone.utc),
     )
-    # Corrupt the WorkItem's JSON file on disk after it's been created.
-    wi_path = tmp_path / ".mothership" / "workitems" / f"{wi.id}.json"
-    wi_path.write_text("{not valid json")
+    corrupt_workitem(tmp_path / ".mothership", wi.id)
 
     sm, pm = _workitem_gate_env(tmp_path)
     sm.save(WorkspaceState(tasks={"wi-task": _plan_task(work_item_id=wi.id)}))
@@ -580,8 +579,7 @@ def test_plan_to_dev_bypass_spec_gate_skips_corrupt_workitem_store(tmp_path: Pat
         title="add thing", kind="feature", workspace="test",
         now=datetime(2026, 4, 10, tzinfo=timezone.utc),
     )
-    wi_path = tmp_path / ".mothership" / "workitems" / f"{wi.id}.json"
-    wi_path.write_text("{not valid json")
+    corrupt_workitem(tmp_path / ".mothership", wi.id)
 
     sm, pm = _workitem_gate_env(tmp_path)
     sm.save(WorkspaceState(tasks={"wi-task": _plan_task(work_item_id=wi.id)}))

@@ -40,6 +40,7 @@ def test_init_non_interactive_with_cwd(init_workspace: Path, monkeypatch):
     assert data["repos"]["shared"]["type"] == "library"
     assert data["repos"]["auth-service"]["type"] == "service"
     assert data["repos"]["auth-service"]["depends_on"] == ["shared"]
+    assert (init_workspace / ".mothership" / "mothership.db").is_file()
 
 
 def test_init_detect(init_workspace: Path, monkeypatch):
@@ -81,6 +82,7 @@ def test_init_detect_emits_git_root_for_single_git_monorepo(tmp_path: Path, monk
     for sub in ("web", "infra"):
         assert data["repos"][sub]["path"] == sub
         assert data["repos"][sub]["git_root"] == root_name
+    assert (tmp_path / ".mothership" / "mothership.db").is_file()
     for repo in data["repos"].values():          # ac2
         assert not str(repo["path"]).startswith("/")
 

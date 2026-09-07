@@ -199,6 +199,7 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=1)
 
         initializer.write_config(config_path, config)
+        initializer.initialize_storage(cwd / ".mothership")
 
         config = ConfigLoader.load(config_path, require_paths=False)
         # Scaffold Taskfiles
@@ -409,6 +410,7 @@ def _run_interactive(
         raise typer.Exit(code=1)
 
     initializer.write_config(config_path, config)
+    initializer.initialize_storage(cwd / ".mothership")
     config = ConfigLoader.load(config_path, require_paths=False)
 
     # Install pre-commit hooks on each effective git root

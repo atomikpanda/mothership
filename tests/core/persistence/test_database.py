@@ -47,6 +47,28 @@ def test_explicit_write_rolls_back_on_exception(tmp_path: Path) -> None:
     assert count == 0
 
 
+def test_immediate_write_works_with_pep249_autocommit_disabled(
+    tmp_path: Path,
+) -> None:
+    database = WorkspaceDatabase(tmp_path / ".mothership")
+    database.initialize()
+
+    with database.write(immediate=True) as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE immediate_probe (value INTEGER NOT NULL)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO immediate_probe (value) VALUES (1)"
+        )
+
+    with database.read() as connection:
+        count = connection.exec_driver_sql(
+            "SELECT COUNT(*) FROM immediate_probe"
+        ).scalar_one()
+
+    assert count == 1
+
+
 def test_initialize_rejects_an_unknown_existing_revision(tmp_path: Path) -> None:
     database = WorkspaceDatabase(tmp_path / ".mothership")
     database.initialize()

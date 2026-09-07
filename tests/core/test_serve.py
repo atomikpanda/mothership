@@ -16,6 +16,7 @@ from mship.core.spec_storage import SpecStorage
 from mship.core.state import StateManager, Task, WorkspaceState
 from mship.core.log import LogManager
 from mship.core.workitem_store import WorkItemStore
+from tests.persistence_helpers import corrupt_workitem
 
 
 def _app(tmp_path: Path):
@@ -1323,7 +1324,8 @@ def test_threads_keep_healthy_terminal_link_with_corrupt_work_item(tmp_path):
     item = items.create("Implemented", "feature", "test-ws", now)
     items.link_spec(item.id, "implemented", now)
     items.add_thread(item.id, thread.id, now)
-    (tmp_path / ".mothership" / "workitems" / "corrupt.json").write_text("{")
+    corrupt = items.create("Corrupt", "chore", "test-ws", now)
+    corrupt_workitem(tmp_path / ".mothership", corrupt.id)
 
     response = TestClient(_app(tmp_path)).get("/threads", params={"inbox": "all"})
 
@@ -1677,5 +1679,4 @@ def test_get_task_serializes_activity_fields(tmp_path):
     body = TestClient(_app(tmp_path)).get("/tasks/dq").json()
     assert body["last_activity_at"].startswith("2026-07-13T12:00:00")
     assert body["phase_entered_at"].startswith("2026-07-13T12:00:00")
-
 

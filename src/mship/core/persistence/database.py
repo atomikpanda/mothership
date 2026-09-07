@@ -129,6 +129,11 @@ class WorkspaceDatabase:
         try:
             with self.connect() as connection:
                 if immediate:
+                    # Python 3.14's PEP 249 mode keeps a transaction open while
+                    # autocommit is False. End that empty transaction with SQL
+                    # (Connection.commit would immediately open another one)
+                    # before acquiring the reserved writer lock.
+                    connection.exec_driver_sql("COMMIT")
                     connection.exec_driver_sql("BEGIN IMMEDIATE")
                     try:
                         yield connection

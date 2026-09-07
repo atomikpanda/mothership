@@ -2,7 +2,11 @@ from datetime import datetime, timezone
 
 import pytest
 
-from mship.core.workitem_store import ThreadAlreadyLinkedError, WorkItemStore
+from mship.core.workitem_store import (
+    TaskLinkAmbiguousError,
+    ThreadAlreadyLinkedError,
+    WorkItemStore,
+)
 
 
 def _now():
@@ -137,6 +141,36 @@ def test_add_thread_refuses_when_owner_is_archived(tmp_path):
     with pytest.raises(ThreadAlreadyLinkedError) as exc:
         store.add_thread(b.id, "thread-x", now=_now())
     assert exc.value.owner_id == a.id
+
+
+def test_save_translates_duplicate_task_owner(tmp_path):
+    store = WorkItemStore(tmp_path / "workitems")
+    first = store.create(title="a", kind="feature", workspace="ws", now=_now())
+    second = store.create(title="b", kind="feature", workspace="ws", now=_now())
+    first.task_slugs.append("task-x")
+    store.save(first)
+    second.task_slugs.append("task-x")
+
+    with pytest.raises(TaskLinkAmbiguousError) as exc:
+        store.save(second)
+
+    assert exc.value.task_slug == "task-x"
+    assert exc.value.item_ids == sorted([first.id, second.id])
+
+
+def test_save_translates_duplicate_thread_owner(tmp_path):
+    store = WorkItemStore(tmp_path / "workitems")
+    first = store.create(title="a", kind="feature", workspace="ws", now=_now())
+    second = store.create(title="b", kind="feature", workspace="ws", now=_now())
+    first.thread_ids.append("thread-x")
+    store.save(first)
+    second.thread_ids.append("thread-x")
+
+    with pytest.raises(ThreadAlreadyLinkedError) as exc:
+        store.save(second)
+
+    assert exc.value.thread_id == "thread-x"
+    assert exc.value.owner_id == first.id
 
 
 def test_unarchive_clears_flag(tmp_path):

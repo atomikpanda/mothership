@@ -206,14 +206,14 @@ def test_finish_not_blocked_by_own_worktree(finish_workspace):
 
     # Point the state's worktree entry at /tmp/shared-wt so the exclusion matches
     # what the mocked `git worktree list` reports.
-    state_path = workspace / ".mothership" / "state.yaml"
-    import yaml
-    data = yaml.safe_load(state_path.read_text())
     slug = "own-wt"
-    data["tasks"][slug]["worktrees"] = {"shared": "/tmp/shared-wt"}
-    state_path.write_text(yaml.safe_dump(data))
-    from mship.cli import container
-    container.state_manager.reset()
+    StateManager(workspace / ".mothership").mutate(
+        lambda state: setattr(
+            state.tasks[slug],
+            "worktrees",
+            {"shared": Path("/tmp/shared-wt")},
+        )
+    )
 
     result = runner.invoke(app, ["finish", "--hotfix", "--task", slug, "--no-require-tests"])
     assert result.exit_code == 0, result.output

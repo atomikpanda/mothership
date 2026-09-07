@@ -2008,20 +2008,19 @@ def test_finish_does_not_capture_diagnostic_when_main_is_clean(configured_git_ap
 
 def test_close_logs_rate_limit_reason_when_pr_state_unknown(configured_git_app: Path):
     """When gh pr view fails with rate-limit stderr, close surfaces the reason. See #73."""
+    from datetime import datetime, timezone
     from mship.cli import container as cli_container
     from mship.util.shell import ShellResult, ShellRunner
     from unittest.mock import MagicMock
 
     runner.invoke(app, ["spawn", "--hotfix", "rate-limit close", "--repos", "shared"])
     # Set a pr_url manually so close actually calls gh pr view.
-    import yaml
-    state_path = configured_git_app / ".mothership" / "state.yaml"
-    data = yaml.safe_load(state_path.read_text())
-    data["tasks"]["rate-limit-close"]["pr_urls"] = {
-        "shared": "https://github.com/org/repo/pull/1"
-    }
-    data["tasks"]["rate-limit-close"]["finished_at"] = "2026-04-22T00:00:00Z"
-    state_path.write_text(yaml.safe_dump(data))
+    def _mark_finished(state):
+        task = state.tasks["rate-limit-close"]
+        task.pr_urls = {"shared": "https://github.com/org/repo/pull/1"}
+        task.finished_at = datetime(2026, 4, 22, tzinfo=timezone.utc)
+
+    StateManager(configured_git_app / ".mothership").mutate(_mark_finished)
 
     def mock_run(cmd, cwd, env=None):
         if "gh pr view" in cmd and "--json state" in cmd:
