@@ -171,6 +171,11 @@ mship state export --format json|yaml               # full Task/WorkItem data on
 
 ### Workspace state storage
 
+New workspaces initialize `.mothership/mothership.db` for Task and WorkItem
+state. Existing `state.yaml` and `workitems/*.json` files remain authoritative
+legacy inputs until an explicit migration; mship never dual-writes them with
+SQLite.
+
 `mship state status` is read-only. Its structured output contains `backend`,
 `database_path`, `current_revision`, `head_revision`, and
 `migration_required`, so operators can check compatibility before maintenance.

@@ -158,7 +158,16 @@ class WorkspaceDatabase:
                     # (Connection.commit would immediately open another one)
                     # before acquiring the reserved writer lock.
                     connection.exec_driver_sql("COMMIT")
-                    connection.exec_driver_sql("BEGIN IMMEDIATE")
+                    try:
+                        connection.exec_driver_sql("BEGIN IMMEDIATE")
+                    except OperationalError as error:
+                        # The raw COMMIT above ends SQLite's transaction while
+                        # SQLAlchemy still tracks its autobegin transaction. If
+                        # BEGIN fails (normally at the busy deadline), discard
+                        # the divergent connection so context cleanup cannot
+                        # mask the real error by rolling back no transaction.
+                        connection.invalidate(error)
+                        raise
                     try:
                         yield connection
                     except BaseException:

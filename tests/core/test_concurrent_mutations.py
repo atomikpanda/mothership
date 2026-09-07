@@ -1,9 +1,9 @@
 """Concurrency tests proving lost-update prevention across tasks.
 
-These target the four `mutate()` migrations (executor batch save, phase
-transition, task abort, spawn TOCTOU). They use multiprocessing so each
-worker has its own process and therefore its own flock — the exact scenario
-two concurrent `mship` invocations create.
+These retain the original command-level race coverage alongside the normalized
+repository contracts. They use spawn-context multiprocessing so every worker
+opens its own SQLite connection — the exact scenario concurrent `mship`
+invocations create on every supported platform.
 """
 from __future__ import annotations
 
@@ -24,6 +24,18 @@ from mship.core.state import StateManager, Task, WorkspaceState
 from mship.core.worktree import WorktreeManager
 from mship.util.git import GitRunner
 from mship.util.shell import ShellRunner, ShellResult
+
+
+PROCESS_TIMEOUT_SECONDS = 10
+
+
+def _join_or_terminate(process) -> None:
+    process.join(timeout=PROCESS_TIMEOUT_SECONDS)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=PROCESS_TIMEOUT_SECONDS)
+        pytest.fail(f"worker exceeded {PROCESS_TIMEOUT_SECONDS}s")
+    assert process.exitcode == 0, f"worker crashed (exitcode={process.exitcode})"
 
 
 # ---------------------------------------------------------------------------
@@ -55,20 +67,20 @@ def test_concurrent_phase_transitions_do_not_lose_updates(tmp_path: Path):
     sm.save(state)
 
     # Fire a reasonable number of pairs to amplify any lost-update race.
+    ctx = multiprocessing.get_context("spawn")
     pairs = 8
     procs = []
     for i in range(pairs):
-        procs.append(multiprocessing.Process(
+        procs.append(ctx.Process(
             target=_phase_worker, args=(str(state_dir), "a", "dev"),
         ))
-        procs.append(multiprocessing.Process(
+        procs.append(ctx.Process(
             target=_phase_worker, args=(str(state_dir), "b", "review"),
         ))
     for p in procs:
         p.start()
     for p in procs:
-        p.join(timeout=60)
-        assert p.exitcode == 0, f"worker crashed (exitcode={p.exitcode})"
+        _join_or_terminate(p)
 
     final = sm.load()
     # Without mutate(), one task's update could have been clobbered by the
@@ -129,18 +141,17 @@ def test_concurrent_same_slug_spawns_exactly_one_wins(tmp_path: Path):
     r1 = tmp_path / "r1.txt"
     r2 = tmp_path / "r2.txt"
 
-    p1 = multiprocessing.Process(
+    ctx = multiprocessing.get_context("spawn")
+    p1 = ctx.Process(
         target=_spawn_worker, args=(str(state_dir), str(r1), "same desc"),
     )
-    p2 = multiprocessing.Process(
+    p2 = ctx.Process(
         target=_spawn_worker, args=(str(state_dir), str(r2), "same desc"),
     )
     p1.start()
     p2.start()
-    p1.join(timeout=30)
-    p2.join(timeout=30)
-    assert p1.exitcode == 0
-    assert p2.exitcode == 0
+    _join_or_terminate(p1)
+    _join_or_terminate(p2)
 
     outcomes = sorted([r1.read_text(), r2.read_text()])
     assert outcomes == ["duplicate", "ok"], f"expected one ok + one duplicate, got {outcomes}"
@@ -196,25 +207,24 @@ def test_real_spawn_concurrent_same_slug(workspace_with_git: Path):
     r1 = workspace_with_git / "r1.txt"
     r2 = workspace_with_git / "r2.txt"
 
-    p1 = multiprocessing.Process(
+    ctx = multiprocessing.get_context("spawn")
+    p1 = ctx.Process(
         target=_real_spawn_worker,
         args=(str(workspace_with_git), str(r1), "race me"),
     )
-    p2 = multiprocessing.Process(
+    p2 = ctx.Process(
         target=_real_spawn_worker,
         args=(str(workspace_with_git), str(r2), "race me"),
     )
     p1.start()
     p2.start()
-    p1.join(timeout=60)
-    p2.join(timeout=60)
-    assert p1.exitcode == 0, f"p1 crashed: exitcode={p1.exitcode}"
-    assert p2.exitcode == 0, f"p2 crashed: exitcode={p2.exitcode}"
+    _join_or_terminate(p1)
+    _join_or_terminate(p2)
 
     outcomes = sorted([r1.read_text(), r2.read_text()])
     # At least one spawn must succeed (otherwise something else is broken),
     # and we must NOT see two "ok" outcomes (which would indicate a
-    # lost-update race past the in-mutate check-and-set).
+    # lost-update race past the transactional check-and-set).
     ok_count = sum(1 for o in outcomes if o == "ok")
     assert ok_count >= 1, f"neither spawn succeeded: {outcomes}"
     assert ok_count == 1, (

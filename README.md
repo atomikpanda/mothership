@@ -104,7 +104,7 @@ repair command.
 
 ## How it works
 
-Tasks live in git worktrees managed by mship and tracked in `.mothership/state.yaml`. The runtime layer (`mship run`) reads a topology from `mothership.yaml` — services, dependencies, healthchecks, `env_runner` for secret delegation, `start_mode: background` for long-running services — and brings the stack up in dependency-ordered tiers. The interface layer (`mship status`, `context`, `journal`, `dispatch`) exposes that state to agents as structured output. The coordination layer (phases, audits, the pre-commit hook, `mship finish`) keeps state consistent across sessions and across repos.
+Tasks live in git worktrees managed by mship and are tracked with WorkItems in `.mothership/mothership.db`. The runtime layer (`mship run`) reads a topology from `mothership.yaml` — services, dependencies, healthchecks, `env_runner` for secret delegation, `start_mode: background` for long-running services — and brings the stack up in dependency-ordered tiers. The interface layer (`mship status`, `context`, `journal`, `dispatch`) exposes that state to agents as structured output. The coordination layer (phases, audits, the pre-commit hook, `mship finish`) keeps state consistent across sessions and across repos. Existing workspaces keep their legacy `state.yaml` and WorkItem JSON authoritative until an explicit `mship state migrate` cutover.
 
 Agents plug into this through any MCP server or shell tool they already have. mship doesn't replace `bash`, `playwright-mcp`, or `postgres-mcp`; it tells those tools where to point and what's real.
 

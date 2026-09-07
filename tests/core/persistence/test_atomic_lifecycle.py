@@ -9,6 +9,7 @@ from mship.core.state import StateManager, Task
 from mship.core.workitem import WorkItem
 from mship.core.workitem_lifecycle import TaskMetadataRetentionConflictError
 from mship.core.workitem_store import TaskLinkAmbiguousError, WorkItemStore
+from tests.persistence_helpers import corrupt_workitem
 
 
 NOW = datetime(2026, 9, 7, 20, 0, tzinfo=timezone.utc)
@@ -333,3 +334,25 @@ def test_record_pr_urls_rolls_back_task_when_workitem_update_fails(
 
     assert state.load().tasks["task-a"].pr_urls == {}
     assert items.get(item.id) == before_item
+
+
+def test_record_pr_urls_hotfix_preserves_task_when_workitem_is_unreadable(
+    lifecycle_stores,
+) -> None:
+    lifecycle, state, items = lifecycle_stores
+    item = _item(items)
+    task = _task(work_item_id=item.id)
+    task.pr_urls = {}
+    lifecycle.register_task(task, item.id, now=NOW)
+    corrupt_workitem(state.state_dir, item.id)
+
+    url = "https://example.test/pr/3"
+    recorded = lifecycle.record_pr_urls(
+        task.slug,
+        {"api": url},
+        now=NOW,
+        allow_unreadable_workitem=True,
+    )
+
+    assert recorded.pr_urls == {"api": url}
+    assert state.load().tasks[task.slug].pr_urls == {"api": url}

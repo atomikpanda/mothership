@@ -2043,6 +2043,7 @@ def register(app: typer.Typer, get_container):
                 t.slug,
                 {name: pr_url for name in group.members},
                 now=_dt_pr.now(_tz_pr.utc),
+                allow_unreadable_workitem=hotfix,
             )
 
             pr_list.append({

@@ -6,6 +6,7 @@ from datetime import datetime
 from sqlalchemy import Connection
 
 from mship.core.persistence.workspace_store import WorkspaceStore
+from mship.core.persistence.serialization import PersistenceDecodeError
 from mship.core.state import Task
 from mship.core.workitem import WorkItem
 from mship.core.workitem_lifecycle import TaskMetadataRetentionConflictError
@@ -291,8 +292,14 @@ class LifecycleRepository:
         pr_urls: Mapping[str, str],
         *,
         now: datetime,
+        allow_unreadable_workitem: bool = False,
     ) -> Task:
-        """Record Task PRs and mirror retained WorkItem URLs in one short write."""
+        """Record Task PRs and mirror retained WorkItem URLs in one short write.
+
+        A hotfix finish may explicitly preserve the Task result even when a
+        corrupt WorkItem payload cannot be decoded. Normal calls remain atomic:
+        any WorkItem read or update failure rolls the Task write back.
+        """
         with self._store.write(immediate=True) as transaction:
             task = transaction.tasks.get(transaction.connection, task_slug)
             if task is None:
@@ -300,5 +307,9 @@ class LifecycleRepository:
             task.pr_urls.update(pr_urls)
             transaction.tasks.replace(transaction.connection, task)
             self._checkpoint("after_task_replace")
-            self._retain_loaded(transaction.connection, task, now=now)
+            try:
+                self._retain_loaded(transaction.connection, task, now=now)
+            except PersistenceDecodeError:
+                if not allow_unreadable_workitem:
+                    raise
             return task

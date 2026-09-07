@@ -136,6 +136,56 @@ def test_abort_removes_worktrees(worktree_deps):
     state = state_mgr.load()
     assert "to-abort" not in state.tasks
 
+
+def test_spawn_and_abort_run_external_collaborators_outside_sql(
+    worktree_deps, monkeypatch,
+):
+    from contextlib import contextmanager
+
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    database = state_mgr.workspace_store.database
+    active_connections = []
+    observations = []
+    original_write = database.write
+    original_add = git.worktree_add
+    original_remove = git.worktree_remove
+
+    @contextmanager
+    def tracked_write(*, immediate=False):
+        with original_write(immediate=immediate) as connection:
+            active_connections.append(connection)
+            try:
+                yield connection
+            finally:
+                active_connections.remove(connection)
+
+    def assert_outside_sql(name):
+        assert all(not connection.in_transaction() for connection in active_connections)
+        observations.append(name)
+
+    def observed_add(*args, **kwargs):
+        assert_outside_sql("worktree_add")
+        return original_add(*args, **kwargs)
+
+    def observed_remove(*args, **kwargs):
+        assert_outside_sql("worktree_remove")
+        return original_remove(*args, **kwargs)
+
+    def observed_task(*args, **kwargs):
+        assert_outside_sql("subprocess")
+        return ShellResult(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(database, "write", tracked_write)
+    monkeypatch.setattr(git, "worktree_add", observed_add)
+    monkeypatch.setattr(git, "worktree_remove", observed_remove)
+    shell.run_task.side_effect = observed_task
+    manager = WorktreeManager(config, graph, state_mgr, git, shell, log)
+
+    manager.spawn("transaction boundary", repos=["shared"], workspace_root=workspace)
+    manager.abort("transaction-boundary")
+
+    assert {"worktree_add", "worktree_remove", "subprocess"} <= set(observations)
+
 def test_abort_retains_linked_delivery_metadata_for_item_summary(worktree_deps):
     from mship.core.view.workitem_index import build_workitem_index
     from mship.core.workitem_store import WorkItemStore

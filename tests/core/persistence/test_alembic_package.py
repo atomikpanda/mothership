@@ -59,6 +59,15 @@ def test_initial_revision_is_a_package_resource() -> None:
     assert migration.is_file()
 
 
+def test_packaged_alembic_environment_contains_every_runtime_resource() -> None:
+    package = resources.files("mship.core.persistence.alembic")
+
+    assert package.joinpath("env.py").is_file()
+    assert package.joinpath("script.py.mako").is_file()
+    assert package.joinpath("versions", "__init__.py").is_file()
+    assert package.joinpath("versions", "0001_tasks_and_workitems.py").is_file()
+
+
 def test_standalone_alembic_upgrade_enables_wal(tmp_path: Path) -> None:
     state_dir = tmp_path / ".mothership"
     state_dir.mkdir()

@@ -236,3 +236,43 @@ def test_migration_rejects_invalid_legacy_data(
 
     assert not WorkspaceDatabase(legacy_workspace.state_dir).path.exists()
     assert (legacy_workspace.state_dir / "state.yaml").is_file()
+
+
+def test_retirement_failure_restores_legacy_authority_and_is_retryable(
+    legacy_workspace: LegacyWorkspace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_rename = Path.rename
+    failed = False
+
+    def fail_workitems_retirement(path: Path, target: Path):
+        nonlocal failed
+        if path.name == "workitems" and not failed:
+            failed = True
+            raise OSError("injected retirement failure")
+        return original_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", fail_workitems_retirement)
+
+    with pytest.raises(OSError, match="retirement failure"):
+        migrate_legacy_state(
+            legacy_workspace.state_dir,
+            daemon_probe=lambda: None,
+            now=NOW,
+        )
+
+    assert not WorkspaceDatabase(legacy_workspace.state_dir).path.exists()
+    assert (legacy_workspace.state_dir / "state.yaml").is_file()
+    assert (legacy_workspace.state_dir / "workitems").is_dir()
+    assert not list(legacy_workspace.state_dir.glob("state.yaml.migrated-*"))
+    assert not list(legacy_workspace.state_dir.glob("workitems.migrated-*"))
+
+    report = migrate_legacy_state(
+        legacy_workspace.state_dir,
+        daemon_probe=lambda: None,
+        now=NOW,
+    )
+    assert report.migrated is True
+    assert StateManager(legacy_workspace.state_dir).load() == (
+        legacy_workspace.expected_state
+    )

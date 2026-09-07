@@ -768,10 +768,12 @@ def test_finish_handoff(configured_git_app: Path):
     assert handoff_file.exists()
 
 
-def test_finish_creates_prs(configured_git_app: Path):
+def test_finish_creates_prs(configured_git_app: Path, monkeypatch):
+    from contextlib import contextmanager
     from datetime import datetime, timezone
 
     from mship.cli import container as cli_container
+    from mship.core.persistence.database import WorkspaceDatabase
     from mship.core.persistence.lifecycle_repository import LifecycleRepository
     from mship.core.workitem_store import WorkItemStore
 
@@ -783,9 +785,28 @@ def test_finish_creates_prs(configured_git_app: Path):
     LifecycleRepository(StateManager(state_dir).workspace_store).link_task(
         item.id, "test-prs", now=datetime.now(timezone.utc),
     )
+    active_connections = []
+    observations = []
+    original_write = WorkspaceDatabase.write
+
+    @contextmanager
+    def tracked_write(database, *, immediate=False):
+        with original_write(database, immediate=immediate) as connection:
+            active_connections.append(connection)
+            try:
+                yield connection
+            finally:
+                active_connections.remove(connection)
+
+    def assert_outside_sql(name):
+        assert all(not connection.in_transaction() for connection in active_connections)
+        observations.append(name)
+
+    monkeypatch.setattr(WorkspaceDatabase, "write", tracked_write)
 
     # Mock shell for finish operations
     def mock_run(cmd, cwd, env=None):
+        assert_outside_sql("git_or_github")
         if "gh auth status" in cmd:
             return ShellResult(returncode=0, stdout="Logged in", stderr="")
         if "ls-remote" in cmd:
@@ -807,6 +828,14 @@ def test_finish_creates_prs(configured_git_app: Path):
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
 
+    def observed_announce(*args, **kwargs):
+        assert_outside_sql("message_store")
+
+    monkeypatch.setattr(
+        "mship.core.pr_watcher.announce_prs_on_thread",
+        observed_announce,
+    )
+
     result = runner.invoke(app, ["finish", "--hotfix", "--task", "test-prs", "--no-require-tests"])
     assert result.exit_code == 0, result.output
 
@@ -816,6 +845,7 @@ def test_finish_creates_prs(configured_git_app: Path):
     assert "test-prs" in state.tasks
     assert state.tasks["test-prs"].pr_urls.get("shared") == "https://github.com/org/shared/pull/1"
     assert items.get(item.id).pr_urls == ["https://github.com/org/shared/pull/1"]
+    assert {"git_or_github", "message_store"} <= set(observations)
 
     cli_container.shell.reset_override()
 

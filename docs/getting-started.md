@@ -110,8 +110,9 @@ mship close
 # Closed: completed (1 prs merged): add-hello-world
 ```
 
-`close` verifies the PR state, tears down the worktrees, and clears the task
-from `.mothership/state.yaml`. The loop is complete.
+`close` verifies the PR state, tears down the worktrees, and clears the transient
+task from `.mothership/mothership.db` after retaining delivery metadata on its
+WorkItem. The loop is complete.
 
 ## Where next
 

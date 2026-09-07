@@ -86,17 +86,21 @@ of untracked files under `specs/` is the usual cause.
 
 | State | Why it stays local |
 |---|---|
-| `state.yaml` — tasks, phases, worktrees | A task's worktrees are paths on *this* disk |
+| `mothership.db` — tasks, phases, worktrees, WorkItems | A task's worktrees and active lifecycle state belong to *this* machine |
 | `serve-token` | Each machine's serve has its own bearer |
 | `run-hosts.yaml` — role → url + token | Which machines *this* one can reach, plus their tokens |
 | `relay-runtime.json` | The tunnel this machine is running |
-| `messages/`, `workitems/` | Mailbox and work-item stores for this machine's serve |
+| `messages/` | Mailbox threads for this machine's serve |
 
 The consequence worth internalising: **tasks are machine-local**. A task you
 spawned on the devbox does not exist on the desktop — `mship status` there will
 not list it, and `mship test --task <slug>` will report an unknown task. What
 crosses machines is the *branch* (pushed to the remote) and the *spec and plan*
 (committed to the workspace repo).
+
+For an existing workspace, legacy `state.yaml` and `workitems/*.json` remain
+read-only migration inputs until `mship state migrate` atomically activates the
+database. They are not a second synchronized state store.
 
 Note what you cannot do: **`mship spawn` always derives its own branch** from the
 task slug (`branch_pattern`, e.g. `feat/<slug>`), and there is no flag to adopt an

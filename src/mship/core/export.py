@@ -379,9 +379,11 @@ def _render_journal(task_slug: str, entries: list) -> str:
 
 
 def _task_state_data(task: "Task") -> dict:
-    """A task's state slice as a plain JSON-serializable dict, the same shape
-    StateManager persists to state.yaml (worktrees as plain strings,
-    passive_repos sorted)."""
+    """Return a stable JSON-serializable task slice for review exports.
+
+    Paths become plain strings and ``passive_repos`` is sorted independently
+    of the normalized SQLite persistence representation.
+    """
     data = task.model_dump(mode="json")
     data["worktrees"] = {k: str(v) for k, v in task.worktrees.items()}
     if "passive_repos" in data:

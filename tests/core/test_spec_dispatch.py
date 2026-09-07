@@ -179,6 +179,47 @@ def test_dispatch_spec_retry_recovers_workitem_after_first_spec_save_failure(
     assert len(items.list()) == 1
 
 
+def test_dispatch_spec_file_writes_run_outside_sql_transaction(
+    tmp_path, monkeypatch,
+):
+    from contextlib import contextmanager
+
+    sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
+    sm.save(WorkspaceState(tasks={"dq": _task()}))
+    store.save(_approved_spec())
+    database = sm.workspace_store.database
+    active_connections = []
+    save_observations = []
+    original_write = database.write
+    original_save = store.save_while_locked
+
+    @contextmanager
+    def tracked_write(*, immediate=False):
+        with original_write(immediate=immediate) as connection:
+            active_connections.append(connection)
+            try:
+                yield connection
+            finally:
+                active_connections.remove(connection)
+
+    def observed_save(spec, artifact):
+        assert all(not connection.in_transaction() for connection in active_connections)
+        save_observations.append(spec.status)
+        return original_save(spec, artifact)
+
+    monkeypatch.setattr(database, "write", tracked_write)
+    monkeypatch.setattr(store, "save_while_locked", observed_save)
+
+    result = dispatch_spec(
+        store.find_by_id("dq"), state_manager=sm, store=store,
+        spawn_fn=lambda s: None, now=NOW, workitems=items,
+        workspace=WORKSPACE,
+    )
+
+    assert result.spec.status == "dispatched"
+    assert save_observations == ["approved", "dispatched"]
+
+
 def test_dispatch_spec_binds_existing_task_without_spawning(tmp_path):
     sm, store, items = _sm(tmp_path), _store(tmp_path), _items(tmp_path)
     sm.save(WorkspaceState(tasks={"dq": _task()}))

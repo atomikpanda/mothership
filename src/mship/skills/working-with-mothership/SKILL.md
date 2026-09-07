@@ -495,7 +495,7 @@ mship journal           # full narrative of what was done
 mship journal --last 5  # only the recent entries
 ```
 
-The state file lives in `<git-main-repo>/.mothership/state.yaml` (anchored to the main repo's `.git`, so it works correctly when you `cd` into a worktree).
+Task and WorkItem state lives in `<git-main-repo>/.mothership/mothership.db` (anchored to the main repo's `.git`, so it works correctly when you `cd` into a worktree). In an unmigrated workspace, legacy `state.yaml` and `workitems/*.json` remain authoritative until `mship state migrate` performs the explicit cutover.
 
 **Always log progress before:**
 - Ending a session
@@ -625,7 +625,7 @@ Then `mship test --tag mobile` runs both.
 - **Don't ship a PR with a placeholder body.** If you didn't pass `--body-file`/`--body` to `mship finish`, the PR body is just the task description — not a Summary + Test plan. Follow up with `gh pr edit <url> --body-file <path>` before declaring done. Reviewers (human or agent) need to know what changed and how it was verified.
 - **Don't paste test output into `mship journal`** — after every `mship test`, mship auto-logs a structured entry with iteration, test_state, and action. The iteration file under `.mothership/test-runs/` has stderr for failures.
 - **Don't keep editing a worktree after `mship finish` without using `mship commit`** — once `finish` stamps the task as done, phase transitions are blocked (except `run`). For small post-finish changes (reviewer feedback, CI fixes, doc tweaks), stage your changes and run `mship commit "<msg>"` — it commits and pushes to the existing PR across all affected repos. For larger changes, open a new task with `mship spawn`.
-- **Don't manually edit `.mothership/state.yaml`** — use the CLI commands instead.
+- **Don't manually edit `.mothership/mothership.db` or legacy state files** — use the CLI, including `mship state status`, `migrate`, and `export`.
 - **Don't assume `mship` knows what's running outside of it** — if you started services manually, mothership won't track them. Use `mship run` or accept that `mship status` won't reflect them.
 - **Don't `--force-audit` without reading the drift** — the gate is there to stop you from starting work on a dirty/wrong-branch repo. If you bypass, know why; the task log records the bypass.
 - **Don't `cd` between worktrees without `mship switch`** — you'll miss cross-repo changes and lose the "since your last switch" anchor. Always call `mship switch <repo>` before starting work in a different repo.

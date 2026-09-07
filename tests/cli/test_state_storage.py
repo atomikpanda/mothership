@@ -113,6 +113,34 @@ def test_state_migrate_is_idempotent(
     assert json.loads(second.output)["migrated"] is False
 
 
+def test_state_status_and_export_use_sqlite_after_migration(
+    state_cli: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (state_cli / "state.yaml").write_text("tasks: {}\n")
+    monkeypatch.setattr(
+        "mship.core.persistence.migration.daemon_is_running",
+        lambda: False,
+    )
+
+    migrated = runner.invoke(app, ["--json", "state", "migrate"])
+    status = runner.invoke(app, ["--json", "state", "status"])
+    exported = runner.invoke(app, ["state", "export", "--format", "json"])
+
+    assert migrated.exit_code == 0, migrated.output
+    assert status.exit_code == 0, status.output
+    status_payload = json.loads(status.output)
+    assert status_payload == {
+        "backend": "sqlite",
+        "database_path": str(state_cli / "mothership.db"),
+        "current_revision": "0001_tasks_and_workitems",
+        "head_revision": "0001_tasks_and_workitems",
+        "migration_required": False,
+    }
+    assert exported.exit_code == 0, exported.output
+    assert json.loads(exported.output) == {"tasks": [], "work_items": []}
+
+
 @pytest.mark.parametrize("revision", ["behind_revision", "future_revision"])
 def test_state_commands_explain_incompatible_revision(
     state_cli: Path,

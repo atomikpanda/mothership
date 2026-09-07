@@ -50,6 +50,74 @@ tasks:
         uv venv "$tmp/venv" >/dev/null
         uv pip install --python "$tmp/venv/bin/python" --quiet .
         "$tmp/venv/bin/python" -c "import mship.cli"
+        "$tmp/venv/bin/python" - "$tmp" <<'PY'
+        import json
+        import subprocess
+        import sys
+        from datetime import datetime, timezone
+        from pathlib import Path
+
+        import yaml
+        from sqlalchemy import inspect
+
+        from mship.core.persistence.database import WorkspaceDatabase
+        from mship.core.persistence.migration import migrate_legacy_state
+        from mship.core.state import StateManager, Task, WorkspaceState
+        from mship.core.workitem import WorkItem
+        from mship.core.workitem_store import WorkItemStore
+
+        root = Path(sys.argv[1])
+        expected_tables = {
+            "storage_metadata", "tasks", "task_repos", "task_test_results",
+            "task_pr_urls", "task_switch_anchors", "task_dependencies",
+            "work_items", "workitem_tasks", "workitem_threads",
+            "workitem_external_links", "workitem_affected_repos",
+            "workitem_pr_urls",
+        }
+
+        fresh = root / "fresh"
+        fresh.mkdir()
+        (fresh / "mothership.yaml").write_text("workspace: installed-wheel\n")
+        fresh_database = WorkspaceDatabase(fresh / ".mothership")
+        fresh_database.initialize()
+        with fresh_database.connect() as connection:
+            assert expected_tables <= set(inspect(connection).get_table_names())
+        assert fresh_database.current_revision() == fresh_database.head_revision()
+        status = subprocess.run(
+            [str(Path(sys.executable).with_name("mship")), "--json", "state", "status"],
+            cwd=fresh, check=True, capture_output=True, text=True,
+        )
+        status_payload = json.loads(status.stdout)
+        assert status_payload["backend"] == "sqlite"
+        assert status_payload["current_revision"] == fresh_database.head_revision()
+
+        legacy = root / "legacy"
+        legacy_state_dir = legacy / ".mothership"
+        legacy_items_dir = legacy_state_dir / "workitems"
+        legacy_items_dir.mkdir(parents=True)
+        (legacy / "mothership.yaml").write_text("workspace: installed-wheel-legacy\n")
+        now = datetime(2026, 9, 7, tzinfo=timezone.utc)
+        task = Task(
+            slug="legacy-task", description="legacy", phase="dev",
+            created_at=now, affected_repos=[], branch="feat/legacy-task",
+            work_item_id="wi-legacy",
+        )
+        (legacy_state_dir / "state.yaml").write_text(
+            yaml.safe_dump(WorkspaceState(tasks={task.slug: task}).model_dump(mode="json"))
+        )
+        item = WorkItem(
+            id="wi-legacy", title="Legacy", workspace="installed-wheel-legacy",
+            kind="chore", created_at=now, updated_at=now,
+            task_slugs=[task.slug],
+        )
+        (legacy_items_dir / "wi-legacy.json").write_text(item.model_dump_json())
+        report = migrate_legacy_state(
+            legacy_state_dir, daemon_probe=lambda: None, now=now,
+        )
+        assert report.migrated is True
+        assert StateManager(legacy_state_dir).load().tasks[task.slug] == task
+        assert WorkItemStore(legacy_items_dir).get(item.id) == item
+        PY
 
   lint:
     desc: Run static analysis
