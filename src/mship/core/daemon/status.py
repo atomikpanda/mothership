@@ -7,6 +7,7 @@ supervisor state.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +37,11 @@ def probe_daemon(*, home: Path, env: Mapping[str, str]) -> dict | None:
     if record is not None and record.socket_path:
         return probe_control_socket(record.socket_path)
     return probe_control_socket(daemon_socket_path(env, home))
+
+
+def daemon_is_running() -> bool:
+    """Return whether maintenance must treat the per-user daemon as active."""
+    return probe_daemon(home=Path.home(), env=os.environ) is not None
 
 
 _LOOP_WINDOW_S = 600

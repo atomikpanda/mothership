@@ -118,6 +118,7 @@ from mship.cli import relay as _relay_mod
 from mship.cli import run_host as _run_host_mod
 from mship.cli import skill as _skill_mod
 from mship.cli import spec as _spec_mod
+from mship.cli import state as _state_storage_mod
 from mship.cli import status as _status_mod
 from mship.cli import switch as _switch_mod
 from mship.cli import ui as _ui_mod
@@ -188,6 +189,7 @@ _relay_mod.register(app, get_container)
 _run_host_mod.register(app, get_container)
 _skill_mod.register(app, get_container)
 _spec_mod.register(app, get_container)
+_state_storage_mod.register(app, get_container)
 _status_mod.register(app, get_container)
 _switch_mod.register(app, get_container)
 _serve_mod.register(app, get_container)

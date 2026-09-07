@@ -48,6 +48,12 @@ def test_view_no_args_shows_help(workspace: Path):
         container.state_manager.reset()
 
 
+def test_state_no_args_shows_help():
+    result = runner.invoke(app, ["state"])
+    assert result.exit_code in (0, 2)
+    assert "Inspect, migrate, and export workspace state storage" in result.output
+
+
 # ---------------------------------------------------------------------------
 # 2. _resolve_repos error lists available repos
 # ---------------------------------------------------------------------------

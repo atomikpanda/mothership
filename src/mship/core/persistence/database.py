@@ -61,13 +61,37 @@ def make_alembic_config(database_path: Path) -> Config:
 class WorkspaceDatabase:
     """Own the SQLite engine and its transaction policy for one workspace."""
 
-    def __init__(self, state_dir: Path) -> None:
+    def __init__(
+        self,
+        state_dir: Path,
+        *,
+        database_path: Path | None = None,
+    ) -> None:
         self._state_dir = state_dir
+        self._database_path = database_path
         self._engine = self._create_engine()
 
     @property
     def path(self) -> Path:
-        return self._state_dir / DB_FILENAME
+        return self._database_path or self._state_dir / DB_FILENAME
+
+    def dispose(self) -> None:
+        self._engine.dispose()
+
+    def checkpoint(self) -> None:
+        """Move committed WAL content into the database before file activation."""
+        with self.connect() as connection:
+            dbapi_connection = connection.connection.driver_connection
+            previous_autocommit = dbapi_connection.autocommit
+            dbapi_connection.autocommit = True
+            try:
+                cursor = dbapi_connection.cursor()
+                try:
+                    cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                finally:
+                    cursor.close()
+            finally:
+                dbapi_connection.autocommit = previous_autocommit
 
     def _create_engine(self) -> Engine:
         engine = create_engine(
