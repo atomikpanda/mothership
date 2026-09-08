@@ -41,10 +41,10 @@ or registration has succeeded.
 | Relay HTTP request and deadline | synchronous tunnel worker (or CLI caller) owns `relay.http.request` and its short-lived AnyIO asyncio run | complete HTTP response body returned | whole-call deadline: 10s registration/enrollment, 8s health read-back | cancel request and close HTTPX async client before returning; no detached request worker | HTTPX timeout exception; registration/read-back retain recoverable error mapping |
 | Native hostname resolution | request-local asyncio loop owns one `anyio.run_process` child per lookup | complete OS `getaddrinfo` address list returned | enclosing HTTP deadline, including resolver interpreter startup | cancellation kills and reaps child before returning; no default-executor DNS work survives the scope | native DNS errors retain HTTPX `ConnectError` mapping; deadline retains HTTPX timeout mapping |
 | Cached workspace sub-app lifespans | host lifespan task group, one `_SubApp._supervise` child per cached app | nested lifespan startup completes in the same task that will exit it | replacement, refresh removal/degradation, or host lifespan exit | shield old-app drain and cache removal under the host lock; start no successor until drain completes | startup error reaches forwarding request; child/lifespan failure reaches host ASGI error handling |
-| PR watcher and its interval timer | workspace serve-app lifespan task group | first sweep finishes, including a logged recoverable failure | owning lifespan exits or is cancelled | stop wakes timer; join any in-flight sweep before lifespan ends | sweep exception logged as `pr-watch tick failed`, then retry |
+| PR watcher and its interval timer | workspace serve-app lifespan task group | local ownership established before the immediate background sweep or waiting for its lane | owning lifespan exits or is cancelled | stop wakes timer; join any in-flight sweep before lifespan ends | sweep exception logged as `pr-watch tick failed`, then retry |
 | Registry refresh offload | control or host refresh request | scan returns before response and stale-subapp cleanup | request cancellation | join in-flight scan; no independent timer or total scan timeout | `ValueError`/`RegistryReadError` map to HTTP 503; other errors reach ASGI error handling |
 | Mailbox thread-list and long-poll reads | `/threads` request | each snapshot read completes | request cancellation or request deadline between reads | join in-flight read; long-poll timeout is capped at 30s, not a deadline on filesystem I/O | bad cursor maps to HTTP 422; read errors reach ASGI error handling |
-| Forwarding producer and bounded queues | forwarding request until headers; then `_SettlingStreamingResponse` | one-slot response-start queue delivers headers; eight-slot chunk queue supplies body | disconnect, request cancellation, response send error, or response/body finalization | cancel and await producer, retrieve result exactly once; no independent cleanup timeout | pre-header failure supplies HTTP 500; post-header failure ends stream; non-cancellation producer error logged |
+| Forwarding producer and bounded queues | forwarding request until headers; then `_SettlingStreamingResponse` | one-slot response-start queue delivers headers; eight-slot chunk queue supplies body | disconnect, request cancellation, response send error, or response/body finalization | cancel and await producer, retrieve result exactly once; finalization never waits for body queue space; no independent cleanup timeout | pre-header failure supplies HTTP 500; post-header failure ends stream; non-cancellation producer error logged |
 | SSH reverse-forward process and reconnect/read-back schedules | `HostTunnel` and its `TunnelSupervisor` | retained `Popen` handle; online only after matching health read-back | tunnel stop, failed child, redial, or orphan reap | join tick before final stop; direct child TERM wait 5s then KILL wait 5s; orphan phases described below | tunnel snapshot/log; existing next-start orphan recovery |
 
 ### Offload capacity and cancellation
@@ -105,13 +105,16 @@ group. A signal requests exit through that same shared state. Interrupted
 Uvicorn children explicitly finish shielded shutdown because cancelling
 `Server.serve()` alone skips Uvicorn's normal shutdown call and can leave an
 ASGI lifespan alive. The root joins its children before stopping the tunnel;
-`_run` writes clean-stop history only after `_serve` returns normally.
+each child records its outcome after cleanup independently of cancellable
+notification delivery. The root reconciles all recorded outcomes, including
+sibling failures that finish during cancellation. `_run` writes clean-stop
+history only after `_serve` returns normally with no fatal outcome.
 
 | Outcome | Daemon result |
 |---|---|
 | Server returns after a requested exit | normal return; clean-stop history/log; exit 0 |
 | Control/TCP server exits before readiness | `RuntimeError("control server failed to bind")` or `RuntimeError("TCP server failed to bind")`, with original exception as cause |
-| Running server raises | `RuntimeError("daemon server failed")`, with original exception as cause; if shutdown also fails, the cause is a group containing both original and cleanup exceptions |
+| Running server raises | `RuntimeError("daemon server failed")`, with original exception as cause; if shutdown also fails, the cause is a group containing both original and cleanup exceptions; concurrent server/cleanup failures are reported together in an exception group |
 | Running server returns without requested exit | `RuntimeError("daemon server stopped unexpectedly")` |
 | Root cancellation | cleanup runs and cancellation propagates; no clean-stop history |
 | Other fatal task-group failure | exception group propagates to the daemon composition boundary; `main` logs the traceback and returns 1 |

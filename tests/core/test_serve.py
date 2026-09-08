@@ -1779,10 +1779,10 @@ def test_get_task_serializes_activity_fields(tmp_path):
     assert body["last_activity_at"].startswith("2026-07-13T12:00:00")
     assert body["phase_entered_at"].startswith("2026-07-13T12:00:00")
 
-def test_watcher_lifespan_is_ready_after_first_sweep_and_survives_failure(
-    tmp_path, monkeypatch
+def test_watcher_lifespan_starts_immediate_sweep_and_survives_failure(
+    tmp_path, monkeypatch, caplog
 ):
-    """Readiness waits for the first sweep; a failed sweep is logged and retried."""
+    """A locally ready watcher immediately sweeps, logging and retrying failures."""
     from mship.core import serve as serve_mod
 
     class FailingFirstSweep:
@@ -1810,12 +1810,13 @@ def test_watcher_lifespan_is_ready_after_first_sweep_and_survives_failure(
     async def scenario():
         async with app.router.lifespan_context(app):
             (watcher,) = FailingFirstSweep.instances
-            assert watcher.calls == 1
             with anyio.fail_after(1):
                 while watcher.calls < 2:
                     await anyio.sleep(0)
 
     anyio.run(scenario, backend="asyncio")
+    assert "pr-watch tick failed" in caplog.text
+    assert "first sweep failed" in caplog.text
 
 
 def test_watcher_sweep_does_not_depend_on_default_thread_capacity():

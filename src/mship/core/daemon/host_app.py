@@ -704,10 +704,13 @@ def create_host_app(
         # daemon memory — the unbounded-buffer OOM class #469 calls out. With a
         # bound, the sub-app blocks until the client consumes.
         chunks: asyncio.Queue = asyncio.Queue(maxsize=8)
+        response_started = False
 
         async def send(message):
+            nonlocal response_started
             if message["type"] == "http.response.start":
                 await start.put(message)
+                response_started = True
             elif message["type"] == "http.response.body":
                 await chunks.put(message.get("body", b""))
                 if not message.get("more_body", False):
@@ -716,15 +719,16 @@ def create_host_app(
         async def run_subapp():
             try:
                 await sub.app(scope, request.receive, send)
-            except Exception:
-                if start.empty():
-                    await start.put({"type": "http.response.start", "status": 500, "headers": []})
-                await chunks.put(None)
-                raise
             finally:
-                if start.empty():  # sub-app returned without starting a response
-                    await start.put({"type": "http.response.start", "status": 500, "headers": []})
-                    await chunks.put(None)
+                if not response_started:
+                    start.put_nowait({"type": "http.response.start", "status": 500, "headers": []})
+                # Wake an idle consumer, but never wait for queue space during
+                # cancellation. If full, the consumer drains the queued body
+                # and observes task completion instead of needing a sentinel.
+                try:
+                    chunks.put_nowait(None)
+                except asyncio.QueueFull:
+                    pass
 
         task = asyncio.create_task(run_subapp())
         producer_settled = False
@@ -737,7 +741,8 @@ def create_host_app(
             if not task.done():
                 task.cancel()
             try:
-                await task
+                with anyio.CancelScope(shield=True):
+                    await task
             except asyncio.CancelledError:
                 pass
             except Exception:
@@ -756,6 +761,8 @@ def create_host_app(
         async def body_stream():
             try:
                 while True:
+                    if task.done() and chunks.empty():
+                        break
                     chunk = await chunks.get()
                     if chunk is None:
                         break

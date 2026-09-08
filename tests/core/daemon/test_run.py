@@ -596,6 +596,78 @@ def test_clean_first_server_completion_stops_sibling_without_error(monkeypatch):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("control_fails", [False, True])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_simultaneous_server_outcomes_preserve_all_failures(
+    monkeypatch, control_fails, cleanup_fails
+):
+    """A sibling result must survive cancellation during its shielded cleanup."""
+    import anyio
+
+    control_error = LookupError("control failed") if control_fails else None
+    host_error = ValueError("host failed")
+    cleanup_error = OSError("host shutdown failed")
+
+    def leaves(error):
+        if isinstance(error, BaseExceptionGroup):
+            return [leaf for child in error.exceptions for leaf in leaves(child)]
+        if error.__cause__ is not None:
+            return leaves(error.__cause__)
+        return [error]
+
+    async def scenario():
+        control = _ServerLifecycle(start_immediately=True, completion_error=control_error)
+        host = _ServerLifecycle(start_immediately=True, completion_error=host_error)
+        _fake_uvicorn(monkeypatch, lifecycles=[control, host])
+        app = _TrackingControlApp()
+        host_in_cleanup = anyio.Event()
+        release_cleanup = anyio.Event()
+        failures = []
+
+        async def shutdown(server):
+            if server is host.server:
+                host_in_cleanup.set()
+                await release_cleanup.wait()
+                if cleanup_fails:
+                    raise cleanup_error
+
+        monkeypatch.setattr("uvicorn.Server.shutdown", shutdown)
+
+        async def daemon():
+            try:
+                await run_mod._serve(
+                    app, Path("/control.sock"), object(), SERVE_BLOCK, None
+                )
+            except BaseException as error:
+                failures.append(error)
+
+        with anyio.fail_after(2):
+            async with anyio.create_task_group() as group:
+                group.start_soon(daemon)
+                try:
+                    await app.state.bound.wait()
+                    host.allow_completion.set()
+                    await host_in_cleanup.wait()
+                    control.allow_completion.set()
+                    # The control result starts root cancellation while the host
+                    # has already failed and is still joining real child cleanup.
+                    await anyio.wait_all_tasks_blocked()
+                finally:
+                    release_cleanup.set()
+
+        assert failures, "a clean control result hid the fatal host result"
+        errors = [leaf for failure in failures for leaf in leaves(failure)]
+        assert host_error in errors
+        if control_fails:
+            assert control_error in errors
+        if cleanup_fails:
+            assert cleanup_error in errors
+        assert control.completed.is_set() and host.completed.is_set()
+        assert app.state.values[-1] is False
+
+    anyio.run(scenario, backend="asyncio")
+
+
 def test_unexpected_server_completion_stops_sibling_and_fails(monkeypatch):
     import asyncio
 

@@ -625,6 +625,7 @@ class _OwnedForwardSubApp:
         self.cancelled = asyncio.Event()
         self.blocked_on_ninth_send = asyncio.Event()
         self.release = asyncio.Event()
+        self.lifespan_stopped = asyncio.Event()
 
     async def __call__(self, _scope, _receive, send):
         task = asyncio.current_task()
@@ -691,11 +692,16 @@ class _OwnedForwardSubApp:
     def router(self):
         from contextlib import asynccontextmanager
 
+        outer = self
+
         class _Router:
             def lifespan_context(self, _app):
                 @asynccontextmanager
                 async def lifespan():
-                    yield
+                    try:
+                        yield
+                    finally:
+                        outer.lifespan_stopped.set()
 
                 return lifespan()
 
@@ -969,6 +975,52 @@ def test_forward_connection_cancellation_before_body_iteration_finalizes_produce
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("exit_mode", ["cancel", "header-error"])
+def test_full_forward_queue_settles_before_any_body_iteration(tmp_path, exit_mode):
+    """Header delivery failure/cancellation must join a full-queue producer."""
+    app, subapp = _owned_forward_app(tmp_path, "block-on-ninth-send")
+
+    async def scenario():
+        header_entered = asyncio.Event()
+        fail_headers = asyncio.Event()
+        body_messages = []
+
+        async def receive():
+            await asyncio.Future()
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                header_entered.set()
+                await fail_headers.wait()
+                raise OSError("header delivery failed")
+            body_messages.append(message)
+
+        async with app.router.lifespan_context(app):
+            connection = asyncio.create_task(app(_forward_scope(), receive, send))
+            try:
+                await _wait_for(header_entered)
+                await _wait_for(subapp.blocked_on_ninth_send)
+                if exit_mode == "cancel":
+                    connection.cancel()
+                else:
+                    fail_headers.set()
+                done, _ = await asyncio.wait({connection}, timeout=1)
+                assert done, "forward cleanup blocked on a full queue without a consumer"
+                expected = asyncio.CancelledError if exit_mode == "cancel" else OSError
+                with pytest.raises(expected):
+                    await connection
+                assert subapp.cancelled.is_set()
+                assert subapp.active == set()
+                assert body_messages == []
+            finally:
+                # A second cancellation releases the buggy final sentinel put
+                # on RED, so this bounded regression leaves no pending task.
+                connection.cancel()
+                await asyncio.gather(connection, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
 def test_forward_streams_chunks_incrementally(tmp_path):
     """Regression (#476 P2): a buffered proxy delivered nothing until the task
     exited, breaking live `mship ... --remote` output.
@@ -1025,6 +1077,89 @@ def test_forward_streams_chunks_incrementally(tmp_path):
     assert b"".join(received) == b"chunk-0\nchunk-1\nchunk-2\n"
     # the client had chunk 0 in hand before the sub-app had emitted all three
     assert first_at and first_at[0] < 3, f"response was buffered until completion (sent={first_at})"
+
+
+def test_active_forward_stream_host_shutdown_joins_producer_and_subapp(
+    tmp_path, monkeypatch
+):
+    """Real server shutdown must settle the request before ending its subapp."""
+    from contextlib import asynccontextmanager
+    from tempfile import TemporaryDirectory
+
+    import anyio
+    import httpx
+    import uvicorn
+    from fastapi import FastAPI
+
+    from mship.core.daemon import run as run_mod
+
+    async def scenario():
+        host, subapp = _owned_forward_app(tmp_path, "wait-for-cancellation")
+        control = FastAPI()
+        ready = anyio.Event()
+        stopped = anyio.Event()
+        lifespan_ended = anyio.Event()
+        control.state.set_serve_bound = lambda bound: ready.set() if bound else None
+        original_lifespan = host.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app):
+            async with original_lifespan(app):
+                yield
+            assert subapp.active == set()
+            assert subapp.finalized.is_set()
+            assert subapp.lifespan_stopped.is_set()
+            lifespan_ended.set()
+
+        host.router.lifespan_context = lifespan
+        servers = []
+        real_server = uvicorn.Server
+
+        def build_server(config):
+            # The deliberately endless stream makes graceful shutdown expire;
+            # Uvicorn must cancel and join the request before closing lifespan.
+            config.timeout_graceful_shutdown = 0
+            server = real_server(config)
+            servers.append(server)
+            return server
+
+        monkeypatch.setattr(uvicorn, "Server", build_server)
+        monkeypatch.setattr(run_mod, "_install_stop_handlers", lambda *_args: None)
+        daemon_scope = anyio.CancelScope()
+
+        async def daemon():
+            with daemon_scope:
+                await run_mod._serve(
+                    control, Path(socket_dir) / "control.sock", host,
+                    {"host": "127.0.0.1", "port": 0}, None,
+                )
+            stopped.set()
+
+        with anyio.fail_after(5):
+            async with anyio.create_task_group() as group:
+                group.start_soon(daemon)
+                await ready.wait()
+                port = servers[1].servers[0].sockets[0].getsockname()[1]
+                try:
+                    async with httpx.AsyncClient() as client:
+                        async with client.stream(
+                            "POST", f"http://127.0.0.1:{port}/workspaces/ws-stream/exec/run"
+                        ) as response:
+                            assert response.status_code == 207
+                            assert await anext(response.aiter_bytes()) == b"raw-first\x00"
+                            assert subapp.active
+                            daemon_scope.cancel()
+                            await stopped.wait()
+                finally:
+                    daemon_scope.cancel()
+                    subapp.release.set()
+                assert lifespan_ended.is_set()
+                assert subapp.cancelled.is_set()
+                assert all(not server.server_state.tasks for server in servers)
+
+    # macOS pytest roots can exceed the native Unix socket path limit.
+    with TemporaryDirectory(prefix="mship-stream-", dir="/tmp") as socket_dir:
+        anyio.run(scenario, backend="asyncio")
 
 
 def test_moved_workspace_rebuilds_subapp(tmp_path):
@@ -1497,6 +1632,91 @@ def test_unbuildable_workspace_is_503_not_500(tmp_path):
         r = client.get("/workspaces/ws-x/specs")
         assert r.status_code == 503
         assert "no mothership.yaml" in r.json()["detail"]
+
+
+def test_cold_workspace_startup_does_not_block_routes_when_pr_watch_lane_is_full(
+    tmp_path, monkeypatch
+):
+    """A cold watcher must release cache ownership before waiting for its lane."""
+    from threading import Event
+
+    import anyio
+    import httpx
+
+    from mship.core import serve as serve_mod
+    from mship.core.async_runtime import _limiter_for
+    from mship.core.serve import create_app as create_workspace_app
+    from mship.core.state import StateManager
+
+    watcher_built = asyncio.Event()
+    swept = Event()
+    rescanned = Event()
+
+    class Watcher:
+        def __init__(self, *_args, **_kwargs):
+            watcher_built.set()
+
+        def check_once(self):
+            swept.set()
+
+    monkeypatch.setattr(serve_mod, "PrWatcher", Watcher)
+    store = _seed(tmp_path / "home", [
+        _entry("cold", "cold", tmp_path / "cold"),
+        _entry("warm", "warm", tmp_path / "warm"),
+    ])
+
+    def build(entry, **_kwargs):
+        root = Path(entry.path)
+        return create_workspace_app(
+            specs_dir=root / "specs", state_manager=StateManager(root / ".mothership"),
+            log_manager=None, workspace_root=root, workspace_name=entry.name,
+            pr_watch_interval=60 if entry.id == "cold" else 0,
+        )
+
+    host = create_host_app(
+        store, auth_token=None, build_subapp=build, rescan=rescanned.set
+    )
+
+    async def scenario():
+        async with host.router.lifespan_context(host):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=host), base_url="http://host"
+            ) as client:
+                with anyio.fail_after(2):
+                    assert (await client.get("/workspaces/warm/health")).status_code == 200
+                lane = _limiter_for("pr_watch")
+                await lane.acquire()
+                pending = []
+                try:
+                    cold = asyncio.create_task(client.get("/workspaces/cold/health"))
+                    pending.append(cold)
+                    await _wait_for(watcher_built)
+                    await anyio.wait_all_tasks_blocked()
+                    for method, path in [
+                        ("GET", "/workspaces/warm/health"),
+                        ("GET", "/health"),
+                        ("POST", "/workspaces/refresh"),
+                    ]:
+                        pending.append(asyncio.create_task(client.request(method, path)))
+                    done, blocked = await asyncio.wait(pending, timeout=1)
+                    assert not blocked, "cold watcher held the host cache lock during lane I/O"
+                    assert len(done) == 4
+                    assert all(response.result().status_code == 200 for response in done)
+                    assert rescanned.is_set()
+                    assert not swept.is_set()
+                finally:
+                    lane.release()
+                    # Let startup finish and publish its cache entry before
+                    # host shutdown; cancellation here races that publication.
+                    _, unfinished = await asyncio.wait(pending, timeout=2)
+                    for request in unfinished:
+                        request.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                with anyio.fail_after(1):
+                    while not swept.is_set():
+                        await anyio.sleep(0)
+
+    asyncio.run(scenario())
 
 
 def test_workspace_refresh_replacement_and_host_shutdown_drain_watchers(

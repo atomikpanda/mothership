@@ -204,15 +204,14 @@ async def _pr_watch_loop(
     `PrWatcher.check_once` already isolates failures per-PR, but this is a
     second, coarser layer of defense in case something outside that (e.g.
     `state_manager.load()`) raises."""
-    first_sweep = True
+    # Readiness means this lifespan owns the watcher. External sweep I/O (or
+    # waiting for another workspace's lane token) must not hold host startup.
+    task_status.started()
     while not stop.is_set():
         try:
             await run_sync("pr_watch", watcher.check_once)
         except Exception:
             logger.exception("pr-watch tick failed")
-        if first_sweep:
-            task_status.started()
-            first_sweep = False
         with anyio.move_on_after(interval):
             await stop.wait()
 
