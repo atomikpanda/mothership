@@ -637,6 +637,7 @@ version = "0.5.75"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
+    { name = "anyio" },
     { name = "cryptography" },
     { name = "dependency-injector" },
     { name = "fastapi" },
@@ -671,6 +672,7 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.19,<2" },
+    { name = "anyio", specifier = ">=4.13,<5" },
     { name = "cryptography", specifier = ">=50.0.0" },
     { name = "dependency-injector", specifier = ">=4.0" },
     { name = "fastapi", specifier = ">=0.110" },
