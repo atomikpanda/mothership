@@ -1103,6 +1103,7 @@ def test_workspace_refresh_replacement_and_host_shutdown_drain_watchers(
 ):
     """Every cached serve app owns one watcher and fully drains it before the
     cache replaces/removes the app or the host lifespan itself exits."""
+    from contextlib import asynccontextmanager
     from threading import Event, Thread
 
     from mship.core import serve as serve_mod
@@ -1138,10 +1139,11 @@ def test_workspace_refresh_replacement_and_host_shutdown_drain_watchers(
     home = tmp_path / "home"
     before = tmp_path / "before"
     store = _seed(home, [_entry("ws-a", "a", before)])
+    subapp_stops = []
 
     def build(entry, **_kwargs):
         root = Path(entry.path)
-        return create_workspace_app(
+        app = create_workspace_app(
             specs_dir=root / "specs",
             state_manager=StateManager(root / ".mothership"),
             log_manager=None,
@@ -1149,6 +1151,20 @@ def test_workspace_refresh_replacement_and_host_shutdown_drain_watchers(
             workspace_name=entry.name,
             pr_watch_interval=0.01,
         )
+        original_lifespan = app.router.lifespan_context
+        stop_reached = Event()
+        subapp_stops.append(stop_reached)
+
+        @asynccontextmanager
+        async def observed_lifespan(lifespan_app):
+            async with original_lifespan(lifespan_app):
+                try:
+                    yield
+                finally:
+                    stop_reached.set()
+
+        app.router.lifespan_context = observed_lifespan
+        return app
 
     host = create_host_app(
         store,
@@ -1200,7 +1216,8 @@ def test_workspace_refresh_replacement_and_host_shutdown_drain_watchers(
             )
         )
         replace = in_thread(lambda: client.get("/workspaces/ws-a/health"))
-        observations["replacement_finished_while_old_active"] = replace[1].wait(0.1)
+        assert subapp_stops[0].wait(1)
+        observations["replacement_finished_while_old_active"] = replace[1].is_set()
         first.release.set()
         assert finish_call(*replace).status_code == 200
         assert len(BlockingSecondSweep.instances) == 2
@@ -1215,7 +1232,8 @@ def test_workspace_refresh_replacement_and_host_shutdown_drain_watchers(
             )
         )
         refresh = in_thread(lambda: client.post("/workspaces/refresh"))
-        observations["refresh_finished_while_removed_active"] = refresh[1].wait(0.1)
+        assert subapp_stops[1].wait(1)
+        observations["refresh_finished_while_removed_active"] = refresh[1].is_set()
         second.release.set()
         assert finish_call(*refresh).status_code == 200
         assert len(BlockingSecondSweep.instances) == 2
@@ -1228,7 +1246,8 @@ def test_workspace_refresh_replacement_and_host_shutdown_drain_watchers(
         assert third.entered.wait(1)
 
         shutdown = in_thread(lambda: client.__exit__(None, None, None))
-        observations["shutdown_finished_while_active"] = shutdown[1].wait(0.1)
+        assert subapp_stops[2].wait(1)
+        observations["shutdown_finished_while_active"] = shutdown[1].is_set()
         third.release.set()
         finish_call(*shutdown)
         closed = True
@@ -1249,3 +1268,150 @@ def test_workspace_refresh_replacement_and_host_shutdown_drain_watchers(
         "shutdown_finished_while_active": False,
         "active_after_shutdown": 0,
     }
+
+
+@pytest.mark.parametrize("transition", ["replacement", "removal"])
+def test_cancelled_subapp_transition_keeps_old_lifespan_until_drain(
+    tmp_path, transition
+):
+    """Cancelling cache replacement/removal cannot let a successor overlap."""
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    import anyio
+    import httpx
+    from fastapi import FastAPI
+
+    home = tmp_path / "home"
+    before = tmp_path / "before"
+    moved = tmp_path / "moved"
+    store = _seed(home, [_entry("ws-a", "a", before)])
+    built = []
+    active = 0
+
+    def build(entry, **_kwargs):
+        nonlocal active
+        stop_reached = anyio.Event()
+        allow_drain = anyio.Event()
+        drained = anyio.Event()
+        block_drain = not built
+        probe = SimpleNamespace(
+            stop_reached=stop_reached,
+            allow_drain=allow_drain,
+            drained=drained,
+            started=False,
+            created_while_active=active,
+        )
+
+        @asynccontextmanager
+        async def lifespan(_app):
+            nonlocal active
+            probe.started = True
+            active += 1
+            try:
+                yield
+            finally:
+                stop_reached.set()
+                if block_drain:
+                    await allow_drain.wait()
+                active -= 1
+                drained.set()
+
+        app = FastAPI(lifespan=lifespan)
+
+        @app.get("/health")
+        def health():
+            return {"status": "ok", "workspace": entry.name}
+
+        built.append(probe)
+        return app
+
+    host = create_host_app(store, auth_token=None, build_subapp=build)
+
+    async def scenario():
+        first = None
+        try:
+            async with host.router.lifespan_context(host):
+                transport = httpx.ASGITransport(app=host)
+                async with httpx.AsyncClient(
+                    transport=transport, base_url="http://test"
+                ) as client:
+                    response = await client.get("/workspaces/ws-a/health")
+                    assert response.status_code == 200
+                    first = built[0]
+
+                    if transition == "replacement":
+                        store.mutate(
+                            lambda state: state.entries.__setitem__(
+                                0, _entry("ws-a", "a", moved)
+                            )
+                        )
+
+                        async def transition_call():
+                            await client.get("/workspaces/ws-a/health")
+
+                    else:
+                        store.mutate(lambda state: state.entries.clear())
+
+                        async def transition_call():
+                            await host.state.drop_stale_subapps()
+
+                    transition_done = anyio.Event()
+                    successor_done = anyio.Event()
+                    successor_response = []
+
+                    async def interrupt_transition(
+                        *, task_status=anyio.TASK_STATUS_IGNORED
+                    ):
+                        with anyio.CancelScope() as scope:
+                            task_status.started(scope)
+                            await transition_call()
+                        transition_done.set()
+
+                    async def request_successor():
+                        successor_response.append(
+                            await client.get("/workspaces/ws-a/health")
+                        )
+                        successor_done.set()
+
+                    async with anyio.create_task_group() as task_group:
+                        scope = await task_group.start(interrupt_transition)
+                        await first.stop_reached.wait()
+                        scope.cancel()
+                        await anyio.wait_all_tasks_blocked()
+
+                        if transition == "removal":
+                            store.mutate(
+                                lambda state: state.entries.append(
+                                    _entry("ws-a", "a", moved)
+                                )
+                            )
+
+                        task_group.start_soon(request_successor)
+                        await anyio.wait_all_tasks_blocked()
+                        observed_before_drain = {
+                            "transition_done": transition_done.is_set(),
+                            "successor_done": successor_done.is_set(),
+                            "built": len(built),
+                            "active": active,
+                        }
+
+                        first.allow_drain.set()
+                        await successor_done.wait()
+
+                    assert observed_before_drain == {
+                        "transition_done": False,
+                        "successor_done": False,
+                        "built": 1,
+                        "active": 1,
+                    }
+                    assert first.drained.is_set()
+                    started = [probe for probe in built if probe.started]
+                    assert len(started) == 2
+                    assert started[1].created_while_active == 0
+                    assert successor_response[0].status_code == 200
+        finally:
+            if first is not None:
+                first.allow_drain.set()
+
+    anyio.run(scenario, backend="asyncio")

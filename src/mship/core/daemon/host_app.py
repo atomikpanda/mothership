@@ -480,6 +480,13 @@ def create_host_app(
     lock = asyncio.Lock()
     subapp_task_group: anyio.abc.TaskGroup | None = None
 
+    async def _stop_cached_subapp(workspace_id: str, sub: _SubApp) -> None:
+        """Drain and remove one cached sub-app while the caller holds ``lock``."""
+        with anyio.CancelScope(shield=True):
+            await sub.stop()
+            if subapps.get(workspace_id) is sub:
+                subapps.pop(workspace_id)
+
     @asynccontextmanager
     async def _lifespan(_app):
         nonlocal subapp_task_group
@@ -489,10 +496,10 @@ def create_host_app(
                 try:
                     yield
                 finally:
-                    async with lock:
-                        for sub in subapps.values():
-                            await sub.stop()
-                        subapps.clear()
+                    with anyio.CancelScope(shield=True):
+                        async with lock:
+                            for workspace_id, sub in list(subapps.items()):
+                                await _stop_cached_subapp(workspace_id, sub)
         finally:
             subapp_task_group = None
 
@@ -521,8 +528,9 @@ def create_host_app(
                 # the cached app still points at the OLD root and state dir.
                 # Checked per request, so a rescan through ANY path — the host
                 # refresh route or the control socket's — takes effect.
-                await subapps.pop(entry.id).stop()
+                await _stop_cached_subapp(entry.id, sub)
                 sub = None
+                await anyio.lowlevel.checkpoint_if_cancelled()
             if sub is None:
                 if subapp_task_group is None:
                     raise RuntimeError("host lifespan is not running")
@@ -549,7 +557,7 @@ def create_host_app(
         async with lock:
             for wid in list(subapps):
                 if wid not in healthy_ids:
-                    await subapps.pop(wid).stop()
+                    await _stop_cached_subapp(wid, subapps[wid])
 
     # The control-socket refresh route runs the same registry rescan but lives
     # in a sibling ASGI app. Expose only the post-rescan cleanup it must await.
