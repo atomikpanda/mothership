@@ -1,4 +1,6 @@
 """Workspace-addressed host app (#472 Task 7)."""
+import asyncio
+import gc
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -609,6 +611,316 @@ class StreamingSubApp:
                 return cm()
 
         return _R()
+
+
+class _OwnedForwardSubApp:
+    """An event-driven ASGI peer for request-owned forwarding tests."""
+
+    def __init__(self, mode):
+        self.mode = mode
+        self.active: set[asyncio.Task] = set()
+        self.entered = asyncio.Event()
+        self.finalized = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.blocked_on_ninth_send = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __call__(self, _scope, _receive, send):
+        task = asyncio.current_task()
+        assert task is not None
+        self.active.add(task)
+        self.entered.set()
+        try:
+            if self.mode == "fail-before-start":
+                raise RuntimeError("before response start")
+
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 207,
+                    "headers": [(b"x-forwarded-test", b"kept")],
+                }
+            )
+            if self.mode == "fail-after-start":
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": b"raw-first\\x00",
+                        "more_body": True,
+                    }
+                )
+                raise RuntimeError("after response start")
+            if self.mode == "block-on-ninth-send":
+                for index in range(9):
+                    if index == 8:
+                        self.blocked_on_ninth_send.set()
+                    await send(
+                        {
+                            "type": "http.response.body",
+                            "body": bytes([index]),
+                            "more_body": True,
+                        }
+                    )
+                await send(
+                    {"type": "http.response.body", "body": b"", "more_body": False}
+                )
+                return
+
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": b"raw-first\x00",
+                    "more_body": True,
+                }
+            )
+            if self.mode == "normal":
+                await send(
+                    {"type": "http.response.body", "body": b"raw-last", "more_body": False}
+                )
+            else:
+                await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        finally:
+            self.active.discard(task)
+            self.finalized.set()
+
+    @property
+    def router(self):
+        from contextlib import asynccontextmanager
+
+        class _Router:
+            def lifespan_context(self, _app):
+                @asynccontextmanager
+                async def lifespan():
+                    yield
+
+                return lifespan()
+
+        return _Router()
+
+
+def _owned_forward_app(tmp_path, mode):
+    store = _seed(tmp_path / "home", [_entry("ws-stream", "stream", tmp_path / "stream")])
+    subapp = _OwnedForwardSubApp(mode)
+    app = create_host_app(
+        store, auth_token=None, build_subapp=lambda _entry, **_kwargs: subapp
+    )
+    return app, subapp
+
+
+def _forward_scope():
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "path": "/workspaces/ws-stream/exec/run",
+        "raw_path": b"/workspaces/ws-stream/exec/run",
+        "root_path": "",
+        "scheme": "http",
+        "query_string": b"",
+        "headers": [],
+        "client": ("test", 1),
+        "server": ("test", 80),
+    }
+
+
+def _forward_endpoint(app):
+    def find(routes):
+        for route in routes:
+            if getattr(route, "name", None) == "forward":
+                return route.endpoint
+            nested = getattr(route, "routes", None)
+            if nested is None:
+                nested = getattr(getattr(route, "original_router", None), "routes", None)
+            if nested:
+                endpoint = find(nested)
+                if endpoint is not None:
+                    return endpoint
+        return None
+
+    endpoint = find(app.routes)
+    assert endpoint is not None
+    return endpoint
+
+
+async def _wait_for(event):
+    async with asyncio.timeout(5):
+        await event.wait()
+
+
+def test_forward_normal_completion_finalizes_request_producer_and_keeps_wire_shape(tmp_path):
+    """Catches removing the terminal queue sentinel or losing forwarded status,
+    headers, or raw chunks after the producer completes normally."""
+    app, subapp = _owned_forward_app(tmp_path, "normal")
+
+    async def scenario():
+        messages = []
+        response_finished = asyncio.Event()
+        sent_request = False
+
+        async def receive():
+            nonlocal sent_request
+            if not sent_request:
+                sent_request = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await response_finished.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            messages.append(message)
+            if (
+                message["type"] == "http.response.body"
+                and not message.get("more_body", False)
+            ):
+                response_finished.set()
+
+        async with app.router.lifespan_context(app):
+            await app(_forward_scope(), receive, send)
+        await _wait_for(subapp.finalized)
+        return messages
+
+    messages = asyncio.run(scenario())
+    start = next(message for message in messages if message["type"] == "http.response.start")
+    body = [message.get("body", b"") for message in messages if message["type"] == "http.response.body"]
+    assert (start["status"], dict(start["headers"])[b"x-forwarded-test"]) == (207, b"kept")
+    assert body == [b"raw-first\x00", b"raw-last", b""]
+    assert subapp.active == set()
+
+
+def test_forward_client_disconnect_finalizes_request_producer(tmp_path):
+    """Catches deleting ``task.cancel()`` from ``body_stream``'s disconnect
+    finalizer, which leaves the workspace producer live after the client leaves."""
+    app, subapp = _owned_forward_app(tmp_path, "wait-for-cancellation")
+
+    async def scenario():
+        first_body_forwarded = asyncio.Event()
+        sent_request = False
+
+        async def receive():
+            nonlocal sent_request
+            if not sent_request:
+                sent_request = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await first_body_forwarded.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            if message["type"] == "http.response.body" and message.get("body"):
+                first_body_forwarded.set()
+
+        async with app.router.lifespan_context(app):
+            await app(_forward_scope(), receive, send)
+        await _wait_for(subapp.finalized)
+
+    asyncio.run(scenario())
+    assert subapp.cancelled.is_set()
+    assert subapp.active == set()
+
+
+@pytest.mark.parametrize("mode", ["fail-before-start", "fail-after-start"])
+def test_forward_subapp_failure_is_retrieved_after_request_completion(tmp_path, mode):
+    """Catches dropping the producer exception retrieval: a failure before or
+    after response start must not reach asyncio as an unretrieved task error."""
+    app, subapp = _owned_forward_app(tmp_path, mode)
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        unhandled = []
+        previous_handler = loop.get_exception_handler()
+        response_finished = asyncio.Event()
+        sent_request = False
+
+        def capture_unhandled(_loop, context):
+            unhandled.append(context)
+
+        async def receive():
+            nonlocal sent_request
+            if not sent_request:
+                sent_request = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await response_finished.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            if (
+                message["type"] == "http.response.body"
+                and not message.get("more_body", False)
+            ):
+                response_finished.set()
+
+        loop.set_exception_handler(capture_unhandled)
+        try:
+            async with app.router.lifespan_context(app):
+                await app(_forward_scope(), receive, send)
+            await _wait_for(subapp.finalized)
+            gc.collect()
+            await asyncio.sleep(0)
+        finally:
+            loop.set_exception_handler(previous_handler)
+        return unhandled
+
+    unhandled = asyncio.run(scenario())
+    assert not unhandled
+    assert subapp.active == set()
+
+
+def test_forward_cancellation_while_eight_chunk_queue_send_is_blocked_finalizes_producer(tmp_path):
+    """Catches changing the eight-chunk queue to unbounded, or cancelling a
+    blocked producer without draining it through the response lifecycle."""
+    from starlette.requests import Request
+
+    app, subapp = _owned_forward_app(tmp_path, "block-on-ninth-send")
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def scenario():
+        request = Request(_forward_scope(), receive=receive)
+        async with app.router.lifespan_context(app):
+            response = await _forward_endpoint(app)("ws-stream", "exec/run", request)
+            await _wait_for(subapp.blocked_on_ninth_send)
+            first = await anext(response.body_iterator)
+            assert first == b"\x00"
+            await response.body_iterator.aclose()
+            await _wait_for(subapp.finalized)
+
+    asyncio.run(scenario())
+    assert subapp.cancelled.is_set()
+    assert subapp.active == set()
+
+
+def test_forward_host_shutdown_cancels_active_connection_and_finalizes_producer(tmp_path):
+    """Catches bypassing the response finalizer during server shutdown, which
+    would leave an active forwarded producer after its connection is cancelled."""
+    app, subapp = _owned_forward_app(tmp_path, "wait-for-cancellation")
+
+    async def scenario():
+        sent_request = False
+
+        async def receive():
+            nonlocal sent_request
+            if not sent_request:
+                sent_request = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await asyncio.Future()
+
+        async def send(_message):
+            return None
+
+        async with app.router.lifespan_context(app):
+            connection = asyncio.create_task(app(_forward_scope(), receive, send))
+            await _wait_for(subapp.entered)
+            connection.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await connection
+        await _wait_for(subapp.finalized)
+
+    asyncio.run(scenario())
+    assert subapp.cancelled.is_set()
+    assert subapp.active == set()
 
 
 def test_forward_streams_chunks_incrementally(tmp_path):
