@@ -55,10 +55,13 @@ def storage_status(state_dir: Path) -> StorageStatus:
 def _export_payload(state_dir: Path) -> dict[str, list[dict[str, object]]]:
     state = StateManager(state_dir).load()
     items = WorkItemStore(state_dir / "workitems").list(include_archived=True)
+    tasks = []
+    for slug in sorted(state.tasks):
+        task = state.tasks[slug].model_dump(mode="json")
+        task["passive_repos"] = sorted(task["passive_repos"])
+        tasks.append(task)
     return {
-        "tasks": [
-            state.tasks[slug].model_dump(mode="json") for slug in sorted(state.tasks)
-        ],
+        "tasks": tasks,
         "work_items": [
             item.model_dump(mode="json")
             for item in sorted(items, key=lambda value: value.id)

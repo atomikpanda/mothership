@@ -109,6 +109,20 @@ def _backup_legacy(state_dir: Path, now: datetime) -> Path:
     return backup
 
 
+def _normalize_timestamps(value: object) -> object:
+    if isinstance(value, datetime):
+        return encode_datetime(value)
+    if isinstance(value, dict):
+        return {key: _normalize_timestamps(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize_timestamps(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_normalize_timestamps(item) for item in value)
+    if isinstance(value, set):
+        return {_normalize_timestamps(item) for item in value}
+    return value
+
+
 def _verify_candidate(
     database: WorkspaceDatabase,
     expected_state: WorkspaceState,
@@ -122,13 +136,17 @@ def _verify_candidate(
         foreign_key_errors = connection.exec_driver_sql(
             "PRAGMA foreign_key_check"
         ).all()
-    if actual_state != expected_state:
+    if _normalize_timestamps(actual_state.model_dump(mode="python")) != (
+        _normalize_timestamps(expected_state.model_dump(mode="python"))
+    ):
         raise MigrationVerificationError(
             "candidate Task state does not match legacy state"
         )
-    if {item.id: item for item in actual_items} != {
-        item.id: item for item in expected_items
-    }:
+    if _normalize_timestamps(
+        {item.id: item.model_dump(mode="python") for item in actual_items}
+    ) != _normalize_timestamps(
+        {item.id: item.model_dump(mode="python") for item in expected_items}
+    ):
         raise MigrationVerificationError(
             "candidate WorkItem state does not match legacy state"
         )

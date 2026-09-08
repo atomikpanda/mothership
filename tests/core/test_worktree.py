@@ -338,6 +338,38 @@ def test_spawn_duplicate_slug_raises(worktree_deps):
         mgr.spawn("duplicate test", repos=["shared"], workspace_root=workspace)
 
 
+def test_spawn_duplicate_slug_insert_race_is_actionable(
+    worktree_deps,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    state_mgr.insert_task(
+        Task(
+            slug="duplicate-race",
+            description="already registered by another process",
+            phase="plan",
+            created_at=datetime(2026, 9, 7, tzinfo=timezone.utc),
+            affected_repos=[],
+            branch="feat/duplicate-race",
+        )
+    )
+    monkeypatch.setattr(state_mgr, "load", lambda: WorkspaceState())
+    manager = WorktreeManager(config, graph, state_mgr, git, shell, log)
+
+    with pytest.raises(ValueError) as error:
+        manager.spawn(
+            "duplicate race",
+            repos=["shared"],
+            workspace_root=workspace,
+        )
+
+    assert str(error.value) == (
+        "Task 'duplicate-race' already exists. "
+        "Run `mship close --yes --abandon --task duplicate-race` to remove it "
+        "first, or use a different description."
+    )
+
+
 # ---------------------------------------------------------------------------
 # spawn --base: cut the new worktree from another branch (stacked PRs, #42)
 # ---------------------------------------------------------------------------

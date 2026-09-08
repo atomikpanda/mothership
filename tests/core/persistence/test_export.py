@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -72,6 +75,43 @@ def test_export_json_is_deterministic_sorted_and_scoped(tmp_path: Path) -> None:
     assert payload["work_items"][1]["archived"] is True
     assert "MESSAGE_SENTINEL" not in first
     assert "ARTIFACT_SENTINEL" not in first
+
+
+def test_export_json_is_stable_across_python_hash_seeds(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".mothership"
+    _seed_sqlite_state(state_dir)
+    state = StateManager(state_dir).load()
+    state.tasks["alpha"].passive_repos = {
+        "analytics",
+        "billing",
+        "catalog",
+        "delivery",
+        "events",
+    }
+    StateManager(state_dir).save(state)
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "from pathlib import Path; "
+            "from mship.core.persistence.export import export_state; "
+            "print(export_state(Path(__import__('sys').argv[1])), end='')"
+        ),
+        str(state_dir),
+    ]
+
+    rendered = [
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        ).stdout
+        for seed in ("1", "2")
+    ]
+
+    assert rendered[0] == rendered[1]
 
 
 def test_export_yaml_has_same_payload_as_json(tmp_path: Path) -> None:
