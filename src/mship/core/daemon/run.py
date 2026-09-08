@@ -253,6 +253,7 @@ async def _run_server_child(
     name,
     server,
     outcomes,
+    terminal_outcomes,
     *,
     task_status: anyio.abc.TaskStatus[None],
 ) -> None:
@@ -298,15 +299,24 @@ async def _run_server_child(
                             await lifespan.shutdown()
             except BaseException as cleanup_error:
                 if outcome is None or outcome.error is None:
-                    raise
-                outcome = replace(
-                    outcome,
-                    error=BaseExceptionGroup(
-                        "daemon server and shutdown failed",
-                        [outcome.error, cleanup_error],
-                    ),
-                )
+                    outcome = _ServerOutcome(
+                        name=name, started=server.started,
+                        clean=server.should_exit, error=cleanup_error,
+                    )
+                else:
+                    outcome = replace(
+                        outcome,
+                        error=BaseExceptionGroup(
+                            "daemon server and shutdown failed",
+                            [outcome.error, cleanup_error],
+                        ),
+                    )
             finally:
+                # Delivery below can be cancelled by a sibling's outcome.
+                # Record the result without a checkpoint, after cleanup, so
+                # the root can reconcile every failure once it has joined us.
+                if outcome is not None:
+                    terminal_outcomes.append(outcome)
                 completed.set()
 
     async with outcomes:
@@ -324,7 +334,9 @@ async def _run_server_child(
             raise _ServerStoppedBeforeReady(outcome)
 
 
-async def _start_server_and_report_ready(task_group, name, server, events) -> None:
+async def _start_server_and_report_ready(
+    task_group, name, server, events, terminal_outcomes
+) -> None:
     """Race one server's readiness handshake against sibling outcomes."""
     async with events:
         try:
@@ -333,6 +345,7 @@ async def _start_server_and_report_ready(task_group, name, server, events) -> No
                 name,
                 server,
                 events.clone(),
+                terminal_outcomes,
             )
         except _ServerStoppedBeforeReady:
             # The child sent its startup outcome before raising this transport
@@ -362,6 +375,8 @@ async def _serve(control_app, socket_path, host_app, serve_cfg, tunnel) -> None:
     control_app.state.set_serve_bound(False)
     stop = anyio.Event()
     first_outcome = None
+    terminal_outcomes = []
+    failures = []
     try:
         send_outcome, receive_outcome = anyio.create_memory_object_stream(2)
         async with send_outcome, receive_outcome:
@@ -373,6 +388,7 @@ async def _serve(control_app, socket_path, host_app, serve_cfg, tunnel) -> None:
                             "control",
                             control,
                             send_outcome.clone(),
+                            terminal_outcomes,
                         )
                     except _ServerStoppedBeforeReady as stopped:
                         first_outcome = stopped.outcome
@@ -397,6 +413,7 @@ async def _serve(control_app, socket_path, host_app, serve_cfg, tunnel) -> None:
                             "host",
                             host,
                             send_outcome.clone(),
+                            terminal_outcomes,
                         )
                         host_start = await receive_outcome.receive()
                         if host_start is None:
@@ -415,6 +432,8 @@ async def _serve(control_app, socket_path, host_app, serve_cfg, tunnel) -> None:
                         server.should_exit = True
                     stop.set()
                     task_group.cancel_scope.cancel()
+    except BaseException as error:
+        failures.append(error)
     finally:
         control_app.state.set_serve_bound(False)
         # Joined BEFORE the tunnel is torn down, and torn down before `_run`
@@ -423,9 +442,19 @@ async def _serve(control_app, socket_path, host_app, serve_cfg, tunnel) -> None:
         # and that orphan holds the subdomain against the next start.
         stop.set()
         if tunnel is not None:
-            tunnel.stop()
-    assert first_outcome is not None
-    _raise_for_server_outcome(first_outcome)
+            try:
+                tunnel.stop()
+            except BaseException as error:
+                failures.append(error)
+    for outcome in terminal_outcomes:
+        try:
+            _raise_for_server_outcome(outcome)
+        except RuntimeError as error:
+            failures.append(error)
+    if len(failures) == 1:
+        raise failures[0]
+    if failures:
+        raise BaseExceptionGroup("daemon failures", failures)
 
 
 def _install_stop_handlers(stop, servers) -> None:
