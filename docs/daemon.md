@@ -39,6 +39,7 @@ or registration has succeeded.
 | Control UDS and optional host TCP server children | daemon `_serve` task group, with a nested group per server | `TaskGroup.start()` returns after Uvicorn sets `started`; only then is TCP `serve` capability published | SIGTERM/SIGINT, root cancellation, or first server outcome | join server children and shield interrupted Uvicorn shutdown, including its initialized pre-bind lifespan; no new wall-clock deadline | fatal outcome translated after cleanup; daemon log and nonzero exit |
 | Tunnel loop and one-second timer | daemon `_serve` task group | local `TaskStatus.started()` before the first tick | shared stop event or root-group cancellation | stop wakes the timer; join in-flight tick, then call `HostTunnel.stop()` | tick exceptions logged and retried; published tunnel state reports collaborator failures |
 | Relay HTTP request and deadline | synchronous tunnel worker (or CLI caller) owns `relay.http.request` and its short-lived AnyIO asyncio run | complete HTTP response body returned | whole-call deadline: 10s registration/enrollment, 8s health read-back | cancel request and close HTTPX async client before returning; no detached request worker | HTTPX timeout exception; registration/read-back retain recoverable error mapping |
+| Native hostname resolution | request-local asyncio loop owns one `anyio.run_process` child per lookup | complete OS `getaddrinfo` address list returned | enclosing HTTP deadline, including resolver interpreter startup | cancellation kills and reaps child before returning; no default-executor DNS work survives the scope | native DNS errors retain HTTPX `ConnectError` mapping; deadline retains HTTPX timeout mapping |
 | Cached workspace sub-app lifespans | host lifespan task group, one `_SubApp._supervise` child per cached app | nested lifespan startup completes in the same task that will exit it | replacement, refresh removal/degradation, or host lifespan exit | shield old-app drain and cache removal under the host lock; start no successor until drain completes | startup error reaches forwarding request; child/lifespan failure reaches host ASGI error handling |
 | PR watcher and its interval timer | workspace serve-app lifespan task group | first sweep finishes, including a logged recoverable failure | owning lifespan exits or is cancelled | stop wakes timer; join any in-flight sweep before lifespan ends | sweep exception logged as `pr-watch tick failed`, then retry |
 | Registry refresh offload | control or host refresh request | scan returns before response and stale-subapp cleanup | request cancellation | join in-flight scan; no independent timer or total scan timeout | `ValueError`/`RegistryReadError` map to HTTP 503; other errors reach ASGI error handling |
@@ -69,9 +70,19 @@ poll interval, cursor/filter semantics, and timeout response shape.
 The `_tunnel_join_timeout()` operation-budget calculation is 84 seconds:
 three 10s relay calls, up to three 10s process-table snapshots, and two shared
 2s orphan exit waits, plus one 10s signing and one 10s key-generation subprocess.
-The HTTP allowances are whole-call AnyIO deadlines around the request and full
-response consumption. HTTPX's per-phase inactivity timeout is also retained,
-but repeated small response chunks cannot extend the whole-call deadline.
+The HTTP allowances are whole-call AnyIO deadlines around resolver startup,
+native name resolution, the request, and full response consumption. A
+request-local public asyncio loop override runs the unchanged OS
+`socket.getaddrinfo` in an owned subprocess, rather than the uninterruptible
+default-executor thread that asyncio would otherwise join after cancellation.
+The process is killed and reaped within request cleanup; resolution consumes
+the existing HTTP allowance rather than adding a separate DNS allowance.
+HTTPX's per-phase inactivity timeout is also retained, but repeated small
+response chunks cannot extend the whole-call deadline. The tradeoff is one
+short-lived Python process per hostname lookup (numeric IPs need no resolver),
+with no resolver cache. The full IPv4/IPv6 address list still goes through
+AnyIO's fallback; HTTPX retains the original URL, Host, SNI, TLS verification,
+proxy selection, and HTTP error/response mappings.
 Each orphan phase polls at most every 50ms and revalidates process identity
 before signaling. A running-child tick can instead perform an 8s health
 read-back and a 5s TERM/5s KILL stop; those fit inside the larger 34s orphan

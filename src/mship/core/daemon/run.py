@@ -185,7 +185,8 @@ def _tunnel_join_timeout() -> float:
     this budget documents the underlying operation bounds, not permission to
     abandon a still-running tick. That worst case is the three
     relay calls a single tick can make (challenge, register, enroll), each with
-    a whole-call deadline including its response body, plus one signing
+    a whole-call deadline including owned resolver startup/resolution and its
+    response body (resolver cancellation kills and reaps the child), plus one signing
     subprocess, and one key-generation subprocess on automatic clone recovery.
     Recovery does not revoke the incumbent's shared key, so it adds no relay
     calls. The tick can also make three fixed, bounded

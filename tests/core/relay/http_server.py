@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 
 @contextmanager
-def response_server(*, drip=True):
-    state = SimpleNamespace(sent=0, finished=Event(), requests=[])
+def response_server(*, drip=True, tls_context=None):
+    state = SimpleNamespace(sent=0, finished=Event(), requests=[], hosts=[])
     stop = Event()
     body = b'{"padding":"' + b'x' * 80 + b'"}'
 
@@ -23,6 +23,7 @@ def response_server(*, drip=True):
             self.respond()
 
         def respond(self):
+            state.hosts.append(self.headers.get("Host"))
             state.requests.append((
                 self.command, self.path, self.headers.get("Authorization"),
                 self.rfile.read(int(self.headers.get("Content-Length", "0"))),
@@ -45,7 +46,10 @@ def response_server(*, drip=True):
                 state.finished.set()
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
-    state.url = f"http://127.0.0.1:{server.server_port}"
+    if tls_context is not None:
+        server.socket = tls_context.wrap_socket(server.socket, server_side=True)
+    scheme = "https" if tls_context is not None else "http"
+    state.url = f"{scheme}://127.0.0.1:{server.server_port}"
     thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
     thread.start()
     try:
