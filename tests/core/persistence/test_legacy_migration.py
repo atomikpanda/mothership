@@ -205,6 +205,108 @@ def test_migration_preserves_switch_source_without_dependencies(
     assert not (state_dir / "state.yaml").exists()
 
 
+@pytest.mark.parametrize(
+    ("legacy_slugs", "expected_slugs"),
+    [
+        (["upstream", "upstream"], ["upstream"]),
+        (
+            ["closed-z", "upstream", "closed-z", "upstream", "closed-a"],
+            ["closed-z", "upstream", "closed-a"],
+        ),
+    ],
+)
+def test_migration_deduplicates_same_owner_task_links(
+    legacy_workspace: LegacyWorkspace,
+    legacy_slugs: list[str],
+    expected_slugs: list[str],
+) -> None:
+    item = legacy_workspace.expected_items[0].model_copy(
+        update={"task_slugs": legacy_slugs}
+    )
+    item_path = legacy_workspace.state_dir / "workitems" / "wi-active.json"
+    original = item.model_dump_json(indent=2)
+    item_path.write_text(original)
+
+    report = migrate_legacy_state(
+        legacy_workspace.state_dir, daemon_probe=lambda: None, now=NOW
+    )
+
+    assert report.migrated is True
+    assert report.backup_path is not None
+    assert (report.backup_path / "workitems" / "wi-active.json").read_text() == original
+    store = WorkItemStore(legacy_workspace.state_dir / "workitems")
+    expected_item = item.model_copy(update={"task_slugs": expected_slugs})
+    assert store.get("wi-active") == expected_item
+    assert store.get("wi-archived") == legacy_workspace.expected_items[1]
+    assert (
+        StateManager(legacy_workspace.state_dir).load()
+        == legacy_workspace.expected_state
+    )
+
+    repeated = migrate_legacy_state(
+        legacy_workspace.state_dir, daemon_probe=lambda: None, now=NOW
+    )
+    assert repeated.migrated is False
+    assert repeated.backup_path is None
+    assert repeated.tasks == 2
+    assert repeated.work_items == 2
+    assert store.get("wi-active") == expected_item
+
+
+@pytest.mark.parametrize("conflict_source", ["workitem", "task", "historical-task"])
+def test_migration_rejects_conflicting_task_owners_before_import(
+    legacy_workspace: LegacyWorkspace,
+    conflict_source: str,
+) -> None:
+    state_dir = legacy_workspace.state_dir
+    slug = "closed-task" if conflict_source == "historical-task" else "upstream"
+    if conflict_source == "historical-task":
+        active = legacy_workspace.expected_items[0]
+        active.task_slugs.append(slug)
+        (state_dir / "workitems" / "wi-active.json").write_text(
+            active.model_dump_json()
+        )
+    if conflict_source != "task":
+        item = legacy_workspace.expected_items[1].model_copy(
+            update={"task_slugs": ["downstream", slug]}
+        )
+        source = state_dir / "workitems" / "wi-archived.json"
+        valid = source.read_bytes()
+        source.write_text(item.model_dump_json())
+    else:
+        state = legacy_workspace.expected_state.model_copy(deep=True)
+        state.tasks["upstream"].work_item_id = "wi-archived"
+        source = state_dir / "state.yaml"
+        valid = source.read_bytes()
+        source.write_text(yaml.safe_dump(state.model_dump(mode="json")))
+    originals = {
+        path: path.read_bytes()
+        for path in [
+            state_dir / "state.yaml",
+            *sorted((state_dir / "workitems").glob("*.json")),
+        ]
+    }
+
+    with pytest.raises(MigrationPreflightError) as error:
+        migrate_legacy_state(state_dir, daemon_probe=lambda: None, now=NOW)
+
+    for identifier in (slug, "wi-active", "wi-archived"):
+        assert identifier in str(error.value)
+    assert {path: path.read_bytes() for path in originals} == originals
+    assert not WorkspaceDatabase(state_dir).path.exists()
+    assert not list(state_dir.glob(".mothership.db.migrating-*"))
+    assert not (state_dir / "backups").exists()
+
+    source.write_bytes(valid)
+    report = migrate_legacy_state(state_dir, daemon_probe=lambda: None, now=NOW)
+    assert report.migrated is True
+    assert StateManager(state_dir).load() == legacy_workspace.expected_state
+    assert {
+        item.id: item
+        for item in WorkItemStore(state_dir / "workitems").list(include_archived=True)
+    } == {item.id: item for item in legacy_workspace.expected_items}
+
+
 def test_migration_accepts_semantically_equivalent_naive_timestamps(
     tmp_path: Path,
 ) -> None:
@@ -259,9 +361,7 @@ def test_migration_rejects_non_timestamp_candidate_mismatch(
             return
         candidate_path = next(
             path
-            for path in legacy_workspace.state_dir.glob(
-                ".mothership.db.migrating-*"
-            )
+            for path in legacy_workspace.state_dir.glob(".mothership.db.migrating-*")
             if not path.name.endswith(("-wal", "-shm"))
         )
         candidate = WorkspaceDatabase(
