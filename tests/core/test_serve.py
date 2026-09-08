@@ -69,6 +69,104 @@ def test_health_carries_daemon_workspace_identity_when_provided(tmp_path):
     }
 
 
+def test_blocked_mailbox_route_does_not_starve_health_or_registry_route(
+    tmp_path, monkeypatch
+):
+    """Mailbox reads sharing the registry executor would stall refresh work."""
+    import asyncio
+    import concurrent.futures
+    import threading
+
+    import httpx
+
+    from mship.core.async_runtime import LANE_CAPACITIES
+    from mship.core.daemon.control import create_control_app
+    from mship.core.daemon.host_app import create_host_app
+    from mship.core.daemon.registry import RegistryStore
+
+    mailbox_capacity = LANE_CAPACITIES["mailbox"]
+    saturated = threading.Event()
+    release = threading.Event()
+    lock = threading.Lock()
+    active = 0
+    real_list = MessageStore.list
+
+    def blocking_list(store):
+        nonlocal active
+        with lock:
+            active += 1
+            if active == mailbox_capacity:
+                saturated.set()
+        try:
+            assert release.wait(3), "test did not release mailbox reads"
+            return real_list(store)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(MessageStore, "list", blocking_list)
+    serve_app = _app(tmp_path)
+    registry_rescanned = threading.Event()
+    host_registry_rescanned = threading.Event()
+    registry = RegistryStore(tmp_path / "registry.json")
+    control_app = create_control_app(
+        started_at=datetime.now(timezone.utc),
+        version="test",
+        socket_path="/control.sock",
+        store=registry,
+        rescan=registry_rescanned.set,
+    )
+    host_app = create_host_app(
+        registry,
+        auth_token=None,
+        rescan=host_registry_rescanned.set,
+    )
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(
+            concurrent.futures.ThreadPoolExecutor(max_workers=mailbox_capacity)
+        )
+        serve_transport = httpx.ASGITransport(app=serve_app)
+        control_transport = httpx.ASGITransport(app=control_app)
+        host_transport = httpx.ASGITransport(app=host_app)
+        async with (
+            httpx.AsyncClient(
+                transport=serve_transport, base_url="http://serve"
+            ) as serve_client,
+            httpx.AsyncClient(
+                transport=control_transport, base_url="http://control"
+            ) as control_client,
+            httpx.AsyncClient(
+                transport=host_transport, base_url="http://host"
+            ) as host_client,
+            anyio.create_task_group() as task_group,
+        ):
+            async def read_threads():
+                response = await serve_client.get("/threads")
+                assert response.status_code == 200
+
+            try:
+                for _ in range(mailbox_capacity):
+                    task_group.start_soon(read_threads)
+                with anyio.fail_after(1):
+                    while not saturated.is_set():
+                        await anyio.sleep(0)
+
+                with anyio.fail_after(1):
+                    assert (await serve_client.get("/health")).status_code == 200
+                    response = await control_client.post("/workspaces/refresh")
+                    assert response.status_code == 200
+                    response = await host_client.post("/workspaces/refresh")
+                    assert response.status_code == 200
+                assert registry_rescanned.is_set()
+                assert host_registry_rescanned.is_set()
+            finally:
+                release.set()
+
+    anyio.run(scenario, backend="asyncio")
+
+
 def test_list_specs(tmp_path):
     _seed_spec(tmp_path)
     r = TestClient(_app(tmp_path)).get("/specs")
@@ -1716,6 +1814,39 @@ def test_watcher_lifespan_is_ready_after_first_sweep_and_survives_failure(
             with anyio.fail_after(1):
                 while watcher.calls < 2:
                     await anyio.sleep(0)
+
+    anyio.run(scenario, backend="asyncio")
+
+
+def test_watcher_sweep_does_not_depend_on_default_thread_capacity():
+    """Routing watcher work through the default lane would stall its sweep."""
+    from mship.core import serve as serve_mod
+
+    called = Event()
+
+    class Watcher:
+        def check_once(self):
+            called.set()
+
+    async def scenario():
+        stop = anyio.Event()
+        default = anyio.to_thread.current_default_thread_limiter()
+        default.total_tokens = 1
+        await default.acquire()
+        try:
+            async with anyio.create_task_group() as task_group:
+                try:
+                    task_group.start_soon(
+                        serve_mod._pr_watch_loop, Watcher(), stop, 60
+                    )
+                    with anyio.fail_after(1):
+                        while not called.is_set():
+                            await anyio.sleep(0)
+                finally:
+                    stop.set()
+                    task_group.cancel_scope.cancel()
+        finally:
+            default.release()
 
     anyio.run(scenario, backend="asyncio")
 

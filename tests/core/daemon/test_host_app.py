@@ -359,6 +359,49 @@ def test_host_refresh_reports_operational_error_without_dropping_cached_subapp(
         assert built["ws-a"] is cached
 
 
+def test_host_refresh_does_not_depend_on_default_executor_capacity(tmp_path):
+    """A busy unrelated executor must not prevent a registry refresh."""
+    import asyncio
+    import concurrent.futures
+    import threading
+
+    import anyio
+    import httpx
+
+    occupied = threading.Event()
+    release = threading.Event()
+    rescanned = threading.Event()
+
+    def occupy_default_executor():
+        occupied.set()
+        assert release.wait(3), "test did not release the default executor"
+
+    store = _seed(tmp_path / "home", [])
+    app = create_host_app(store, auth_token=None, rescan=rescanned.set)
+
+    async def scenario():
+        asyncio.get_running_loop().set_default_executor(
+            concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        )
+        blocker = asyncio.create_task(asyncio.to_thread(occupy_default_executor))
+        try:
+            with anyio.fail_after(1):
+                while not occupied.is_set():
+                    await anyio.sleep(0)
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app),
+                    base_url="http://host",
+                ) as client:
+                    response = await client.post("/workspaces/refresh")
+            assert response.status_code == 200
+            assert rescanned.is_set()
+        finally:
+            release.set()
+            await blocker
+
+    anyio.run(scenario, backend="asyncio")
+
+
 def test_host_passes_github_app_credentials_to_workspace_subapp(tmp_path):
     home = tmp_path / "home"
     store = _seed(home, [_entry("ws-a", "a", tmp_path / "a")])

@@ -23,6 +23,7 @@ from pydantic import BaseModel, field_validator
 # a deferred import inside `create_app`.
 from fastapi import Request, Response
 
+from mship.core.async_runtime import run_sync
 from mship.core.gh_app import GhAppError, mint_installation_token, resolve_installation
 from mship.core.pr import PRManager
 from mship.core.pr_watcher import PrWatcher
@@ -206,9 +207,7 @@ async def _pr_watch_loop(
     first_sweep = True
     while not stop.is_set():
         try:
-            await anyio.to_thread.run_sync(
-                watcher.check_once, abandon_on_cancel=False
-            )
+            await run_sync("pr_watch", watcher.check_once)
         except Exception:
             logger.exception("pr-watch tick failed")
         if first_sweep:
@@ -1554,7 +1553,8 @@ def create_app(
         q: str | None = None,
     ):
         if not wait:
-            return await asyncio.to_thread(
+            return await run_sync(
+                "mailbox",
                 lambda: _filtered_summaries(msgs.list(), inbox, q)
             )
         from mship.core.message_wait import changed_since
@@ -1573,7 +1573,7 @@ def create_app(
         interval = 1.0
         deadline = _time.monotonic() + timeout
         while True:
-            summaries, cursor = await asyncio.to_thread(read_updates)
+            summaries, cursor = await run_sync("mailbox", read_updates)
             threads = [
                 summary for summary in summaries
                 if _matches_thread_filter(summary, inbox, q)

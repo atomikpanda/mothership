@@ -824,15 +824,23 @@ def test_tunnel_join_timeout_uses_the_reapers_fixed_snapshot_bound(monkeypatch):
     assert run_mod._tunnel_join_timeout() == 3 * 13 + 5 * 7 + 2 * 11
 
 
-def test_tunnel_offload_has_dedicated_non_abandoning_capacity(monkeypatch):
-    """Default-pool offload or abandonment can strand a reconnecting worker."""
+def test_tunnel_offload_uses_shared_non_abandoning_tunnel_lane(monkeypatch):
+    """A caller-local limiter or abandonment can strand reconnecting work."""
     import anyio
+
+    from mship.core.async_runtime import _limiter_for
 
     calls = []
     real_run_sync = anyio.to_thread.run_sync
 
     async def capture_offload(func, *args, **kwargs):
-        calls.append((kwargs, anyio.to_thread.current_default_thread_limiter()))
+        calls.append(
+            (
+                kwargs,
+                anyio.to_thread.current_default_thread_limiter(),
+                _limiter_for("tunnel"),
+            )
+        )
         return await real_run_sync(func, *args, **kwargs)
 
     monkeypatch.setattr(anyio.to_thread, "run_sync", capture_offload)
@@ -847,9 +855,10 @@ def test_tunnel_offload_has_dedicated_non_abandoning_capacity(monkeypatch):
     assert len(calls) >= 3
     limiter = calls[0][0]["limiter"]
     assert limiter.total_tokens == 1
-    assert all(options["limiter"] is limiter for options, _ in calls)
-    assert all(options["abandon_on_cancel"] is False for options, _ in calls)
-    assert all(default is not limiter for _, default in calls)
+    assert all(options["limiter"] is limiter for options, _, _ in calls)
+    assert all(options["abandon_on_cancel"] is False for options, _, _ in calls)
+    assert all(default is not limiter for _, default, _ in calls)
+    assert all(shared is limiter for _, _, shared in calls)
 
 
 class _BlockedTunnel(_FakeTunnel):

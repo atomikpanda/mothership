@@ -11,13 +11,12 @@ Remote traffic stays on the #471 tunnel path.
 
 from __future__ import annotations
 
-import asyncio
-
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from mship.core.async_runtime import run_sync
 from mship.core.daemon.registry import RegistryReadError
 
 # CLI<->daemon control-protocol version; bump on breaking payload changes.
@@ -52,7 +51,7 @@ def create_control_app(
     `tunnel_state` can independently publish an initialization failure.
 
     Only the tunnel's PUBLISHED SNAPSHOT is ever read here: ticks mutate it on
-    an executor thread (`run.py::_tunnel_loop`) while requests are served on the
+    an offload thread (`run.py::_tunnel_loop`) while requests are served on the
     loop thread, so reading its live fields would be a torn read.
     """
     from fastapi import FastAPI, HTTPException
@@ -109,7 +108,7 @@ def create_control_app(
         async def refresh(cleanup_only: bool = False):
             if not cleanup_only and rescan is not None:
                 try:
-                    await asyncio.get_running_loop().run_in_executor(None, rescan)
+                    await run_sync("registry", rescan)
                 except (ValueError, RegistryReadError) as exc:
                     raise HTTPException(
                         status_code=RESCAN_ERROR_STATUS, detail=str(exc)
