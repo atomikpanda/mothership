@@ -136,6 +136,7 @@ mship dispatch --task <slug> -i "<instruction>"     # emit self-contained subage
 mship dispatch --task <slug> --mode standalone -i "<instruction>"  # standalone framing — subagent finishes and opens its own PR
 mship audit [--repos r] [--json]
 mship reconcile [--json] [--ignore SLUG] [--clear-ignores] [--refresh]
+mship reconcile --adopt-merged SLUG                  # verify merged PRs and recover missing task PR URLs/finish time; no teardown
 mship pr                                            # PR state for every active task with recorded PR URLs
 mship debug hypothesis "..." | rule-out "..." | resolved  # structured debugging journal entries (#30)
 mship view status|journal|diff|spec [--watch]
