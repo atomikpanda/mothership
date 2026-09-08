@@ -20,7 +20,7 @@ mship init --install-hooks                          # (re)install Git hooks plus
                                                     # .codex/hooks.json (review via Codex /hooks)
                                                     # .omp/extensions/mship.ts
                                                     # Commit project artifacts so worktrees inherit them.
-                                                    # Main-edit bypass: MSHIP_ALLOW_MAIN_EDIT=1.
+                                                    # Entire PreToolUse edit-guard bypass: MSHIP_ALLOW_MAIN_EDIT=1.
 mship spawn "description" (--work-item <id> | --hotfix) [--repos a,b] [--skip-setup] [--bypass-reconcile]
                                                     # --work-item <id> required (create via `mship item new`);
                                                     # bypass the gate with --hotfix. Also: --depends-on, --base, --slug.
@@ -47,6 +47,33 @@ a manual action even when the capability is already enabled.
 artifact is valid, whether the Codex hook feature capability is enabled, and
 whether manual project trust remains unresolved. A current registration is
 therefore configured but untrusted, not reported as fully active.
+
+Codex edit failures also have distinct signatures. A Mothership edit-gate
+denial exits with status 2 and starts stderr with `mship edit gate rejected:`;
+`MSHIP_BYPASS_GATE=1` bypasses only the WorkItem/spec gate, while
+`MSHIP_ALLOW_MAIN_EDIT=1` currently exits before the event is parsed and
+therefore bypasses the entire PreToolUse edit guard, including WorkItem/spec
+checks. Neither override affects sandbox bootstrap. By contrast,
+`bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` means the Codex
+filesystem sandbox failed before the requested edit ran. On Ubuntu hosts with
+restricted unprivileged user namespaces, ask the host operator to install the
+intended profile if needed. It may already be at
+`/etc/apparmor.d/bwrap-userns-restrict`; only if it is absent should the operator
+locate a distribution-provided copy (often
+`/usr/share/apparmor/extra-profiles/bwrap-userns-restrict`) and install or copy it
+per that distribution's guidance. This diagnostic cannot detect whether another
+AppArmor profile already attaches `/usr/bin/bwrap`: inspect the host policy
+configuration and reconcile any collision before loading the intended profile
+with `sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict`. Restart
+Codex and retry the original edit tool. Verify recovery with an add-update-delete
+cycle; do not substitute a shell, Python, or other unapproved file writer.
+
+`mship doctor` and `mship init --install-hooks` diagnose this Ubuntu
+prerequisite from the user-namespace restriction, installed profile, and
+current confinement state. They deliberately do not launch nested `bwrap`:
+inside a working Codex sandbox that nested launch can fail normally. When the
+profile exists but its loaded state cannot be confirmed from the sandbox, the
+commands warn and direct the operator to verify it from the host.
 
 > **Entry point — spawn vs. spec dispatch:** `mship spawn` starts an ad-hoc task directly, but for **spec-driven** work you don't call it first. `mship spec dispatch <id>` (see **Work items & specs** below) is the entry point: it binds an approved spec and **spawns its own task**. Running `spawn` and then `spec dispatch` against the same spec double-creates tasks (#296). Rule of thumb: have an approved spec → `spec dispatch`; ad-hoc chore/bug → `spawn`.
 

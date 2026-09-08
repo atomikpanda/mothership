@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
 import shlex
-import tempfile
+import stat
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -19,6 +21,17 @@ CODEX_HOOKS_PATH = Path(".codex/hooks.json")
 CODEX_FEATURE_ENABLE_COMMAND = "codex features enable codex_hooks"
 CODEX_TRUST_ACTION = "open `/hooks` in Codex to review and trust the project hooks"
 CODEX_CAPABILITY_PROBE_TIMEOUT_SECONDS = 5
+APPARMOR_USERNS_RESTRICTION_PATH = Path(
+    "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+)
+APPARMOR_BWRAP_PROFILE_PATH = Path("/etc/apparmor.d/bwrap-userns-restrict")
+APPARMOR_CURRENT_PROFILE_PATH = Path("/proc/self/attr/current")
+CODEX_SANDBOX_BOOTSTRAP_SIGNATURE = (
+    "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
+)
+BWRAP_APPARMOR_CONFINEMENT_RE = re.compile(
+    r"^bwrap(?://&?unpriv_bwrap)? \(enforce\)$"
+)
 CODEX_COMMANDS = {
     "SessionStart": "mship _session-context --runtime codex",
     "PreToolUse": "mship _guard-edit --runtime codex",
@@ -73,6 +86,138 @@ class CodexHookCapabilityResult:
     state: CodexHookCapability
     feature_name: str | None = None
     detail: str = ""
+
+
+class CodexSandboxReadiness(str, Enum):
+    NOT_APPLICABLE = "not-applicable"
+    UNKNOWN = "unknown"
+    UNREADABLE = "unreadable"
+    PROFILE_MISSING = "profile-missing"
+    PROFILE_PRESENT_UNVERIFIED = "profile-present-unverified"
+    ACTIVE = "active"
+
+
+@dataclass(frozen=True)
+class CodexSandboxReadinessResult:
+    state: CodexSandboxReadiness
+    detail: str = ""
+
+
+def format_codex_sandbox_warning(result: CodexSandboxReadinessResult) -> str:
+    """Explain a non-ready sandbox result without probing nested bwrap."""
+    return (
+        f"Codex filesystem sandbox readiness could not be confirmed: "
+        f"{result.detail}. If Codex reports "
+        f"`{CODEX_SANDBOX_BOOTSTRAP_SIGNATURE}`, its outer filesystem sandbox "
+        "failed before the requested edit runs; this is not a Mothership hook "
+        "rejection. `MSHIP_BYPASS_GATE=1` bypasses only the WorkItem/spec gate "
+        "and does not affect sandbox bootstrap. Do not test this by launching "
+        "nested bwrap from Codex. Ask the host operator whether the intended "
+        "profile is already installed at `/etc/apparmor.d/bwrap-userns-restrict`; "
+        "if it is absent, locate the distribution-provided profile (often "
+        "`/usr/share/apparmor/extra-profiles/bwrap-userns-restrict`) and install "
+        "or copy it according to that distribution's guidance. This check does "
+        "not detect whether another AppArmor profile attaches `/usr/bin/bwrap`; "
+        "inspect the host policy configuration and reconcile any collision before "
+        "loading. Load the intended profile with `sudo apparmor_parser -r "
+        "/etc/apparmor.d/bwrap-userns-restrict`, restart Codex, and retry the "
+        "original `apply_patch` edit."
+    )
+
+
+def inspect_codex_sandbox_readiness(
+    *,
+    codex_binary: str | None,
+    bwrap_binary: str | None,
+    platform_name: str | None = None,
+    restriction_path: Path | None = None,
+    profile_path: Path | None = None,
+    current_profile_path: Path | None = None,
+) -> CodexSandboxReadinessResult:
+    """Inspect Ubuntu/AppArmor bwrap prerequisites without executing bwrap.
+
+    A command probe is deliberately unsafe here: doctor can itself run inside
+    Codex's outer bwrap sandbox, where a nested namespace failure is expected
+    even when the host is configured correctly.
+    """
+    if codex_binary is None or (platform_name or platform.system()) != "Linux":
+        return CodexSandboxReadinessResult(CodexSandboxReadiness.NOT_APPLICABLE)
+
+    restriction = restriction_path or APPARMOR_USERNS_RESTRICTION_PATH
+    profile = profile_path or APPARMOR_BWRAP_PROFILE_PATH
+    current_profile = current_profile_path or APPARMOR_CURRENT_PROFILE_PATH
+    try:
+        confinement = current_profile.read_text().strip()
+        confinement_error = ""
+    except FileNotFoundError:
+        confinement = ""
+        confinement_error = ""
+    except OSError as exc:
+        confinement = ""
+        confinement_error = (
+            f"cannot read current AppArmor confinement at {current_profile}: {exc}"
+        )
+    if BWRAP_APPARMOR_CONFINEMENT_RE.fullmatch(confinement):
+        return CodexSandboxReadinessResult(
+            CodexSandboxReadiness.ACTIVE,
+            detail=f"active AppArmor confinement: {confinement}",
+        )
+
+    if bwrap_binary is None:
+        return CodexSandboxReadinessResult(CodexSandboxReadiness.NOT_APPLICABLE)
+
+    try:
+        restriction_value = restriction.read_text().strip()
+    except FileNotFoundError:
+        return CodexSandboxReadinessResult(CodexSandboxReadiness.NOT_APPLICABLE)
+    except OSError as exc:
+        return CodexSandboxReadinessResult(
+            CodexSandboxReadiness.UNREADABLE,
+            detail=f"cannot read userns restriction at {restriction}: {exc}",
+        )
+    if restriction_value == "0":
+        return CodexSandboxReadinessResult(CodexSandboxReadiness.NOT_APPLICABLE)
+    if restriction_value != "1":
+        return CodexSandboxReadinessResult(
+            CodexSandboxReadiness.UNKNOWN,
+            detail=(
+                f"userns restriction at {restriction} has unexpected value "
+                f"{restriction_value!r}"
+            ),
+        )
+
+    try:
+        profile_mode = profile.stat().st_mode
+    except FileNotFoundError:
+        return CodexSandboxReadinessResult(
+            CodexSandboxReadiness.PROFILE_MISSING,
+            detail=(
+                "Ubuntu's bwrap-userns-restrict AppArmor profile is missing at "
+                f"{profile}"
+            ),
+        )
+    except OSError as exc:
+        return CodexSandboxReadinessResult(
+            CodexSandboxReadiness.UNREADABLE,
+            detail=f"cannot inspect AppArmor profile at {profile}: {exc}",
+        )
+    if not stat.S_ISREG(profile_mode):
+        return CodexSandboxReadinessResult(
+            CodexSandboxReadiness.UNKNOWN,
+            detail=f"AppArmor profile path is not a regular file: {profile}",
+        )
+    if confinement_error:
+        return CodexSandboxReadinessResult(
+            CodexSandboxReadiness.UNREADABLE,
+            detail=confinement_error,
+        )
+    return CodexSandboxReadinessResult(
+        CodexSandboxReadiness.PROFILE_PRESENT_UNVERIFIED,
+        detail=(
+            f"AppArmor profile present at {profile}, but its loaded state is not "
+            "visible from this process"
+        ),
+    )
 
 
 def probe_codex_hook_capability(

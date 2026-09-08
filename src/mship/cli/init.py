@@ -12,6 +12,9 @@ from mship.core.codex_hooks import (
     CODEX_FEATURE_ENABLE_COMMAND,
     CODEX_TRUST_ACTION,
     CodexHookCapability,
+    CodexSandboxReadiness,
+    format_codex_sandbox_warning,
+    inspect_codex_sandbox_readiness,
     install_codex_hooks,
     probe_codex_hook_capability,
 )
@@ -60,10 +63,15 @@ def _install_agent_hooks_with_output(
             output.warning(f"OMP extension install skipped at {project_root}: {e}")
 
     if project_roots:
+        codex_binary = shutil.which("codex")
         capability = probe_codex_hook_capability(
             ShellRunner(),
             ws_root,
-            codex_binary=shutil.which("codex"),
+            codex_binary=codex_binary,
+        )
+        sandbox = inspect_codex_sandbox_readiness(
+            codex_binary=codex_binary,
+            bwrap_binary=shutil.which("bwrap"),
         )
         if not codex_registrations_current:
             message = (
@@ -98,6 +106,16 @@ def _install_agent_hooks_with_output(
             output.warning(
                 "Codex hooks configured but not verified active: "
                 f"{capability.detail}; {CODEX_TRUST_ACTION}"
+            )
+
+        if sandbox.state not in {
+            CodexSandboxReadiness.NOT_APPLICABLE,
+            CodexSandboxReadiness.ACTIVE,
+        }:
+            output.warning(format_codex_sandbox_warning(sandbox))
+        elif sandbox.state is CodexSandboxReadiness.ACTIVE:
+            output.success(
+                "Ubuntu AppArmor bwrap profile active for this Codex process"
             )
 
 

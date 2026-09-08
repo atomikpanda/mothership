@@ -936,6 +936,114 @@ def test_doctor_reports_all_agent_integrations_healthy(workspace: Path, monkeypa
     assert "fully active" not in " ".join(check.message for check in report.checks)
 
 
+@pytest.mark.parametrize(
+    "profile_present",
+    [False, True],
+    ids=["missing", "present-unverified"],
+)
+def test_doctor_distinguishes_unready_bwrap_profile_from_mothership_gate(
+    workspace: Path,
+    tmp_path: Path,
+    monkeypatch,
+    profile_present: bool,
+):
+    from mship.core import codex_hooks
+
+    _install_all_agent_integrations(workspace)
+    restriction = tmp_path / "apparmor_restrict_unprivileged_userns"
+    restriction.write_text("1\n")
+    current = tmp_path / "current"
+    current.write_text("unconfined\n")
+    profile = tmp_path / "bwrap-userns-restrict"
+    if profile_present:
+        profile.write_text("profile bwrap /usr/bin/bwrap { allow userns, }\n")
+    monkeypatch.setattr(
+        codex_hooks, "APPARMOR_USERNS_RESTRICTION_PATH", restriction
+    )
+    monkeypatch.setattr(codex_hooks, "APPARMOR_BWRAP_PROFILE_PATH", profile)
+    monkeypatch.setattr(codex_hooks, "APPARMOR_CURRENT_PROFILE_PATH", current)
+    monkeypatch.setattr(
+        "mship.core.doctor.shutil.which",
+        lambda name: f"/usr/bin/{name}"
+        if name in {"task", "codex", "bwrap", "omp"}
+        else None,
+    )
+    shell = _agent_runtime_shell()
+
+    report = DoctorChecker(
+        ConfigLoader.load(workspace / "mothership.yaml"),
+        shell,
+        workspace_root=workspace,
+        probe_network=False,
+    ).run()
+    row = next(
+        check
+        for check in report.checks
+        if check.name == "agent-runtime/codex-sandbox"
+    )
+
+    assert row.status == "warn"
+    assert codex_hooks.CODEX_SANDBOX_BOOTSTRAP_SIGNATURE in row.message
+    assert "not a Mothership hook rejection" in row.message
+    assert "MSHIP_BYPASS_GATE=1` bypasses only the WorkItem/spec gate" in row.message
+    assert "profile is already installed at `/etc/apparmor.d/bwrap-userns-restrict`" in row.message
+    assert "`sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict`" in row.message
+    assert "does not detect whether another AppArmor profile attaches `/usr/bin/bwrap`" in row.message
+    assert "reconcile any collision before loading" in row.message
+    assert "aa-enforce" not in row.message
+    assert "restart Codex" in row.message
+    assert "original `apply_patch` edit" in row.message
+    assert not any(
+        call.args[0].startswith("bwrap ") for call in shell.run.call_args_list
+    )
+
+
+def test_doctor_reports_active_bwrap_profile_without_nested_probe(
+    workspace: Path,
+    tmp_path: Path,
+    monkeypatch,
+):
+    from mship.core import codex_hooks
+
+    _install_all_agent_integrations(workspace)
+    restriction = tmp_path / "apparmor_restrict_unprivileged_userns"
+    restriction.write_text("1\n")
+    profile = tmp_path / "bwrap-userns-restrict"
+    profile.write_text("profile bwrap /usr/bin/bwrap { allow userns, }\n")
+    current = tmp_path / "current"
+    current.write_text("bwrap//&unpriv_bwrap (enforce)\n")
+    monkeypatch.setattr(
+        codex_hooks, "APPARMOR_USERNS_RESTRICTION_PATH", restriction
+    )
+    monkeypatch.setattr(codex_hooks, "APPARMOR_BWRAP_PROFILE_PATH", profile)
+    monkeypatch.setattr(codex_hooks, "APPARMOR_CURRENT_PROFILE_PATH", current)
+    monkeypatch.setattr(
+        "mship.core.doctor.shutil.which",
+        lambda name: f"/usr/bin/{name}"
+        if name in {"task", "codex", "bwrap", "omp"}
+        else None,
+    )
+    shell = _agent_runtime_shell()
+
+    report = DoctorChecker(
+        ConfigLoader.load(workspace / "mothership.yaml"),
+        shell,
+        workspace_root=workspace,
+        probe_network=False,
+    ).run()
+    row = next(
+        check
+        for check in report.checks
+        if check.name == "agent-runtime/codex-sandbox"
+    )
+
+    assert row.status == "pass"
+    assert "AppArmor bwrap profile active" in row.message
+    assert not any(
+        call.args[0].startswith("bwrap ") for call in shell.run.call_args_list
+    )
+
+
 
 
 def test_doctor_probes_pi_alias_when_omp_binary_is_absent(workspace: Path, monkeypatch):
