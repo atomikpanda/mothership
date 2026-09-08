@@ -239,6 +239,54 @@ def test_control_refresh_runs_host_cleanup_after_rescan(tmp_path):
     assert events == ["cleanup"]
 
 
+def test_control_refresh_does_not_depend_on_default_executor_capacity(tmp_path):
+    """A busy unrelated executor must not prevent a registry refresh."""
+    import asyncio
+    import concurrent.futures
+    import threading
+
+    import anyio
+    import httpx
+
+    occupied = threading.Event()
+    release = threading.Event()
+    rescanned = threading.Event()
+
+    def occupy_default_executor():
+        occupied.set()
+        assert release.wait(3), "test did not release the default executor"
+
+    app = create_control_app(
+        started_at=STARTED,
+        version="1",
+        socket_path="/s",
+        store=_registry_store(tmp_path),
+        rescan=rescanned.set,
+    )
+
+    async def scenario():
+        asyncio.get_running_loop().set_default_executor(
+            concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        )
+        blocker = asyncio.create_task(asyncio.to_thread(occupy_default_executor))
+        try:
+            with anyio.fail_after(1):
+                while not occupied.is_set():
+                    await anyio.sleep(0)
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app),
+                    base_url="http://control",
+                ) as client:
+                    response = await client.post("/workspaces/refresh")
+            assert response.status_code == 200
+            assert rescanned.is_set()
+        finally:
+            release.set()
+            await blocker
+
+    anyio.run(scenario, backend="asyncio")
+
+
 @pytest.mark.parametrize(
     ("error_type", "detail"),
     [

@@ -43,6 +43,7 @@ import anyio
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from mship.core.async_runtime import run_sync
 from mship.core.daemon.capabilities import runner_block
 from mship.core.daemon.control import RESCAN_ERROR_STATUS
 from mship.core.daemon.registry import RegistryReadError, RegistryStore, WorkspaceEntry
@@ -631,7 +632,7 @@ def create_host_app(
     async def refresh():
         if rescan is not None:
             try:
-                await asyncio.get_running_loop().run_in_executor(None, rescan)
+                await run_sync("registry", rescan)
             except (ValueError, RegistryReadError) as exc:
                 raise HTTPException(
                     status_code=RESCAN_ERROR_STATUS, detail=str(exc)

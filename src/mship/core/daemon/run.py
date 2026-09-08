@@ -443,9 +443,9 @@ async def _tunnel_loop(
     the daemon that recovers by retrying."""
     import anyio
 
+    from mship.core.async_runtime import run_sync
     from mship.core.daemon.host_tunnel import TICK_INTERVAL_S
 
-    limiter = anyio.CapacityLimiter(1)
     # Readiness means the local loop can supervise reconnects; a relay outage
     # must never hold daemon startup behind network registration/read-back.
     task_status.started()
@@ -453,9 +453,7 @@ async def _tunnel_loop(
         try:
             # Cancellation joins the bounded tick before the root can stop
             # its supervisor. Abandoning this worker could orphan a respawn.
-            await anyio.to_thread.run_sync(
-                tunnel.tick, limiter=limiter, abandon_on_cancel=False
-            )
+            await run_sync("tunnel", tunnel.tick)
         except Exception:
             log.exception("tunnel tick failed")
         with anyio.move_on_after(TICK_INTERVAL_S):
