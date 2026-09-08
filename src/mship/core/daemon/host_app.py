@@ -9,8 +9,8 @@ NOT `app.mount`: Starlette neither supports mutating a mount table safely on
 refresh nor runs mounted sub-apps' lifespan events at all — the PrWatcher in
 `create_app`'s lifespan would silently never start. Instead each sub-app's
 lifespan is entered explicitly on first build and exited when a refresh
-removes/degrades its entry, under a per-host `AsyncExitStack`-style supervisor
-guarded by a lock.
+removes/degrades its entry, under a per-host AnyIO task-group supervisor guarded
+by a lock.
 
 Addressing is by ID only — name-in-URL would reintroduce the same-name
 ambiguity the id exists to kill. Degraded/missing ids → 503 with the stored
@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs
 
+import anyio
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
@@ -203,16 +204,54 @@ class _SubApp:
         self.app = app
         self.fingerprint = fingerprint
         self._cm = None
+        self._stop_requested: anyio.Event | None = None
+        self._drained: anyio.Event | None = None
 
-    async def start(self) -> None:
-        # Enter the sub-app's lifespan explicitly (mounted apps never get it).
+    async def _supervise(
+        self,
+        *,
+        task_status: anyio.abc.TaskStatus[None] = anyio.TASK_STATUS_IGNORED,
+    ) -> None:
+        """Enter and exit the nested lifespan in this one owner task."""
+        stop_requested = self._stop_requested
+        drained = self._drained
+        assert stop_requested is not None and drained is not None
         self._cm = self.app.router.lifespan_context(self.app)
-        await self._cm.__aenter__()
+        entered = False
+        try:
+            await self._cm.__aenter__()
+            entered = True
+            task_status.started()
+            await stop_requested.wait()
+        finally:
+            try:
+                if entered:
+                    await self._cm.__aexit__(None, None, None)
+            finally:
+                self._cm = None
+                drained.set()
+
+    async def start(self, task_group: anyio.abc.TaskGroup) -> None:
+        # Mounted apps never get lifespan events. Start a host-owned supervisor
+        # and do not report readiness until the nested serve lifespan is ready.
+        self._stop_requested = anyio.Event()
+        self._drained = anyio.Event()
+        try:
+            await task_group.start(self._supervise)
+        except BaseException:
+            self._stop_requested = None
+            self._drained = None
+            raise
 
     async def stop(self) -> None:
-        if self._cm is not None:
-            await self._cm.__aexit__(None, None, None)
-            self._cm = None
+        stop_requested = self._stop_requested
+        drained = self._drained
+        if stop_requested is None or drained is None:
+            return
+        stop_requested.set()
+        await drained.wait()
+        self._stop_requested = None
+        self._drained = None
 
 
 def _default_build_subapp(
@@ -439,16 +478,23 @@ def create_host_app(
 
     subapps: dict[str, _SubApp] = {}
     lock = asyncio.Lock()
+    subapp_task_group: anyio.abc.TaskGroup | None = None
 
     @asynccontextmanager
     async def _lifespan(_app):
+        nonlocal subapp_task_group
         try:
-            yield
+            async with anyio.create_task_group() as task_group:
+                subapp_task_group = task_group
+                try:
+                    yield
+                finally:
+                    async with lock:
+                        for sub in subapps.values():
+                            await sub.stop()
+                        subapps.clear()
         finally:
-            async with lock:
-                for sub in subapps.values():
-                    await sub.stop()
-                subapps.clear()
+            subapp_task_group = None
 
     app = FastAPI(title="mship host", docs_url=None, redoc_url=None,
                   openapi_url=None, lifespan=_lifespan)
@@ -478,6 +524,8 @@ def create_host_app(
                 await subapps.pop(entry.id).stop()
                 sub = None
             if sub is None:
+                if subapp_task_group is None:
+                    raise RuntimeError("host lifespan is not running")
                 sub = _SubApp(
                     build_subapp(
                         entry,
@@ -490,7 +538,7 @@ def create_host_app(
                     ),
                     fp,
                 )
-                await sub.start()
+                await sub.start(subapp_task_group)
                 subapps[entry.id] = sub
             return sub
 
