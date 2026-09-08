@@ -626,6 +626,10 @@ class _OwnedForwardSubApp:
         self.blocked_on_ninth_send = asyncio.Event()
         self.release = asyncio.Event()
         self.lifespan_stopped = asyncio.Event()
+        self.cleanup_started = asyncio.Event()
+        self.cleanup_release = asyncio.Event()
+        if mode != "wait-for-cancellation-hold-cleanup":
+            self.cleanup_release.set()
 
     async def __call__(self, _scope, _receive, send):
         task = asyncio.current_task()
@@ -685,6 +689,8 @@ class _OwnedForwardSubApp:
             self.cancelled.set()
             raise
         finally:
+            self.cleanup_started.set()
+            await self.cleanup_release.wait()
             self.active.discard(task)
             self.finalized.set()
 
@@ -1079,8 +1085,13 @@ def test_forward_streams_chunks_incrementally(tmp_path):
     assert first_at and first_at[0] < 3, f"response was buffered until completion (sent={first_at})"
 
 
-def test_active_forward_stream_host_shutdown_joins_producer_and_subapp(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    ("server_role", "interrupt"),
+    [("control", True), ("host", True), ("control", False)],
+    ids=["control-interrupted", "host-interrupted", "control-graceful"],
+)
+def test_daemon_shutdown_cancels_active_forward_stream(
+    tmp_path, monkeypatch, server_role, interrupt
 ):
     """Real server shutdown must settle the request before ending its subapp."""
     from contextlib import asynccontextmanager
@@ -1094,11 +1105,12 @@ def test_active_forward_stream_host_shutdown_joins_producer_and_subapp(
     from mship.core.daemon import run as run_mod
 
     async def scenario():
-        host, subapp = _owned_forward_app(tmp_path, "wait-for-cancellation")
-        control = FastAPI()
+        host, subapp = _owned_forward_app(tmp_path, "wait-for-cancellation-hold-cleanup")
+        control = FastAPI() if server_role == "host" else host
         ready = anyio.Event()
         stopped = anyio.Event()
         lifespan_ended = anyio.Event()
+        graceful_shutdown_entered = anyio.Event()
         control.state.set_serve_bound = lambda bound: ready.set() if bound else None
         original_lifespan = host.router.lifespan_context
 
@@ -1116,22 +1128,29 @@ def test_active_forward_stream_host_shutdown_joins_producer_and_subapp(
         real_server = uvicorn.Server
 
         def build_server(config):
-            # The deliberately endless stream makes graceful shutdown expire;
-            # Uvicorn must cancel and join the request before closing lifespan.
-            config.timeout_graceful_shutdown = 0
             server = real_server(config)
+            if not interrupt:
+                original_shutdown = server.shutdown
+
+                async def observe_shutdown(sockets=None):
+                    graceful_shutdown_entered.set()
+                    await original_shutdown(sockets=sockets)
+
+                server.shutdown = observe_shutdown
             servers.append(server)
             return server
 
         monkeypatch.setattr(uvicorn, "Server", build_server)
-        monkeypatch.setattr(run_mod, "_install_stop_handlers", lambda *_args: None)
+        monkeypatch.setattr(run_mod, "_install_stop_handlers", lambda *_args: ready.set())
         daemon_scope = anyio.CancelScope()
 
         async def daemon():
             with daemon_scope:
                 await run_mod._serve(
-                    control, Path(socket_dir) / "control.sock", host,
-                    {"host": "127.0.0.1", "port": 0}, None,
+                    control, Path(socket_dir) / "control.sock",
+                    host if server_role == "host" else None,
+                    {"host": "127.0.0.1", "port": 0} if server_role == "host" else None,
+                    None,
                 )
             stopped.set()
 
@@ -1139,22 +1158,56 @@ def test_active_forward_stream_host_shutdown_joins_producer_and_subapp(
             async with anyio.create_task_group() as group:
                 group.start_soon(daemon)
                 await ready.wait()
-                port = servers[1].servers[0].sockets[0].getsockname()[1]
+                if server_role == "host":
+                    port = servers[1].servers[0].sockets[0].getsockname()[1]
+                    transport = httpx.AsyncHTTPTransport()
+                    origin = f"http://127.0.0.1:{port}"
+                else:
+                    transport = httpx.AsyncHTTPTransport(uds=str(Path(socket_dir) / "control.sock"))
+                    origin = "http://daemon"
                 try:
-                    async with httpx.AsyncClient() as client:
+                    async with httpx.AsyncClient(transport=transport) as client:
                         async with client.stream(
-                            "POST", f"http://127.0.0.1:{port}/workspaces/ws-stream/exec/run"
+                            "POST", f"{origin}/workspaces/ws-stream/exec/run"
                         ) as response:
-                            assert response.status_code == 207
-                            assert await anext(response.aiter_bytes()) == b"raw-first\x00"
-                            assert subapp.active
-                            daemon_scope.cancel()
-                            await stopped.wait()
+                            body = response.aiter_bytes()
+                            try:
+                                assert response.status_code == 207
+                                assert await anext(body) == b"raw-first\x00"
+                                assert subapp.active
+                                if interrupt:
+                                    daemon_scope.cancel()
+                                else:
+                                    servers[0].should_exit = True
+                                    with anyio.fail_after(1):
+                                        await graceful_shutdown_entered.wait()
+                                    assert not subapp.cleanup_started.is_set()
+                                    assert not subapp.cancelled.is_set()
+                                    subapp.release.set()
+                                # Keep the iterator AND transport open through
+                                # this observation: client cleanup cannot be
+                                # what makes server-side cancellation succeed.
+                                with anyio.move_on_after(1):
+                                    await subapp.cleanup_started.wait()
+                                assert subapp.cleanup_started.is_set(), "daemon waited for client stream closure"
+                                assert not stopped.is_set()
+                                assert not lifespan_ended.is_set()
+                                assert not subapp.lifespan_stopped.is_set()
+                                subapp.cleanup_release.set()
+                                with anyio.move_on_after(1):
+                                    await stopped.wait()
+                                assert stopped.is_set(), "daemon waited for client stream closure"
+                                assert subapp.finalized.is_set()
+                                assert subapp.cancelled.is_set() is interrupt
+                                assert lifespan_ended.is_set()
+                            finally:
+                                await body.aclose()
                 finally:
                     daemon_scope.cancel()
                     subapp.release.set()
+                    subapp.cleanup_release.set()
                 assert lifespan_ended.is_set()
-                assert subapp.cancelled.is_set()
+                assert subapp.cancelled.is_set() is interrupt
                 assert all(not server.server_state.tasks for server in servers)
 
     # macOS pytest roots can exceed the native Unix socket path limit.

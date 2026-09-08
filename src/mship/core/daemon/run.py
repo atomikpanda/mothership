@@ -248,6 +248,29 @@ class _ServerStoppedBeforeReady(Exception):
         self.outcome = outcome
 
 
+async def _shutdown_interrupted_server(server) -> None:
+    """Cancel and join Uvicorn requests before ending their app lifespans.
+
+    An interrupted serve() has lost its graceful-shutdown owner. Stop ingress
+    first, then explicitly settle its asyncio request tasks; Uvicorn's default
+    shutdown timeout is unbounded and otherwise waits for streaming clients.
+    Normal serve() returns keep Uvicorn's ordinary graceful shutdown policy.
+    """
+    import asyncio
+
+    for listener in server.servers:
+        listener.close()
+    for connection in list(server.server_state.connections):
+        connection.shutdown()
+    while requests := tuple(server.server_state.tasks):
+        for request in requests:
+            request.cancel("daemon server interrupted")
+        # Uvicorn observes/logs ASGI errors. Retrieve every request result and
+        # let its cancellation finalizers finish before lifespan shutdown.
+        await asyncio.gather(*requests, return_exceptions=True)
+    await server.shutdown()
+
+
 async def _run_server_child(
     name,
     server,
@@ -291,7 +314,7 @@ async def _run_server_child(
                     # cancelling our child must still join that cleanup.
                     with anyio.CancelScope(shield=True):
                         if server.started:
-                            await server.shutdown()
+                            await _shutdown_interrupted_server(server)
                         elif (lifespan := getattr(server, "lifespan", None)) is not None:
                             # Startup creates the lifespan before binding. No
                             # listening sockets exist yet, but the app must exit.
