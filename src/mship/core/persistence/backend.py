@@ -79,7 +79,8 @@ def list_legacy_workitems(
     uncertain = False
     for path in directory.glob("*.json"):
         try:
-            items.append(WorkItem.model_validate_json(path.read_text()))
+            contained_path = _legacy_workitem_path(directory, path.stem)
+            items.append(WorkItem.model_validate_json(contained_path.read_text()))
         except Exception:
             if not tolerant:
                 raise
