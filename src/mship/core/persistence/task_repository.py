@@ -11,6 +11,7 @@ from mship.core.persistence.schema import (
     task_pr_urls,
     task_repos,
     task_switch_anchors,
+    task_switch_sources,
     task_test_results,
     tasks,
 )
@@ -26,6 +27,7 @@ from mship.core.state import DependencyEdge, Task, TestResult
 _TASK_CHILD_TABLES = (
     task_dependencies,
     task_switch_anchors,
+    task_switch_sources,
     task_pr_urls,
     task_test_results,
     task_repos,
@@ -160,6 +162,17 @@ class TaskRepository:
         )
         self._insert_many(
             conn,
+            task_switch_sources,
+            (
+                {
+                    "task_slug": task.slug,
+                    "source_repo": source_repo,
+                }
+                for source_repo in task.last_switched_at_sha
+            ),
+        )
+        self._insert_many(
+            conn,
             task_switch_anchors,
             (
                 {
@@ -237,7 +250,14 @@ class TaskRepository:
                     .order_by(task_pr_urls.c.repo_name)
                 ).mappings()
             }
-            switched: dict[str, dict[str, str]] = {}
+            switched = {
+                str(source["source_repo"]): {}
+                for source in conn.execute(
+                    select(task_switch_sources)
+                    .where(task_switch_sources.c.task_slug == slug)
+                    .order_by(task_switch_sources.c.source_repo)
+                ).mappings()
+            }
             for anchor in conn.execute(
                 select(task_switch_anchors)
                 .where(task_switch_anchors.c.task_slug == slug)

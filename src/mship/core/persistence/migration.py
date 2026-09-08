@@ -14,7 +14,7 @@ from pathlib import Path
 from mship.core.daemon.status import daemon_is_running
 from mship.core.persistence.backend import (
     StorageBackend,
-    _legacy_workitem_path,
+    _legacy_workitem_entries,
     detect_backend,
     list_legacy_workitems,
     load_legacy_state,
@@ -85,9 +85,8 @@ def _legacy_fingerprints(state_dir: Path) -> tuple[str, str]:
     items_digest = hashlib.sha256()
     workitems_dir = state_dir / "workitems"
     if workitems_dir.is_dir():
-        for discovered in sorted(workitems_dir.glob("*.json")):
-            path = _legacy_workitem_path(workitems_dir, discovered.stem)
-            items_digest.update(path.name.encode())
+        for item_id, path in sorted(_legacy_workitem_entries(workitems_dir)):
+            items_digest.update(f"{item_id}.json".encode())
             items_digest.update(b"\0")
             items_digest.update(hashlib.sha256(path.read_bytes()).digest())
     return state_digest, items_digest.hexdigest()
@@ -106,9 +105,8 @@ def _backup_legacy(state_dir: Path, now: datetime) -> Path:
     if workitems_dir.is_dir():
         backup_items = backup / "workitems"
         backup_items.mkdir()
-        for discovered in sorted(workitems_dir.glob("*.json")):
-            path = _legacy_workitem_path(workitems_dir, discovered.stem)
-            shutil.copy2(path, backup_items / discovered.name)
+        for item_id, path in sorted(_legacy_workitem_entries(workitems_dir)):
+            shutil.copy2(path, backup_items / f"{item_id}.json")
     return backup
 
 
@@ -227,14 +225,9 @@ def migrate_legacy_state(
             )
 
         workitems_dir = state_dir / "workitems"
-        item_paths = (
-            [
-                _legacy_workitem_path(workitems_dir, path.stem)
-                for path in sorted(workitems_dir.glob("*.json"))
-            ]
-            if workitems_dir.is_dir()
-            else []
-        )
+        item_paths = [
+            path for _, path in sorted(_legacy_workitem_entries(workitems_dir))
+        ]
         with ExitStack() as locks:
             locks.enter_context(_exclusive_lock(state_dir / "state.lock"))
             locks.enter_context(_exclusive_lock(workitems_dir / ".thread-link.lock"))

@@ -69,7 +69,8 @@ tasks:
         root = Path(sys.argv[1])
         expected_tables = {
             "storage_metadata", "tasks", "task_repos", "task_test_results",
-            "task_pr_urls", "task_switch_anchors", "task_dependencies",
+            "task_pr_urls", "task_switch_sources", "task_switch_anchors",
+            "task_dependencies",
             "work_items", "workitem_tasks", "workitem_threads",
             "workitem_external_links", "workitem_affected_repos",
             "workitem_pr_urls",

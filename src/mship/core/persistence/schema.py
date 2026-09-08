@@ -113,6 +113,20 @@ task_pr_urls = Table(
     PrimaryKeyConstraint("task_slug", "repo_name"),
 )
 
+
+task_switch_sources = Table(
+    "task_switch_sources",
+    metadata,
+    Column(
+        "task_slug",
+        Text,
+        ForeignKey("tasks.slug", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("source_repo", Text, nullable=False),
+    PrimaryKeyConstraint("task_slug", "source_repo"),
+)
+
 task_switch_anchors = Table(
     "task_switch_anchors",
     metadata,

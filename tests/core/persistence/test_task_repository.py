@@ -88,6 +88,21 @@ def test_task_round_trips_every_model_field(connection: Connection) -> None:
     assert restored.model_dump(mode="json") == task.model_dump(mode="json")
 
 
+def test_task_round_trips_switch_source_without_dependencies(
+    connection: Connection,
+) -> None:
+    repository = TaskRepository()
+    task = _full_task().model_copy(
+        update={"last_switched_at_sha": {"mothership": {}}}
+    )
+
+    repository.insert(connection, task)
+    restored = repository.get(connection, task.slug)
+
+    assert restored is not None
+    assert restored.last_switched_at_sha == {"mothership": {}}
+
+
 def test_task_list_order_is_stable_by_slug(connection: Connection) -> None:
     repository = TaskRepository()
     repository.insert(connection, _full_task("task-b"))

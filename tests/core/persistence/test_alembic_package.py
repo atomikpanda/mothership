@@ -13,6 +13,7 @@ EXPECTED_DOMAIN_TABLES = {
     "task_repos",
     "task_test_results",
     "task_pr_urls",
+    "task_switch_sources",
     "task_switch_anchors",
     "task_dependencies",
     "work_items",

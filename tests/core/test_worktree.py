@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from mship.core.config import ConfigLoader, WorkspaceConfig
 from mship.core.graph import DependencyGraph
@@ -368,6 +369,29 @@ def test_spawn_duplicate_slug_insert_race_is_actionable(
         "Run `mship close --yes --abandon --task duplicate-race` to remove it "
         "first, or use a different description."
     )
+
+
+def test_spawn_propagates_unrelated_integrity_error(
+    worktree_deps,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    error = IntegrityError(
+        "INSERT INTO task_dependencies",
+        {},
+        RuntimeError("FOREIGN KEY constraint failed"),
+    )
+    monkeypatch.setattr(
+        state_mgr,
+        "insert_task",
+        MagicMock(side_effect=error),
+    )
+    manager = WorktreeManager(config, graph, state_mgr, git, shell, log)
+
+    with pytest.raises(IntegrityError) as raised:
+        manager.spawn("unrelated integrity", repos=["shared"], workspace_root=workspace)
+
+    assert raised.value is error
 
 
 # ---------------------------------------------------------------------------

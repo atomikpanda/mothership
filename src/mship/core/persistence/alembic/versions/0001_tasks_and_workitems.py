@@ -116,6 +116,22 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("task_slug", "repo_name", name="pk_task_pr_urls"),
     )
     op.create_table(
+        "task_switch_sources",
+        sa.Column("task_slug", sa.Text(), nullable=False),
+        sa.Column("source_repo", sa.Text(), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["task_slug"],
+            ["tasks.slug"],
+            name="fk_task_switch_sources_task_slug_tasks",
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint(
+            "task_slug",
+            "source_repo",
+            name="pk_task_switch_sources",
+        ),
+    )
+    op.create_table(
         "task_switch_anchors",
         sa.Column("task_slug", sa.Text(), nullable=False),
         sa.Column("source_repo", sa.Text(), nullable=False),
@@ -335,6 +351,7 @@ def downgrade() -> None:
     op.drop_table("work_items")
     op.drop_table("task_dependencies")
     op.drop_table("task_switch_anchors")
+    op.drop_table("task_switch_sources")
     op.drop_table("task_pr_urls")
     op.drop_table("task_test_results")
     op.drop_table("task_repos")
