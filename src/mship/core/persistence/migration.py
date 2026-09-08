@@ -124,6 +124,31 @@ def _normalize_timestamps(value: object) -> object:
     return value
 
 
+def _normalize_task_links(
+    state: WorkspaceState,
+    items: list[WorkItem],
+) -> list[WorkItem]:
+    """Collapse repeated links, preserving order and rejecting competing owners."""
+    owners = {
+        slug: task.work_item_id
+        for slug, task in state.tasks.items()
+        if task.work_item_id is not None
+    }
+    normalized = []
+    for item in items:
+        task_slugs = list(dict.fromkeys(item.task_slugs))
+        for slug in task_slugs:
+            owner = owners.setdefault(slug, item.id)
+            if owner != item.id:
+                raise MigrationPreflightError(
+                    f"legacy task {slug!r} has conflicting WorkItem owners "
+                    f"{owner!r} and {item.id!r}; correct the legacy task links "
+                    "before retrying migration"
+                )
+        normalized.append(item.model_copy(update={"task_slugs": task_slugs}))
+    return normalized
+
+
 def _verify_candidate(
     database: WorkspaceDatabase,
     expected_state: WorkspaceState,
@@ -242,6 +267,7 @@ def migrate_legacy_state(
                 workitems_dir,
                 include_archived=True,
             )[0]
+            legacy_items = _normalize_task_links(legacy_state, legacy_items)
             state_fingerprint, items_fingerprint = _legacy_fingerprints(state_dir)
 
             _call_stage(stage_hook, "backup")
