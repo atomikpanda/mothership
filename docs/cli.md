@@ -20,7 +20,7 @@ mship init --install-hooks                          # (re)install Git hooks plus
                                                     # .codex/hooks.json (review via Codex /hooks)
                                                     # .omp/extensions/mship.ts
                                                     # Commit project artifacts so worktrees inherit them.
-                                                    # Main-edit bypass: MSHIP_ALLOW_MAIN_EDIT=1.
+                                                    # Entire PreToolUse edit-guard bypass: MSHIP_ALLOW_MAIN_EDIT=1.
 mship spawn "description" (--work-item <id> | --hotfix) [--repos a,b] [--skip-setup] [--bypass-reconcile]
                                                     # --work-item <id> required (create via `mship item new`);
                                                     # bypass the gate with --hotfix. Also: --depends-on, --base, --slug.
@@ -51,17 +51,22 @@ therefore configured but untrusted, not reported as fully active.
 Codex edit failures also have distinct signatures. A Mothership edit-gate
 denial exits with status 2 and starts stderr with `mship edit gate rejected:`;
 `MSHIP_BYPASS_GATE=1` bypasses only the WorkItem/spec gate, while
-`MSHIP_ALLOW_MAIN_EDIT=1` controls only main-checkout protection. Neither
-override affects sandbox bootstrap. By contrast,
+`MSHIP_ALLOW_MAIN_EDIT=1` currently exits before the event is parsed and
+therefore bypasses the entire PreToolUse edit guard, including WorkItem/spec
+checks. Neither override affects sandbox bootstrap. By contrast,
 `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` means the Codex
 filesystem sandbox failed before the requested edit ran. On Ubuntu hosts with
 restricted unprivileged user namespaces, ask the host operator to install the
-distribution AppArmor profiles if needed, enable and load
-`/usr/share/apparmor/extra-profiles/bwrap-userns-restrict` as
-`/etc/apparmor.d/bwrap-userns-restrict`, load it with
-`sudo aa-enforce /etc/apparmor.d/bwrap-userns-restrict`, restart Codex, and
-retry the original edit tool. Verify recovery with an add-update-delete cycle;
-do not substitute a shell, Python, or other unapproved file writer.
+intended profile if needed. It may already be at
+`/etc/apparmor.d/bwrap-userns-restrict`; only if it is absent should the operator
+locate a distribution-provided copy (often
+`/usr/share/apparmor/extra-profiles/bwrap-userns-restrict`) and install or copy it
+per that distribution's guidance. This diagnostic cannot detect whether another
+AppArmor profile already attaches `/usr/bin/bwrap`: inspect the host policy
+configuration and reconcile any collision before loading the intended profile
+with `sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict`. Restart
+Codex and retry the original edit tool. Verify recovery with an add-update-delete
+cycle; do not substitute a shell, Python, or other unapproved file writer.
 
 `mship doctor` and `mship init --install-hooks` diagnose this Ubuntu
 prerequisite from the user-namespace restriction, installed profile, and

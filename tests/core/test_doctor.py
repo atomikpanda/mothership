@@ -986,8 +986,11 @@ def test_doctor_distinguishes_unready_bwrap_profile_from_mothership_gate(
     assert codex_hooks.CODEX_SANDBOX_BOOTSTRAP_SIGNATURE in row.message
     assert "not a Mothership hook rejection" in row.message
     assert "MSHIP_BYPASS_GATE=1` bypasses only the WorkItem/spec gate" in row.message
-    assert "/usr/share/apparmor/extra-profiles/bwrap-userns-restrict" in row.message
-    assert "aa-enforce /etc/apparmor.d/bwrap-userns-restrict" in row.message
+    assert "profile is already installed at `/etc/apparmor.d/bwrap-userns-restrict`" in row.message
+    assert "`sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict`" in row.message
+    assert "does not detect whether another AppArmor profile attaches `/usr/bin/bwrap`" in row.message
+    assert "reconcile any collision before loading" in row.message
+    assert "aa-enforce" not in row.message
     assert "restart Codex" in row.message
     assert "original `apply_patch` edit" in row.message
     assert not any(

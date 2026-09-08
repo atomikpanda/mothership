@@ -112,11 +112,16 @@ def format_codex_sandbox_warning(result: CodexSandboxReadinessResult) -> str:
         "failed before the requested edit runs; this is not a Mothership hook "
         "rejection. `MSHIP_BYPASS_GATE=1` bypasses only the WorkItem/spec gate "
         "and does not affect sandbox bootstrap. Do not test this by launching "
-        "nested bwrap from Codex. Ask the host operator to enable the packaged "
-        "`/usr/share/apparmor/extra-profiles/bwrap-userns-restrict` profile at "
-        "`/etc/apparmor.d/bwrap-userns-restrict`, load and enforce it with "
-        "`sudo aa-enforce /etc/apparmor.d/bwrap-userns-restrict`, restart "
-        "Codex, and retry the original `apply_patch` edit."
+        "nested bwrap from Codex. Ask the host operator whether the intended "
+        "profile is already installed at `/etc/apparmor.d/bwrap-userns-restrict`; "
+        "if it is absent, locate the distribution-provided profile (often "
+        "`/usr/share/apparmor/extra-profiles/bwrap-userns-restrict`) and install "
+        "or copy it according to that distribution's guidance. This check does "
+        "not detect whether another AppArmor profile attaches `/usr/bin/bwrap`; "
+        "inspect the host policy configuration and reconcile any collision before "
+        "loading. Load the intended profile with `sudo apparmor_parser -r "
+        "/etc/apparmor.d/bwrap-userns-restrict`, restart Codex, and retry the "
+        "original `apply_patch` edit."
     )
 
 

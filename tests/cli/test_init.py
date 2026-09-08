@@ -595,7 +595,11 @@ def test_install_hooks_warns_before_codex_with_unready_bwrap_profile(
     assert codex_hooks.CODEX_SANDBOX_BOOTSTRAP_SIGNATURE in result.output
     assert "not a Mothership hook rejection" in result.output
     assert "MSHIP_BYPASS_GATE=1` bypasses only the WorkItem/spec gate" in result.output
-    assert "aa-enforce /etc/apparmor.d/bwrap-userns-restrict" in result.output
+    assert "profile is already installed at `/etc/apparmor.d/bwrap-userns-restrict`" in result.output
+    assert "`sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict`" in result.output
+    assert "does not detect whether another AppArmor profile attaches `/usr/bin/bwrap`" in result.output
+    assert "reconcile any collision before loading" in result.output
+    assert "aa-enforce" not in result.output
     assert "restart Codex" in result.output
     assert "original `apply_patch` edit" in result.output
 
