@@ -4,6 +4,7 @@ from threading import Event, Thread
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 
@@ -1680,3 +1681,117 @@ def test_get_task_serializes_activity_fields(tmp_path):
     assert body["last_activity_at"].startswith("2026-07-13T12:00:00")
     assert body["phase_entered_at"].startswith("2026-07-13T12:00:00")
 
+def test_watcher_lifespan_is_ready_after_first_sweep_and_survives_failure(
+    tmp_path, monkeypatch
+):
+    """Readiness waits for the first sweep; a failed sweep is logged and retried."""
+    from mship.core import serve as serve_mod
+
+    class FailingFirstSweep:
+        instances = []
+
+        def __init__(self, *_args, **_kwargs):
+            self.calls = 0
+            self.__class__.instances.append(self)
+
+        def check_once(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("first sweep failed")
+
+    monkeypatch.setattr(serve_mod, "PrWatcher", FailingFirstSweep)
+    app = create_app(
+        specs_dir=tmp_path / "specs",
+        state_manager=StateManager(tmp_path / ".mothership"),
+        log_manager=None,
+        workspace_root=tmp_path,
+        workspace_name="test-ws",
+        pr_watch_interval=0.01,
+    )
+
+    async def scenario():
+        async with app.router.lifespan_context(app):
+            (watcher,) = FailingFirstSweep.instances
+            assert watcher.calls == 1
+            with anyio.fail_after(1):
+                while watcher.calls < 2:
+                    await anyio.sleep(0)
+
+    anyio.run(scenario, backend="asyncio")
+
+
+def test_watcher_lifespan_drains_an_inflight_sweep_before_shutdown(
+    tmp_path, monkeypatch
+):
+    """A worker thread running a sweep must not outlive the app lifespan."""
+    from threading import Event, Timer
+
+    from mship.core import serve as serve_mod
+
+    class BlockingSecondSweep:
+        def __init__(self, *_args, **_kwargs):
+            self.calls = 0
+            self.active = 0
+            self.entered = Event()
+            self.release = Event()
+
+        def check_once(self):
+            self.calls += 1
+            if self.calls != 2:
+                return
+            self.active += 1
+            self.entered.set()
+            try:
+                self.release.wait()
+            finally:
+                self.active -= 1
+
+    watcher = None
+
+    def build_watcher(*args, **kwargs):
+        nonlocal watcher
+        watcher = BlockingSecondSweep(*args, **kwargs)
+        return watcher
+
+    monkeypatch.setattr(serve_mod, "PrWatcher", build_watcher)
+    app = create_app(
+        specs_dir=tmp_path / "specs",
+        state_manager=StateManager(tmp_path / ".mothership"),
+        log_manager=None,
+        workspace_root=tmp_path,
+        workspace_name="test-ws",
+        pr_watch_interval=0.01,
+    )
+
+    async def scenario():
+        cm = app.router.lifespan_context(app)
+        await cm.__aenter__()
+        assert watcher is not None
+        with anyio.fail_after(1):
+            while not watcher.entered.is_set():
+                await anyio.sleep(0)
+
+        exited = Event()
+        exited_before_release = []
+
+        def release_sweep():
+            exited_before_release.append(exited.is_set())
+            watcher.release.set()
+
+        releaser = Timer(0.05, release_sweep)
+        releaser.start()
+        try:
+            await cm.__aexit__(None, None, None)
+            exited.set()
+        finally:
+            watcher.release.set()
+            releaser.join(timeout=1)
+
+        assert exited_before_release == [False]
+        assert watcher.active == 0
+
+    try:
+        anyio.run(scenario, backend="asyncio")
+    finally:
+        if watcher is not None:
+            watcher.release.set()

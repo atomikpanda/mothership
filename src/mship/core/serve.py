@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import os
 import threading
@@ -11,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
 
+import anyio
 from pydantic import BaseModel, field_validator
 
 # The only fastapi names imported at MODULE scope, and they have to be: this
@@ -186,7 +186,13 @@ def _make_auth_dependency(token: str):
     return _require_token
 
 
-async def _pr_watch_loop(watcher: PrWatcher, stop: asyncio.Event, interval: float) -> None:
+async def _pr_watch_loop(
+    watcher: PrWatcher,
+    stop: anyio.Event,
+    interval: float,
+    *,
+    task_status: anyio.abc.TaskStatus[None] = anyio.TASK_STATUS_IGNORED,
+) -> None:
     """Runs `watcher.check_once()` off the event loop (it shells out to `gh`)
     every `interval` seconds until `stop` is set. The first sweep happens
     immediately on entry rather than after the first interval, and the loop
@@ -197,15 +203,19 @@ async def _pr_watch_loop(watcher: PrWatcher, stop: asyncio.Event, interval: floa
     `PrWatcher.check_once` already isolates failures per-PR, but this is a
     second, coarser layer of defense in case something outside that (e.g.
     `state_manager.load()`) raises."""
+    first_sweep = True
     while not stop.is_set():
         try:
-            await asyncio.to_thread(watcher.check_once)
+            await anyio.to_thread.run_sync(
+                watcher.check_once, abandon_on_cancel=False
+            )
         except Exception:
             logger.exception("pr-watch tick failed")
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=interval)
-        except asyncio.TimeoutError:
-            pass
+        if first_sweep:
+            task_status.started()
+            first_sweep = False
+        with anyio.move_on_after(interval):
+            await stop.wait()
 
 
 def _dispatch_marker(spec_id: str, task_slug: str) -> str:
@@ -404,15 +414,14 @@ def create_app(
             shell=ShellRunner(),
             worktree_manager=worktree_manager,
         )
-        stop = asyncio.Event()
-        task = asyncio.create_task(_pr_watch_loop(watcher, stop, interval))
-        try:
-            yield
-        finally:
-            stop.set()
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        stop = anyio.Event()
+        async with anyio.create_task_group() as task_group:
+            await task_group.start(_pr_watch_loop, watcher, stop, interval)
+            try:
+                yield
+            finally:
+                stop.set()
+                task_group.cancel_scope.cancel()
 
     if auth_token:
         dependencies = [Depends(_make_auth_dependency(auth_token))]

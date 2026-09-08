@@ -1096,3 +1096,156 @@ def test_unbuildable_workspace_is_503_not_500(tmp_path):
         r = client.get("/workspaces/ws-x/specs")
         assert r.status_code == 503
         assert "no mothership.yaml" in r.json()["detail"]
+
+
+def test_workspace_refresh_replacement_and_host_shutdown_drain_watchers(
+    tmp_path, monkeypatch
+):
+    """Every cached serve app owns one watcher and fully drains it before the
+    cache replaces/removes the app or the host lifespan itself exits."""
+    from threading import Event, Thread
+
+    from mship.core import serve as serve_mod
+    from mship.core.serve import create_app as create_workspace_app
+    from mship.core.state import StateManager
+
+    class BlockingSecondSweep:
+        instances = []
+
+        def __init__(self, *_args, **_kwargs):
+            self.calls = 0
+            self.active = False
+            self.entered = Event()
+            self.release = Event()
+            self.created_while_active = sum(
+                probe.active for probe in self.__class__.instances
+            )
+            self.__class__.instances.append(self)
+
+        def check_once(self):
+            self.calls += 1
+            if self.calls != 2:
+                return
+            self.active = True
+            self.entered.set()
+            try:
+                self.release.wait()
+            finally:
+                self.active = False
+
+    monkeypatch.setattr(serve_mod, "PrWatcher", BlockingSecondSweep)
+
+    home = tmp_path / "home"
+    before = tmp_path / "before"
+    store = _seed(home, [_entry("ws-a", "a", before)])
+
+    def build(entry, **_kwargs):
+        root = Path(entry.path)
+        return create_workspace_app(
+            specs_dir=root / "specs",
+            state_manager=StateManager(root / ".mothership"),
+            log_manager=None,
+            workspace_root=root,
+            workspace_name=entry.name,
+            pr_watch_interval=0.01,
+        )
+
+    host = create_host_app(
+        store,
+        auth_token=None,
+        build_subapp=build,
+        pr_watch_interval=0.01,
+    )
+    client = TestClient(host)
+    client.__enter__()
+    closed = False
+    observations = {}
+
+    def in_thread(call):
+        done = Event()
+        result = []
+        error = []
+
+        def run():
+            try:
+                result.append(call())
+            except BaseException as exc:  # surfaced on the test thread below
+                error.append(exc)
+            finally:
+                done.set()
+
+        thread = Thread(target=run)
+        thread.start()
+        return thread, done, result, error
+
+    def finish_call(thread, done, result, error):
+        assert done.wait(2)
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        if error:
+            raise error[0]
+        return result[0] if result else None
+
+    try:
+        assert client.get("/workspaces/ws-a/health").status_code == 200
+        assert client.get("/workspaces/ws-a/health").status_code == 200
+        assert len(BlockingSecondSweep.instances) == 1
+        first = BlockingSecondSweep.instances[0]
+        assert first.entered.wait(1)
+
+        moved = tmp_path / "moved"
+        store.mutate(
+            lambda state: state.entries.__setitem__(
+                0, _entry("ws-a", "a", moved)
+            )
+        )
+        replace = in_thread(lambda: client.get("/workspaces/ws-a/health"))
+        observations["replacement_finished_while_old_active"] = replace[1].wait(0.1)
+        first.release.set()
+        assert finish_call(*replace).status_code == 200
+        assert len(BlockingSecondSweep.instances) == 2
+        second = BlockingSecondSweep.instances[1]
+        observations["replacement_overlap"] = second.created_while_active
+        assert second.entered.wait(1)
+
+        added = tmp_path / "added"
+        store.mutate(
+            lambda state: state.entries.__setitem__(
+                0, _entry("ws-b", "b", added)
+            )
+        )
+        refresh = in_thread(lambda: client.post("/workspaces/refresh"))
+        observations["refresh_finished_while_removed_active"] = refresh[1].wait(0.1)
+        second.release.set()
+        assert finish_call(*refresh).status_code == 200
+        assert len(BlockingSecondSweep.instances) == 2
+
+        assert client.get("/workspaces/ws-b/health").status_code == 200
+        assert client.get("/workspaces/ws-b/health").status_code == 200
+        assert len(BlockingSecondSweep.instances) == 3
+        third = BlockingSecondSweep.instances[2]
+        observations["addition_overlap"] = third.created_while_active
+        assert third.entered.wait(1)
+
+        shutdown = in_thread(lambda: client.__exit__(None, None, None))
+        observations["shutdown_finished_while_active"] = shutdown[1].wait(0.1)
+        third.release.set()
+        finish_call(*shutdown)
+        closed = True
+        observations["active_after_shutdown"] = sum(
+            probe.active for probe in BlockingSecondSweep.instances
+        )
+    finally:
+        for probe in BlockingSecondSweep.instances:
+            probe.release.set()
+        if not closed:
+            client.__exit__(None, None, None)
+
+    assert observations == {
+        "replacement_finished_while_old_active": False,
+        "replacement_overlap": 0,
+        "refresh_finished_while_removed_active": False,
+        "addition_overlap": 0,
+        "shutdown_finished_while_active": False,
+        "active_after_shutdown": 0,
+    }
