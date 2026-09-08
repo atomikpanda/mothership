@@ -50,15 +50,18 @@ therefore configured but untrusted, not reported as fully active.
 
 Codex edit failures also have distinct signatures. A Mothership edit-gate
 denial exits with status 2 and starts stderr with `mship edit gate rejected:`;
-`MSHIP_BYPASS_GATE=1` affects only that gate. By contrast,
+`MSHIP_BYPASS_GATE=1` bypasses only the WorkItem/spec gate, while
+`MSHIP_ALLOW_MAIN_EDIT=1` controls only main-checkout protection. Neither
+override affects sandbox bootstrap. By contrast,
 `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` means the Codex
 filesystem sandbox failed before the requested edit ran. On Ubuntu hosts with
 restricted unprivileged user namespaces, ask the host operator to install the
 distribution AppArmor profiles if needed, enable and load
 `/usr/share/apparmor/extra-profiles/bwrap-userns-restrict` as
-`/etc/apparmor.d/bwrap-userns-restrict`, restart Codex, and retry the original
-edit tool. Verify recovery with an add-update-delete cycle; do not substitute a
-shell, Python, or other unapproved file writer.
+`/etc/apparmor.d/bwrap-userns-restrict`, load it with
+`sudo aa-enforce /etc/apparmor.d/bwrap-userns-restrict`, restart Codex, and
+retry the original edit tool. Verify recovery with an add-update-delete cycle;
+do not substitute a shell, Python, or other unapproved file writer.
 
 `mship doctor` and `mship init --install-hooks` diagnose this Ubuntu
 prerequisite from the user-namespace restriction, installed profile, and

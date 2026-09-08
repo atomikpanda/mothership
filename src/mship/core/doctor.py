@@ -507,10 +507,10 @@ class DoctorChecker:
             CODEX_COMMANDS,
             CODEX_FEATURE_ENABLE_COMMAND,
             CODEX_HOOKS_PATH,
-            CODEX_SANDBOX_BOOTSTRAP_SIGNATURE,
             CODEX_TRUST_ACTION,
             CodexHookCapability,
             CodexSandboxReadiness,
+            format_codex_sandbox_warning,
             inspect_codex_sandbox_readiness,
             probe_codex_hook_capability,
             registration_issues as codex_registration_issues,
@@ -658,30 +658,14 @@ class DoctorChecker:
                 message=codex_capability.detail,
             ))
 
-        if codex_sandbox.state is CodexSandboxReadiness.PROFILE_MISSING:
+        if codex_sandbox.state not in {
+            CodexSandboxReadiness.NOT_APPLICABLE,
+            CodexSandboxReadiness.ACTIVE,
+        }:
             checks.append(CheckResult(
                 name="agent-runtime/codex-sandbox",
                 status="warn",
-                message=(
-                    f"Codex filesystem sandbox prerequisite missing: "
-                    f"{codex_sandbox.detail}. If Codex reports "
-                    f"`{CODEX_SANDBOX_BOOTSTRAP_SIGNATURE}`, the outer sandbox "
-                    "failed before the requested edit runs; this is not a "
-                    "Mothership hook rejection, and MSHIP_BYPASS_GATE does not "
-                    "apply. Ask the operator to enable and load Ubuntu's "
-                    "`/usr/share/apparmor/extra-profiles/bwrap-userns-restrict` "
-                    "profile, restart Codex, and retry the original edit tool."
-                ),
-            ))
-        elif codex_sandbox.state is CodexSandboxReadiness.PROFILE_PRESENT_UNVERIFIED:
-            checks.append(CheckResult(
-                name="agent-runtime/codex-sandbox",
-                status="warn",
-                message=(
-                    f"{codex_sandbox.detail}. Do not test this by launching nested "
-                    "bwrap from Codex; ask the operator to confirm the profile is "
-                    "loaded and enforced, then restart Codex."
-                ),
+                message=format_codex_sandbox_warning(codex_sandbox),
             ))
         elif codex_sandbox.state is CodexSandboxReadiness.ACTIVE:
             checks.append(CheckResult(

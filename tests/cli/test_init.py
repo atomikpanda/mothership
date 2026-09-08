@@ -529,9 +529,15 @@ def test_install_hooks_reports_codex_activation_without_mutating_user_state(
     assert _home_bytes(home) == before
 
 
-def test_install_hooks_warns_before_codex_with_missing_bwrap_profile(
+@pytest.mark.parametrize(
+    "profile_present",
+    [False, True],
+    ids=["missing", "present-unverified"],
+)
+def test_install_hooks_warns_before_codex_with_unready_bwrap_profile(
     tmp_path: Path,
     monkeypatch,
+    profile_present: bool,
 ):
     from mship.core import codex_hooks
 
@@ -550,14 +556,13 @@ def test_install_hooks_warns_before_codex_with_missing_bwrap_profile(
     restriction.write_text("1\n")
     current = tmp_path / "current"
     current.write_text("unconfined\n")
+    profile = tmp_path / "bwrap-userns-restrict"
+    if profile_present:
+        profile.write_text("profile bwrap /usr/bin/bwrap { allow userns, }\n")
     monkeypatch.setattr(
         codex_hooks, "APPARMOR_USERNS_RESTRICTION_PATH", restriction
     )
-    monkeypatch.setattr(
-        codex_hooks,
-        "APPARMOR_BWRAP_PROFILE_PATH",
-        tmp_path / "missing-bwrap-userns-restrict",
-    )
+    monkeypatch.setattr(codex_hooks, "APPARMOR_BWRAP_PROFILE_PATH", profile)
     monkeypatch.setattr(codex_hooks, "APPARMOR_CURRENT_PROFILE_PATH", current)
     monkeypatch.setattr(
         shutil,
@@ -589,7 +594,10 @@ def test_install_hooks_warns_before_codex_with_missing_bwrap_profile(
     assert result.exit_code == 0, result.output
     assert codex_hooks.CODEX_SANDBOX_BOOTSTRAP_SIGNATURE in result.output
     assert "not a Mothership hook rejection" in result.output
-    assert "MSHIP_BYPASS_GATE does not apply" in result.output
+    assert "MSHIP_BYPASS_GATE=1` bypasses only the WorkItem/spec gate" in result.output
+    assert "aa-enforce /etc/apparmor.d/bwrap-userns-restrict" in result.output
+    assert "restart Codex" in result.output
+    assert "original `apply_patch` edit" in result.output
 
 
 @pytest.mark.parametrize("failure_mode", ["skipped", "raised"])

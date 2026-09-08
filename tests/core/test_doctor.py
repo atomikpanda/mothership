@@ -936,10 +936,16 @@ def test_doctor_reports_all_agent_integrations_healthy(workspace: Path, monkeypa
     assert "fully active" not in " ".join(check.message for check in report.checks)
 
 
-def test_doctor_distinguishes_missing_bwrap_profile_from_mothership_gate(
+@pytest.mark.parametrize(
+    "profile_present",
+    [False, True],
+    ids=["missing", "present-unverified"],
+)
+def test_doctor_distinguishes_unready_bwrap_profile_from_mothership_gate(
     workspace: Path,
     tmp_path: Path,
     monkeypatch,
+    profile_present: bool,
 ):
     from mship.core import codex_hooks
 
@@ -948,14 +954,13 @@ def test_doctor_distinguishes_missing_bwrap_profile_from_mothership_gate(
     restriction.write_text("1\n")
     current = tmp_path / "current"
     current.write_text("unconfined\n")
+    profile = tmp_path / "bwrap-userns-restrict"
+    if profile_present:
+        profile.write_text("profile bwrap /usr/bin/bwrap { allow userns, }\n")
     monkeypatch.setattr(
         codex_hooks, "APPARMOR_USERNS_RESTRICTION_PATH", restriction
     )
-    monkeypatch.setattr(
-        codex_hooks,
-        "APPARMOR_BWRAP_PROFILE_PATH",
-        tmp_path / "missing-bwrap-userns-restrict",
-    )
+    monkeypatch.setattr(codex_hooks, "APPARMOR_BWRAP_PROFILE_PATH", profile)
     monkeypatch.setattr(codex_hooks, "APPARMOR_CURRENT_PROFILE_PATH", current)
     monkeypatch.setattr(
         "mship.core.doctor.shutil.which",
@@ -980,8 +985,11 @@ def test_doctor_distinguishes_missing_bwrap_profile_from_mothership_gate(
     assert row.status == "warn"
     assert codex_hooks.CODEX_SANDBOX_BOOTSTRAP_SIGNATURE in row.message
     assert "not a Mothership hook rejection" in row.message
-    assert "MSHIP_BYPASS_GATE does not apply" in row.message
+    assert "MSHIP_BYPASS_GATE=1` bypasses only the WorkItem/spec gate" in row.message
     assert "/usr/share/apparmor/extra-profiles/bwrap-userns-restrict" in row.message
+    assert "aa-enforce /etc/apparmor.d/bwrap-userns-restrict" in row.message
+    assert "restart Codex" in row.message
+    assert "original `apply_patch` edit" in row.message
     assert not any(
         call.args[0].startswith("bwrap ") for call in shell.run.call_args_list
     )
