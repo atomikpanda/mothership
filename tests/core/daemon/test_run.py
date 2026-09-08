@@ -824,6 +824,212 @@ def test_tunnel_join_timeout_uses_the_reapers_fixed_snapshot_bound(monkeypatch):
     assert run_mod._tunnel_join_timeout() == 3 * 13 + 5 * 7 + 2 * 11
 
 
+def test_tunnel_offload_has_dedicated_non_abandoning_capacity(monkeypatch):
+    """Default-pool offload or abandonment can strand a reconnecting worker."""
+    import anyio
+
+    calls = []
+    real_run_sync = anyio.to_thread.run_sync
+
+    async def capture_offload(func, *args, **kwargs):
+        calls.append((kwargs, anyio.to_thread.current_default_thread_limiter()))
+        return await real_run_sync(func, *args, **kwargs)
+
+    monkeypatch.setattr(anyio.to_thread, "run_sync", capture_offload)
+    monkeypatch.setattr(host_tunnel_mod, "TICK_INTERVAL_S", 0)
+    _configs, servers = _fake_uvicorn(monkeypatch, hold=True)
+    tunnel = _FakeTunnel(stop_after=3, servers=servers)
+
+    run_mod._serve_forever(
+        _control_app(), Path("/control.sock"), object(), SERVE_BLOCK, tunnel
+    )
+
+    assert len(calls) >= 3
+    limiter = calls[0][0]["limiter"]
+    assert limiter.total_tokens == 1
+    assert all(options["limiter"] is limiter for options, _ in calls)
+    assert all(options["abandon_on_cancel"] is False for options, _ in calls)
+    assert all(default is not limiter for _, default in calls)
+
+
+class _BlockedTunnel(_FakeTunnel):
+    """A bounded reconnect held at the point that could spawn a replacement."""
+
+    def __init__(self, *, events):
+        import threading
+
+        super().__init__(events=events)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.finished = threading.Event()
+        self.active = 0
+        self.max_active = 0
+
+    def snapshot(self):
+        return {"state": "connecting", "subdomain": "hst-fake"}
+
+    def tick(self):
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        self.ticks += 1
+        self._events.append("tick:entered")
+        self.entered.set()
+        try:
+            assert self.release.wait(5), "test did not release the bounded tick"
+            assert not self.stopped, "stop raced a reconnect that can still spawn"
+        finally:
+            self.active -= 1
+            self._events.append("tick:finished")
+            self.finished.set()
+
+
+def test_tunnel_readiness_is_local_and_ticks_do_not_use_default_capacity(monkeypatch):
+    """A full request pool or offline relay must not block child readiness."""
+    import anyio
+
+    monkeypatch.setattr(host_tunnel_mod, "TICK_INTERVAL_S", 0)
+    tunnel = _BlockedTunnel(events=[])
+
+    async def scenario():
+        stop = anyio.Event()
+        default = anyio.to_thread.current_default_thread_limiter()
+        default.total_tokens = 1
+        async with default:
+            with anyio.fail_after(2):
+                async with anyio.create_task_group() as task_group:
+                    try:
+                        await task_group.start(run_mod._tunnel_loop, tunnel, stop)
+                        assert tunnel.snapshot()["state"] == "connecting"
+                        while not tunnel.entered.is_set():
+                            await anyio.sleep(0)
+                        for _ in range(10):
+                            await anyio.sleep(0)
+                        assert tunnel.ticks == 1
+                        assert tunnel.max_active == 1
+                    finally:
+                        stop.set()
+                        tunnel.release.set()
+
+    anyio.run(scenario, backend="asyncio")
+    assert tunnel.finished.is_set()
+
+
+@pytest.mark.parametrize("cancel_root", [False, True])
+def test_inflight_tunnel_joins_before_stop_and_clean_history(
+    env_home, monkeypatch, cancel_root
+):
+    """Root cancellation must join the worker just like a clean server exit."""
+    import asyncio
+
+    import anyio
+
+    home, env = env_home
+    _seed_config(home, serve=SERVE_BLOCK)
+    events = []
+    tunnel = _BlockedTunnel(events=events)
+    _configs, servers = _fake_uvicorn(monkeypatch, hold=True)
+    monkeypatch.setattr(run_mod, "_build_tunnel", lambda *args: tunnel)
+    real_tunnel_loop = run_mod._tunnel_loop
+    real_clean_stop = run_mod.history.append_clean_stop
+    owners = {}
+
+    async def observe_child(*args, **kwargs):
+        owners["tunnel"] = anyio.get_current_task().parent_id
+        try:
+            await real_tunnel_loop(*args, **kwargs)
+        finally:
+            events.append("child:joined")
+
+    monkeypatch.setattr(run_mod, "_tunnel_loop", observe_child)
+    monkeypatch.setattr(
+        run_mod.history,
+        "append_clean_stop",
+        lambda *args: (events.append("clean_stop"), real_clean_stop(*args))[1],
+    )
+
+    async def scenario(*args):
+        daemon_done = anyio.Event()
+        scope = anyio.CancelScope()
+        cancellation = None
+
+        async def daemon():
+            nonlocal cancellation
+            owners["root"] = anyio.get_current_task().id
+            try:
+                with scope:
+                    try:
+                        await run_mod._serve(*args)
+                    except anyio.get_cancelled_exc_class() as error:
+                        cancellation = error
+                        raise
+            finally:
+                daemon_done.set()
+
+        with anyio.fail_after(2):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(daemon)
+                try:
+                    while not tunnel.entered.is_set():
+                        await anyio.sleep(0)
+                    if cancel_root:
+                        scope.cancel()
+                    else:
+                        servers[0].should_exit = True
+                    await anyio.sleep(0.02)
+                    assert not tunnel.stopped
+                    assert not daemon_done.is_set()
+                    assert "clean_stop" not in events
+                finally:
+                    tunnel.release.set()
+                await daemon_done.wait()
+        if cancellation is not None:
+            # Preserve the root's actual cancellation across the test driver;
+            # `_run` must not append clean-stop history for this exit.
+            raise cancellation
+
+    monkeypatch.setattr(
+        run_mod,
+        "_serve_forever",
+        lambda *args: anyio.run(scenario, *args, backend="asyncio"),
+    )
+
+    if cancel_root:
+        with pytest.raises(asyncio.CancelledError):
+            run_mod.main(home=home, env=env)
+        assert "clean_stop" not in events
+    else:
+        assert run_mod.main(home=home, env=env) == 0
+        assert events.pop() == "clean_stop"
+    assert owners["tunnel"] == owners["root"]
+    assert events[-3:] == ["tick:finished", "child:joined", "sup.stop"]
+    assert tunnel.max_active == 1
+    assert tunnel.ticks == 1
+    assert [entry.kind for entry in read_history(run_mod.paths.start_history_path(home))] == (
+        ["start"] if cancel_root else ["start", "clean_stop"]
+    )
+
+
+def test_tunnel_stop_wakes_a_long_interval_without_another_tick(monkeypatch):
+    """A stop must wake the interval immediately, without a new reconnect."""
+    import anyio
+
+    monkeypatch.setattr(host_tunnel_mod, "TICK_INTERVAL_S", 60)
+    tunnel = _FakeTunnel()
+
+    async def scenario():
+        stop = anyio.Event()
+        with anyio.fail_after(1):
+            async with anyio.create_task_group() as task_group:
+                await task_group.start(run_mod._tunnel_loop, tunnel, stop)
+                while tunnel.ticks == 0:
+                    await anyio.sleep(0)
+                await anyio.sleep(0.01)
+                stop.set()
+
+    anyio.run(scenario, backend="asyncio")
+    assert tunnel.ticks == 1
+
+
 def test_shutdown_joins_the_tunnel_then_stops_it_then_records_clean_stop(
     env_home, monkeypatch
 ):
@@ -873,7 +1079,11 @@ def test_clean_stop_is_recorded_even_when_every_tunnel_tick_raises(
         "start",
         "clean_stop",
     ]
-    assert "tick boom" in (daemon_log_dir(home) / "daemon.log").read_text()
+    assert tunnel.ticks >= 3
+    assert tunnel.stopped
+    log_text = (daemon_log_dir(home) / "daemon.log").read_text()
+    assert log_text.count("tunnel tick failed") >= 3
+    assert "tick boom" in log_text
 
 
 def test_unbuildable_relay_logs_and_leaves_the_daemon_healthy(env_home, monkeypatch):
@@ -1039,25 +1249,27 @@ def test_sigterm_sets_the_shared_event_and_stops_every_server(server_count):
     learn a stop was requested — the daemon would then outlive
     `TimeoutStopSec`, be SIGKILLed, and orphan its ssh child. Both shapes:
     control-only (1) and control+host (2)."""
-    import asyncio
     import os
     import signal
+
+    import anyio
 
     class _Server:
         def __init__(self):
             self.should_exit = False
 
     async def scenario():
-        stop = asyncio.Event()
+        stop = anyio.Event()
         servers = [_Server() for _ in range(server_count)]
         run_mod._install_stop_handlers(stop, servers)
         if signal.getsignal(signal.SIGTERM) in (signal.SIG_DFL, signal.SIG_IGN):
             pytest.skip("no asyncio signal handlers on this platform")
         os.kill(os.getpid(), signal.SIGTERM)
-        await asyncio.wait_for(stop.wait(), timeout=5)
+        with anyio.fail_after(5):
+            await stop.wait()
         return servers
 
-    servers = asyncio.run(scenario())
+    servers = anyio.run(scenario, backend="asyncio")
 
     assert all(server.should_exit for server in servers)
 
