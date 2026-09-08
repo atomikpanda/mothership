@@ -654,6 +654,43 @@ def test_server_exception_retains_original_cause(monkeypatch):
     assert app.state.values[-1] is False
 
 
+def test_server_and_shutdown_failures_both_reach_daemon_reporting(monkeypatch):
+    """A cleanup exception must not discard the server failure that caused it."""
+    import anyio
+
+    server_error = LookupError("server failed before cleanup")
+    cleanup_error = OSError("server cleanup failed")
+    control = _ServerLifecycle(
+        start_immediately=True,
+        complete_immediately=True,
+        completion_error=server_error,
+    )
+    _fake_uvicorn(monkeypatch, lifecycles=[control])
+
+    async def fail_shutdown(_server):
+        raise cleanup_error
+
+    monkeypatch.setattr("uvicorn.Server.shutdown", fail_shutdown)
+
+    def leaves(error):
+        if isinstance(error, BaseExceptionGroup):
+            return [leaf for child in error.exceptions for leaf in leaves(child)]
+        if error.__cause__ is not None:
+            return leaves(error.__cause__)
+        return [error]
+
+    async def scenario():
+        with pytest.raises(BaseException) as raised:
+            await run_mod._serve(
+                _TrackingControlApp(), Path("/control.sock"), None, None, None
+            )
+        errors = leaves(raised.value)
+        assert server_error in errors
+        assert cleanup_error in errors
+
+    anyio.run(scenario, backend="asyncio")
+
+
 @pytest.mark.parametrize("during_startup", [False, True])
 def test_real_uvicorn_root_cancellation_drains_app_lifespans(
     tmp_path, monkeypatch, during_startup

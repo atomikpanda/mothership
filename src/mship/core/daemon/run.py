@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -183,7 +183,8 @@ def _tunnel_join_timeout() -> float:
     The task group joins the non-abandoned worker before stopping its supervisor;
     this budget documents the underlying operation bounds, not permission to
     abandon a still-running tick. That worst case is the three
-    relay calls a single tick can make (challenge, register, enroll), one signing
+    relay calls a single tick can make (challenge, register, enroll), each with
+    a whole-call deadline including its response body, plus one signing
     subprocess, and one key-generation subprocess on automatic clone recovery.
     Recovery does not revoke the incumbent's shared key, so it adds no relay
     calls. The tick can also make three fixed, bounded
@@ -293,6 +294,16 @@ async def _run_server_child(
                             # Startup creates the lifespan before binding. No
                             # listening sockets exist yet, but the app must exit.
                             await lifespan.shutdown()
+            except BaseException as cleanup_error:
+                if outcome is None or outcome.error is None:
+                    raise
+                outcome = replace(
+                    outcome,
+                    error=BaseExceptionGroup(
+                        "daemon server and shutdown failed",
+                        [outcome.error, cleanup_error],
+                    ),
+                )
             finally:
                 completed.set()
 

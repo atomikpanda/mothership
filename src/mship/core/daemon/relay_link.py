@@ -74,7 +74,8 @@ JITTER = tunnel.BACKOFF_JITTER
 # daemon does.
 _MAX_EXPONENT = math.ceil(math.log2(host_contract.MAX_BACKOFF_S / RETRY_BASE_S))
 
-# Per-call bound on every relay HTTP call this link makes. Public: the daemon's
+# Whole-call deadline on every relay HTTP call this link makes, including body
+# consumption (not just HTTPX's per-phase inactivity timeout). Public: the daemon's
 # shutdown derives its tunnel-join bound from it (`core/daemon/run.py`), so a
 # worst-case tick cannot outlast the wait that exists to prevent an orphan.
 HTTP_TIMEOUT_S = 10.0
@@ -552,6 +553,6 @@ def _detail(resp) -> str:
 
 
 def _default_post(url, **kw):
-    import httpx
+    from mship.core.relay.http import request
 
-    return httpx.post(url, **kw)
+    return request("POST", url, **kw)
