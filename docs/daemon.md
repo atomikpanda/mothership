@@ -24,6 +24,31 @@ mship daemon run       # foreground/debug, no supervisor
 `mship serve` is unchanged: a foreground/API dev surface. Ordinary local mship
 commands never require the daemon.
 
+## Structured concurrency and ownership
+
+The daemon root is the owner of every long-lived activity below. Readiness means
+the owner may publish or consume the activity; cancellation starts at the shared
+stop signal (or the enclosing lifespan), and cleanup is bounded so shutdown can
+finish before the supervisor's kill deadline. Failures are routed to the stated
+destination rather than silently detached.
+
+| Activity | Owner | Readiness | Cancellation trigger | Cleanup bound | Failure destination |
+|---|---|---|---|---|---|
+| Control and optional TCP Uvicorn servers | daemon `_serve` task group | UDS server starts; TCP server sets `started` before `serve` is advertised | shared stop event, signal, or sibling failure | await both server tasks; supervisor kill deadline | `_serve` raises `RuntimeError`; start history/log |
+| HostTunnel registration/SSH supervisor | daemon `_serve` tunnel task | first tick publishes tunnel state | shared stop event after server tasks join | bounded tick join, then `HostTunnel.stop()` | tunnel snapshot/log; tick errors retry and log |
+| Workspace sub-app lifespans | each workspace app lifespan, owned by its host server | app lifespan completes startup | enclosing host server lifespan cancellation | server lifespan exit | ASGI server error and daemon log |
+| PR watchers | watcher task group owned by its workspace app | watcher registers its initial poll | workspace lifespan cancellation | cancel and await watcher tasks | workspace app error/log |
+| Registry rescans | daemon registry task/timer | initial scan completes; refresh callback is installed | daemon stop or refresh task cancellation | cancel and await timer/task | refresh error is logged; last registry remains |
+| Mailbox reads | daemon mailbox polling task | initial snapshot read completes | daemon stop | cancel and await polling task | mailbox read error is logged to daemon history/log |
+| Forwarding producers | owning connection/lifespan task group | producer is attached to its consumer | consumer disconnect or enclosing lifespan cancellation | cancel producers and await completion | connection/lifespan error; no detached producer |
+| Blocking SSH processes | HostTunnel owns each low-level `Popen` child | child handle is recorded and monitored | tunnel stop or reap decision | bounded TERM/KILL waits, then supervisor kill as final bound | tunnel state/log; orphan is surfaced for supervisor recovery |
+
+The intentional interop exceptions are narrow: Uvicorn still owns its asyncio
+server implementation, and low-level SSH uses `Popen` because it is an OS process
+boundary. The daemon enters that implementation through `anyio.run(...,
+backend="asyncio")`; those exceptions do not create unowned asyncio tasks or
+unbounded subprocess cleanup.
+
 ## Paths
 
 - State: `~/.mothership/daemon/` (per OS user — the daemon is workspace-agnostic)

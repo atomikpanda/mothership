@@ -261,6 +261,28 @@ def test_entrypoint_registered():
     assert callable(run_mod.main)
 
 
+def test_serve_forever_enters_serve_through_anyio_asyncio_backend(monkeypatch):
+    entered = {}
+
+    async def fake_serve(*args):
+        entered["args"] = args
+
+    def fake_run(func, *args, **kwargs):
+        entered["backend"] = kwargs.get("backend")
+        entered["args"] = args
+        assert func is fake_serve
+
+    monkeypatch.setattr(run_mod, "_serve", fake_serve)
+    monkeypatch.setattr("anyio.run", fake_run)
+
+    run_mod._serve_forever("control", "socket", None, None)
+
+    assert entered == {
+        "args": ("control", "socket", None, None, None),
+        "backend": "asyncio",
+    }
+
+
 def test_tcp_bind_failure_stops_control_and_clears_capability(monkeypatch):
     import asyncio
     from datetime import datetime, timezone

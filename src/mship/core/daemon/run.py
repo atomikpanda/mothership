@@ -211,9 +211,17 @@ def _serve_forever(control_app, socket_path, host_app, serve_cfg, tunnel=None) -
     and one startup/shutdown shape for all three configurations is one shutdown
     path to keep correct rather than three.
     """
-    import asyncio
+    import anyio
 
-    asyncio.run(_serve(control_app, socket_path, host_app, serve_cfg, tunnel))
+    anyio.run(
+        _serve,
+        control_app,
+        socket_path,
+        host_app,
+        serve_cfg,
+        tunnel,
+        backend="asyncio",
+    )
 
 
 async def _serve(control_app, socket_path, host_app, serve_cfg, tunnel) -> None:
