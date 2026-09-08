@@ -88,6 +88,38 @@ def test_generates_key_when_absent(tmp_path):
     assert relay_public_key(path).startswith("ssh-ed25519 ")
 
 
+def test_key_generation_timeout_reaps_the_child(tmp_path, monkeypatch):
+    """Omitting the key-generation deadline can block clone recovery forever."""
+    import subprocess
+    import sys
+
+    import pytest
+
+    from mship.core.relay import keys
+
+    real_run = subprocess.run
+    real_popen = subprocess.Popen
+    children = []
+
+    def capture_child(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    def slow_keygen(_argv, **kwargs):
+        return real_run([sys.executable, "-c", "import time; time.sleep(0.2)"], **kwargs)
+
+    monkeypatch.setattr(keys, "KEYGEN_TIMEOUT_S", 0.01, raising=False)
+    monkeypatch.setattr(subprocess, "Popen", capture_child)
+    monkeypatch.setattr(subprocess, "run", slow_keygen)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        ensure_relay_key(home=tmp_path)
+    assert len(children) == 1
+    assert children[0].poll() is not None
+    assert not relay_key_path(tmp_path).exists()
+
+
 def test_idempotent_when_present(tmp_path):
     # pre-create the key; runner must NOT be called
     mothership_dir = tmp_path / ".mothership"

@@ -26,28 +26,117 @@ commands never require the daemon.
 
 ## Structured concurrency and ownership
 
-The daemon root is the owner of every long-lived activity below. Readiness means
-the owner may publish or consume the activity; cancellation starts at the shared
-stop signal (or the enclosing lifespan), and cleanup is bounded so shutdown can
-finish before the supervisor's kill deadline. Failures are routed to the stated
-destination rather than silently detached.
+`anyio.run(..., backend="asyncio")` enters one daemon-root task group for all
+three configurations: control only, control plus host, and control plus host
+plus tunnel. Ownership below is nested: a server owns its ASGI lifespans and
+requests; the host lifespan owns cached workspace lifespans; each workspace
+lifespan owns its PR watcher. Readiness and cleanup mean different things for
+each owner. In particular, local tunnel readiness does not mean relay enrollment
+or registration has succeeded.
 
 | Activity | Owner | Readiness | Cancellation trigger | Cleanup bound | Failure destination |
 |---|---|---|---|---|---|
-| Control and optional TCP Uvicorn servers | daemon `_serve` task group | UDS server starts; TCP server sets `started` before `serve` is advertised | shared stop event, signal, or sibling failure | await both server tasks; supervisor kill deadline | `_serve` raises `RuntimeError`; start history/log |
-| HostTunnel registration/SSH supervisor | daemon `_serve` tunnel task | first tick publishes tunnel state | shared stop event after server tasks join | bounded tick join, then `HostTunnel.stop()` | tunnel snapshot/log; tick errors retry and log |
-| Workspace sub-app lifespans | each workspace app lifespan, owned by its host server | app lifespan completes startup | enclosing host server lifespan cancellation | server lifespan exit | ASGI server error and daemon log |
-| PR watchers | watcher task group owned by its workspace app | watcher registers its initial poll | workspace lifespan cancellation | cancel and await watcher tasks | workspace app error/log |
-| Registry rescans | daemon registry task/timer | initial scan completes; refresh callback is installed | daemon stop or refresh task cancellation | cancel and await timer/task | refresh error is logged; last registry remains |
-| Mailbox reads | daemon mailbox polling task | initial snapshot read completes | daemon stop | cancel and await polling task | mailbox read error is logged to daemon history/log |
-| Forwarding producers | owning connection/lifespan task group | producer is attached to its consumer | consumer disconnect or enclosing lifespan cancellation | cancel producers and await completion | connection/lifespan error; no detached producer |
-| Blocking SSH processes | HostTunnel owns each low-level `Popen` child | child handle is recorded and monitored | tunnel stop or reap decision | bounded TERM/KILL waits, then supervisor kill as final bound | tunnel state/log; orphan is surfaced for supervisor recovery |
+| Control UDS and optional host TCP server children | daemon `_serve` task group, with a nested group per server | `TaskGroup.start()` returns after Uvicorn sets `started`; only then is TCP `serve` capability published | SIGTERM/SIGINT, root cancellation, or first server outcome | join server children and shield interrupted Uvicorn shutdown, including its initialized pre-bind lifespan; no new wall-clock deadline | fatal outcome translated after cleanup; daemon log and nonzero exit |
+| Tunnel loop and one-second timer | daemon `_serve` task group | local `TaskStatus.started()` before the first tick | shared stop event or root-group cancellation | stop wakes the timer; join in-flight tick, then call `HostTunnel.stop()` | tick exceptions logged and retried; published tunnel state reports collaborator failures |
+| Cached workspace sub-app lifespans | host lifespan task group, one `_SubApp._supervise` child per cached app | nested lifespan startup completes in the same task that will exit it | replacement, refresh removal/degradation, or host lifespan exit | shield old-app drain and cache removal under the host lock; start no successor until drain completes | startup error reaches forwarding request; child/lifespan failure reaches host ASGI error handling |
+| PR watcher and its interval timer | workspace serve-app lifespan task group | first sweep finishes, including a logged recoverable failure | owning lifespan exits or is cancelled | stop wakes timer; join any in-flight sweep before lifespan ends | sweep exception logged as `pr-watch tick failed`, then retry |
+| Registry refresh offload | control or host refresh request | scan returns before response and stale-subapp cleanup | request cancellation | join in-flight scan; no independent timer or total scan timeout | `ValueError`/`RegistryReadError` map to HTTP 503; other errors reach ASGI error handling |
+| Mailbox thread-list and long-poll reads | `/threads` request | each snapshot read completes | request cancellation or request deadline between reads | join in-flight read; long-poll timeout is capped at 30s, not a deadline on filesystem I/O | bad cursor maps to HTTP 422; read errors reach ASGI error handling |
+| Forwarding producer and bounded queues | forwarding request until headers; then `_SettlingStreamingResponse` | one-slot response-start queue delivers headers; eight-slot chunk queue supplies body | disconnect, request cancellation, response send error, or response/body finalization | cancel and await producer, retrieve result exactly once; no independent cleanup timeout | pre-header failure supplies HTTP 500; post-header failure ends stream; non-cancellation producer error logged |
+| SSH reverse-forward process and reconnect/read-back schedules | `HostTunnel` and its `TunnelSupervisor` | retained `Popen` handle; online only after matching health read-back | tunnel stop, failed child, redial, or orphan reap | join tick before final stop; direct child TERM wait 5s then KILL wait 5s; orphan phases described below | tunnel snapshot/log; existing next-start orphan recovery |
 
-The intentional interop exceptions are narrow: Uvicorn still owns its asyncio
-server implementation, and low-level SSH uses `Popen` because it is an OS process
-boundary. The daemon enters that implementation through `anyio.run(...,
-backend="asyncio")`; those exceptions do not create unowned asyncio tasks or
-unbounded subprocess cleanup.
+### Offload capacity and cancellation
+
+`core/async_runtime.py` supplies four independent, run-local capacity limiters:
+
+| Lane | Tokens | Operations |
+|---|---:|---|
+| `tunnel` | 1 | `HostTunnel.tick()` |
+| `registry` | 1 | control/host registry rescans |
+| `pr_watch` | 1 | all workspace PR watcher sweeps in this event loop |
+| `mailbox` | 4 | thread-list and long-poll snapshot reads |
+
+These limiters are shared within one event loop and recreated for another run.
+They do not consume the default Starlette limiter or asyncio executor capacity.
+Every lane uses `abandon_on_cancel=False`: cancellation while waiting for a token
+can stop the caller, but an already-running worker must finish before its owner
+leaves the await. Python cannot safely kill that thread. Registry and mailbox
+filesystem work and a whole PR sweep have no added total deadline. The PR timer
+uses the configured interval; mailbox requests retain their one-second async
+poll interval, cursor/filter semantics, and timeout response shape.
+
+The `_tunnel_join_timeout()` operation-budget calculation is 84 seconds:
+three 10s relay calls, up to three 10s process-table snapshots, and two shared
+2s orphan exit waits, plus one 10s signing and one 10s key-generation subprocess.
+Each orphan phase polls at most every 50ms and revalidates process identity
+before signaling. A running-child tick can instead perform an 8s health
+read-back and a 5s TERM/5s KILL stop; those fit inside the larger 34s orphan
+allowance. Final direct-child stop adds its existing two 5s waits after the tick
+joins. Subprocess timeout kills and reaps the short-lived signer/key generator;
+signing timeout maps to `SignatureError` and a recoverable registration failure.
+
+This calculation is not an outer cancellation timer: the worker is never
+abandoned on expiry. It budgets the explicit network/process deadlines, not
+an absolute wall-clock guarantee for scheduler delays, process creation,
+filesystem I/O, or a wedged kernel. Registry/mailbox operations and a whole PR
+sweep still have no total deadline. Those limitations can outlast the OS
+supervisor's stop deadline and require the existing supervisor/orphan recovery.
+
+### Shutdown and exception mapping
+
+The first server outcome or root cancellation clears `serve` capability, sets
+every server's `should_exit`, sets the shared stop event, and cancels the owning
+group. A signal requests exit through that same shared state. Interrupted
+Uvicorn children explicitly finish shielded shutdown because cancelling
+`Server.serve()` alone skips Uvicorn's normal shutdown call and can leave an
+ASGI lifespan alive. The root joins its children before stopping the tunnel;
+`_run` writes clean-stop history only after `_serve` returns normally.
+
+| Outcome | Daemon result |
+|---|---|
+| Server returns after a requested exit | normal return; clean-stop history/log; exit 0 |
+| Control/TCP server exits before readiness | `RuntimeError("control server failed to bind")` or `RuntimeError("TCP server failed to bind")`, with original exception as cause |
+| Running server raises | `RuntimeError("daemon server failed")`, with original exception as cause |
+| Running server returns without requested exit | `RuntimeError("daemon server stopped unexpectedly")` |
+| Root cancellation | cleanup runs and cancellation propagates; no clean-stop history |
+| Other fatal task-group failure | exception group propagates to the daemon composition boundary; `main` logs the traceback and returns 1 |
+
+Fatal exceptions handled by `main` leave the start entry without a clean-stop
+entry. Recoverable tunnel/sweep exceptions are logged inside their loop and do
+not become daemon failures. The lease loser exit policy below is unchanged.
+
+### Intentional interop and audit coverage
+
+- Uvicorn retains its asyncio sockets, ASGI tasks, and signal capture. The
+  daemon's `_install_stop_handlers` is the asyncio signal bridge; child readiness
+  observes `server.started` with cooperative `anyio.sleep(0)`. Real-Uvicorn
+  regressions exercise cancellation both before bind and while serving, and
+  daemon tests cover one/two-server SIGTERM and fatal/clean outcomes.
+- The single remaining `asyncio.create_task` in `core/daemon` is the forwarding
+  producer above. Its response scope always cancels/awaits it, including before
+  body iteration. `test_host_app.py` characterizes completion, disconnect,
+  failure, header-send cancellation/error, and eight-chunk backpressure;
+  `test_serve_exec.py` retains real subprocess-disconnect and task-lock coverage.
+  Remote-exec's request-owned sync generator, AnyIO response group, cancellation
+  event, and process-group protocol remain unchanged.
+- Registry startup discovery runs synchronously before the async runtime.
+  The lease's loser-record retry also precedes that runtime (five reads, up to
+  four 30ms sleeps). `test_run.py` and `test_lease.py` cover those entry paths.
+- `host_tunnel.py` retains its synchronous `ps` subprocess and orphan polling
+  inside the tunnel lane. Low-level `Popen(start_new_session=True)`, polling,
+  and TERM/KILL handling remain in the existing tunnel supervisor, covered by
+  `test_host_tunnel.py` and the relay tunnel tests.
+- `daemon/supervisor.py` subprocesses belong to synchronous CLI install/start/
+  stop/status operations, not daemon background tasks. Launchctl calls retain
+  their 30s timeout; systemctl/loginctl calls retain no Python timeout. The
+  supervisor tests cover command and error mapping; native launchd tests remain
+  macOS-only.
+
+There are no remaining `gather(return_exceptions=True)`, `run_in_executor`, or
+caller-local `asyncio.to_thread` offloads in `core/daemon` or `core/serve.py`.
+Synchronous FastAPI handlers and request-stream iteration still use the
+framework's own worker pool; this boundary does not rewrite all synchronous
+domain operations.
 
 ## Paths
 

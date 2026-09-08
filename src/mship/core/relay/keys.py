@@ -7,10 +7,11 @@ from pathlib import Path
 from mship.core.relay.enroll import _locked
 
 _SUBDOMAIN_SECRET_LEN = 32
+KEYGEN_TIMEOUT_S = 10.0
 
 
 def _default_runner(argv: list[str]) -> int:
-    return subprocess.run(argv, check=True).returncode
+    return subprocess.run(argv, check=True, timeout=KEYGEN_TIMEOUT_S).returncode
 
 
 def _read_secret_if_valid(path: Path, length: int) -> bytes | None:
