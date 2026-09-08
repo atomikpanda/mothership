@@ -166,6 +166,38 @@ def _link(
 # --- register_once: challenge → sign → register ----------------------------
 
 
+def test_default_post_deadline_closes_a_continuously_dripping_response():
+    """An inactivity-only timeout accepts indefinitely trickling relay bytes."""
+    import httpx
+
+    from tests.core.relay.http_server import response_server
+
+    with response_server() as peer:
+        with pytest.raises(httpx.TimeoutException):
+            relay_link._default_post(peer.url, json={"nonce": "test"}, timeout=0.4)
+        assert peer.sent >= 2, "test must reach body streaming, not connect timeout"
+        assert peer.sent < 80, "deadline must interrupt the incomplete body"
+        assert peer.finished.wait(1), "timed-out client left its connection open"
+
+
+def test_default_post_preserves_request_and_complete_response():
+    from tests.core.relay.http_server import response_server
+
+    with response_server(drip=False) as peer:
+        response = relay_link._default_post(
+            peer.url + "/hosts/register", json={"nonce": "test"}, timeout=2,
+            headers={"Authorization": "Bearer test-only"},
+        )
+        assert response.status_code == 200
+        assert response.json() == {"padding": "x" * 80}
+        assert response.headers["X-Deadline-Test"] == "preserved"
+        [(method, path, authorization, body)] = peer.requests
+        assert (method, path, authorization) == (
+            "POST", "/hosts/register", "Bearer test-only"
+        )
+        assert json.loads(body) == {"nonce": "test"}
+
+
 def test_signer_subprocess_timeout_is_recoverable_on_next_tick(tmp_path, monkeypatch):
     """A missing signer deadline makes registration appear successful after a stall."""
     import subprocess
