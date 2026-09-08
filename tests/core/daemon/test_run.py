@@ -106,6 +106,7 @@ def _fake_uvicorn(monkeypatch, *, on_serve=None, hold=False, lifecycles=None):
     import asyncio
 
     import uvicorn
+    from uvicorn.server import ServerState
 
     configs: list = []
     servers: list = []
@@ -120,6 +121,8 @@ def _fake_uvicorn(monkeypatch, *, on_serve=None, hold=False, lifecycles=None):
     class _Server:
         def __init__(self, config):
             self.config = config
+            self.servers = []
+            self.server_state = ServerState()
             self.started = False
             self.should_exit = False
             if lifecycles is None:

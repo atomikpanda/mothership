@@ -36,7 +36,7 @@ or registration has succeeded.
 
 | Activity | Owner | Readiness | Cancellation trigger | Cleanup bound | Failure destination |
 |---|---|---|---|---|---|
-| Control UDS and optional host TCP server children | daemon `_serve` task group, with a nested group per server | `TaskGroup.start()` returns after Uvicorn sets `started`; only then is TCP `serve` capability published | SIGTERM/SIGINT, root cancellation, or first server outcome | join server children and shield interrupted Uvicorn shutdown, including its initialized pre-bind lifespan; no new wall-clock deadline | fatal outcome translated after cleanup; daemon log and nonzero exit |
+| Control UDS and optional host TCP server children | daemon `_serve` task group, with a nested group per server | `TaskGroup.start()` returns after Uvicorn sets `started`; only then is TCP `serve` capability published | SIGTERM/SIGINT, root cancellation, or first server outcome | on interruption close listeners/connections, cancel and join request tasks, then shield Uvicorn/lifespan shutdown; initialized pre-bind lifespans also drain; no new wall-clock deadline | fatal outcome translated after cleanup; daemon log and nonzero exit |
 | Tunnel loop and one-second timer | daemon `_serve` task group | local `TaskStatus.started()` before the first tick | shared stop event or root-group cancellation | stop wakes the timer; join in-flight tick, then call `HostTunnel.stop()` | tick exceptions logged and retried; published tunnel state reports collaborator failures |
 | Relay HTTP request and deadline | synchronous tunnel worker (or CLI caller) owns `relay.http.request` and its short-lived AnyIO asyncio run | complete HTTP response body returned | whole-call deadline: 10s registration/enrollment, 8s health read-back | cancel request and close HTTPX async client before returning; no detached request worker | HTTPX timeout exception; registration/read-back retain recoverable error mapping |
 | Native hostname resolution | request-local asyncio loop owns one `anyio.run_process` child per lookup | complete OS `getaddrinfo` address list returned | enclosing HTTP deadline, including resolver interpreter startup | cancellation kills and reaps child before returning; no default-executor DNS work survives the scope | native DNS errors retain HTTPX `ConnectError` mapping; deadline retains HTTPX timeout mapping |
@@ -104,7 +104,16 @@ every server's `should_exit`, sets the shared stop event, and cancels the owning
 group. A signal requests exit through that same shared state. Interrupted
 Uvicorn children explicitly finish shielded shutdown because cancelling
 `Server.serve()` alone skips Uvicorn's normal shutdown call and can leave an
-ASGI lifespan alive. The root joins its children before stopping the tunnel;
+ASGI lifespan alive. For both control UDS and host TCP, interrupted shutdown
+first closes listeners and requests connection shutdown, then explicitly
+cancels and joins Uvicorn's active asyncio request tasks. Request finalizers
+therefore settle forwarding producers before Uvicorn ends the app lifespan;
+an open streaming client is not responsible for releasing shutdown. Ordinary
+Uvicorn graceful shutdown remains unchanged when `serve()` returns normally.
+Interruption gives active requests no additional grace interval, but their
+cancellation cleanup is joined without abandonment or a new wall-clock limit;
+code that ignores cancellation or blocks in cleanup can still delay shutdown.
+The root joins its children before stopping the tunnel;
 each child records its outcome after cleanup independently of cancellable
 notification delivery. The root reconciles all recorded outcomes, including
 sibling failures that finish during cancellation. `_run` writes clean-stop
