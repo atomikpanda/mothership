@@ -257,8 +257,10 @@ async def _run_server_child(
 
     async def run_server() -> None:
         nonlocal outcome
+        returned = False
         try:
             await server.serve()
+            returned = True
         except anyio.get_cancelled_exc_class():
             raise
         except BaseException as error:
@@ -275,7 +277,20 @@ async def _run_server_child(
                 clean=server.should_exit,
             )
         finally:
-            completed.set()
+            try:
+                if not returned:
+                    # Uvicorn calls shutdown only on a normal serve() return.
+                    # Its ASGI lifespan and connections are asyncio-owned, so
+                    # cancelling our child must still join that cleanup.
+                    with anyio.CancelScope(shield=True):
+                        if server.started:
+                            await server.shutdown()
+                        elif (lifespan := getattr(server, "lifespan", None)) is not None:
+                            # Startup creates the lifespan before binding. No
+                            # listening sockets exist yet, but the app must exit.
+                            await lifespan.shutdown()
+            finally:
+                completed.set()
 
     async with outcomes:
         async with anyio.create_task_group() as server_group:

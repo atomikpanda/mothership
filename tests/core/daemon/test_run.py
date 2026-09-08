@@ -163,6 +163,9 @@ def _fake_uvicorn(monkeypatch, *, on_serve=None, hold=False, lifecycles=None):
                 lifecycle.completed.set()
                 lifecycle.record("completed")
 
+        async def shutdown(self):
+            pass  # This fake owns no sockets or ASGI lifespan tasks.
+
     def _forbidden(app, **kwargs):
         raise AssertionError("uvicorn.run bypasses the asyncio branch (#471 AC7)")
 
@@ -649,6 +652,84 @@ def test_server_exception_retains_original_cause(monkeypatch):
     assert raised.value.__cause__ is server_error
     assert control.completed.is_set()
     assert app.state.values[-1] is False
+
+
+@pytest.mark.parametrize("during_startup", [False, True])
+def test_real_uvicorn_root_cancellation_drains_app_lifespans(
+    tmp_path, monkeypatch, during_startup
+):
+    """Cancelling serve() without Uvicorn shutdown leaves its ASGI lifespan alive."""
+    from contextlib import asynccontextmanager
+
+    import anyio
+    import uvicorn
+    from fastapi import FastAPI
+
+    servers = []
+    real_server = uvicorn.Server
+
+    def build_server(config):
+        server = real_server(config)
+        servers.append(server)
+        return server
+
+    monkeypatch.setattr(uvicorn, "Server", build_server)
+    monkeypatch.setattr(run_mod, "_install_stop_handlers", lambda *_args: None)
+
+    async def scenario():
+        active = set()
+        host_entered = anyio.Event()
+        startup_release = anyio.Event()
+
+        @asynccontextmanager
+        async def lifespan(app):
+            active.add(app)
+            try:
+                if app is host:
+                    host_entered.set()
+                    if during_startup:
+                        await startup_release.wait()
+                yield
+            finally:
+                active.remove(app)
+
+        control = FastAPI(lifespan=lifespan)
+        host = FastAPI(lifespan=lifespan)
+        ready = anyio.Event()
+        control.state.set_serve_bound = lambda bound: ready.set() if bound else None
+        daemon_done = anyio.Event()
+        scope = anyio.CancelScope()
+
+        async def daemon():
+            with scope:
+                await run_mod._serve(
+                    control, tmp_path / "control.sock", host,
+                    {"host": "127.0.0.1", "port": 0}, None,
+                )
+            daemon_done.set()
+
+        try:
+            with anyio.fail_after(5):
+                async with anyio.create_task_group() as task_group:
+                    task_group.start_soon(daemon)
+                    await (host_entered if during_startup else ready).wait()
+                    assert active == {control, host}
+                    scope.cancel()
+                    await anyio.wait_all_tasks_blocked()
+                    startup_release.set()
+                    await daemon_done.wait()
+            assert active == set(), "daemon returned before ASGI lifespans ended"
+        finally:
+            # A RED run must close real sockets and lifespan tasks itself.
+            startup_release.set()
+            for server in servers:
+                if server.config.app in active:
+                    if server.started:
+                        await server.shutdown()
+                    else:
+                        await server.lifespan.shutdown()
+
+    anyio.run(scenario, backend="asyncio")
 
 
 def test_control_server_bind_failure_retains_original_cause(monkeypatch):
