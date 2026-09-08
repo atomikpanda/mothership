@@ -307,3 +307,126 @@ def test_probe_codex_hook_capability_reports_timeout_without_retry():
         cwd=Path("/workspace"),
         timeout=codex_hooks.CODEX_CAPABILITY_PROBE_TIMEOUT_SECONDS,
     )
+
+
+def test_codex_sandbox_readiness_reports_missing_ubuntu_bwrap_profile(
+    tmp_path: Path,
+):
+    restriction = tmp_path / "apparmor_restrict_unprivileged_userns"
+    restriction.write_text("1\n")
+
+    result = codex_hooks.inspect_codex_sandbox_readiness(
+        codex_binary="/usr/bin/codex",
+        bwrap_binary="/usr/bin/bwrap",
+        platform_name="Linux",
+        restriction_path=restriction,
+        profile_path=tmp_path / "missing-bwrap-profile",
+        current_profile_path=tmp_path / "current",
+    )
+
+    assert result.state.value == "profile-missing"
+    assert "bwrap-userns-restrict" in result.detail
+
+
+def test_codex_sandbox_readiness_confirms_active_bwrap_apparmor_profile(
+    tmp_path: Path,
+):
+    restriction = tmp_path / "apparmor_restrict_unprivileged_userns"
+    restriction.write_text("1\n")
+    profile = tmp_path / "bwrap-userns-restrict"
+    profile.write_text("profile bwrap /usr/bin/bwrap { allow userns, }\n")
+    current = tmp_path / "current"
+    current.write_text("bwrap//&unpriv_bwrap (enforce)\n")
+
+    result = codex_hooks.inspect_codex_sandbox_readiness(
+        codex_binary="/usr/bin/codex",
+        bwrap_binary="/usr/bin/bwrap",
+        platform_name="Linux",
+        restriction_path=restriction,
+        profile_path=profile,
+        current_profile_path=current,
+    )
+
+    assert result.state.value == "active"
+
+
+def test_codex_sandbox_readiness_prefers_active_confinement_over_hidden_profile(
+    tmp_path: Path,
+):
+    restriction = tmp_path / "apparmor_restrict_unprivileged_userns"
+    restriction.write_text("1\n")
+    current = tmp_path / "current"
+    current.write_text("bwrap//&unpriv_bwrap (enforce)\n")
+
+    result = codex_hooks.inspect_codex_sandbox_readiness(
+        codex_binary="/usr/bin/codex",
+        bwrap_binary="/usr/bin/bwrap",
+        platform_name="Linux",
+        restriction_path=restriction,
+        profile_path=tmp_path / "hidden-bwrap-profile",
+        current_profile_path=current,
+    )
+
+    assert result.state.value == "active"
+
+
+def test_codex_sandbox_readiness_does_not_execute_nested_bwrap(
+    tmp_path: Path,
+):
+    restriction = tmp_path / "apparmor_restrict_unprivileged_userns"
+    restriction.write_text("1\n")
+    profile = tmp_path / "bwrap-userns-restrict"
+    profile.write_text("profile bwrap /usr/bin/bwrap { allow userns, }\n")
+    current = tmp_path / "current"
+    current.write_text("unconfined\n")
+
+    result = codex_hooks.inspect_codex_sandbox_readiness(
+        codex_binary="/usr/bin/codex",
+        bwrap_binary="/usr/bin/bwrap",
+        platform_name="Linux",
+        restriction_path=restriction,
+        profile_path=profile,
+        current_profile_path=current,
+    )
+
+    assert result.state.value == "profile-present-unverified"
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "restriction_value"),
+    [("Darwin", "1\n"), ("Linux", "0\n")],
+)
+def test_codex_sandbox_readiness_is_not_applicable_without_ubuntu_restriction(
+    tmp_path: Path,
+    platform_name: str,
+    restriction_value: str,
+):
+    restriction = tmp_path / "apparmor_restrict_unprivileged_userns"
+    restriction.write_text(restriction_value)
+
+    result = codex_hooks.inspect_codex_sandbox_readiness(
+        codex_binary="/usr/bin/codex",
+        bwrap_binary="/usr/bin/bwrap",
+        platform_name=platform_name,
+        restriction_path=restriction,
+        profile_path=tmp_path / "missing-bwrap-profile",
+        current_profile_path=tmp_path / "current",
+    )
+
+    assert result.state.value == "not-applicable"
+
+
+def test_codex_sandbox_readiness_is_not_applicable_without_bwrap(tmp_path: Path):
+    restriction = tmp_path / "apparmor_restrict_unprivileged_userns"
+    restriction.write_text("1\n")
+
+    result = codex_hooks.inspect_codex_sandbox_readiness(
+        codex_binary="/usr/bin/codex",
+        bwrap_binary=None,
+        platform_name="Linux",
+        restriction_path=restriction,
+        profile_path=tmp_path / "missing-bwrap-profile",
+        current_profile_path=tmp_path / "current",
+    )
+
+    assert result.state.value == "not-applicable"

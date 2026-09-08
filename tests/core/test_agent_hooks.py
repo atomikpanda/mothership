@@ -55,7 +55,7 @@ def test_pre_tool_use_evaluates_every_deduplicated_target(monkeypatch, tmp_path:
 
     assert calls == [tmp_path / "src/ok.py", tmp_path / "src/blocked.py"]
     assert decision.kind is DecisionKind.DENY
-    assert decision.message == "blocked target"
+    assert decision.message == "mship edit gate rejected: blocked target"
 
 
 def test_pre_tool_use_main_edit_bypass_skips_policy(monkeypatch, tmp_path: Path):

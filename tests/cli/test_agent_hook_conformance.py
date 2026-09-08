@@ -277,6 +277,7 @@ def test_any_denied_target_denies_the_whole_native_multi_target_edit(
     assert len(set(outcomes.values())) == 1
     outcome = outcomes["claude"]
     assert outcome.kind == "deny"
+    assert outcome.message.startswith("mship edit gate rejected: ")
     assert str(harness_workspace.worktree / "src" / denied.name) in outcome.message
     assert "MAIN checkout" in outcome.message
 
@@ -315,6 +316,7 @@ def test_workitem_bypass_preserves_main_checkout_protection(harness_workspace: H
     assert set(worktree_outcomes.values()) == {Outcome("allow")}
     assert len(set(main_outcomes.values())) == 1
     assert main_outcomes["claude"].kind == "deny"
+    assert main_outcomes["claude"].message.startswith("mship edit gate rejected: ")
     assert "MAIN checkout" in main_outcomes["claude"].message
 
 

@@ -507,8 +507,11 @@ class DoctorChecker:
             CODEX_COMMANDS,
             CODEX_FEATURE_ENABLE_COMMAND,
             CODEX_HOOKS_PATH,
+            CODEX_SANDBOX_BOOTSTRAP_SIGNATURE,
             CODEX_TRUST_ACTION,
             CodexHookCapability,
+            CodexSandboxReadiness,
+            inspect_codex_sandbox_readiness,
             probe_codex_hook_capability,
             registration_issues as codex_registration_issues,
         )
@@ -529,6 +532,10 @@ class DoctorChecker:
             self._shell,
             root,
             codex_binary=codex_binary,
+        )
+        codex_sandbox = inspect_codex_sandbox_readiness(
+            codex_binary=codex_binary,
+            bwrap_binary=shutil.which("bwrap"),
         )
         checks = [
             self._json_hook_check(
@@ -649,6 +656,38 @@ class DoctorChecker:
                 name="agent-runtime/codex",
                 status="warn",
                 message=codex_capability.detail,
+            ))
+
+        if codex_sandbox.state is CodexSandboxReadiness.PROFILE_MISSING:
+            checks.append(CheckResult(
+                name="agent-runtime/codex-sandbox",
+                status="warn",
+                message=(
+                    f"Codex filesystem sandbox prerequisite missing: "
+                    f"{codex_sandbox.detail}. If Codex reports "
+                    f"`{CODEX_SANDBOX_BOOTSTRAP_SIGNATURE}`, the outer sandbox "
+                    "failed before the requested edit runs; this is not a "
+                    "Mothership hook rejection, and MSHIP_BYPASS_GATE does not "
+                    "apply. Ask the operator to enable and load Ubuntu's "
+                    "`/usr/share/apparmor/extra-profiles/bwrap-userns-restrict` "
+                    "profile, restart Codex, and retry the original edit tool."
+                ),
+            ))
+        elif codex_sandbox.state is CodexSandboxReadiness.PROFILE_PRESENT_UNVERIFIED:
+            checks.append(CheckResult(
+                name="agent-runtime/codex-sandbox",
+                status="warn",
+                message=(
+                    f"{codex_sandbox.detail}. Do not test this by launching nested "
+                    "bwrap from Codex; ask the operator to confirm the profile is "
+                    "loaded and enforced, then restart Codex."
+                ),
+            ))
+        elif codex_sandbox.state is CodexSandboxReadiness.ACTIVE:
+            checks.append(CheckResult(
+                name="agent-runtime/codex-sandbox",
+                status="pass",
+                message="Ubuntu AppArmor bwrap profile active for this Codex process",
             ))
 
         omp_command = "omp"

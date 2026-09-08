@@ -195,6 +195,7 @@ def test_codex_blocks_entire_multi_target_patch_when_one_target_is_denied(tmp_pa
             input=_codex_patch_event(allowed, denied),
         )
         assert result.exit_code == 2
+        assert result.stderr.startswith("mship edit gate rejected: ")
         assert "MAIN checkout" in result.stderr
     finally:
         _reset()
@@ -233,5 +234,6 @@ def test_codex_malformed_patch_warns_and_fails_open(tmp_path: Path):
         )
         assert result.exit_code == 0
         assert "failed open" in result.stderr
+        assert "mship edit gate rejected:" not in result.stderr
     finally:
         _reset()

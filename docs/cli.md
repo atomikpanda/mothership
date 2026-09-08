@@ -48,6 +48,25 @@ artifact is valid, whether the Codex hook feature capability is enabled, and
 whether manual project trust remains unresolved. A current registration is
 therefore configured but untrusted, not reported as fully active.
 
+Codex edit failures also have distinct signatures. A Mothership edit-gate
+denial exits with status 2 and starts stderr with `mship edit gate rejected:`;
+`MSHIP_BYPASS_GATE=1` affects only that gate. By contrast,
+`bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` means the Codex
+filesystem sandbox failed before the requested edit ran. On Ubuntu hosts with
+restricted unprivileged user namespaces, ask the host operator to install the
+distribution AppArmor profiles if needed, enable and load
+`/usr/share/apparmor/extra-profiles/bwrap-userns-restrict` as
+`/etc/apparmor.d/bwrap-userns-restrict`, restart Codex, and retry the original
+edit tool. Verify recovery with an add-update-delete cycle; do not substitute a
+shell, Python, or other unapproved file writer.
+
+`mship doctor` and `mship init --install-hooks` diagnose this Ubuntu
+prerequisite from the user-namespace restriction, installed profile, and
+current confinement state. They deliberately do not launch nested `bwrap`:
+inside a working Codex sandbox that nested launch can fail normally. When the
+profile exists but its loaded state cannot be confirmed from the sandbox, the
+commands warn and direct the operator to verify it from the host.
+
 > **Entry point — spawn vs. spec dispatch:** `mship spawn` starts an ad-hoc task directly, but for **spec-driven** work you don't call it first. `mship spec dispatch <id>` (see **Work items & specs** below) is the entry point: it binds an approved spec and **spawns its own task**. Running `spawn` and then `spec dispatch` against the same spec double-creates tasks (#296). Rule of thumb: have an approved spec → `spec dispatch`; ad-hoc chore/bug → `spawn`.
 
 ## Setup & admin

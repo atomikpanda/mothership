@@ -13,6 +13,9 @@ from mship.core.gate import messaging_notice, no_task_notice
 from mship.core.message_wait import stamp_agent_seen
 
 
+EDIT_GATE_REJECTION_PREFIX = "mship edit gate rejected: "
+
+
 class Runtime(str, Enum):
     CLAUDE = "claude"
     CODEX = "codex"
@@ -88,7 +91,11 @@ def pre_tool_use(
             bypass_workitem_gate=bypass_workitem_gate,
         )
         if not decision.allowed:
-            return AgentHookDecision(runtime, DecisionKind.DENY, decision.reason)
+            return AgentHookDecision(
+                runtime,
+                DecisionKind.DENY,
+                f"{EDIT_GATE_REJECTION_PREFIX}{decision.reason}",
+            )
     return AgentHookDecision(runtime, DecisionKind.ALLOW)
 
 

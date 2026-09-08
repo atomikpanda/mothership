@@ -529,6 +529,69 @@ def test_install_hooks_reports_codex_activation_without_mutating_user_state(
     assert _home_bytes(home) == before
 
 
+def test_install_hooks_warns_before_codex_with_missing_bwrap_profile(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from mship.core import codex_hooks
+
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "mothership.yaml"
+    cfg.write_text(
+        "workspace: t\n"
+        "repos:\n"
+        "  only:\n"
+        "    path: .\n"
+        "    type: service\n"
+    )
+    (tmp_path / "Taskfile.yml").write_text("version: '3'\ntasks: {}\n")
+    (tmp_path / ".git" / "hooks").mkdir(parents=True)
+    restriction = tmp_path / "apparmor_restrict_unprivileged_userns"
+    restriction.write_text("1\n")
+    current = tmp_path / "current"
+    current.write_text("unconfined\n")
+    monkeypatch.setattr(
+        codex_hooks, "APPARMOR_USERNS_RESTRICTION_PATH", restriction
+    )
+    monkeypatch.setattr(
+        codex_hooks,
+        "APPARMOR_BWRAP_PROFILE_PATH",
+        tmp_path / "missing-bwrap-userns-restrict",
+    )
+    monkeypatch.setattr(codex_hooks, "APPARMOR_CURRENT_PROFILE_PATH", current)
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name: f"/usr/bin/{name}" if name in {"codex", "bwrap"} else None,
+    )
+
+    def run_probe(self, command, cwd, env=None, timeout=None):
+        assert command == "codex features list"
+        return ShellResult(
+            returncode=0,
+            stdout="hooks stable true\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(ShellRunner, "run", run_probe)
+    container.config.reset()
+    container.state_manager.reset()
+    container.config_path.override(cfg)
+    container.state_dir.override(tmp_path / ".mothership")
+    try:
+        result = runner.invoke(app, ["init", "--install-hooks"])
+    finally:
+        container.config_path.reset_override()
+        container.state_dir.reset_override()
+        container.config.reset()
+        container.state_manager.reset()
+
+    assert result.exit_code == 0, result.output
+    assert codex_hooks.CODEX_SANDBOX_BOOTSTRAP_SIGNATURE in result.output
+    assert "not a Mothership hook rejection" in result.output
+    assert "MSHIP_BYPASS_GATE does not apply" in result.output
+
+
 @pytest.mark.parametrize("failure_mode", ["skipped", "raised"])
 def test_install_hooks_reports_incomplete_codex_registration_before_activation(
     tmp_path: Path,
