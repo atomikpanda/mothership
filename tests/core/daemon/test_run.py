@@ -511,6 +511,58 @@ def test_cancellation_while_host_startup_pending_stops_every_server(monkeypatch)
     asyncio.run(scenario())
 
 
+def test_control_server_exception_cancels_host_startup_before_readiness(monkeypatch):
+    import asyncio
+
+    import anyio
+
+    server_error = LookupError("control exploded during host startup")
+
+    async def scenario():
+        control = _ServerLifecycle(
+            start_immediately=True,
+            completion_error=server_error,
+            name="control",
+        )
+        host = _ServerLifecycle(name="host")
+        _configs, servers = _fake_uvicorn(monkeypatch, lifecycles=[control, host])
+        app = _TrackingControlApp()
+        daemon_finished = anyio.Event()
+        failures = []
+
+        async def run_daemon():
+            try:
+                await run_mod._serve(
+                    app,
+                    Path("/control.sock"),
+                    object(),
+                    SERVE_BLOCK,
+                    None,
+                )
+            except BaseException as error:
+                failures.append(error)
+            finally:
+                daemon_finished.set()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(run_daemon)
+            await host.entered.wait()
+            control.allow_completion.set()
+            with anyio.fail_after(1):
+                await daemon_finished.wait()
+            task_group.cancel_scope.cancel()
+
+        assert len(failures) == 1
+        assert isinstance(failures[0], RuntimeError)
+        assert str(failures[0]) == "daemon server failed"
+        assert failures[0].__cause__ is server_error
+        assert all(server.should_exit for server in servers)
+        assert host.cancelled.is_set()
+        assert app.state.values[-1] is False
+
+    asyncio.run(scenario())
+
+
 def test_clean_first_server_completion_stops_sibling_without_error(monkeypatch):
     import asyncio
 

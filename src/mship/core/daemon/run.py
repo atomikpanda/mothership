@@ -292,6 +292,23 @@ async def _run_server_child(
             raise _ServerStoppedBeforeReady(outcome)
 
 
+async def _start_server_and_report_ready(task_group, name, server, events) -> None:
+    """Race one server's readiness handshake against sibling outcomes."""
+    async with events:
+        try:
+            await task_group.start(
+                _run_server_child,
+                name,
+                server,
+                events.clone(),
+            )
+        except _ServerStoppedBeforeReady:
+            # The child sent its startup outcome before raising this transport
+            # sentinel, so readiness must not also be reported.
+            return
+        await events.send(None)
+
+
 def _raise_for_server_outcome(outcome: _ServerOutcome) -> None:
     if not outcome.started:
         label = "TCP" if outcome.name == "host" else "control"
@@ -345,17 +362,18 @@ async def _serve(control_app, socket_path, host_app, serve_cfg, tunnel) -> None:
                             )
                         )
                         servers.append(host)
-                        try:
-                            await task_group.start(
-                                _run_server_child,
-                                "host",
-                                host,
-                                send_outcome.clone(),
-                            )
-                        except _ServerStoppedBeforeReady as stopped:
-                            first_outcome = stopped.outcome
-                        else:
+                        task_group.start_soon(
+                            _start_server_and_report_ready,
+                            task_group,
+                            "host",
+                            host,
+                            send_outcome.clone(),
+                        )
+                        host_start = await receive_outcome.receive()
+                        if host_start is None:
                             control_app.state.set_serve_bound(True)
+                        else:
+                            first_outcome = host_start
 
                     if first_outcome is None:
                         _install_stop_handlers(stop, servers)
