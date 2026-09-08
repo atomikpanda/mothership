@@ -371,7 +371,16 @@ def create_app(
     # otherwise both create a thread (orphaning one message) or lose the
     # add_thread update. threading.Lock is the right primitive for that pool.
     msgs = MessageStore(workspace_root / ".mothership" / "messages")
-    workitems = WorkItemStore(workspace_root / ".mothership" / "workitems")
+    if hasattr(state_manager, "state_dir") and hasattr(
+        state_manager,
+        "workspace_store",
+    ):
+        workitems = WorkItemStore(
+            state_manager.state_dir / "workitems",
+            workspace_store=state_manager.workspace_store,
+        )
+    else:
+        workitems = WorkItemStore(workspace_root / ".mothership" / "workitems")
     _item_msg_lock = threading.Lock()
 
     @asynccontextmanager

@@ -867,6 +867,38 @@ def test_merge_auto_advances_spec_and_workitem_then_tears_down(tmp_path):
     assert any(c["kind"] == "event" and "merged" in c["text"] for c in msgs.append_calls)
 
 
+def test_merge_auto_close_uses_injected_canonical_workitem_store(tmp_path):
+    from mship.core.workitem_store import WorkItemStore
+
+    linked_root = tmp_path / "linked-worktree"
+    linked_root.mkdir()
+    canonical_state = tmp_path / "main-checkout" / ".mothership"
+    wstore = WorkItemStore(canonical_state / "workitems")
+    wi = wstore.create(
+        title="Canonical lifecycle",
+        kind="chore",
+        workspace="ws",
+        now=NOW,
+    )
+    wstore.add_task(wi.id, "task-m", now=NOW)
+    url = "https://github.com/org/repo1/pull/1"
+    task = SimpleNamespace(
+        slug="task-m",
+        pr_urls={"repo1": url},
+        work_item_id=wi.id,
+        spec_id=None,
+        worktrees={"repo1": str(linked_root / "wt")},
+    )
+    tasks = {"task-m": task}
+
+    PrWatcher(
+        FakeMessageStore(), wstore, FakeStateManager(tasks), lambda u: "merged", now_fn,
+        worktree_manager=FakeWorktreeManager(tasks), workspace_root=linked_root,
+    ).check_once()
+
+    assert wstore.get(wi.id).phase_override == "done"
+
+
 def test_merge_auto_close_removes_sdd_records(tmp_path):
     from mship.core.sdd_store import SddStore, DispatchRecord
     from datetime import datetime, timezone

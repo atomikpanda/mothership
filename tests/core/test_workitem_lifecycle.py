@@ -140,6 +140,25 @@ def test_no_op_when_no_work_item_id(tmp_path):
     assert store.get(wi.id).phase_override is None
 
 
+def test_close_advance_uses_injected_canonical_workitem_store(tmp_path):
+    state_dir = tmp_path / "main-checkout" / ".mothership"
+    store = WorkItemStore(state_dir / "workitems")
+    wi = store.create(title="t", kind="chore", workspace="ws", now=_now())
+    store.add_task(wi.id, "task-a", now=_now())
+    task = _task("task-a", wi.id)
+
+    advance_workitem_on_close(
+        task=task,
+        workitems=store,
+        specs_dir=tmp_path / "linked-worktree" / "specs",
+        state=WorkspaceState(tasks={"task-a": task}),
+        merged_count=1,
+        closed_count=0,
+    )
+
+    assert store.get(wi.id).phase_override == "done"
+
+
 def test_no_op_when_workitem_missing(tmp_path):
     # Dangling work_item_id (item deleted) must not raise.
     t = _task("task-a", "wi-does-not-exist")

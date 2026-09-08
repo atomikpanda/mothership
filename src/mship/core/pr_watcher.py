@@ -243,14 +243,13 @@ class PrWatcher:
             self._auto_closed_slugs.add(slug)
 
             specs_dir = self.workspace_root / SPECS_DIRNAME
-            workitems_dir = self.workspace_root / ".mothership" / "workitems"
             snapshot = self.state_manager.load()  # still contains the closing task
             advance_spec_on_close(
                 task=task, specs_dir=specs_dir,
                 merged_count=merged_count, closed_count=closed_count,
             )
             advance_workitem_on_close(
-                task=task, workitems_dir=workitems_dir, specs_dir=specs_dir,
+                task=task, workitems=self.workitems, specs_dir=specs_dir,
                 state=snapshot, merged_count=merged_count, closed_count=closed_count,
             )
 
@@ -262,7 +261,7 @@ class PrWatcher:
                 from mship.core.pr import PRManager
                 close_linked_issues(
                     task=task,
-                    workitems_dir=workitems_dir,
+                    workitems=self.workitems,
                     pr_manager=PRManager(self.shell),
                     merged_count=merged_count,
                     closed_count=closed_count,

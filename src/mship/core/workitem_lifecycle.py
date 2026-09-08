@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from mship.core.workitem_store import WorkItemStore
+
 
 @dataclass(frozen=True)
 class RetainedTaskMetadata:
@@ -101,7 +103,8 @@ def require_retained_task_metadata(
 def advance_workitem_on_close(
     *,
     task,
-    workitems_dir: Path,
+    workitems_dir: Path | None = None,
+    workitems: WorkItemStore | None = None,
     specs_dir: Path,
     state,
     merged_count: int,
@@ -144,9 +147,12 @@ def advance_workitem_on_close(
     if not completed_without_prs and (merged_count == 0 or closed_count > 0):
         return
 
-    from mship.core.workitem_store import WorkItemStore
-
-    store = WorkItemStore(workitems_dir)
+    if workitems is not None:
+        store = workitems
+    elif workitems_dir is not None:
+        store = WorkItemStore(workitems_dir)
+    else:
+        raise TypeError("workitems or workitems_dir is required")
     item = store.get(wid)
     if item is None:
         return

@@ -172,6 +172,8 @@ class LifecycleRepository:
         self,
         connection: Connection,
         task: Task,
+        *,
+        allow_missing_workitem: bool = False,
     ) -> WorkItem | None:
         owners = self._owner_ids(connection, task.slug)
         if len(owners) > 1:
@@ -184,6 +186,8 @@ class LifecycleRepository:
             return None
         item = self._store.workitems.get(connection, item_id)
         if item is None:
+            if allow_missing_workitem:
+                return None
             raise TaskMetadataRetentionConflictError(
                 task.slug,
                 f"linked work item {item_id!r} is unavailable",
@@ -196,8 +200,13 @@ class LifecycleRepository:
         task: Task,
         *,
         now: datetime,
+        allow_missing_workitem: bool = False,
     ) -> None:
-        item = self._resolve_owner_item(connection, task)
+        item = self._resolve_owner_item(
+            connection,
+            task,
+            allow_missing_workitem=allow_missing_workitem,
+        )
         if item is None:
             return
         repos = list(dict.fromkeys([*item.affected_repos, *task.affected_repos]))
@@ -297,7 +306,7 @@ class LifecycleRepository:
         """Record Task PRs and mirror retained WorkItem URLs in one short write.
 
         A hotfix finish may explicitly preserve the Task result even when a
-        corrupt WorkItem payload cannot be decoded. Normal calls remain atomic:
+        linked WorkItem is unreadable or has gone stale/missing. Normal calls remain atomic:
         any WorkItem read or update failure rolls the Task write back.
         """
         with self._store.write(immediate=True) as transaction:
@@ -308,7 +317,12 @@ class LifecycleRepository:
             transaction.tasks.replace(transaction.connection, task)
             self._checkpoint("after_task_replace")
             try:
-                self._retain_loaded(transaction.connection, task, now=now)
+                self._retain_loaded(
+                    transaction.connection,
+                    task,
+                    now=now,
+                    allow_missing_workitem=allow_unreadable_workitem,
+                )
             except PersistenceDecodeError:
                 if not allow_unreadable_workitem:
                     raise
