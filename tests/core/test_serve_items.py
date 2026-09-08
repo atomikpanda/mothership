@@ -45,6 +45,36 @@ def test_list_and_get_item_with_derived_phase(tmp_path):
     assert client.get("/items/nope").status_code == 404
 
 
+def test_serve_uses_state_managers_canonical_workitem_store_from_linked_worktree(
+    tmp_path,
+):
+    linked_root = tmp_path / "linked-worktree"
+    linked_root.mkdir()
+    specs_dir = linked_root / "specs"
+    SpecStore(specs_dir)
+    state_manager = StateManager(tmp_path / "main-checkout" / ".mothership")
+    items = WorkItemStore(
+        state_manager.state_dir / "workitems",
+        workspace_store=state_manager.workspace_store,
+    )
+    wi = items.create(
+        title="Canonical item",
+        kind="question",
+        workspace="testws",
+        now=_now(),
+    )
+
+    app = create_app(
+        specs_dir=specs_dir,
+        state_manager=state_manager,
+        log_manager=None,
+        workspace_root=linked_root,
+        workspace_name="testws",
+    )
+
+    assert [item["id"] for item in TestClient(app).get("/items").json()] == [wi.id]
+
+
 # --- MOS-228 T3: GET /items archived filter; GET /items/{id} stays unfiltered ---
 
 def test_list_items_excludes_archived_by_default(tmp_path):

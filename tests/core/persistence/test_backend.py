@@ -4,7 +4,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from mship.core.persistence.backend import StorageBackend, detect_backend
+from mship.core.persistence.backend import (
+    StorageBackend,
+    detect_backend,
+    get_legacy_workitem,
+)
 from mship.core.persistence.database import WorkspaceDatabase
 from mship.core.persistence.errors import LegacyMigrationRequired
 from mship.core.persistence.task_repository import TaskRepository
@@ -99,6 +103,32 @@ def test_legacy_workitems_are_readable_but_mutations_require_migration(
         store.link_spec(item.id, "spec-a", now=NOW)
     with pytest.raises(LegacyMigrationRequired, match="mship state migrate"):
         store.create("new", "feature", "test", NOW)
+
+
+def test_legacy_backend_rejects_workitem_id_traversal(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".mothership"
+    items_dir = state_dir / "workitems"
+    items_dir.mkdir(parents=True)
+    outside = _item("outside")
+    (state_dir / "outside.json").write_text(outside.model_dump_json())
+
+    with pytest.raises(ValueError, match="unsafe work item id"):
+        get_legacy_workitem(items_dir, "../outside")
+
+
+def test_legacy_workitem_list_rejects_symlink_outside_directory(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".mothership"
+    items_dir = state_dir / "workitems"
+    items_dir.mkdir(parents=True)
+    outside = _item("outside")
+    outside_path = state_dir / "outside.json"
+    outside_path.write_text(outside.model_dump_json())
+    (items_dir / "linked.json").symlink_to(outside_path)
+
+    with pytest.raises(ValueError, match="unsafe work item id"):
+        WorkItemStore(items_dir).list()
 
 
 def test_empty_state_store_initializes_sqlite_on_first_write(tmp_path: Path) -> None:

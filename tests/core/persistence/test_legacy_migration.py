@@ -11,6 +11,8 @@ from sqlalchemy import select
 from mship.core.persistence.database import WorkspaceDatabase
 from mship.core.persistence.migration import (
     MigrationPreflightError,
+    _backup_legacy,
+    _legacy_fingerprints,
     migrate_legacy_state,
 )
 from mship.core.persistence.schema import storage_metadata
@@ -172,6 +174,52 @@ def test_migration_activates_only_after_verified_import(
     assert len(metadata["legacy_workitems_sha256"]) == 64
 
 
+def test_migration_accepts_semantically_equivalent_naive_timestamps(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".mothership"
+    workitems_dir = state_dir / "workitems"
+    workitems_dir.mkdir(parents=True)
+    naive = datetime(2026, 9, 7, 20, 0)
+    task = Task(
+        slug="naive-task",
+        description="legacy naive timestamps",
+        phase="dev",
+        created_at=naive,
+        affected_repos=["mothership"],
+        branch="feat/naive-task",
+        test_results={"mothership": TestResult(status="pass", at=naive)},
+        phase_entered_at=naive,
+        work_item_id="wi-naive",
+    )
+    item = WorkItem(
+        id="wi-naive",
+        title="Naive timestamps",
+        workspace="test",
+        kind="chore",
+        created_at=naive,
+        updated_at=naive,
+        task_slugs=[task.slug],
+    )
+    (state_dir / "state.yaml").write_text(
+        yaml.safe_dump(WorkspaceState(tasks={task.slug: task}).model_dump(mode="json"))
+    )
+    (workitems_dir / f"{item.id}.json").write_text(item.model_dump_json(indent=2))
+
+    report = migrate_legacy_state(
+        state_dir,
+        daemon_probe=lambda: None,
+        now=NOW,
+    )
+
+    assert report.migrated is True
+    restored = StateManager(state_dir).load().tasks[task.slug]
+    assert restored.created_at == naive.replace(tzinfo=timezone.utc)
+    restored_item = WorkItemStore(state_dir / "workitems").get(item.id)
+    assert restored_item is not None
+    assert restored_item.updated_at == naive.replace(tzinfo=timezone.utc)
+
+
 @pytest.mark.parametrize(
     "stage",
     ["validate", "backup", "alembic", "import", "verify", "activate"],
@@ -236,6 +284,85 @@ def test_migration_rejects_invalid_legacy_data(
 
     assert not WorkspaceDatabase(legacy_workspace.state_dir).path.exists()
     assert (legacy_workspace.state_dir / "state.yaml").is_file()
+
+
+def test_legacy_fingerprints_reject_external_workitem_symlink(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".mothership"
+    workitems_dir = state_dir / "workitems"
+    workitems_dir.mkdir(parents=True)
+    outside = WorkItem(
+        id="outside",
+        title="Outside",
+        workspace="test",
+        kind="chore",
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    outside_path = state_dir / "outside.json"
+    outside_path.write_text(outside.model_dump_json())
+    (workitems_dir / "linked.json").symlink_to(outside_path)
+
+    with pytest.raises(ValueError, match="unsafe work item id"):
+        _legacy_fingerprints(state_dir)
+
+
+def test_legacy_backup_rejects_external_workitem_symlink(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".mothership"
+    workitems_dir = state_dir / "workitems"
+    workitems_dir.mkdir(parents=True)
+    outside = WorkItem(
+        id="outside",
+        title="Outside",
+        workspace="test",
+        kind="chore",
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    outside_path = state_dir / "outside.json"
+    outside_path.write_text(outside.model_dump_json())
+    (workitems_dir / "linked.json").symlink_to(outside_path)
+
+    with pytest.raises(ValueError, match="unsafe work item id"):
+        _backup_legacy(state_dir, NOW)
+
+
+def test_migration_rejects_external_workitem_symlink_before_loading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_dir = tmp_path / ".mothership"
+    workitems_dir = state_dir / "workitems"
+    workitems_dir.mkdir(parents=True)
+    (state_dir / "state.yaml").write_text("tasks: {}\n")
+    outside = WorkItem(
+        id="outside",
+        title="Outside",
+        workspace="test",
+        kind="chore",
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    outside_path = state_dir / "outside.json"
+    outside_path.write_text(outside.model_dump_json())
+    (workitems_dir / "linked.json").symlink_to(outside_path)
+    monkeypatch.setattr(
+        "mship.core.persistence.migration.list_legacy_workitems",
+        lambda *_args, **_kwargs: ([], False),
+    )
+
+    with pytest.raises(ValueError, match="unsafe work item id"):
+        migrate_legacy_state(
+            state_dir,
+            daemon_probe=lambda: None,
+            now=NOW,
+        )
+
+    assert (state_dir / "state.yaml").is_file()
+    assert not WorkspaceDatabase(state_dir).path.exists()
 
 
 def test_retirement_failure_restores_legacy_authority_and_is_retryable(

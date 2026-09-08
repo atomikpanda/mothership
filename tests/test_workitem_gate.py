@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 from mship.core.spec import Spec
 from mship.core.spec_store import SpecStore
+from mship.core.persistence.workspace_store import WorkspaceStore
 from mship.core.state import StateManager, Task, WorkspaceState
 from mship.core.workitem_gate import GateResult, check_task_gate, log_hotfix, resolve_bound_spec
 from mship.core.workitem_store import WorkItemStore
@@ -35,6 +36,22 @@ def test_bug_work_item_ok_without_spec(tmp_path):
     result = check_task_gate(_task(work_item_id=wi.id), tmp_path)
     assert result.ok
     assert result.reason is None
+
+
+def test_gate_uses_injected_canonical_workitem_store_from_linked_worktree(tmp_path):
+    checkout_root = tmp_path / "linked-worktree"
+    checkout_root.mkdir()
+    state_dir = tmp_path / "main-checkout" / ".mothership"
+    workspace_store = WorkspaceStore(state_dir)
+    items = WorkItemStore(
+        state_dir / "workitems",
+        workspace_store=workspace_store,
+    )
+    wi = items.create(title="fix it", kind="bug", workspace="ws", now=_now())
+
+    result = check_task_gate(_task(work_item_id=wi.id), checkout_root, workitems=items)
+
+    assert result.ok
 
 
 def test_feature_work_item_without_approved_spec_is_not_ok(tmp_path):

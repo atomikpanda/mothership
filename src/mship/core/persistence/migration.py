@@ -14,6 +14,7 @@ from pathlib import Path
 from mship.core.daemon.status import daemon_is_running
 from mship.core.persistence.backend import (
     StorageBackend,
+    _legacy_workitem_path,
     detect_backend,
     list_legacy_workitems,
     load_legacy_state,
@@ -84,7 +85,8 @@ def _legacy_fingerprints(state_dir: Path) -> tuple[str, str]:
     items_digest = hashlib.sha256()
     workitems_dir = state_dir / "workitems"
     if workitems_dir.is_dir():
-        for path in sorted(workitems_dir.glob("*.json")):
+        for discovered in sorted(workitems_dir.glob("*.json")):
+            path = _legacy_workitem_path(workitems_dir, discovered.stem)
             items_digest.update(path.name.encode())
             items_digest.update(b"\0")
             items_digest.update(hashlib.sha256(path.read_bytes()).digest())
@@ -104,9 +106,24 @@ def _backup_legacy(state_dir: Path, now: datetime) -> Path:
     if workitems_dir.is_dir():
         backup_items = backup / "workitems"
         backup_items.mkdir()
-        for path in sorted(workitems_dir.glob("*.json")):
-            shutil.copy2(path, backup_items / path.name)
+        for discovered in sorted(workitems_dir.glob("*.json")):
+            path = _legacy_workitem_path(workitems_dir, discovered.stem)
+            shutil.copy2(path, backup_items / discovered.name)
     return backup
+
+
+def _normalize_timestamps(value: object) -> object:
+    if isinstance(value, datetime):
+        return encode_datetime(value)
+    if isinstance(value, dict):
+        return {key: _normalize_timestamps(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize_timestamps(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_normalize_timestamps(item) for item in value)
+    if isinstance(value, set):
+        return {_normalize_timestamps(item) for item in value}
+    return value
 
 
 def _verify_candidate(
@@ -122,13 +139,17 @@ def _verify_candidate(
         foreign_key_errors = connection.exec_driver_sql(
             "PRAGMA foreign_key_check"
         ).all()
-    if actual_state != expected_state:
+    if _normalize_timestamps(actual_state.model_dump(mode="python")) != (
+        _normalize_timestamps(expected_state.model_dump(mode="python"))
+    ):
         raise MigrationVerificationError(
             "candidate Task state does not match legacy state"
         )
-    if {item.id: item for item in actual_items} != {
-        item.id: item for item in expected_items
-    }:
+    if _normalize_timestamps(
+        {item.id: item.model_dump(mode="python") for item in actual_items}
+    ) != _normalize_timestamps(
+        {item.id: item.model_dump(mode="python") for item in expected_items}
+    ):
         raise MigrationVerificationError(
             "candidate WorkItem state does not match legacy state"
         )
@@ -207,7 +228,12 @@ def migrate_legacy_state(
 
         workitems_dir = state_dir / "workitems"
         item_paths = (
-            sorted(workitems_dir.glob("*.json")) if workitems_dir.is_dir() else []
+            [
+                _legacy_workitem_path(workitems_dir, path.stem)
+                for path in sorted(workitems_dir.glob("*.json"))
+            ]
+            if workitems_dir.is_dir()
+            else []
         )
         with ExitStack() as locks:
             locks.enter_context(_exclusive_lock(state_dir / "state.lock"))

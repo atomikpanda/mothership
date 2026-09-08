@@ -113,6 +113,34 @@ def _registration_worker(
     Path(result_path).write_text(json.dumps(outcomes))
 
 
+def _first_write_worker(
+    state_dir: str,
+    slug: str,
+    result_path: str,
+    barrier,
+) -> None:
+    current_revision = WorkspaceDatabase.current_revision
+    first_check = True
+
+    def synchronized_revision(database):
+        nonlocal first_check
+        current = current_revision(database)
+        if first_check:
+            first_check = False
+            barrier.wait(timeout=PROCESS_TIMEOUT_SECONDS)
+        return current
+
+    WorkspaceDatabase.current_revision = synchronized_revision
+    try:
+        manager = StateManager(Path(state_dir))
+        manager.insert_task(_task(slug))
+    except Exception as error:
+        outcome = f"{type(error).__name__}: {error}"
+    else:
+        outcome = "ok"
+    Path(result_path).write_text(outcome)
+
+
 def _run_pair(ctx, target, args_a: tuple, args_b: tuple) -> None:
     barrier = ctx.Barrier(2)
     processes = [
@@ -128,6 +156,28 @@ def _run_pair(ctx, target, args_a: tuple, args_b: tuple) -> None:
             process.join(timeout=PROCESS_TIMEOUT_SECONDS)
             pytest.fail(f"multiprocess worker exceeded {PROCESS_TIMEOUT_SECONDS}s")
         assert process.exitcode == 0, f"worker exited with {process.exitcode}"
+
+
+def test_concurrent_first_writes_initialize_alembic_once_without_leaking_errors(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".mothership"
+    first_result = tmp_path / "first-result"
+    second_result = tmp_path / "second-result"
+    ctx = multiprocessing.get_context("spawn")
+
+    _run_pair(
+        ctx,
+        _first_write_worker,
+        (str(state_dir), "first", str(first_result)),
+        (str(state_dir), "second", str(second_result)),
+    )
+
+    assert first_result.read_text() == "ok"
+    assert second_result.read_text() == "ok"
+
+    state = StateManager(state_dir).load()
+    assert set(state.tasks) == {"first", "second"}
 
 
 def test_concurrent_different_task_mutations_never_lose_updates(

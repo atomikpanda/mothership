@@ -356,3 +356,79 @@ def test_record_pr_urls_hotfix_preserves_task_when_workitem_is_unreadable(
 
     assert recorded.pr_urls == {"api": url}
     assert state.load().tasks[task.slug].pr_urls == {"api": url}
+
+
+def test_record_pr_urls_hotfix_preserves_task_when_linked_workitem_is_missing(
+    lifecycle_stores,
+) -> None:
+    lifecycle, state, items = lifecycle_stores
+    item = _item(items)
+    task = _task(work_item_id=item.id)
+    task.pr_urls = {}
+    lifecycle.register_task(task, item.id, now=NOW)
+    with state.workspace_store.write(immediate=True) as transaction:
+        transaction.workitems.delete(transaction.connection, item.id)
+
+    url = "https://example.test/pr/3"
+    recorded = lifecycle.record_pr_urls(
+        task.slug,
+        {"api": url},
+        now=NOW,
+        allow_unreadable_workitem=True,
+    )
+
+    assert recorded.pr_urls == {"api": url}
+    assert state.load().tasks[task.slug].pr_urls == {"api": url}
+
+
+def test_record_pr_urls_missing_workitem_rolls_back_without_hotfix(
+    lifecycle_stores,
+) -> None:
+    lifecycle, state, items = lifecycle_stores
+    item = _item(items)
+    task = _task(work_item_id=item.id)
+    task.pr_urls = {}
+    lifecycle.register_task(task, item.id, now=NOW)
+    with state.workspace_store.write(immediate=True) as transaction:
+        transaction.workitems.delete(transaction.connection, item.id)
+
+    with pytest.raises(
+        TaskMetadataRetentionConflictError,
+        match="linked work item.*unavailable",
+    ):
+        lifecycle.record_pr_urls(
+            task.slug,
+            {"api": "https://example.test/pr/3"},
+            now=NOW,
+        )
+
+    assert state.load().tasks[task.slug].pr_urls == {}
+
+
+def test_record_pr_urls_hotfix_keeps_ambiguous_workitem_atomic(
+    lifecycle_stores,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lifecycle, state, items = lifecycle_stores
+    item = _item(items)
+    task = _task(work_item_id=item.id)
+    task.pr_urls = {}
+    lifecycle.register_task(task, item.id, now=NOW)
+    monkeypatch.setattr(
+        lifecycle,
+        "_owner_ids",
+        lambda connection, task_slug: ["wi-first", "wi-second"],
+    )
+
+    with pytest.raises(
+        TaskMetadataRetentionConflictError,
+        match="ambiguous",
+    ):
+        lifecycle.record_pr_urls(
+            task.slug,
+            {"api": "https://example.test/pr/3"},
+            now=NOW,
+            allow_unreadable_workitem=True,
+        )
+
+    assert state.load().tasks[task.slug].pr_urls == {}

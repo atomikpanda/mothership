@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from mship.core.workitem_store import WorkItemStore
+
 _PR_URL = re.compile(r"https?://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)")
 
 
@@ -20,7 +22,8 @@ def _shipped_comment(pr_url: str) -> str:
     return "Shipped (PR merged)."
 
 
-def close_linked_issues(*, task, workitems_dir, pr_manager,
+def close_linked_issues(*, task, workitems_dir: Path | None = None,
+                        workitems: WorkItemStore | None = None, pr_manager,
                         merged_count: int, closed_count: int, warn,
                         open_count: int = 0) -> dict:
     """Close every still-open GitHub issue linked to the task's WorkItem.
@@ -39,9 +42,13 @@ def close_linked_issues(*, task, workitems_dir, pr_manager,
     try:
         from mship.core.issue_link import linked_issue_refs
         from mship.core.issue_refs import issue_slug_and_number
-        from mship.core.workitem_store import WorkItemStore
-
-        item = WorkItemStore(Path(workitems_dir)).get(task.work_item_id)
+        if workitems is not None:
+            store = workitems
+        elif workitems_dir is not None:
+            store = WorkItemStore(workitems_dir)
+        else:
+            raise TypeError("workitems or workitems_dir is required")
+        item = store.get(task.work_item_id)
         if item is None:
             return result
         refs = linked_issue_refs(item)

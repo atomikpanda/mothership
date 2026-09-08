@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
+from sqlalchemy.exc import IntegrityError
+
 from mship.core.config import WorkspaceConfig
 from mship.core.graph import DependencyGraph
 from mship.core.log import LogManager
@@ -741,8 +743,11 @@ class WorktreeManager:
                 LifecycleRepository(self._state_manager.workspace_store).register_task(
                     task, work_item_id, now=now
                 )
-        except KeyError as error:
-            if error.args != (slug,):
+        except (IntegrityError, KeyError) as error:
+            if isinstance(error, KeyError):
+                if error.args != (slug,):
+                    raise
+            elif "UNIQUE constraint failed: tasks.slug" not in str(error.orig):
                 raise
             raise ValueError(
                 f"Task '{slug}' already exists. "

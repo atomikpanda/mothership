@@ -59,6 +59,25 @@ def test_closes_open_issue_with_shipped_comment(tmp_path):
     assert warnings == []
 
 
+def test_issue_close_uses_injected_canonical_workitem_store(tmp_path):
+    store, wi_id = _item_with_issue(
+        tmp_path / "main-checkout" / ".mothership",
+        ["acme/widgets#12"],
+    )
+    pm = FakePRManager({"acme/widgets#12": "open"})
+
+    result = close_linked_issues(
+        task=_task(wi_id),
+        workitems=store,
+        pr_manager=pm,
+        merged_count=1,
+        closed_count=0,
+        warn=lambda message: None,
+    )
+
+    assert result["closed"] == ["acme/widgets#12"]
+
+
 def test_already_closed_issue_is_skipped_without_comment(tmp_path):
     store, wi_id = _item_with_issue(tmp_path, ["acme/widgets#12"])
     pm = FakePRManager({"acme/widgets#12": "closed"})

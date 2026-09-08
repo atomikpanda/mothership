@@ -43,8 +43,24 @@ def load_legacy_state(state_dir: Path) -> WorkspaceState:
     return WorkspaceState.model_validate(raw)
 
 
+def _legacy_workitem_path(workitems_dir: Path, item_id: str) -> Path:
+    if (
+        not item_id
+        or "/" in item_id
+        or "\\" in item_id
+        or item_id in (".", "..")
+        or item_id.startswith(".")
+    ):
+        raise ValueError(f"unsafe work item id: {item_id!r}")
+    directory = Path(workitems_dir).resolve()
+    path = (directory / f"{item_id}.json").resolve()
+    if path.parent != directory:
+        raise ValueError(f"unsafe work item id: {item_id!r}")
+    return path
+
+
 def get_legacy_workitem(workitems_dir: Path, item_id: str) -> WorkItem | None:
-    path = Path(workitems_dir) / f"{item_id}.json"
+    path = _legacy_workitem_path(workitems_dir, item_id)
     if not path.is_file():
         return None
     return WorkItem.model_validate_json(path.read_text())
@@ -63,7 +79,8 @@ def list_legacy_workitems(
     uncertain = False
     for path in directory.glob("*.json"):
         try:
-            items.append(WorkItem.model_validate_json(path.read_text()))
+            contained_path = _legacy_workitem_path(directory, path.stem)
+            items.append(WorkItem.model_validate_json(contained_path.read_text()))
         except Exception:
             if not tolerant:
                 raise
