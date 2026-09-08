@@ -24,16 +24,20 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
 
 from mship.core.daemon import history, lease as lease_mod, paths
 from mship.core.daemon.log_capture import (
     LAUNCHD_CAPTURE_MAX_BYTES,
     rotate_launchd_captures,
 )
+
+if TYPE_CHECKING:
+    import anyio
 
 log = logging.getLogger(__name__)
 
@@ -223,53 +227,148 @@ def _serve_forever(control_app, socket_path, host_app, serve_cfg, tunnel=None) -
     )
 
 
+@dataclass(frozen=True)
+class _ServerOutcome:
+    name: str
+    started: bool
+    clean: bool
+    error: BaseException | None = None
+
+
+class _ServerStoppedBeforeReady(Exception):
+    def __init__(self, outcome: _ServerOutcome) -> None:
+        super().__init__(outcome.name)
+        self.outcome = outcome
+
+
+async def _run_server_child(
+    name,
+    server,
+    outcomes,
+    *,
+    task_status: anyio.abc.TaskStatus[None],
+) -> None:
+    """Own one uvicorn server and expose its readiness to the root group."""
+    import anyio
+
+    completed = anyio.Event()
+    outcome = None
+
+    async def run_server() -> None:
+        nonlocal outcome
+        try:
+            await server.serve()
+        except anyio.get_cancelled_exc_class():
+            raise
+        except BaseException as error:
+            outcome = _ServerOutcome(
+                name=name,
+                started=server.started,
+                clean=server.should_exit,
+                error=error,
+            )
+        else:
+            outcome = _ServerOutcome(
+                name=name,
+                started=server.started,
+                clean=server.should_exit,
+            )
+        finally:
+            completed.set()
+
+    async with outcomes:
+        async with anyio.create_task_group() as server_group:
+            server_group.start_soon(run_server)
+            while not server.started and not completed.is_set():
+                await anyio.sleep(0)
+            if server.started:
+                task_status.started()
+            await completed.wait()
+
+        assert outcome is not None
+        await outcomes.send(outcome)
+        if not outcome.started:
+            raise _ServerStoppedBeforeReady(outcome)
+
+
+def _raise_for_server_outcome(outcome: _ServerOutcome) -> None:
+    if not outcome.started:
+        label = "TCP" if outcome.name == "host" else "control"
+        raise RuntimeError(f"{label} server failed to bind") from outcome.error
+    if outcome.error is not None:
+        raise RuntimeError("daemon server failed") from outcome.error
+    if not outcome.clean:
+        raise RuntimeError("daemon server stopped unexpectedly")
+
+
 async def _serve(control_app, socket_path, host_app, serve_cfg, tunnel) -> None:
     import asyncio
 
+    import anyio
     import uvicorn
 
     control = uvicorn.Server(
         uvicorn.Config(control_app, uds=str(socket_path), log_config=None)
     )
     servers = [control]
-    tasks = [asyncio.create_task(control.serve())]
     control_app.state.set_serve_bound(False)
     stop = asyncio.Event()
     tunnel_task = None
+    first_outcome = None
     try:
-        if host_app is not None and serve_cfg is not None:
-            host = uvicorn.Server(
-                uvicorn.Config(
-                    host_app,
-                    host=serve_cfg["host"],
-                    port=int(serve_cfg["port"]),
-                    log_config=None,
-                )
-            )
-            servers.append(host)
-            tasks.append(asyncio.create_task(host.serve()))
-            await _await_tcp_bind(control, tasks[0], host, tasks[1])
-            control_app.state.set_serve_bound(True)
-        _install_stop_handlers(stop, servers)
-        if tunnel is not None:
-            tunnel_task = asyncio.create_task(_tunnel_loop(tunnel, stop))
+        send_outcome, receive_outcome = anyio.create_memory_object_stream(2)
+        async with send_outcome, receive_outcome:
+            async with anyio.create_task_group() as task_group:
+                try:
+                    try:
+                        await task_group.start(
+                            _run_server_child,
+                            "control",
+                            control,
+                            send_outcome.clone(),
+                        )
+                    except _ServerStoppedBeforeReady as stopped:
+                        first_outcome = stopped.outcome
 
-        done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        unexpected = any(
-            task in done and not server.should_exit
-            for task, server in zip(tasks, servers)
-        )
-        for server in servers:
-            server.should_exit = True
-        stop.set()
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        failure = next(
-            (result for result in results if isinstance(result, BaseException)), None
-        )
-        if failure is not None:
-            raise RuntimeError("daemon server failed") from failure
-        if unexpected:
-            raise RuntimeError("daemon server stopped unexpectedly")
+                    if (
+                        first_outcome is None
+                        and host_app is not None
+                        and serve_cfg is not None
+                    ):
+                        host = uvicorn.Server(
+                            uvicorn.Config(
+                                host_app,
+                                host=serve_cfg["host"],
+                                port=int(serve_cfg["port"]),
+                                log_config=None,
+                            )
+                        )
+                        servers.append(host)
+                        try:
+                            await task_group.start(
+                                _run_server_child,
+                                "host",
+                                host,
+                                send_outcome.clone(),
+                            )
+                        except _ServerStoppedBeforeReady as stopped:
+                            first_outcome = stopped.outcome
+                        else:
+                            control_app.state.set_serve_bound(True)
+
+                    if first_outcome is None:
+                        _install_stop_handlers(stop, servers)
+                        if tunnel is not None:
+                            tunnel_task = asyncio.create_task(
+                                _tunnel_loop(tunnel, stop)
+                            )
+                        first_outcome = await receive_outcome.receive()
+                finally:
+                    control_app.state.set_serve_bound(False)
+                    for server in servers:
+                        server.should_exit = True
+                    stop.set()
+                    task_group.cancel_scope.cancel()
     finally:
         control_app.state.set_serve_bound(False)
         # Joined BEFORE the tunnel is torn down, and torn down before `_run`
@@ -280,25 +379,8 @@ async def _serve(control_app, socket_path, host_app, serve_cfg, tunnel) -> None:
         await _join_tunnel(tunnel_task)
         if tunnel is not None:
             tunnel.stop()
-
-
-async def _await_tcp_bind(control, control_task, host, host_task) -> None:
-    """Block until the TCP host app is listening, or fail loudly if either
-    server gives up first — a half-bound daemon must not advertise itself."""
-    import asyncio
-
-    while not host.started:
-        if host_task.done():
-            control.should_exit = True
-            await asyncio.gather(control_task, return_exceptions=True)
-            raise RuntimeError("TCP server failed to bind") from host_task.exception()
-        if control_task.done():
-            host.should_exit = True
-            await asyncio.gather(host_task, return_exceptions=True)
-            raise RuntimeError(
-                "control server stopped before TCP bind"
-            ) from control_task.exception()
-        await asyncio.sleep(0)
+    assert first_outcome is not None
+    _raise_for_server_outcome(first_outcome)
 
 
 def _install_stop_handlers(stop, servers) -> None:
@@ -307,15 +389,12 @@ def _install_stop_handlers(stop, servers) -> None:
     Uvicorn's own handlers only set `should_exit` on the server that installed
     them, so nothing else in the process would ever learn a stop was requested.
 
-    ORDERING, deliberately not relied upon: uvicorn captures signals with
-    `signal.signal` from inside `serve()`, and so does `add_signal_handler` —
-    last install wins. Ours goes in after the TCP bind wait, which is after both
-    servers have started (so ours wins) in the host shape, but before the
-    control server's first await in the control-only shape (so uvicorn's wins
-    there). Both outcomes are correct, and that is the point: uvicorn's handler
-    ends its server's task, and the shutdown path below sets this Event the
-    moment ANY server task completes. The handler here is the fast path, never
-    the only one."""
+    Uvicorn captures signals from inside `serve()`, and `add_signal_handler`
+    also replaces the prior handler. The readiness handshakes mean ours is
+    installed after every server has entered `serve()` and marked itself
+    started, so ours wins on the asyncio backend. Where the platform refuses
+    the handler, uvicorn's own handler still ends a server and the first
+    completion outcome drives the same shared shutdown path."""
     import asyncio
     import signal
 
@@ -329,7 +408,7 @@ def _install_stop_handlers(stop, servers) -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
             loop.add_signal_handler(sig, _request_stop)
-        except (NotImplementedError, RuntimeError, ValueError):
+        except NotImplementedError, RuntimeError, ValueError:
             # Non-POSIX, or not the main thread (tests). Uvicorn's own handlers
             # plus the shutdown path still stop everything.
             log.debug("no asyncio signal handler available for %s", sig)

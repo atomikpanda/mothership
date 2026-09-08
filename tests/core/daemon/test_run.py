@@ -48,7 +48,46 @@ def env_home(tmp_path, monkeypatch):
             h.close()
 
 
-def _fake_uvicorn(monkeypatch, *, on_serve=None, hold=False):
+class _ServerLifecycle:
+    """Deterministic controls and observations for one fake uvicorn server."""
+
+    def __init__(
+        self,
+        *,
+        start_immediately=False,
+        complete_immediately=False,
+        startup_error=None,
+        completion_error=None,
+        clean=True,
+        events=None,
+        name="server",
+    ):
+        import asyncio
+
+        self.constructed = asyncio.Event()
+        self.entered = asyncio.Event()
+        self.allow_start = asyncio.Event()
+        self.started = asyncio.Event()
+        self.allow_completion = asyncio.Event()
+        self.completed = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.startup_error = startup_error
+        self.completion_error = completion_error
+        self.clean = clean
+        self.events = events
+        self.name = name
+        self.server = None
+        if start_immediately:
+            self.allow_start.set()
+        if complete_immediately:
+            self.allow_completion.set()
+
+    def record(self, event):
+        if self.events is not None:
+            self.events.append(f"{self.name}:{event}")
+
+
+def _fake_uvicorn(monkeypatch, *, on_serve=None, hold=False, lifecycles=None):
     """Stub uvicorn's Config/Server, and forbid `uvicorn.run` outright.
 
     The capture seam moved with the code: `_serve_forever` runs on asyncio in
@@ -60,9 +99,9 @@ def _fake_uvicorn(monkeypatch, *, on_serve=None, hold=False):
     Returns `(configs, servers)`, in construction order and unfiltered — the
     shape of a startup is how many servers it builds and what each was given,
     so a test asserts both rather than reading a dict that only ever holds the
-    kwargs it expected. `hold=True` makes `serve()` run until something sets
-    `should_exit`, so a test can drive shutdown; otherwise each server serves
-    once and reports the clean exit a signalled uvicorn does.
+    kwargs it expected. A supplied lifecycle gives tests explicit startup,
+    completion, and cancellation events instead of relying on scheduler timing.
+    `hold=True` retains the tunnel tests' signal-driven shutdown seam.
     """
     import asyncio
 
@@ -83,17 +122,46 @@ def _fake_uvicorn(monkeypatch, *, on_serve=None, hold=False):
             self.config = config
             self.started = False
             self.should_exit = False
+            if lifecycles is None:
+                lifecycle = _ServerLifecycle(
+                    start_immediately=True,
+                    complete_immediately=not hold,
+                )
+            else:
+                lifecycle = lifecycles[len(servers)]
+            self.lifecycle = lifecycle
+            lifecycle.server = self
             servers.append(self)
+            lifecycle.constructed.set()
 
         async def serve(self):
-            self.started = True
-            if on_serve is not None:
-                on_serve()
-            while hold and not self.should_exit:
-                await asyncio.sleep(0)
-            # A real server returns from serve() with should_exit set once it
-            # has been asked to stop; leaving it False reads as a crash.
-            self.should_exit = True
+            lifecycle = self.lifecycle
+            lifecycle.entered.set()
+            lifecycle.record("entered")
+            try:
+                await lifecycle.allow_start.wait()
+                if lifecycle.startup_error is not None:
+                    raise lifecycle.startup_error
+                self.started = True
+                lifecycle.started.set()
+                lifecycle.record("started")
+                if on_serve is not None:
+                    on_serve()
+                while not lifecycle.allow_completion.is_set() and not self.should_exit:
+                    await asyncio.sleep(0)
+                if lifecycle.completion_error is not None:
+                    raise lifecycle.completion_error
+                if lifecycle.clean:
+                    # A real server returns from serve() with should_exit set
+                    # once it has been asked to stop.
+                    self.should_exit = True
+            except asyncio.CancelledError:
+                lifecycle.cancelled.set()
+                lifecycle.record("cancelled")
+                raise
+            finally:
+                lifecycle.completed.set()
+                lifecycle.record("completed")
 
     def _forbidden(app, **kwargs):
         raise AssertionError("uvicorn.run bypasses the asyncio branch (#471 AC7)")
@@ -283,53 +351,279 @@ def test_serve_forever_enters_serve_through_anyio_asyncio_backend(monkeypatch):
     }
 
 
-def test_tcp_bind_failure_stops_control_and_clears_capability(monkeypatch):
+class _TrackingControlState:
+    def __init__(self, events=None):
+        import asyncio
+
+        self.events = events
+        self.values = []
+        self.bound = asyncio.Event()
+
+    def set_serve_bound(self, value):
+        self.values.append(value)
+        if self.events is not None:
+            self.events.append(f"serve-bound:{value}")
+        if value:
+            self.bound.set()
+
+
+class _TrackingControlApp:
+    def __init__(self, events=None):
+        self.state = _TrackingControlState(events)
+
+
+def test_control_readiness_precedes_host_server_startup(monkeypatch):
     import asyncio
-    from datetime import datetime, timezone
 
-    import uvicorn
-    from fastapi.testclient import TestClient
+    import anyio
 
-    from mship.core.daemon.control import create_control_app
+    async def scenario():
+        control = _ServerLifecycle(name="control")
+        host = _ServerLifecycle(name="host")
+        _configs, servers = _fake_uvicorn(monkeypatch, lifecycles=[control, host])
+        app = _TrackingControlApp()
 
-    class FakeConfig:
-        def __init__(self, app, **kwargs):
-            self.app = app
-            self.host = kwargs.get("host")
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                run_mod._serve,
+                app,
+                Path("/control.sock"),
+                object(),
+                SERVE_BLOCK,
+                None,
+            )
+            await control.entered.wait()
+            assert not host.constructed.is_set()
 
-    class FakeServer:
-        def __init__(self, config):
-            self.config = config
-            self.started = False
-            self.should_exit = False
+            control.allow_start.set()
+            await host.constructed.wait()
+            assert control.started.is_set()
 
-        async def serve(self):
-            if self.config.host is not None:
-                return  # TCP bind failed before Uvicorn marked the server started
-            self.started = True
-            while not self.should_exit:
-                await asyncio.sleep(0)
+            host.allow_start.set()
+            await host.started.wait()
+            await app.state.bound.wait()
+            servers[0].should_exit = True
+            control.allow_completion.set()
 
-    monkeypatch.setattr(uvicorn, "Config", FakeConfig)
-    monkeypatch.setattr(uvicorn, "Server", FakeServer)
-    control_app = create_control_app(
-        started_at=datetime.now(timezone.utc),
-        version="1",
-        socket_path="/control.sock",
-        serve_bound=True,
+    asyncio.run(scenario())
+
+
+def test_host_readiness_precedes_serve_bound_capability(monkeypatch):
+    import asyncio
+
+    import anyio
+
+    async def scenario():
+        events = []
+        control = _ServerLifecycle(
+            start_immediately=True, events=events, name="control"
+        )
+        host = _ServerLifecycle(events=events, name="host")
+        _configs, servers = _fake_uvicorn(monkeypatch, lifecycles=[control, host])
+        app = _TrackingControlApp(events)
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                run_mod._serve,
+                app,
+                Path("/control.sock"),
+                object(),
+                SERVE_BLOCK,
+                None,
+            )
+            await host.entered.wait()
+            assert app.state.values == [False]
+
+            host.allow_start.set()
+            await host.started.wait()
+            await app.state.bound.wait()
+            assert events.index("host:started") < events.index("serve-bound:True")
+
+            servers[0].should_exit = True
+            control.allow_completion.set()
+
+    asyncio.run(scenario())
+
+
+def test_host_bind_failure_cancels_started_control_server_and_clears_capability(
+    monkeypatch,
+):
+    import asyncio
+
+    bind_error = OSError("address already in use")
+
+    async def scenario():
+        control = _ServerLifecycle(start_immediately=True, name="control")
+        host = _ServerLifecycle(
+            start_immediately=True,
+            startup_error=bind_error,
+            name="host",
+        )
+        _configs, servers = _fake_uvicorn(monkeypatch, lifecycles=[control, host])
+        app = _TrackingControlApp()
+
+        with pytest.raises(RuntimeError, match="TCP server failed to bind") as raised:
+            await run_mod._serve(
+                app,
+                Path("/control.sock"),
+                object(),
+                SERVE_BLOCK,
+                None,
+            )
+
+        assert raised.value.__cause__ is bind_error
+        assert servers[0].should_exit is True
+        assert control.cancelled.is_set()
+        assert control.completed.is_set()
+        assert app.state.values[-1] is False
+
+    asyncio.run(scenario())
+
+
+def test_cancellation_while_host_startup_pending_stops_every_server(monkeypatch):
+    import asyncio
+
+    import anyio
+
+    async def scenario():
+        control = _ServerLifecycle(start_immediately=True, name="control")
+        host = _ServerLifecycle(name="host")
+        _configs, servers = _fake_uvicorn(monkeypatch, lifecycles=[control, host])
+        app = _TrackingControlApp()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                run_mod._serve,
+                app,
+                Path("/control.sock"),
+                object(),
+                SERVE_BLOCK,
+                None,
+            )
+            await host.entered.wait()
+            task_group.cancel_scope.cancel()
+
+        assert all(server.should_exit for server in servers)
+        assert control.cancelled.is_set()
+        assert host.cancelled.is_set()
+        assert app.state.values[-1] is False
+
+    asyncio.run(scenario())
+
+
+def test_clean_first_server_completion_stops_sibling_without_error(monkeypatch):
+    import asyncio
+
+    import anyio
+
+    async def scenario():
+        control = _ServerLifecycle(start_immediately=True, name="control")
+        host = _ServerLifecycle(start_immediately=True, name="host")
+        _configs, servers = _fake_uvicorn(monkeypatch, lifecycles=[control, host])
+        app = _TrackingControlApp()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                run_mod._serve,
+                app,
+                Path("/control.sock"),
+                object(),
+                SERVE_BLOCK,
+                None,
+            )
+            await app.state.bound.wait()
+            servers[0].should_exit = True
+            control.allow_completion.set()
+
+        assert host.cancelled.is_set()
+        assert app.state.values[-1] is False
+
+    asyncio.run(scenario())
+
+
+def test_unexpected_server_completion_stops_sibling_and_fails(monkeypatch):
+    import asyncio
+
+    control = _ServerLifecycle(
+        start_immediately=True,
+        complete_immediately=True,
+        clean=False,
+        name="control",
     )
+    host = _ServerLifecycle(start_immediately=True, name="host")
+    _configs, servers = _fake_uvicorn(monkeypatch, lifecycles=[control, host])
+    app = _TrackingControlApp()
 
-    with pytest.raises(RuntimeError, match="TCP server failed to bind"):
-        run_mod._serve_forever(
-            control_app,
-            Path("/control.sock"),
-            object(),
-            {"host": "127.0.0.1", "port": 47190},
+    with pytest.raises(RuntimeError, match="daemon server stopped unexpectedly"):
+        asyncio.run(
+            run_mod._serve(
+                app,
+                Path("/control.sock"),
+                object(),
+                SERVE_BLOCK,
+                None,
+            )
         )
 
-    assert (
-        TestClient(control_app).get("/health").json()["capabilities"]["serve"] is False
+    assert all(server.should_exit for server in servers)
+    assert host.cancelled.is_set()
+    assert app.state.values[-1] is False
+
+
+def test_server_exception_retains_original_cause(monkeypatch):
+    import asyncio
+
+    server_error = LookupError("server exploded")
+    control = _ServerLifecycle(
+        start_immediately=True,
+        complete_immediately=True,
+        completion_error=server_error,
+        name="control",
     )
+    _configs, _servers = _fake_uvicorn(monkeypatch, lifecycles=[control])
+    app = _TrackingControlApp()
+
+    with pytest.raises(RuntimeError, match="daemon server failed") as raised:
+        asyncio.run(
+            run_mod._serve(
+                app,
+                Path("/control.sock"),
+                None,
+                None,
+                None,
+            )
+        )
+
+    assert raised.value.__cause__ is server_error
+    assert control.completed.is_set()
+    assert app.state.values[-1] is False
+
+
+def test_control_server_bind_failure_retains_original_cause(monkeypatch):
+    import asyncio
+
+    bind_error = OSError("control socket unavailable")
+    control = _ServerLifecycle(
+        start_immediately=True,
+        startup_error=bind_error,
+        name="control",
+    )
+    _configs, _servers = _fake_uvicorn(monkeypatch, lifecycles=[control])
+    app = _TrackingControlApp()
+
+    with pytest.raises(RuntimeError, match="control server failed to bind") as raised:
+        asyncio.run(
+            run_mod._serve(
+                app,
+                Path("/control.sock"),
+                None,
+                None,
+                None,
+            )
+        )
+
+    assert raised.value.__cause__ is bind_error
+    assert app.state.values[-1] is False
 
 
 def test_oversized_launchd_capture_preserves_latest_evidence_on_start(
@@ -641,9 +935,7 @@ def test_invalid_relay_config_is_not_reported_as_disabled(tmp_path):
     config_path = daemon_config_path(home)
     config_path.parent.mkdir(parents=True)
     config_path.write_text(
-        "relay:\n"
-        "  host: relay.example.com\n"
-        "  ssh_port: not-an-integer\n"
+        "relay:\n  host: relay.example.com\n  ssh_port: not-an-integer\n"
     )
 
     with pytest.raises(ValueError, match="relay.ssh_port"):
