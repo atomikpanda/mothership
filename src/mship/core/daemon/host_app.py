@@ -30,14 +30,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import secrets
 import tempfile
-from collections.abc import Mapping
-from contextlib import suppress
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import parse_qs
 
 import anyio
@@ -49,6 +49,23 @@ from mship.core.daemon.capabilities import runner_block
 from mship.core.daemon.control import RESCAN_ERROR_STATUS
 from mship.core.daemon.registry import RegistryReadError, RegistryStore, WorkspaceEntry
 from mship.core.workspace_context import ContextError
+
+
+log = logging.getLogger(__name__)
+
+
+class _SettlingStreamingResponse(StreamingResponse):
+    """A stream response that settles its request-owned producer on every exit."""
+
+    def __init__(self, *args, settle_producer: Callable[[], Awaitable[None]], **kwargs):
+        super().__init__(*args, **kwargs)
+        self._settle_producer = settle_producer
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._settle_producer()
 
 
 def _credential_paths(home: Path) -> tuple[Path, Path, Path]:
@@ -710,20 +727,30 @@ def create_host_app(
                     await chunks.put(None)
 
         task = asyncio.create_task(run_subapp())
+        producer_settled = False
 
-        async def settle_producer(*, cancel: bool) -> None:
+        async def settle_producer() -> None:
             """Join the request-owned asyncio task and retrieve its result."""
-            if cancel and not task.done():
+            nonlocal producer_settled
+            if producer_settled:
+                return
+            if not task.done():
                 task.cancel()
-            with suppress(asyncio.CancelledError, Exception):
+            try:
                 await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                log.exception("forwarded workspace producer failed")
+            finally:
+                producer_settled = True
 
         try:
             started = await start.get()
         except BaseException:
             # A server shutdown can cancel this request before the sub-app
             # starts its response. The producer is still request-owned here.
-            await settle_producer(cancel=True)
+            await settle_producer()
             raise
 
         async def body_stream():
@@ -737,12 +764,13 @@ def create_host_app(
             finally:
                 # Normal completion retrieves sub-app failures too; cancellation
                 # propagates to its receive path before the task is joined.
-                await settle_producer(cancel=True)
+                await settle_producer()
 
-        return StreamingResponse(
+        return _SettlingStreamingResponse(
             body_stream(),
             status_code=started.get("status", 500),
             headers={k.decode(): v.decode() for k, v in started.get("headers", [])},
+            settle_producer=settle_producer,
         )
 
     app.include_router(guarded)

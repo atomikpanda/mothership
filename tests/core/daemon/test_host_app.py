@@ -1,6 +1,7 @@
 """Workspace-addressed host app (#472 Task 7)."""
 import asyncio
 import gc
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -821,10 +822,13 @@ def test_forward_client_disconnect_finalizes_request_producer(tmp_path):
 
 
 @pytest.mark.parametrize("mode", ["fail-before-start", "fail-after-start"])
-def test_forward_subapp_failure_is_retrieved_after_request_completion(tmp_path, mode):
-    """Catches dropping the producer exception retrieval: a failure before or
-    after response start must not reach asyncio as an unretrieved task error."""
+def test_forward_subapp_failure_is_retrieved_and_logged_after_request_completion(
+    tmp_path, caplog, mode
+):
+    """Catches silently swallowing a producer exception after retrieving it;
+    failures before and after response start must reach the daemon log."""
     app, subapp = _owned_forward_app(tmp_path, mode)
+    caplog.set_level(logging.ERROR, logger="mship.core.daemon.host_app")
 
     async def scenario():
         loop = asyncio.get_running_loop()
@@ -865,6 +869,41 @@ def test_forward_subapp_failure_is_retrieved_after_request_completion(tmp_path, 
     unhandled = asyncio.run(scenario())
     assert not unhandled
     assert subapp.active == set()
+    assert "forwarded workspace producer failed" in caplog.text
+
+
+def test_forward_response_start_send_failure_finalizes_request_producer(tmp_path):
+    """Catches returning a bare StreamingResponse: if its response-start send
+    fails before body iteration, its producer must still be cancelled and joined."""
+    app, subapp = _owned_forward_app(tmp_path, "wait-for-cancellation")
+
+    async def scenario():
+        sent_request = False
+
+        async def receive():
+            nonlocal sent_request
+            if not sent_request:
+                sent_request = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await asyncio.Future()
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                raise OSError("client disconnected while receiving response headers")
+
+        async with app.router.lifespan_context(app):
+            with pytest.raises(OSError, match="response headers"):
+                await app(_forward_scope(), receive, send)
+            try:
+                assert subapp.cancelled.is_set()
+                assert subapp.active == set()
+            finally:
+                # Release the peer if the assertion fails so a RED run leaves
+                # no task behind when asyncio.run closes its loop.
+                subapp.release.set()
+                await _wait_for(subapp.finalized)
+
+    asyncio.run(scenario())
 
 
 def test_forward_cancellation_while_eight_chunk_queue_send_is_blocked_finalizes_producer(tmp_path):
@@ -892,13 +931,15 @@ def test_forward_cancellation_while_eight_chunk_queue_send_is_blocked_finalizes_
     assert subapp.active == set()
 
 
-def test_forward_host_shutdown_cancels_active_connection_and_finalizes_producer(tmp_path):
-    """Catches bypassing the response finalizer during server shutdown, which
-    would leave an active forwarded producer after its connection is cancelled."""
+def test_forward_connection_cancellation_before_body_iteration_finalizes_producer(tmp_path):
+    """Catches cancellation while the response header send is blocked, before
+    body iteration can enter the generator finalizer and settle its producer."""
     app, subapp = _owned_forward_app(tmp_path, "wait-for-cancellation")
 
     async def scenario():
         sent_request = False
+        response_start_entered = asyncio.Event()
+        hold_response_start = asyncio.Event()
 
         async def receive():
             nonlocal sent_request
@@ -907,20 +948,25 @@ def test_forward_host_shutdown_cancels_active_connection_and_finalizes_producer(
                 return {"type": "http.request", "body": b"", "more_body": False}
             await asyncio.Future()
 
-        async def send(_message):
-            return None
+        async def send(message):
+            if message["type"] == "http.response.start":
+                response_start_entered.set()
+                await hold_response_start.wait()
 
         async with app.router.lifespan_context(app):
             connection = asyncio.create_task(app(_forward_scope(), receive, send))
-            await _wait_for(subapp.entered)
+            await _wait_for(response_start_entered)
             connection.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await connection
-        await _wait_for(subapp.finalized)
+            try:
+                assert subapp.cancelled.is_set()
+                assert subapp.active == set()
+            finally:
+                subapp.release.set()
+                await _wait_for(subapp.finalized)
 
     asyncio.run(scenario())
-    assert subapp.cancelled.is_set()
-    assert subapp.active == set()
 
 
 def test_forward_streams_chunks_incrementally(tmp_path):
