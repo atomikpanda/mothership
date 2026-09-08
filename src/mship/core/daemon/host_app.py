@@ -34,6 +34,7 @@ import os
 import secrets
 import tempfile
 from collections.abc import Mapping
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -709,7 +710,21 @@ def create_host_app(
                     await chunks.put(None)
 
         task = asyncio.create_task(run_subapp())
-        started = await start.get()
+
+        async def settle_producer(*, cancel: bool) -> None:
+            """Join the request-owned asyncio task and retrieve its result."""
+            if cancel and not task.done():
+                task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await task
+
+        try:
+            started = await start.get()
+        except BaseException:
+            # A server shutdown can cancel this request before the sub-app
+            # starts its response. The producer is still request-owned here.
+            await settle_producer(cancel=True)
+            raise
 
         async def body_stream():
             try:
@@ -720,8 +735,9 @@ def create_host_app(
                     if chunk:
                         yield chunk
             finally:
-                if not task.done():
-                    task.cancel()  # client hung up → propagate to the serve app
+                # Normal completion retrieves sub-app failures too; cancellation
+                # propagates to its receive path before the task is joined.
+                await settle_producer(cancel=True)
 
         return StreamingResponse(
             body_stream(),
