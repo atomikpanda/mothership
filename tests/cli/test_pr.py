@@ -4,10 +4,10 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-import yaml
 from typer.testing import CliRunner
 
 from mship.cli import app, container
+from mship.core.state import StateManager
 from mship.util.shell import ShellResult, ShellRunner
 
 runner = CliRunner()
@@ -15,11 +15,13 @@ runner = CliRunner()
 
 def _set_pr_urls(workspace: Path, slug: str, pr_urls: dict[str, str]) -> None:
     from datetime import datetime, timezone
-    state_path = workspace / ".mothership" / "state.yaml"
-    data = yaml.safe_load(state_path.read_text())
-    data["tasks"][slug]["pr_urls"] = pr_urls
-    data["tasks"][slug]["finished_at"] = datetime.now(timezone.utc).isoformat()
-    state_path.write_text(yaml.safe_dump(data))
+    manager = StateManager(workspace / ".mothership")
+
+    def _update(state):
+        state.tasks[slug].pr_urls = pr_urls
+        state.tasks[slug].finished_at = datetime.now(timezone.utc)
+
+    manager.mutate(_update)
 
 
 def _pr_view_shell(mapping: dict[str, tuple[str, int, str]]):

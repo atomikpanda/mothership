@@ -16,6 +16,7 @@ from mship.core.codex_hooks import (
     probe_codex_hook_capability,
 )
 from mship.core.omp_extension import install_omp_extension
+from mship.core.workspace_context import _resolve_state_dir
 from mship.util.shell import ShellRunner
 
 
@@ -199,6 +200,7 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=1)
 
         initializer.write_config(config_path, config)
+        initializer.initialize_storage(_resolve_state_dir(config_path))
 
         config = ConfigLoader.load(config_path, require_paths=False)
         # Scaffold Taskfiles
@@ -409,6 +411,7 @@ def _run_interactive(
         raise typer.Exit(code=1)
 
     initializer.write_config(config_path, config)
+    initializer.initialize_storage(_resolve_state_dir(config_path))
     config = ConfigLoader.load(config_path, require_paths=False)
 
     # Install pre-commit hooks on each effective git root

@@ -1,8 +1,8 @@
-"""Tiny key/value store for workspace-level metadata that doesn't fit in state.yaml.
+"""Tiny key/value store for metadata outside normalized Task/WorkItem state.
 
 Currently holds only `last_sync_at` (written by `mship sync`, read by
-`mship context`). Kept as a separate JSON file so a corrupt write here can
-never wedge `state.yaml`.
+`mship context`). Kept as a separate JSON file so a corrupt write here cannot
+wedge the authoritative Task and WorkItem database.
 """
 from __future__ import annotations
 

@@ -15,13 +15,14 @@ runner = CliRunner()
 
 def _set_finished(workspace: Path, slug: str, pr_urls: dict[str, str]) -> None:
     """Mark a spawned task as finished with given pr_urls."""
-    import yaml
     from datetime import datetime, timezone
-    state_path = workspace / ".mothership" / "state.yaml"
-    data = yaml.safe_load(state_path.read_text())
-    data["tasks"][slug]["finished_at"] = datetime.now(timezone.utc).isoformat()
-    data["tasks"][slug]["pr_urls"] = pr_urls
-    state_path.write_text(yaml.safe_dump(data))
+    manager = StateManager(workspace / ".mothership")
+
+    def _update(state):
+        state.tasks[slug].finished_at = datetime.now(timezone.utc)
+        state.tasks[slug].pr_urls = pr_urls
+
+    manager.mutate(_update)
 
 
 def test_commit_pre_finish_single_repo(configured_git_app: Path):

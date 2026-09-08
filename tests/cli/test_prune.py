@@ -71,11 +71,12 @@ def test_prune_retention_conflict_is_clean_error(
         ),
     }))
 
-    def reject_retention(*, task, workitems_dir):
-        raise TaskMetadataRetentionConflictError(task.slug, "metadata retention failed")
+    def reject_retention(self, task_slug, repos, *, now, expected_task=None):
+        raise TaskMetadataRetentionConflictError(task_slug, "metadata retention failed")
 
     monkeypatch.setattr(
-        "mship.core.workitem_lifecycle.retain_workitem_metadata_on_teardown",
+        "mship.core.persistence.lifecycle_repository."
+        "LifecycleRepository.retain_and_prune_task_repos",
         reject_retention,
     )
 

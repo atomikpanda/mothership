@@ -18,6 +18,7 @@ from mship.core.spec import Spec
 from mship.core.spec_store import SpecStore
 from mship.core.state import StateManager
 from mship.core.workitem_store import WorkItemStore
+from tests.persistence_helpers import corrupt_workitem
 from mship.util.shell import ShellResult, ShellRunner
 
 runner = CliRunner()
@@ -237,10 +238,8 @@ def test_finish_blocks_cleanly_on_corrupt_workitem_store(finish_gate_workspace):
     )
     assert result.exit_code == 0, result.output
 
-    # Corrupt the WorkItem's JSON file on disk (spawn already validated it
-    # while it was still well-formed).
-    wi_path = workspace / ".mothership" / "workitems" / f"{wi.id}.json"
-    wi_path.write_text("{not valid json")
+    # Corrupt the persisted payload after spawn already validated it.
+    corrupt_workitem(workspace / ".mothership", wi.id)
 
     result = runner.invoke(app, ["finish", "--task", "corrupt-store-task"])
     assert result.exit_code == 1, result.output
@@ -265,8 +264,7 @@ def test_finish_hotfix_survives_corrupt_workitem_store(finish_gate_workspace):
     )
     assert result.exit_code == 0, result.output
 
-    wi_path = workspace / ".mothership" / "workitems" / f"{wi.id}.json"
-    wi_path.write_text("{not valid json")
+    corrupt_workitem(workspace / ".mothership", wi.id)
 
     result = runner.invoke(app, ["finish", "--hotfix", "--task", "corrupt-store-hotfix-task", "--no-require-tests"])
     assert result.exit_code == 0, result.output

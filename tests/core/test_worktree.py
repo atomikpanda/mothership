@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from mship.core.config import ConfigLoader, WorkspaceConfig
 from mship.core.graph import DependencyGraph
@@ -136,6 +137,56 @@ def test_abort_removes_worktrees(worktree_deps):
     state = state_mgr.load()
     assert "to-abort" not in state.tasks
 
+
+def test_spawn_and_abort_run_external_collaborators_outside_sql(
+    worktree_deps, monkeypatch,
+):
+    from contextlib import contextmanager
+
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    database = state_mgr.workspace_store.database
+    active_connections = []
+    observations = []
+    original_write = database.write
+    original_add = git.worktree_add
+    original_remove = git.worktree_remove
+
+    @contextmanager
+    def tracked_write(*, immediate=False):
+        with original_write(immediate=immediate) as connection:
+            active_connections.append(connection)
+            try:
+                yield connection
+            finally:
+                active_connections.remove(connection)
+
+    def assert_outside_sql(name):
+        assert all(not connection.in_transaction() for connection in active_connections)
+        observations.append(name)
+
+    def observed_add(*args, **kwargs):
+        assert_outside_sql("worktree_add")
+        return original_add(*args, **kwargs)
+
+    def observed_remove(*args, **kwargs):
+        assert_outside_sql("worktree_remove")
+        return original_remove(*args, **kwargs)
+
+    def observed_task(*args, **kwargs):
+        assert_outside_sql("subprocess")
+        return ShellResult(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(database, "write", tracked_write)
+    monkeypatch.setattr(git, "worktree_add", observed_add)
+    monkeypatch.setattr(git, "worktree_remove", observed_remove)
+    shell.run_task.side_effect = observed_task
+    manager = WorktreeManager(config, graph, state_mgr, git, shell, log)
+
+    manager.spawn("transaction boundary", repos=["shared"], workspace_root=workspace)
+    manager.abort("transaction-boundary")
+
+    assert {"worktree_add", "worktree_remove", "subprocess"} <= set(observations)
+
 def test_abort_retains_linked_delivery_metadata_for_item_summary(worktree_deps):
     from mship.core.view.workitem_index import build_workitem_index
     from mship.core.workitem_store import WorkItemStore
@@ -201,10 +252,10 @@ def test_abort_retains_metadata_for_forward_only_workitem_link(worktree_deps):
 
 
 def test_abort_refuses_metadata_changed_after_retention(worktree_deps, monkeypatch):
-    from mship.core.workitem_lifecycle import (
-        TaskMetadataRetentionConflictError,
-        retain_workitem_metadata_on_teardown,
+    from mship.core.persistence.lifecycle_repository import (
+        LifecycleRepository,
     )
+    from mship.core.workitem_lifecycle import TaskMetadataRetentionConflictError
     from mship.core.workitem_store import WorkItemStore
 
     config, graph, state_mgr, git, shell, workspace, log = worktree_deps
@@ -215,24 +266,30 @@ def test_abort_refuses_metadata_changed_after_retention(worktree_deps, monkeypat
     manager.spawn("racing delivery", repos=["shared"], workspace_root=workspace,
                   work_item_id=item.id)
 
-    def retain_then_update(*, task, workitems_dir):
-        retained = retain_workitem_metadata_on_teardown(
-            task=task, workitems_dir=workitems_dir,
-        )
-        state_mgr.mutate(
-            lambda state: (
-                setattr(state.tasks[task.slug], "work_item_id", updated_item.id),
-                state.tasks[task.slug].affected_repos.append("api-gateway"),
-                state.tasks[task.slug].pr_urls.update(
+    original = LifecycleRepository.retain_and_delete_task
+
+    def update_then_retain(self, task_slug, *, now, expected_task=None):
+        state_mgr.mutate_task(
+            task_slug,
+            lambda task: (
+                setattr(task, "work_item_id", updated_item.id),
+                task.affected_repos.append("api-gateway"),
+                task.pr_urls.update(
                     {"api-gateway": "https://github.example/api/pull/2"},
                 ),
             ),
         )
-        return retained
+        return original(
+            self,
+            task_slug,
+            now=now,
+            expected_task=expected_task,
+        )
 
     monkeypatch.setattr(
-        "mship.core.workitem_lifecycle.retain_workitem_metadata_on_teardown",
-        retain_then_update,
+        LifecycleRepository,
+        "retain_and_delete_task",
+        update_then_retain,
     )
 
     with pytest.raises(TaskMetadataRetentionConflictError, match="Retry"):
@@ -280,6 +337,61 @@ def test_spawn_duplicate_slug_raises(worktree_deps):
     mgr.spawn("duplicate test", repos=["shared"], workspace_root=workspace)
     with pytest.raises(ValueError, match="already exists"):
         mgr.spawn("duplicate test", repos=["shared"], workspace_root=workspace)
+
+
+def test_spawn_duplicate_slug_insert_race_is_actionable(
+    worktree_deps,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    state_mgr.insert_task(
+        Task(
+            slug="duplicate-race",
+            description="already registered by another process",
+            phase="plan",
+            created_at=datetime(2026, 9, 7, tzinfo=timezone.utc),
+            affected_repos=[],
+            branch="feat/duplicate-race",
+        )
+    )
+    monkeypatch.setattr(state_mgr, "load", lambda: WorkspaceState())
+    manager = WorktreeManager(config, graph, state_mgr, git, shell, log)
+
+    with pytest.raises(ValueError) as error:
+        manager.spawn(
+            "duplicate race",
+            repos=["shared"],
+            workspace_root=workspace,
+        )
+
+    assert str(error.value) == (
+        "Task 'duplicate-race' already exists. "
+        "Run `mship close --yes --abandon --task duplicate-race` to remove it "
+        "first, or use a different description."
+    )
+
+
+def test_spawn_propagates_unrelated_integrity_error(
+    worktree_deps,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, graph, state_mgr, git, shell, workspace, log = worktree_deps
+    error = IntegrityError(
+        "INSERT INTO task_dependencies",
+        {},
+        RuntimeError("FOREIGN KEY constraint failed"),
+    )
+    monkeypatch.setattr(
+        state_mgr,
+        "insert_task",
+        MagicMock(side_effect=error),
+    )
+    manager = WorktreeManager(config, graph, state_mgr, git, shell, log)
+
+    with pytest.raises(IntegrityError) as raised:
+        manager.spawn("unrelated integrity", repos=["shared"], workspace_root=workspace)
+
+    assert raised.value is error
 
 
 # ---------------------------------------------------------------------------

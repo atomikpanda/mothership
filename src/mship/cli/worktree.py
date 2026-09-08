@@ -1079,7 +1079,7 @@ def register(app: typer.Typer, get_container):
             _ws_root = Path(container.config_path()).parent
             advance_workitem_on_close(
                 task=task,
-                workitems_dir=_ws_root / ".mothership" / "workitems",
+                workitems=container.workitem_store(),
                 specs_dir=_ws_root / SPECS_DIRNAME,
                 state=state,
                 merged_count=merged_count,
@@ -1095,7 +1095,7 @@ def register(app: typer.Typer, get_container):
             from mship.core.issue_close import close_linked_issues
             close_linked_issues(
                 task=task,
-                workitems_dir=Path(container.config_path()).parent / ".mothership" / "workitems",
+                workitems=container.workitem_store(),
                 pr_manager=container.pr_manager(),
                 merged_count=merged_count,
                 closed_count=closed_count,
@@ -1153,49 +1153,30 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=1)
 
         if downstream and detach_downstream:
-            def _detach(s):
-                for d_slug in downstream:
-                    t = s.tasks.get(d_slug)
-                    if t is None:
-                        continue
+            def _detach(tasks):
+                for t in tasks.values():
                     t.depends_on = [e for e in t.depends_on if e.upstream_slug != task.slug]
-            state_mgr.mutate(_detach)
+
+            state_mgr.mutate_tasks(downstream, _detach)
         elif downstream and cascade:
-            # Cascaded tasks are removed directly rather than through
-            # WorktreeManager.abort, so retain their observed delivery metadata
-            # before dropping their only live state copy. Never take item locks
-            # while StateManager.mutate holds state.lock.
-            from mship.core.workitem_lifecycle import (
-                require_retained_task_metadata,
-                retain_workitem_metadata_on_teardown,
+            from datetime import datetime as _dt_cascade, timezone as _tz_cascade
+
+            from mship.core.persistence.lifecycle_repository import (
+                LifecycleRepository,
             )
 
             try:
-                workitems_dir = Path(container.state_dir()) / "workitems"
-                retained_by_slug = {}
                 state_before_cascade = state_mgr.load()
-                for d_slug in downstream:
-                    downstream_task = state_before_cascade.tasks.get(d_slug)
-                    if downstream_task is not None:
-                        retained_by_slug[d_slug] = retain_workitem_metadata_on_teardown(
-                            task=downstream_task,
-                            workitems_dir=workitems_dir,
-                        )
-
-                def _cascade(s):
-                    tasks_to_remove = []
-                    for d_slug in downstream:
-                        downstream_task = s.tasks.get(d_slug)
-                        if downstream_task is None:
-                            continue
-                        require_retained_task_metadata(
-                            downstream_task, retained_by_slug.get(d_slug),
-                        )
-                        tasks_to_remove.append(d_slug)
-                    for d_slug in tasks_to_remove:
-                        del s.tasks[d_slug]
-
-                state_mgr.mutate(_cascade)
+                lifecycle = LifecycleRepository(state_mgr.workspace_store)
+                expected_downstream = {
+                    d_slug: state_before_cascade.tasks[d_slug]
+                    for d_slug in downstream
+                    if d_slug in state_before_cascade.tasks
+                }
+                lifecycle.retain_and_delete_tasks(
+                    expected_downstream,
+                    now=_dt_cascade.now(_tz_cascade.utc),
+                )
             except TaskMetadataRetentionConflictError as e:
                 output.error(str(e))
                 raise typer.Exit(code=1)
@@ -1390,6 +1371,10 @@ def register(app: typer.Typer, get_container):
         t = resolved_finish.task
         task = t
 
+        from mship.core.persistence.lifecycle_repository import LifecycleRepository
+
+        lifecycle = LifecycleRepository(state_mgr.workspace_store)
+
         # Scoped to this task only — drift on another, unrelated task must not
         # block this one's finish (#455 Part 2).
         _run_gate(
@@ -1415,8 +1400,14 @@ def register(app: typer.Typer, get_container):
         # cleanly via output.error rather than a traceback.
         from mship.core import workitem_gate
         workspace_root = container.config_path().parent
+        canonical_workitems = container.workitem_store()
         try:
-            gate_result = workitem_gate.check_task_gate(task, workspace_root, require_plan=True)
+            gate_result = workitem_gate.check_task_gate(
+                task,
+                workspace_root,
+                require_plan=True,
+                workitems=canonical_workitems,
+            )
         except Exception as e:
             gate_result = workitem_gate.GateResult(
                 False, f"couldn't evaluate WorkItem gate (corrupt store?): {e}"
@@ -1436,8 +1427,7 @@ def register(app: typer.Typer, get_container):
         if getattr(task, "work_item_id", None):
             try:
                 from mship.core.issue_link import linked_issue_refs
-                from mship.core.workitem_store import WorkItemStore
-                _wi = WorkItemStore(workspace_root / ".mothership" / "workitems").get(task.work_item_id)
+                _wi = canonical_workitems.get(task.work_item_id)
                 if _wi is not None:
                     linked_issue_canonicals = linked_issue_refs(_wi)
             except Exception as e:
@@ -1612,10 +1602,10 @@ def register(app: typer.Typer, get_container):
             if task.finished_at is None:
                 now = _dt.now(_tz.utc)
 
-                def _stamp_push_only(s):
-                    s.tasks[t.slug].finished_at = now
+                def _stamp_push_only(task):
+                    task.finished_at = now
 
-                state_mgr.mutate(_stamp_push_only)
+                state_mgr.mutate_task(t.slug, _stamp_push_only)
                 task.finished_at = now
 
             if output.is_tty:
@@ -1770,7 +1760,7 @@ def register(app: typer.Typer, get_container):
         # reused by the PR-body assembly below (build_acceptance_block).
         from mship.core.workitem_gate import resolve_bound_spec
         try:
-            bound_spec = resolve_bound_spec(task, workspace_root)
+            bound_spec = resolve_bound_spec(task, workspace_root, workitems=canonical_workitems)
         except Exception as e:
             # The bound spec should exist but couldn't be resolved (ambiguous slug,
             # missing linked spec, or a corrupt store). Never SILENTLY skip a required
@@ -2050,13 +2040,16 @@ def register(app: typer.Typer, get_container):
                     output.error(f"{group.rep_name}: {e}")
                     raise typer.Exit(code=1)
 
-            # Store URL on every group member (crash-safe: single state mutation).
-            def _record_group(s, members=list(group.members), u=pr_url):
-                for name in members:
-                    s.tasks[t.slug].pr_urls[name] = u
-            state_mgr.mutate(_record_group)
-            for name in group.members:
-                task.pr_urls[name] = pr_url
+            # GitHub work is complete before SQL begins. Mirror the URL to the
+            # Task and its WorkItem in one short transaction.
+            from datetime import datetime as _dt_pr, timezone as _tz_pr
+
+            task = lifecycle.record_pr_urls(
+                t.slug,
+                {name: pr_url for name in group.members},
+                now=_dt_pr.now(_tz_pr.utc),
+                allow_unreadable_workitem=hotfix,
+            )
 
             pr_list.append({
                 "repo": group.rep_name,
@@ -2107,10 +2100,9 @@ def register(app: typer.Typer, get_container):
             from datetime import datetime as _dt_ann, timezone as _tz_ann
             from mship.core.message_store import MessageStore
             from mship.core.pr_watcher import announce_prs_on_thread
-            from mship.core.workitem_store import WorkItemStore
             _md = workspace_root / ".mothership"
             announce_prs_on_thread(
-                MessageStore(_md / "messages"), WorkItemStore(_md / "workitems"),
+                MessageStore(_md / "messages"), canonical_workitems,
                 t.slug, task, pr_list, _dt_ann.now(_tz_ann.utc),
             )
         except Exception as e:
@@ -2139,10 +2131,10 @@ def register(app: typer.Typer, get_container):
         if task.finished_at is None or force:
             now = _dt.now(_tz.utc)
 
-            def _stamp_finished(s):
-                s.tasks[t.slug].finished_at = now
+            def _stamp_finished(task):
+                task.finished_at = now
 
-            state_mgr.mutate(_stamp_finished)
+            state_mgr.mutate_task(t.slug, _stamp_finished)
             task.finished_at = now
 
         if output.is_tty:

@@ -47,17 +47,18 @@ Two rules of thumb:
 
 - **Parallel subagents are safe to run.** Both halves are isolated: each task
   gets its own worktree and branch, so code edits never collide, and every write
-  to `state.yaml` goes through a single read-modify-write under an exclusive
-  `flock` with an atomic replace — so concurrent `journal` / `test` / `finish`
-  calls cannot lose each other's updates to it. There are multiprocessing
-  regression tests covering concurrent phase transitions and a same-slug spawn
-  race.
+  to Task and WorkItem state goes through a short SQLite transaction. WAL mode,
+  `BEGIN IMMEDIATE`, bounded busy retries, and row-targeted mutations prevent
+  concurrent `journal` / `test` / `finish` calls from losing each other's
+  updates. Lifecycle changes that touch both a Task and its WorkItem commit
+  atomically. Multiprocessing regression tests cover concurrent phase changes,
+  Task↔WorkItem linking, duplicate ownership, and same-slug spawn races.
 
-  Everything else those commands write is keyed by task, so **different tasks**
-  never contend: `mship journal` appends to `logs/<task>.md`, and a test run's
-  output, iteration JSON, and `latest.json` pointer live under
-  `.mothership/test-runs/<task>/`. Only the pass/fail status in `state.yaml` goes
-  through the lock; the run artifacts are written outside it.
+  External artifacts remain keyed by task: `mship journal` appends to
+  `logs/<task>.md`, and a test run's output, iteration JSON, and `latest.json`
+  pointer live under `.mothership/test-runs/<task>/`. Only the pass/fail status
+  is committed to `mothership.db`; file, Git, process, and network operations run
+  outside SQL transactions so a slow collaborator does not hold the writer lock.
 
   That leaves one narrow case to avoid: **two concurrent runs of the *same* task**.
   The test iteration number is chosen by scanning the run directory for its highest

@@ -64,15 +64,14 @@ def register(app: typer.Typer, get_container):
             output.error(f"Cycle detected: {' → '.join(cycle)}")
             raise typer.Exit(code=1)
 
-        def _mutate(s):
-            t = s.tasks[downstream]
+        def _mutate(t):
             if any(e.upstream_slug == upstream_slug for e in t.depends_on):
                 return  # idempotent
             t.depends_on.append(
                 DependencyEdge(upstream_slug=upstream_slug, created_at=datetime.now(timezone.utc))
             )
 
-        state_mgr.mutate(_mutate)
+        state_mgr.mutate_task(downstream, _mutate)
         if output.human_mode:
             output.success(f"{downstream} now depends on {upstream_slug}")
         else:
@@ -96,13 +95,13 @@ def register(app: typer.Typer, get_container):
             output.error(f"No edge from {downstream!r} to {upstream_slug!r}.")
             raise typer.Exit(code=1)
 
-        def _mutate(s):
-            s.tasks[downstream].depends_on = [
-                e for e in s.tasks[downstream].depends_on
+        def _mutate(task):
+            task.depends_on = [
+                e for e in task.depends_on
                 if e.upstream_slug != upstream_slug
             ]
 
-        state_mgr.mutate(_mutate)
+        state_mgr.mutate_task(downstream, _mutate)
         if output.human_mode:
             output.success(f"{downstream} no longer depends on {upstream_slug}")
         else:

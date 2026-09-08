@@ -24,7 +24,12 @@ class GateResult:
 
 
 def check_task_gate(
-    task, workspace_root: Path, require_plan: bool = False, require_assumption_gate: bool = False
+    task,
+    workspace_root: Path,
+    require_plan: bool = False,
+    require_assumption_gate: bool = False,
+    *,
+    workitems: WorkItemStore | None = None,
 ) -> GateResult:
     """Universal: a task must have a WorkItem. Kind-gated: a feature WorkItem
     must have an approved spec. When `require_plan` is set — only at phase
@@ -36,11 +41,13 @@ def check_task_gate(
     if getattr(task, "work_item_id", None) is None:
         return GateResult(False, "no WorkItem — create one with `mship item new --kind <kind>` "
                                  "and spawn with `--work-item <id>` (or pass `--hotfix` to override)")
-    items = WorkItemStore(Path(workspace_root) / ".mothership" / "workitems")
+    items = workitems or WorkItemStore(Path(workspace_root) / ".mothership" / "workitems")
     wi = items.get(task.work_item_id)
     if wi is None:
         return GateResult(False, f"work_item_id {task.work_item_id!r} not found")
-    if wi.kind == "feature" and not _feature_has_approved_spec(wi, task, workspace_root):
+    if wi.kind == "feature" and not _feature_has_approved_spec(
+        wi, task, workspace_root, workitems=items,
+    ):
         return GateResult(False, "feature WorkItem requires an approved spec before dev/finish "
                                  "(approve it in Ground Control, or `--hotfix` to override)")
     if require_plan and wi.kind == "feature" and not _feature_has_plan(wi, task, workspace_root):
@@ -56,14 +63,20 @@ def check_task_gate(
     return GateResult(True)
 
 
-def _feature_has_approved_spec(wi: WorkItem, task, workspace_root: Path) -> bool:
+def _feature_has_approved_spec(
+    wi: WorkItem,
+    task,
+    workspace_root: Path,
+    *,
+    workitems: WorkItemStore | None = None,
+) -> bool:
     """Feature gate: satisfied iff the task resolves to an APPROVED spec, using the
     SAME resolution rules as `resolve_bound_spec` (single source of truth) — the
     explicit `spec_id` link is terminal, and an unresolvable binding (a deleted
     linked spec, or several approved specs tying on the slug) is NOT satisfied rather
     than silently falling back to a possibly-unrelated slug match."""
     try:
-        spec = resolve_bound_spec(task, workspace_root)
+        spec = resolve_bound_spec(task, workspace_root, workitems=workitems)
     except BoundSpecUnresolved:
         return False
     return spec is not None and spec.status in APPROVED_STATUSES
@@ -77,7 +90,12 @@ class BoundSpecUnresolved(Exception):
     (phase review, default finish) warn/skip."""
 
 
-def resolve_bound_spec(task, workspace_root: Path):
+def resolve_bound_spec(
+    task,
+    workspace_root: Path,
+    *,
+    workitems: WorkItemStore | None = None,
+):
     """Return the Spec bound to `task`, or None when the task genuinely has NO spec.
 
     The three outcomes are distinct on purpose:
@@ -106,7 +124,8 @@ def resolve_bound_spec(task, workspace_root: Path):
     wi = None
     wi_id = getattr(task, "work_item_id", None)
     if wi_id is not None:
-        wi = WorkItemStore(Path(workspace_root) / ".mothership" / "workitems").get(wi_id)
+        items = workitems or WorkItemStore(Path(workspace_root) / ".mothership" / "workitems")
+        wi = items.get(wi_id)
         if wi is not None and wi.spec_id:
             bound = specs.read_strict(wi.spec_id)
             if bound is None:

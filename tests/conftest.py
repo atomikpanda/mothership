@@ -91,6 +91,25 @@ def _isolate_runtime_dir(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(status, "probe_control_socket", sandboxed_probe)
 
 
+@pytest.fixture(autouse=True)
+def _reset_global_workspace_storage():
+    """Keep process-wide storage singletons isolated between test workspaces."""
+    from mship.cli import container
+
+    providers = (
+        container.state_manager,
+        container.workspace_store,
+        container.workspace_database,
+    )
+    for provider in providers:
+        provider.reset()
+    try:
+        yield
+    finally:
+        for provider in providers:
+            provider.reset()
+
+
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
     """Create a minimal workspace with repos that have Taskfile.yml files."""

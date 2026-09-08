@@ -41,6 +41,8 @@ def _isolate(tmp_path):
     # state_manager/log_manager are Singletons keyed off state_dir; drop any
     # instance a prior test bound to its own tmp so they rebind to this one.
     container.state_manager.reset()
+    container.workspace_store.reset()
+    container.workspace_database.reset()
     container.log_manager.reset()
 
 
@@ -49,6 +51,8 @@ def _reset():
     container.state_dir.reset_override()
     container.config.reset()
     container.state_manager.reset()
+    container.workspace_store.reset()
+    container.workspace_database.reset()
     container.log_manager.reset()
 
 

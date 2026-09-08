@@ -22,6 +22,28 @@ def init_workspace(tmp_path: Path) -> Path:
     return tmp_path
 
 
+def _linked_worktree(tmp_path: Path, *, with_project: bool = False) -> tuple[Path, Path]:
+    main = tmp_path / "main"
+    main.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=main, check=True)
+    if with_project:
+        (main / "pyproject.toml").write_text("[project]\nname='root'\n")
+        subprocess.run(["git", "add", "pyproject.toml"], cwd=main, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "commit", "--allow-empty", "-m", "initial"],
+        cwd=main,
+        check=True,
+    )
+    worktree = tmp_path / "linked"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "linked", str(worktree)],
+        cwd=main,
+        check=True,
+    )
+    return main, worktree
+
+
 def test_init_non_interactive_with_cwd(init_workspace: Path, monkeypatch):
     monkeypatch.chdir(init_workspace)
     result = runner.invoke(app, [
@@ -40,6 +62,24 @@ def test_init_non_interactive_with_cwd(init_workspace: Path, monkeypatch):
     assert data["repos"]["shared"]["type"] == "library"
     assert data["repos"]["auth-service"]["type"] == "service"
     assert data["repos"]["auth-service"]["depends_on"] == ["shared"]
+    assert (init_workspace / ".mothership" / "mothership.db").is_file()
+
+
+def test_init_non_interactive_in_linked_worktree_uses_git_common_state(
+    tmp_path: Path,
+    monkeypatch,
+):
+    main, worktree = _linked_worktree(tmp_path)
+    monkeypatch.chdir(worktree)
+
+    result = runner.invoke(
+        app,
+        ["init", "--name", "linked", "--repo", ".:service"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (main / ".mothership" / "mothership.db").is_file()
+    assert not (worktree / ".mothership").exists()
 
 
 def test_init_detect(init_workspace: Path, monkeypatch):
@@ -81,6 +121,7 @@ def test_init_detect_emits_git_root_for_single_git_monorepo(tmp_path: Path, monk
     for sub in ("web", "infra"):
         assert data["repos"][sub]["path"] == sub
         assert data["repos"][sub]["git_root"] == root_name
+    assert (tmp_path / ".mothership" / "mothership.db").is_file()
     for repo in data["repos"].values():          # ac2
         assert not str(repo["path"]).startswith("/")
 
@@ -622,3 +663,90 @@ def test_interactive_wizard_emits_git_root_for_single_git_monorepo(tmp_path: Pat
     for sub in ("web", "infra"):
         assert data["repos"][sub]["path"] == sub
         assert data["repos"][sub]["git_root"] == root_name
+
+
+def test_init_interactive_in_linked_worktree_uses_git_common_state(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import InquirerPy.inquirer  # noqa: F401
+    from mship.cli.init import _run_interactive
+    from mship.cli.output import Output
+    from mship.core.init import WorkspaceInitializer
+
+    main, worktree = _linked_worktree(tmp_path, with_project=True)
+    monkeypatch.chdir(worktree)
+
+    class _Prompt:
+        def __init__(self, value):
+            self.value = value
+
+        def execute(self):
+            return self.value
+
+    class _FakeInquirer:
+        def text(self, message="", default="", **_kwargs):
+            return _Prompt("linked") if "Workspace name" in message else _Prompt("")
+
+        def checkbox(self, message="", choices=None, **_kwargs):
+            if "Select repos" in message:
+                return _Prompt([choice["value"] for choice in choices or []])
+            return _Prompt([])
+
+        def select(self, message="", choices=None, default=None, **_kwargs):
+            return _Prompt("service") if "type is" in message else _Prompt(None)
+
+        def confirm(self, message="", default=True, **_kwargs):
+            return _Prompt(False)
+
+    monkeypatch.setattr("InquirerPy.inquirer", _FakeInquirer())
+
+    _run_interactive(
+        WorkspaceInitializer(),
+        Output(),
+        worktree,
+        worktree / "mothership.yaml",
+        None,
+        False,
+    )
+
+    assert (main / ".mothership" / "mothership.db").is_file()
+    assert not (worktree / ".mothership").exists()
+
+
+def test_init_ignores_state_before_creating_database(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from mship.core.persistence.workspace_store import WorkspaceStore
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    assert not (workspace / ".gitignore").exists()
+
+    initialize_if_empty = WorkspaceStore.initialize_if_empty
+    observed_order = False
+
+    def initialize_after_ignore(self):
+        nonlocal observed_order
+        ignore_path = self.state_dir.parent / ".gitignore"
+        assert ignore_path.is_file()
+        assert ".mothership/" in ignore_path.read_text().splitlines()
+        assert not (self.state_dir / "mothership.db").exists()
+        observed_order = True
+        return initialize_if_empty(self)
+
+    monkeypatch.setattr(
+        WorkspaceStore,
+        "initialize_if_empty",
+        initialize_after_ignore,
+    )
+    monkeypatch.chdir(workspace)
+
+    result = runner.invoke(
+        app,
+        ["init", "--name", "ignored", "--repo", ".:service"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert observed_order

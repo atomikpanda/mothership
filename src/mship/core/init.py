@@ -5,6 +5,8 @@ from typing import Literal
 import yaml
 
 from mship.core.config import RepoConfig, WorkspaceConfig, resolve_go_task_files
+from mship.core.persistence.workspace_store import WorkspaceStore
+from mship.util.git import GitRunner
 
 
 REPO_MARKERS = [
@@ -239,6 +241,11 @@ tasks:
 
         with open(path, "w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+    def initialize_storage(self, state_dir: Path) -> bool:
+        """Initialize SQLite only when the workspace has no active storage."""
+        GitRunner().add_to_gitignore(state_dir.parent, ".mothership/")
+        return WorkspaceStore(state_dir).initialize_if_empty()
 
     def write_taskfile(self, repo_path: Path) -> TaskfileWriteResult:
         """Write a starter Taskfile.yml only when NO go-task file already resolves

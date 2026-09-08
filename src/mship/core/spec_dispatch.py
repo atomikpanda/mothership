@@ -246,18 +246,35 @@ def _dispatch_current(
     # same as workitem_migrate.wrap_existing pass 1 — so the spawned/bound task
     # carries a work_item_id and clears the enforcement gate.
     if spec.work_item_id:
-        workitems.add_task(spec.work_item_id, chosen_slug, now=now, state=state_manager)
+        work_item_id = spec.work_item_id
     else:
-        wi = workitems.create(title=spec.title, kind="feature", workspace=workspace, now=now)
-        workitems.link_spec(wi.id, spec.id, now=now)
-        spec.work_item_id = wi.id
-        workitems.add_task(wi.id, chosen_slug, now=now, state=state_manager)
+        # A prior dispatch may have created and spec-linked the WorkItem before
+        # its spec-file save failed. Reuse that durable identity on retry rather
+        # than minting a second item that would conflict with task ownership.
+        candidates = [item for item in workitems.list() if item.spec_id == spec.id]
+        if len(candidates) > 1:
+            raise DispatchError(
+                f"spec {spec.id!r} is linked to multiple work items: "
+                f"{[item.id for item in candidates]}"
+            )
+        if candidates:
+            work_item_id = candidates[0].id
+        else:
+            wi = workitems.create(title=spec.title, kind="feature", workspace=workspace, now=now)
+            workitems.link_spec(wi.id, spec.id, now=now)
+            work_item_id = wi.id
+        spec.work_item_id = work_item_id
+        spec.updated_at = now
+        store.save_while_locked(spec, artifact)
 
-    def _bind(s):
-        if chosen_slug in s.tasks:
-            s.tasks[chosen_slug].spec_id = spec.id
+    from mship.core.persistence.lifecycle_repository import LifecycleRepository
 
-    state_manager.mutate(_bind)
+    LifecycleRepository(state_manager.workspace_store).bind_spec(
+        chosen_slug,
+        work_item_id,
+        spec.id,
+        now=now,
+    )
 
     spec.status = "dispatched"
     spec.task_slug = chosen_slug

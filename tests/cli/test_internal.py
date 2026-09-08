@@ -164,12 +164,14 @@ _TASK_YAML_NO_WORKITEM = (
 def _seed_bug_workitem(state_dir, item_id: str = _KNOWN_WORK_ITEM_ID) -> None:
     from datetime import datetime, timezone
     from mship.core.workitem import WorkItem
-    from mship.core.workitem_store import WorkItemStore
     now = datetime.now(timezone.utc)
-    WorkItemStore(state_dir / "workitems").save(
-        WorkItem(id=item_id, title="t", workspace="w", kind="bug",
-                 created_at=now, updated_at=now)
+    workitems_dir = state_dir / "workitems"
+    workitems_dir.mkdir(parents=True, exist_ok=True)
+    item = WorkItem(
+        id=item_id, title="t", workspace="w", kind="bug",
+        created_at=now, updated_at=now,
     )
+    (workitems_dir / f"{item_id}.json").write_text(item.model_dump_json())
 
 
 def test_check_push_rejects_unregistered_feat_branch(tmp_path, monkeypatch):

@@ -8,9 +8,12 @@ from mship.core.healthcheck import HealthcheckRunner
 from mship.core.graph import DependencyGraph
 from mship.core.log import LogManager
 from mship.core.phase import PhaseManager
+from mship.core.persistence.database import WorkspaceDatabase
+from mship.core.persistence.workspace_store import WorkspaceStore
 from mship.core.state import StateManager
 from mship.core.pr import PRManager
 from mship.core.prune import PruneManager
+from mship.core.workitem_store import WorkItemStore
 from mship.core.worktree import WorktreeManager
 from mship.util.git import GitRunner
 from mship.util.shell import ShellRunner
@@ -25,9 +28,29 @@ class Container(containers.DeclarativeContainer):
         path=config_path,
     )
 
+    workspace_database = providers.Singleton(
+        WorkspaceDatabase,
+        state_dir=state_dir,
+    )
+
+    workspace_store = providers.Singleton(
+        WorkspaceStore,
+        state_dir=state_dir,
+        database=workspace_database,
+    )
+
     state_manager = providers.Singleton(
         StateManager,
-        state_dir=state_dir,
+        workspace_store=workspace_store,
+    )
+
+    workitem_store = providers.Factory(
+        WorkItemStore,
+        workitems_dir=providers.Factory(
+            lambda state_dir: Path(state_dir) / "workitems",
+            state_dir,
+        ),
+        workspace_store=workspace_store,
     )
 
     git = providers.Singleton(GitRunner)

@@ -154,10 +154,10 @@ def test_prune_retains_metadata_for_forward_only_workitem_link(prune_deps):
 
 
 def test_prune_refuses_metadata_changed_after_retention(prune_deps, monkeypatch):
-    from mship.core.workitem_lifecycle import (
-        TaskMetadataRetentionConflictError,
-        retain_workitem_metadata_on_teardown,
+    from mship.core.persistence.lifecycle_repository import (
+        LifecycleRepository,
     )
+    from mship.core.workitem_lifecycle import TaskMetadataRetentionConflictError
     from mship.core.workitem_store import WorkItemStore
 
     config, state_mgr, git, _workspace = prune_deps
@@ -173,23 +173,37 @@ def test_prune_refuses_metadata_changed_after_retention(prune_deps, monkeypatch)
     state_mgr.save(WorkspaceState(tasks={task.slug: task}))
     manager = PruneManager(config, state_mgr, git)
 
-    def retain_then_update(*, task, workitems_dir):
-        retained = retain_workitem_metadata_on_teardown(
-            task=task, workitems_dir=workitems_dir,
-        )
-        state_mgr.mutate(
-            lambda state: (
-                state.tasks[task.slug].affected_repos.append("api-gateway"),
-                state.tasks[task.slug].pr_urls.update(
+    original = LifecycleRepository.retain_and_prune_task_repos
+
+    def update_then_prune(
+        self,
+        task_slug,
+        repos,
+        *,
+        now,
+        expected_task=None,
+    ):
+        state_mgr.mutate_task(
+            task_slug,
+            lambda task: (
+                task.affected_repos.append("api-gateway"),
+                task.pr_urls.update(
                     {"api-gateway": "https://github.example/api/pull/2"},
                 ),
             ),
         )
-        return retained
+        return original(
+            self,
+            task_slug,
+            repos,
+            now=now,
+            expected_task=expected_task,
+        )
 
     monkeypatch.setattr(
-        "mship.core.workitem_lifecycle.retain_workitem_metadata_on_teardown",
-        retain_then_update,
+        LifecycleRepository,
+        "retain_and_prune_task_repos",
+        update_then_prune,
     )
 
     with pytest.raises(TaskMetadataRetentionConflictError, match="Retry"):

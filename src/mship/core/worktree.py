@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
+from sqlalchemy.exc import IntegrityError
+
 from mship.core.config import WorkspaceConfig
 from mship.core.graph import DependencyGraph
 from mship.core.log import LogManager
@@ -730,26 +732,27 @@ class WorktreeManager:
             work_item_id=work_item_id,
         )
 
-        def _apply(s: WorkspaceState) -> None:
-            # Atomic check-and-set: re-check under the exclusive lock so two
-            # concurrent spawns with the same slug cannot both register. The
-            # caller-facing error matches the preflight message.
-            if slug in s.tasks:
-                raise ValueError(
-                    f"Task '{slug}' already exists. "
-                    f"Run `mship close --yes --abandon --task {slug}` to remove it first, or use a different description."
+        try:
+            if work_item_id is None:
+                self._state_manager.insert_task(task)
+            else:
+                from mship.core.persistence.lifecycle_repository import (
+                    LifecycleRepository,
                 )
-            s.tasks[slug] = task
-        self._state_manager.mutate(_apply)
 
-        if work_item_id is not None:
-            # Forward link (task_slugs) on the WorkItem. The reverse link
-            # (task.work_item_id) is already set atomically on the Task above;
-            # add_task's state=... mutate is a harmless no-op re-set of the
-            # same value (see WorkItemStore.add_task).
-            from mship.core.workitem_store import WorkItemStore
-            items = WorkItemStore(workspace_root / ".mothership" / "workitems")
-            items.add_task(work_item_id, slug, now=now, state=self._state_manager)
+                LifecycleRepository(self._state_manager.workspace_store).register_task(
+                    task, work_item_id, now=now
+                )
+        except (IntegrityError, KeyError) as error:
+            if isinstance(error, KeyError):
+                if error.args != (slug,):
+                    raise
+            elif "UNIQUE constraint failed: tasks.slug" not in str(error.orig):
+                raise
+            raise ValueError(
+                f"Task '{slug}' already exists. "
+                f"Run `mship close --yes --abandon --task {slug}` to remove it first, or use a different description."
+            ) from error
 
         self._log.create(slug)
         log_msg = f"Task spawned. Repos: {', '.join(ordered)}. Branch: {branch}"
@@ -842,29 +845,13 @@ class WorktreeManager:
             except Exception:
                 pass
 
-        # State is the final copy of task delivery metadata. Persist it before
-        # removing the task so a failed WorkItem write cannot silently lose it.
-        # Item locks stay outside StateManager.mutate's state.lock.
-        from mship.core.workitem_lifecycle import (
-            require_retained_task_metadata,
-            retain_workitem_metadata_on_teardown,
+        from mship.core.persistence.lifecycle_repository import LifecycleRepository
+
+        LifecycleRepository(self._state_manager.workspace_store).retain_and_delete_task(
+            task_slug,
+            now=datetime.now(timezone.utc),
+            expected_task=task,
         )
-
-        retained = retain_workitem_metadata_on_teardown(
-            task=task,
-            workitems_dir=self._state_manager.state_dir / "workitems",
-        )
-
-        # Only update state after all cleanup attempts. A task metadata update
-        # that raced the retention write must remain available for a retry.
-        def _abort(s):
-            live_task = s.tasks.get(task_slug)
-            if live_task is None:
-                return
-            require_retained_task_metadata(live_task, retained)
-            del s.tasks[task_slug]
-
-        self._state_manager.mutate(_abort)
 
     def list_worktrees(self) -> dict[str, dict[str, Path]]:
         state = self._state_manager.load()

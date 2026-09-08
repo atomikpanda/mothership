@@ -29,11 +29,11 @@ def register(app: typer.Typer, get_container):
             )
             raise typer.Exit(code=1)
 
-        def _apply(s):
-            s.tasks[t.slug].blocked_reason = reason
-            s.tasks[t.slug].blocked_at = datetime.now(timezone.utc)
+        def _apply(task):
+            task.blocked_reason = reason
+            task.blocked_at = datetime.now(timezone.utc)
 
-        state_mgr.mutate(_apply)
+        state_mgr.mutate_task(t.slug, _apply)
 
         log_mgr = container.log_manager()
         log_mgr.append(t.slug, f"Blocked: {reason}")
@@ -65,11 +65,11 @@ def register(app: typer.Typer, get_container):
             output.error("Task is not blocked. Use `mship block \"reason\"` to mark it as blocked.")
             raise typer.Exit(code=1)
 
-        def _apply(s):
-            s.tasks[t.slug].blocked_reason = None
-            s.tasks[t.slug].blocked_at = None
+        def _apply(task):
+            task.blocked_reason = None
+            task.blocked_at = None
 
-        state_mgr.mutate(_apply)
+        state_mgr.mutate_task(t.slug, _apply)
 
         log_mgr = container.log_manager()
         log_mgr.append(t.slug, "Unblocked")

@@ -768,14 +768,45 @@ def test_finish_handoff(configured_git_app: Path):
     assert handoff_file.exists()
 
 
-def test_finish_creates_prs(configured_git_app: Path):
+def test_finish_creates_prs(configured_git_app: Path, monkeypatch):
+    from contextlib import contextmanager
+    from datetime import datetime, timezone
+
     from mship.cli import container as cli_container
+    from mship.core.persistence.database import WorkspaceDatabase
+    from mship.core.persistence.lifecycle_repository import LifecycleRepository
+    from mship.core.workitem_store import WorkItemStore
 
     # Spawn a task first
     runner.invoke(app, ["spawn", "--hotfix", "test prs", "--repos", "shared"])
+    state_dir = configured_git_app / ".mothership"
+    items = WorkItemStore(state_dir / "workitems")
+    item = items.create("Test PRs", "chore", "test", datetime.now(timezone.utc))
+    LifecycleRepository(StateManager(state_dir).workspace_store).link_task(
+        item.id, "test-prs", now=datetime.now(timezone.utc),
+    )
+    active_connections = []
+    observations = []
+    original_write = WorkspaceDatabase.write
+
+    @contextmanager
+    def tracked_write(database, *, immediate=False):
+        with original_write(database, immediate=immediate) as connection:
+            active_connections.append(connection)
+            try:
+                yield connection
+            finally:
+                active_connections.remove(connection)
+
+    def assert_outside_sql(name):
+        assert all(not connection.in_transaction() for connection in active_connections)
+        observations.append(name)
+
+    monkeypatch.setattr(WorkspaceDatabase, "write", tracked_write)
 
     # Mock shell for finish operations
     def mock_run(cmd, cwd, env=None):
+        assert_outside_sql("git_or_github")
         if "gh auth status" in cmd:
             return ShellResult(returncode=0, stdout="Logged in", stderr="")
         if "ls-remote" in cmd:
@@ -797,15 +828,24 @@ def test_finish_creates_prs(configured_git_app: Path):
     mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok", stderr="")
     cli_container.shell.override(mock_shell)
 
+    def observed_announce(*args, **kwargs):
+        assert_outside_sql("message_store")
+
+    monkeypatch.setattr(
+        "mship.core.pr_watcher.announce_prs_on_thread",
+        observed_announce,
+    )
+
     result = runner.invoke(app, ["finish", "--hotfix", "--task", "test-prs", "--no-require-tests"])
     assert result.exit_code == 0, result.output
 
     # Verify PR URL stored in state
-    from mship.core.state import StateManager
     mgr = StateManager(configured_git_app / ".mothership")
     state = mgr.load()
     assert "test-prs" in state.tasks
     assert state.tasks["test-prs"].pr_urls.get("shared") == "https://github.com/org/shared/pull/1"
+    assert items.get(item.id).pr_urls == ["https://github.com/org/shared/pull/1"]
+    assert {"git_or_github", "message_store"} <= set(observations)
 
     cli_container.shell.reset_override()
 
@@ -2008,20 +2048,19 @@ def test_finish_does_not_capture_diagnostic_when_main_is_clean(configured_git_ap
 
 def test_close_logs_rate_limit_reason_when_pr_state_unknown(configured_git_app: Path):
     """When gh pr view fails with rate-limit stderr, close surfaces the reason. See #73."""
+    from datetime import datetime, timezone
     from mship.cli import container as cli_container
     from mship.util.shell import ShellResult, ShellRunner
     from unittest.mock import MagicMock
 
     runner.invoke(app, ["spawn", "--hotfix", "rate-limit close", "--repos", "shared"])
     # Set a pr_url manually so close actually calls gh pr view.
-    import yaml
-    state_path = configured_git_app / ".mothership" / "state.yaml"
-    data = yaml.safe_load(state_path.read_text())
-    data["tasks"]["rate-limit-close"]["pr_urls"] = {
-        "shared": "https://github.com/org/repo/pull/1"
-    }
-    data["tasks"]["rate-limit-close"]["finished_at"] = "2026-04-22T00:00:00Z"
-    state_path.write_text(yaml.safe_dump(data))
+    def _mark_finished(state):
+        task = state.tasks["rate-limit-close"]
+        task.pr_urls = {"shared": "https://github.com/org/repo/pull/1"}
+        task.finished_at = datetime(2026, 4, 22, tzinfo=timezone.utc)
+
+    StateManager(configured_git_app / ".mothership").mutate(_mark_finished)
 
     def mock_run(cmd, cwd, env=None):
         if "gh pr view" in cmd and "--json state" in cmd:
@@ -2380,7 +2419,7 @@ def test_close_cascade_refuses_metadata_changed_after_retention(
     configured_git_app: Path, monkeypatch,
 ):
     from datetime import datetime, timezone
-    from mship.core.workitem_lifecycle import retain_workitem_metadata_on_teardown
+    from mship.core.persistence.lifecycle_repository import LifecycleRepository
     from mship.core.workitem_store import WorkItemStore
 
     state = _seed_ab_tasks(configured_git_app)
@@ -2396,24 +2435,25 @@ def test_close_cascade_refuses_metadata_changed_after_retention(
         ),
     )
 
-    def retain_then_update(*, task, workitems_dir):
-        retained = retain_workitem_metadata_on_teardown(
-            task=task, workitems_dir=workitems_dir,
-        )
-        if task.slug == "b":
-            state.mutate(
-                lambda s: (
-                    s.tasks["b"].affected_repos.append("api-gateway"),
-                    s.tasks["b"].pr_urls.update(
+    original = LifecycleRepository.retain_and_delete_tasks
+
+    def update_then_retain(self, expected_tasks, *, now):
+        if "b" in expected_tasks:
+            state.mutate_task(
+                "b",
+                lambda task: (
+                    task.affected_repos.append("api-gateway"),
+                    task.pr_urls.update(
                         {"api-gateway": "https://github.example/api/pull/3"},
                     ),
                 ),
             )
-        return retained
+        return original(self, expected_tasks, now=now)
 
     monkeypatch.setattr(
-        "mship.core.workitem_lifecycle.retain_workitem_metadata_on_teardown",
-        retain_then_update,
+        LifecycleRepository,
+        "retain_and_delete_tasks",
+        update_then_retain,
     )
 
     result = runner.invoke(app, ["close", "a", "--yes", "--skip-pr-check", "--cascade"])
