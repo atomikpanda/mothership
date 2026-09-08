@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 from collections.abc import Iterator
 from contextlib import contextmanager
 from importlib import resources
@@ -14,6 +15,7 @@ from sqlalchemy.exc import OperationalError
 
 DB_FILENAME = "mothership.db"
 BUSY_TIMEOUT_MS = 5_000
+INITIALIZE_LOCK_FILENAME = "mothership.db.initialize.lock"
 
 
 class DatabaseRevisionError(RuntimeError):
@@ -22,6 +24,19 @@ class DatabaseRevisionError(RuntimeError):
 
 class DatabaseBusyError(RuntimeError):
     """The workspace database remained locked past the bounded busy timeout."""
+
+
+@contextmanager
+def _initialization_lock(state_dir: Path) -> Iterator[None]:
+    """Serialize first-time Alembic setup across workspace processes."""
+    lock_path = state_dir / INITIALIZE_LOCK_FILENAME
+    lock_path.touch(exist_ok=True)
+    with lock_path.open("r+") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
 
 
 def install_sqlite_policy(engine: Engine) -> None:
@@ -116,10 +131,20 @@ class WorkspaceDatabase:
             )
         if current == head:
             return
-        with self.connect() as connection:
-            config = make_alembic_config(self.path)
-            config.attributes["connection"] = connection
-            command.upgrade(config, "head")
+        with _initialization_lock(self._state_dir):
+            current = self.current_revision()
+            if current is not None and current != head:
+                raise DatabaseRevisionError(
+                    f"workspace database {self.path} is at revision {current!r}; "
+                    f"this binary requires {head!r}. Stop active writers and run "
+                    "mship state migrate with a compatible binary"
+                )
+            if current == head:
+                return
+            with self.connect() as connection:
+                config = make_alembic_config(self.path)
+                config.attributes["connection"] = connection
+                command.upgrade(config, "head")
 
     def current_revision(self) -> str | None:
         if not self.path.exists():
