@@ -183,9 +183,10 @@ def _tunnel_join_timeout() -> float:
     The task group joins the non-abandoned worker before stopping its supervisor;
     this budget documents the underlying operation bounds, not permission to
     abandon a still-running tick. That worst case is the three
-    relay calls a single tick can make (challenge, register, enroll); automatic
-    clone recovery rotates its local key without revoking the incumbent's shared
-    key, so it adds no relay calls. The tick can also make three fixed, bounded
+    relay calls a single tick can make (challenge, register, enroll), one signing
+    subprocess, and one key-generation subprocess on automatic clone recovery.
+    Recovery does not revoke the incumbent's shared key, so it adds no relay
+    calls. The tick can also make three fixed, bounded
     process-table snapshots (discovery, pre-TERM, pre-KILL) and the shared
     TERM/KILL exit waits. Still bounded,
     because a daemon that never returns is
@@ -198,11 +199,15 @@ def _tunnel_join_timeout() -> float:
         PROCESS_LIST_TIMEOUT_S,
     )
     from mship.core.daemon.relay_link import HTTP_TIMEOUT_S
+    from mship.core.relay.keys import KEYGEN_TIMEOUT_S
+    from mship.core.relay.ssh_sig import SSH_KEYGEN_TIMEOUT_S
 
     return (
         3 * HTTP_TIMEOUT_S
         + MAX_PROCESS_LIST_CALLS_PER_REAP * PROCESS_LIST_TIMEOUT_S
         + 2 * ORPHAN_EXIT_TIMEOUT_S
+        + SSH_KEYGEN_TIMEOUT_S
+        + KEYGEN_TIMEOUT_S
     )
 
 

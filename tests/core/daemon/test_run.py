@@ -897,12 +897,16 @@ def test_serve_forever_always_runs_on_asyncio(
 
 
 def test_tunnel_join_timeout_uses_the_reapers_fixed_snapshot_bound(monkeypatch):
+    from mship.core.relay import keys, ssh_sig
+
     monkeypatch.setattr(relay_link_mod, "HTTP_TIMEOUT_S", 13)
     monkeypatch.setattr(host_tunnel_mod, "PROCESS_LIST_TIMEOUT_S", 7)
     monkeypatch.setattr(host_tunnel_mod, "MAX_PROCESS_LIST_CALLS_PER_REAP", 5)
     monkeypatch.setattr(host_tunnel_mod, "ORPHAN_EXIT_TIMEOUT_S", 11)
+    monkeypatch.setattr(keys, "KEYGEN_TIMEOUT_S", 17, raising=False)
+    monkeypatch.setattr(ssh_sig, "SSH_KEYGEN_TIMEOUT_S", 19, raising=False)
 
-    assert run_mod._tunnel_join_timeout() == 3 * 13 + 5 * 7 + 2 * 11
+    assert run_mod._tunnel_join_timeout() == 3 * 13 + 5 * 7 + 2 * 11 + 17 + 19
 
 
 def test_tunnel_offload_uses_shared_non_abandoning_tunnel_lane(monkeypatch):

@@ -166,6 +166,45 @@ def _link(
 # --- register_once: challenge → sign → register ----------------------------
 
 
+def test_signer_subprocess_timeout_is_recoverable_on_next_tick(tmp_path, monkeypatch):
+    """A missing signer deadline makes registration appear successful after a stall."""
+    import subprocess
+    import sys
+
+    from mship.core.relay import ssh_sig
+
+    relay = _Relay()
+    clock = _Clock()
+    _seed_key(tmp_path)
+    link = RelayLink(
+        tmp_path, RELAY, post=relay.post, clock=clock,
+        issue_refresh=lambda host_id: f"refresh-for-{host_id}",
+    )
+    real_run = subprocess.run
+    stalled = True
+
+    def signer_process(argv, **kwargs):
+        if stalled:
+            return real_run(
+                [sys.executable, "-c", "import time; time.sleep(0.2)"], **kwargs
+            )
+        return subprocess.CompletedProcess(argv, 0, stdout=b"SIG", stderr=b"")
+
+    monkeypatch.setattr(ssh_sig, "SSH_KEYGEN_TIMEOUT_S", 0.01, raising=False)
+    monkeypatch.setattr(subprocess, "run", signer_process)
+    outcome = link.tick()
+    assert outcome.kind == "signing"
+    assert link.state == "error"
+    assert "timed out" in link.last_error
+    assert relay.posts_to(host_contract.REGISTER_PATH) == []
+
+    stalled = False
+    _advance_past(clock, link)
+    assert link.tick().ok
+    assert link.state == "registered"
+    assert link.last_error is None
+
+
 def test_register_once_signs_the_posted_payload_and_returns_the_refresh(tmp_path: Path):
     relay = _Relay()
     link = _link(tmp_path, relay, _Clock())
