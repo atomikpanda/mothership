@@ -43,7 +43,7 @@ def load_legacy_state(state_dir: Path) -> WorkspaceState:
     return WorkspaceState.model_validate(raw)
 
 
-def _legacy_workitem_path(workitems_dir: Path, item_id: str) -> Path:
+def _validate_legacy_workitem_id(item_id: str) -> None:
     if (
         not item_id
         or "/" in item_id
@@ -52,18 +52,42 @@ def _legacy_workitem_path(workitems_dir: Path, item_id: str) -> Path:
         or item_id.startswith(".")
     ):
         raise ValueError(f"unsafe work item id: {item_id!r}")
+
+
+def _contained_legacy_workitem_path(
+    workitems_dir: Path,
+    discovered: Path,
+) -> Path:
     directory = Path(workitems_dir).resolve()
-    path = (directory / f"{item_id}.json").resolve()
+    path = discovered.resolve()
     if path.parent != directory:
-        raise ValueError(f"unsafe work item id: {item_id!r}")
+        raise ValueError(f"unsafe work item id: {discovered.stem!r}")
     return path
 
 
+def _legacy_workitem_entries(workitems_dir: Path) -> list[tuple[str, Path]]:
+    directory = Path(workitems_dir)
+    if not directory.is_dir():
+        return []
+    return [
+        (discovered.stem, _contained_legacy_workitem_path(directory, discovered))
+        for discovered in directory.glob("*.json")
+    ]
+
+
 def get_legacy_workitem(workitems_dir: Path, item_id: str) -> WorkItem | None:
-    path = _legacy_workitem_path(workitems_dir, item_id)
-    if not path.is_file():
+    _validate_legacy_workitem_id(item_id)
+    directory = Path(workitems_dir)
+    if not directory.is_dir():
         return None
-    return WorkItem.model_validate_json(path.read_text())
+    for discovered in directory.glob("*.json"):
+        if discovered.stem != item_id:
+            continue
+        path = _contained_legacy_workitem_path(directory, discovered)
+        if path.is_file():
+            return WorkItem.model_validate_json(path.read_text())
+        return None
+    return None
 
 
 def list_legacy_workitems(
@@ -77,10 +101,13 @@ def list_legacy_workitems(
         return [], False
     items: list[WorkItem] = []
     uncertain = False
-    for path in directory.glob("*.json"):
+    for discovered in directory.glob("*.json"):
         try:
-            contained_path = _legacy_workitem_path(directory, path.stem)
-            items.append(WorkItem.model_validate_json(contained_path.read_text()))
+            path = _contained_legacy_workitem_path(
+                directory,
+                discovered,
+            )
+            items.append(WorkItem.model_validate_json(path.read_text()))
         except Exception:
             if not tolerant:
                 raise

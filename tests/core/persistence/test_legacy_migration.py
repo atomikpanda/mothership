@@ -11,11 +11,12 @@ from sqlalchemy import select
 from mship.core.persistence.database import WorkspaceDatabase
 from mship.core.persistence.migration import (
     MigrationPreflightError,
+    MigrationVerificationError,
     _backup_legacy,
     _legacy_fingerprints,
     migrate_legacy_state,
 )
-from mship.core.persistence.schema import storage_metadata
+from mship.core.persistence.schema import storage_metadata, tasks
 from mship.core.state import (
     DependencyEdge,
     StateManager,
@@ -174,6 +175,36 @@ def test_migration_activates_only_after_verified_import(
     assert len(metadata["legacy_workitems_sha256"]) == 64
 
 
+def test_migration_preserves_switch_source_without_dependencies(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".mothership"
+    state_dir.mkdir()
+    task = Task(
+        slug="no-dependencies",
+        description="switch source without usable dependencies",
+        phase="dev",
+        created_at=NOW,
+        affected_repos=["mothership"],
+        branch="feat/no-dependencies",
+        last_switched_at_sha={"mothership": {}},
+    )
+    expected = WorkspaceState(tasks={task.slug: task})
+    (state_dir / "state.yaml").write_text(
+        yaml.safe_dump(expected.model_dump(mode="json"))
+    )
+
+    report = migrate_legacy_state(
+        state_dir,
+        daemon_probe=lambda: None,
+        now=NOW,
+    )
+
+    assert report.migrated is True
+    assert StateManager(state_dir).load() == expected
+    assert not (state_dir / "state.yaml").exists()
+
+
 def test_migration_accepts_semantically_equivalent_naive_timestamps(
     tmp_path: Path,
 ) -> None:
@@ -218,6 +249,43 @@ def test_migration_accepts_semantically_equivalent_naive_timestamps(
     restored_item = WorkItemStore(state_dir / "workitems").get(item.id)
     assert restored_item is not None
     assert restored_item.updated_at == naive.replace(tzinfo=timezone.utc)
+
+
+def test_migration_rejects_non_timestamp_candidate_mismatch(
+    legacy_workspace: LegacyWorkspace,
+) -> None:
+    def corrupt_candidate(stage: str) -> None:
+        if stage != "verify":
+            return
+        candidate_path = next(
+            path
+            for path in legacy_workspace.state_dir.glob(
+                ".mothership.db.migrating-*"
+            )
+            if not path.name.endswith(("-wal", "-shm"))
+        )
+        candidate = WorkspaceDatabase(
+            legacy_workspace.state_dir,
+            database_path=candidate_path,
+        )
+        with candidate.write() as connection:
+            connection.execute(
+                tasks.update()
+                .where(tasks.c.slug == "upstream")
+                .values(description="corrupted")
+            )
+
+    with pytest.raises(MigrationVerificationError, match="does not match"):
+        migrate_legacy_state(
+            legacy_workspace.state_dir,
+            daemon_probe=lambda: None,
+            now=NOW,
+            stage_hook=corrupt_candidate,
+        )
+
+    assert (legacy_workspace.state_dir / "state.yaml").is_file()
+    assert (legacy_workspace.state_dir / "workitems").is_dir()
+    assert not WorkspaceDatabase(legacy_workspace.state_dir).path.exists()
 
 
 @pytest.mark.parametrize(
