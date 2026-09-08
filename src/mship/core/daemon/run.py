@@ -16,7 +16,7 @@ SIGTERM is no longer uvicorn's business alone (#471): its handlers only set
 would never learn a stop was requested, the daemon would outlive
 `TimeoutStopSec`, be SIGKILLed, and leave its `start_new_session=True` ssh child
 orphaned on the subdomain — where it blocks the next start from claiming it. One
-shared `asyncio.Event` is the stop condition for everything.
+shared `anyio.Event` is the stop condition for everything.
 """
 
 from __future__ import annotations
@@ -179,11 +179,11 @@ def _build_tunnel(home: Path, relay_cfg, serve_cfg):
 
 
 def _tunnel_join_timeout() -> float:
-    """How long a shutdown waits for the tunnel loop's in-flight tick.
+    """Retained shutdown budget for the tunnel loop's bounded in-flight tick.
 
-    DERIVED, never picked: cancelling the loop cannot interrupt the tick already
-    running in the executor, so a bound shorter than a worst-case tick would
-    routinely give up while one is still in flight. That worst case is the three
+    The task group joins the non-abandoned worker before stopping its supervisor;
+    this budget documents the underlying operation bounds, not permission to
+    abandon a still-running tick. That worst case is the three
     relay calls a single tick can make (challenge, register, enroll); automatic
     clone recovery rotates its local key without revoking the incumbent's shared
     key, so it adds no relay calls. The tick can also make three fixed, bounded
@@ -320,8 +320,6 @@ def _raise_for_server_outcome(outcome: _ServerOutcome) -> None:
 
 
 async def _serve(control_app, socket_path, host_app, serve_cfg, tunnel) -> None:
-    import asyncio
-
     import anyio
     import uvicorn
 
@@ -330,8 +328,7 @@ async def _serve(control_app, socket_path, host_app, serve_cfg, tunnel) -> None:
     )
     servers = [control]
     control_app.state.set_serve_bound(False)
-    stop = asyncio.Event()
-    tunnel_task = None
+    stop = anyio.Event()
     first_outcome = None
     try:
         send_outcome, receive_outcome = anyio.create_memory_object_stream(2)
@@ -378,9 +375,7 @@ async def _serve(control_app, socket_path, host_app, serve_cfg, tunnel) -> None:
                     if first_outcome is None:
                         _install_stop_handlers(stop, servers)
                         if tunnel is not None:
-                            tunnel_task = asyncio.create_task(
-                                _tunnel_loop(tunnel, stop)
-                            )
+                            await task_group.start(_tunnel_loop, tunnel, stop)
                         first_outcome = await receive_outcome.receive()
                 finally:
                     control_app.state.set_serve_bound(False)
@@ -395,7 +390,6 @@ async def _serve(control_app, socket_path, host_app, serve_cfg, tunnel) -> None:
         # signals the ssh child could spawn a replacement nothing then owns,
         # and that orphan holds the subdomain against the next start.
         stop.set()
-        await _join_tunnel(tunnel_task)
         if tunnel is not None:
             tunnel.stop()
     assert first_outcome is not None
@@ -433,45 +427,39 @@ def _install_stop_handlers(stop, servers) -> None:
             log.debug("no asyncio signal handler available for %s", sig)
 
 
-async def _tunnel_loop(tunnel, stop) -> None:
+async def _tunnel_loop(
+    tunnel,
+    stop,
+    *,
+    task_status: anyio.abc.TaskStatus[None],
+) -> None:
     """`tick(); sleep(interval)` until the shared stop Event says otherwise.
 
-    The tick runs in the default executor because it BLOCKS: a registration
-    waits out an HTTP timeout, an auto-reidentify shells out to `ssh-keygen`,
+    The tick has its own one-token offload capacity because it BLOCKS: a
+    registration waits out an HTTP timeout, an auto-reidentify runs `ssh-keygen`,
     the orphan sweep to `ps`, and a respawn opens a `Popen` — any of them on the
     loop thread would stall both HTTP servers. A tick never raises by contract;
     if one ever does it must not end the loop, because the tunnel is the half of
     the daemon that recovers by retrying."""
-    import asyncio
+    import anyio
 
     from mship.core.daemon.host_tunnel import TICK_INTERVAL_S
 
-    loop = asyncio.get_running_loop()
+    limiter = anyio.CapacityLimiter(1)
+    # Readiness means the local loop can supervise reconnects; a relay outage
+    # must never hold daemon startup behind network registration/read-back.
+    task_status.started()
     while not stop.is_set():
         try:
-            await loop.run_in_executor(None, tunnel.tick)
+            # Cancellation joins the bounded tick before the root can stop
+            # its supervisor. Abandoning this worker could orphan a respawn.
+            await anyio.to_thread.run_sync(
+                tunnel.tick, limiter=limiter, abandon_on_cancel=False
+            )
         except Exception:
             log.exception("tunnel tick failed")
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=TICK_INTERVAL_S)
-        except TimeoutError:
-            pass
-
-
-async def _join_tunnel(task) -> None:
-    import asyncio
-
-    if task is None:
-        return
-    await asyncio.wait({task}, timeout=_tunnel_join_timeout())
-    task.cancel()
-    for result in await asyncio.gather(task, return_exceptions=True):
-        # `return_exceptions` keeps a shutdown going; it must not also make a
-        # crashed tunnel loop invisible.
-        if isinstance(result, BaseException) and not isinstance(
-            result, asyncio.CancelledError
-        ):
-            log.error("tunnel loop stopped on an error: %r", result)
+        with anyio.move_on_after(TICK_INTERVAL_S):
+            await stop.wait()
 
 
 def _configure_logging(home: Path) -> None:
