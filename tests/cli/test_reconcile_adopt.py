@@ -13,9 +13,12 @@ import pytest
 from typer.testing import CliRunner
 
 from mship.cli import app, container
+from mship.core.persistence.lifecycle_repository import LifecycleRepository
 from mship.core.reconcile.cache import CachePayload, ReconcileCache
 from mship.core.state import StateManager, Task, WorkspaceState
+from mship.core.workitem_store import WorkItemStore
 from mship.util.shell import ShellResult, ShellRunner
+from tests.persistence_helpers import corrupt_workitem
 
 
 _BRANCH = "feat/adopt"
@@ -246,6 +249,7 @@ def test_adopt_merged_recovers_only_lifecycle_metadata_and_invalidates_cache(
                 "url": _pr(repos[0])["url"],
                 "merge_commit": repos[0].merge,
                 "merged_at": "2026-09-08T12:34:56+00:00",
+                "base": "main",
             }
         ]
         task = manager.load().tasks["adopt"]
@@ -292,6 +296,151 @@ def test_adopt_merged_is_idempotent_without_timestamp_churn(tmp_path: Path):
         assert manager.load().tasks["adopt"].model_dump(mode="json") == first_state
         assert [entry.action for entry in first_journal_entries] == ["adopt_merged"]
         assert container.log_manager().read("adopt") == first_journal_entries
+    finally:
+        _reset_container()
+
+
+def test_adopt_merged_succeeds_after_origin_deletes_head(tmp_path: Path):
+    cfg, state_dir, repos, manager = _workspace(tmp_path)
+    repo = repos[0]
+    _git(repo.worktree, "push", "origin", "--delete", _BRANCH)
+    shell = _GitHubFixtureShell({repo.name: [_pr(repo)]})
+    _configure(cfg, state_dir, shell)
+    try:
+        result, payload = _invoke_adoption()
+        assert result.exit_code == 0, result.output
+        assert payload["adopted"] is True
+        assert manager.load().tasks["adopt"].pr_urls == {
+            "api": "https://github.com/acme/api/pull/7"
+        }
+    finally:
+        _reset_container()
+
+
+@pytest.mark.parametrize("names", [("api",), ("api", "worker")])
+@pytest.mark.parametrize("recorded_base", [None, ""])
+def test_adopt_discovers_actual_default_base_and_persists_it(tmp_path: Path, names, recorded_base):
+    cfg, state_dir, repos, manager = _workspace(tmp_path, names)
+    cfg.write_text(cfg.read_text().replace("    base_branch: main\n", ""))
+    manager.mutate(lambda state: setattr(state.tasks["adopt"], "base_branch", recorded_base))
+    for repo in repos:
+        _git(repo.worktree, "push", "origin", "main:refs/heads/release")
+        _git(repo.worktree, "update-ref", "-d", "refs/remotes/origin/main")
+    shell = _GitHubFixtureShell({repo.name: [_pr(repo, baseRefName="release")] for repo in repos})
+    _configure(cfg, state_dir, shell)
+    try:
+        result, payload = _invoke_adoption()
+        assert result.exit_code == 0, result.output
+        assert manager.load().tasks["adopt"].base_branch == "release"
+        assert all(pr["base"] == "release" for pr in payload["prs"])
+        assert all(
+            command.endswith("origin/release")
+            for command in shell.commands if command.startswith("git merge-base")
+        )
+    finally:
+        _reset_container()
+
+
+@pytest.mark.parametrize("bases", [("main", "release"), ("", ""), (None, None)])
+def test_adopt_refuses_unrepresentable_or_missing_discovered_bases(tmp_path: Path, bases):
+    cfg, state_dir, repos, manager = _workspace(tmp_path, ("api", "worker"))
+    cfg.write_text(cfg.read_text().replace("    base_branch: main\n", ""))
+    manager.mutate(lambda state: setattr(state.tasks["adopt"], "base_branch", None))
+    _git(repos[1].worktree, "push", "origin", "main:refs/heads/release")
+    before = manager.load()
+    shell = _GitHubFixtureShell({repo.name: [_pr(repo, baseRefName=base)] for repo, base in zip(repos, bases)})
+    _configure(cfg, state_dir, shell)
+    try:
+        result, _ = _invoke_adoption()
+        assert result.exit_code != 0
+        assert manager.load() == before
+    finally:
+        _reset_container()
+
+
+def _owner(state_dir, manager):
+    items = WorkItemStore(state_dir / "workitems", workspace_store=manager.workspace_store)
+    item = items.create("Owner", "bug", "test", datetime(2026, 9, 8, tzinfo=timezone.utc))
+    item.task_slugs = ["adopt"]
+    item.affected_repos = ["historical"]
+    item.pr_urls = ["https://github.com/acme/historical/pull/1"]
+    items.save(item)
+    manager.mutate(lambda state: setattr(state.tasks["adopt"], "work_item_id", item.id))
+    return items, item
+
+
+@pytest.mark.parametrize("task_complete", [False, True])
+def test_adopt_mirrors_and_repairs_workitem_metadata(tmp_path: Path, task_complete):
+    cfg, state_dir, repos, manager = _workspace(tmp_path)
+    items, owner = _owner(state_dir, manager)
+    if task_complete:
+        manager.mutate(lambda state: (
+            setattr(state.tasks["adopt"], "pr_urls", {"api": "https://github.com/acme/api/pull/7"}),
+            setattr(state.tasks["adopt"], "finished_at", datetime(2026, 9, 8, tzinfo=timezone.utc)),
+        ))
+    shell = _GitHubFixtureShell({repo.name: [_pr(repo)] for repo in repos})
+    _configure(cfg, state_dir, shell)
+    try:
+        result, payload = _invoke_adoption()
+        assert result.exit_code == 0, result.output
+        assert payload["adopted"] is True
+        saved = items.get(owner.id)
+        assert saved.affected_repos == ["historical", "api"]
+        assert saved.pr_urls == ["https://github.com/acme/historical/pull/1", "https://github.com/acme/api/pull/7"]
+        assert saved.task_slugs == ["adopt"]
+        before_task = manager.load().tasks["adopt"]
+        cache = ReconcileCache(state_dir)
+        cache.write(CachePayload(fetched_at=12345, ttl_seconds=300, results={"sentinel": {}}))
+        second, second_payload = _invoke_adoption()
+        assert second.exit_code == 0, second.output
+        assert second_payload["adopted"] is False
+        assert items.get(owner.id) == saved
+        assert manager.load().tasks["adopt"] == before_task
+        assert cache.read().fetched_at == 12345
+    finally:
+        _reset_container()
+
+
+@pytest.mark.parametrize("stage", ["after_task_replace", "after_adoption_retention"])
+def test_adopt_rolls_back_task_and_workitem_on_write_failure(tmp_path: Path, monkeypatch, stage):
+    cfg, state_dir, repos, manager = _workspace(tmp_path)
+    items, owner = _owner(state_dir, manager)
+    before = manager.load()
+    def fail(self, checkpoint):
+        if checkpoint == stage:
+            raise RuntimeError("injected adoption failure")
+    monkeypatch.setattr(LifecycleRepository, "_checkpoint", fail)
+    shell = _GitHubFixtureShell({repo.name: [_pr(repo)] for repo in repos})
+    _configure(cfg, state_dir, shell)
+    try:
+        result, _ = _invoke_adoption()
+        assert result.exit_code != 0
+        assert "injected adoption failure" in result.output
+        assert manager.load() == before
+        assert items.get(owner.id) == owner
+    finally:
+        _reset_container()
+
+
+@pytest.mark.parametrize("case", ["corrupt", "ambiguous"])
+def test_adopt_refuses_corrupt_or_ambiguous_owner_atomically(tmp_path: Path, monkeypatch, case):
+    cfg, state_dir, repos, manager = _workspace(tmp_path)
+    items, owner = _owner(state_dir, manager)
+    if case == "corrupt":
+        corrupt_workitem(state_dir, owner.id)
+    else:
+        # SQLite forbids duplicate forward links; inject the malformed lookup
+        # at the ownership boundary to exercise adoption's fail-closed path.
+        monkeypatch.setattr(LifecycleRepository, "_owner_ids", lambda *args: [owner.id, "wi-duplicate"])
+    before = manager.load()
+    shell = _GitHubFixtureShell({repo.name: [_pr(repo)] for repo in repos})
+    _configure(cfg, state_dir, shell)
+    try:
+        result, _ = _invoke_adoption()
+        assert result.exit_code != 0
+        assert manager.load() == before
+        if case == "ambiguous":
+            assert items.get(owner.id) == owner
     finally:
         _reset_container()
 

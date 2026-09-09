@@ -91,6 +91,7 @@ def register(app: typer.Typer, get_container):
                         "url": entry.url,
                         "merge_commit": entry.merge_commit,
                         "merged_at": entry.merged_at.isoformat(),
+                        "base": entry.base,
                     }
                     for entry in verified
                 ],
@@ -135,10 +136,7 @@ def register(app: typer.Typer, get_container):
         config = ConfigLoader.load(container.config_path(), require_paths=False)
 
         if refresh:
-            payload = cache.read()
-            if payload is not None:
-                payload.fetched_at = 0.0
-                cache.write(payload)
+            cache.invalidate()
 
         def _fetcher(branches, worktrees_by_branch):
             return (

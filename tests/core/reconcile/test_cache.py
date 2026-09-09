@@ -1,7 +1,11 @@
 import json
 import time
+import fcntl
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
 from mship.core.reconcile.cache import ReconcileCache, CachePayload
 
 
@@ -64,6 +68,104 @@ def test_clear_ignores(tmp_path: Path):
     c.add_ignore("slug-b")
     c.clear_ignores()
     assert c.read_ignores() == []
+
+
+@pytest.mark.parametrize("operation", ["add", "remove", "clear", "invalidate", "write"])
+def test_cache_mutations_serialize_with_concurrent_result_writer(tmp_path, monkeypatch, operation):
+    first = ReconcileCache(tmp_path)
+    second = ReconcileCache(tmp_path)
+    first.write(CachePayload(fetched_at=10, ttl_seconds=300, results={"old": {}}, ignored=["a"]))
+    paused = threading.Event()
+    release = threading.Event()
+    contender = threading.Event()
+    first_ident = []
+    second_ident = []
+    original_read = Path.read_text
+    original_write = Path.write_text
+    original_flock = fcntl.flock
+
+    def pause():
+        paused.set()
+        assert release.wait(5), "interleaving did not release first writer"
+
+    def read(path, *args, **kwargs):
+        value = original_read(path, *args, **kwargs)
+        if threading.get_ident() in first_ident and operation != "write":
+            pause()
+        return value
+
+    def write(path, *args, **kwargs):
+        value = original_write(path, *args, **kwargs)
+        if threading.get_ident() in first_ident and operation == "write":
+            pause()
+        return value
+
+    def flock(fd, mode):
+        if threading.get_ident() in second_ident and mode == fcntl.LOCK_EX:
+            contender.set()
+        return original_flock(fd, mode)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    monkeypatch.setattr(Path, "write_text", write)
+    monkeypatch.setattr(fcntl, "flock", flock)
+
+    def mutate():
+        first_ident.append(threading.get_ident())
+        try:
+            if operation == "add":
+                first.add_ignore("b")
+            elif operation == "remove":
+                first.remove_ignore("a")
+            elif operation == "clear":
+                first.clear_ignores()
+            elif operation == "invalidate":
+                first.invalidate()
+            else:
+                first.write(CachePayload(fetched_at=20, ttl_seconds=300, results={"first": {}}))
+        finally:
+            paused.set()
+
+    def replace_results():
+        second_ident.append(threading.get_ident())
+        try:
+            second.write(CachePayload(fetched_at=30, ttl_seconds=300, results={"new": {}}, ignored=["new-ignore"]))
+        finally:
+            # Without a lock the second write completes before resuming the
+            # first; with a lock its acquisition attempt releases the barrier.
+            contender.set()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        one = pool.submit(mutate)
+        try:
+            assert paused.wait(5)
+            if one.done():
+                one.result()
+            two = pool.submit(replace_results)
+            assert contender.wait(5)
+        finally:
+            release.set()
+        one.result(timeout=5)
+        two.result(timeout=5)
+    saved = first.read()
+    assert saved.results == {"new": {}}
+    assert saved.ignored == ["new-ignore"]
+    assert saved.fetched_at == 30
+
+
+def test_invalidate_preserves_payload_and_ignores(tmp_path):
+    cache = ReconcileCache(tmp_path)
+    cache.invalidate()
+    assert cache.read() is None
+    payload = CachePayload(fetched_at=50, ttl_seconds=123, results={"a": {}}, ignored=["keep"], schema_version=0, base_context={"a": ["release"]})
+    cache.write(payload)
+    cache.invalidate()
+    saved = cache.read()
+    assert saved.fetched_at == 0
+    assert saved.results == {"a": {}}
+    assert saved.ignored == ["keep"]
+    assert saved.schema_version == 0
+    assert saved.base_context == {"a": ["release"]}
+    assert saved.ttl_seconds == 123
 
 
 def test_corrupt_cache_returns_none(tmp_path: Path):

@@ -6,12 +6,13 @@ import json
 import re
 import shlex
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from mship.core.base_resolver import resolve_base
 from mship.core.log import LogManager
+from mship.core.persistence.lifecycle_repository import LifecycleRepository
 from mship.core.pr import PRManager
 from mship.core.reconcile.cache import ReconcileCache
 from mship.core.state import StateManager, Task
@@ -34,6 +35,7 @@ class VerifiedMergedPR:
     url: str
     merge_commit: str
     merged_at: datetime
+    base: str
 
 
 def adopt_merged_task(
@@ -56,7 +58,6 @@ def adopt_merged_task(
     task = state.tasks.get(task_slug)
     if task is None:
         raise AdoptionError(f"Unknown task: {task_slug!r}.")
-    expected = task.model_dump(mode="json")
     if not task.affected_repos:
         raise AdoptionError(f"Task {task_slug!r} has no affected repositories.")
 
@@ -71,37 +72,23 @@ def adopt_merged_task(
     ]
     recovered_urls = {entry.repo: entry.url for entry in verified}
     completed_at = max(entry.merged_at for entry in verified)
+    discovered_bases = {
+        entry.base for entry in verified
+        if not _effective_base(task, entry.repo, config)
+    }
+    if len(discovered_bases) > 1:
+        raise AdoptionError("Discovered PR bases cannot be represented by one Task base branch.")
+    discovered_base = next(iter(discovered_bases), None)
 
-    changed = False
-
-    def apply(current_state) -> None:
-        nonlocal changed
-        current = current_state.tasks.get(task_slug)
-        if current is None or current.model_dump(mode="json") != expected:
-            raise AdoptionError(
-                f"Task {task_slug!r} changed while PR recovery was being verified; retry it."
-            )
-        for repo, url in recovered_urls.items():
-            recorded = current.pr_urls.get(repo)
-            if recorded is not None and recorded != url:
-                raise AdoptionError(
-                    f"{repo}: recorded PR URL {recorded!r} does not match verified URL {url!r}."
-                )
-        missing_urls = {
-            repo: url
-            for repo, url in recovered_urls.items()
-            if repo not in current.pr_urls
-        }
-        if missing_urls:
-            current.pr_urls.update(missing_urls)
-            changed = True
-        if current.finished_at is None:
-            current.finished_at = completed_at
-            changed = True
-
-    state_manager.mutate(apply)
-    _invalidate(cache)
+    changed = LifecycleRepository(state_manager.workspace_store).adopt_merged_metadata(
+        task,
+        recovered_urls,
+        finished_at=completed_at,
+        discovered_base=discovered_base,
+        now=datetime.now(timezone.utc),
+    )
     if changed:
+        cache.invalidate()
         details = "; ".join(
             f"{entry.repo}: {entry.url} (merge {entry.merge_commit}, merged {entry.merged_at.isoformat()})"
             for entry in verified
@@ -131,31 +118,15 @@ def _verify_repo(
     if not worktree.is_dir():
         raise AdoptionError(f"{repo_name}: task worktree does not exist: {worktree}")
 
-    base = (
-        resolve_base(
-            repo_name,
-            repo_config,
-            cli_base=None,
-            base_map={},
-            known_repos=getattr(config, "repos", {}).keys(),
-            task_base=task.base_override,
-        )
-        or task.base_branch
-    )
-    if not base:
-        raise AdoptionError(f"{repo_name}: no effective base branch is recorded.")
+    base = _effective_base(task, repo_name, config)
 
     _require_clean_worktree(repo_name, worktree, shell)
     head_sha = _git_value(repo_name, worktree, shell, "git rev-parse HEAD")
     if not _SHA_RE.fullmatch(head_sha):
         raise AdoptionError(f"{repo_name}: git returned an invalid HEAD SHA.")
-    if not pr_manager.check_pushed_to_origin(worktree, task.branch):
-        raise AdoptionError(
-            f"{repo_name}: task branch {task.branch!r} is not pushed at its current commit."
-        )
-
     github_repo = _github_repo(repo_name, worktree, shell)
     pr = _fetch_exact_pr(repo_name, worktree, shell, github_repo, task.branch, base)
+    base = pr["baseRefName"]
     pr_head = pr["headRefOid"]
     if pr_head != head_sha:
         raise AdoptionError(
@@ -179,7 +150,19 @@ def _verify_repo(
         url=pr["url"],
         merge_commit=pr["mergeCommit"]["oid"],
         merged_at=_parse_merged_at(repo_name, pr["mergedAt"]),
+        base=base,
     )
+
+
+def _effective_base(task: Task, repo_name: str, config: Any) -> str | None:
+    return resolve_base(
+        repo_name,
+        config.repos[repo_name],
+        cli_base=None,
+        base_map={},
+        known_repos=config.repos.keys(),
+        task_base=task.base_override,
+    ) or task.base_branch or None
 
 
 def _require_clean_worktree(repo_name: str, worktree: Path, shell: ShellRunner) -> None:
@@ -211,7 +194,7 @@ def _fetch_exact_pr(
     shell: ShellRunner,
     github_repo: str,
     branch: str,
-    base: str,
+    base: str | None,
 ) -> dict[str, Any]:
     command = (
         "gh pr list "
@@ -246,7 +229,10 @@ def _fetch_exact_pr(
         raise AdoptionError(
             f"{repo_name}: GitHub returned a PR with the wrong head branch."
         )
-    if pr.get("baseRefName") != base:
+    actual_base = pr.get("baseRefName")
+    if not isinstance(actual_base, str) or not actual_base.strip():
+        raise AdoptionError(f"{repo_name}: merged PR has no valid base branch.")
+    if base is not None and actual_base != base:
         raise AdoptionError(
             f"{repo_name}: GitHub returned a PR with the wrong base branch."
         )
@@ -277,10 +263,3 @@ def _parse_merged_at(repo_name: str, raw: object) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise AdoptionError(f"{repo_name}: merged PR timestamp lacks a timezone.")
     return value
-
-
-def _invalidate(cache: ReconcileCache) -> None:
-    payload = cache.read()
-    if payload is not None:
-        payload.fetched_at = 0.0
-        cache.write(payload)

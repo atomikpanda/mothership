@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field
+import fcntl
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 
@@ -31,6 +33,18 @@ class ReconcileCache:
     def __init__(self, state_dir: Path) -> None:
         self._state_dir = Path(state_dir)
         self._path = self._state_dir / CACHE_FILENAME
+        self._lock_path = self._path.with_name(self._path.name + ".lock")
+
+    @contextmanager
+    def _locked(self):
+        # Lock a stable adjacent inode: the payload itself is atomically replaced.
+        self._state_dir.mkdir(parents=True, exist_ok=True)
+        with self._lock_path.open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
 
     # --- payload ---
 
@@ -74,8 +88,14 @@ class ReconcileCache:
         except (KeyError, TypeError, ValueError):
             return None
 
-    def write(self, payload: CachePayload) -> None:
-        self._state_dir.mkdir(parents=True, exist_ok=True)
+    def write(self, payload: CachePayload, *, preserve_ignores: bool = False) -> None:
+        with self._locked():
+            if preserve_ignores:
+                current = self.read()
+                payload = replace(payload, ignored=current.ignored if current else [])
+            self._write_unlocked(payload)
+
+    def _write_unlocked(self, payload: CachePayload) -> None:
         body = {
             "fetched_at": payload.fetched_at,
             "ttl_seconds": payload.ttl_seconds,
@@ -97,6 +117,14 @@ class ReconcileCache:
         tmp = self._path.with_suffix(".tmp")
         tmp.write_text(json.dumps(body, indent=2))
         tmp.replace(self._path)
+
+    def invalidate(self) -> None:
+        """Expire the latest results without losing concurrent cache changes."""
+        with self._locked():
+            payload = self.read()
+            if payload is not None:
+                payload.fetched_at = 0.0
+                self._write_unlocked(payload)
 
     def is_fresh(self, payload: CachePayload) -> bool:
         if payload.schema_version != SCHEMA_VERSION:
@@ -142,23 +170,26 @@ class ReconcileCache:
         return list(payload.ignored) if payload else []
 
     def add_ignore(self, slug: str) -> None:
-        payload = self.read() or CachePayload(
-            fetched_at=0.0, ttl_seconds=DEFAULT_TTL_SECONDS, results={}, ignored=[],
-        )
-        if slug not in payload.ignored:
-            payload.ignored.append(slug)
-        self.write(payload)
+        with self._locked():
+            payload = self.read() or CachePayload(
+                fetched_at=0.0, ttl_seconds=DEFAULT_TTL_SECONDS, results={}, ignored=[],
+            )
+            if slug not in payload.ignored:
+                payload.ignored.append(slug)
+            self._write_unlocked(payload)
 
     def remove_ignore(self, slug: str) -> None:
-        payload = self.read()
-        if payload is None or slug not in payload.ignored:
-            return
-        payload.ignored = [s for s in payload.ignored if s != slug]
-        self.write(payload)
+        with self._locked():
+            payload = self.read()
+            if payload is None or slug not in payload.ignored:
+                return
+            payload.ignored = [s for s in payload.ignored if s != slug]
+            self._write_unlocked(payload)
 
     def clear_ignores(self) -> None:
-        payload = self.read()
-        if payload is None:
-            return
-        payload.ignored = []
-        self.write(payload)
+        with self._locked():
+            payload = self.read()
+            if payload is None:
+                return
+            payload.ignored = []
+            self._write_unlocked(payload)
