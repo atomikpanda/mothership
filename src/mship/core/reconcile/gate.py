@@ -330,9 +330,8 @@ def reconcile_now(
             fetched_at=time.time(),
             ttl_seconds=ttl_seconds,
             results=results,
-            ignored=(payload.ignored if payload else []),
             base_context=base_context,
-        ))
+        ), preserve_ignores=True)
     decisions = {
         slug: _decision_from_detection(slug, d, state)
         for slug, d in detections.items()

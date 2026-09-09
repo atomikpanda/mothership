@@ -39,6 +39,22 @@ def test_reconcile_now_uses_fresh_cache(tmp_path: Path):
     assert decisions["a"].state == UpstreamState.merged
 
 
+def test_reconcile_result_write_preserves_ignore_changes_during_fetch(tmp_path):
+    cache = ReconcileCache(tmp_path)
+    cache.add_ignore("old")
+    state = WorkspaceState(tasks={"a": _task("a")})
+
+    def fetcher(*_):
+        other = ReconcileCache(tmp_path)
+        other.remove_ignore("old")
+        other.add_ignore("new")
+        return {}, {}
+
+    reconcile_now(state, cache=cache, fetcher=fetcher)
+    assert cache.read_ignores() == ["new"]
+    assert "a" in cache.read().results
+
+
 def test_reconcile_now_refetches_when_fresh_full_cache_entry_is_missing(
     tmp_path: Path,
 ):

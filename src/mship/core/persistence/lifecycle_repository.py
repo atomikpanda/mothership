@@ -201,22 +201,62 @@ class LifecycleRepository:
         *,
         now: datetime,
         allow_missing_workitem: bool = False,
-    ) -> None:
+    ) -> bool:
         item = self._resolve_owner_item(
             connection,
             task,
             allow_missing_workitem=allow_missing_workitem,
         )
         if item is None:
-            return
+            return False
         repos = list(dict.fromkeys([*item.affected_repos, *task.affected_repos]))
         urls = list(dict.fromkeys([*item.pr_urls, *task.pr_urls.values()]))
         if repos == item.affected_repos and urls == item.pr_urls:
-            return
+            return False
         item.affected_repos = repos
         item.pr_urls = urls
         item.updated_at = now
         self._store.workitems.replace(connection, item)
+        return True
+
+    def adopt_merged_metadata(
+        self,
+        expected_task: Task,
+        pr_urls: Mapping[str, str],
+        *,
+        finished_at: datetime,
+        discovered_base: str | None,
+        now: datetime,
+    ) -> bool:
+        """Fill verified missing delivery metadata and repair its durable mirror."""
+        with self._store.write(immediate=True) as transaction:
+            task = transaction.tasks.get(transaction.connection, expected_task.slug)
+            if task is None:
+                raise TaskMetadataRetentionConflictError(
+                    expected_task.slug, "its Task disappeared after external checks"
+                )
+            self._validate_expected_task(task, expected_task)
+            for repo, url in pr_urls.items():
+                recorded = task.pr_urls.get(repo)
+                if recorded is not None and recorded != url:
+                    raise TaskMetadataRetentionConflictError(
+                        task.slug,
+                        f"{repo}: recorded PR URL {recorded!r} does not match verified URL {url!r}",
+                    )
+            task.pr_urls.update(pr_urls)
+            if task.finished_at is None:
+                task.finished_at = finished_at
+            if not task.base_branch and discovered_base is not None:
+                task.base_branch = discovered_base
+            task_changed = task != expected_task
+            if task_changed:
+                transaction.tasks.replace(transaction.connection, task)
+                self._checkpoint("after_task_replace")
+            item_changed = self._retain_loaded(
+                transaction.connection, task, now=now, allow_missing_workitem=True
+            )
+            self._checkpoint("after_adoption_retention")
+            return task_changed or item_changed
 
     def retain_and_delete_task(
         self,
