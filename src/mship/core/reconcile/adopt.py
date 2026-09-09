@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from mship.core.base_resolver import resolve_base
 from mship.core.log import LogManager
@@ -67,7 +68,7 @@ def adopt_merged_task(
         raise AdoptionError(str(exc)) from exc
 
     verified = [
-        _verify_repo(task, repo, config, shell, pr_manager)
+        _verify_repo(task, repo, config, shell)
         for repo in task.affected_repos
     ]
     recovered_urls = {entry.repo: entry.url for entry in verified}
@@ -106,7 +107,6 @@ def _verify_repo(
     repo_name: str,
     config: Any,
     shell: ShellRunner,
-    pr_manager: PRManager,
 ) -> VerifiedMergedPR:
     repo_config = getattr(config, "repos", {}).get(repo_name)
     if repo_config is None:
@@ -133,17 +133,35 @@ def _verify_repo(
             f"{repo_name}: worktree HEAD does not match the merged PR head commit."
         )
 
-    if not pr_manager.fetch_remote_branch(worktree, base):
-        raise AdoptionError(f"{repo_name}: could not fetch origin/{base}.")
-    reachability = shell.run(
-        "git merge-base --is-ancestor "
-        f"{shlex.quote(pr['mergeCommit']['oid'])} {shlex.quote(f'origin/{base}')}",
-        cwd=worktree,
-    )
-    if reachability.returncode != 0:
-        raise AdoptionError(
-            f"{repo_name}: merge commit is not reachable from origin/{base}."
+    # An explicit destination bypasses narrowed remote fetch mappings. A unique
+    # ref isolates simultaneous recoveries; neither tracking refs nor FETCH_HEAD
+    # provide that guarantee. Pin ancestry to the commit fetched by this check.
+    recovery_ref = f"refs/mship/adopt-merged/{uuid4().hex}"
+    try:
+        fetched = shell.run(
+            "git fetch --no-tags --no-write-fetch-head origin "
+            f"{shlex.quote(f'+refs/heads/{base}:{recovery_ref}')}",
+            cwd=worktree,
         )
+        if fetched.returncode != 0:
+            raise AdoptionError(f"{repo_name}: could not fetch origin/{base}.")
+        base_commit = _git_value(
+            repo_name, worktree, shell,
+            f"git rev-parse --verify {shlex.quote(recovery_ref + '^{commit}')}",
+        )
+        if not _SHA_RE.fullmatch(base_commit):
+            raise AdoptionError(f"{repo_name}: fetched base has an invalid commit SHA.")
+        reachability = shell.run(
+            "git merge-base --is-ancestor "
+            f"{shlex.quote(pr['mergeCommit']['oid'])} {shlex.quote(base_commit)}",
+            cwd=worktree,
+        )
+        if reachability.returncode != 0:
+            raise AdoptionError(
+                f"{repo_name}: merge commit is not reachable from fetched origin/{base}."
+            )
+    finally:
+        shell.run(f"git update-ref -d {shlex.quote(recovery_ref)}", cwd=worktree)
 
     return VerifiedMergedPR(
         repo=repo_name,

@@ -317,6 +317,41 @@ def test_adopt_merged_succeeds_after_origin_deletes_head(tmp_path: Path):
         _reset_container()
 
 
+@pytest.mark.parametrize("tracking_ref", ["stale", "missing"])
+def test_adopt_uses_actual_base_with_narrowed_fetch_mapping(tmp_path: Path, tracking_ref):
+    cfg, state_dir, repos, manager = _workspace(tmp_path)
+    repo = repos[0]
+    _git(repo.worktree, "config", "remote.origin.fetch",
+         "+refs/heads/feat/adopt:refs/remotes/origin/feat/adopt")
+    if tracking_ref == "stale":
+        # Change the bare remote directly: the local tracking ref must retain
+        # the old merge while the actual remote base no longer contains it.
+        bare = tmp_path / "origins" / "api.git"
+        old_base = _git(repo.worktree, "rev-parse", f"{repo.merge}^1")
+        _git(bare, "update-ref", "refs/heads/main", old_base)
+        assert _git(repo.worktree, "rev-parse", "origin/main") == repo.merge
+    else:
+        _git(repo.worktree, "update-ref", "-d", "refs/remotes/origin/main")
+    before = manager.load()
+    shell = _GitHubFixtureShell({repo.name: [_pr(repo)]})
+    _configure(cfg, state_dir, shell)
+    try:
+        result, payload = _invoke_adoption()
+        if tracking_ref == "stale":
+            assert result.exit_code != 0, result.output
+            assert "not reachable" in result.output
+            assert manager.load() == before
+        else:
+            assert result.exit_code == 0, result.output
+            assert payload["adopted"] is True
+            assert manager.load().tasks["adopt"].pr_urls == {
+                "api": "https://github.com/acme/api/pull/7"
+            }
+        assert _git(repo.worktree, "for-each-ref", "refs/mship/adopt-merged") == ""
+    finally:
+        _reset_container()
+
+
 @pytest.mark.parametrize("names", [("api",), ("api", "worker")])
 @pytest.mark.parametrize("recorded_base", [None, ""])
 def test_adopt_discovers_actual_default_base_and_persists_it(tmp_path: Path, names, recorded_base):
@@ -333,10 +368,8 @@ def test_adopt_discovers_actual_default_base_and_persists_it(tmp_path: Path, nam
         assert result.exit_code == 0, result.output
         assert manager.load().tasks["adopt"].base_branch == "release"
         assert all(pr["base"] == "release" for pr in payload["prs"])
-        assert all(
-            command.endswith("origin/release")
-            for command in shell.commands if command.startswith("git merge-base")
-        )
+        for repo in repos:
+            assert f"git merge-base --is-ancestor {repo.merge} {repo.merge}" in shell.commands
     finally:
         _reset_container()
 
