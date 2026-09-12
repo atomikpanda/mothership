@@ -30,6 +30,7 @@ def _candidate(
     rank: tuple[int, ...],
     *,
     aliases: tuple[str, ...] = (),
+    capabilities: tuple[str, ...] = ("run",),
     ready: bool = True,
     reason: str | None = None,
 ) -> TargetCandidate:
@@ -38,7 +39,7 @@ def _candidate(
         label="iPhone simulator",
         tags=(),
         aliases=aliases,
-        capabilities=("run",),
+        capabilities=capabilities,
         ready=ready,
         reason=reason,
         remediation=None,
@@ -48,11 +49,17 @@ def _candidate(
     )
 
 
-def _inventory(host: HostRegistration, *candidates: TargetCandidate, error: str | None = None) -> HostInventory:
+def _inventory(
+    host: HostRegistration,
+    *candidates: TargetCandidate,
+    error: str | None = None,
+    operation: str = "run",
+) -> HostInventory:
     return HostInventory(
         host=host,
         backend_revision="adapter-revision",
         rank_schema=("major", "minor"),
+        operation=operation,
         candidates=candidates,
         error=error,
     )
@@ -124,7 +131,7 @@ def test_newest_runtime_beats_preferred_host():
         _inventory(air, _candidate("private-new", (19, 0))),
     ]
 
-    winners = rank_targets(inventories, profile_revision="exact-source-profile")
+    winners = rank_targets(inventories, profile_revision="exact-source-profile", operation="run")
 
     assert [(winner.host.name, winner.candidate.label) for winner in winners] == [("air", "iPhone simulator")]
 
@@ -136,6 +143,7 @@ def test_remembered_older_target_cannot_beat_newer_profile_rank():
         [_inventory(studio, _candidate("old-private", (18, 0), aliases=("desk-phone",))),
          _inventory(air, _candidate("new-private", (19, 0), aliases=("travel-phone",)))],
         profile_revision="exact-source-profile",
+        operation="run",
         preference=TargetPreference(host_name="studio", target_alias="desk-phone"),
     )
 
@@ -149,6 +157,7 @@ def test_same_rank_distinct_simulator_families_remain_a_real_tie():
                     _candidate("private-ios", (18, 0), aliases=("ios",)),
                     _candidate("private-vision", (18, 0), aliases=("vision",)))],
         profile_revision="exact-source-profile",
+        operation="run",
     )
 
     assert [winner.candidate.aliases for winner in winners] == [("ios",), ("vision",)]
@@ -162,6 +171,7 @@ def test_failed_host_inventory_never_establishes_a_unique_target_and_is_safe():
             [_inventory(good, _candidate("private-good", (19, 0))),
              _inventory(failed, error="backend_transport")],
             profile_revision="exact-source-profile",
+            operation="run",
         )
 
     assert error.value.code == "discovery_incomplete"
@@ -171,7 +181,7 @@ def test_failed_host_inventory_never_establishes_a_unique_target_and_is_safe():
 
 def test_successful_inventory_with_no_candidates_is_not_discovery_failure():
     with pytest.raises(TargetSelectionError) as error:
-        rank_targets([_inventory(_host("studio"))], profile_revision="exact-source-profile")
+        rank_targets([_inventory(_host("studio"))], profile_revision="exact-source-profile", operation="run")
     assert error.value.code == "target_unavailable"
 
 
@@ -181,11 +191,12 @@ def test_incompatible_inventory_rank_contract_fails_before_selection():
         host=host,
         backend_revision="adapter-revision",
         rank_schema=("runtime",),
+        operation="run",
         candidates=(_candidate("private", (19, 0)),),
         error=None,
     )
     with pytest.raises(TargetSelectionError) as error:
-        rank_targets([incompatible], profile_revision="exact-source-profile")
+        rank_targets([incompatible], profile_revision="exact-source-profile", operation="run")
     assert error.value.code == "backend_protocol"
 
 
@@ -195,6 +206,42 @@ def test_disappeared_remembered_target_requires_explicit_reselection():
         rank_targets(
             [_inventory(host, _candidate("private-replacement", (19, 0), aliases=("replacement",)))],
             profile_revision="exact-source-profile",
+            operation="run",
             preference=TargetPreference(host_name="studio", target_alias="former-phone"),
         )
     assert error.value.code == "target_preference_stale"
+
+
+def test_requested_operation_capability_filters_higher_ranked_wrong_target():
+    host = _host("studio")
+    winners = rank_targets(
+        [_inventory(
+            host,
+            _candidate("capture-only-private", (20, 0), capabilities=("capture",)),
+            _candidate("run-private", (19, 0), capabilities=("run",)),
+        )],
+        profile_revision="exact-source-profile",
+        operation="run",
+    )
+    assert [winner.candidate.label for winner in winners] == ["iPhone simulator"]
+    assert [winner.candidate.rank for winner in winners] == [(19, 0)]
+
+
+def test_no_requested_operation_capability_is_target_unavailable():
+    with pytest.raises(TargetSelectionError) as error:
+        rank_targets(
+            [_inventory(_host("studio"), _candidate("capture-only-private", (20, 0), capabilities=("capture",)))],
+            profile_revision="exact-source-profile",
+            operation="run",
+        )
+    assert error.value.code == "target_unavailable"
+
+
+def test_inventory_operation_must_match_trusted_requested_operation():
+    with pytest.raises(TargetSelectionError) as error:
+        rank_targets(
+            [_inventory(_host("studio"), _candidate("capture-private", (20, 0), capabilities=("capture",)), operation="capture")],
+            profile_revision="exact-source-profile",
+            operation="run",
+        )
+    assert error.value.code == "backend_protocol"

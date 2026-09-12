@@ -134,7 +134,14 @@ def load_host_bindings(path: Path, backend: str) -> dict[str, JsonValue]:
 
 
 def _failure(host: HostRegistration, request: DiscoveryRequest, code: str) -> HostInventory:
-    return HostInventory(host=host, backend_revision=request.backend_revision, rank_schema=(), candidates=(), error=code)
+    return HostInventory(
+        host=host,
+        backend_revision=request.backend_revision,
+        rank_schema=(),
+        operation=request.operation,
+        candidates=(),
+        error=code,
+    )
 
 
 def discover_on_host(
@@ -179,6 +186,7 @@ def discover_on_host(
         host=host,
         backend_revision=parsed.backend_revision,
         rank_schema=parsed.rank_schema,
+        operation=request.operation,
         candidates=parsed.candidates,
         error="backend_reported_error" if parsed.errors else None,
     )

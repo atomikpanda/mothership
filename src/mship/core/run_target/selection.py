@@ -9,6 +9,7 @@ from mship.core.run_target.models import (
     HostRequirements,
     SelectedTarget,
     TargetSelectionError,
+    safe_identifier,
 )
 from mship.core.run_target.preferences import TargetPreference
 
@@ -97,6 +98,7 @@ def rank_targets(
     inventories: Sequence[HostInventory],
     *,
     profile_revision: str,
+    operation: str,
     preference: TargetPreference | None = None,
     preferred_role: str | None = None,
 ) -> tuple[SelectedTarget, ...]:
@@ -108,8 +110,11 @@ def rank_targets(
     weakened by remembered state. This function never uses labels, host
     enumeration, or backend keys to resolve a tie.
     """
+    safe_identifier(operation, field="operation")
     if not inventories:
         raise TargetSelectionError("target_unavailable", "No eligible target")
+    if any(inventory.operation != operation for inventory in inventories):
+        raise TargetSelectionError("backend_protocol", "target inventory operation does not match the requested operation")
     failures = tuple(
         f"{inventory.host.name}: {inventory.error}"
         for inventory in inventories
@@ -133,9 +138,8 @@ def rank_targets(
         for candidate in inventory.candidates:
             if len(candidate.rank) != len(schema):
                 raise TargetSelectionError("backend_protocol", "target rank does not match inventory schema")
-            # Discovery is operation-specific.  Empty capability metadata cannot
-            # establish that the requested operation is supported.
-            if not candidate.ready or not candidate.capabilities:
+            # A discovery result is trusted only for its request-bound operation.
+            if not candidate.ready or operation not in candidate.capabilities:
                 continue
             pairs.append(
                 SelectedTarget(

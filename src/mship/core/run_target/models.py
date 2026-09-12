@@ -238,6 +238,7 @@ class HostInventory:
     host: HostRegistration
     backend_revision: str
     rank_schema: tuple[str, ...]
+    operation: str
     candidates: tuple[TargetCandidate, ...]
     error: str | None
 
