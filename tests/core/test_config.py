@@ -1292,3 +1292,61 @@ def test_setup_inputs_parses_from_yaml(tmp_path):
     config = ConfigLoader.load(config_path)
     assert config.repos["api"].setup_inputs == ["pyproject.toml", "uv.lock"]
 
+
+def test_run_profile_config_validates_backend_tasks_roles_and_default():
+    config = WorkspaceConfig.model_validate(
+        {
+            "workspace": "test",
+            "run_hosts": ["mobile"],
+            "repos": {
+                "app": {
+                    "path": ".",
+                    "type": "service",
+                    "tasks": {"discover": "targets", "launch": "run-app"},
+                    "run_backends": {
+                        "flutter": {
+                            "discover_task": "discover",
+                            "operations": {"run": "launch"},
+                        }
+                    },
+                    "run_profiles": {
+                        "ios": {
+                            "backend": "flutter",
+                            "hosts": {"roles": ["mobile"]},
+                            "options": {"runtime": 18},
+                        }
+                    },
+                    "default_run_profile": "ios",
+                }
+            },
+        }
+    )
+    assert config.repos["app"].run_profiles["ios"].hosts.roles == ("mobile",)
+
+
+@pytest.mark.parametrize(
+    "repo",
+    [
+        {"run_backends": {}, "run_profiles": {"ios": {"backend": "none", "hosts": {"roles": ["mobile"]}, "options": {}}}},
+        {"run_backends": {"flutter": {"discover_task": "missing", "operations": {}}}, "run_profiles": {}},
+        {"run_backends": {"flutter": {"discover_task": "discover", "operations": {"run": "missing"}}}, "run_profiles": {}},
+        {"run_backends": {}, "run_profiles": {}, "default_run_profile": "missing"},
+        {"run_backends": {"flutter": {"discover_task": "discover", "operations": {}}}, "run_profiles": {"ios": {"backend": "flutter", "hosts": {"roles": ["unapproved"]}, "options": {}}}},
+    ],
+)
+def test_run_profile_config_rejects_invalid_cross_references(repo):
+    with pytest.raises(ValueError):
+        WorkspaceConfig.model_validate(
+            {
+                "workspace": "test",
+                "run_hosts": ["mobile"],
+                "repos": {
+                    "app": {
+                        "path": ".",
+                        "type": "service",
+                        "tasks": {"discover": "targets"},
+                        **repo,
+                    }
+                },
+            }
+        )

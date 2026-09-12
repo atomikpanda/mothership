@@ -5,6 +5,7 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, field_validator, model_validator
 
+from mship.core.run_target.models import BackendConfig, RunProfile
 from mship.core.evidence_store import EvidenceModeError, resolve_evidence_mode
 from mship.core.relay.config import RelayConfig
 
@@ -214,6 +215,31 @@ class RepoConfig(BaseModel):
     # re-run-on-change. Deliberately explicit rather than inferred — an operator
     # can see and widen a declared key; they cannot inspect a heuristic.
     setup_inputs: list[str] = []
+    # Strict profile/backend schema is deliberately scoped to these new nested
+    # values; WorkspaceConfig retains its established permissive compatibility.
+    run_profiles: dict[str, RunProfile] = {}
+    run_backends: dict[str, BackendConfig] = {}
+    default_run_profile: str | None = None
+
+    @model_validator(mode="after")
+    def validate_run_target_refs(self) -> "RepoConfig":
+        if self.default_run_profile is not None and self.default_run_profile not in self.run_profiles:
+            raise ValueError(
+                f"default_run_profile {self.default_run_profile!r} does not name a configured profile"
+            )
+        for profile_name, profile in self.run_profiles.items():
+            if profile.backend not in self.run_backends:
+                raise ValueError(
+                    f"run profile {profile_name!r} references unknown backend {profile.backend!r}"
+                )
+        for backend_name, backend in self.run_backends.items():
+            requested = [backend.discover_task, *backend.operations.values()]
+            unknown = [task for task in requested if task not in self.tasks]
+            if unknown:
+                raise ValueError(
+                    f"run backend {backend_name!r} references unknown logical task(s): {sorted(set(unknown))}"
+                )
+        return self
 
     @field_validator("url", mode="after")
     @classmethod
@@ -472,6 +498,22 @@ class WorkspaceConfig(BaseModel):
                     f"default_scope references unknown repos: {unknown}. "
                     f"Valid repos: {sorted(self.repos.keys())}"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def validate_run_target_roles(self) -> "WorkspaceConfig":
+        allowed_roles = set(self.run_hosts)
+        for repo_name, repo in self.repos.items():
+            for profile_name, profile in repo.run_profiles.items():
+                if not profile.hosts.roles:
+                    raise ValueError(
+                        f"run profile {profile_name!r} in repo {repo_name!r} requires at least one host role"
+                    )
+                unknown = sorted(set(profile.hosts.roles) - allowed_roles)
+                if unknown:
+                    raise ValueError(
+                        f"run profile {profile_name!r} in repo {repo_name!r} references unapproved run host role(s): {unknown}"
+                    )
         return self
 
     @model_validator(mode="after")
