@@ -54,12 +54,14 @@ def _inventory(
     *candidates: TargetCandidate,
     error: str | None = None,
     operation: str = "run",
+    profile_revision: str = "exact-source-profile",
 ) -> HostInventory:
     return HostInventory(
         host=host,
         backend_revision="adapter-revision",
         rank_schema=("major", "minor"),
         operation=operation,
+        profile_revision=profile_revision,
         candidates=candidates,
         error=error,
     )
@@ -192,6 +194,7 @@ def test_incompatible_inventory_rank_contract_fails_before_selection():
         backend_revision="adapter-revision",
         rank_schema=("runtime",),
         operation="run",
+        profile_revision="exact-source-profile",
         candidates=(_candidate("private", (19, 0)),),
         error=None,
     )
@@ -245,3 +248,22 @@ def test_inventory_operation_must_match_trusted_requested_operation():
             operation="run",
         )
     assert error.value.code == "backend_protocol"
+
+
+def test_inventory_profile_revision_must_match_requested_profile_before_ranking():
+    with pytest.raises(TargetSelectionError) as error:
+        rank_targets(
+            [_inventory(_host("studio"), _candidate("private", (19, 0)), profile_revision="different-profile")],
+            profile_revision="exact-source-profile",
+            operation="run",
+        )
+    assert error.value.code == "backend_protocol"
+
+
+def test_matching_inventory_profile_revision_is_preserved_on_selected_target():
+    winner = rank_targets(
+        [_inventory(_host("studio"), _candidate("private", (19, 0)), profile_revision="exact-source-profile")],
+        profile_revision="exact-source-profile",
+        operation="run",
+    )[0]
+    assert winner.profile_revision == "exact-source-profile"

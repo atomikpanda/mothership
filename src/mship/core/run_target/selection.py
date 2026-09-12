@@ -113,6 +113,8 @@ def rank_targets(
     safe_identifier(operation, field="operation")
     if not inventories:
         raise TargetSelectionError("target_unavailable", "No eligible target")
+    if any(inventory.profile_revision != profile_revision for inventory in inventories):
+        raise TargetSelectionError("backend_protocol", "target inventory profile revision does not match the requested profile")
     if any(inventory.operation != operation for inventory in inventories):
         raise TargetSelectionError("backend_protocol", "target inventory operation does not match the requested operation")
     failures = tuple(
@@ -147,7 +149,7 @@ def rank_targets(
                     candidate=candidate,
                     backend_revision=inventory.backend_revision,
                     rank_schema=inventory.rank_schema,
-                    profile_revision=profile_revision,
+                    profile_revision=inventory.profile_revision,
                 )
             )
     return _best_ranked(pairs, preference=preference, preferred_role=preferred_role)

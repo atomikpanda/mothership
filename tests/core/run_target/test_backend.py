@@ -122,6 +122,7 @@ def test_backend_reported_error_marks_inventory_incomplete_even_with_candidates(
     assert inventory.error == "backend_reported_error"
     assert len(inventory.candidates) == 1
     assert inventory.operation == "run"
+    assert inventory.profile_revision == "profile-a"
 
 def test_discover_requires_exact_backend_revision_and_alias():
     config = BackendConfig(discover_task="discover", operations={"run": "launch"})
@@ -144,6 +145,7 @@ def test_discover_normalizes_transport_error_without_exposing_stderr():
     assert inventory.error == "backend_transport"
     assert inventory.candidates == ()
     assert inventory.operation == "run"
+    assert inventory.profile_revision == "profile-a"
 
 
 def test_discovery_script_consumes_private_request_and_emits_protocol(tmp_path: Path):
@@ -175,6 +177,7 @@ def test_discovery_script_consumes_private_request_and_emits_protocol(tmp_path: 
     assert inventory.host.name == "studio"
     assert inventory.candidates[0].aliases == ("phone",)
     assert inventory.operation == "run"
+    assert inventory.profile_revision == "profile-a"
 def test_bindings_require_owner_private_regular_file_and_stay_bounded(tmp_path: Path):
     bindings = tmp_path / "run-target-bindings.yaml"
     bindings.write_text("version: 1\nbackends:\n  flutter:\n    paths: {}\n    aliases: {}\n")

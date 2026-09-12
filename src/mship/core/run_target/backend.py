@@ -139,6 +139,7 @@ def _failure(host: HostRegistration, request: DiscoveryRequest, code: str) -> Ho
         backend_revision=request.backend_revision,
         rank_schema=(),
         operation=request.operation,
+        profile_revision=request.profile_revision,
         candidates=(),
         error=code,
     )
@@ -187,6 +188,7 @@ def discover_on_host(
         backend_revision=parsed.backend_revision,
         rank_schema=parsed.rank_schema,
         operation=request.operation,
+        profile_revision=request.profile_revision,
         candidates=parsed.candidates,
         error="backend_reported_error" if parsed.errors else None,
     )
