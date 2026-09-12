@@ -254,21 +254,6 @@ class RunHostStore:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)
 
-    # Legacy method names deliberately create versioned entries; they do not read legacy files.
-    def get(self, role: str) -> RunHostConnection | None:
-        try:
-            return _connection_for_role(self, role, environ=os.environ)
-        except _MigrationRequired:
-            return None
-
-    def set(self, role: str, conn: RunHostConnection) -> None:
-        self.set_host(HostRegistration(role, (role,), (), 0, conn, "project"), scope="project")
-
-    def remove(self, role: str) -> None:
-        self.remove_host(role, scope="project")
-
-    def redacted_list(self) -> list[tuple[str, str]]:
-        return sorted((name, host.connection.url) for name, host in self.effective_hosts().items())
 
     def safe_hosts(self) -> dict[str, dict[str, object]]:
         return {name: {"name": host.name, "roles": host.roles, "tags": host.tags,

@@ -178,9 +178,12 @@ def test_probed_at_and_version_present(tmp_path: Path):
 # --- run-host edges --------------------------------------------------------
 
 def _map_role(tmp_path: Path, role: str, url: str, token: str = "tok"):
-    from mship.core.run_host.config import RunHostConnection
+    from mship.core.run_host.config import HostRegistration, RunHostConnection
     from mship.core.run_host.store import RunHostStore
-    RunHostStore(tmp_path / ".mothership").set(role, RunHostConnection(url=url, token=token))
+    RunHostStore(tmp_path / ".mothership").set_host(
+        HostRegistration(role, (role,), (), 0, RunHostConnection(url, token), "project"),
+        scope="project",
+    )
 
 
 def _named(t, name):

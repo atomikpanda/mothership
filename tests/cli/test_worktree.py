@@ -2793,7 +2793,7 @@ def test_close_deletes_scratch_refs_from_the_run_host(configured_git_app):
     """ac8, wired: closing a task removes what `--remote` left on the host."""
     from datetime import datetime, timezone
 
-    from mship.core.run_host import RunHostConnection, RunHostStore
+    from mship.core.run_host import HostRegistration, RunHostConnection, RunHostStore
 
     config_path = configured_git_app / "mothership.yaml"
     config_path.write_text(
@@ -2806,9 +2806,7 @@ def test_close_deletes_scratch_refs_from_the_run_host(configured_git_app):
         )
     )
     container.config.reset()
-    RunHostStore(configured_git_app / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(configured_git_app / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
 
     sm = StateManager(configured_git_app / ".mothership")
     sm.save(WorkspaceState(tasks={"t": Task(
@@ -2831,8 +2829,7 @@ def test_close_still_succeeds_when_the_run_host_is_unreachable(configured_git_ap
     """Fail-open: a run host that is off must never stop a close."""
     from datetime import datetime, timezone
 
-    from mship.core.run_host import RunHostConnection, RunHostStore
-
+    from mship.core.run_host import HostRegistration, RunHostConnection, RunHostStore
     config_path = configured_git_app / "mothership.yaml"
     config_path.write_text(
         config_path.read_text().replace(
@@ -2844,9 +2841,7 @@ def test_close_still_succeeds_when_the_run_host_is_unreachable(configured_git_ap
         )
     )
     container.config.reset()
-    RunHostStore(configured_git_app / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(configured_git_app / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
 
     shell = container.shell()
     original = shell.run.side_effect

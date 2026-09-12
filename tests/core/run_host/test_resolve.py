@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from mship.core.config import RepoConfig, WorkspaceConfig
-from mship.core.run_host.config import RunHostConnection
+from mship.core.run_host.config import HostRegistration, RunHostConnection
 from mship.core.run_host.store import RunHostError, RunHostStore, resolve_run_host
 
 
@@ -24,8 +24,8 @@ def _repo(run_host=None):
 
 def test_explicit_role_wins_over_repo_and_sole_entry(tmp_path):
     store = RunHostStore(tmp_path)
-    store.set("ios-sim-host", RunHostConnection(url="http://ios", token="ios-tok"))
-    store.set("android-emu-host", RunHostConnection(url="http://android", token="android-tok"))
+    store.set_host(HostRegistration("ios-sim-host", ("ios-sim-host",), (), 0, RunHostConnection(url="http://ios", token="ios-tok"), "project"), scope="project")
+    store.set_host(HostRegistration("android-emu-host", ("android-emu-host",), (), 0, RunHostConnection(url="http://android", token="android-tok"), "project"), scope="project")
     config = _config(["ios-sim-host", "android-emu-host"])
     repo = _repo(run_host="ios-sim-host")
 
@@ -37,7 +37,7 @@ def test_explicit_role_wins_over_repo_and_sole_entry(tmp_path):
 
 def test_falls_back_to_repo_run_host(tmp_path):
     store = RunHostStore(tmp_path)
-    store.set("ios-sim-host", RunHostConnection(url="http://ios", token="ios-tok"))
+    store.set_host(HostRegistration("ios-sim-host", ("ios-sim-host",), (), 0, RunHostConnection(url="http://ios", token="ios-tok"), "project"), scope="project")
     config = _config(["ios-sim-host", "android-emu-host"])
     repo = _repo(run_host="ios-sim-host")
 
@@ -47,7 +47,7 @@ def test_falls_back_to_repo_run_host(tmp_path):
 
 def test_falls_back_to_sole_config_entry_when_no_repo_role(tmp_path):
     store = RunHostStore(tmp_path)
-    store.set("ios-sim-host", RunHostConnection(url="http://ios", token="ios-tok"))
+    store.set_host(HostRegistration("ios-sim-host", ("ios-sim-host",), (), 0, RunHostConnection(url="http://ios", token="ios-tok"), "project"), scope="project")
     config = _config(["ios-sim-host"])
     repo = _repo(run_host=None)
 
@@ -57,7 +57,7 @@ def test_falls_back_to_sole_config_entry_when_no_repo_role(tmp_path):
 
 def test_falls_back_to_sole_config_entry_when_repo_is_none(tmp_path):
     store = RunHostStore(tmp_path)
-    store.set("ios-sim-host", RunHostConnection(url="http://ios", token="ios-tok"))
+    store.set_host(HostRegistration("ios-sim-host", ("ios-sim-host",), (), 0, RunHostConnection(url="http://ios", token="ios-tok"), "project"), scope="project")
     config = _config(["ios-sim-host"])
 
     conn = resolve_run_host(None, repo=None, config=config, store=store)
@@ -78,7 +78,7 @@ def test_ambiguous_when_multiple_roles_and_none_specified(tmp_path):
 
 def test_unknown_role_not_in_config_run_hosts(tmp_path):
     store = RunHostStore(tmp_path)
-    store.set("ghost-host", RunHostConnection(url="http://ghost", token="ghost-tok"))
+    store.set_host(HostRegistration("ghost-host", ("ghost-host",), (), 0, RunHostConnection(url="http://ghost", token="ghost-tok"), "project"), scope="project")
     config = _config(["ios-sim-host"])
     repo = _repo(run_host=None)
 

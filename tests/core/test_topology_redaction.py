@@ -10,8 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from mship.core.relay.health import HealthProbe
-from mship.core.run_host.config import RunHostConnection
-from mship.core.run_host.store import RunHostStore
+from mship.core.run_host import HostRegistration, RunHostConnection, RunHostStore
 from mship.core.topology import probe_topology, topology_payload
 
 SECRETS = {
@@ -55,9 +54,7 @@ def test_no_secret_reaches_the_payload(tmp_path: Path):
     (state / "relay-subdomain-secret").write_bytes(
         SECRETS["subdomain_secret"].encode() * 2
     )
-    RunHostStore(state).set("mac", RunHostConnection(
-        url="https://mac.relay", token=SECRETS["run_host_token"],
-    ))
+    RunHostStore(state).set_host(HostRegistration("mac", ("mac",), (), 0, RunHostConnection(url="https://mac.relay", token=SECRETS["run_host_token"]), "project"), scope="project")
     key = tmp_path / "app.pem"
     key.write_text(f"-----BEGIN PRIVATE KEY-----\n{SECRETS['app_key_body']}\n")
 
@@ -87,9 +84,7 @@ def test_token_presence_is_still_reported_as_a_boolean(tmp_path: Path):
     payload says a token IS configured, without saying what it is."""
     state = tmp_path / ".mothership"
     state.mkdir(parents=True)
-    RunHostStore(state).set("mac", RunHostConnection(
-        url="https://mac.relay", token=SECRETS["run_host_token"],
-    ))
+    RunHostStore(state).set_host(HostRegistration("mac", ("mac",), (), 0, RunHostConnection(url="https://mac.relay", token=SECRETS["run_host_token"]), "project"), scope="project")
     topology = probe_topology(
         config=Cfg(), state_dir=state, workspace_root=tmp_path, home=tmp_path,
         env={}, shell=Shell(), now=lambda: "t", pid_alive=lambda pid: True,

@@ -562,7 +562,7 @@ def test_a_real_push_lands_the_ref_and_writes_the_token_to_no_config_file(tmp_pa
 # --- cleanup on close --------------------------------------------------------
 
 from mship.core.config import RepoConfig, WorkspaceConfig
-from mship.core.run_host import RunHostStore
+from mship.core.run_host import HostRegistration, RunHostStore
 from mship.core.run_transfer import cleanup_run_refs
 
 
@@ -580,7 +580,10 @@ def _run_host_config(tmp_path, **extra_repos) -> WorkspaceConfig:
 
 def _store(tmp_path) -> RunHostStore:
     store = RunHostStore(tmp_path / ".mothership")
-    store.set("role-x", RunHostConnection(url="http://remote.example", token="tok-abc"))
+    store.set_host(HostRegistration(
+        "role-x", ("role-x",), (), 0,
+        RunHostConnection(url="http://remote.example", token="tok-abc"), "project",
+    ), scope="project")
     return store
 
 

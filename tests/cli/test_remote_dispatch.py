@@ -37,7 +37,7 @@ from typer.testing import CliRunner
 from mship.cli import app, container
 from mship.core import remote_client
 from mship.core.remote_exec import ARTIFACT_MARKER, EXIT_MARKER
-from mship.core.run_host import RunHostConnection, RunHostError, RunHostStore
+from mship.core.run_host import HostRegistration, RunHostConnection, RunHostError, RunHostStore
 from mship.core.spec import AcceptanceCriterion, Spec
 from mship.core.spec_store import SpecStore
 from mship.core.state import StateManager, Task, WorkspaceState
@@ -583,9 +583,7 @@ def test_cli_run_remote_dispatches_posts_and_streams_live(tmp_path, monkeypatch)
     _configure(tmp_path)
     shell = _git_shell(_repo_git())
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     body = _frame(["hello\n", "world\n"], exit_code=0)
 
@@ -611,9 +609,7 @@ def test_cli_run_bare_remote_auto_resolves_sole_run_host(tmp_path, monkeypatch):
     _seed_task_with_worktree(tmp_path, "t1", "api")
     _configure(tmp_path)
     container.shell.override(_git_shell(_repo_git()))
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     body = _frame(["ok\n"], exit_code=0)
     try:
         with _ClientPatch(monkeypatch, _recording_handler({}, body)):
@@ -630,9 +626,7 @@ def test_cli_run_remote_nonzero_exit_conveyed_as_local_exit(tmp_path, monkeypatc
     _seed_task_with_worktree(tmp_path, "t1", "api")
     _configure(tmp_path)
     container.shell.override(_git_shell(_repo_git()))
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     body = _frame(["oops\n"], exit_code=3)
     try:
         with _ClientPatch(monkeypatch, _recording_handler({}, body)):
@@ -650,9 +644,7 @@ def test_cli_build_remote_dispatches_to_run_host(tmp_path, monkeypatch):
     _configure(tmp_path)
     shell = _git_shell(_repo_git())
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     body = _frame(["built\n"], exit_code=0)
     try:
@@ -673,9 +665,7 @@ def test_cli_run_remote_without_resolvable_task_is_clean_error(tmp_path, monkeyp
     cleanly rather than attempt a remote call with no task."""
     _write_run_workspace(tmp_path, run_hosts=["role-x"])
     _configure(tmp_path)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     try:
         result = runner.invoke(app, ["run", "--remote=role-x"])
         assert result.exit_code != 0
@@ -697,9 +687,7 @@ def test_cli_capture_remote_extracts_artifacts_into_exact_local_captures_path(tm
     _configure(tmp_path)
     shell = _git_shell({"app": _repo_git()})
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     tar_bytes = _make_tar({"screen.png": b"PNGDATA", "layout.json": b'{"a": 1}'})
     body = _frame(["remote task progress\n"], exit_code=0, artifact_tar=tar_bytes)
@@ -770,9 +758,7 @@ def test_cli_capture_remote_with_evidence_attaches_artifact_with_remote_provenan
         acceptance_criteria=[AcceptanceCriterion(id="ac1", text="The card clears.")],
     ))
 
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     tar_bytes = _make_tar({"screen.png": b"PNGDATA"})
     body = _frame(["captured\n"], exit_code=0, artifact_tar=tar_bytes)
 
@@ -824,9 +810,7 @@ def test_cli_capture_remote_exit0_but_no_artifact_is_hard_error(tmp_path, monkey
     _configure(tmp_path)
     shell = _git_shell({"app": _repo_git()})
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     # Exit 0 with NO artifact tar block — the failure mode this guards.
     body = _frame(["captured\n"], exit_code=0)
     try:
@@ -865,9 +849,7 @@ def test_cli_capture_remote_refuses_unprepared_source(
     }[case]
     _configure(tmp_path)
     container.shell.override(_git_shell({"app": repo_state}))
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
 
     try:
@@ -889,9 +871,7 @@ def test_cli_capture_remote_transfers_dirty_snapshot_before_dispatch(tmp_path, m
     _configure(tmp_path)
     shell = _git_shell({"app": _repo_git(" M screen.dart\n?? scratch.txt\n")})
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     body = _frame([], exit_code=0, artifact_tar=_make_tar({"screen.png": b"PNGDATA"}))
 
@@ -917,9 +897,7 @@ def test_cli_capture_remote_aborts_when_dirty_snapshot_transfer_fails(tmp_path, 
     container.shell.override(
         _git_shell({"app": _repo_git(" M screen.dart\n")}, push_rc=1)
     )
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
 
     try:
@@ -958,9 +936,7 @@ def test_cli_capture_remote_uses_git_root_for_dirty_child(tmp_path, monkeypatch)
     _configure(tmp_path)
     shell = _git_shell({"mono": _repo_git(), "pkg": _repo_git(" M screen.dart\n")})
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     body = _frame([], exit_code=0, artifact_tar=_make_tar({"screen.png": b"PNGDATA"}))
 
@@ -984,9 +960,7 @@ def test_cli_capture_remote_scopes_preflight_to_the_selected_repo(tmp_path, monk
     _configure(tmp_path)
     shell = _git_shell({"api": _repo_git(), "web": _repo_git(" M unrelated.py\n")})
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     body = _frame([], exit_code=0, artifact_tar=_make_tar({"screen.png": b"PNGDATA"}))
 
@@ -1015,9 +989,7 @@ def test_cli_capture_remote_without_active_task_is_clean_error(tmp_path, monkeyp
     container.state_dir.override(state_dir)
     StateManager(state_dir).save(WorkspaceState(tasks={}))
     container.shell.override(MagicMock(spec=ShellRunner))
-    RunHostStore(state_dir).set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(state_dir).set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     try:
         result = runner.invoke(app, ["capture", "--repo", "app", "--remote=role-x"])
         assert result.exit_code != 0
@@ -1071,9 +1043,7 @@ def test_cli_run_remote_unreachable_host_is_clean_error_not_traceback(tmp_path, 
     _seed_task_with_worktree(tmp_path, "t1", "api")
     _configure(tmp_path)
     container.shell.override(_git_shell(_repo_git()))
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
 
     def handler(request):
         raise httpx.ConnectError("connection refused", request=request)
@@ -1097,9 +1067,7 @@ def test_cli_run_remote_not_bootstrapped_is_clean_error_not_traceback(tmp_path, 
     _seed_task_with_worktree(tmp_path, "t1", "api")
     _configure(tmp_path)
     container.shell.override(_git_shell(_repo_git()))
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
 
     def handler(request):
         return httpx.Response(503, json={"detail": "remote workspace not bootstrapped"})
@@ -1139,12 +1107,8 @@ def test_cli_run_bare_remote_ambiguous_roles_is_clean_error_not_traceback(tmp_pa
     _write_run_workspace(tmp_path, run_hosts=["role-x", "role-y"])
     _seed_task(tmp_path, slug="t1", repos=["api"])
     _configure(tmp_path)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://h", token="t"),
-    )
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-y", RunHostConnection(url="http://h2", token="t2"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://h", token="t"), "project"), scope="project")
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-y", ("role-y",), (), 0, RunHostConnection(url="http://h2", token="t2"), "project"), scope="project")
     try:
         result = runner.invoke(app, ["run", "--task", "t1", "--remote"])
         assert result.exit_code != 0
@@ -1347,9 +1311,7 @@ def test_a_dirty_worktree_is_sent_to_the_run_host_not_to_origin(tmp_path, monkey
     _configure(tmp_path)
     shell = _git_shell(_repo_git(" M src/app.py\n?? scratch.txt\n"))
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
         with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame(["ok\n"], exit_code=0))):
@@ -1401,9 +1363,7 @@ def test_a_git_root_child_is_transferred_under_its_parents_name(tmp_path, monkey
     _configure(tmp_path)
     shell = _git_shell({"mono": _repo_git(), "pkg": _repo_git(" M pkg/a.py\n")})
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
         with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame(["ok\n"], exit_code=0))):
@@ -1428,9 +1388,7 @@ def test_the_bearer_never_reaches_the_push_command_line(tmp_path, monkeypatch):
     _configure(tmp_path)
     shell = _git_shell(_repo_git(" M src/app.py\n"))
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     try:
         with _ClientPatch(monkeypatch, _recording_handler({}, _frame(["ok\n"], exit_code=0))):
             runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
@@ -1453,9 +1411,7 @@ def test_the_output_names_the_revision_as_a_throwaway_run_ref(tmp_path, monkeypa
     _seed_task_with_worktree(tmp_path, "t1", "api")
     _configure(tmp_path)
     container.shell.override(_git_shell(_repo_git(" M src/app.py\n")))
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     try:
         with _ClientPatch(monkeypatch, _recording_handler({}, _frame(["ok\n"], exit_code=0))):
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
@@ -1474,9 +1430,7 @@ def test_a_failed_transfer_aborts_before_dispatch(tmp_path, monkeypatch):
     _seed_task_with_worktree(tmp_path, "t1", "api")
     _configure(tmp_path)
     container.shell.override(_git_shell(_repo_git(" M src/app.py\n"), push_rc=1))
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
         with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
@@ -1497,9 +1451,7 @@ def test_a_mid_rebase_repo_is_refused_before_anything_is_sent(tmp_path, monkeypa
     _configure(tmp_path)
     shell = _git_shell(_repo_git("UU src/app.py\n"))
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
         with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
@@ -1598,9 +1550,7 @@ def test_clean_operation_marker_outranks_detached_or_wrong_branch(
         git_dirs={"api": git_dir} if linked_worktree else None,
     )
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
         with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
@@ -1633,9 +1583,7 @@ def test_remote_run_pushes_a_clean_unpushed_branch_then_dispatches(tmp_path, mon
     _configure(tmp_path)
     shell = _git_shell(_repo_git(origin=None))
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
         with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame(["ok\n"], exit_code=0))):
@@ -1657,9 +1605,7 @@ def test_a_failed_push_aborts_before_dispatch(tmp_path, monkeypatch):
     _seed_task_with_worktree(tmp_path, "t1", "api")
     _configure(tmp_path)
     container.shell.override(_git_shell(_repo_git(origin=None), push_rc=1))
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
         with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
@@ -1678,9 +1624,7 @@ def test_an_up_to_date_repo_dispatches_without_pushing(tmp_path, monkeypatch):
     _configure(tmp_path)
     shell = _git_shell(_repo_git())
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
         with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame(["ok\n"], exit_code=0))):
@@ -1703,9 +1647,7 @@ def test_a_repo_whose_git_state_is_unreadable_is_not_dispatched(tmp_path, monkey
         status_rc=128, status_err="fatal: not a git repository\n",
     ))
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
         with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
@@ -1729,9 +1671,7 @@ def test_a_newer_commit_on_origin_is_refused_not_pushed(tmp_path, monkeypatch):
     _configure(tmp_path)
     shell = _git_shell(_repo_git(origin="abcdef0123456789", head="oldsha"))
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
         with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
@@ -1755,9 +1695,7 @@ def test_a_task_repo_whose_worktree_vanished_is_not_dispatched(tmp_path, monkeyp
     _configure(tmp_path)
     shell = _git_shell(_repo_git())
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
         with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
@@ -1778,9 +1716,7 @@ def test_a_worktree_not_on_the_task_branch_is_not_dispatched(tmp_path, monkeypat
     _configure(tmp_path)
     shell = _git_shell(_repo_git(head_ref="refs/heads/main"))
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
         with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
@@ -1805,9 +1741,7 @@ def test_a_detached_worktree_at_the_task_tip_is_not_dispatched(tmp_path, monkeyp
         pair_output="headsha\nheadsha\n",
     ))
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
         with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
@@ -1862,9 +1796,7 @@ def test_a_task_missing_from_a_later_state_read_does_not_skip_the_preflight(
     container.state_manager.override(
         _TaskVanishesAfterFirstRead(StateManager(tmp_path / ".mothership"))
     )
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
         with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
@@ -1885,9 +1817,7 @@ def test_repos_scope_keeps_an_unrelated_dirty_repo_from_blocking(tmp_path, monke
     _configure(tmp_path)
     shell = _git_shell({"api": _repo_git(), "web": _repo_git(" M b.ts\n")})
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
         with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame(["ok\n"], exit_code=0))):
@@ -1914,9 +1844,7 @@ def test_a_repos_selection_outside_the_tasks_worktrees_is_not_dispatched(tmp_pat
     _configure(tmp_path)
     shell = _git_shell(_repo_git())
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
         with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
@@ -1942,9 +1870,7 @@ def test_repos_scope_does_not_push_a_repo_the_operator_did_not_name(tmp_path, mo
     _configure(tmp_path)
     shell = _git_shell({"api": _repo_git(), "web": _repo_git(origin=None)})
     container.shell.override(shell)
-    RunHostStore(tmp_path / ".mothership").set(
-        "role-x", RunHostConnection(url="http://remote.example", token="tok-abc"),
-    )
+    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     try:
         with _ClientPatch(monkeypatch, _recording_handler({}, _frame(["ok\n"], exit_code=0))):
             result = runner.invoke(
