@@ -15,8 +15,12 @@ def register(parent: typer.Typer, get_container):
 
     from mship.core.run_host.store import RunHostError
 
-    def registry_failure(out: Output) -> None:
-        out.error("could not read private run-host registry; fix the private file and retry")
+    def registry_failure(out: Output, error: Exception) -> None:
+        message = (
+            str(error) if isinstance(error, RunHostError)
+            else "could not read private run-host registry; fix the private file and retry"
+        )
+        out.error(message)
         raise typer.Exit(1)
 
     def store():
@@ -59,8 +63,8 @@ def register(parent: typer.Typer, get_container):
         try:
             store().set_host(HostRegistration(name, roles, tuple(tag or ()), preference,
                                               RunHostConnection(resolved_url, resolved_token), scope), scope=scope)
-        except (RunHostError, OSError, UnicodeError):
-            registry_failure(Output())
+        except (RunHostError, OSError, UnicodeError) as exc:
+            registry_failure(Output(), exc)
         Output().success(f"registered run-host {name!r} in {scope} scope")
 
     @run_host_app.command("list")
@@ -69,8 +73,8 @@ def register(parent: typer.Typer, get_container):
         out = Output()
         try:
             entries = store().safe_hosts()
-        except (RunHostError, OSError, UnicodeError):
-            registry_failure(out)
+        except (RunHostError, OSError, UnicodeError) as exc:
+            registry_failure(out, exc)
         if not entries:
             out.print("no run-hosts configured")
             return
@@ -86,8 +90,8 @@ def register(parent: typer.Typer, get_container):
         """Remove a scoped host entry (a missing entry is a no-op)."""
         try:
             store().remove_host(name, scope=scope)
-        except (RunHostError, OSError, UnicodeError):
-            registry_failure(Output())
+        except (RunHostError, OSError, UnicodeError) as exc:
+            registry_failure(Output(), exc)
         Output().success(f"removed run-host {name!r} from {scope} scope")
 
     @run_host_app.command("allow-role")
@@ -103,8 +107,8 @@ def register(parent: typer.Typer, get_container):
             raise typer.Exit(2)
         try:
             store().set_role_hosts(role, None if all_hosts else host)
-        except (RunHostError, OSError, UnicodeError):
-            registry_failure(out)
+        except (RunHostError, OSError, UnicodeError) as exc:
+            registry_failure(out, exc)
         out.success(f"updated allowed hosts for role {role!r}")
 
     @run_host_app.command("migrate")
@@ -117,8 +121,8 @@ def register(parent: typer.Typer, get_container):
         allowed = get_container().config().run_hosts
         try:
             report = store().migrate(scope=scope, allowed_roles=allowed, apply=apply)
-        except (RunHostError, OSError, UnicodeError):
-            registry_failure(out)
+        except (RunHostError, OSError, UnicodeError) as exc:
+            registry_failure(out, exc)
         if not report.changed:
             out.print(f"no legacy {scope} run-host registry needs migration")
         elif not apply:

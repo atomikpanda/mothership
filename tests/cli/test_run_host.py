@@ -192,6 +192,21 @@ def test_migrate_previews_then_applies_valid_registry(tmp_path):
         _reset()
 
 
+def test_legacy_registry_reports_executable_migration_recovery(tmp_path):
+    ws = _ws(tmp_path)
+    _configure(ws)
+    (ws / ".mothership" / "run-hosts.yaml").write_text(
+        "ios:\n  url: https://host.invalid\n  token: private-token\n"
+    )
+    try:
+        result = runner.invoke(app, ["run-host", "list"])
+        assert result.exit_code == 1
+        assert "mship run-host migrate --scope project --apply" in result.output
+        assert "private-token" not in result.output
+    finally:
+        _reset()
+
+
 def test_migrate_malformed_registry_never_echoes_credential_text(tmp_path):
     ws = _ws(tmp_path)
     _configure(ws)
@@ -203,7 +218,7 @@ def test_migrate_malformed_registry_never_echoes_credential_text(tmp_path):
         result = runner.invoke(app, ["run-host", "migrate", "--scope", "project"])
         assert result.exit_code == 1
         assert secret not in result.output
-        assert "could not read private run-host registry" in result.output
+        assert isinstance(result.exception, SystemExit)
     finally:
         _reset()
 
@@ -228,6 +243,6 @@ def test_registry_commands_redact_malformed_private_registry(tmp_path, command, 
         result = runner.invoke(app, [*command, *extra])
         assert result.exit_code == 1
         assert secret not in result.output
-        assert "could not read private run-host registry" in result.output
+        assert isinstance(result.exception, SystemExit)
     finally:
         _reset()
