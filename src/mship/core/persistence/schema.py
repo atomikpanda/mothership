@@ -122,9 +122,17 @@ app_runs = Table(
         name="status",
     ),
     CheckConstraint(
-        "(status = 'active' AND owner_ref IS NOT NULL AND owner_generation IS NOT NULL) "
-        "OR (status <> 'active' AND owner_ref IS NULL AND owner_generation IS NULL)",
-        name="owner_acknowledgement",
+        "(owner_ref IS NULL AND owner_generation IS NULL) "
+        "OR (owner_ref IS NOT NULL AND owner_generation IS NOT NULL)",
+        name="owner_pair",
+    ),
+    CheckConstraint(
+        "status <> 'active' OR owner_ref IS NOT NULL",
+        name="active_owner_acknowledgement",
+    ),
+    CheckConstraint(
+        "binary_provenance_json IS NULL",
+        name="binary_provenance_unavailable",
     ),
     CheckConstraint("revision >= 0", name="revision_non_negative"),
     Index("ix_app_runs_task_repo_status", "task_slug", "repo", "status"),

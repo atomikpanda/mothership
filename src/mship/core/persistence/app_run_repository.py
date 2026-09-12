@@ -1,4 +1,5 @@
 """Durable, safe selected-target metadata; never an execution owner."""
+
 from __future__ import annotations
 
 import json
@@ -41,7 +42,9 @@ class AppRunConflict(RuntimeError):
 
     def __init__(self, run_id: str) -> None:
         self.run_id = run_id
-        super().__init__(f"app run {run_id!r} changed concurrently; refresh before retrying")
+        super().__init__(
+            f"app run {run_id!r} changed concurrently; refresh before retrying"
+        )
 
 
 class AppRunTransitionError(ValueError):
@@ -66,6 +69,11 @@ class PrivateBindingError(RuntimeError):
 def _private_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.chmod(0o700)
+    parent_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
 
 
 class AppRunRepository:
@@ -85,23 +93,24 @@ class AppRunRepository:
         connection.execute(app_runs.insert().values(**self._values(run)))
 
     def get(self, connection: Connection, run_id: str) -> AppRun | None:
-        row = connection.execute(
-            select(app_runs).where(app_runs.c.id == run_id)
-        ).mappings().one_or_none()
+        row = (
+            connection.execute(select(app_runs).where(app_runs.c.id == run_id))
+            .mappings()
+            .one_or_none()
+        )
         return None if row is None else self._decode(row)
 
-    def list_active(
+    def list_candidates(
         self,
         connection: Connection,
         *,
         task_slug: str,
         repo: str,
     ) -> list[AppRun]:
-        """Return exact task/repo observation candidates, including uncertain runs.
+        """Return exact task/repo observation candidates, including uncertainty.
 
-        The historical name is retained by the planned API. It deliberately includes
-        ``starting`` and ``unknown`` records: neither implies liveness, but removing
-        either could falsely make a different run uniquely selectable.
+        ``starting`` and ``unknown`` never assert liveness, but removing either
+        could falsely make a different run uniquely selectable.
         """
         rows = connection.execute(
             select(app_runs)
@@ -149,27 +158,35 @@ class AppRunRepository:
             raise KeyError(run_id)
         return updated
 
-    def delete_for_task(self, connection: Connection, task_slug: str) -> None:
-        """Remove terminal metadata only after the owner/evidence lifecycle permits it.
+    def delete_for_task(
+        self, connection: Connection, task_slug: str
+    ) -> tuple[str, ...]:
+        """Delete terminal metadata and hand private refs to post-commit cleanup.
 
-        This repository refuses to erase ``starting``, ``active``, or ``unknown`` rows.
-        Task deletion therefore cannot cascade away possibly-live/uncertain metadata;
-        lifecycle owners must first confirm a terminal result and explicitly call here.
+        The returned opaque refs are not authorization to remove payload files.
+        Existing owner/evidence cleanup must first observe a committed deletion and
+        prove no remaining rows reference each payload. Until that integration
+        exists, private payloads are safely retained.
         """
-        rows = connection.execute(
-            select(app_runs.c.private_binding_ref, app_runs.c.status).where(
-                app_runs.c.task_slug == task_slug
+        rows = (
+            connection.execute(
+                select(app_runs.c.private_binding_ref, app_runs.c.status).where(
+                    app_runs.c.task_slug == task_slug
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         if any(str(row["status"]) not in _TERMINAL_STATUSES for row in rows):
             raise AppRunCleanupBlocked(task_slug)
         connection.execute(delete(app_runs).where(app_runs.c.task_slug == task_slug))
-        for row in rows:
-            self._binding_path(str(row["private_binding_ref"])).unlink(missing_ok=True)
+        return tuple(dict.fromkeys(str(row["private_binding_ref"]) for row in rows))
 
     def store_private_binding(self, binding: Mapping[str, JsonValue]) -> str:
         """Atomically create and return an unguessable owner-private binding key."""
-        encoded = json.dumps(dict(binding), sort_keys=True, separators=(",", ":")).encode()
+        encoded = json.dumps(
+            dict(binding), sort_keys=True, separators=(",", ":")
+        ).encode()
         if len(encoded) > _MAX_BINDING_BYTES:
             raise PrivateBindingError("private binding exceeds the bounded size")
         _private_dir(self._binding_dir)
@@ -200,7 +217,9 @@ class AppRunRepository:
             value = json.loads(path.read_bytes())
         except (OSError, ValueError) as error:
             raise PrivateBindingError("private binding is unreadable") from error
-        if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+        if not isinstance(value, dict) or not all(
+            isinstance(key, str) for key in value
+        ):
             raise PrivateBindingError("private binding has invalid data")
         return value  # type: ignore[return-value]
 
@@ -219,6 +238,11 @@ class AppRunRepository:
             raise
         else:
             temp.unlink(missing_ok=True)
+            parent_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
 
     def _binding_path(self, binding_ref: str) -> Path:
         return self._binding_dir / f"{binding_ref}.json"
@@ -238,12 +262,24 @@ class AppRunRepository:
             raise AppRunTransitionError(
                 f"cannot transition app run from {current.status!r} to {status!r}"
             )
-        if status == "active":
-            if not owner_ref or not owner_generation:
-                raise AppRunTransitionError("active app run acknowledgement requires owner identity")
-        elif owner_ref is not None or owner_generation is not None:
+        if (owner_ref is None) != (owner_generation is None):
             raise AppRunTransitionError(
-                f"{status} app run acknowledgement must not retain an owner reference"
+                "owner reference and generation must be supplied together"
+            )
+        if status == "active" and owner_ref is None:
+            raise AppRunTransitionError(
+                "active app run acknowledgement requires owner identity"
+            )
+        if current.owner_ref is not None and (
+            owner_ref != current.owner_ref
+            or owner_generation != current.owner_generation
+        ):
+            raise AppRunTransitionError(
+                "acknowledged app run owner identity cannot be cleared or replaced"
+            )
+        if current.owner_ref is None and status != "active" and owner_ref is not None:
+            raise AppRunTransitionError(
+                "owner identity may only be acknowledged by an active transition"
             )
 
     def _values(self, run: AppRun) -> dict[str, object]:
@@ -269,11 +305,7 @@ class AppRunRepository:
             "revision": run.revision,
             "created_at": encode_datetime(run.created_at),
             "updated_at": encode_datetime(run.updated_at),
-            "binary_provenance_json": (
-                None
-                if run.binary_provenance is None
-                else encode_json(run.binary_provenance)
-            ),
+            "binary_provenance_json": None,
         }
 
     def _decode(self, row: Mapping[str, object]) -> AppRun:
@@ -283,7 +315,9 @@ class AppRunRepository:
             provenance = (
                 None if provenance_text is None else decode_json(str(provenance_text))
             )
-            if not isinstance(capabilities, list) or not isinstance(provenance, (dict, type(None))):
+            if not isinstance(capabilities, list) or not isinstance(
+                provenance, (dict, type(None))
+            ):
                 raise ValueError("invalid JSON field")
             return AppRun(
                 id=str(row["id"]),
@@ -314,4 +348,6 @@ class AppRunRepository:
                 binary_provenance=provenance,  # type: ignore[arg-type]
             )
         except (KeyError, TypeError, ValueError) as error:
-            raise PersistenceDecodeError("app_runs", str(row.get("id", "unknown")), error) from error
+            raise PersistenceDecodeError(
+                "app_runs", str(row.get("id", "unknown")), error
+            ) from error

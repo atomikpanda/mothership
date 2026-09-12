@@ -1,4 +1,5 @@
 """Bounded discovery invocation and protocol parsing for run-target backends."""
+
 from __future__ import annotations
 
 import json
@@ -32,7 +33,9 @@ BackendExecutor = Callable[[HostRegistration, BackendExecution], BackendResult]
 
 
 def _protocol_error(detail: str = "invalid discovery result") -> TargetSelectionError:
-    return TargetSelectionError("backend_protocol", "backend emitted invalid discovery data", (detail,))
+    return TargetSelectionError(
+        "backend_protocol", "backend emitted invalid discovery data", (detail,)
+    )
 
 
 def parse_discovery_result(payload: bytes, *, max_bytes: int) -> DiscoveryResult:
@@ -46,7 +49,14 @@ def parse_discovery_result(payload: bytes, *, max_bytes: int) -> DiscoveryResult
         raise _protocol_error("json") from error
     if not isinstance(raw, dict):
         raise _protocol_error("object")
-    expected = {"protocol_version", "backend", "backend_revision", "rank_schema", "candidates", "errors"}
+    expected = {
+        "protocol_version",
+        "backend",
+        "backend_revision",
+        "rank_schema",
+        "candidates",
+        "errors",
+    }
     if set(raw) != expected:
         raise _protocol_error("control_fields")
     try:
@@ -56,7 +66,10 @@ def parse_discovery_result(payload: bytes, *, max_bytes: int) -> DiscoveryResult
     target_keys = [candidate.target_key for candidate in result.candidates]
     if len(target_keys) != len(set(target_keys)):
         raise _protocol_error("duplicate_target")
-    if any(len(candidate.rank) != len(result.rank_schema) for candidate in result.candidates):
+    if any(
+        len(candidate.rank) != len(result.rank_schema)
+        for candidate in result.candidates
+    ):
         raise _protocol_error("rank_arity")
     return result
 
@@ -115,7 +128,11 @@ def load_host_bindings(path: Path, backend: str) -> dict[str, JsonValue]:
         raw = yaml.safe_load(payload)
     except (UnicodeError, yaml.YAMLError) as error:
         raise _protocol_error("bindings") from error
-    if not isinstance(raw, dict) or set(raw) != {"version", "backends"} or raw.get("version") != 1:
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != {"version", "backends"}
+        or raw.get("version") != 1
+    ):
         raise _protocol_error("bindings")
     backends = raw["backends"]
     if not isinstance(backends, dict):
@@ -133,7 +150,9 @@ def load_host_bindings(path: Path, backend: str) -> dict[str, JsonValue]:
     return {"paths": paths, "aliases": aliases}
 
 
-def _failure(host: HostRegistration, request: DiscoveryRequest, code: str) -> HostInventory:
+def _failure(
+    host: HostRegistration, request: DiscoveryRequest, code: str
+) -> HostInventory:
     return HostInventory(
         host=host,
         backend_revision=request.backend_revision,
@@ -154,7 +173,9 @@ def discover_on_host(
 ) -> HostInventory:
     """Run bounded read-only discovery through the injected supervised executor."""
     if request.operation not in config.operations:
-        raise TargetSelectionError("constraint_conflict", "requested operation is not supported by backend")
+        raise TargetSelectionError(
+            "constraint_conflict", "requested operation is not supported by backend"
+        )
     execution = BackendExecution(
         task=request.task,
         repo=request.repo,
@@ -168,27 +189,44 @@ def discover_on_host(
     )
     result = execute(host, execution)
     if result.error_code is not None:
-        return _failure(host, request, "backend_timeout" if result.error_code == "timeout" else "backend_transport")
+        return _failure(
+            host,
+            request,
+            "backend_timeout"
+            if result.error_code == "timeout"
+            else "backend_transport",
+        )
     if result.exit_code is None:
         return _failure(host, request, "backend_transport")
     if result.exit_code != 0:
         return _failure(host, request, "backend_nonzero")
-    if len(result.stdout) > DISCOVERY_STDOUT_LIMIT or len(result.stderr) > DISCOVERY_STDERR_LIMIT:
+    if (
+        len(result.stdout) > DISCOVERY_STDOUT_LIMIT
+        or len(result.stderr) > DISCOVERY_STDERR_LIMIT
+    ):
         return _failure(host, request, "backend_protocol")
     try:
         parsed = parse_discovery_result(result.stdout, max_bytes=DISCOVERY_STDOUT_LIMIT)
     except TargetSelectionError:
         return _failure(host, request, "backend_protocol")
-    if parsed.backend != request.backend or parsed.backend_revision != request.backend_revision:
+    if (
+        parsed.backend != request.backend
+        or parsed.backend_revision != request.backend_revision
+    ):
         return _failure(host, request, "backend_protocol")
-    if request.target_alias is not None and not any(request.target_alias in candidate.aliases for candidate in parsed.candidates):
-        return _failure(host, request, "target_unavailable")
+    candidates = parsed.candidates
+    if request.target_alias is not None:
+        candidates = tuple(
+            candidate
+            for candidate in candidates
+            if request.target_alias in candidate.aliases
+        )
     return HostInventory(
         host=host,
         backend_revision=parsed.backend_revision,
         rank_schema=parsed.rank_schema,
         operation=request.operation,
         profile_revision=request.profile_revision,
-        candidates=parsed.candidates,
+        candidates=candidates,
         error="backend_reported_error" if parsed.errors else None,
     )

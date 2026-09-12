@@ -30,7 +30,6 @@ _TASK_CHILD_TABLES = (
     task_switch_sources,
     task_pr_urls,
     task_test_results,
-    task_repos,
 )
 
 
@@ -40,15 +39,18 @@ class TaskRepository:
         return {slug: self._load(conn, slug) for slug in slugs}
 
     def get(self, conn: Connection, slug: str) -> Task | None:
-        row = conn.execute(
-            select(tasks).where(tasks.c.slug == slug)
-        ).mappings().one_or_none()
+        row = (
+            conn.execute(select(tasks).where(tasks.c.slug == slug))
+            .mappings()
+            .one_or_none()
+        )
         if row is None:
             return None
         return self._decode(conn, row)
 
     def insert(self, conn: Connection, task: Task) -> None:
         conn.execute(tasks.insert().values(**self._scalar_values(task)))
+        self._insert_many(conn, task_repos, self._task_repo_values(task))
         self._insert_children(conn, task)
 
     def replace(
@@ -58,25 +60,27 @@ class TaskRepository:
         *,
         expected_revision: int | None = None,
     ) -> int:
-        predicate = tasks.c.slug == task.slug
-        if expected_revision is not None:
-            predicate &= tasks.c.revision == expected_revision
-        statement = (
-            tasks.update()
-            .where(predicate)
-            .values(
-                **self._scalar_values(task),
-                revision=tasks.c.revision + 1,
-            )
-            .returning(tasks.c.revision)
-        )
-        new_revision = conn.execute(statement).scalar_one_or_none()
-        if new_revision is None:
+        with conn.begin_nested():
+            predicate = tasks.c.slug == task.slug
             if expected_revision is not None:
-                raise ConcurrentUpdateError("tasks", task.slug, expected_revision)
-            raise KeyError(task.slug)
-        self._delete_children(conn, task.slug)
-        self._insert_children(conn, task)
+                predicate &= tasks.c.revision == expected_revision
+            statement = (
+                tasks.update()
+                .where(predicate)
+                .values(
+                    **self._scalar_values(task),
+                    revision=tasks.c.revision + 1,
+                )
+                .returning(tasks.c.revision)
+            )
+            new_revision = conn.execute(statement).scalar_one_or_none()
+            if new_revision is None:
+                if expected_revision is not None:
+                    raise ConcurrentUpdateError("tasks", task.slug, expected_revision)
+                raise KeyError(task.slug)
+            self._delete_children(conn, task.slug)
+            self._replace_task_repos(conn, task)
+            self._insert_children(conn, task)
         return int(new_revision)
 
     def delete(self, conn: Connection, slug: str) -> bool:
@@ -113,28 +117,85 @@ class TaskRepository:
         for table in _TASK_CHILD_TABLES:
             conn.execute(delete(table).where(table.c.task_slug == slug))
 
-    def _insert_children(self, conn: Connection, task: Task) -> None:
+    def _task_repo_values(self, task: Task) -> tuple[dict[str, object], ...]:
         repo_names = list(dict.fromkeys(task.affected_repos))
         repo_names.extend(name for name in task.worktrees if name not in repo_names)
-        repo_names.extend(name for name in sorted(task.passive_repos) if name not in repo_names)
+        repo_names.extend(
+            name for name in sorted(task.passive_repos) if name not in repo_names
+        )
         affected_ordinals = {
-            repo_name: ordinal
-            for ordinal, repo_name in enumerate(task.affected_repos)
+            repo_name: ordinal for ordinal, repo_name in enumerate(task.affected_repos)
         }
+        return tuple(
+            {
+                "task_slug": task.slug,
+                "repo_name": repo_name,
+                "affected_ordinal": affected_ordinals.get(repo_name),
+                "passive": repo_name in task.passive_repos,
+                "worktree_path": encode_path(task.worktrees.get(repo_name)),
+            }
+            for repo_name in repo_names
+        )
+
+    def _replace_task_repos(self, conn: Connection, task: Task) -> None:
+        desired = {
+            str(values["repo_name"]): values for values in self._task_repo_values(task)
+        }
+        existing = {
+            str(row["repo_name"]): row
+            for row in conn.execute(
+                select(task_repos).where(task_repos.c.task_slug == task.slug)
+            ).mappings()
+        }
+        removed = set(existing).difference(desired)
+        if removed:
+            conn.execute(
+                delete(task_repos).where(
+                    task_repos.c.task_slug == task.slug,
+                    task_repos.c.repo_name.in_(removed),
+                )
+            )
+        shared = set(existing).intersection(desired)
+        reordered = {
+            repo_name
+            for repo_name in shared
+            if existing[repo_name]["affected_ordinal"]
+            != desired[repo_name]["affected_ordinal"]
+        }
+        if reordered:
+            conn.execute(
+                task_repos.update()
+                .where(
+                    task_repos.c.task_slug == task.slug,
+                    task_repos.c.repo_name.in_(reordered),
+                )
+                .values(affected_ordinal=None)
+            )
+        for repo_name in shared:
+            values = desired[repo_name]
+            conn.execute(
+                task_repos.update()
+                .where(
+                    task_repos.c.task_slug == task.slug,
+                    task_repos.c.repo_name == repo_name,
+                )
+                .values(
+                    affected_ordinal=values["affected_ordinal"],
+                    passive=values["passive"],
+                    worktree_path=values["worktree_path"],
+                )
+            )
         self._insert_many(
             conn,
             task_repos,
             (
-                {
-                    "task_slug": task.slug,
-                    "repo_name": repo_name,
-                    "affected_ordinal": affected_ordinals.get(repo_name),
-                    "passive": repo_name in task.passive_repos,
-                    "worktree_path": encode_path(task.worktrees.get(repo_name)),
-                }
-                for repo_name in repo_names
+                values
+                for values in self._task_repo_values(task)
+                if str(values["repo_name"]) not in shared
             ),
         )
+
+    def _insert_children(self, conn: Connection, task: Task) -> None:
         self._insert_many(
             conn,
             task_test_results,
@@ -211,15 +272,23 @@ class TaskRepository:
     def _decode(self, conn: Connection, row) -> Task:
         slug = str(row["slug"])
         try:
-            repo_rows = conn.execute(
-                select(task_repos)
-                .where(task_repos.c.task_slug == slug)
-                .order_by(task_repos.c.repo_name)
-            ).mappings().all()
+            repo_rows = (
+                conn.execute(
+                    select(task_repos)
+                    .where(task_repos.c.task_slug == slug)
+                    .order_by(task_repos.c.repo_name)
+                )
+                .mappings()
+                .all()
+            )
             affected_repos = [
                 str(repo["repo_name"])
                 for repo in sorted(
-                    (repo for repo in repo_rows if repo["affected_ordinal"] is not None),
+                    (
+                        repo
+                        for repo in repo_rows
+                        if repo["affected_ordinal"] is not None
+                    ),
                     key=lambda repo: int(repo["affected_ordinal"]),
                 )
             ]

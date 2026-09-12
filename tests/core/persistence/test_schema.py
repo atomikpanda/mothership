@@ -81,7 +81,7 @@ def _app_run_row(**updates: object) -> dict[str, object]:
         "private_binding_ref": "c" * 43,
         "operation": "run",
         "protocol_version": 1,
-        "capabilities_json": "[\"run\"]",
+        "capabilities_json": '["run"]',
         "owner_ref": None,
         "owner_generation": None,
         "status": "starting",
@@ -97,7 +97,9 @@ def _app_run_row(**updates: object) -> dict[str, object]:
 def test_one_task_slug_has_one_workitem_owner(connection: Connection) -> None:
     _seed_work_items(connection)
     connection.execute(
-        workitem_tasks.insert().values(work_item_id="wi-a", task_slug="task-a", ordinal=0)
+        workitem_tasks.insert().values(
+            work_item_id="wi-a", task_slug="task-a", ordinal=0
+        )
     )
 
     with pytest.raises(IntegrityError):
@@ -237,6 +239,25 @@ def test_app_run_requires_exact_task_repo_and_blocks_task_cascade(
     )
     with pytest.raises(IntegrityError):
         connection.execute(app_runs.insert().values(**_app_run_row(status="active")))
+    connection.execute(
+        app_runs.insert().values(
+            **_app_run_row(
+                id="known-owner",
+                status="unknown",
+                owner_ref="operation-42",
+                owner_generation="generation-7",
+            )
+        )
+    )
+    with pytest.raises(IntegrityError):
+        connection.execute(
+            app_runs.insert().values(
+                **_app_run_row(
+                    id="untrusted-provenance",
+                    binary_provenance_json='{"source_revision":"not-proof"}',
+                )
+            )
+        )
 
     with pytest.raises(IntegrityError):
         connection.execute(app_runs.insert().values(**_app_run_row(status="running")))

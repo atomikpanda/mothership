@@ -3,6 +3,7 @@
 Revision ID: 0002_app_run_targets
 Revises: 0001_tasks_and_workitems
 """
+
 from collections.abc import Sequence
 
 from alembic import op
@@ -35,7 +36,9 @@ def upgrade() -> None:
         sa.Column("owner_ref", sa.Text()),
         sa.Column("owner_generation", sa.Text()),
         sa.Column("status", sa.Text(), nullable=False),
-        sa.Column("revision", sa.Integer(), server_default=sa.text("0"), nullable=False),
+        sa.Column(
+            "revision", sa.Integer(), server_default=sa.text("0"), nullable=False
+        ),
         sa.Column("created_at", sa.Text(), nullable=False),
         sa.Column("updated_at", sa.Text(), nullable=False),
         sa.Column("binary_provenance_json", sa.Text()),
@@ -48,9 +51,17 @@ def upgrade() -> None:
             name="ck_app_runs_status",
         ),
         sa.CheckConstraint(
-            "(status = 'active' AND owner_ref IS NOT NULL AND owner_generation IS NOT NULL) "
-            "OR (status <> 'active' AND owner_ref IS NULL AND owner_generation IS NULL)",
-            name="ck_app_runs_owner_acknowledgement",
+            "(owner_ref IS NULL AND owner_generation IS NULL) "
+            "OR (owner_ref IS NOT NULL AND owner_generation IS NOT NULL)",
+            name="ck_app_runs_owner_pair",
+        ),
+        sa.CheckConstraint(
+            "status <> 'active' OR owner_ref IS NOT NULL",
+            name="ck_app_runs_active_owner_acknowledgement",
+        ),
+        sa.CheckConstraint(
+            "binary_provenance_json IS NULL",
+            name="ck_app_runs_binary_provenance_unavailable",
         ),
         sa.CheckConstraint("revision >= 0", name="ck_app_runs_revision_non_negative"),
         sa.ForeignKeyConstraint(

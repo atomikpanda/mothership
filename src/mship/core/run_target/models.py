@@ -1,4 +1,5 @@
 """Strict data contracts for profile-driven target discovery."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,14 +15,18 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from mship.core.capture import Artifact
 from mship.core.run_host.config import HostRegistration
 
-JsonValue: TypeAlias = str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
+JsonValue: TypeAlias = (
+    str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
+)
 
 _MAX_JSON_DEPTH = 16
 _MAX_JSON_ITEMS = 512
 _MAX_JSON_STRING = 16 * 1024
 
 
-def _json_value(value: object, *, depth: int = 0, items: list[int] | None = None) -> JsonValue:
+def _json_value(
+    value: object, *, depth: int = 0, items: list[int] | None = None
+) -> JsonValue:
     """Validate bounded JSON data without allowing executable configuration values."""
     if items is None:
         items = [0]
@@ -48,7 +53,9 @@ def _json_value(value: object, *, depth: int = 0, items: list[int] | None = None
         converted: dict[str, JsonValue] = {}
         for key, item in value.items():
             if not isinstance(key, str) or not key:
-                raise ValueError("JSON-compatible mappings require non-empty string keys")
+                raise ValueError(
+                    "JSON-compatible mappings require non-empty string keys"
+                )
             converted[key] = _json_value(item, depth=depth + 1, items=items)
         return converted
     raise ValueError("value is not JSON-compatible data")
@@ -64,11 +71,11 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-
-
 def safe_identifier(value: str, *, field: str) -> str:
     """Validate a user-facing profile/backend identifier consistently."""
     return _safe_text(value, field=field)
+
+
 class HostRequirements(_StrictModel):
     roles: tuple[str, ...]
     tags: tuple[str, ...] = ()
@@ -129,7 +136,15 @@ class DiscoveryRequest(_StrictModel):
     options: dict[str, Any]
     target_alias: str | None
 
-    @field_validator("backend", "backend_revision", "profile", "profile_revision", "task", "repo", "operation")
+    @field_validator(
+        "backend",
+        "backend_revision",
+        "profile",
+        "profile_revision",
+        "task",
+        "repo",
+        "operation",
+    )
     @classmethod
     def validate_identifiers(cls, value: str) -> str:
         return _safe_text(value, field="discovery request identifier")
@@ -283,11 +298,15 @@ class TargetSelectionError(Exception):
     def __init__(self, code: str, message: str, details: tuple[str, ...] = ()) -> None:
         self.code = code
         self.message = _safe_text(message, field="selection error")
-        self.details = tuple(_safe_text(detail, field="selection detail") for detail in details)
+        self.details = tuple(
+            _safe_text(detail, field="selection detail") for detail in details
+        )
         super().__init__(self.message)
 
 
-def profile_revision(profile: RunProfile, backend: BackendConfig, *, prepared_source_revision: str) -> str:
+def profile_revision(
+    profile: RunProfile, backend: BackendConfig, *, prepared_source_revision: str
+) -> str:
     """Fingerprint the effective definition and immutable source snapshot."""
     source = _safe_text(prepared_source_revision, field="prepared source revision")
     payload = {
@@ -295,7 +314,12 @@ def profile_revision(profile: RunProfile, backend: BackendConfig, *, prepared_so
         "profile": profile.model_dump(mode="json"),
         "prepared_source_revision": source,
     }
-    return sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+    return sha256(
+        json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode()
+    ).hexdigest()
+
 
 _APP_RUN_STATUSES = frozenset(("starting", "active", "stopped", "failed", "unknown"))
 _BINDING_REF = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
@@ -353,7 +377,9 @@ class AppRun:
         if not _FINGERPRINT.fullmatch(self.host_endpoint_fingerprint):
             raise ValueError("host endpoint fingerprint must be a SHA-256 hex digest")
         if not _BINDING_REF.fullmatch(self.private_binding_ref):
-            raise ValueError("private binding reference must be an opaque generated key")
+            raise ValueError(
+                "private binding reference must be an opaque generated key"
+            )
         if self.protocol_version != 1:
             raise ValueError("app run protocol version must be 1")
         if self.status not in _APP_RUN_STATUSES:
@@ -366,23 +392,24 @@ class AppRun:
             raise ValueError("app run capabilities must contain non-empty strings")
         if len(set(self.capabilities)) != len(self.capabilities):
             raise ValueError("app run capabilities must not contain duplicates")
-        if self.status == "active":
-            if self.owner_ref is None or self.owner_generation is None:
-                raise ValueError("active app runs require an owner reference and generation")
-        elif self.owner_ref is not None or self.owner_generation is not None:
-            raise ValueError("non-active app runs must not claim an owner")
+        if (self.owner_ref is None) != (self.owner_generation is None):
+            raise ValueError(
+                "app run owner reference and generation must be supplied together"
+            )
+        if self.status == "active" and self.owner_ref is None:
+            raise ValueError(
+                "active app runs require an owner reference and generation"
+            )
         if self.owner_ref is not None:
             _safe_text(self.owner_ref, field="owner reference")
-        if self.owner_generation is not None:
             _safe_text(self.owner_generation, field="owner generation")
         if self.binary_provenance is not None:
-            checked = _json_value(self.binary_provenance)
-            if not isinstance(checked, dict):
-                raise ValueError("binary provenance must be a JSON object")
-            object.__setattr__(self, "binary_provenance", checked)
+            raise ValueError(
+                "binary provenance is unavailable until a trusted build identity contract exists"
+            )
 
     def public_projection(self) -> dict[str, object]:
-        """Return safe selected metadata without a binding, credential, or raw provenance."""
+        """Return safe selected metadata without a binding or raw provenance."""
         return {
             "id": self.id,
             "task_slug": self.task_slug,
@@ -402,5 +429,5 @@ class AppRun:
             "revision": self.revision,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-            "binary_provenance_known": self.binary_provenance is not None,
+            "binary_provenance": None,
         }

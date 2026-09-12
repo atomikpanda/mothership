@@ -1,4 +1,5 @@
 """Owner-private, project-local remembered target preferences."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -58,11 +59,15 @@ class TargetPreferenceStore:
 
     @staticmethod
     def _invalid() -> TargetSelectionError:
-        return TargetSelectionError("preferences_invalid", "could not read private target preferences")
+        return TargetSelectionError(
+            "preferences_invalid", "could not read private target preferences"
+        )
 
     def _read_nolock(self) -> dict[str, dict[str, TargetPreference]]:
         try:
-            descriptor = os.open(self._path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+            descriptor = os.open(
+                self._path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+            )
         except FileNotFoundError:
             return {}
         except OSError as exc:
@@ -94,7 +99,10 @@ class TargetPreferenceStore:
             raise self._invalid() from exc
         finally:
             os.close(descriptor)
-        if not isinstance(document, Mapping) or set(document) != {"version", "preferences"}:
+        if not isinstance(document, Mapping) or set(document) != {
+            "version",
+            "preferences",
+        }:
             raise self._invalid()
         if document["version"] != _VERSION or isinstance(document["version"], bool):
             raise self._invalid()
@@ -104,39 +112,63 @@ class TargetPreferenceStore:
         parsed: dict[str, dict[str, TargetPreference]] = {}
         try:
             for repo, profiles in preferences.items():
-                repo_name = self._key(repo, field="preference repo") if isinstance(repo, str) else None
+                repo_name = (
+                    self._key(repo, field="preference repo")
+                    if isinstance(repo, str)
+                    else None
+                )
                 if repo_name is None or not isinstance(profiles, Mapping):
                     raise ValueError("invalid preference repository")
                 parsed[repo_name] = {}
                 for profile, raw_preference in profiles.items():
-                    profile_name = self._key(profile, field="preference profile") if isinstance(profile, str) else None
+                    profile_name = (
+                        self._key(profile, field="preference profile")
+                        if isinstance(profile, str)
+                        else None
+                    )
                     if profile_name is None or not isinstance(raw_preference, Mapping):
                         raise ValueError("invalid preference profile")
                     if set(raw_preference) != {"host_name", "target_alias"}:
                         raise ValueError("invalid preference fields")
                     host_name = raw_preference["host_name"]
                     target_alias = raw_preference["target_alias"]
-                    if not isinstance(host_name, str | type(None)) or not isinstance(target_alias, str | type(None)):
+                    if not isinstance(host_name, str | type(None)) or not isinstance(
+                        target_alias, str | type(None)
+                    ):
                         raise ValueError("invalid preference values")
-                    parsed[repo_name][profile_name] = TargetPreference(host_name, target_alias)
+                    parsed[repo_name][profile_name] = TargetPreference(
+                        host_name, target_alias
+                    )
         except (TypeError, ValueError) as exc:
             raise self._invalid() from exc
         return parsed
 
-    def _write_nolock(self, preferences: Mapping[str, Mapping[str, TargetPreference]]) -> None:
+    def _write_nolock(
+        self, preferences: Mapping[str, Mapping[str, TargetPreference]]
+    ) -> None:
         document = {
             "version": _VERSION,
             "preferences": {
                 repo: {
-                    profile: {"host_name": preference.host_name, "target_alias": preference.target_alias}
+                    profile: {
+                        "host_name": preference.host_name,
+                        "target_alias": preference.target_alias,
+                    }
                     for profile, preference in profiles.items()
                 }
                 for repo, profiles in preferences.items()
             },
         }
         payload = yaml.safe_dump(document, sort_keys=True).encode("utf-8")
+        if len(payload) > _MAX_BYTES:
+            raise TargetSelectionError(
+                "preferences_invalid",
+                "private target preferences exceed the storage limit",
+            )
         self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        descriptor, temp_name = tempfile.mkstemp(prefix=f".{self._path.name}.", dir=self._path.parent)
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=f".{self._path.name}.", dir=self._path.parent
+        )
         temp = Path(temp_name)
         try:
             os.fchmod(descriptor, 0o600)

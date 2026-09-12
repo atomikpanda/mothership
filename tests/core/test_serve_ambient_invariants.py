@@ -12,6 +12,7 @@ Every allowlist entry names its reason; the runtime poison test
 (tests/core/daemon/test_poison_cwd.py) covers what static analysis can't —
 that the allowlisted call sites are never used to SELECT a workspace.
 """
+
 from __future__ import annotations
 
 import ast
@@ -20,23 +21,84 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parents[2] / "src"
 PKG = "mship"
 
-ROOTS = ["mship.core.serve", "mship.core.daemon.host_app", "mship.core.workspace_context"]
+ROOTS = [
+    "mship.core.serve",
+    "mship.core.daemon.host_app",
+    "mship.core.workspace_context",
+]
 
 # (module suffix, qualname prefix, kind) -> reason. Kind: cwd|dot|env
 ALLOWLIST: dict[tuple[str, str, str], str] = {
-    ("mship/util/shell.py", "*", "env"): "#473 seam: subprocess env construction, not workspace selection",
-    ("mship/core/relay/token.py", "*", "env"): "#471 seam: MSHIP_SERVE_TOKEN host auth material",
-    ("mship/core/daemon/host_app.py", "ensure_host_token", "env"): "#472 seam: MSHIP_SERVE_TOKEN host auth material",
-    ("mship/core/daemon/host_app.py", "load_gh_app_credentials", "env"): "#472 seam: GitHub App host auth material",
-    ("mship/core/gh_auth.py", "*", "env"): "#471 seam: broker URL/token + GH token, host-level auth",
-    ("mship/core/evidence_url.py", "*", "env"): "env augmentation (GIT_SSH_COMMAND), not selection",
-    ("mship/core/run_host/store.py", "RunHostStore.get", "env"): "run-host connection env override (per-machine, not workspace selection)",
-    ("mship/core/topology.py", "probe_topology", "env"): "injectable host-env default (relay/run-host edges), not workspace selection",
-    ("mship/core/doctor.py", "DoctorChecker.run", "dot"): "CLI-invocation fallback; serve's /doctor passes workspace_root (serve.py _doctor_payload)",
-    ("mship/core/workspace_context.py", "_resolve_state_dir", "env"): "strips GIT_* vars — never selects",
-    ("mship/core/daemon/run.py", "*", "env"): "#470 process-env boundary (socket path for the daemon itself)",
-    ("mship/core/config.py", "ConfigLoader.discover", "env"): "CLI discovery only — daemon paths use build_workspace_context (poison test proves)",
-    ("mship/core/pr.py", "PRManager.__init__", "dot"): "CLI-boundary default; serve/daemon pass workspace_root explicitly (poison test proves)",
+    (
+        "mship/util/shell.py",
+        "*",
+        "env",
+    ): "#473 seam: subprocess env construction, not workspace selection",
+    (
+        "mship/core/relay/token.py",
+        "*",
+        "env",
+    ): "#471 seam: MSHIP_SERVE_TOKEN host auth material",
+    (
+        "mship/core/daemon/host_app.py",
+        "ensure_host_token",
+        "env",
+    ): "#472 seam: MSHIP_SERVE_TOKEN host auth material",
+    (
+        "mship/core/daemon/host_app.py",
+        "load_gh_app_credentials",
+        "env",
+    ): "#472 seam: GitHub App host auth material",
+    (
+        "mship/core/gh_auth.py",
+        "*",
+        "env",
+    ): "#471 seam: broker URL/token + GH token, host-level auth",
+    (
+        "mship/core/evidence_url.py",
+        "*",
+        "env",
+    ): "env augmentation (GIT_SSH_COMMAND), not selection",
+    (
+        "mship/core/run_host/store.py",
+        "RunHostStore.__init__",
+        "env",
+    ): "XDG private host-registry location, not workspace selection",
+    (
+        "mship/core/run_host/store.py",
+        "resolve_run_host",
+        "env",
+    ): "per-role connection override, with explicit state_dir/config inputs",
+    (
+        "mship/core/topology.py",
+        "probe_topology",
+        "env",
+    ): "injectable host-env default (relay/run-host edges), not workspace selection",
+    (
+        "mship/core/doctor.py",
+        "DoctorChecker.run",
+        "dot",
+    ): "CLI-invocation fallback; serve's /doctor passes workspace_root (serve.py _doctor_payload)",
+    (
+        "mship/core/workspace_context.py",
+        "_resolve_state_dir",
+        "env",
+    ): "strips GIT_* vars — never selects",
+    (
+        "mship/core/daemon/run.py",
+        "*",
+        "env",
+    ): "#470 process-env boundary (socket path for the daemon itself)",
+    (
+        "mship/core/config.py",
+        "ConfigLoader.discover",
+        "env",
+    ): "CLI discovery only — daemon paths use build_workspace_context (poison test proves)",
+    (
+        "mship/core/pr.py",
+        "PRManager.__init__",
+        "dot",
+    ): "CLI-boundary default; serve/daemon pass workspace_root explicitly (poison test proves)",
 }
 
 
@@ -59,7 +121,11 @@ def _imports_of(path: Path, mod: str) -> set[str]:
                     found.add(a.name)
         elif isinstance(node, ast.ImportFrom):
             if node.level:
-                base = pkg_parts[: len(pkg_parts) - node.level + (0 if path.name != "__init__.py" else 1)]
+                base = pkg_parts[
+                    : len(pkg_parts)
+                    - node.level
+                    + (0 if path.name != "__init__.py" else 1)
+                ]
                 target = ".".join(base + ([node.module] if node.module else []))
             else:
                 target = node.module or ""
@@ -85,7 +151,11 @@ def derive_closure(roots: list[str]) -> dict[str, Path]:
         for imp in _imports_of(f, mod):
             # try both the name and its parent (from X import name-of-def)
             for cand in (imp, imp.rsplit(".", 1)[0]):
-                if cand.startswith(PKG) and cand not in seen and _module_file(cand) is not None:
+                if (
+                    cand.startswith(PKG)
+                    and cand not in seen
+                    and _module_file(cand) is not None
+                ):
                     stack.append(cand)
     return seen
 
@@ -113,19 +183,40 @@ class _Detector(ast.NodeVisitor):
     def visit_Call(self, node):
         f = node.func
         if isinstance(f, ast.Attribute):
-            if f.attr == "cwd" and isinstance(f.value, ast.Name) and f.value.id == "Path":
+            if (
+                f.attr == "cwd"
+                and isinstance(f.value, ast.Name)
+                and f.value.id == "Path"
+            ):
                 self.hits.append(("cwd", self._qual(), node.lineno))
-            if f.attr == "getcwd" and isinstance(f.value, ast.Name) and f.value.id == "os":
+            if (
+                f.attr == "getcwd"
+                and isinstance(f.value, ast.Name)
+                and f.value.id == "os"
+            ):
                 self.hits.append(("cwd", self._qual(), node.lineno))
-            if f.attr == "getenv" and isinstance(f.value, ast.Name) and f.value.id == "os":
+            if (
+                f.attr == "getenv"
+                and isinstance(f.value, ast.Name)
+                and f.value.id == "os"
+            ):
                 self.hits.append(("env", self._qual(), node.lineno))
-        if (isinstance(f, ast.Name) and f.id == "Path" and node.args
-                and isinstance(node.args[0], ast.Constant) and node.args[0].value == "."):
+        if (
+            isinstance(f, ast.Name)
+            and f.id == "Path"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == "."
+        ):
             self.hits.append(("dot", self._qual(), node.lineno))
         self.generic_visit(node)
 
     def visit_Attribute(self, node):
-        if node.attr == "environ" and isinstance(node.value, ast.Name) and node.value.id == "os":
+        if (
+            node.attr == "environ"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "os"
+        ):
             self.hits.append(("env", self._qual(), node.lineno))
         self.generic_visit(node)
 
@@ -138,7 +229,11 @@ def _detect(source: str) -> list[tuple[str, str, int]]:
 
 def _allowed(rel: str, qualname: str, kind: str) -> bool:
     for (mod_sfx, qual, k), _reason in ALLOWLIST.items():
-        if rel.endswith(mod_sfx) and k == kind and (qual == "*" or qualname.startswith(qual)):
+        if (
+            rel.endswith(mod_sfx)
+            and k == kind
+            and (qual == "*" or qualname.startswith(qual))
+        ):
             return True
     return False
 
@@ -161,14 +256,26 @@ def test_closure_is_superset_of_known_reachable():
     """Canary: a walker bug must not silently shrink coverage."""
     closure = set(derive_closure(ROOTS))
     known = {
-        "mship.core.serve", "mship.core.pr", "mship.core.pr_watcher",
-        "mship.core.remote_exec", "mship.core.git_receive", "mship.core.spec_dispatch",
-        "mship.core.lifecycle_hooks", "mship.core.topology", "mship.core.gh_auth",
-        "mship.core.evidence_url", "mship.core.doctor", "mship.core.run_host.store",
-        "mship.core.workspace_context", "mship.util.shell", "mship.core.config",
+        "mship.core.serve",
+        "mship.core.pr",
+        "mship.core.pr_watcher",
+        "mship.core.remote_exec",
+        "mship.core.git_receive",
+        "mship.core.spec_dispatch",
+        "mship.core.lifecycle_hooks",
+        "mship.core.topology",
+        "mship.core.gh_auth",
+        "mship.core.evidence_url",
+        "mship.core.doctor",
+        "mship.core.run_host.store",
+        "mship.core.workspace_context",
+        "mship.util.shell",
+        "mship.core.config",
     }
     missing = known - closure
-    assert not missing, f"import-closure walker lost known serve-reachable modules: {sorted(missing)}"
+    assert not missing, (
+        f"import-closure walker lost known serve-reachable modules: {sorted(missing)}"
+    )
 
 
 def test_detector_fires_on_synthetic_positive():

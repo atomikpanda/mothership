@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from mship.core.persistence.app_run_repository import (
     AppRunCleanupBlocked,
@@ -41,6 +42,9 @@ def _run(
     repo: str = "api",
     status: str = "starting",
     revision: int = 0,
+    owner_ref: str | None = None,
+    owner_generation: str | None = None,
+    binary_provenance: dict[str, object] | None = None,
 ) -> AppRun:
     return AppRun(
         id=run_id,
@@ -52,19 +56,21 @@ def _run(
         backend_revision="adapter-r2",
         host_name="studio",
         host_scope="project",
-        host_endpoint_fingerprint=host_endpoint_fingerprint("https://studio.example.test"),
+        host_endpoint_fingerprint=host_endpoint_fingerprint(
+            "https://studio.example.test"
+        ),
         safe_target_label="iPhone 16",
         private_binding_ref=binding_ref,
         operation="run",
         protocol_version=1,
         capabilities=("logs", "run"),
-        owner_ref=None,
-        owner_generation=None,
+        owner_ref=owner_ref,
+        owner_generation=owner_generation,
         status=status,
         revision=revision,
         created_at=NOW,
         updated_at=NOW,
-        binary_provenance=None,
+        binary_provenance=binary_provenance,  # type: ignore[arg-type]
     )
 
 
@@ -119,8 +125,9 @@ def test_two_connections_cas_owner_conflict_survives_reopen(tmp_path: Path) -> N
     assert persisted.revision == 1
 
 
-
-def test_transition_distinguishes_missing_run_from_stale_revision(tmp_path: Path) -> None:
+def test_transition_distinguishes_missing_run_from_stale_revision(
+    tmp_path: Path,
+) -> None:
     store = WorkspaceStore(tmp_path / ".mothership")
 
     with store.write(immediate=True) as transaction:
@@ -136,7 +143,9 @@ def test_transition_distinguishes_missing_run_from_stale_revision(tmp_path: Path
             )
 
 
-def test_candidate_lookup_is_exact_task_repo_and_retains_unknown_states(tmp_path: Path) -> None:
+def test_candidate_lookup_is_exact_task_repo_and_retains_unknown_states(
+    tmp_path: Path,
+) -> None:
     store = WorkspaceStore(tmp_path / ".mothership")
 
     with store.write(immediate=True) as transaction:
@@ -144,7 +153,9 @@ def test_candidate_lookup_is_exact_task_repo_and_retains_unknown_states(tmp_path
         transaction.tasks.insert(transaction.connection, _task("task-b", "web"))
         api_ref = transaction.app_runs.store_private_binding({"serial": "api"})
         web_ref = transaction.app_runs.store_private_binding({"serial": "web"})
-        transaction.app_runs.insert(transaction.connection, _run(api_ref, run_id="starting"))
+        transaction.app_runs.insert(
+            transaction.connection, _run(api_ref, run_id="starting")
+        )
         transaction.app_runs.insert(
             transaction.connection,
             _run(api_ref, run_id="unknown", status="unknown"),
@@ -163,7 +174,7 @@ def test_candidate_lookup_is_exact_task_repo_and_retains_unknown_states(tmp_path
         )
 
     with store.read() as transaction:
-        candidates = transaction.app_runs.list_active(
+        candidates = transaction.app_runs.list_candidates(
             transaction.connection,
             task_slug="task-a",
             repo="api",
@@ -173,7 +184,9 @@ def test_candidate_lookup_is_exact_task_repo_and_retains_unknown_states(tmp_path
     assert [run.status for run in candidates] == ["starting", "unknown"]
 
 
-def test_invalid_owner_acknowledgements_do_not_turn_unknown_into_active(tmp_path: Path) -> None:
+def test_acknowledged_owner_survives_unknown_and_terminal_transitions(
+    tmp_path: Path,
+) -> None:
     store = WorkspaceStore(tmp_path / ".mothership")
     with store.write(immediate=True) as transaction:
         transaction.tasks.insert(transaction.connection, _task("task-a", "api"))
@@ -191,28 +204,67 @@ def test_invalid_owner_acknowledgements_do_not_turn_unknown_into_active(tmp_path
                 owner_generation=None,
                 now=NOW,
             )
-        unknown = transaction.app_runs.transition(
+        active = transaction.app_runs.transition(
             transaction.connection,
             run_id="run-a",
             expected_revision=0,
-            status="unknown",
-            owner_ref=None,
-            owner_generation=None,
+            status="active",
+            owner_ref="operation-42",
+            owner_generation="generation-7",
             now=NOW,
         )
-        with pytest.raises(AppRunTransitionError, match="unknown"):
+        unknown = transaction.app_runs.transition(
+            transaction.connection,
+            run_id="run-a",
+            expected_revision=active.revision,
+            status="unknown",
+            owner_ref="operation-42",
+            owner_generation="generation-7",
+            now=NOW,
+        )
+        with pytest.raises(
+            AppRunTransitionError, match="cannot be cleared or replaced"
+        ):
             transaction.app_runs.transition(
                 transaction.connection,
                 run_id="run-a",
                 expected_revision=unknown.revision,
-                status="active",
-                owner_ref="late-owner",
-                owner_generation="late-generation",
+                status="stopped",
+                owner_ref=None,
+                owner_generation=None,
                 now=NOW,
             )
+        with pytest.raises(
+            AppRunTransitionError, match="cannot be cleared or replaced"
+        ):
+            transaction.app_runs.transition(
+                transaction.connection,
+                run_id="run-a",
+                expected_revision=unknown.revision,
+                status="stopped",
+                owner_ref="operation-other",
+                owner_generation="generation-other",
+                now=NOW,
+            )
+        stopped = transaction.app_runs.transition(
+            transaction.connection,
+            run_id="run-a",
+            expected_revision=unknown.revision,
+            status="stopped",
+            owner_ref="operation-42",
+            owner_generation="generation-7",
+            now=NOW,
+        )
+
+    assert stopped.owner_ref == "operation-42"
+    assert stopped.owner_generation == "generation-7"
+    assert "owner_ref" not in stopped.public_projection()
+    assert "owner_generation" not in stopped.public_projection()
 
 
-def test_private_binding_is_owner_only_and_public_projection_redacts_it(tmp_path: Path) -> None:
+def test_private_binding_is_owner_only_and_public_projection_redacts_it(
+    tmp_path: Path,
+) -> None:
     state_dir = tmp_path / ".mothership"
     repository = AppRunRepository(state_dir)
     private_binding = {
@@ -222,7 +274,6 @@ def test_private_binding_is_owner_only_and_public_projection_redacts_it(tmp_path
     }
 
     binding_ref = repository.store_private_binding(private_binding)
-
 
     path = state_dir / "app-run-bindings" / f"{binding_ref}.json"
     run = _run(binding_ref)
@@ -239,9 +290,9 @@ def test_private_binding_is_owner_only_and_public_projection_redacts_it(tmp_path
     with pytest.raises(PrivateBindingError):
         repository.load_private_binding("../not-a-binding")
     assert not os.path.islink(path)
-def test_task_metadata_cleanup_requires_terminal_status_and_explicit_delete(
-    tmp_path: Path,
-) -> None:
+
+
+def test_task_metadata_cleanup_returns_retained_binding_handoff(tmp_path: Path) -> None:
     state_dir = tmp_path / ".mothership"
     store = WorkspaceStore(state_dir)
 
@@ -260,7 +311,120 @@ def test_task_metadata_cleanup_requires_terminal_status_and_explicit_delete(
             owner_generation=None,
             now=NOW,
         )
-        transaction.app_runs.delete_for_task(transaction.connection, "task-a")
+        cleanup_handoff = transaction.app_runs.delete_for_task(
+            transaction.connection,
+            "task-a",
+        )
         assert transaction.tasks.delete(transaction.connection, "task-a")
 
-    assert not (state_dir / "app-run-bindings" / f"{binding_ref}.json").exists()
+    assert cleanup_handoff == (binding_ref,)
+    assert store.app_runs.load_private_binding(binding_ref) == {"serial": "private"}
+
+
+def test_rollback_keeps_terminal_metadata_and_private_binding(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".mothership"
+    store = WorkspaceStore(state_dir)
+    with store.write(immediate=True) as transaction:
+        transaction.tasks.insert(transaction.connection, _task("task-a", "api"))
+        binding_ref = transaction.app_runs.store_private_binding({"serial": "private"})
+        transaction.app_runs.insert(
+            transaction.connection,
+            _run(binding_ref, status="stopped"),
+        )
+
+    with pytest.raises(RuntimeError, match="rollback"):
+        with store.write(immediate=True) as transaction:
+            assert transaction.app_runs.delete_for_task(
+                transaction.connection,
+                "task-a",
+            ) == (binding_ref,)
+            raise RuntimeError("rollback")
+
+    with store.read() as transaction:
+        restored = transaction.app_runs.get(transaction.connection, "run-a")
+    assert restored is not None
+    assert store.app_runs.load_private_binding(binding_ref) == {"serial": "private"}
+
+
+def test_shared_private_binding_is_retained_after_one_task_metadata_deletion(
+    tmp_path: Path,
+) -> None:
+    store = WorkspaceStore(tmp_path / ".mothership")
+    with store.write(immediate=True) as transaction:
+        transaction.tasks.insert(transaction.connection, _task("task-a", "api"))
+        transaction.tasks.insert(transaction.connection, _task("task-b", "web"))
+        binding_ref = transaction.app_runs.store_private_binding({"serial": "shared"})
+        transaction.app_runs.insert(
+            transaction.connection,
+            _run(binding_ref, run_id="run-a", status="stopped"),
+        )
+        transaction.app_runs.insert(
+            transaction.connection,
+            _run(
+                binding_ref,
+                run_id="run-b",
+                task_slug="task-b",
+                repo="web",
+                status="stopped",
+            ),
+        )
+        assert transaction.app_runs.delete_for_task(
+            transaction.connection,
+            "task-a",
+        ) == (binding_ref,)
+
+    with store.read() as transaction:
+        surviving = transaction.app_runs.get(transaction.connection, "run-b")
+    assert surviving is not None
+    assert store.app_runs.load_private_binding(binding_ref) == {"serial": "shared"}
+
+
+def test_untrusted_binary_provenance_is_rejected(tmp_path: Path) -> None:
+    binding_ref = AppRunRepository(tmp_path / ".mothership").store_private_binding({})
+    assert _run(binding_ref).public_projection()["binary_provenance"] is None
+
+    with pytest.raises(ValueError, match="trusted build identity"):
+        _run(binding_ref, binary_provenance={"source_revision": "not-proof"})
+
+
+def test_task_replace_preserves_referenced_memberships_and_rejects_removal(
+    tmp_path: Path,
+) -> None:
+    store = WorkspaceStore(tmp_path / ".mothership")
+    task = Task(
+        slug="task-a",
+        description="Task membership regression",
+        phase="dev",
+        created_at=NOW,
+        affected_repos=["api", "web"],
+        branch="feat/task-a",
+    )
+    with store.write(immediate=True) as transaction:
+        transaction.tasks.insert(transaction.connection, task)
+        binding_ref = transaction.app_runs.store_private_binding({"serial": "private"})
+        transaction.app_runs.insert(transaction.connection, _run(binding_ref))
+
+    reordered = task.model_copy(
+        update={
+            "description": "Task metadata changed",
+            "phase": "review",
+            "affected_repos": ["web", "api"],
+        }
+    )
+    with store.write(immediate=True) as transaction:
+        transaction.tasks.replace(transaction.connection, reordered)
+        preserved = transaction.app_runs.get(transaction.connection, "run-a")
+
+    assert preserved is not None
+    assert preserved.repo == "api"
+
+    removed = reordered.model_copy(update={"affected_repos": ["web"]})
+    with store.write(immediate=True) as transaction:
+        with pytest.raises(IntegrityError):
+            transaction.tasks.replace(transaction.connection, removed)
+        retained_task = transaction.tasks.get(transaction.connection, "task-a")
+        retained_run = transaction.app_runs.get(transaction.connection, "run-a")
+
+    assert retained_task is not None
+    assert retained_task.model_dump(mode="json") == reordered.model_dump(mode="json")
+    assert retained_run is not None
