@@ -159,3 +159,19 @@ def test_remove_missing_role_is_not_an_error(tmp_path):
         assert result.exit_code == 0, result.output
     finally:
         _reset()
+
+
+def test_migrate_malformed_registry_never_echoes_credential_text(tmp_path):
+    ws = _ws(tmp_path)
+    _configure(ws)
+    secret = "private-token-must-not-appear"
+    (ws / ".mothership" / "run-hosts.yaml").write_text(
+        f"ios:\n  url: https://host.invalid\n  token: {secret}:\n"
+    )
+    try:
+        result = runner.invoke(app, ["run-host", "migrate", "--scope", "project"])
+        assert result.exit_code == 1
+        assert secret not in result.output
+        assert "could not read project run-host registry" in result.output
+    finally:
+        _reset()

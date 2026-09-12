@@ -143,7 +143,10 @@ class RunHostStore:
         path = self._path_for(scope)
         if not path.exists():
             return None
-        raw = yaml.safe_load(path.read_text()) or {}
+        try:
+            raw = yaml.safe_load(path.read_text()) or {}
+        except (OSError, yaml.YAMLError, UnicodeError) as exc:
+            raise RunHostError(f"could not read {scope} run-host registry") from exc
         if isinstance(raw, Mapping) and "version" in raw:
             return None
         return _legacy(raw, scope=scope)

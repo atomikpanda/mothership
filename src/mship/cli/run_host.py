@@ -100,11 +100,12 @@ def register(parent: typer.Typer, get_container):
     ):
         """Preview, then explicitly convert, a legacy private registry."""
         out = Output()
-        allowed = get_container().config().run_hosts
         try:
             report = store().migrate(scope=scope, allowed_roles=allowed, apply=apply)
-        except Exception as exc:
-            out.error(str(exc))
+        except Exception:
+            # Registry parser errors can quote the input line; never surface
+            # private YAML (including tokens) through the command output.
+            out.error(f"could not read {scope} run-host registry; fix the private file and retry")
             raise typer.Exit(1)
         if not report.changed:
             out.print(f"no legacy {scope} run-host registry needs migration")

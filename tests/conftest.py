@@ -91,6 +91,13 @@ def _isolate_runtime_dir(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(status, "probe_control_socket", sandboxed_probe)
 
 
+
+
+@pytest.fixture(autouse=True)
+def _isolate_user_run_host_registry(monkeypatch, tmp_path: Path):
+    """Keep layered host-registry tests away from the invoking user's XDG data."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+
 @pytest.fixture(autouse=True)
 def _reset_global_workspace_storage():
     """Keep process-wide storage singletons isolated between test workspaces."""
