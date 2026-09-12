@@ -6,6 +6,7 @@ from sqlalchemy import (
     Column,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     Integer,
     MetaData,
     PrimaryKeyConstraint,
@@ -81,6 +82,52 @@ task_repos = Table(
         "affected_ordinal IS NULL OR affected_ordinal >= 0",
         name="affected_ordinal_non_negative",
     ),
+)
+
+app_runs = Table(
+    "app_runs",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("task_slug", Text, nullable=False),
+    Column("repo", Text, nullable=False),
+    Column("profile", Text, nullable=False),
+    Column("profile_revision", Text, nullable=False),
+    Column("backend", Text, nullable=False),
+    Column("backend_revision", Text, nullable=False),
+    Column("host_name", Text, nullable=False),
+    Column("host_scope", Text, nullable=False),
+    Column("host_endpoint_fingerprint", Text, nullable=False),
+    Column("safe_target_label", Text, nullable=False),
+    Column("private_binding_ref", Text, nullable=False),
+    Column("operation", Text, nullable=False),
+    Column("protocol_version", Integer, nullable=False),
+    Column("capabilities_json", Text, nullable=False),
+    Column("owner_ref", Text),
+    Column("owner_generation", Text),
+    Column("status", Text, nullable=False),
+    Column("revision", Integer, nullable=False, server_default=text("0")),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    Column("binary_provenance_json", Text),
+    ForeignKeyConstraint(["task_slug"], ["tasks.slug"], ondelete="RESTRICT"),
+    ForeignKeyConstraint(
+        ["task_slug", "repo"],
+        ["task_repos.task_slug", "task_repos.repo_name"],
+        ondelete="RESTRICT",
+    ),
+    CheckConstraint("host_scope IN ('user', 'project')", name="host_scope"),
+    CheckConstraint("protocol_version = 1", name="protocol_version"),
+    CheckConstraint(
+        "status IN ('starting', 'active', 'stopped', 'failed', 'unknown')",
+        name="status",
+    ),
+    CheckConstraint(
+        "(status = 'active' AND owner_ref IS NOT NULL AND owner_generation IS NOT NULL) "
+        "OR (status <> 'active' AND owner_ref IS NULL AND owner_generation IS NULL)",
+        name="owner_acknowledgement",
+    ),
+    CheckConstraint("revision >= 0", name="revision_non_negative"),
+    Index("ix_app_runs_task_repo_status", "task_slug", "repo", "status"),
 )
 
 task_test_results = Table(

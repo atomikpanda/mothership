@@ -12,6 +12,7 @@ from mship.core.persistence.backend import (
     detect_backend,
     load_legacy_state,
 )
+from mship.core.persistence.app_run_repository import AppRunRepository
 from mship.core.persistence.database import WorkspaceDatabase
 from mship.core.persistence.errors import LegacyMigrationRequired
 from mship.core.persistence.task_repository import TaskRepository
@@ -24,6 +25,7 @@ class WorkspaceTransaction:
     connection: Connection
     tasks: TaskRepository
     workitems: WorkItemRepository
+    app_runs: AppRunRepository
 
 
 class WorkspaceStore:
@@ -38,6 +40,7 @@ class WorkspaceStore:
         self.database = database or WorkspaceDatabase(self.state_dir)
         self.tasks = TaskRepository()
         self.workitems = WorkItemRepository()
+        self.app_runs = AppRunRepository(self.state_dir)
 
     @property
     def backend(self) -> StorageBackend:
@@ -65,7 +68,12 @@ class WorkspaceStore:
             raise RuntimeError("SQLite workspace transaction requested without a database")
         self.database.initialize()
         with self.database.read() as connection:
-            yield WorkspaceTransaction(connection, self.tasks, self.workitems)
+            yield WorkspaceTransaction(
+                connection,
+                self.tasks,
+                self.workitems,
+                self.app_runs,
+            )
 
     @contextmanager
     def write(self, *, immediate: bool = False) -> Iterator[WorkspaceTransaction]:
@@ -74,4 +82,9 @@ class WorkspaceStore:
             raise LegacyMigrationRequired(self.state_dir)
         self.database.initialize()
         with self.database.write(immediate=immediate) as connection:
-            yield WorkspaceTransaction(connection, self.tasks, self.workitems)
+            yield WorkspaceTransaction(
+                connection,
+                self.tasks,
+                self.workitems,
+                self.app_runs,
+            )

@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from hashlib import sha256
 import json
 import math
+import re
 from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
@@ -294,3 +296,111 @@ def profile_revision(profile: RunProfile, backend: BackendConfig, *, prepared_so
         "prepared_source_revision": source,
     }
     return sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+
+_APP_RUN_STATUSES = frozenset(("starting", "active", "stopped", "failed", "unknown"))
+_BINDING_REF = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
+_FINGERPRINT = re.compile(r"^[0-9a-f]{64}$")
+
+
+def host_endpoint_fingerprint(endpoint: str) -> str:
+    """Return a safe stable identity for a host endpoint without persisting credentials."""
+    return sha256(_safe_text(endpoint, field="host endpoint").encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class AppRun:
+    """A selected-target record, never proof that an owner is still live."""
+
+    id: str
+    task_slug: str
+    repo: str
+    profile: str
+    profile_revision: str
+    backend: str
+    backend_revision: str
+    host_name: str
+    host_scope: Literal["user", "project"]
+    host_endpoint_fingerprint: str
+    safe_target_label: str
+    private_binding_ref: str
+    operation: str
+    protocol_version: Literal[1]
+    capabilities: tuple[str, ...]
+    owner_ref: str | None
+    owner_generation: str | None
+    status: Literal["starting", "active", "stopped", "failed", "unknown"]
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    binary_provenance: dict[str, JsonValue] | None
+
+    def __post_init__(self) -> None:
+        for field in (
+            "id",
+            "task_slug",
+            "repo",
+            "profile",
+            "profile_revision",
+            "backend",
+            "backend_revision",
+            "host_name",
+            "safe_target_label",
+            "operation",
+        ):
+            _safe_text(getattr(self, field), field=field.replace("_", " "))
+        if self.host_scope not in {"user", "project"}:
+            raise ValueError("host scope must be user or project")
+        if not _FINGERPRINT.fullmatch(self.host_endpoint_fingerprint):
+            raise ValueError("host endpoint fingerprint must be a SHA-256 hex digest")
+        if not _BINDING_REF.fullmatch(self.private_binding_ref):
+            raise ValueError("private binding reference must be an opaque generated key")
+        if self.protocol_version != 1:
+            raise ValueError("app run protocol version must be 1")
+        if self.status not in _APP_RUN_STATUSES:
+            raise ValueError("invalid app run status")
+        if self.revision < 0:
+            raise ValueError("app run revision must be non-negative")
+        if self.created_at.tzinfo is None or self.updated_at.tzinfo is None:
+            raise ValueError("app run timestamps must be timezone-aware")
+        if not all(isinstance(value, str) and value for value in self.capabilities):
+            raise ValueError("app run capabilities must contain non-empty strings")
+        if len(set(self.capabilities)) != len(self.capabilities):
+            raise ValueError("app run capabilities must not contain duplicates")
+        if self.status == "active":
+            if self.owner_ref is None or self.owner_generation is None:
+                raise ValueError("active app runs require an owner reference and generation")
+        elif self.owner_ref is not None or self.owner_generation is not None:
+            raise ValueError("non-active app runs must not claim an owner")
+        if self.owner_ref is not None:
+            _safe_text(self.owner_ref, field="owner reference")
+        if self.owner_generation is not None:
+            _safe_text(self.owner_generation, field="owner generation")
+        if self.binary_provenance is not None:
+            checked = _json_value(self.binary_provenance)
+            if not isinstance(checked, dict):
+                raise ValueError("binary provenance must be a JSON object")
+            object.__setattr__(self, "binary_provenance", checked)
+
+    def public_projection(self) -> dict[str, object]:
+        """Return safe selected metadata without a binding, credential, or raw provenance."""
+        return {
+            "id": self.id,
+            "task_slug": self.task_slug,
+            "repo": self.repo,
+            "profile": self.profile,
+            "profile_revision": self.profile_revision,
+            "backend": self.backend,
+            "backend_revision": self.backend_revision,
+            "host_name": self.host_name,
+            "host_scope": self.host_scope,
+            "host_endpoint_fingerprint": self.host_endpoint_fingerprint,
+            "safe_target_label": self.safe_target_label,
+            "operation": self.operation,
+            "protocol_version": self.protocol_version,
+            "capabilities": self.capabilities,
+            "status": self.status,
+            "revision": self.revision,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "binary_provenance_known": self.binary_provenance is not None,
+        }
