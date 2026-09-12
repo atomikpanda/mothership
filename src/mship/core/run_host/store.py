@@ -1,135 +1,304 @@
-"""Gitignored role->connection store + `--remote[=role]` resolution.
-
-Two-layer run-host model (see `mship.core.config` for the public layer):
-`mothership.yaml` declares only logical role *names* (`run_hosts: [...]`,
-optionally opted into per-repo via `RepoConfig.run_host`). This module owns
-the private layer: `RunHostStore` persists each role's concrete
-`{url, token}` in the gitignored `<state_dir>/run-hosts.yaml` (state_dir is
-the `.mothership` dir itself — see `mship.core.state.StateManager` for the
-same anchoring), and `resolve_run_host` picks the connection for a given
-invocation.
-"""
+"""Versioned, private layered run-host registration and resolution."""
 from __future__ import annotations
 
+import fcntl
 import os
+import tempfile
+from dataclasses import replace
 from pathlib import Path
+from typing import Literal, Mapping, Sequence
 
 import yaml
 
 from mship.core.config import RepoConfig, WorkspaceConfig
-from mship.core.run_host.config import RunHostConnection
+from mship.core.run_host.config import HostRegistration, MigrationReport, RunHostConnection
+from mship.core.run_host.paths import run_host_config_dir
+
+Scope = Literal["user", "project"]
+_VERSION = 1
 
 
 class RunHostError(Exception):
-    """Actionable failure resolving a run-host role to a connection.
+    """Safe, actionable run-host registration or resolution failure."""
 
-    Raised by `resolve_run_host` for an ambiguous role, an unknown role (not
-    declared in `config.run_hosts`), or a role that's declared but has no
-    connection mapped in the store yet.
-    """
+
+class _MigrationRequired(RunHostError):
+    pass
 
 
 def _env_key(role: str, field: str) -> str:
-    """`MSHIP_RUN_HOST_<ROLE>_<FIELD>`; role upper-cased, `-` -> `_`."""
     normalized = role.upper().replace("-", "_")
     return f"MSHIP_RUN_HOST_{normalized}_{field}"
 
 
+def _connection(raw: object, *, scope: Scope, name: str) -> RunHostConnection:
+    if not isinstance(raw, Mapping):
+        raise RunHostError(f"invalid {scope} run-host entry {name!r}: missing connection")
+    url, token = raw.get("url"), raw.get("token")
+    if not isinstance(url, str) or not url or not isinstance(token, str) or not token:
+        raise RunHostError(f"invalid {scope} run-host entry {name!r}: connection requires url and token")
+    return RunHostConnection(url, token)
+
+
+def _as_strings(raw: object, *, field: str, scope: Scope, name: str) -> tuple[str, ...]:
+    if not isinstance(raw, list) or not all(isinstance(value, str) and value for value in raw):
+        raise RunHostError(f"invalid {scope} run-host entry {name!r}: {field} must be a list of names")
+    return tuple(raw)
+
+
+def _parse_v1(raw: object, *, scope: Scope) -> tuple[dict[str, HostRegistration], dict[str, tuple[str, ...]]]:
+    if not isinstance(raw, Mapping):
+        raise RunHostError(f"invalid {scope} run-host registry: expected a mapping")
+    if raw.get("version") != _VERSION:
+        if "version" not in raw:
+            raise _MigrationRequired(
+                f"{scope} run-host registry uses the legacy format; run "
+                f"`mship run-host migrate --scope {scope} --apply`"
+            )
+        raise RunHostError(f"unsupported {scope} run-host registry version")
+    hosts = raw.get("hosts")
+    if not isinstance(hosts, Mapping):
+        raise RunHostError(f"invalid {scope} run-host registry: hosts must be a mapping")
+    unknown = set(raw) - {"version", "hosts", "role_hosts"}
+    if unknown:
+        raise RunHostError(f"invalid {scope} run-host registry: unknown keys {sorted(unknown)}")
+    parsed: dict[str, HostRegistration] = {}
+    for name, entry in hosts.items():
+        if not isinstance(name, str) or not name or not isinstance(entry, Mapping):
+            raise RunHostError(f"invalid {scope} run-host registry host entry")
+        unknown_entry = set(entry) - {"roles", "tags", "preference", "connection"}
+        if unknown_entry:
+            raise RunHostError(f"invalid {scope} run-host entry {name!r}: unknown keys {sorted(unknown_entry)}")
+        roles = _as_strings(entry.get("roles"), field="roles", scope=scope, name=name)
+        tags = _as_strings(entry.get("tags", []), field="tags", scope=scope, name=name)
+        preference = entry.get("preference", 0)
+        if not isinstance(preference, int) or isinstance(preference, bool):
+            raise RunHostError(f"invalid {scope} run-host entry {name!r}: preference must be an integer")
+        parsed[name] = HostRegistration(name, roles, tags, preference, _connection(entry.get("connection"), scope=scope, name=name), scope)
+    policy_raw = raw.get("role_hosts", {})
+    if scope == "user" and "role_hosts" in raw:
+        raise RunHostError("invalid user run-host registry: role_hosts is project-only")
+    if not isinstance(policy_raw, Mapping):
+        raise RunHostError(f"invalid {scope} run-host registry: role_hosts must be a mapping")
+    policy: dict[str, tuple[str, ...]] = {}
+    for role, names in policy_raw.items():
+        if not isinstance(role, str) or not role or not isinstance(names, list) or not all(isinstance(name, str) and name for name in names):
+            raise RunHostError(f"invalid {scope} run-host role_hosts entry")
+        policy[role] = tuple(names)
+    return parsed, policy
+
+
+def _legacy(raw: object, *, scope: Scope) -> dict[str, RunHostConnection | None]:
+    if not isinstance(raw, Mapping):
+        raise RunHostError(f"invalid {scope} legacy run-host registry")
+    result: dict[str, RunHostConnection | None] = {}
+    for role, entry in raw.items():
+        if not isinstance(role, str) or not role:
+            raise RunHostError(f"invalid {scope} legacy run-host role")
+        if not isinstance(entry, Mapping):
+            raise RunHostError(f"invalid {scope} legacy run-host entry {role!r}")
+        url, token = entry.get("url"), entry.get("token")
+        if url is None and token is None:
+            result[role] = None
+        elif isinstance(url, str) and url and isinstance(token, str) and token:
+            result[role] = RunHostConnection(url, token)
+        else:
+            raise RunHostError(f"invalid {scope} legacy run-host entry {role!r}")
+    return result
+
+
 class RunHostStore:
-    """Filesystem-backed `{role: {url, token}}` map at
-    `<state_dir>/run-hosts.yaml`.
+    """Layer user XDG hosts with complete, shadowing project host entries."""
 
-    `state_dir` is the `.mothership` directory itself (the file is *not*
-    nested one level deeper under another `.mothership/`), matching how
-    `StateManager` and `InboxLease` anchor their files — see
-    `mship.cli._resolve_state_dir` for how that directory is located.
+    def __init__(self, state_dir: Path, *, user_config_dir: Path | None = None) -> None:
+        self._project_path = Path(state_dir) / "run-hosts.yaml"
+        config_dir = user_config_dir or run_host_config_dir(Path.home(), os.environ)
+        self._user_path = Path(config_dir) / "run-hosts.yaml"
+        self._path = self._project_path  # compatibility for callers that surface this path
 
-    Per-role env overrides win over the file, mirroring
-    `mship.core.relay.token.ensure_serve_token`'s env>file precedence:
-    `MSHIP_RUN_HOST_<ROLE>_URL` / `_TOKEN` (role upper-cased, `-` -> `_`).
-    """
+    def _path_for(self, scope: Scope) -> Path:
+        return self._user_path if scope == "user" else self._project_path
 
-    def __init__(self, state_dir: Path) -> None:
-        self._path = Path(state_dir) / "run-hosts.yaml"
+    def _lock(self, path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock = path.with_name(path.name + ".lock")
+        fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+        os.chmod(lock, 0o600)
+        return fd
 
-    def _read_all(self) -> dict[str, dict[str, str]]:
-        if not self._path.exists():
-            return {}
-        raw = yaml.safe_load(self._path.read_text())
-        return raw or {}
-
-    def _write_all(self, data: dict[str, dict[str, str]]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        payload = yaml.safe_dump(data, sort_keys=True)
-        # Create the tmp file 0600 FROM THE START (os.open with mode 0o600),
-        # not under the process umask (typically 0644) then chmod'd afterward —
-        # otherwise the token sits world-readable for the window between write
-        # and chmod. `os.open` applies the mode subject to umask, so we also
-        # chmod the final file to guarantee 0600 even under an odd umask.
-        tmp = self._path.with_suffix(".yaml.tmp")
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    def _read_scope(self, scope: Scope, *, migration: bool = False) -> tuple[dict[str, HostRegistration], dict[str, tuple[str, ...]]]:
+        path = self._path_for(scope)
+        if not path.exists():
+            return {}, {}
         try:
-            with os.fdopen(fd, "w") as fh:
-                fh.write(payload)
-        except BaseException:
-            # Don't leave a partial tmp behind if the write fails.
-            tmp.unlink(missing_ok=True)
-            raise
-        os.chmod(tmp, 0o600)  # belt-and-suspenders vs. a permissive umask
-        tmp.replace(self._path)
+            raw = yaml.safe_load(path.read_text())
+        except (OSError, yaml.YAMLError, UnicodeError) as exc:
+            raise RunHostError(f"could not read {scope} run-host registry") from exc
+        raw = raw or {}
+        if migration and isinstance(raw, Mapping) and "version" not in raw:
+            return {}, {}
+        return _parse_v1(raw, scope=scope)
 
-    def get(self, role: str) -> RunHostConnection | None:
-        """The connection for `role`, or None if neither the file nor the
-        env overrides supply both a url and a token."""
-        entry = self._read_all().get(role, {})
-        url = os.environ.get(_env_key(role, "URL")) or entry.get("url")
-        token = os.environ.get(_env_key(role, "TOKEN")) or entry.get("token")
-        if not url or not token:
+    def _legacy_scope(self, scope: Scope) -> dict[str, RunHostConnection | None] | None:
+        path = self._path_for(scope)
+        if not path.exists():
             return None
-        return RunHostConnection(url=url, token=token)
+        raw = yaml.safe_load(path.read_text()) or {}
+        if isinstance(raw, Mapping) and "version" in raw:
+            return None
+        return _legacy(raw, scope=scope)
+
+    @staticmethod
+    def _document(hosts: Mapping[str, HostRegistration], role_hosts: Mapping[str, Sequence[str]] | None = None) -> dict:
+        document = {"version": _VERSION, "hosts": {}}
+        for name, host in hosts.items():
+            document["hosts"][name] = {
+                "roles": list(host.roles), "tags": list(host.tags), "preference": host.preference,
+                "connection": {"url": host.connection.url, "token": host.connection.token},
+            }
+        if role_hosts is not None:
+            document["role_hosts"] = {role: list(names) for role, names in role_hosts.items()}
+        return document
+
+    @staticmethod
+    def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        temp = Path(temp_name)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temp.replace(path)
+            os.chmod(path, 0o600)
+        except BaseException:
+            temp.unlink(missing_ok=True)
+            raise
+
+    @classmethod
+    def _atomic_write(cls, path: Path, document: dict) -> None:
+        cls._atomic_write_bytes(path, yaml.safe_dump(document, sort_keys=True).encode())
+
+    def _mutate(self, scope: Scope, mutation) -> None:
+        path = self._path_for(scope)
+        lock_fd = self._lock(path)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            hosts, policy = self._read_scope(scope)
+            mutation(hosts, policy)
+            self._atomic_write(path, self._document(hosts, policy if scope == "project" else None))
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+
+    def effective_hosts(self) -> dict[str, HostRegistration]:
+        user_hosts, _ = self._read_scope("user")
+        project_hosts, _ = self._read_scope("project")
+        return {**user_hosts, **project_hosts}
+
+    def role_hosts(self) -> dict[str, tuple[str, ...]]:
+        _, policy = self._read_scope("project")
+        return policy
+
+    def set_host(self, host: HostRegistration, *, scope: Scope) -> None:
+        if not host.name or not host.roles:
+            raise RunHostError("run-host name and at least one role are required")
+        self._mutate(scope, lambda hosts, _policy: hosts.__setitem__(host.name, replace(host, scope=scope)))
+
+    def remove_host(self, name: str, *, scope: Scope) -> None:
+        self._mutate(scope, lambda hosts, _policy: hosts.pop(name, None))
+
+    def set_role_hosts(self, role: str, names: Sequence[str] | None) -> None:
+        if not role:
+            raise RunHostError("role is required")
+        def mutate(_hosts, policy):
+            if names is None:
+                policy.pop(role, None)
+            else:
+                policy[role] = tuple(names)
+        self._mutate("project", mutate)
+
+    def migrate(self, *, scope: Scope, allowed_roles: Sequence[str], apply: bool) -> MigrationReport:
+        path = self._path_for(scope)
+        lock_fd = self._lock(path)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            legacy = self._legacy_scope(scope)
+            if legacy is None:
+                return MigrationReport(scope, False, ())
+            hosts: dict[str, HostRegistration] = {}
+            policy: dict[str, tuple[str, ...]] = {}
+            for role, conn in legacy.items():
+                if conn is not None:
+                    hosts[role] = HostRegistration(role, (role,), (), 0, conn, scope)
+                    if scope == "project":
+                        policy[role] = (role,)
+                elif scope == "project":
+                    policy[role] = ()
+            if scope == "project":
+                for role in allowed_roles:
+                    policy.setdefault(role, ())
+            backup = path.with_name(path.name + ".legacy.bak")
+            if apply:
+                # The backup is byte-for-byte exact and installed before the
+                # atomically replaced active file.
+                self._atomic_write_bytes(backup, path.read_bytes())
+                self._atomic_write(path, self._document(hosts, policy if scope == "project" else None))
+            return MigrationReport(scope, True, tuple(sorted(hosts)), backup if apply else None)
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+
+    # Legacy method names deliberately create versioned entries; they do not read legacy files.
+    def get(self, role: str) -> RunHostConnection | None:
+        try:
+            return _connection_for_role(self, role, environ=os.environ)
+        except _MigrationRequired:
+            return None
 
     def set(self, role: str, conn: RunHostConnection) -> None:
-        data = self._read_all()
-        data[role] = {"url": conn.url, "token": conn.token}
-        self._write_all(data)
+        self.set_host(HostRegistration(role, (role,), (), 0, conn, "project"), scope="project")
 
     def remove(self, role: str) -> None:
-        data = self._read_all()
-        if role in data:
-            del data[role]
-            self._write_all(data)
+        self.remove_host(role, scope="project")
 
     def redacted_list(self) -> list[tuple[str, str]]:
-        """`(role, url)` for every role mapped in the file, role-sorted.
-        Tokens are never returned by this method."""
-        return sorted((role, entry.get("url", "")) for role, entry in self._read_all().items())
+        return sorted((name, host.connection.url) for name, host in self.effective_hosts().items())
+
+    def safe_hosts(self) -> dict[str, dict[str, object]]:
+        return {name: {"name": host.name, "roles": host.roles, "tags": host.tags,
+                       "preference": host.preference, "scope": host.scope,
+                       "url": host.connection.url}
+                for name, host in self.effective_hosts().items()}
 
 
-def resolve_run_host(
-    role: str | None,
-    *,
-    repo: RepoConfig | None,
-    config: WorkspaceConfig,
-    store: RunHostStore,
-) -> RunHostConnection:
-    """Pick the run-host connection for a `--remote[=role]` invocation.
+    def connection_for_role(self, role: str, *, environ: Mapping[str, str]) -> RunHostConnection | None:
+        """Resolve a role's private connection for a trusted in-process caller."""
+        return _connection_for_role(self, role, environ=environ)
 
-    Precedence (most specific wins):
-        1. explicit `role` (an operator-supplied `--remote=<role>`)
-        2. `repo.run_host` (the repo's declared default role)
-        3. the sole entry in `config.run_hosts`, if there is exactly one
+def _connection_for_role(store: RunHostStore, role: str, *, environ: Mapping[str, str]) -> RunHostConnection | None:
+    hosts = store.effective_hosts()
+    policy = store.role_hosts()
+    candidates = [host for host in hosts.values() if role in host.roles]
+    if role in policy:
+        candidates = [host for host in candidates if host.name in policy[role]]
+    url, token = environ.get(_env_key(role, "URL")), environ.get(_env_key(role, "TOKEN"))
+    if len(candidates) > 1:
+        raise RunHostError(f"ambiguous run-host role {role!r}; eligible hosts: {sorted(host.name for host in candidates)}")
+    if len(candidates) == 1:
+        base = candidates[0].connection
+        return RunHostConnection(url or base.url, token or base.token)
+    # Legacy environment-only registration remains supported for a declared role,
+    # but a project role policy that explicitly permits none must not be bypassed.
+    if role not in policy and url and token:
+        return RunHostConnection(url, token)
+    return None
 
-    Raises `RunHostError` with an actionable message when:
-        - no role resolves and `config.run_hosts` is empty (nothing declared)
-        - no role resolves and `config.run_hosts` has 2+ entries (ambiguous;
-          message asks for an explicit `--remote=<role>`)
-        - the resolved role isn't in `config.run_hosts` (unknown role, e.g. a
-          typo in `repo.run_host` or an explicit `--remote`)
-        - the resolved role is declared but `store.get(role)` is None (names
-          `mship run-host add <role>` as the fix)
-    """
-    known = config.run_hosts
 
+def resolve_run_host(role: str | None, *, repo: RepoConfig | None, config: WorkspaceConfig, store: RunHostStore) -> RunHostConnection:
+    known = tuple(config.run_hosts)
     if role is not None:
         chosen = role
     elif repo is not None and repo.run_host:
@@ -137,29 +306,19 @@ def resolve_run_host(
     elif len(known) == 1:
         chosen = known[0]
     elif not known:
-        raise RunHostError(
-            "no run_hosts declared in mothership.yaml; add a `run_hosts:` "
-            "list of role names before using --remote"
-        )
+        raise RunHostError("no run_hosts declared in mothership.yaml; add a `run_hosts:` list before using --remote")
     else:
-        raise RunHostError(
-            f"ambiguous run-host: multiple roles are configured "
-            f"({', '.join(known)}) and none was specified; pass "
-            f"--remote=<role> to pick one"
-        )
-
+        raise RunHostError(f"ambiguous run-host: multiple roles are configured ({', '.join(known)}) and none was specified; pass --remote=<role> to pick one")
     if chosen not in known:
-        raise RunHostError(
-            f"unknown run-host role {chosen!r}; not declared in this "
-            f"workspace's `run_hosts:` list. Declared roles: "
-            f"{sorted(known)}"
-        )
-
-    conn = store.get(chosen)
+        raise RunHostError(f"unknown run-host role {chosen!r}; not declared in this workspace's `run_hosts:` list. Declared roles: {sorted(known)}")
+    normalized = _env_key(chosen, "URL")
+    collisions = [candidate for candidate in known if _env_key(candidate, "URL") == normalized]
+    if len(collisions) > 1:
+        raise RunHostError(f"ambiguous environment normalization for roles {sorted(collisions)}")
+    try:
+        conn = _connection_for_role(store, chosen, environ=os.environ)
+    except _MigrationRequired as exc:
+        raise RunHostError(str(exc)) from exc
     if conn is None:
-        raise RunHostError(
-            f"run-host role {chosen!r} is declared but has no connection "
-            f"mapped on this machine; run `mship run-host add {chosen}` to "
-            f"map it to a {{url, token}}"
-        )
+        raise RunHostError(f"run-host role {chosen!r} is declared but has no eligible connection mapped on this machine; run `mship run-host add {chosen}` or migrate the legacy registry")
     return conn

@@ -1,16 +1,7 @@
-"""`mship run-host` — manage the per-machine run-host connection store.
-
-`mothership.yaml` declares only logical role *names* (`run_hosts: [...]`,
-`RepoConfig.run_host`) — see `mship.core.config`. This command group manages
-the concrete, gitignored `{role: {url, token}}` mapping that lives at
-`<state_dir>/run-hosts.yaml` (`RunHostStore`, in `mship.core.run_host.store`),
-which `resolve_run_host` reads at invocation time (`--remote[=role]`).
-
-`add` accepts a connection either directly (`--url` + `--token`) or via a
-pasted Ground Control pair link (`--pair-link`, the same
-`groundcontrol://add?...` shape `mship pair` prints) — exactly one source.
-"""
+"""Private named run-host registry management."""
 from __future__ import annotations
+
+from typing import Literal
 
 import typer
 
@@ -19,75 +10,107 @@ from mship.cli.output import Output
 
 def register(parent: typer.Typer, get_container):
     run_host_app = typer.Typer(
-        name="run-host",
-        help="Manage per-machine run-host connections (role -> {url, token}).",
-        no_args_is_help=True,
+        name="run-host", help="Manage private named run-host connections.", no_args_is_help=True,
     )
 
-    @run_host_app.command("add")
-    def add(
-        role: str = typer.Argument(..., help="Logical run-host role name (declared in mothership.yaml's run_hosts:)."),
-        url: str = typer.Option(None, "--url", help="Run-host base URL. Requires --token; mutually exclusive with --pair-link."),
-        token: str = typer.Option(None, "--token", help="Run-host bearer token. Requires --url; mutually exclusive with --pair-link."),
-        pair_link: str = typer.Option(None, "--pair-link", help="A pasted groundcontrol://add?... pair link to parse url+token from, instead of --url/--token."),
-    ):
-        """Map a run-host role to a connection ({url, token})."""
-        from mship.core.relay.pairing import parse_pair_link
-        from mship.core.run_host.config import RunHostConnection
+    def store():
         from mship.core.run_host.store import RunHostStore
+        return RunHostStore(get_container().state_dir())
 
+    def connection(url: str | None, token: str | None, pair_link: str | None):
+        from mship.core.relay.pairing import parse_pair_link
         out = Output()
-        has_pair_link = pair_link is not None
-        has_url_or_token = url is not None or token is not None
-
-        if has_pair_link and has_url_or_token:
+        if pair_link is not None and (url is not None or token is not None):
             out.error("pass either --url/--token or --pair-link, not both")
             raise typer.Exit(2)
-
-        if has_pair_link:
+        if pair_link is not None:
             try:
                 parsed = parse_pair_link(pair_link)
             except ValueError as exc:
                 out.error(f"invalid --pair-link: {exc}")
                 raise typer.Exit(2)
-            resolved_url, resolved_token = parsed["url"], parsed["token"]
-        elif url is not None and token is not None:
-            resolved_url, resolved_token = url, token
-        else:
-            out.error("provide a connection: either --url and --token together, or --pair-link")
-            raise typer.Exit(2)
+            return parsed["url"], parsed["token"]
+        if url is not None and token is not None:
+            return url, token
+        out.error("provide a connection: either --url and --token together, or --pair-link")
+        raise typer.Exit(2)
 
-        state_dir = get_container().state_dir()
-        RunHostStore(state_dir).set(role, RunHostConnection(url=resolved_url, token=resolved_token))
-        out.success(f"run-host {role!r} -> {resolved_url}")
+    @run_host_app.command("add")
+    def add(
+        name: str = typer.Argument(..., help="Private host name."),
+        role: list[str] = typer.Option(None, "--role", help="Advertised role (repeatable; defaults to NAME)."),
+        scope: Literal["user", "project"] = typer.Option("project", "--scope", help="Registration scope."),
+        url: str | None = typer.Option(None, "--url", help="Run-host base URL. Requires --token."),
+        token: str | None = typer.Option(None, "--token", help="Bearer token. Requires --url."),
+        pair_link: str | None = typer.Option(None, "--pair-link", help="Ground Control pair link."),
+        tag: list[str] = typer.Option(None, "--tag", help="Host tag (repeatable)."),
+        preference: int = typer.Option(0, "--preference", help="Host preference among equal targets."),
+    ):
+        """Add or replace one complete named host entry in its chosen scope."""
+        from mship.core.run_host.config import HostRegistration, RunHostConnection
+        resolved_url, resolved_token = connection(url, token, pair_link)
+        roles = tuple(role or [name])
+        store().set_host(HostRegistration(name, roles, tuple(tag or ()), preference,
+                                          RunHostConnection(resolved_url, resolved_token), scope), scope=scope)
+        Output().success(f"registered run-host {name!r} in {scope} scope")
 
     @run_host_app.command("list")
     def list_cmd():
-        """List configured run-host roles and URLs (tokens are never shown)."""
-        from mship.core.run_host.store import RunHostStore
-
+        """List safe effective host summaries; tokens are never displayed."""
         out = Output()
-        state_dir = get_container().state_dir()
-        entries = RunHostStore(state_dir).redacted_list()
+        try:
+            entries = store().safe_hosts()
+        except Exception as exc:
+            out.error(str(exc))
+            raise typer.Exit(1)
         if not entries:
             out.print("no run-hosts configured")
             return
-        out.table(
-            title="Run hosts",
-            columns=["Role", "URL"],
-            rows=[[role, url] for role, url in entries],
-        )
+        out.table(title="Run hosts", columns=["Name", "Roles", "URL", "Scope"],
+                  rows=[[name, ", ".join(host["roles"]), host["url"], host["scope"]]
+                        for name, host in sorted(entries.items())])
 
     @run_host_app.command("remove")
     def remove(
-        role: str = typer.Argument(..., help="Run-host role name to remove."),
+        name: str = typer.Argument(..., help="Host name to remove."),
+        scope: Literal["user", "project"] = typer.Option("project", "--scope", help="Registration scope."),
     ):
-        """Remove a role's mapped connection (a no-op if it isn't mapped)."""
-        from mship.core.run_host.store import RunHostStore
+        """Remove a scoped host entry (a missing entry is a no-op)."""
+        store().remove_host(name, scope=scope)
+        Output().success(f"removed run-host {name!r} from {scope} scope")
 
+    @run_host_app.command("allow-role")
+    def allow_role(
+        role: str = typer.Argument(..., help="Role whose project eligibility policy is changed."),
+        host: list[str] = typer.Option(None, "--host", help="Allowed host name (repeatable)."),
+        all_hosts: bool = typer.Option(False, "--all", help="Opt into all hosts advertising this role."),
+    ):
+        """Set project-only role eligibility; --all removes the restriction."""
         out = Output()
-        state_dir = get_container().state_dir()
-        RunHostStore(state_dir).remove(role)
-        out.success(f"removed run-host {role!r}")
+        if all_hosts == bool(host):
+            out.error("pass exactly one of --host or --all")
+            raise typer.Exit(2)
+        store().set_role_hosts(role, None if all_hosts else host)
+        out.success(f"updated allowed hosts for role {role!r}")
+
+    @run_host_app.command("migrate")
+    def migrate(
+        scope: Literal["user", "project"] = typer.Option("project", "--scope", help="Legacy registry scope."),
+        apply: bool = typer.Option(False, "--apply", help="Write backup and convert the legacy registry."),
+    ):
+        """Preview, then explicitly convert, a legacy private registry."""
+        out = Output()
+        allowed = get_container().config().run_hosts
+        try:
+            report = store().migrate(scope=scope, allowed_roles=allowed, apply=apply)
+        except Exception as exc:
+            out.error(str(exc))
+            raise typer.Exit(1)
+        if not report.changed:
+            out.print(f"no legacy {scope} run-host registry needs migration")
+        elif not apply:
+            out.print(f"would migrate {scope} registry hosts: {', '.join(report.hosts) or '(none)'}; rerun with --apply")
+        else:
+            out.success(f"migrated {scope} registry; private backup: {report.backup_path}")
 
     parent.add_typer(run_host_app, rich_help_panel="Runtime")

@@ -249,7 +249,11 @@ def cleanup_run_refs(task, *, config, store, shell, warn) -> list[str]:
             continue
         try:
             conn = resolve_run_host(None, repo=root_config, config=config, store=store)
-        except RunHostError:
+        except RunHostError as exc:
+            # A pooled role cannot be guessed during unprofiled cleanup; the
+            # selected-run exact-host owner is intentionally deferred to Task 7.
+            if "ambiguous" in str(exc):
+                warn(f"could not determine {git_repo}'s exact run host for cleanup: {exc}")
             continue
         try:
             delete_run_ref(

@@ -48,24 +48,45 @@ repos:
 
 ## Mapping a role to a connection (`mship run-host`)
 
-Each machine maps a role to a concrete `{url, token}` **locally**, in the gitignored `.mothership/run-hosts.yaml` (never in `mothership.yaml`):
+Named host registrations are private. User registrations live in
+`$XDG_CONFIG_HOME/mothership/run-hosts.yaml` (or `~/.config/mothership` when
+XDG is unset, empty, or relative); project registrations live in the private
+`.mothership/run-hosts.yaml`. A same-named project entry replaces the complete
+user entry. Neither location belongs in `mothership.yaml`.
 
 ```bash
 # on the remote machine (the run host itself):
-mship pair              # prints a groundcontrol://add?... link (+ QR) for its own relay URL + serve token
+mship pair              # prints a groundcontrol://add?... link (+ QR)
 
-# on your operator machine:
-mship run-host add ios-sim-host --pair-link 'groundcontrol://add?...'
-# or, if you already have the url/token some other way:
-mship run-host add ios-sim-host --url https://mac-abc123.relay.example.com --token <serve-token>
+# on your operator machine: reusable registration
+mship run-host add studio --scope user --role ios-sim-host \
+  --pair-link 'groundcontrol://add?...'
 
-mship run-host list      # role -> url (tokens are always redacted)
-mship run-host remove ios-sim-host
+# a project-specific complete replacement (the default scope is project):
+mship run-host add studio --role ios-sim-host \
+  --url https://mac-abc123.relay.example.com --token <serve-token>
+
+mship run-host list      # safe name, role, URL and winning scope; never token
+mship run-host remove studio --scope project
 ```
 
-`MSHIP_RUN_HOST_<ROLE>_URL` / `MSHIP_RUN_HOST_<ROLE>_TOKEN` env vars override the file per-role, if you'd rather not persist a mapping (role upper-cased, `-` → `_`).
+Existing local role-to-connection files must be migrated explicitly; preview
+first, then apply. Migration writes an owner-private exact backup beside the
+original file and preserves each old role as an exact named host:
 
-Because the mapping lives outside `mothership.yaml`, the same public config is portable across the whole team — each operator binds `ios-sim-host` to whatever Mac *they* have.
+```bash
+mship run-host migrate --scope project
+mship run-host migrate --scope project --apply
+```
+
+After migration an old role remains restricted to its exact converted host.
+Only deliberately opt into a pool with `mship run-host allow-role <role> --all`
+or list approved names with repeated `--host NAME`.
+
+`MSHIP_RUN_HOST_<ROLE>_URL` / `MSHIP_RUN_HOST_<ROLE>_TOKEN` env vars are a
+per-role override for one already eligible host; both variables can also form a
+legacy environment-only registration. They never distribute credentials across
+a pooled role (role upper-cased, `-` → `_`).
 
 ## Using it (`--remote[=role]`)
 

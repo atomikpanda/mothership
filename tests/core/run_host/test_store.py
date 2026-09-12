@@ -61,11 +61,13 @@ def test_token_tmp_file_is_0600_from_the_start_no_wide_window(tmp_path: Path, mo
     assert (tmp_path / "run-hosts.yaml").stat().st_mode & 0o777 == 0o600
 
 
-def test_store_file_shape_is_role_to_url_token_mapping(tmp_path: Path):
+def test_store_file_shape_is_versioned_named_host_registry(tmp_path: Path):
     store = RunHostStore(tmp_path)
     store.set("ios-sim-host", RunHostConnection(url="http://h", token="t"))
     raw = yaml.safe_load((tmp_path / "run-hosts.yaml").read_text())
-    assert raw == {"ios-sim-host": {"url": "http://h", "token": "t"}}
+    assert raw["version"] == 1
+    assert raw["hosts"]["ios-sim-host"]["roles"] == ["ios-sim-host"]
+    assert raw["hosts"]["ios-sim-host"]["connection"] == {"url": "http://h", "token": "t"}
 
 
 def test_remove_deletes_role(tmp_path: Path):
