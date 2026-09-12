@@ -6,11 +6,13 @@ import os
 import tempfile
 from dataclasses import replace
 from pathlib import Path
-from typing import Literal, Mapping, Sequence
+from typing import TYPE_CHECKING, Literal, Mapping, Sequence
 
 import yaml
 
-from mship.core.config import RepoConfig, WorkspaceConfig
+if TYPE_CHECKING:
+    from mship.core.config import RepoConfig, WorkspaceConfig
+
 from mship.core.run_host.config import HostRegistration, MigrationReport, RunHostConnection
 from mship.core.run_host.paths import run_host_config_dir
 

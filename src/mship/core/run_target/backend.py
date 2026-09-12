@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -25,6 +26,7 @@ from mship.core.run_target.models import (
 DISCOVERY_STDOUT_LIMIT = 1024 * 1024
 DISCOVERY_STDERR_LIMIT = 256 * 1024
 DISCOVERY_TIMEOUT_SECONDS = 60
+HOST_BINDINGS_MAX_BYTES = 1024 * 1024
 
 BackendExecutor = Callable[[HostRegistration, BackendExecution], BackendResult]
 
@@ -66,15 +68,52 @@ def host_bindings_path(home: Path, environ: Mapping[str, str] = os.environ) -> P
     return base / "mothership" / "run-target-bindings.yaml"
 
 
+def _read_private_bindings(path: Path) -> bytes | None:
+    """Read one owner-private regular file without following a replacement link."""
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise _protocol_error("bindings") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_mode & 0o077
+            or metadata.st_size > HOST_BINDINGS_MAX_BYTES
+        ):
+            raise _protocol_error("bindings")
+        chunks: list[bytes] = []
+        remaining = HOST_BINDINGS_MAX_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) > HOST_BINDINGS_MAX_BYTES:
+            raise _protocol_error("bindings")
+        return payload
+    except OSError as error:
+        raise _protocol_error("bindings") from error
+    finally:
+        os.close(descriptor)
+
+
 def load_host_bindings(path: Path, backend: str) -> dict[str, JsonValue]:
     """Load only one backend's bounded private path and alias data."""
     if not backend:
         raise _protocol_error("backend")
-    if not path.exists():
+    payload = _read_private_bindings(path)
+    if payload is None:
         return {"paths": {}, "aliases": {}}
     try:
-        raw = yaml.safe_load(path.read_text())
-    except (OSError, UnicodeError, yaml.YAMLError) as error:
+        raw = yaml.safe_load(payload)
+    except (UnicodeError, yaml.YAMLError) as error:
         raise _protocol_error("bindings") from error
     if not isinstance(raw, dict) or set(raw) != {"version", "backends"} or raw.get("version") != 1:
         raise _protocol_error("bindings")

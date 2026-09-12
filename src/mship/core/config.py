@@ -5,7 +5,7 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, field_validator, model_validator
 
-from mship.core.run_target.models import BackendConfig, RunProfile
+from mship.core.run_target.models import BackendConfig, RunProfile, safe_identifier
 from mship.core.evidence_store import EvidenceModeError, resolve_evidence_mode
 from mship.core.relay.config import RelayConfig
 
@@ -223,16 +223,20 @@ class RepoConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_run_target_refs(self) -> "RepoConfig":
-        if self.default_run_profile is not None and self.default_run_profile not in self.run_profiles:
-            raise ValueError(
-                f"default_run_profile {self.default_run_profile!r} does not name a configured profile"
-            )
+        if self.default_run_profile is not None:
+            safe_identifier(self.default_run_profile, field="default_run_profile")
+            if self.default_run_profile not in self.run_profiles:
+                raise ValueError(
+                    f"default_run_profile {self.default_run_profile!r} does not name a configured profile"
+                )
         for profile_name, profile in self.run_profiles.items():
+            safe_identifier(profile_name, field="run profile name")
             if profile.backend not in self.run_backends:
                 raise ValueError(
                     f"run profile {profile_name!r} references unknown backend {profile.backend!r}"
                 )
         for backend_name, backend in self.run_backends.items():
+            safe_identifier(backend_name, field="run backend name")
             requested = [backend.discover_task, *backend.operations.values()]
             unknown = [task for task in requested if task not in self.tasks]
             if unknown:

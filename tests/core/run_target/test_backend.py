@@ -154,7 +154,8 @@ def test_discovery_script_consumes_private_request_and_emits_protocol(tmp_path: 
         "'backend_revision': request['backend_revision'], 'rank_schema': [], 'candidates': [{"
         "'target_key': 'device-private', 'label': 'Phone', 'tags': [], 'roles': [], 'aliases': ['phone'], "
         "'capabilities': ['run'], 'ready': True, 'reason': None, 'remediation': None, 'preparation': [], 'rank': [], 'binding': {}}], 'errors': []}))\n"
-        "print('read-only inventory', file=sys.stderr)\n"
+
+
     )
     config = BackendConfig(discover_task="discover", operations={"run": "launch"})
 
@@ -171,6 +172,32 @@ def test_discovery_script_consumes_private_request_and_emits_protocol(tmp_path: 
     assert inventory.error is None
     assert inventory.host.name == "studio"
     assert inventory.candidates[0].aliases == ("phone",)
+def test_bindings_require_owner_private_regular_file_and_stay_bounded(tmp_path: Path):
+    bindings = tmp_path / "run-target-bindings.yaml"
+    bindings.write_text("version: 1\nbackends:\n  flutter:\n    paths: {}\n    aliases: {}\n")
+    bindings.chmod(0o644)
+    with pytest.raises(TargetSelectionError) as error:
+        load_host_bindings(bindings, "flutter")
+    assert error.value.code == "backend_protocol"
+
+    bindings.chmod(0o600)
+    link = tmp_path / "bindings-link.yaml"
+    link.symlink_to(bindings)
+    with pytest.raises(TargetSelectionError) as error:
+        load_host_bindings(link, "flutter")
+    assert error.value.code == "backend_protocol"
+
+    fifo = tmp_path / "bindings.fifo"
+    os.mkfifo(fifo, 0o600)
+    with pytest.raises(TargetSelectionError) as error:
+        load_host_bindings(fifo, "flutter")
+    assert error.value.code == "backend_protocol"
+
+    bindings.write_bytes(b"x" * (1024 * 1024 + 1))
+    bindings.chmod(0o600)
+    with pytest.raises(TargetSelectionError) as error:
+        load_host_bindings(bindings, "flutter")
+    assert error.value.code == "backend_protocol"
 
 
 def test_bindings_only_return_requested_backend_and_reject_non_json(tmp_path: Path):
@@ -178,10 +205,12 @@ def test_bindings_only_return_requested_backend_and_reject_non_json(tmp_path: Pa
     bindings.write_text(
         "version: 1\nbackends:\n  flutter:\n    paths: {sdk: /private/flutter}\n    aliases: {phone: device-private}\n  browser:\n    paths: {binary: /private/browser}\n    aliases: {}\n"
     )
+    bindings.chmod(0o600)
     assert load_host_bindings(bindings, "flutter") == {
         "paths": {"sdk": "/private/flutter"}, "aliases": {"phone": "device-private"}
     }
     bindings.write_text("version: 1\nbackends:\n  flutter:\n    paths: {bad: !!set {x: null}}\n    aliases: {}\n")
+    bindings.chmod(0o600)
     with pytest.raises(TargetSelectionError) as error:
         load_host_bindings(bindings, "flutter")
     assert error.value.code == "backend_protocol"

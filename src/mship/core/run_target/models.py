@@ -62,6 +62,11 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+
+
+def safe_identifier(value: str, *, field: str) -> str:
+    """Validate a user-facing profile/backend identifier consistently."""
+    return _safe_text(value, field=field)
 class HostRequirements(_StrictModel):
     roles: tuple[str, ...]
     tags: tuple[str, ...] = ()

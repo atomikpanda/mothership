@@ -1350,3 +1350,35 @@ def test_run_profile_config_rejects_invalid_cross_references(repo):
                 },
             }
         )
+
+
+@pytest.mark.parametrize(
+    "run_profiles,run_backends,default",
+    [
+        (
+            {"bad\nprofile": {"backend": "flutter", "hosts": {"roles": ["mobile"]}, "options": {}}},
+            {"flutter": {"discover_task": "discover", "operations": {"run": "launch"}}},
+            None,
+        ),
+        (
+            {"ios": {"backend": "bad\tbackend", "hosts": {"roles": ["mobile"]}, "options": {}}},
+            {"bad\tbackend": {"discover_task": "discover", "operations": {"run": "launch"}}},
+            None,
+        ),
+        (
+            {"ios": {"backend": "flutter", "hosts": {"roles": ["mobile"]}, "options": {}}},
+            {"flutter": {"discover_task": "discover", "operations": {"run": "launch"}}},
+            "ios\n",
+        ),
+    ],
+)
+def test_run_target_config_identifiers_reject_empty_or_control_characters(run_profiles, run_backends, default):
+    with pytest.raises(ValueError):
+        RepoConfig(
+            path=Path("."),
+            type="service",
+            tasks={"discover": "targets", "launch": "run"},
+            run_profiles=run_profiles,
+            run_backends=run_backends,
+            default_run_profile=default,
+        )
