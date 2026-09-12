@@ -123,7 +123,7 @@ mship item link-plan <id> <path>                    # attach an implementation p
 mship item archive|unarchive <id>                   # soft-hide / restore
 
 mship state status                                  # inspect legacy/SQLite backend and schema revision
-mship state migrate                                 # explicitly cut legacy Task/WorkItem files over to SQLite
+mship state migrate                                 # explicit legacy cutover or known SQLite schema upgrade
 mship state export --format json|yaml               # deterministic Task/WorkItem records on stdout
 
 mship spec new --title "title"                      # create a spec (lands in needs_review)
@@ -193,7 +193,7 @@ mship sync [--repos r]                              # fast-forward behind-only c
 mship prune [--force]                               # remove orphaned worktrees
 mship export [--redacted] [--format dir|zip]        # bundle a task's journal/plan/spec/state/diffs (opt-in secret redaction)
 mship state status                                  # read-only storage backend/revision inspection
-mship state migrate                                 # validated legacy -> SQLite cutover
+mship state migrate                                 # validated legacy cutover or known SQLite schema upgrade
 mship state export --format json|yaml               # full Task/WorkItem data only
 ```
 
@@ -208,13 +208,21 @@ SQLite.
 `database_path`, `current_revision`, `head_revision`, and
 `migration_required`, so operators can check compatibility before maintenance.
 
-Stop the per-user daemon before running `mship state migrate`. Migration takes
-exclusive state locks, validates every legacy Task and WorkItem, and copies the
-live legacy files to `.mothership/backups/<UTC timestamp>/`. It builds and
-verifies a candidate database before atomically activating `mothership.db`; a
-failure leaves the legacy files live and can be retried. Successful legacy
-paths are retained beside the database with a `.migrated-<UTC timestamp>`
-suffix.
+Stop the per-user daemon before running `mship state migrate`. For legacy
+Task/WorkItem files, migration takes exclusive state locks, validates every
+record, and copies the live inputs to `.mothership/backups/<UTC timestamp>/`.
+It builds and verifies a candidate database before atomically activating
+`mothership.db`; a failure leaves the legacy files live and can be retried.
+Successful legacy paths are retained beside the database with a
+`.migrated-<UTC timestamp>` suffix.
+
+For an existing SQLite database at a known older packaged revision, the same
+command reserves the writer, creates a consistent owner-private backup, and
+reports its location. It applies the packaged upgrade transactionally and
+verifies the resulting revision, foreign keys, and preserved Task/WorkItem
+data before committing. A failed upgrade rolls back; unknown or future
+revisions are not guessed or overwritten. Repeating a successful migration
+is a no-op.
 
 The cutover has no dual-write period. Once `mothership.db` is active, the
 SQLite database is authoritative and older Mothership binaries that only write
@@ -224,7 +232,9 @@ revisions rather than being changed implicitly.
 
 `mship state export --format json` and `--format yaml` emit the same stable,
 sorted Task and WorkItem payload, including archived WorkItems. The export does
-not traverse mailbox messages, secrets, specs, journals, or artifact bytes. It
+not include app-run metadata or traverse private target bindings, mailbox
+messages, secrets, specs, journals, or artifact bytes. This is not a full
+database backup. It
 is distinct from `mship export`, which builds a task review bundle.
 
 ## Long-running services
