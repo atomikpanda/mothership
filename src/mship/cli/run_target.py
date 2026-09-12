@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 
 from mship.cli.output import Output
-from mship.core.run_target.models import SelectedTarget, TargetSelectionError
+from mship.core.run_target.models import SelectedTarget, TargetSelectionError, safe_identifier
 
 
 def _can_prompt(*, interactive: bool, output: Output) -> bool:
@@ -43,11 +43,15 @@ def _select_number(
 def choose_target(
     candidates: Sequence[SelectedTarget],
     *,
+    profile_name: str,
+    backend_name: str,
     interactive: bool,
     input_fn: Callable[[str], str],
     output: Output,
 ) -> SelectedTarget:
     """Choose a safe friendly target, or fail without touching stdin."""
+    safe_identifier(profile_name, field="profile name")
+    safe_identifier(backend_name, field="backend name")
     if not candidates:
         raise TargetSelectionError("target_unavailable", "No eligible target")
     if len(candidates) == 1:
@@ -59,9 +63,9 @@ def choose_target(
             aliases = ", ".join(candidate.aliases) or "none"
             readiness = "ready" if candidate.ready else candidate.reason or "unavailable"
             output.print(
-                f"{number}. host: {selected.host.name}; target: {candidate.label}; "
-                f"aliases: {aliases}; readiness: {readiness}; scope: {selected.host.scope}; "
-                f"backend revision: {selected.backend_revision}; profile revision: {selected.profile_revision}"
+                f"{number}. host: {selected.host.name}; profile: {profile_name}; backend: {backend_name}; "
+                f"target: {candidate.label}; aliases: {aliases}; readiness: {readiness}; "
+                f"scope: {selected.host.scope}"
             )
     index = _select_number(
         len(candidates), kind="target", interactive=interactive, input_fn=input_fn, output=output
@@ -81,7 +85,7 @@ def choose_profile(
         raise TargetSelectionError("profile_missing", "no run profile is configured")
     if len(set(names)) != len(names):
         raise TargetSelectionError("constraint_conflict", "configured profile names are not unique")
-    if len(names) == 1:
+    if len(names) == 1 and _can_prompt(interactive=interactive, output=output):
         return names[0]
     if _can_prompt(interactive=interactive, output=output):
         output.print("Select a run profile:")
