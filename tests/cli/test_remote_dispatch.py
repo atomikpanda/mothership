@@ -18,6 +18,7 @@ Two layers:
     that OMITTING --remote never touches `remote_client`/httpx at all and
     runs the untouched local path.
 """
+
 from __future__ import annotations
 
 import io
@@ -55,10 +56,14 @@ NONCE = "nonceabcdef012345"
 NONCE_HEADER = "X-Mship-Exec-Nonce"
 
 
-def _frame(lines, exit_code: int, artifact_tar: bytes | None = None, *, nonce: str = NONCE) -> bytes:
+def _frame(
+    lines, exit_code: int, artifact_tar: bytes | None = None, *, nonce: str = NONCE
+) -> bytes:
     body = b"".join(l.encode() if isinstance(l, str) else l for l in lines)
     if artifact_tar is not None:
-        body += f"{ARTIFACT_MARKER}:{nonce} {len(artifact_tar)}\n".encode() + artifact_tar
+        body += (
+            f"{ARTIFACT_MARKER}:{nonce} {len(artifact_tar)}\n".encode() + artifact_tar
+        )
     body += f"{EXIT_MARKER}:{nonce} {exit_code}\n".encode()
     return body
 
@@ -84,7 +89,9 @@ def _mock_transport(handler):
     return httpx.MockTransport(handler)
 
 
-def _recording_handler(recorder: dict, body: bytes, status: int = 200, *, nonce: str | None = NONCE):
+def _recording_handler(
+    recorder: dict, body: bytes, status: int = 200, *, nonce: str | None = NONCE
+):
     def handler(request: httpx.Request) -> httpx.Response:
         recorder["url"] = str(request.url)
         recorder["headers"] = dict(request.headers)
@@ -132,7 +139,10 @@ def test_exec_remote_posts_expected_url_headers_and_body():
     printed = []
 
     code = remote_client.exec_remote(
-        verb="run", conn=conn, task="t1", repos=["api"],
+        verb="run",
+        conn=conn,
+        task="t1",
+        repos=["api"],
         print_fn=printed.append,
         transport=_mock_transport(_recording_handler(recorder, body)),
     )
@@ -150,7 +160,11 @@ def test_exec_remote_includes_platform_when_given():
     conn = RunHostConnection(url="http://remote.example", token="tok")
 
     remote_client.exec_remote(
-        verb="capture", conn=conn, task="t1", repos=["app"], platform="ios",
+        verb="capture",
+        conn=conn,
+        task="t1",
+        repos=["app"],
+        platform="ios",
         transport=_mock_transport(_recording_handler(recorder, body)),
         print_fn=lambda _l: None,
     )
@@ -163,7 +177,11 @@ def test_exec_remote_renders_lines_live_in_order():
     printed = []
 
     code = remote_client.exec_remote(
-        verb="run", conn=conn, task="t1", repos=["api"], print_fn=printed.append,
+        verb="run",
+        conn=conn,
+        task="t1",
+        repos=["api"],
+        print_fn=printed.append,
         transport=_mock_transport(_recording_handler({}, body)),
     )
     assert code == 0
@@ -174,7 +192,11 @@ def test_exec_remote_returns_nonzero_remote_exit_code_not_a_raise():
     body = _frame(["boom\n"], exit_code=7)
     conn = RunHostConnection(url="http://h", token="t")
     code = remote_client.exec_remote(
-        verb="run", conn=conn, task="t1", repos=["api"], print_fn=lambda _l: None,
+        verb="run",
+        conn=conn,
+        task="t1",
+        repos=["api"],
+        print_fn=lambda _l: None,
         transport=_mock_transport(_recording_handler({}, body)),
     )
     assert code == 7
@@ -187,8 +209,13 @@ def test_exec_remote_extracts_artifact_tar_into_captures_dir(tmp_path):
     out_dir = tmp_path / "captures" / "t1" / "20260711T000000Z-android"
 
     code = remote_client.exec_remote(
-        verb="capture", conn=conn, task="t1", repos=["app"], platform="android",
-        captures_dir_for=out_dir, print_fn=lambda _l: None,
+        verb="capture",
+        conn=conn,
+        task="t1",
+        repos=["app"],
+        platform="android",
+        captures_dir_for=out_dir,
+        print_fn=lambda _l: None,
         transport=_mock_transport(_recording_handler({}, body)),
     )
 
@@ -202,7 +229,11 @@ def test_exec_remote_no_artifact_block_when_captures_dir_for_absent():
     body = _frame(["ok\n"], exit_code=0)
     conn = RunHostConnection(url="http://h", token="t")
     code = remote_client.exec_remote(
-        verb="run", conn=conn, task="t1", repos=["api"], print_fn=lambda _l: None,
+        verb="run",
+        conn=conn,
+        task="t1",
+        repos=["api"],
+        print_fn=lambda _l: None,
         transport=_mock_transport(_recording_handler({}, body)),
     )
     assert code == 0
@@ -215,7 +246,11 @@ def test_exec_remote_connection_failure_raises_remote_exec_error():
     conn = RunHostConnection(url="http://unreachable.example", token="t")
     with pytest.raises(remote_client.RemoteExecError) as exc_info:
         remote_client.exec_remote(
-            verb="run", conn=conn, task="t1", repos=["api"], print_fn=lambda _l: None,
+            verb="run",
+            conn=conn,
+            task="t1",
+            repos=["api"],
+            print_fn=lambda _l: None,
             transport=_mock_transport(handler),
         )
     # Task 6: a connection-level failure gets a specific, actionable message
@@ -233,7 +268,11 @@ def test_exec_remote_non_2xx_raises_remote_exec_error():
 
     with pytest.raises(remote_client.RemoteExecError):
         remote_client.exec_remote(
-            verb="run", conn=conn, task="t1", repos=["api"], print_fn=lambda _l: None,
+            verb="run",
+            conn=conn,
+            task="t1",
+            repos=["api"],
+            print_fn=lambda _l: None,
             transport=_mock_transport(handler),
         )
 
@@ -253,7 +292,11 @@ def test_exec_remote_503_surfaces_not_bootstrapped_message():
 
     with pytest.raises(remote_client.RemoteExecError) as exc_info:
         remote_client.exec_remote(
-            verb="run", conn=conn, task="t1", repos=["api"], print_fn=lambda _l: None,
+            verb="run",
+            conn=conn,
+            task="t1",
+            repos=["api"],
+            print_fn=lambda _l: None,
             transport=_mock_transport(handler),
         )
     msg = str(exc_info.value)
@@ -262,6 +305,7 @@ def test_exec_remote_503_surfaces_not_bootstrapped_message():
 
 def test_exec_remote_survives_quiet_build_then_returns_remote_result():
     """A real socket must survive more than HTTPX's default five idle seconds."""
+
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             self.rfile.read(int(self.headers["Content-Length"]))
@@ -289,9 +333,12 @@ def test_exec_remote_survives_quiet_build_then_returns_remote_result():
             code = remote_client.exec_remote(
                 verb="run",
                 conn=RunHostConnection(
-                    url=f"http://127.0.0.1:{server.server_port}", token="test",
+                    url=f"http://127.0.0.1:{server.server_port}",
+                    token="test",
                 ),
-                task="quiet-build", repos=["app"], print_fn=printed.append,
+                task="quiet-build",
+                repos=["app"],
+                print_fn=printed.append,
             )
         finally:
             worker.join(timeout=10)
@@ -323,9 +370,12 @@ def test_exec_remote_bounds_stalled_error_body():
                 remote_client.exec_remote(
                     verb="run",
                     conn=RunHostConnection(
-                        url=f"http://127.0.0.1:{server.server_port}", token="test",
+                        url=f"http://127.0.0.1:{server.server_port}",
+                        token="test",
                     ),
-                    task="stalled-error", repos=["app"], print_fn=lambda _: None,
+                    task="stalled-error",
+                    repos=["app"],
+                    print_fn=lambda _: None,
                 )
         finally:
             release.set()
@@ -341,13 +391,18 @@ def test_exec_remote_stream_without_exit_sentinel_raises():
 
     def handler(request):
         return httpx.Response(
-            200, content=_chunked(b"partial output\n"),
+            200,
+            content=_chunked(b"partial output\n"),
             headers={NONCE_HEADER: NONCE},
         )
 
     with pytest.raises(remote_client.RemoteExecError):
         remote_client.exec_remote(
-            verb="run", conn=conn, task="t1", repos=["api"], print_fn=lambda _l: None,
+            verb="run",
+            conn=conn,
+            task="t1",
+            repos=["api"],
+            print_fn=lambda _l: None,
             transport=_mock_transport(handler),
         )
 
@@ -360,7 +415,11 @@ def test_exec_remote_missing_nonce_header_raises():
     conn = RunHostConnection(url="http://h", token="t")
     with pytest.raises(remote_client.RemoteExecError) as exc:
         remote_client.exec_remote(
-            verb="run", conn=conn, task="t1", repos=["api"], print_fn=lambda _l: None,
+            verb="run",
+            conn=conn,
+            task="t1",
+            repos=["api"],
+            print_fn=lambda _l: None,
             transport=_mock_transport(_recording_handler({}, body, nonce=None)),
         )
     assert "nonce" in str(exc.value).lower()
@@ -378,7 +437,11 @@ def test_exec_remote_task_stdout_cannot_spoof_exit_code():
     printed: list[str] = []
 
     code = remote_client.exec_remote(
-        verb="run", conn=conn, task="t1", repos=["api"], print_fn=printed.append,
+        verb="run",
+        conn=conn,
+        task="t1",
+        repos=["api"],
+        print_fn=printed.append,
         transport=_mock_transport(_recording_handler({}, body)),
     )
     assert code == 7  # the real nonce-tagged exit governs, not the spoof
@@ -400,8 +463,12 @@ def test_exec_remote_over_cap_artifact_count_errors_without_reading(tmp_path):
     out_dir = tmp_path / "captures"
     with pytest.raises(remote_client.RemoteExecError) as exc:
         remote_client.exec_remote(
-            verb="capture", conn=conn, task="t1", repos=["app"],
-            captures_dir_for=out_dir, print_fn=lambda _l: None,
+            verb="capture",
+            conn=conn,
+            task="t1",
+            repos=["app"],
+            captures_dir_for=out_dir,
+            print_fn=lambda _l: None,
             transport=_mock_transport(_recording_handler({}, body)),
         )
     assert "cap" in str(exc.value).lower()
@@ -423,8 +490,12 @@ def test_exec_remote_negative_artifact_count_errors_without_reading(tmp_path):
     out_dir = tmp_path / "captures"
     with pytest.raises(remote_client.RemoteExecError) as exc:
         remote_client.exec_remote(
-            verb="capture", conn=conn, task="t1", repos=["app"],
-            captures_dir_for=out_dir, print_fn=lambda _l: None,
+            verb="capture",
+            conn=conn,
+            task="t1",
+            repos=["app"],
+            captures_dir_for=out_dir,
+            print_fn=lambda _l: None,
             transport=_mock_transport(_recording_handler({}, body)),
         )
     assert "negative" in str(exc.value).lower()
@@ -442,8 +513,12 @@ def test_exec_remote_compressed_tar_is_rejected(tmp_path):
     out_dir = tmp_path / "captures"
     with pytest.raises(remote_client.RemoteExecError) as exc:
         remote_client.exec_remote(
-            verb="capture", conn=conn, task="t1", repos=["app"],
-            captures_dir_for=out_dir, print_fn=lambda _l: None,
+            verb="capture",
+            conn=conn,
+            task="t1",
+            repos=["app"],
+            captures_dir_for=out_dir,
+            print_fn=lambda _l: None,
             transport=_mock_transport(_recording_handler({}, body)),
         )
     assert "tar" in str(exc.value).lower()
@@ -457,7 +532,11 @@ def test_exec_remote_malformed_control_count_raises_clean_error():
     conn = RunHostConnection(url="http://h", token="t")
     with pytest.raises(remote_client.RemoteExecError) as exc:
         remote_client.exec_remote(
-            verb="run", conn=conn, task="t1", repos=["api"], print_fn=lambda _l: None,
+            verb="run",
+            conn=conn,
+            task="t1",
+            repos=["api"],
+            print_fn=lambda _l: None,
             transport=_mock_transport(_recording_handler({}, body)),
         )
     assert "malformed" in str(exc.value).lower()
@@ -469,7 +548,10 @@ def test_exec_remote_malformed_control_count_raises_clean_error():
 
 
 def _write_run_workspace(
-    ws: Path, *, run_hosts: list[str], repo_run_host: str | None = None,
+    ws: Path,
+    *,
+    run_hosts: list[str],
+    repo_run_host: str | None = None,
     repos: list[str] = ["api"],
 ) -> None:
     run_host_line = f"    run_host: {repo_run_host}\n" if repo_run_host else ""
@@ -483,17 +565,18 @@ def _write_run_workspace(
         )
         blocks += f"  {name}:\n    path: ./{name}\n    type: service\n{run_host_line}"
     (ws / "mothership.yaml").write_text(
-        "workspace: t\n"
-        f"run_hosts: [{', '.join(run_hosts)}]\n"
-        "repos:\n"
-        f"{blocks}"
+        f"workspace: t\nrun_hosts: [{', '.join(run_hosts)}]\nrepos:\n{blocks}"
     )
 
 
-def _write_capture_workspace(ws: Path, *, run_hosts: list[str], platforms: list[str]) -> Path:
+def _write_capture_workspace(
+    ws: Path, *, run_hosts: list[str], platforms: list[str]
+) -> Path:
     repo_dir = ws / "app"
     repo_dir.mkdir(exist_ok=True)
-    (repo_dir / "Taskfile.yml").write_text("version: '3'\ntasks:\n  capture:\n    cmds:\n      - echo ok\n")
+    (repo_dir / "Taskfile.yml").write_text(
+        "version: '3'\ntasks:\n  capture:\n    cmds:\n      - echo ok\n"
+    )
     plat = "[" + ", ".join(platforms) + "]"
     (ws / "mothership.yaml").write_text(
         "workspace: t\n"
@@ -514,16 +597,26 @@ def _write_capture_workspace(ws: Path, *, run_hosts: list[str], platforms: list[
     return wt
 
 
-def _seed_task(ws: Path, *, slug: str, repos: list[str], worktrees: dict[str, str] | None = None) -> None:
-    StateManager(ws / ".mothership").save(WorkspaceState(tasks={
-        slug: Task(
-            slug=slug, description="d", phase="dev",
-            created_at=datetime(2026, 7, 11, tzinfo=timezone.utc),
-            affected_repos=repos, branch=f"feat/{slug}",
-            worktrees=worktrees or {}, base_branch="main",
-            active_repo=repos[0] if worktrees else None,
+def _seed_task(
+    ws: Path, *, slug: str, repos: list[str], worktrees: dict[str, str] | None = None
+) -> None:
+    StateManager(ws / ".mothership").save(
+        WorkspaceState(
+            tasks={
+                slug: Task(
+                    slug=slug,
+                    description="d",
+                    phase="dev",
+                    created_at=datetime(2026, 7, 11, tzinfo=timezone.utc),
+                    affected_repos=repos,
+                    branch=f"feat/{slug}",
+                    worktrees=worktrees or {},
+                    base_branch="main",
+                    active_repo=repos[0] if worktrees else None,
+                )
+            }
         )
-    }))
+    )
 
 
 def _configure(ws: Path) -> MagicMock:
@@ -534,7 +627,9 @@ def _configure(ws: Path) -> MagicMock:
     container.config_path.override(ws / "mothership.yaml")
     container.state_dir.override(state_dir)
     mock_shell = MagicMock(spec=ShellRunner)
-    mock_shell.run_task.return_value = ShellResult(returncode=0, stdout="ok\n", stderr="")
+    mock_shell.run_task.return_value = ShellResult(
+        returncode=0, stdout="ok\n", stderr=""
+    )
     popen_mock = MagicMock()
     popen_mock.stdout = None
     popen_mock.stderr = None
@@ -676,7 +771,9 @@ def test_cli_run_remote_without_resolvable_task_is_clean_error(tmp_path, monkeyp
         _reset()
 
 
-def test_cli_capture_remote_extracts_artifacts_into_exact_local_captures_path(tmp_path, monkeypatch):
+def test_cli_capture_remote_extracts_artifacts_into_exact_local_captures_path(
+    tmp_path, monkeypatch
+):
     """The capture path this test asserts against (.mothership/captures/
     <task>/<UTCts>-<platform>/) must be identical in shape to the LOCAL
     capture path computed at cli/capture.py:104-110 — see
@@ -695,8 +792,14 @@ def test_cli_capture_remote_extracts_artifacts_into_exact_local_captures_path(tm
     try:
         with _ClientPatch(monkeypatch, _recording_handler(recorder, body)):
             result = runner.invoke(
-                app, [
-                    "--json", "capture", "--task", "t1", "--repo", "app",
+                app,
+                [
+                    "--json",
+                    "capture",
+                    "--task",
+                    "t1",
+                    "--repo",
+                    "app",
                     "--remote=role-x",
                 ],
             )
@@ -707,7 +810,10 @@ def test_cli_capture_remote_extracts_artifacts_into_exact_local_captures_path(tm
         assert "remote task progress" in result.stderr
         assert recorder["url"] == "http://remote.example/exec/capture"
         assert recorder["json"] == {
-            "task": "t1", "repos": ["app"], "kind": "all", "platform": "android",
+            "task": "t1",
+            "repos": ["app"],
+            "kind": "all",
+            "platform": "android",
         }
 
         captures_root = tmp_path / ".mothership" / "captures" / "t1"
@@ -736,7 +842,8 @@ def test_cli_capture_remote_extracts_artifacts_into_exact_local_captures_path(tm
 
 
 def test_cli_capture_remote_with_evidence_attaches_artifact_with_remote_provenance(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Remote evidence records the sent snapshot, not its parent or binary.
 
@@ -752,11 +859,19 @@ def test_cli_capture_remote_with_evidence_attaches_artifact_with_remote_provenan
     container.shell.override(shell)
 
     now = datetime(2026, 7, 25, tzinfo=timezone.utc)
-    SpecStore(tmp_path / "specs").save(Spec(
-        id="dq", title="Dequeue", status="approved",
-        created_at=now, updated_at=now, affected_repos=["app"],
-        acceptance_criteria=[AcceptanceCriterion(id="ac1", text="The card clears.")],
-    ))
+    SpecStore(tmp_path / "specs").save(
+        Spec(
+            id="dq",
+            title="Dequeue",
+            status="approved",
+            created_at=now,
+            updated_at=now,
+            affected_repos=["app"],
+            acceptance_criteria=[
+                AcceptanceCriterion(id="ac1", text="The card clears.")
+            ],
+        )
+    )
 
     RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     tar_bytes = _make_tar({"screen.png": b"PNGDATA"})
@@ -765,10 +880,17 @@ def test_cli_capture_remote_with_evidence_attaches_artifact_with_remote_provenan
     try:
         with _ClientPatch(monkeypatch, _recording_handler({}, body)):
             result = runner.invoke(
-                app, [
-                    "capture", "--task", "t1", "--repo", "app", "--remote=role-x",
-                    "--evidence", "dq:ac1",
-                ]
+                app,
+                [
+                    "capture",
+                    "--task",
+                    "t1",
+                    "--repo",
+                    "app",
+                    "--remote=role-x",
+                    "--evidence",
+                    "dq:ac1",
+                ],
             )
         assert result.exit_code == 0, result.output
 
@@ -825,6 +947,7 @@ def test_cli_capture_remote_exit0_but_no_artifact_is_hard_error(tmp_path, monkey
     finally:
         _reset()
 
+
 @pytest.mark.parametrize(
     ("case", "remove_worktree", "diagnostic"),
     [
@@ -834,7 +957,11 @@ def test_cli_capture_remote_exit0_but_no_artifact_is_hard_error(tmp_path, monkey
     ],
 )
 def test_cli_capture_remote_refuses_unprepared_source(
-    tmp_path, monkeypatch, case, remove_worktree, diagnostic,
+    tmp_path,
+    monkeypatch,
+    case,
+    remove_worktree,
+    diagnostic,
 ):
     """Capture shares run/build's refusal path and never reaches the host."""
     wt = _write_capture_workspace(tmp_path, run_hosts=["role-x"], platforms=["android"])
@@ -853,7 +980,9 @@ def test_cli_capture_remote_refuses_unprepared_source(
     recorder: dict = {}
 
     try:
-        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+        with _ClientPatch(
+            monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))
+        ):
             result = runner.invoke(
                 app, ["capture", "--task", "t1", "--repo", "app", "--remote=role-x"]
             )
@@ -864,7 +993,9 @@ def test_cli_capture_remote_refuses_unprepared_source(
         _reset()
 
 
-def test_cli_capture_remote_transfers_dirty_snapshot_before_dispatch(tmp_path, monkeypatch):
+def test_cli_capture_remote_transfers_dirty_snapshot_before_dispatch(
+    tmp_path, monkeypatch
+):
     """Dirty capture sends the exact snapshot to the run host, never origin."""
     wt = _write_capture_workspace(tmp_path, run_hosts=["role-x"], platforms=["android"])
     _seed_task(tmp_path, slug="t1", repos=["app"], worktrees={"app": str(wt)})
@@ -889,7 +1020,10 @@ def test_cli_capture_remote_transfers_dirty_snapshot_before_dispatch(tmp_path, m
     finally:
         _reset()
 
-def test_cli_capture_remote_aborts_when_dirty_snapshot_transfer_fails(tmp_path, monkeypatch):
+
+def test_cli_capture_remote_aborts_when_dirty_snapshot_transfer_fails(
+    tmp_path, monkeypatch
+):
     """A failed scratch-ref push must not capture against an older remote tree."""
     wt = _write_capture_workspace(tmp_path, run_hosts=["role-x"], platforms=["android"])
     _seed_task(tmp_path, slug="t1", repos=["app"], worktrees={"app": str(wt)})
@@ -901,7 +1035,9 @@ def test_cli_capture_remote_aborts_when_dirty_snapshot_transfer_fails(tmp_path, 
     recorder: dict = {}
 
     try:
-        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+        with _ClientPatch(
+            monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))
+        ):
             result = runner.invoke(
                 app, ["capture", "--task", "t1", "--repo", "app", "--remote=role-x"]
             )
@@ -910,6 +1046,7 @@ def test_cli_capture_remote_aborts_when_dirty_snapshot_transfer_fails(tmp_path, 
         assert recorder == {}
     finally:
         _reset()
+
 
 def test_cli_capture_remote_uses_git_root_for_dirty_child(tmp_path, monkeypatch):
     """A capture of a git-root child transfers its parent tree under the parent."""
@@ -930,7 +1067,9 @@ def test_cli_capture_remote_uses_git_root_for_dirty_child(tmp_path, monkeypatch)
     (wt_mono / "Taskfile.yml").write_text(taskfile)
     (wt_pkg / "Taskfile.yml").write_text(taskfile)
     _seed_task(
-        tmp_path, slug="t1", repos=["mono", "pkg"],
+        tmp_path,
+        slug="t1",
+        repos=["mono", "pkg"],
         worktrees={"mono": str(wt_mono), "pkg": str(wt_pkg)},
     )
     _configure(tmp_path)
@@ -953,7 +1092,9 @@ def test_cli_capture_remote_uses_git_root_for_dirty_child(tmp_path, monkeypatch)
         _reset()
 
 
-def test_cli_capture_remote_scopes_preflight_to_the_selected_repo(tmp_path, monkeypatch):
+def test_cli_capture_remote_scopes_preflight_to_the_selected_repo(
+    tmp_path, monkeypatch
+):
     """A capture of api cannot inspect or transfer unrelated web work."""
     _write_run_workspace(tmp_path, run_hosts=["role-x"], repos=["api", "web"])
     _seed_task_with_worktree(tmp_path, "t1", "api", "web")
@@ -1002,10 +1143,15 @@ def test_cli_capture_remote_without_active_task_is_clean_error(tmp_path, monkeyp
 # --- RunHostError surfaces as a clean CLI error, never a traceback --------
 
 
-@pytest.mark.parametrize("cli_args_role", [
-    ("run", "--remote=role-x"),   # role declared but never mapped locally
-])
-def test_cli_run_remote_unmapped_role_is_clean_error_not_traceback(tmp_path, monkeypatch, cli_args_role):
+@pytest.mark.parametrize(
+    "cli_args_role",
+    [
+        ("run", "--remote=role-x"),  # role declared but never mapped locally
+    ],
+)
+def test_cli_run_remote_unmapped_role_is_clean_error_not_traceback(
+    tmp_path, monkeypatch, cli_args_role
+):
     verb, remote_flag = cli_args_role
     _write_run_workspace(tmp_path, run_hosts=["role-x"])
     _seed_task(tmp_path, slug="t1", repos=["api"])
@@ -1022,7 +1168,9 @@ def test_cli_run_remote_unmapped_role_is_clean_error_not_traceback(tmp_path, mon
         _reset()
 
 
-def test_cli_run_remote_unknown_role_is_clean_error_not_traceback(tmp_path, monkeypatch):
+def test_cli_run_remote_unknown_role_is_clean_error_not_traceback(
+    tmp_path, monkeypatch
+):
     _write_run_workspace(tmp_path, run_hosts=["role-x"])
     _seed_task(tmp_path, slug="t1", repos=["api"])
     _configure(tmp_path)
@@ -1036,7 +1184,9 @@ def test_cli_run_remote_unknown_role_is_clean_error_not_traceback(tmp_path, monk
         _reset()
 
 
-def test_cli_run_remote_unreachable_host_is_clean_error_not_traceback(tmp_path, monkeypatch):
+def test_cli_run_remote_unreachable_host_is_clean_error_not_traceback(
+    tmp_path, monkeypatch
+):
     """A relay/network-level connect failure must surface as a clean CLI
     error (naming "unreachable") + non-zero exit, never a raw traceback."""
     _write_run_workspace(tmp_path, run_hosts=["role-x"])
@@ -1060,7 +1210,9 @@ def test_cli_run_remote_unreachable_host_is_clean_error_not_traceback(tmp_path, 
         _reset()
 
 
-def test_cli_run_remote_not_bootstrapped_is_clean_error_not_traceback(tmp_path, monkeypatch):
+def test_cli_run_remote_not_bootstrapped_is_clean_error_not_traceback(
+    tmp_path, monkeypatch
+):
     """A remote serve with no workspace config wired in 503s — the CLI must
     show a specific "not bootstrapped" message, not a generic HTTP error."""
     _write_run_workspace(tmp_path, run_hosts=["role-x"])
@@ -1084,7 +1236,9 @@ def test_cli_run_remote_not_bootstrapped_is_clean_error_not_traceback(tmp_path, 
         _reset()
 
 
-def test_cli_capture_remote_unmapped_role_is_clean_error_not_traceback(tmp_path, monkeypatch):
+def test_cli_capture_remote_unmapped_role_is_clean_error_not_traceback(
+    tmp_path, monkeypatch
+):
     """Capture surfaces the shared dispatcher's role-resolution error cleanly."""
     wt = _write_capture_workspace(tmp_path, run_hosts=["role-x"], platforms=["android"])
     _seed_task(tmp_path, slug="t1", repos=["app"], worktrees={"app": str(wt)})
@@ -1103,7 +1257,9 @@ def test_cli_capture_remote_unmapped_role_is_clean_error_not_traceback(tmp_path,
         _reset()
 
 
-def test_cli_run_bare_remote_ambiguous_roles_is_clean_error_not_traceback(tmp_path, monkeypatch):
+def test_cli_run_bare_remote_ambiguous_roles_is_clean_error_not_traceback(
+    tmp_path, monkeypatch
+):
     _write_run_workspace(tmp_path, run_hosts=["role-x", "role-y"])
     _seed_task(tmp_path, slug="t1", repos=["api"])
     _configure(tmp_path)
@@ -1124,12 +1280,16 @@ def test_cli_run_bare_remote_ambiguous_roles_is_clean_error_not_traceback(tmp_pa
 # =============================================================================
 
 
-def test_cli_run_without_remote_never_touches_remote_client_or_httpx(tmp_path, monkeypatch):
+def test_cli_run_without_remote_never_touches_remote_client_or_httpx(
+    tmp_path, monkeypatch
+):
     _write_run_workspace(tmp_path, run_hosts=["role-x"])
     _seed_task(tmp_path, slug="t1", repos=["api"])
     mock_shell = _configure(tmp_path)
 
-    exec_remote_spy = MagicMock(side_effect=AssertionError("exec_remote must not be called"))
+    exec_remote_spy = MagicMock(
+        side_effect=AssertionError("exec_remote must not be called")
+    )
     monkeypatch.setattr(remote_client, "exec_remote", exec_remote_spy)
 
     def httpx_client_guard(*a, **kw):
@@ -1146,12 +1306,16 @@ def test_cli_run_without_remote_never_touches_remote_client_or_httpx(tmp_path, m
         _reset()
 
 
-def test_cli_build_without_remote_never_touches_remote_client_or_httpx(tmp_path, monkeypatch):
+def test_cli_build_without_remote_never_touches_remote_client_or_httpx(
+    tmp_path, monkeypatch
+):
     _write_run_workspace(tmp_path, run_hosts=["role-x"])
     _seed_task(tmp_path, slug="t1", repos=["api"])
     mock_shell = _configure(tmp_path)
 
-    exec_remote_spy = MagicMock(side_effect=AssertionError("exec_remote must not be called"))
+    exec_remote_spy = MagicMock(
+        side_effect=AssertionError("exec_remote must not be called")
+    )
     monkeypatch.setattr(remote_client, "exec_remote", exec_remote_spy)
 
     def httpx_client_guard(*a, **kw):
@@ -1168,12 +1332,16 @@ def test_cli_build_without_remote_never_touches_remote_client_or_httpx(tmp_path,
         _reset()
 
 
-def test_cli_capture_without_remote_never_touches_remote_client_or_httpx(tmp_path, monkeypatch):
+def test_cli_capture_without_remote_never_touches_remote_client_or_httpx(
+    tmp_path, monkeypatch
+):
     wt = _write_capture_workspace(tmp_path, run_hosts=["role-x"], platforms=["android"])
     _seed_task(tmp_path, slug="t1", repos=["app"], worktrees={"app": str(wt)})
     mock_shell = _configure(tmp_path)
 
-    def _run_task_writes_screenshot(task_name, actual_task_name, cwd, env_runner=None, env=None):
+    def _run_task_writes_screenshot(
+        task_name, actual_task_name, cwd, env_runner=None, env=None
+    ):
         out = Path(env["MSHIP_CAPTURE_DIR"])
         out.mkdir(parents=True, exist_ok=True)
         (out / "screen.png").write_bytes(b"PNGDATA")
@@ -1181,7 +1349,9 @@ def test_cli_capture_without_remote_never_touches_remote_client_or_httpx(tmp_pat
 
     mock_shell.run_task.side_effect = _run_task_writes_screenshot
 
-    exec_remote_spy = MagicMock(side_effect=AssertionError("exec_remote must not be called"))
+    exec_remote_spy = MagicMock(
+        side_effect=AssertionError("exec_remote must not be called")
+    )
     monkeypatch.setattr(remote_client, "exec_remote", exec_remote_spy)
 
     def httpx_client_guard(*a, **kw):
@@ -1202,34 +1372,49 @@ def test_cli_capture_without_remote_never_touches_remote_client_or_httpx(tmp_pat
 
 # --- preflight: never dispatch a run that would execute stale code -----------
 
+
 def _seed_task_with_worktree(ws: Path, slug: str, *repos: str) -> dict[str, Path]:
     wts = {}
     for repo in repos:
         wt = ws / ".worktrees" / slug / repo
         wt.mkdir(parents=True, exist_ok=True)
         wts[repo] = wt
-    _seed_task(ws, slug=slug, repos=list(repos),
-               worktrees={r: str(p) for r, p in wts.items()})
+    _seed_task(
+        ws, slug=slug, repos=list(repos), worktrees={r: str(p) for r, p in wts.items()}
+    )
     return wts
 
 
-def _repo_git(porcelain: str = "", *, origin: str | None = "headsha",
-              head: str = "headsha", contains: list[str] = [],
-              status_rc: int = 0, status_err: str = "",
-              head_ref: str = "refs/heads/feat/t1",
-              pair_output: str | None = None) -> dict:
+def _repo_git(
+    porcelain: str = "",
+    *,
+    origin: str | None = "headsha",
+    head: str = "headsha",
+    contains: list[str] = [],
+    status_rc: int = 0,
+    status_err: str = "",
+    head_ref: str = "refs/heads/feat/t1",
+    pair_output: str | None = None,
+) -> dict:
     """One repo's scripted git answers. Defaults to clean, on the task's branch,
     and in sync with origin (`origin` None = the branch is not on origin at
     all; `head_ref` "" = a detached HEAD)."""
     return {
-        "status": porcelain, "status_rc": status_rc, "status_err": status_err,
-        "origin": origin, "head": head, "contains": contains,
-        "head_ref": head_ref, "pair_output": pair_output,
+        "status": porcelain,
+        "status_rc": status_rc,
+        "status_err": status_err,
+        "origin": origin,
+        "head": head,
+        "contains": contains,
+        "head_ref": head_ref,
+        "pair_output": pair_output,
     }
 
 
 def _git_shell(
-    spec: dict | dict[str, dict], *, push_rc: int = 0,
+    spec: dict | dict[str, dict],
+    *,
+    push_rc: int = 0,
     git_dirs: dict[str, Path] | None = None,
 ):
     """A shell whose git answers are scripted per repo (keyed by the worktree
@@ -1247,19 +1432,24 @@ def _git_shell(
         s = spec[Path(cwd).name]
         if "status --porcelain" in cmd:
             return ShellResult(
-                returncode=s["status_rc"], stdout=s["status"], stderr=s["status_err"],
+                returncode=s["status_rc"],
+                stdout=s["status"],
+                stderr=s["status_err"],
             )
         if "rev-parse --git-dir" in cmd:
             # `_inspect_repo` looks here for MERGE_HEAD / rebase-merge — a test
             # that wants the in-progress refusal creates the marker itself.
             git_dir = git_dirs.get(Path(cwd).name)
             return ShellResult(
-                returncode=0, stdout=str(git_dir) if git_dir is not None else ".git",
+                returncode=0,
+                stdout=str(git_dir) if git_dir is not None else ".git",
                 stderr="",
             )
         if "symbolic-ref" in cmd:
             return ShellResult(
-                returncode=0 if s["head_ref"] else 1, stdout=s["head_ref"], stderr="",
+                returncode=0 if s["head_ref"] else 1,
+                stdout=s["head_ref"],
+                stderr="",
             )
         if "ls-remote" in cmd:
             out = "" if s["origin"] is None else f"{s['origin']}\trefs/heads/feat/t1\n"
@@ -1274,15 +1464,18 @@ def _git_shell(
             if s["pair_output"] is not None:
                 return ShellResult(returncode=0, stdout=s["pair_output"], stderr="")
             branch_sha = (
-                s["head"] if s["head_ref"] == f"refs/heads/{target_ref}"
+                s["head"]
+                if s["head_ref"] == f"refs/heads/{target_ref}"
                 else "otherbranchsha"
             )
-            return ShellResult(returncode=0, stdout=f"{s['head']}\n{branch_sha}",
-                               stderr="")
+            return ShellResult(
+                returncode=0, stdout=f"{s['head']}\n{branch_sha}", stderr=""
+            )
         if "merge-base --is-ancestor" in cmd:
             tip = cmd.split()[-2].strip("'")
-            return ShellResult(returncode=0 if tip in s["contains"] else 1,
-                               stdout="", stderr="")
+            return ShellResult(
+                returncode=0 if tip in s["contains"] else 1, stdout="", stderr=""
+            )
         # --- commit synthesis (core/run_transfer.py) -------------------------
         if "write-tree" in cmd:
             return ShellResult(returncode=0, stdout="tree1111\n", stderr="")
@@ -1314,14 +1507,16 @@ def test_a_dirty_worktree_is_sent_to_the_run_host_not_to_origin(tmp_path, monkey
     RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
-        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame(["ok\n"], exit_code=0))):
+        with _ClientPatch(
+            monkeypatch, _recording_handler(recorder, _frame(["ok\n"], exit_code=0))
+        ):
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert result.exit_code == 0, result.output
 
         assert len(shell.pushes) == 1
         assert "synth2222:refs/mship/run/t1/api" in shell.pushes[0]
         assert "http://remote.example/git/api" in shell.pushes[0]
-        assert "origin" not in shell.pushes[0]              # ac3
+        assert "origin" not in shell.pushes[0]  # ac3
         assert recorder["json"]["run_ref_repos"] == ["api"]
         # The snapshot is rooted on the sha the preflight CERTIFIED HEAD to be
         # at, not on a re-resolved `HEAD`: a subagent committing in this
@@ -1330,8 +1525,9 @@ def test_a_dirty_worktree_is_sent_to_the_run_host_not_to_origin(tmp_path, monkey
         # closes for the origin path. Passing the literal "HEAD" here reads
         # identically in every other assertion, so it is asserted directly.
         commands = [c.args[0] for c in shell.run.call_args_list]
-        assert any(c.startswith("git commit-tree tree1111 -p headsha ")
-                   for c in commands), commands
+        assert any(
+            c.startswith("git commit-tree tree1111 -p headsha ") for c in commands
+        ), commands
     finally:
         container.shell.reset_override()
         _reset()
@@ -1358,15 +1554,21 @@ def test_a_git_root_child_is_transferred_under_its_parents_name(tmp_path, monkey
     wt_mono = tmp_path / ".worktrees" / "t1" / "mono"
     wt_pkg = wt_mono / "pkg"
     wt_pkg.mkdir(parents=True)
-    _seed_task(tmp_path, slug="t1", repos=["mono", "pkg"],
-               worktrees={"mono": str(wt_mono), "pkg": str(wt_pkg)})
+    _seed_task(
+        tmp_path,
+        slug="t1",
+        repos=["mono", "pkg"],
+        worktrees={"mono": str(wt_mono), "pkg": str(wt_pkg)},
+    )
     _configure(tmp_path)
     shell = _git_shell({"mono": _repo_git(), "pkg": _repo_git(" M pkg/a.py\n")})
     container.shell.override(shell)
     RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
-        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame(["ok\n"], exit_code=0))):
+        with _ClientPatch(
+            monkeypatch, _recording_handler(recorder, _frame(["ok\n"], exit_code=0))
+        ):
             result = runner.invoke(
                 app, ["run", "--task", "t1", "--repos", "pkg", "--remote=role-x"]
             )
@@ -1375,7 +1577,7 @@ def test_a_git_root_child_is_transferred_under_its_parents_name(tmp_path, monkey
         assert "synth2222:refs/mship/run/t1/mono" in shell.pushes[0]
         assert "http://remote.example/git/mono" in shell.pushes[0]
         assert recorder["json"]["run_ref_repos"] == ["mono"]
-        assert recorder["json"]["repos"] == ["pkg"]   # the RUN's scope is unchanged
+        assert recorder["json"]["repos"] == ["pkg"]  # the RUN's scope is unchanged
     finally:
         container.shell.reset_override()
         _reset()
@@ -1390,7 +1592,9 @@ def test_the_bearer_never_reaches_the_push_command_line(tmp_path, monkeypatch):
     container.shell.override(shell)
     RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     try:
-        with _ClientPatch(monkeypatch, _recording_handler({}, _frame(["ok\n"], exit_code=0))):
+        with _ClientPatch(
+            monkeypatch, _recording_handler({}, _frame(["ok\n"], exit_code=0))
+        ):
             runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert "tok-abc" not in shell.pushes[0]
         assert "Authorization: Bearer tok-abc" in shell.push_envs[0].values()
@@ -1413,7 +1617,9 @@ def test_the_output_names_the_revision_as_a_throwaway_run_ref(tmp_path, monkeypa
     container.shell.override(_git_shell(_repo_git(" M src/app.py\n")))
     RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     try:
-        with _ClientPatch(monkeypatch, _recording_handler({}, _frame(["ok\n"], exit_code=0))):
+        with _ClientPatch(
+            monkeypatch, _recording_handler({}, _frame(["ok\n"], exit_code=0))
+        ):
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert "throwaway" in result.output
         assert "refs/mship/run/t1/api" in result.output
@@ -1433,11 +1639,13 @@ def test_a_failed_transfer_aborts_before_dispatch(tmp_path, monkeypatch):
     RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
-        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+        with _ClientPatch(
+            monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))
+        ):
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert result.exit_code == 1, result.output
         assert "run host" in result.output and "denied" in result.output
-        assert recorder == {}                       # never contacted
+        assert recorder == {}  # never contacted
     finally:
         container.shell.reset_override()
         _reset()
@@ -1454,7 +1662,9 @@ def test_a_mid_rebase_repo_is_refused_before_anything_is_sent(tmp_path, monkeypa
     RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
-        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+        with _ClientPatch(
+            monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))
+        ):
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert result.exit_code == 1, result.output
         assert "merge or rebase in progress in api" in result.output
@@ -1523,16 +1733,19 @@ def test_a_mid_rebase_repo_is_refused_before_anything_is_sent(tmp_path, monkeypa
     ids=["wrong-branch", "no-checkout"],
 )
 def test_clean_operation_marker_outranks_detached_or_wrong_branch(
-    tmp_path, monkeypatch, marker, description, recovery_commands,
-    linked_worktree, head_ref,
+    tmp_path,
+    monkeypatch,
+    marker,
+    description,
+    recovery_commands,
+    linked_worktree,
+    head_ref,
 ):
     """A suspended operation wins over a detached/wrong-branch HEAD, even clean."""
     _write_run_workspace(tmp_path, run_hosts=["role-x"])
     wts = _seed_task_with_worktree(tmp_path, "t1", "api")
     git_dir = (
-        tmp_path / ".git-worktrees" / "api"
-        if linked_worktree
-        else wts["api"] / ".git"
+        tmp_path / ".git-worktrees" / "api" if linked_worktree else wts["api"] / ".git"
     )
     marker_path = git_dir / marker
     marker_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1553,7 +1766,9 @@ def test_clean_operation_marker_outranks_detached_or_wrong_branch(
     RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
-        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+        with _ClientPatch(
+            monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))
+        ):
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert result.exit_code == 1, result.output
         assert description in result.output
@@ -1564,7 +1779,14 @@ def test_clean_operation_marker_outranks_detached_or_wrong_branch(
             assert f'git -C "{wts["api"]}" bisect bad' not in result.output
         commands = [call.args[0] for call in shell.run.call_args_list]
         assert not any(
-            command.startswith(("git rev-parse HEAD", "git symbolic-ref", "git ls-remote", "git merge-base"))
+            command.startswith(
+                (
+                    "git rev-parse HEAD",
+                    "git symbolic-ref",
+                    "git ls-remote",
+                    "git merge-base",
+                )
+            )
             for command in commands
         ), commands
         assert "# or git" not in result.output
@@ -1576,7 +1798,9 @@ def test_clean_operation_marker_outranks_detached_or_wrong_branch(
         _reset()
 
 
-def test_remote_run_pushes_a_clean_unpushed_branch_then_dispatches(tmp_path, monkeypatch):
+def test_remote_run_pushes_a_clean_unpushed_branch_then_dispatches(
+    tmp_path, monkeypatch
+):
     """The case that fails outright today — nothing pushes before `mship finish`."""
     _write_run_workspace(tmp_path, run_hosts=["role-x"])
     _seed_task_with_worktree(tmp_path, "t1", "api")
@@ -1586,14 +1810,18 @@ def test_remote_run_pushes_a_clean_unpushed_branch_then_dispatches(tmp_path, mon
     RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
-        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame(["ok\n"], exit_code=0))):
+        with _ClientPatch(
+            monkeypatch, _recording_handler(recorder, _frame(["ok\n"], exit_code=0))
+        ):
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert result.exit_code == 0, result.output
         # The sha `inspect` resolved HEAD to, not a re-resolved `HEAD` — see
         # test_remote_preflight.py's push-refspec tests for why that distinction
         # matters.
-        assert any("push -u origin headsha:refs/heads/feat/t1" in c for c in shell.pushes)
-        assert recorder["url"] == "http://remote.example/exec/run"   # dispatched after
+        assert any(
+            "push -u origin headsha:refs/heads/feat/t1" in c for c in shell.pushes
+        )
+        assert recorder["url"] == "http://remote.example/exec/run"  # dispatched after
     finally:
         container.shell.reset_override()
         _reset()
@@ -1608,7 +1836,9 @@ def test_a_failed_push_aborts_before_dispatch(tmp_path, monkeypatch):
     RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
-        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+        with _ClientPatch(
+            monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))
+        ):
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert result.exit_code == 1, result.output
         assert "could not push api" in result.output
@@ -1627,7 +1857,9 @@ def test_an_up_to_date_repo_dispatches_without_pushing(tmp_path, monkeypatch):
     RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
-        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame(["ok\n"], exit_code=0))):
+        with _ClientPatch(
+            monkeypatch, _recording_handler(recorder, _frame(["ok\n"], exit_code=0))
+        ):
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert result.exit_code == 0, result.output
         assert shell.pushes == []
@@ -1643,21 +1875,26 @@ def test_a_repo_whose_git_state_is_unreadable_is_not_dispatched(tmp_path, monkey
     _write_run_workspace(tmp_path, run_hosts=["role-x"])
     _seed_task_with_worktree(tmp_path, "t1", "api")
     _configure(tmp_path)
-    shell = _git_shell(_repo_git(
-        status_rc=128, status_err="fatal: not a git repository\n",
-    ))
+    shell = _git_shell(
+        _repo_git(
+            status_rc=128,
+            status_err="fatal: not a git repository\n",
+        )
+    )
     container.shell.override(shell)
     RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
-        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+        with _ClientPatch(
+            monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))
+        ):
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert result.exit_code == 1, result.output
         assert "unreadable git state in api" in result.output
         assert "not a git repository" in result.output
-        assert "mship commit" not in result.output   # a broken repo is not a dirty one
+        assert "mship commit" not in result.output  # a broken repo is not a dirty one
         assert shell.pushes == []
-        assert recorder == {}                        # the remote was never contacted
+        assert recorder == {}  # the remote was never contacted
     finally:
         container.shell.reset_override()
         _reset()
@@ -1674,12 +1911,14 @@ def test_a_newer_commit_on_origin_is_refused_not_pushed(tmp_path, monkeypatch):
     RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
-        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+        with _ClientPatch(
+            monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))
+        ):
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert result.exit_code == 1, result.output
         assert "unpulled commits on origin in api" in result.output
         assert "pull --ff-only" in result.output
-        assert shell.pushes == []                    # a push would only confuse
+        assert shell.pushes == []  # a push would only confuse
         assert recorder == {}
     finally:
         container.shell.reset_override()
@@ -1698,7 +1937,9 @@ def test_a_task_repo_whose_worktree_vanished_is_not_dispatched(tmp_path, monkeyp
     RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
-        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+        with _ClientPatch(
+            monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))
+        ):
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert result.exit_code == 1, result.output
         assert "missing worktree in api" in result.output
@@ -1719,12 +1960,14 @@ def test_a_worktree_not_on_the_task_branch_is_not_dispatched(tmp_path, monkeypat
     RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
-        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+        with _ClientPatch(
+            monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))
+        ):
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert result.exit_code == 1, result.output
         assert "worktree is not on the task's branch in api" in result.output
         assert "HEAD is main, not feat/t1" in result.output
-        assert shell.pushes == []        # nothing published for an unverified HEAD
+        assert shell.pushes == []  # nothing published for an unverified HEAD
         assert recorder == {}
     finally:
         container.shell.reset_override()
@@ -1736,15 +1979,19 @@ def test_a_detached_worktree_at_the_task_tip_is_not_dispatched(tmp_path, monkeyp
     _write_run_workspace(tmp_path, run_hosts=["role-x"])
     _seed_task_with_worktree(tmp_path, "t1", "api")
     _configure(tmp_path)
-    shell = _git_shell(_repo_git(
-        head_ref="",
-        pair_output="headsha\nheadsha\n",
-    ))
+    shell = _git_shell(
+        _repo_git(
+            head_ref="",
+            pair_output="headsha\nheadsha\n",
+        )
+    )
     container.shell.override(shell)
     RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
-        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+        with _ClientPatch(
+            monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))
+        ):
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert result.exit_code == 1, result.output
         assert "worktree is not on the task's branch in api" in result.output
@@ -1779,7 +2026,8 @@ class _TaskVanishesAfterFirstRead:
 
 
 def test_a_task_missing_from_a_later_state_read_does_not_skip_the_preflight(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """The preflight is mandatory. Looking the resolved slug up in a SECOND
     state read made it conditional on that read succeeding: a task gone by then
@@ -1790,20 +2038,28 @@ def test_a_task_missing_from_a_later_state_read_does_not_skip_the_preflight(
     _write_run_workspace(tmp_path, run_hosts=["role-x"])
     _seed_task_with_worktree(tmp_path, "t1", "api")
     _configure(tmp_path)
-    container.shell.override(_git_shell(_repo_git(
-        "", status_rc=128, status_err="fatal: not a git repository\n",
-    )))
+    container.shell.override(
+        _git_shell(
+            _repo_git(
+                "",
+                status_rc=128,
+                status_err="fatal: not a git repository\n",
+            )
+        )
+    )
     container.state_manager.override(
         _TaskVanishesAfterFirstRead(StateManager(tmp_path / ".mothership"))
     )
     RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
-        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+        with _ClientPatch(
+            monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))
+        ):
             result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
         assert result.exit_code == 1, result.output
         assert "unreadable git state in api" in result.output
-        assert recorder == {}                    # the remote was never contacted
+        assert recorder == {}  # the remote was never contacted
     finally:
         container.shell.reset_override()
         _reset()
@@ -1820,19 +2076,23 @@ def test_repos_scope_keeps_an_unrelated_dirty_repo_from_blocking(tmp_path, monke
     RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
-        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame(["ok\n"], exit_code=0))):
+        with _ClientPatch(
+            monkeypatch, _recording_handler(recorder, _frame(["ok\n"], exit_code=0))
+        ):
             result = runner.invoke(
                 app, ["run", "--task", "t1", "--repos", "api", "--remote=role-x"]
             )
         assert result.exit_code == 0, result.output
         assert recorder["json"]["repos"] == ["api"]
-        assert "run_ref_repos" not in recorder["json"]   # web was never transferred
+        assert "run_ref_repos" not in recorder["json"]  # web was never transferred
     finally:
         container.shell.reset_override()
         _reset()
 
 
-def test_a_repos_selection_outside_the_tasks_worktrees_is_not_dispatched(tmp_path, monkeypatch):
+def test_a_repos_selection_outside_the_tasks_worktrees_is_not_dispatched(
+    tmp_path, monkeypatch
+):
     """`--repos web` where `web` is a real repo in this workspace but not one of
     task t1's repos at all (no worktree entry) must refuse rather than silently
     drop web from the check: `_resolve_repos` only validates the selection
@@ -1840,20 +2100,22 @@ def test_a_repos_selection_outside_the_tasks_worktrees_is_not_dispatched(tmp_pat
     stands between this selection and a remote dispatch that materializes
     `feat/t1` for a repo the preflight never looked at."""
     _write_run_workspace(tmp_path, run_hosts=["role-x"], repos=["api", "web"])
-    _seed_task_with_worktree(tmp_path, "t1", "api")   # web is NOT one of t1's repos
+    _seed_task_with_worktree(tmp_path, "t1", "api")  # web is NOT one of t1's repos
     _configure(tmp_path)
     shell = _git_shell(_repo_git())
     container.shell.override(shell)
     RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     recorder: dict = {}
     try:
-        with _ClientPatch(monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))):
+        with _ClientPatch(
+            monkeypatch, _recording_handler(recorder, _frame([], exit_code=0))
+        ):
             result = runner.invoke(
                 app, ["run", "--task", "t1", "--repos", "api,web", "--remote=role-x"]
             )
         assert result.exit_code == 1, result.output
         assert "missing worktree in web" in result.output
-        assert shell.touched == {"api"}          # web was never even looked at
+        assert shell.touched == {"api"}  # web was never even looked at
         assert shell.pushes == []
         assert recorder == {}
     finally:
@@ -1861,7 +2123,9 @@ def test_a_repos_selection_outside_the_tasks_worktrees_is_not_dispatched(tmp_pat
         _reset()
 
 
-def test_repos_scope_does_not_push_a_repo_the_operator_did_not_name(tmp_path, monkeypatch):
+def test_repos_scope_does_not_push_a_repo_the_operator_did_not_name(
+    tmp_path, monkeypatch
+):
     """A narrowly scoped command must not push a repo outside its scope — web's
     branch is not on origin, so an unscoped preflight would push it. The check
     is that web was never so much as LOOKED at: no inspection, hence no push."""
@@ -1872,7 +2136,9 @@ def test_repos_scope_does_not_push_a_repo_the_operator_did_not_name(tmp_path, mo
     container.shell.override(shell)
     RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
     try:
-        with _ClientPatch(monkeypatch, _recording_handler({}, _frame(["ok\n"], exit_code=0))):
+        with _ClientPatch(
+            monkeypatch, _recording_handler({}, _frame(["ok\n"], exit_code=0))
+        ):
             result = runner.invoke(
                 app, ["run", "--task", "t1", "--repos", "api", "--remote=role-x"]
             )
@@ -1886,18 +2152,28 @@ def test_repos_scope_does_not_push_a_repo_the_operator_did_not_name(tmp_path, mo
 
 # --- exact copy: which repos come from a scratch ref -------------------------
 
+
 def test_exec_remote_sends_run_ref_repos_when_there_are_any():
     recorder: dict = {}
     conn = RunHostConnection(url="http://remote.example", token="tok")
 
     remote_client.exec_remote(
-        verb="run", conn=conn, task="t1", repos=["api", "web"],
-        run_ref_repos=["api"], print_fn=lambda _l: None,
-        transport=_mock_transport(_recording_handler(recorder, _frame(["ok\n"], exit_code=0))),
+        verb="run",
+        conn=conn,
+        task="t1",
+        repos=["api", "web"],
+        run_ref_repos=["api"],
+        print_fn=lambda _l: None,
+        transport=_mock_transport(
+            _recording_handler(recorder, _frame(["ok\n"], exit_code=0))
+        ),
     )
 
     assert recorder["json"] == {
-        "task": "t1", "repos": ["api", "web"], "kind": "all", "run_ref_repos": ["api"],
+        "task": "t1",
+        "repos": ["api", "web"],
+        "kind": "all",
+        "run_ref_repos": ["api"],
     }
 
 
@@ -1908,8 +2184,122 @@ def test_exec_remote_omits_the_key_entirely_when_nothing_was_transferred():
     conn = RunHostConnection(url="http://remote.example", token="tok")
 
     remote_client.exec_remote(
-        verb="run", conn=conn, task="t1", repos=["api"], print_fn=lambda _l: None,
-        transport=_mock_transport(_recording_handler(recorder, _frame(["ok\n"], exit_code=0))),
+        verb="run",
+        conn=conn,
+        task="t1",
+        repos=["api"],
+        print_fn=lambda _l: None,
+        transport=_mock_transport(
+            _recording_handler(recorder, _frame(["ok\n"], exit_code=0))
+        ),
     )
 
     assert recorder["json"] == {"task": "t1", "repos": ["api"], "kind": "all"}
+
+
+def test_exec_remote_streams_newline_free_launch_output_in_bounded_fragments():
+    """Long ordinary output is delivered incrementally and still reaches exit."""
+    conn = RunHostConnection(url="http://remote.example", token="tok")
+    output = b"x" * (remote_client.MAX_LEGACY_LINE_BYTES * 2 + 1)
+    printed: list[str] = []
+
+    def handler(_request):
+        return httpx.Response(
+            200,
+            content=_chunked(
+                output + b"\n" + f"{EXIT_MARKER}:{NONCE} 0\n".encode(), size=8191
+            ),
+            headers={NONCE_HEADER: NONCE},
+        )
+
+    code = remote_client.exec_remote(
+        verb="run",
+        conn=conn,
+        task="t1",
+        repos=["api"],
+        print_fn=printed.append,
+        transport=_mock_transport(handler),
+    )
+
+    assert code == 0
+    assert "".join(printed) == output.decode()
+    assert len(printed) >= 3
+    assert max(map(len, printed)) <= remote_client.MAX_LEGACY_LINE_BYTES
+
+
+@pytest.mark.parametrize("structured", [False, True])
+def test_live_output_arrives_before_the_remote_stream_finishes(structured):
+    from mship.core.remote_tool import (
+        ToolEvent,
+        ToolRequest,
+        ToolResult,
+        encode_tool_event,
+    )
+
+    received = Event()
+    early = []
+    identity = {
+        "owner_ref": "live-owner",
+        "generation": "live-generation",
+        "source_revision": "a" * 40,
+    }
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.send_header(NONCE_HEADER, NONCE)
+            self.end_headers()
+            if structured:
+                first = encode_tool_event(
+                    ToolEvent("started", result=ToolResult("running", **identity)),
+                    NONCE,
+                )
+                final = encode_tool_event(
+                    ToolEvent(
+                        "result",
+                        result=ToolResult("completed", exit_code=0, **identity),
+                    ),
+                    NONCE,
+                )
+            else:
+                first, final = b"first\n", _frame([], 0)
+            self.wfile.write(first)
+            self.wfile.flush()
+            early.append(received.wait(timeout=2))
+            self.wfile.write(final)
+            self.wfile.flush()
+
+        def log_message(self, *_args):
+            pass
+
+    with HTTPServer(("127.0.0.1", 0), Handler) as server:
+        worker = Thread(target=server.handle_request, daemon=True)
+        worker.start()
+        conn = RunHostConnection(
+            url=f"http://127.0.0.1:{server.server_port}", token="test"
+        )
+        try:
+            if structured:
+                result = remote_client.exec_tool(
+                    request=ToolRequest(task="t1", repo="api", argv=("tool",)),
+                    conn=conn,
+                    event_sink=lambda event: (
+                        received.set() if event.kind == "started" else None
+                    ),
+                )
+                assert result.status == "completed" and result.exit_code == 0
+            else:
+                assert (
+                    remote_client.exec_remote(
+                        verb="run",
+                        conn=conn,
+                        task="t1",
+                        repos=["api"],
+                        print_fn=lambda _line: received.set(),
+                    )
+                    == 0
+                )
+        finally:
+            worker.join(timeout=5)
+    assert early == [True]

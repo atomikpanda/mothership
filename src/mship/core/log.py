@@ -49,7 +49,7 @@ def _format_kv(entry: LogEntry) -> str:
     if entry.test_state is not None:
         parts.append(f"test={entry.test_state}")
     if entry.action is not None:
-        if ' ' in entry.action:
+        if " " in entry.action:
             a = entry.action.replace('"', '\\"')
             parts.append(f'action="{a}"')
         else:
@@ -65,12 +65,18 @@ def _format_kv(entry: LogEntry) -> str:
         ev = entry.evidence.replace('"', '\\"')
         parts.append(f'evidence="{ev}"')
     if entry.category is not None:
-        if ' ' in entry.category:
+        if " " in entry.category:
             c = entry.category.replace('"', '\\"')
             parts.append(f'category="{c}"')
         else:
             parts.append(f"category={entry.category}")
     return "  " + "  ".join(parts) if parts else ""
+
+
+def format_log_entry(entry: LogEntry) -> str:
+    """Serialize the canonical journal format for ordinary and durable writers."""
+    timestamp = entry.timestamp.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return f"\n## {timestamp}{_format_kv(entry)}\n{entry.message}\n"
 
 
 class LogManager:
@@ -114,7 +120,6 @@ class LogManager:
         path = self._log_path(task_slug)
         if not path.exists():
             self.create(task_slug)
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         entry = LogEntry(
             timestamp=datetime.now(timezone.utc),
             message=message,
@@ -128,9 +133,8 @@ class LogManager:
             evidence=evidence,
             category=category,
         )
-        kv = _format_kv(entry)
         with open(path, "a") as f:
-            f.write(f"\n## {timestamp}{kv}\n{message}\n")
+            f.write(format_log_entry(entry))
 
     def read(self, task_slug: str, last: Optional[int] = None) -> list[LogEntry]:
         path = self._log_path(task_slug)
@@ -151,18 +155,22 @@ class LogManager:
             if not message:
                 continue
             kv = _parse_kv(kv_raw)
-            iteration = int(kv["iter"]) if "iter" in kv and kv["iter"].isdigit() else None
-            entries.append(LogEntry(
-                timestamp=timestamp,
-                message=message,
-                repo=kv.get("repo"),
-                iteration=iteration,
-                test_state=kv.get("test"),
-                action=kv.get("action"),
-                open_question=kv.get("open"),
-                id=kv.get("id"),
-                parent=kv.get("parent"),
-                evidence=kv.get("evidence"),
-                category=kv.get("category"),
-            ))
+            iteration = (
+                int(kv["iter"]) if "iter" in kv and kv["iter"].isdigit() else None
+            )
+            entries.append(
+                LogEntry(
+                    timestamp=timestamp,
+                    message=message,
+                    repo=kv.get("repo"),
+                    iteration=iteration,
+                    test_state=kv.get("test"),
+                    action=kv.get("action"),
+                    open_question=kv.get("open"),
+                    id=kv.get("id"),
+                    parent=kv.get("parent"),
+                    evidence=kv.get("evidence"),
+                    category=kv.get("category"),
+                )
+            )
         return entries

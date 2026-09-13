@@ -240,7 +240,7 @@ is distinct from `mship export`, which builds a task review bundle.
 ## Long-running services
 
 ```bash
-mship run [--repos a,b] [--tag t]                   # start services per dependency tier
+mship run [--repos a,b] [--tag t] [--remote[=role]] # start services per dependency tier
 mship logs <service>                                # tail logs for a service
 mship run-host add|list|remove                      # manage per-machine run-host connections (role -> {url, token})
 mship build [--all] [--repos a,b] [--tag t] [--remote[=role]]  # `task build` across repos in dependency order
@@ -249,7 +249,15 @@ mship capture [--repo R] [--platform P] [--kind image|layout|all] [--out DIR] [-
                                                     # task-aware but not required (ad-hoc against a repo's main checkout)
 ```
 
-`mship build` and `mship capture` accept `--remote` to execute on a mapped run-host role (an iOS-sim / Android-emu machine): bare `--remote` auto-resolves the repo's `run_host` (or the sole configured `run_hosts` entry), `--remote=<role>` picks one explicitly.
+`mship run`, `mship build`, and `mship capture` keep their existing
+`--remote[=role]` entry points: bare `--remote` auto-resolves the repo's
+`run_host` (or the sole configured `run_hosts` entry), while `--remote=<role>`
+picks one explicitly. #507 adds no public CLI command; its shared typed runner
+is an internal adapter and `POST /exec/tool` API documented in
+[`remote-run.md`](remote-run.md). Public-relay use remains blocked until #506
+integrates credential resolution for source transfer, execution and cleanup and
+has real relay-path proof. This reference makes no hardware, relay, or macOS
+FD-pathname readiness claim.
 
 ## `mship finish`
 

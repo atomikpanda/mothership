@@ -31,6 +31,7 @@ class _RemoteFlagCommand(TyperCommand):
 def _relpath(path_str: str) -> str:
     """Shorten for display: relative to cwd if possible, else absolute."""
     from pathlib import Path
+
     try:
         return str(Path(path_str).relative_to(Path.cwd()))
     except ValueError:
@@ -40,6 +41,7 @@ def _relpath(path_str: str) -> str:
 def _file_nonempty(path_str: str) -> bool:
     """True if the path exists and has non-zero size. False on OSError."""
     from pathlib import Path
+
     try:
         return Path(path_str).stat().st_size > 0
     except OSError:
@@ -47,8 +49,10 @@ def _file_nonempty(path_str: str) -> bool:
 
 
 def _resolve_repos(
-    config, task_affected: list[str],
-    repos_filter: str | None, tag_filter: list[str] | None,
+    config,
+    task_affected: list[str],
+    repos_filter: str | None,
+    tag_filter: list[str] | None,
 ) -> list[str]:
     """Resolve target repos from --repos and --tag filters."""
     candidates = None
@@ -126,6 +130,7 @@ def _run_remote(
     never a bare traceback.
     """
     from mship.core.remote_client import RemoteExecError, exec_remote
+    from mship.core.remote_dispatch import RemoteDispatchError, prepare_remote_source
     from mship.core.run_host import RunHostError, RunHostStore, resolve_run_host
 
     if task_obj is None:
@@ -146,105 +151,30 @@ def _run_remote(
         output.error(str(e))
         raise typer.Exit(code=1)
 
-    # A CLEAN repo is still materialized on the run host FROM ORIGIN, and nothing
-    # pushes during development (`git push -u` happens at `mship finish`). Without
-    # this check a remote run either fails with a confusing remote-side materialize
-    # error, or — worse — silently executes the last pushed revision and reports it
-    # as a result for code the operator is currently editing.
-    from mship.core import remote_preflight, run_transfer
-    from mship.core.run_ref import RunRefNameError
-
-    shell = container.shell()
-    # `repos=target_repos` is load-bearing and stays: preflighting the task's
-    # other repos would both refuse a run over work in progress it never touches
-    # and transfer repos the operator never named. `config` is what lets a
-    # `git_root` child and its parent collapse to one transfer.
-    pre = remote_preflight.inspect(
-        task_obj, shell, repos=target_repos, config=config,
-    )
-    if not pre.ok:
-        output.error(remote_preflight.blocked_message(pre))
-        raise typer.Exit(code=1)
-
-    # A working tree that differs from HEAD is no longer a refusal, it is a
-    # TRANSFER: synthesize a commit from that tree and push it STRAIGHT to the
-    # run host, onto the throwaway namespace `core/run_ref.py` owns. Origin is
-    # never in this path — routing uncommitted work through it would publish
-    # untracked scratch files to a third party, and deleting the ref afterwards
-    # would not retract the objects.
-    #
-    # `state.head_sha` is the sha the preflight certified HEAD to be at, not a
-    # re-read of HEAD: it is the same guarantee `remote_preflight.push` makes
-    # for the origin path, applied to the snapshot's parent.
-    run_ref_repos: list[str] = []
-    # Only capture asks for source-preparation provenance. Keep the snapshot
-    # identities only in that case so run/build retain their existing work.
-    prepared_snapshots: list[tuple[str, str, str]] | None = (
-        [] if on_prepared is not None else None
-    )
-
-    for state in pre.dirty:
-        try:
-            sha = run_transfer.synthesize_commit(
-                shell, state.path, base_sha=state.head_sha,
-            )
-            ref = run_transfer.push_run_ref(
-                shell, state.path, conn=conn, repo=state.git_repo,
-                task=task_obj.slug, sha=sha,
-            )
-        except (run_transfer.RunTransferError, RunRefNameError) as e:
-            output.error(str(e))
-            raise typer.Exit(code=1)
-        run_ref_repos.append(state.git_repo)
-        if prepared_snapshots is not None:
-            # This is deliberately recorded only after `push_run_ref` succeeds:
-            # it identifies the snapshot actually sent, rather than its parent
-            # HEAD or an unverified attempted transfer.
-            prepared_snapshots.append((state.git_repo, sha, ref))
-        # Name it as throwaway (spec ac13): an operator who sees a bare sha will
-        # reasonably try to `git show` it and find it attached to nothing.
-        output.breadcrumb(
-            f"{state.git_repo}: sent your working tree to the run host as "
-            f"{ref} ({sha[:12]}) — a throwaway run ref, not a commit on "
-            f"{state.branch}"
+    try:
+        prepared = prepare_remote_source(
+            task_obj=task_obj,
+            target_repos=target_repos,
+            config=config,
+            shell=container.shell(),
+            conn=conn,
+            output=output,
+            on_prepared=on_prepared,
         )
-
-    pushed, push_error = remote_preflight.push(pre, shell)
-    if push_error is not None:
-        output.error(push_error)
+    except RemoteDispatchError as e:
+        output.error(str(e))
         raise typer.Exit(code=1)
-    # Name the commit, not just the repo: "pushed" alone doesn't say WHICH sha
-    # landed on origin, and that identity is the guarantee this whole preflight
-    # exists to make (see remote_preflight.py).
-    pushed_sha = {s.repo: s.head_sha for s in pre.to_push}
-    for repo_name in pushed:
-        sha = pushed_sha.get(repo_name)
-        suffix = f" ({sha[:12]})" if sha else ""
-        output.breadcrumb(
-            f"pushed {repo_name}{suffix} so the run host sees your commits"
-        )
-
-    if on_prepared is not None:
-        if prepared_snapshots:
-            snapshots = ", ".join(
-                f"{repo}@{sha[:12]} via {ref} (a throwaway run ref)"
-                for repo, sha, ref in prepared_snapshots
-            )
-            on_prepared(
-                f"an exact working-tree snapshot ({snapshots}) was sent to the run host"
-            )
-        else:
-            states = [s for s in pre.states if s.repo in target_repos]
-            commits = ", ".join(
-                f"{s.repo}@{(s.head_sha or 'unknown')[:12]}" for s in states
-            )
-            on_prepared(f"task source {commits} was verified before remote dispatch")
-
     try:
         return exec_remote(
-            verb=verb, conn=conn, task=task_obj.slug, repos=target_repos,
-            platform=platform, kind=kind, captures_dir_for=captures_dir_for,
-            run_ref_repos=run_ref_repos, print_fn=output.progress,
+            verb=verb,
+            conn=conn,
+            task=task_obj.slug,
+            repos=target_repos,
+            platform=platform,
+            kind=kind,
+            captures_dir_for=captures_dir_for,
+            run_ref_repos=list(prepared.run_ref_repos),
+            print_fn=output.progress,
         )
     except RemoteExecError as e:
         output.error(str(e))
@@ -254,17 +184,33 @@ def _run_remote(
 def register(app: typer.Typer, get_container):
     @app.command(name="test", rich_help_panel="Workflow")
     def test_cmd(
-        run_all: bool = typer.Option(False, "--all", help="Run all repos even on failure"),
-        repos: Optional[str] = typer.Option(None, "--repos", help="Comma-separated repo names to filter"),
-        tag: Optional[list[str]] = typer.Option(None, "--tag", help="Filter repos by tag"),
-        no_diff: bool = typer.Option(False, "--no-diff", help="Skip cross-run diff output"),
-        task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
+        run_all: bool = typer.Option(
+            False, "--all", help="Run all repos even on failure"
+        ),
+        repos: Optional[str] = typer.Option(
+            None, "--repos", help="Comma-separated repo names to filter"
+        ),
+        tag: Optional[list[str]] = typer.Option(
+            None, "--tag", help="Filter repos by tag"
+        ),
+        no_diff: bool = typer.Option(
+            False, "--no-diff", help="Skip cross-run diff output"
+        ),
+        task: Optional[str] = typer.Option(
+            None,
+            "--task",
+            help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var.",
+        ),
     ):
         """Run tests across affected repos; show diff vs. previous iteration."""
         from datetime import datetime, timezone
         from mship.cli._resolve import resolve_for_command
         from mship.core.test_history import (
-            write_run, read_run, latest_iteration, compute_diff, prune,
+            write_run,
+            read_run,
+            latest_iteration,
+            compute_diff,
+            prune,
         )
 
         container = get_container()
@@ -285,6 +231,7 @@ def register(app: typer.Typer, get_container):
 
         from pathlib import Path as _P
         from mship.cli._cwd_check import format_cwd_warning
+
         if t.active_repo is not None and t.active_repo in t.worktrees:
             warn = format_cwd_warning(_P.cwd(), _P(t.worktrees[t.active_repo]))
             if warn is not None:
@@ -303,16 +250,20 @@ def register(app: typer.Typer, get_container):
         prev_run = read_run(state_dir, t.slug, prev_iter) if prev_iter else None
         pre_prev_run = (
             read_run(state_dir, t.slug, prev_iter - 1)
-            if prev_iter and prev_iter > 1 else None
+            if prev_iter and prev_iter > 1
+            else None
         )
 
         started_at = datetime.now(timezone.utc)
 
         executor = container.executor()
         from mship.core.executor import TestTargetConflictError
+
         try:
             result = executor.execute(
-                "test", repos=target_repos, run_all=run_all,
+                "test",
+                repos=target_repos,
+                run_all=run_all,
                 task_slug=t.slug,
             )
         except TestTargetConflictError as exc:
@@ -360,9 +311,13 @@ def register(app: typer.Typer, get_container):
 
         new_iter = (prev_iter or 0) + 1
         write_run(
-            state_dir, t.slug, iteration=new_iter,
-            started_at=started_at, duration_ms=run_duration_ms,
-            results=per_repo, streams=streams,
+            state_dir,
+            t.slug,
+            iteration=new_iter,
+            started_at=started_at,
+            duration_ms=run_duration_ms,
+            results=per_repo,
+            streams=streams,
         )
 
         # Persist iteration on task (read-modify-write under the lock).
@@ -370,6 +325,7 @@ def register(app: typer.Typer, get_container):
             task.test_iteration = new_iter
             # Agent-agnostic activity heartbeat: running tests is task work.
             task.last_activity_at = datetime.now(timezone.utc)
+
         state_mgr.mutate_task(t.slug, _record)
 
         prune(state_dir, t.slug, keep=20)
@@ -388,6 +344,7 @@ def register(app: typer.Typer, get_container):
         # tree-compilation tools can fold this test run into the hypothesis
         # being evaluated. See #30.
         from mship.core.debug import current_debug_thread
+
         thread = current_debug_thread(container.log_manager(), t.slug)
         parent_id = None
         if thread:
@@ -416,7 +373,9 @@ def register(app: typer.Typer, get_container):
         diff = None if no_diff else compute_diff(current_run, prev_run, pre_prev_run)
 
         if output.human_mode:
-            output.print(f"[bold]Test run #{new_iter}[/bold]  ({run_duration_ms / 1000:.1f}s)")
+            output.print(
+                f"[bold]Test run #{new_iter}[/bold]  ({run_duration_ms / 1000:.1f}s)"
+            )
             # Collapse path-share groups (#127): a set of repos that shared a
             # physical run renders as one line listing every member.
             rendered: set[str] = set()
@@ -425,8 +384,10 @@ def register(app: typer.Typer, get_container):
                     continue
                 status = info["status"]
                 color = (
-                    "green" if status == "pass"
-                    else "yellow" if status == "skip"
+                    "green"
+                    if status == "pass"
+                    else "yellow"
+                    if status == "skip"
                     else "red"
                 )
                 dur_s = info["duration_ms"] / 1000
@@ -460,7 +421,9 @@ def register(app: typer.Typer, get_container):
                 fixes = diff["summary"]["fixes"]
                 parts = [f"{pass_count}/{total} repos passing"]
                 if prev_id is not None and new_fail:
-                    parts.append(f"{len(new_fail)} new failure(s) since iter #{prev_id}")
+                    parts.append(
+                        f"{len(new_fail)} new failure(s) since iter #{prev_id}"
+                    )
                 if fixes:
                     parts.append(f"{len(fixes)} fix(es)")
                 output.print("")
@@ -478,16 +441,23 @@ def register(app: typer.Typer, get_container):
 
     @app.command(name="run", cls=_RemoteFlagCommand, rich_help_panel="Runtime")
     def run_cmd(
-        repos: Optional[str] = typer.Option(None, "--repos", help="Comma-separated repo names to filter"),
-        tag: Optional[list[str]] = typer.Option(None, "--tag", help="Filter repos by tag"),
-        task: Optional[str] = typer.Option(None, "--task", help="Narrow to one task's affected repos"),
+        repos: Optional[str] = typer.Option(
+            None, "--repos", help="Comma-separated repo names to filter"
+        ),
+        tag: Optional[list[str]] = typer.Option(
+            None, "--tag", help="Filter repos by tag"
+        ),
+        task: Optional[str] = typer.Option(
+            None, "--task", help="Narrow to one task's affected repos"
+        ),
         remote: Optional[str] = typer.Option(
-            None, "--remote",
+            None,
+            "--remote",
             help="Execute on a mapped run-host role instead of locally. Bare "
-                 "--remote auto-resolves the role (the repo's declared "
-                 "run_host, else the sole configured run_hosts entry); "
-                 "--remote=<role> picks one explicitly. Without this flag, "
-                 "behavior is unchanged (local).",
+            "--remote auto-resolves the role (the repo's declared "
+            "run_host, else the sole configured run_hosts entry); "
+            "--remote=<role> picks one explicitly. Without this flag, "
+            "behavior is unchanged (local).",
         ),
     ):
         """Start services across repos in dependency order."""
@@ -532,7 +502,7 @@ def register(app: typer.Typer, get_container):
             known = ", ".join(sorted(state.tasks.keys())) or "(none)"
             output.error(f"Unknown task: {e.slug}. Known: {known}.")
             raise typer.Exit(1)
-        except (NoActiveTaskError, AmbiguousTaskError):
+        except NoActiveTaskError, AmbiguousTaskError:
             fallback_repos = list(config.repos.keys())
 
         try:
@@ -543,8 +513,12 @@ def register(app: typer.Typer, get_container):
 
         if remote is not None:
             code = _run_remote(
-                verb="run", remote_role=remote, task_obj=task_obj,
-                target_repos=target_repos, config=config, container=container,
+                verb="run",
+                remote_role=remote,
+                task_obj=task_obj,
+                target_repos=target_repos,
+                config=config,
+                container=container,
                 output=output,
             )
             raise typer.Exit(code=code)
@@ -559,7 +533,7 @@ def register(app: typer.Typer, get_container):
                     proc.send_signal(signal.CTRL_BREAK_EVENT)
                 else:
                     os.killpg(proc.pid, sig)
-            except (ProcessLookupError, OSError):
+            except ProcessLookupError, OSError:
                 try:
                     proc.send_signal(sig)
                 except Exception:
@@ -581,12 +555,22 @@ def register(app: typer.Typer, get_container):
             return
 
         # Have background services — wait for them with signal forwarding
-        output.success(f"Started {len(result.background_processes)} background service(s):")
+        output.success(
+            f"Started {len(result.background_processes)} background service(s):"
+        )
         for repo_result in result.results:
             if repo_result.background_pid is None and repo_result.healthcheck is None:
                 continue
-            pid_part = f"(pid {repo_result.background_pid})" if repo_result.background_pid else ""
-            hc_part = f"  {repo_result.healthcheck.message}" if repo_result.healthcheck else ""
+            pid_part = (
+                f"(pid {repo_result.background_pid})"
+                if repo_result.background_pid
+                else ""
+            )
+            hc_part = (
+                f"  {repo_result.healthcheck.message}"
+                if repo_result.healthcheck
+                else ""
+            )
             icon = "[green]✓[/green]" if repo_result.success else "[red]✗[/red]"
             output.print(
                 f"  {icon} {repo_result.repo} → task {repo_result.task_name}  {pid_part}{hc_part}"
@@ -607,6 +591,7 @@ def register(app: typer.Typer, get_container):
                 _kill_group(proc, signal.SIGTERM)
             # Brief grace period, then SIGKILL stragglers
             import time
+
             time.sleep(0.5)
             for proc in result.background_processes:
                 _kill_group(proc, signal.SIGKILL if os.name != "nt" else signal.SIGTERM)
@@ -617,7 +602,9 @@ def register(app: typer.Typer, get_container):
                 try:
                     proc.wait(timeout=5)
                 except Exception:
-                    _kill_group(proc, signal.SIGKILL if os.name != "nt" else signal.SIGTERM)
+                    _kill_group(
+                        proc, signal.SIGKILL if os.name != "nt" else signal.SIGTERM
+                    )
                     try:
                         proc.wait(timeout=2)
                     except Exception:
@@ -627,17 +614,28 @@ def register(app: typer.Typer, get_container):
 
     @app.command(name="build", cls=_RemoteFlagCommand, rich_help_panel="Workflow")
     def build_cmd(
-        run_all: bool = typer.Option(False, "--all", help="Build all repos even if one fails"),
-        repos: Optional[str] = typer.Option(None, "--repos", help="Comma-separated repo names to filter"),
-        tag: Optional[list[str]] = typer.Option(None, "--tag", help="Filter repos by tag"),
-        task: Optional[str] = typer.Option(None, "--task", help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var."),
+        run_all: bool = typer.Option(
+            False, "--all", help="Build all repos even if one fails"
+        ),
+        repos: Optional[str] = typer.Option(
+            None, "--repos", help="Comma-separated repo names to filter"
+        ),
+        tag: Optional[list[str]] = typer.Option(
+            None, "--tag", help="Filter repos by tag"
+        ),
+        task: Optional[str] = typer.Option(
+            None,
+            "--task",
+            help="Target task slug. Defaults to cwd (worktree) > MSHIP_TASK env var.",
+        ),
         remote: Optional[str] = typer.Option(
-            None, "--remote",
+            None,
+            "--remote",
             help="Execute on a mapped run-host role instead of locally. Bare "
-                 "--remote auto-resolves the role (the repo's declared "
-                 "run_host, else the sole configured run_hosts entry); "
-                 "--remote=<role> picks one explicitly. Without this flag, "
-                 "behavior is unchanged (local).",
+            "--remote auto-resolves the role (the repo's declared "
+            "run_host, else the sole configured run_hosts entry); "
+            "--remote=<role> picks one explicitly. Without this flag, "
+            "behavior is unchanged (local).",
         ),
     ):
         """Build artifacts across repos in dependency order (runs `task build`)."""
@@ -664,8 +662,10 @@ def register(app: typer.Typer, get_container):
         fallback_repos: list[str]
         try:
             t, _ = resolve_task(
-                state, cli_task=task,
-                env_task=_os.environ.get("MSHIP_TASK"), cwd=_P.cwd(),
+                state,
+                cli_task=task,
+                env_task=_os.environ.get("MSHIP_TASK"),
+                cwd=_P.cwd(),
             )
             fallback_repos = t.affected_repos
             task_obj = t
@@ -673,7 +673,7 @@ def register(app: typer.Typer, get_container):
             known = ", ".join(sorted(state.tasks.keys())) or "(none)"
             output.error(f"Unknown task: {e.slug}. Known: {known}.")
             raise typer.Exit(1)
-        except (NoActiveTaskError, AmbiguousTaskError):
+        except NoActiveTaskError, AmbiguousTaskError:
             fallback_repos = list(config.repos.keys())
         task_slug = task_obj.slug if task_obj is not None else None
 
@@ -685,15 +685,22 @@ def register(app: typer.Typer, get_container):
 
         if remote is not None:
             code = _run_remote(
-                verb="build", remote_role=remote, task_obj=task_obj,
-                target_repos=target_repos, config=config, container=container,
+                verb="build",
+                remote_role=remote,
+                task_obj=task_obj,
+                target_repos=target_repos,
+                config=config,
+                container=container,
                 output=output,
             )
             raise typer.Exit(code=code)
 
         executor = container.executor()
         result = executor.execute(
-            "build", repos=target_repos, run_all=run_all, task_slug=task_slug,
+            "build",
+            repos=target_repos,
+            run_all=run_all,
+            task_slug=task_slug,
         )
 
         def _status(r) -> str:
@@ -704,7 +711,9 @@ def register(app: typer.Typer, get_container):
             for r in sorted(result.results, key=lambda r: r.repo):
                 st = _status(r)
                 color = "green" if st == "pass" else "yellow" if st == "skip" else "red"
-                output.print(f"  {r.repo}: [{color}]{st}[/{color}]  ({r.duration_ms / 1000:.1f}s)")
+                output.print(
+                    f"  {r.repo}: [{color}]{st}[/{color}]  ({r.duration_ms / 1000:.1f}s)"
+                )
                 if st == "fail":
                     for line in (r.shell_result.stderr or "").splitlines()[-20:]:
                         output.print(f"      {line}")
@@ -712,28 +721,36 @@ def register(app: typer.Typer, get_container):
                 output.print("")
                 output.success("Build succeeded")
         else:
-            output.json({
-                "command": "build",
-                "repos": {
-                    r.repo: {
-                        "status": _status(r),
-                        "duration_ms": r.duration_ms,
-                        "exit_code": r.shell_result.returncode,
-                    }
-                    for r in result.results
-                },
-                "success": result.success,
-                "resolved_task": task_slug,
-            })
+            output.json(
+                {
+                    "command": "build",
+                    "repos": {
+                        r.repo: {
+                            "status": _status(r),
+                            "duration_ms": r.duration_ms,
+                            "exit_code": r.shell_result.returncode,
+                        }
+                        for r in result.results
+                    },
+                    "success": result.success,
+                    "resolved_task": task_slug,
+                }
+            )
 
         if not result.success:
             raise typer.Exit(code=1)
 
     @app.command(rich_help_panel="Runtime")
     def logs(
-        service: Optional[str] = typer.Argument(None, help="Service name (omit with --all)"),
-        all_services: bool = typer.Option(False, "--all", help="Tail logs for every service"),
-        task: Optional[str] = typer.Option(None, "--task", help="Prefer this task's worktrees for cwd"),
+        service: Optional[str] = typer.Argument(
+            None, help="Service name (omit with --all)"
+        ),
+        all_services: bool = typer.Option(
+            False, "--all", help="Tail logs for every service"
+        ),
+        task: Optional[str] = typer.Option(
+            None, "--task", help="Prefer this task's worktrees for cwd"
+        ),
     ):
         """Tail logs for a specific service."""
         import os as _os
@@ -753,17 +770,22 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(code=1)
         if not all_services and service is None:
             available = ", ".join(sorted(config.repos.keys()))
-            output.error(f"Service name required, or pass --all. Available: {available}.")
+            output.error(
+                f"Service name required, or pass --all. Available: {available}."
+            )
             raise typer.Exit(code=1)
 
         targets = sorted(config.repos.keys()) if all_services else [service]
         for name in targets:
             if name not in config.repos:
                 available = ", ".join(sorted(config.repos.keys()))
-                output.error(f"Unknown service '{name}'. Available services: {available}.")
+                output.error(
+                    f"Unknown service '{name}'. Available services: {available}."
+                )
                 raise typer.Exit(code=1)
 
         from pathlib import Path
+
         state_mgr = container.state_manager()
         state = state_mgr.load()
         shell = container.shell()
@@ -783,7 +805,7 @@ def register(app: typer.Typer, get_container):
             known = ", ".join(sorted(state.tasks.keys())) or "(none)"
             output.error(f"Unknown task: {e.slug}. Known: {known}.")
             raise typer.Exit(1)
-        except (NoActiveTaskError, AmbiguousTaskError):
+        except NoActiveTaskError, AmbiguousTaskError:
             resolved_task = None
 
         for name in targets:
@@ -802,6 +824,7 @@ def register(app: typer.Typer, get_container):
             # instead of an actionable error. Reads the local Taskfile
             # only — `includes:` aren't recursed into.
             from mship.util.taskfile import taskfile_has_target
+
             if not taskfile_has_target(cwd, actual_task):
                 output.error(
                     f"'{name}' has no '{actual_task}' task in its Taskfile.\n"

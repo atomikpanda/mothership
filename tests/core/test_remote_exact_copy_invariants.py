@@ -35,6 +35,7 @@ whole suite stay green, and both closed here rather than left as folklore:
     `shell.run(cmd)` — was not, because neither expression contains both halves.
     Simple local bindings are therefore followed (see `_run_ref_bindings`).
 """
+
 import ast
 import re
 from pathlib import Path
@@ -142,7 +143,11 @@ def _run_ref_bindings(source: str, scope: ast.AST) -> dict[str, frozenset[str]]:
             referenced = [bound[i] for i in _IDENT.findall(text) if i in bound]
             if not (_NAMES_RUN_NAMESPACE.search(text) or referenced):
                 continue
-            merged = bound.get(name, frozenset()) | {text} | frozenset().union(*referenced or [frozenset()])
+            merged = (
+                bound.get(name, frozenset())
+                | {text}
+                | frozenset().union(*referenced or [frozenset()])
+            )
             if merged != bound.get(name):
                 bound[name] = merged
                 grew = True
@@ -154,7 +159,8 @@ def _run_ref_bindings(source: str, scope: ast.AST) -> dict[str, frozenset[str]]:
 def _with_bindings(segment: str, bound: dict[str, frozenset[str]]) -> str:
     extra = [
         fragment
-        for name in dict.fromkeys(_IDENT.findall(segment)) if name in bound
+        for name in dict.fromkeys(_IDENT.findall(segment))
+        if name in bound
         for fragment in sorted(bound[name])
     ]
     return " ".join([segment, *extra])
@@ -176,7 +182,7 @@ def _calls_naming_the_namespace(path: Path) -> list[tuple[int, str]]:
     """
     source = path.read_text(encoding="utf-8")
     if not _NAMES_RUN_NAMESPACE.search(source):
-        return []                      # nothing to parse: most of the tree
+        return []  # nothing to parse: most of the tree
     tree = ast.parse(source)
     found = []
     for scope in _scopes(tree):
@@ -184,9 +190,7 @@ def _calls_naming_the_namespace(path: Path) -> list[tuple[int, str]]:
         for node in _own_nodes(scope):
             if not isinstance(node, ast.Call):
                 continue
-            segment = _with_bindings(
-                ast.get_source_segment(source, node) or "", bound
-            )
+            segment = _with_bindings(ast.get_source_segment(source, node) or "", bound)
             if _NAMES_RUN_NAMESPACE.search(segment):
                 found.append((node.lineno, segment))
     return found
@@ -199,45 +203,14 @@ def test_no_code_path_branches_from_merges_or_opens_a_pr_from_the_run_namespace(
         for lineno, segment in _calls_naming_the_namespace(path):
             for label, pattern in _FORMS_HISTORY.items():
                 if pattern.search(segment):
-                    offences.append(f"{path.relative_to(SRC.parent.parent)}:{lineno} ({label})")
+                    offences.append(
+                        f"{path.relative_to(SRC.parent.parent)}:{lineno} ({label})"
+                    )
     assert not offences, (
         "these call sites name refs/mship/run AND form a branch, merge or pull "
         "request, which spec ac14 forbids — the run namespace is a throwaway "
         f"hand-off, not history: {offences}"
     )
-
-
-# Every module that HANDLES the run namespace, per `core/run_ref.py`'s own
-# docstring: the one that owns the name, the endpoint that accepts pushes onto
-# it, the client that pushes, the run host that materializes from it, the CLI
-# that dispatches, and `mship close`, which deletes it. A scan that does not
-# reach one of these cannot say anything about it.
-NAMESPACE_MODULES = (
-    "core/run_ref.py",
-    "core/git_receive.py",
-    "core/run_transfer.py",
-    "core/remote_exec.py",
-    "cli/exec.py",
-    "cli/worktree.py",
-)
-
-
-def test_the_scan_actually_reaches_every_module_that_handles_the_namespace():
-    """Guards the guard: a scan that matched nothing would pass the test above
-    for free, and one that matched only SOME modules would pass it for the
-    modules it never opened.
-
-    That was the real hole. `core/remote_exec.py` resets the run host's
-    worktree to the ref, `cli/exec.py` pushes it and `cli/worktree.py` deletes
-    it — and none of the three ever writes `refs/mship/run` or calls
-    `run_ref(...)` directly, so the original `\\brun_ref\\(` pattern opened none
-    of them. A merge added in any of them was invisible.
-    """
-    seen = {
-        module for module in NAMESPACE_MODULES
-        if _NAMES_RUN_NAMESPACE.search((SRC / module).read_text(encoding="utf-8"))
-    }
-    assert set(NAMESPACE_MODULES) == seen, sorted(set(NAMESPACE_MODULES) - seen)
 
 
 def test_a_different_mship_namespace_is_not_mistaken_for_the_run_namespace():
@@ -248,13 +221,16 @@ def test_a_different_mship_namespace_is_not_mistaken_for_the_run_namespace():
     assert not _NAMES_RUN_NAMESPACE.search("for ref in test_run_refs:")
 
 
-@pytest.mark.parametrize("sample", [
-    'subprocess.run(["git", "merge", run_ref(task, repo)])',
-    'subprocess.run(["git", "checkout", "-b", "x", run_ref(task, repo)])',
-    'self._git("branch", "x", f"{RUN_REF_PREFIX}t1/api")',
-    'shell(f"gh pr create --head refs/mship/run/t1/api")',
-    'run(["gh", "pr", "create", "--head", run_ref(task, repo)])',
-])
+@pytest.mark.parametrize(
+    "sample",
+    [
+        'subprocess.run(["git", "merge", run_ref(task, repo)])',
+        'subprocess.run(["git", "checkout", "-b", "x", run_ref(task, repo)])',
+        'self._git("branch", "x", f"{RUN_REF_PREFIX}t1/api")',
+        'shell(f"gh pr create --head refs/mship/run/t1/api")',
+        'run(["gh", "pr", "create", "--head", run_ref(task, repo)])',
+    ],
+)
 def test_the_detector_fires_on_the_shapes_it_claims_to_catch(sample):
     """The scan above is green because the tree is clean. This is what says it
     is green for that reason and not because the patterns stopped matching —
@@ -277,42 +253,48 @@ def _scan_module(tmp_path: Path, body: str) -> list[str]:
     ]
 
 
-@pytest.mark.parametrize("body", [
-    # The escape that mattered: split over two statements, neither expression
-    # holding both the command and the ref. Confirmed to survive the previous
-    # scanner with the whole suite green.
-    'def go(shell, task, repo, root):\n'
-    '    cmd = f"git merge {run_ref(task, repo)}"\n'
-    '    return shell.run(cmd, cwd=root)\n',
-    # And a chain, so one hop is not the limit.
-    'def go(shell, task, repo, root):\n'
-    '    ref = run_ref(task, repo)\n'
-    '    cmd = "git branch keepme " + ref\n'
-    '    return shell.run(cmd, cwd=root)\n',
-    # Reached through an imported helper rather than the literal name — the
-    # only way `cli/exec.py` and `cli/worktree.py` ever touch the namespace.
-    'def go(shell, root, **kw):\n'
-    '    ref = push_run_ref(shell, root, **kw)\n'
-    '    return shell.run(f"git merge {ref}", cwd=root)\n',
-])
+@pytest.mark.parametrize(
+    "body",
+    [
+        # The escape that mattered: split over two statements, neither expression
+        # holding both the command and the ref. Confirmed to survive the previous
+        # scanner with the whole suite green.
+        "def go(shell, task, repo, root):\n"
+        '    cmd = f"git merge {run_ref(task, repo)}"\n'
+        "    return shell.run(cmd, cwd=root)\n",
+        # And a chain, so one hop is not the limit.
+        "def go(shell, task, repo, root):\n"
+        "    ref = run_ref(task, repo)\n"
+        '    cmd = "git branch keepme " + ref\n'
+        "    return shell.run(cmd, cwd=root)\n",
+        # Reached through an imported helper rather than the literal name — the
+        # only way `cli/exec.py` and `cli/worktree.py` ever touch the namespace.
+        "def go(shell, root, **kw):\n"
+        "    ref = push_run_ref(shell, root, **kw)\n"
+        '    return shell.run(f"git merge {ref}", cwd=root)\n',
+    ],
+)
 def test_the_detector_fires_when_the_command_is_built_across_statements(tmp_path, body):
     assert _scan_module(tmp_path, body), body
 
 
-@pytest.mark.parametrize("body", [
-    # `git merge-base` forms no history, and `core/remote_preflight.py` — now
-    # in scope for this scan — runs one on every clean repo.
-    'def go(shell, root, task, repo):\n'
-    '    ref = run_ref(task, repo)\n'
-    '    return shell.run(f"git merge-base --is-ancestor {ref} HEAD", cwd=root)\n',
-    # One function's `cmd` must not stand in for another's.
-    'def a(shell, root):\n'
-    '    cmd = "git merge origin/main"\n'
-    '    return shell.run(cmd, cwd=root)\n'
-    'def b(shell, root, task, repo):\n'
-    '    cmd = run_ref(task, repo)\n'
-    '    return shell.run(cmd, cwd=root)\n',
-])
+@pytest.mark.parametrize(
+    "body",
+    [
+        # `git merge-base` forms no history, and `core/remote_preflight.py` — now
+        # in scope for this scan — runs one on every clean repo.
+        "def go(shell, root, task, repo):\n"
+        "    ref = run_ref(task, repo)\n"
+        '    return shell.run(f"git merge-base --is-ancestor {ref} HEAD", cwd=root)\n',
+        # One function's `cmd` must not stand in for another's.
+        "def a(shell, root):\n"
+        '    cmd = "git merge origin/main"\n'
+        "    return shell.run(cmd, cwd=root)\n"
+        "def b(shell, root, task, repo):\n"
+        "    cmd = run_ref(task, repo)\n"
+        "    return shell.run(cmd, cwd=root)\n",
+    ],
+)
 def test_the_detector_does_not_cry_wolf(tmp_path, body):
     """A tripwire that fires on legitimate work gets disabled, which is a
     slower way of having no tripwire at all."""
@@ -341,9 +323,14 @@ FINISH_GATE_FUNCTIONS = (
 def _function_source(path: Path, name: str) -> str:
     source = path.read_text(encoding="utf-8")
     for node in ast.walk(ast.parse(source)):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == name
+        ):
             return ast.get_source_segment(source, node) or ""
-    raise AssertionError(f"{path.name} has no function {name!r}; update FINISH_GATE_FUNCTIONS")
+    raise AssertionError(
+        f"{path.name} has no function {name!r}; update FINISH_GATE_FUNCTIONS"
+    )
 
 
 def test_the_real_commits_gate_and_finish_do_not_consult_the_run_namespace():

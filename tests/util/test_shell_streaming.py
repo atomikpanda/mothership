@@ -9,6 +9,7 @@ from mship.util.stream_printer import StreamPrinter, drain_to_printer
 
 class _FakePopen:
     """Minimal Popen-shaped object for drain tests."""
+
     def __init__(self, stdout_text: str = "", stderr_text: str = ""):
         self.stdout = io.StringIO(stdout_text) if stdout_text else None
         self.stderr = io.StringIO(stderr_text) if stderr_text else None
@@ -52,7 +53,9 @@ def test_drain_prefixes_are_correct_for_multiple_repos(capsys):
     printer = StreamPrinter(repos=["api", "worker"], use_color=False)
     p1 = _FakePopen(stdout_text="hello from api\n")
     p2 = _FakePopen(stdout_text="hello from worker\n")
-    threads = drain_to_printer(p1, "api", printer) + drain_to_printer(p2, "worker", printer)
+    threads = drain_to_printer(p1, "api", printer) + drain_to_printer(
+        p2, "worker", printer
+    )
     for t in threads:
         t.join(timeout=1.0)
     out = capsys.readouterr().out

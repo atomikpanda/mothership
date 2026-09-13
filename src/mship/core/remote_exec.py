@@ -48,18 +48,19 @@ Wire contract (Task 5's client parses this):
       (matched against its nonce) to learn the real result and mirror it as
       its own process exit code.
 """
+
 from __future__ import annotations
 
 import errno
 import hashlib
 import io
-import queue
+import re
 import shlex
 import shutil
 import tarfile
 import tempfile
 import threading
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Protocol
@@ -72,12 +73,13 @@ except ModuleNotFoundError:
 from mship.core import capture as _cap
 from mship.core import remote_setup
 from mship.core.config import WorkspaceConfig
-from mship.core.run_ref import RunRefNameError
+from mship.core.remote_tool import ToolContext, ToolEvent, ToolRequest, ToolResult
+from mship.core.run_ref import RunRefNameError, canonical_run_ref_segment
+from mship.core.tool_process import ToolOperationRegistry
 from mship.core.run_ref import run_ref as build_run_ref
 from mship.util.shell import (
     ShellCancellationUnsupported,
     ShellCancelled,
-    _terminate_owned_process_group,
     ensure_cancellable_shell_supported,
 )
 from mship.util.taskfile import taskfile_has_target
@@ -114,10 +116,9 @@ class MaterializeError(Exception):
 
 class ShellLike(Protocol):
     """The subset of `mship.util.shell.ShellRunner` this module needs.
-    `.run_argv` issues git plumbing (fetch/worktree add/reset, base-freshness
-    probes); `.run_streaming` launches the go-task target itself so its
-    output can be drained incrementally. Same shapes as the real
-    `ShellRunner` — tests inject a fake implementing just this surface."""
+    `.run_argv` issues git plumbing; `.spawn_argv` launches the selected
+    tool with structured arguments and an exact server-owned environment.
+    Process supervision belongs to ToolOperationRegistry."""
 
     def run_argv(
         self,
@@ -128,9 +129,7 @@ class ShellLike(Protocol):
         cancel_event: threading.Event | None = None,
     ): ...
 
-    def run_streaming(self, command: str, cwd: Path, env: dict[str, str] | None = None): ...
-
-    def build_command(self, command: str, env_runner: str | None = None) -> str: ...
+    def spawn_argv(self, args: Sequence[str], cwd: Path | int, env: dict[str, str]): ...
 
 
 @dataclass
@@ -154,6 +153,7 @@ class RemoteExecDeps:
     shell: ShellLike
     workspace_root: Path
     cancel_event: threading.Event | None = None
+    operations: ToolOperationRegistry | None = None
 
 
 def _hub_dir(workspace_root: Path, task: str) -> Path:
@@ -419,102 +419,6 @@ def materialize_worktree(
         )
 
 
-def _drain_to_queue(proc, q: "queue.Queue[str]") -> list[threading.Thread]:
-    """Start daemon threads that read `proc.stdout`/`proc.stderr` line by
-    line and push each line onto `q` as it's produced — the same drain
-    pattern as `util.stream_printer.drain_to_printer`, but feeding a queue
-    a generator can pull from instead of a printer."""
-
-    def _drain(stream):
-        if stream is None:
-            return
-        try:
-            while True:
-                line = stream.readline()
-                if not isinstance(line, str) or line == "":
-                    break
-                q.put(line)
-        except Exception:
-            pass
-        finally:
-            try:
-                stream.close()
-            except Exception:
-                pass
-
-    threads = [
-        threading.Thread(target=_drain, args=(proc.stdout,), daemon=True),
-        threading.Thread(target=_drain, args=(proc.stderr,), daemon=True),
-    ]
-    for t in threads:
-        t.start()
-    return threads
-
-
-def _stream_proc_lines(
-    proc,
-    cancel_event: threading.Event | None = None,
-) -> Iterator[bytes]:
-    """Yield each stdout/stderr line from `proc` as UTF-8 bytes AS IT'S
-    PRODUCED (not buffered until the process exits) — this is what makes
-    `run_verb_stream` a live stream rather than a final blob. Returns once
-    both pipes are drained and the process has exited, or returns False when
-    the response reports that its client disconnected."""
-    q: "queue.Queue[str]" = queue.Queue()
-    threads = _drain_to_queue(proc, q)
-    poll = getattr(proc, "poll", None)
-
-    def process_is_running() -> bool:
-        if not callable(poll):
-            return False
-        try:
-            return poll() is None
-        except Exception:
-            return False
-
-    while (
-        any(t.is_alive() for t in threads)
-        or not q.empty()
-        or process_is_running()
-    ):
-        if cancel_event is not None and cancel_event.is_set():
-            return False
-        try:
-            line = q.get(timeout=0.05)
-        except queue.Empty:
-            continue
-        yield line.encode("utf-8", errors="replace")
-    for t in threads:
-        t.join(timeout=1.0)
-    return True
-
-
-def _terminate_proc(proc, *, completed: bool) -> None:
-    """Stop abnormal task trees; leave normally reaped groups untouched."""
-    if proc is None or completed:
-        return
-
-    try:
-        _terminate_owned_process_group(proc)
-    except Exception:
-        # Preserve cleanup for lightweight Popen-shaped fakes that do not expose
-        # the full process-group surface.
-        terminate = getattr(proc, "terminate", None)
-        if not callable(terminate):
-            return
-        try:
-            terminate()
-        except Exception:
-            return
-    wait = getattr(proc, "wait", None)
-    if not callable(wait):
-        return
-    try:
-        wait()
-    except Exception:
-        pass
-
-
 def _build_artifact_tar(artifacts: list[_cap.Artifact]) -> bytes:
     """Pack the discovered artifact files into an in-memory tar, each stored
     at its basename (e.g. `screen.png`, `layout.json`) rather than its full
@@ -538,34 +442,33 @@ def run_verb_stream(
     nonce: str,
     run_ref_repos: list[str] | None = None,
 ) -> Iterator[bytes]:
-    """Run one remote execution stream while owning its per-task process lock.
-
-    Cancellable streams fail with framed infrastructure data before locking or
-    execution when this host cannot safely observe process-group cleanup.
-    """
-    if deps.cancel_event is not None:
-        try:
-            ensure_cancellable_shell_supported()
-        except ShellCancellationUnsupported:
-            yield b"error: remote execution unavailable; execution was not started\n"
-            yield f"{EXIT_MARKER}:{nonce} 1\n".encode("utf-8")
-            return
-
+    """Legacy wire adapter over the shared preparation/process owner."""
+    try:
+        ensure_cancellable_shell_supported()
+        task = canonical_run_ref_segment(task)
+    except ShellCancellationUnsupported, RunRefNameError:
+        yield b"error: remote execution unavailable; execution was not started\n"
+        yield f"{EXIT_MARKER}:{nonce} 1\n".encode()
+        return
     try:
         lock_file = _acquire_task_execution_lock(deps.workspace_root, task)
     except BlockingIOError:
         yield (
             f"error: remote task {task!r} is already running; "
             "try again after it finishes\n"
-        ).encode("utf-8")
-        yield f"{EXIT_MARKER}:{nonce} 2\n".encode("utf-8")
+        ).encode()
+        yield f"{EXIT_MARKER}:{nonce} 2\n".encode()
         return
-    except (OSError, UnicodeError):
+    except OSError, UnicodeError:
         yield b"error: remote-task locking failed; execution was not started\n"
-        yield f"{EXIT_MARKER}:{nonce} 1\n".encode("utf-8")
+        yield f"{EXIT_MARKER}:{nonce} 1\n".encode()
         return
-
     try:
+        admission = _operations(deps).admission_status(task)
+        if admission != "available":
+            yield f"error: remote task execution ownership is {admission}\n".encode()
+            yield f"{EXIT_MARKER}:{nonce} 2\n".encode()
+            return
         yield from _run_verb_stream_unlocked(
             verb,
             task,
@@ -583,6 +486,209 @@ def run_verb_stream(
             lock_file.close()
 
 
+class _PreparationError(Exception):
+    def __init__(self, status: str, message: str, exit_code: int = 1):
+        super().__init__(message)
+        self.status = status
+        self.exit_code = exit_code
+
+
+def _operations(deps: RemoteExecDeps) -> ToolOperationRegistry:
+    if deps.operations is None:
+        deps.operations = ToolOperationRegistry(deps.workspace_root)
+    return deps.operations
+
+
+class _PreparedTask:
+    """One server-owned source preparation, shared by every adapter."""
+
+    def __init__(
+        self,
+        deps: RemoteExecDeps,
+        task: str,
+        repos: Sequence[str],
+        run_ref_repos: Sequence[str],
+    ):
+        self.deps = deps
+        self.task = canonical_run_ref_segment(task)
+        self.hub = _hub_dir(deps.workspace_root, self.task)
+        if not self.hub.resolve().is_relative_to(deps.workspace_root.resolve()):
+            raise _PreparationError("invalid", "task worktree escapes workspace", 2)
+        self.branch = deps.config.branch_pattern.replace("{slug}", self.task)
+        names = {name: name for name in deps.config.repos}
+        unknown = [name for name in (*repos, *run_ref_repos) if name not in names]
+        if unknown:
+            raise _PreparationError(
+                "invalid",
+                f"unknown repo(s) {', '.join(unknown)}; known repos: "
+                f"{', '.join(sorted(names)) or '(none)'}",
+                2,
+            )
+        self.repos = [names[name] for name in repos]
+        self.run_refs: dict[str, str] = {}
+        for name in set(run_ref_repos):
+            try:
+                self.run_refs[names[name]] = build_run_ref(self.task, names[name])
+            except RunRefNameError as exc:
+                raise _PreparationError(
+                    "invalid",
+                    "cannot build a run ref for this request",
+                    2,
+                ) from exc
+        self.materialized: dict[str, Path] = {}
+
+    def _top(self, name: str) -> Generator[bytes, None, Path]:
+        if name in self.materialized:
+            return self.materialized[name]
+        deps = self.deps
+        config = deps.config.repos[name]
+        path = self.hub / name
+        if not path.resolve().is_relative_to(self.hub.resolve()):
+            raise _PreparationError("invalid", "repository worktree escapes task", 2)
+        ref = self.run_refs.get(name)
+        try:
+            if ref is None:
+                warning = check_base_freshness(
+                    deps.shell,
+                    config.path,
+                    config.base_branch,
+                    cancel_event=deps.cancel_event,
+                )
+                if warning is not None:
+                    yield f"{warning}\n".encode()
+            materialize_worktree(
+                deps.shell,
+                config.path,
+                path,
+                self.branch,
+                repo_name=name,
+                run_ref=ref,
+                cancel_event=deps.cancel_event,
+            )
+        except MaterializeError as exc:
+            raise _PreparationError("materialization_error", str(exc)) from exc
+        self.materialized[name] = path
+        return path
+
+    def prepare(self, name: str) -> Generator[bytes, None, Path]:
+        config = self.deps.config.repos[name]
+        if config.git_root is not None:
+            parent = yield from self._top(config.git_root)
+            path = parent / config.path
+            if not path.resolve().is_relative_to(parent.resolve()):
+                raise _PreparationError("invalid", "child repository escapes parent", 2)
+            self.materialized[name] = path
+        else:
+            path = yield from self._top(name)
+        return path
+
+    def context(self, name: str) -> ToolContext:
+        try:
+            path = self.materialized[name].resolve(strict=True)
+        except OSError as exc:
+            raise _PreparationError(
+                "materialization_error",
+                "prepared worktree is unavailable",
+            ) from exc
+        if not path.is_relative_to(self.hub.resolve()) or not path.is_relative_to(
+            self.deps.workspace_root.resolve()
+        ):
+            raise _PreparationError("invalid", "prepared worktree escapes workspace", 2)
+        revision = _git_rev(
+            self.deps.shell,
+            path,
+            "HEAD",
+            cancel_event=self.deps.cancel_event,
+        )
+        if (
+            revision is None
+            or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", revision) is None
+        ):
+            raise _PreparationError(
+                "materialization_error",
+                "cannot verify prepared source identity",
+            )
+        return ToolContext(
+            task=self.task,
+            repo=name,
+            worktree=path,
+            source_revision=revision,
+            env_runner=self.deps.config.repos[name].env_runner
+            or self.deps.config.env_runner,
+        )
+
+
+def _setup_events(
+    prepared: _PreparedTask, name: str, context: ToolContext
+) -> Generator[ToolEvent, None, None]:
+    deps = prepared.deps
+    config = deps.config.repos[name]
+    actual = config.tasks.get("setup", "setup")
+    if "setup" in config.not_applicable or not taskfile_has_target(
+        context.worktree, actual
+    ):
+        yield ToolEvent("result", result=ToolResult("completed", exit_code=0))
+        return
+    key = remote_setup.setup_key(context.worktree, config.setup_inputs)
+    key_path = remote_setup.key_file(deps.workspace_root, prepared.task, name)
+    if not remote_setup.needs_setup(key_path, key):
+        yield ToolEvent("result", result=ToolResult("completed", exit_code=0))
+        return
+    yield ToolEvent("stdout", data=f"setup: {name} (task {actual})\n".encode())
+    request = ToolRequest(task=prepared.task, repo=name, argv=("task", actual))
+    stream = _operations(deps).run(
+        request,
+        context,
+        cancel_event=deps.cancel_event,
+        spawn=deps.shell.spawn_argv,
+    )
+    try:
+        for event in stream:
+            if event.kind == "result" and event.result is not None:
+                if event.result.status == "completed" and event.result.exit_code == 0:
+                    verified = prepared.context(name)
+                    if (
+                        verified.source_revision != context.source_revision
+                        or verified.worktree != context.worktree
+                    ):
+                        raise _PreparationError(
+                            "materialization_error",
+                            "setup changed prepared source identity",
+                        )
+                    remote_setup.record_setup(key_path, key)
+            yield event
+    finally:
+        stream.close()
+
+
+def _legacy_events(events: Iterator[ToolEvent]) -> Generator[bytes, None, ToolResult]:
+    """Adapt bounded binary events; never assemble a complete output line."""
+    last_byte: bytes = b"\n"
+    result = ToolResult("protocol_error")
+    try:
+        for event in events:
+            if event.kind in {"stdout", "stderr"} and event.data:
+                last_byte = event.data[-1:]
+                yield event.data
+            elif event.kind == "result" and event.result is not None:
+                result = event.result
+    finally:
+        close = getattr(events, "close", None)
+        if close is not None:
+            close()
+    # Keep a newline-free final output fragment from swallowing the next
+    # legacy control record. Structured tool frames do not need this separator.
+    if last_byte != b"\n":
+        yield b"\n"
+    return result
+
+
+def _legacy_code(result: ToolResult) -> int:
+    if result.status == "completed":
+        return result.exit_code if result.exit_code is not None else 1
+    return 2 if result.status in {"invalid", "busy"} else 1
+
+
 def _run_verb_stream_unlocked(
     verb: str,
     task: str,
@@ -594,302 +700,168 @@ def _run_verb_stream_unlocked(
     nonce: str,
     run_ref_repos: list[str] | None = None,
 ) -> Iterator[bytes]:
-    """The serve-side body of `POST /exec/{verb}`.
-
-    A plain sync generator — the FastAPI endpoint runs it off the event
-    loop (e.g. via `starlette.concurrency.iterate_in_threadpool`) since it
-    does blocking subprocess/git I/O. For each repo, in order:
-
-      1. MOS-203 base-freshness check (auto-fetch + an optional warning
-         line — see `check_base_freshness`).
-      2. Materialize `<workspace_root>/.worktrees/<task>/<repo>` on the
-         task's branch (see `materialize_worktree`). `git_root` (nested
-         subdirectory) repos skip their own fetch/worktree-add and resolve
-         to a path under their parent's worktree instead, mirroring
-         `WorktreeManager.spawn`'s treatment of subdirectory services.
-      2b. A repo named in `run_ref_repos` is materialized from THIS host's own
-          scratch ref for the task instead — the operator pushed a commit
-          synthesized from their working tree straight here, so the revision is
-          already local and NO fetch (not even the base-freshness probe, which
-          exists only to refresh this host's view of origin) is issued for it.
-          Names are TOP-LEVEL git repo names, so a `git_root` child is covered
-          by its parent's entry.
-      3. Resolve the repo's go-task target for `verb` + its env_runner;
-         for `verb == "capture"` build the same env-var contract as local
-         capture (`MSHIP_CAPTURE_DIR` a fresh remote temp dir,
-         `MSHIP_CAPTURE_KINDS`, `MSHIP_CAPTURE_PLATFORM`) — see
-         `mship.core.capture.run_capture`.
-      4. Run it via `ShellRunner.run_streaming`, yielding each stdout/stderr
-         line as it's produced.
-      4b. For `verb == "capture"` only: once that repo's task exits, if it
-          succeeded and produced artifacts in `MSHIP_CAPTURE_DIR`
-          (`capture.discover_artifacts`), yield them as a length-prefixed
-          tar block (`ARTIFACT_MARKER` line + raw tar bytes — see module
-          docstring). A capture that exits 0 with NO recognized artifact is
-          turned into an error (an error line + a non-zero exit), matching
-          local `capture.run_capture`'s hard-error contract. Either way the
-          remote capture temp dir is removed afterward (even on a client
-          disconnect — see the per-repo `finally`). `run`/`build` skip this
-          entirely (stream-only).
-      5. Stop at the first repo whose task exits non-zero (fail-fast,
-         mirroring `RepoExecutor`'s tier behavior) rather than continuing
-         to the next repo.
-
-    Always ends with the trailing sentinel line
-    `f"{EXIT_MARKER}:{nonce} {code}\\n"` conveying the run's exit code as
-    DATA — never raises for a non-zero task exit (see module docstring for
-    the full wire contract). `nonce` is the per-request anti-spoof secret
-    (see `core/serve.py post_exec`); every control record is tagged with it.
-
-    Task 6 hardening (both fail the SAME way — an error line naming the
-    problem, then a non-zero `__MSHIP_EXIT__`, never a raised exception mid
-    generator):
-      - An unknown repo name (not in `deps.config.repos`) is rejected
-        UPFRONT, before the per-repo loop starts and before any git/task
-        command runs for ANY repo in the request (Task 3 previously left
-        this a raw `KeyError` on `config.repos[repo_name]`).
-      - A branch-materialize failure (a git fetch/checkout/reset/worktree-add
-        exiting non-zero — see `materialize_worktree`/`MaterializeError`)
-        stops at that repo exactly like a failing task would; already-yielded
-        output from earlier repos in the same request is preserved.
-    """
     if verb not in VERBS:
-        raise UnknownVerbError(
-            f"unknown verb {verb!r}; expected one of {VERBS}"
-        )
-
-    kinds: list[str] | None = None
-    if verb == "capture":
-        kinds = _cap.resolve_kinds(kind)
-
-    config = deps.config
-    shell = deps.shell
-    hub = _hub_dir(deps.workspace_root, task)
-    branch = config.branch_pattern.replace("{slug}", task)
-
-    # Select names through the trusted server configuration. These values are
-    # subsequently used in worktree paths, git refs/arguments, task names, and
-    # command working directories. Preserve the client's order and duplicates
-    # for execution while rebuilding each selected value from the server-owned
-    # key objects.
-    configured_names = {name: name for name in config.repos}
-    requested_names = [*repos, *(run_ref_repos or [])]
-    unknown_repos = [name for name in requested_names if name not in configured_names]
-    if unknown_repos:
-        yield (
-            f"error: unknown repo(s) {', '.join(unknown_repos)}; known "
-            f"repos: {', '.join(sorted(config.repos)) or '(none)'}\n"
-        ).encode("utf-8")
-        yield f"{EXIT_MARKER}:{nonce} 2\n".encode("utf-8")
-        return
-
-    repos = [configured_names[name] for name in repos]
-    scratch_repos = sorted({
-        configured_names[name] for name in (run_ref_repos or [])
-    })
-    run_refs: dict[str, str] = {}
-    for scratch_repo in scratch_repos:
-        try:
-            run_refs[scratch_repo] = build_run_ref(task, scratch_repo)
-        except RunRefNameError as exc:
-            # A name that cannot form a ref is refused before anything runs —
-            # as stream DATA, never a raised exception mid-generator, matching
-            # the unknown-repo guard above.
-            yield f"error: cannot build a run ref for this request: {exc}\n".encode("utf-8")
-            yield f"{EXIT_MARKER}:{nonce} 2\n".encode("utf-8")
-            return
-
-    materialized: dict[str, Path] = {}
+        raise UnknownVerbError(f"unknown verb {verb!r}; expected one of {VERBS}")
+    kinds = _cap.resolve_kinds(kind) if verb == "capture" else None
     exit_code = 0
-
-    def _ensure_materialized(top_repo: str) -> Iterator[bytes]:
-        """Materialize a TOP-LEVEL repo's task-branch worktree at
-        `<hub>/<repo>`, recording it in `materialized`. A generator so it can
-        yield the base-freshness warning or a clean materialization error through
-        the stream. Its `yield from` value (PEP 380) is True on success, False
-        if materialization fails or the client disconnects. A materialization
-        failure has already emitted its exit sentinel; cancellation simply
-        unwinds so the response can close.
-
-        Idempotent: a repo already in `materialized` (e.g. a parent brought in
-        while resolving an earlier `git_root` child, then reached again in the
-        loop, or a parent also listed explicitly in `repos`) is a no-op — it is
-        never re-fetched/reset."""
-        if top_repo in materialized:
-            return True
-        rc = config.repos[top_repo]
-        repo_path = rc.path
-        worktree_path = hub / top_repo
-        ref = run_refs.get(top_repo)
-
-        try:
-            if ref is None:
-                # Origin is the source of truth for this repo, so make sure this
-                # host's view of its base is current first (MOS-203). Skipped
-                # entirely on the scratch-ref path: nothing there comes from
-                # origin, and a fetch would be pure latency.
-                warning = check_base_freshness(
-                    shell,
-                    repo_path,
-                    rc.base_branch,
-                    cancel_event=deps.cancel_event,
+    try:
+        prepared = _PreparedTask(deps, task, repos, run_ref_repos or ())
+        for name in prepared.repos:
+            yield from prepared.prepare(name)
+            context = prepared.context(name)
+            setup = yield from _legacy_events(_setup_events(prepared, name, context))
+            if setup.status == "cancelled":
+                return
+            if setup.status != "completed" or setup.exit_code != 0:
+                exit_code = _legacy_code(setup)
+                yield (
+                    f"error: setup failed on the run host for repo {name!r} "
+                    f"(exit {exit_code}); the {verb} was not started.\n"
+                ).encode()
+                break
+            out_dir: Path | None = None
+            try:
+                env: dict[str, str] = {}
+                if verb == "capture":
+                    out_dir = Path(tempfile.mkdtemp(prefix="mship-remote-capture-"))
+                    env = {
+                        "MSHIP_CAPTURE_DIR": str(out_dir),
+                        "MSHIP_CAPTURE_KINDS": ",".join(kinds or []),
+                    }
+                    if platform is not None:
+                        env["MSHIP_CAPTURE_PLATFORM"] = platform
+                actual = deps.config.repos[name].tasks.get(verb, verb)
+                request = ToolRequest(
+                    task=task, repo=name, argv=("task", actual), env=env
                 )
-                if warning is not None:
-                    yield f"{warning}\n".encode("utf-8")
+                result = yield from _legacy_events(
+                    _operations(deps).run(
+                        request,
+                        context,
+                        cancel_event=deps.cancel_event,
+                        spawn=deps.shell.spawn_argv,
+                    )
+                )
+                if result.status == "cancelled":
+                    return
+                exit_code = _legacy_code(result)
+                if result.status != "completed":
+                    yield f"error: remote execution {result.status}\n".encode()
+                if verb == "capture" and exit_code == 0:
+                    artifacts = _cap.discover_artifacts(out_dir, kinds or [])
+                    if artifacts:
+                        data = _build_artifact_tar(artifacts)
+                        yield f"{ARTIFACT_MARKER}:{nonce} {len(data)}\n".encode()
+                        yield data
+                    else:
+                        yield (
+                            f"error: capture target produced no recognized artifact "
+                            f"in {out_dir} for kinds {kinds or []}.\n"
+                        ).encode()
+                        exit_code = 1
+            finally:
+                if out_dir is not None:
+                    shutil.rmtree(out_dir, ignore_errors=True)
+            if exit_code != 0:
+                break
+    except _PreparationError as exc:
+        yield f"error: {exc}\n".encode()
+        exit_code = exc.exit_code
+    except ShellCancelled:
+        return
+    except OSError, ValueError:
+        yield b"error: remote execution preparation or evidence failed\n"
+        exit_code = 1
+    yield f"{EXIT_MARKER}:{nonce} {exit_code}\n".encode()
 
-            materialize_worktree(
-                shell,
-                repo_path,
-                worktree_path,
-                branch,
-                repo_name=top_repo,
-                run_ref=ref,
-                cancel_event=deps.cancel_event,
-            )
-        except ShellCancelled:
-            return False
-        except MaterializeError as exc:
-            yield f"error: {exc}\n".encode("utf-8")
-            yield f"{EXIT_MARKER}:{nonce} 1\n".encode("utf-8")
-            return False
 
-        materialized[top_repo] = worktree_path
-        return True
-
-    def _ensure_setup(repo_name: str, repo_config, worktree_path: Path) -> Iterator[bytes]:
-        """Run `task setup` in a freshly-materialized worktree when it is
-        needed, streaming its output live exactly like the verb itself.
-
-        Git carries source, not dependencies. Without this, an exact-source run
-        against stale dependencies fails with a module-not-found that has no
-        visible relationship to the edit — the same confusing-staleness class
-        the rest of this feature exists to eliminate. So the host DERIVES them.
-
-        Keyed (see `core/remote_setup.py`): the first materialization on this
-        host, then only when the repo's declared `setup_inputs` change. Skipped
-        entirely for a repo that declares `setup` not applicable or whose
-        Taskfile has no such target — `task setup` in a repo that never defined
-        one exits non-zero, and that must not fail every remote run.
-
-        PEP 380 value: True to continue, False when setup FAILED — in which case
-        the error line and the exit sentinel have ALREADY been emitted and the
-        caller MUST return, exactly like `_ensure_materialized`.
-        """
-        if "setup" in repo_config.not_applicable:
-            return True
-        actual_setup = repo_config.tasks.get("setup", "setup")
-        if not taskfile_has_target(worktree_path, actual_setup):
-            return True
-
-        key = remote_setup.setup_key(worktree_path, repo_config.setup_inputs)
-        key_path = remote_setup.key_file(deps.workspace_root, task, repo_name)
-        if not remote_setup.needs_setup(key_path, key):
-            return True
-
-        yield f"setup: {repo_name} (task {actual_setup})\n".encode("utf-8")
-        env_runner = repo_config.env_runner or config.env_runner
-        command = shell.build_command(f"task {actual_setup}", env_runner)
-        completed = False
-        proc = None
+def run_tool_stream(
+    request: ToolRequest, *, deps: RemoteExecDeps
+) -> Generator[ToolEvent, None, None]:
+    """Execute one typed tool operation without a second transport/owner."""
+    operations = _operations(deps)
+    if request.preparation == "observe":
+        stream = operations.observe(
+            request,
+            cancel_event=deps.cancel_event,
+            spawn=deps.shell.spawn_argv,
+        )
         try:
-            proc = shell.run_streaming(command, cwd=worktree_path, env=None)
-            if not (yield from _stream_proc_lines(proc, deps.cancel_event)):
-                return False
-            setup_code = proc.wait()
-            completed = True
+            yield from stream
         finally:
-            _terminate_proc(proc, completed=completed)
-
-        if setup_code != 0:
-            # Surface setup's OWN failure rather than letting the verb run
-            # against half-built dependencies and report something that does not
-            # name the real cause (spec ac18).
-            yield (
-                f"error: `task {actual_setup}` failed on the run host for repo "
-                f"{repo_name!r} (exit {setup_code}); the output above is setup's "
-                f"own. The {verb} was not started.\n"
-            ).encode("utf-8")
-            yield f"{EXIT_MARKER}:{nonce} {setup_code}\n".encode("utf-8")
-            return False
-
-        # Recorded only after a SUCCESSFUL setup: caching a failure would skip
-        # the retry that fixes it.
-        remote_setup.record_setup(key_path, key)
-        return True
-
-    for repo_name in repos:
-        repo_config = config.repos[repo_name]
-
-        if repo_config.git_root is not None:
-            # Subdirectory child (mirrors WorktreeManager.spawn): its git tree
-            # IS the parent's worktree. Guarantee the PARENT is materialized
-            # first (parent-first) — even when this request lists only the
-            # child, or lists it before its parent — then resolve the child's
-            # path UNDER the materialized parent worktree. Previously this fell
-            # back to a never-fetched `hub / git_root` dir, so the task could
-            # run against the serve host's stale/source tree.
-            if not (yield from _ensure_materialized(repo_config.git_root)):
-                return
-            parent_wt = materialized[repo_config.git_root]
-            worktree_path = parent_wt / repo_config.path
-            materialized[repo_name] = worktree_path
-        else:
-            if not (yield from _ensure_materialized(repo_name)):
-                return
-            worktree_path = materialized[repo_name]
-
-        if not (yield from _ensure_setup(repo_name, repo_config, worktree_path)):
+            stream.close()
+        return
+    try:
+        ensure_cancellable_shell_supported()
+    except ShellCancellationUnsupported:
+        yield ToolEvent("result", result=ToolResult("unsupported"))
+        return
+    try:
+        lock_file = _acquire_task_execution_lock(deps.workspace_root, request.task)
+    except BlockingIOError:
+        yield ToolEvent("result", result=ToolResult("busy"))
+        return
+    except OSError, UnicodeError:
+        yield ToolEvent("result", result=ToolResult("evidence_error"))
+        return
+    try:
+        admission = operations.admission_status(request.task)
+        if admission != "available":
+            yield ToolEvent("result", result=ToolResult(admission))
             return
-
-        actual_task_name = repo_config.tasks.get(verb, verb)
-        env_runner = repo_config.env_runner or config.env_runner
-
-        # `out_dir`/`proc` live outside the try so the `finally` can always
-        # clean them up even if a client disconnect (GeneratorExit) fires at
-        # any `yield` below — before the temp dir would otherwise be removed,
-        # and while the task subprocess is still running (FIX 8).
-        out_dir: Path | None = None
-        proc = None
-        completed = False
-        try:
-            env: dict[str, str] | None = None
-            if verb == "capture":
-                out_dir = Path(tempfile.mkdtemp(prefix="mship-remote-capture-"))
-                env = {
-                    "MSHIP_CAPTURE_DIR": str(out_dir),
-                    "MSHIP_CAPTURE_KINDS": ",".join(kinds or []),
-                }
-                if platform is not None:
-                    env["MSHIP_CAPTURE_PLATFORM"] = platform
-
-            command = shell.build_command(f"task {actual_task_name}", env_runner)
-            proc = shell.run_streaming(command, cwd=worktree_path, env=env)
-            if not (yield from _stream_proc_lines(proc, deps.cancel_event)):
+        prepared = _PreparedTask(
+            deps,
+            request.task,
+            (request.repo,),
+            request.run_ref_repos,
+        )
+        # Preparation progress is not backend discovery output.
+        for _ in prepared.prepare(request.repo):
+            pass
+        context = prepared.context(request.repo)
+        if (
+            request.source_revision is not None
+            and request.source_revision != context.source_revision
+        ):
+            yield ToolEvent("result", result=ToolResult("materialization_error"))
+            return
+        if request.preparation == "launch":
+            setup_result = ToolResult("protocol_error")
+            setup_stream = _setup_events(prepared, request.repo, context)
+            try:
+                for event in setup_stream:
+                    if event.kind in {"stdout", "stderr"}:
+                        yield event
+                    elif event.kind == "result" and event.result is not None:
+                        setup_result = event.result
+            finally:
+                setup_stream.close()
+            if setup_result.status != "completed" or setup_result.exit_code != 0:
+                status = (
+                    setup_result.status
+                    if setup_result.status != "completed"
+                    else "launch_error"
+                )
+                yield ToolEvent("result", result=ToolResult(status))
                 return
-            exit_code = proc.wait()
-            completed = True
-
-            if verb == "capture":
-                artifacts = _cap.discover_artifacts(out_dir, kinds or []) if exit_code == 0 else []
-                if artifacts:
-                    tar_bytes = _build_artifact_tar(artifacts)
-                    yield f"{ARTIFACT_MARKER}:{nonce} {len(tar_bytes)}\n".encode("utf-8")
-                    yield tar_bytes
-                elif exit_code == 0:
-                    # Parity with local `capture.run_capture`: a capture that
-                    # "succeeds" but produced nothing recognized is a hard
-                    # error, not a silent success.
-                    yield (
-                        f"error: capture target produced no recognized artifact "
-                        f"in {out_dir} for kinds {kinds or []}.\n"
-                    ).encode("utf-8")
-                    exit_code = 1
+        stream = operations.run(
+            request,
+            context,
+            cancel_event=deps.cancel_event,
+            spawn=deps.shell.spawn_argv,
+        )
+        try:
+            yield from stream
         finally:
-            _terminate_proc(proc, completed=completed)
-            if out_dir is not None:
-                shutil.rmtree(out_dir, ignore_errors=True)
-
-        if exit_code != 0:
-            break
-
-    yield f"{EXIT_MARKER}:{nonce} {exit_code}\n".encode("utf-8")
+            stream.close()
+    except _PreparationError as exc:
+        yield ToolEvent("result", result=ToolResult(exc.status))
+    except ShellCancelled:
+        yield ToolEvent("result", result=ToolResult("cancelled"))
+    except OSError, ValueError:
+        yield ToolEvent("result", result=ToolResult("evidence_error"))
+    finally:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock_file.close()

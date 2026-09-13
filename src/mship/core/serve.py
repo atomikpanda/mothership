@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import threading
@@ -129,7 +130,6 @@ class ResolveThreadBody(BaseModel):
         return value
 
 
-
 class InboxMutationBody(BaseModel):
     mutation_id: str
 
@@ -159,6 +159,7 @@ class PlanFlagApproveBody(BaseModel):
 class ExecBody(BaseModel):
     """POST /exec/{verb} request body — see `mship.core.remote_exec` for the
     full wire contract (how the response streams task output + exit code)."""
+
     task: str
     repos: list[str]
     platform: str | None = None
@@ -181,12 +182,16 @@ def _make_auth_dependency(token: str):
     def _require_token(authorization: str | None = Header(default=None)):
         provided = (authorization or "").encode("utf-8")
         if not hmac.compare_digest(provided, expected):
-            raise HTTPException(status_code=401, detail="missing or invalid bearer token")
+            raise HTTPException(
+                status_code=401, detail="missing or invalid bearer token"
+            )
 
     return _require_token
 
 
-async def _pr_watch_loop(watcher: PrWatcher, stop: asyncio.Event, interval: float) -> None:
+async def _pr_watch_loop(
+    watcher: PrWatcher, stop: asyncio.Event, interval: float
+) -> None:
     """Runs `watcher.check_once()` off the event loop (it shells out to `gh`)
     every `interval` seconds until `stop` is set. The first sweep happens
     immediately on entry rather than after the first interval, and the loop
@@ -224,7 +229,7 @@ def _capture_handoff(thread_id: str, idea: str) -> str:
         f"capture-brainstorm {thread_id}\n\n"
         "An idea was captured from the phone to brainstorm into a spec. Run the "
         "brainstorming flow in THIS thread: ask the operator clarifying questions "
-        f"one at a time with `mship reply {thread_id} \"...\"`, settle "
+        f'one at a time with `mship reply {thread_id} "..."`, settle '
         "purpose/scope/approach, then produce the spec with "
         f"`mship spec from-thread {thread_id}` → fill the draft JSON → "
         "`mship spec apply <id> --from-json <file>`, and reply here when it's drafted.\n\n"
@@ -233,8 +238,14 @@ def _capture_handoff(thread_id: str, idea: str) -> str:
 
 
 def _notify_dispatch(
-    *, msgs: Any, workitems: Any, item_msg_lock: Any,
-    spec: Any, task: Any, handoff: str, now: datetime,
+    *,
+    msgs: Any,
+    workitems: Any,
+    item_msg_lock: Any,
+    spec: Any,
+    task: Any,
+    handoff: str,
+    now: datetime,
 ) -> bool:
     """Post a one-time agent `event` message announcing a serve-side dispatch's
     handoff (spec id, task slug, worktree paths — the same text
@@ -285,7 +296,10 @@ def _notify_dispatch(
         else:
             seed = f"Dispatch handoff for {task.slug}"
             thread = msgs.create_thread(
-                subject=spec.title or task.slug, text=seed, now=now, task_slug=task.slug,
+                subject=spec.title or task.slug,
+                text=seed,
+                now=now,
+                task_slug=task.slug,
             )
             workitems.add_thread(wi.id, thread.id, now=now)
             tid = thread.id
@@ -344,7 +358,11 @@ def create_app(
     `get_gh_token`."""
     from fastapi import Depends, FastAPI, HTTPException
 
-    from mship.core.spec_store import SpecParseError, SpecRepresentationMismatch, SpecStore
+    from mship.core.spec_store import (
+        SpecParseError,
+        SpecRepresentationMismatch,
+        SpecStore,
+    )
     from mship.core.spec_storage import SpecLocked, SpecStorage, resolve_mode
     from mship.core.message_store import MessageStore
     from mship.core.workitem_store import WorkItemStore
@@ -354,7 +372,9 @@ def create_app(
     # exposes read_all() so the list/detail endpoints can render a LOCKED marker
     # (never ciphertext, never a 500) when the key is absent on this host.
     _spec_mode = getattr(config, "spec_storage", None) or resolve_mode(workspace_root)
-    _spec_storage = SpecStorage(specs_dir, mode=_spec_mode, workspace_root=workspace_root)
+    _spec_storage = SpecStorage(
+        specs_dir, mode=_spec_mode, workspace_root=workspace_root
+    )
     store = SpecStore(specs_dir, storage=_spec_storage)
     pr_manager = PRManager(ShellRunner(), cwd=workspace_root)
     # Separate ShellRunner instance for GET /gh-token (Broker A) rather than
@@ -387,12 +407,18 @@ def create_app(
     async def _lifespan(_app):
         """Runs a `PrWatcher` sweep on an interval for the app's lifetime,
         started on ASGI startup and cancelled cleanly on shutdown."""
-        interval = float(pr_watch_interval if pr_watch_interval is not None else PR_WATCH_INTERVAL_SECONDS)
+        interval = float(
+            pr_watch_interval
+            if pr_watch_interval is not None
+            else PR_WATCH_INTERVAL_SECONDS
+        )
         if interval <= 0:
             yield
             return
         watcher = PrWatcher(
-            msgs, workitems, state_manager,
+            msgs,
+            workitems,
+            state_manager,
             check_state=lambda u: pr_manager.check_pr_state(u).state,
             now_fn=lambda: datetime.now(timezone.utc),
             lock=_item_msg_lock,
@@ -419,8 +445,12 @@ def create_app(
         # Auth covers user routes but NOT FastAPI's built-in docs/openapi routes,
         # so disable them when exposed behind auth (no unauthenticated schema surface).
         app = FastAPI(
-            title="mship serve", version="0", dependencies=dependencies,
-            docs_url=None, redoc_url=None, openapi_url=None,
+            title="mship serve",
+            version="0",
+            dependencies=dependencies,
+            docs_url=None,
+            redoc_url=None,
+            openapi_url=None,
             lifespan=_lifespan,
         )
     else:
@@ -442,12 +472,14 @@ def create_app(
         console can never drift from the documented contract."""
         from mship.core import topology as topo
 
-        return topo.topology_payload(topo.probe_topology(
-            config=config,
-            state_dir=workspace_root / ".mothership",
-            workspace_root=workspace_root,
-            gh_app_credentials_loaded=bool(gh_app_id and gh_app_key),
-        ))
+        return topo.topology_payload(
+            topo.probe_topology(
+                config=config,
+                state_dir=workspace_root / ".mothership",
+                workspace_root=workspace_root,
+                gh_app_credentials_loaded=bool(gh_app_id and gh_app_key),
+            )
+        )
 
     def _doctor_payload() -> dict:
         """Workspace health, from the SAME `DoctorChecker` the CLI uses — no
@@ -482,8 +514,10 @@ def create_app(
         if config is None:
             raise HTTPException(
                 status_code=503,
-                detail=("this serve host has no workspace config wired in; "
-                        "bootstrap it as an mship workspace and restart serve"),
+                detail=(
+                    "this serve host has no workspace config wired in; "
+                    "bootstrap it as an mship workspace and restart serve"
+                ),
             )
         return _doctor_payload()
 
@@ -499,8 +533,10 @@ def create_app(
         if config is None:
             raise HTTPException(
                 status_code=503,
-                detail=("this serve host has no workspace config wired in; "
-                        "bootstrap it as an mship workspace and restart serve"),
+                detail=(
+                    "this serve host has no workspace config wired in; "
+                    "bootstrap it as an mship workspace and restart serve"
+                ),
             )
         return _topology_payload()
 
@@ -524,7 +560,8 @@ def create_app(
         }
         if pair_link is None:
             return {
-                **shell, "qr_data_uri": None,
+                **shell,
+                "qr_data_uri": None,
                 "unavailable_reason": (
                     "Not pairable from this serve: pairing needs a bearer token and "
                     "an address a phone can reach (a loopback-only serve has neither). "
@@ -537,8 +574,11 @@ def create_app(
         buf = io.BytesIO()
         segno.make(pair_link, error="m").save(buf, kind="png", scale=6, border=2)
         encoded = base64.b64encode(buf.getvalue()).decode()
-        return {**shell, "qr_data_uri": f"data:image/png;base64,{encoded}",
-                "unavailable_reason": ""}
+        return {
+            **shell,
+            "qr_data_uri": f"data:image/png;base64,{encoded}",
+            "unavailable_reason": "",
+        }
 
     # The management console is an optional, self-contained frontend package
     # (`mship.webui`). It receives ONLY the payload above — no config, no stores —
@@ -560,7 +600,9 @@ def create_app(
 
     from mship.core.spec_review import build_review
 
-    def _matches_inbox_filter(payload: dict, inbox: Literal["active", "archived", "all"]) -> bool:
+    def _matches_inbox_filter(
+        payload: dict, inbox: Literal["active", "archived", "all"]
+    ) -> bool:
         return inbox == "all" or payload["inbox_state"] == inbox
 
     def _matches_search(query: str | None, *values: str | None) -> bool:
@@ -606,18 +648,32 @@ def create_app(
                 if inbox != "all":
                     continue
                 payload = {
-                    "id": locked_id, "locked": True, "status": "locked",
-                    "title": None, "task_slug": None, "affected_repos": [],
-                    "inbox_state": None, "archive_reason": None, "pinned": False,
+                    "id": locked_id,
+                    "locked": True,
+                    "status": "locked",
+                    "title": None,
+                    "task_slug": None,
+                    "affected_repos": [],
+                    "inbox_state": None,
+                    "archive_reason": None,
+                    "pinned": False,
                 }
             else:
-                payload = _stamp_spec_inbox({
-                    "id": spec.id, "title": spec.title, "status": spec.status,
-                    "task_slug": spec.task_slug, "affected_repos": spec.affected_repos,
-                    "locked": False,
-                }, spec, now)
-            if (_matches_inbox_filter(payload, inbox)
-                    and _matches_search(q, payload["id"], payload["title"])):
+                payload = _stamp_spec_inbox(
+                    {
+                        "id": spec.id,
+                        "title": spec.title,
+                        "status": spec.status,
+                        "task_slug": spec.task_slug,
+                        "affected_repos": spec.affected_repos,
+                        "locked": False,
+                    },
+                    spec,
+                    now,
+                )
+            if _matches_inbox_filter(payload, inbox) and _matches_search(
+                q, payload["id"], payload["title"]
+            ):
                 out.append(payload)
         return out
 
@@ -632,10 +688,16 @@ def create_app(
         except SpecLocked as locked:
             if locked.spec_id == spec_id:
                 return {
-                    "id": spec_id, "locked": True, "status": "locked",
-                    "inbox_state": None, "archive_reason": None, "pinned": False,
+                    "id": spec_id,
+                    "locked": True,
+                    "status": "locked",
+                    "inbox_state": None,
+                    "archive_reason": None,
+                    "pinned": False,
                 }
-            raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is blocked by locked storage")
+            raise HTTPException(
+                status_code=409, detail=f"spec {spec_id!r} is blocked by locked storage"
+            )
         except SpecParseError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         except ValueError as exc:
@@ -645,7 +707,9 @@ def create_app(
         return _spec_payload(artifact.spec)
 
     @app.post("/specs/{spec_id}/inbox/{action}")
-    def post_spec_inbox_action(spec_id: str, action: InboxAction, body: InboxMutationBody):
+    def post_spec_inbox_action(
+        spec_id: str, action: InboxAction, body: InboxMutationBody
+    ):
         from mship.core.spec_storage import SpecLocked
 
         now = datetime.now(timezone.utc)
@@ -749,7 +813,9 @@ def create_app(
                     detail="evidence is locked: encrypted, and no key is available on this host",
                 )
             logical = name[: -len(ENC_SUFFIX)]
-            media = CONTENT_TYPES.get(_Path(logical).suffix.lower(), "application/octet-stream")
+            media = CONTENT_TYPES.get(
+                _Path(logical).suffix.lower(), "application/octet-stream"
+            )
             try:
                 plain = spec_key.decrypt_bytes(key, path.read_bytes())
             except InvalidToken:
@@ -847,8 +913,10 @@ def create_app(
             if stored is None:
                 continue
             try:
-                out.append(_task_assumption_summary(slug, stored, rows, docs_dir, state))
-            except (OSError, UnicodeDecodeError):
+                out.append(
+                    _task_assumption_summary(slug, stored, rows, docs_dir, state)
+                )
+            except OSError, UnicodeDecodeError:
                 # This task's plan went missing/unreadable between the check
                 # being recorded and this read (e.g. pruned by `mship close`
                 # while the stored plan-check lingered). Skip just this task
@@ -878,7 +946,10 @@ def create_app(
         from mship.core.assumptions import AssumptionStore, resolve_mode
         from mship.core.plan import effective_plan_path
         from mship.core.plan_assumptions_transition import (
-            NoStoredCheck, StaleCheck, UnknownAxis, approve_flag,
+            NoStoredCheck,
+            StaleCheck,
+            UnknownAxis,
+            approve_flag,
         )
         from mship.core.plan_check import PlanCheckStore
 
@@ -894,8 +965,13 @@ def create_app(
         ).load()
         try:
             approve_flag(
-                store, slug, body.axis, body.reason, approved_by="operator",
-                plan_text=plan_text, rows=rows,
+                store,
+                slug,
+                body.axis,
+                body.reason,
+                approved_by="operator",
+                plan_text=plan_text,
+                rows=rows,
             )
         except NoStoredCheck:
             raise HTTPException(
@@ -972,13 +1048,17 @@ def create_app(
                 installation_id = _installation_cache.get(owner)
                 if installation_id is None:
                     installation_id = resolve_installation(
-                        app_id=gh_app_id, private_key=gh_app_key,
-                        owner=owner, repo=short_names[0],
+                        app_id=gh_app_id,
+                        private_key=gh_app_key,
+                        owner=owner,
+                        repo=short_names[0],
                     )
                     _installation_cache[owner] = installation_id
                 result = mint_installation_token(
-                    app_id=gh_app_id, private_key=gh_app_key,
-                    installation_id=installation_id, repos=short_names,
+                    app_id=gh_app_id,
+                    private_key=gh_app_key,
+                    installation_id=installation_id,
+                    repos=short_names,
                 )
             except GhAppError as e:
                 # Hard error, never a silent Broker-A fallback (no identity swap).
@@ -986,7 +1066,9 @@ def create_app(
             # Audit the mint: broker + owner + repos + timestamp, never the token.
             logger.info(
                 "gh-token minted: broker=App owner=%s repos=%s at=%s",
-                owner, short_names, datetime.now(timezone.utc).isoformat(),
+                owner,
+                short_names,
+                datetime.now(timezone.utc).isoformat(),
             )
             return result
 
@@ -1004,7 +1086,8 @@ def create_app(
         # Audit the mint: timestamp + requested repos, never the token value.
         logger.info(
             "gh-token minted: broker=A repos=%s at=%s",
-            repos_list or None, datetime.now(timezone.utc).isoformat(),
+            repos_list or None,
+            datetime.now(timezone.utc).isoformat(),
         )
         return {"token": token, "expires_at": None, "repositories": repos_list or None}
 
@@ -1012,7 +1095,9 @@ def create_app(
 
     # datetime/timezone are imported at module top (needed earlier by _lifespan).
     from mship.core.spec_review import (
-        infer_evidence_kind, set_criterion_evidence, set_criterion_verdict,
+        infer_evidence_kind,
+        set_criterion_evidence,
+        set_criterion_verdict,
         set_prose_verdict,
     )
     from mship.core.spec_questions import add_question, answer_question
@@ -1034,7 +1119,6 @@ def create_app(
         if spec is None:
             raise HTTPException(status_code=404, detail=f"no spec {spec_id!r}")
         return spec
-
 
     def _archive_and_review(spec_id: str):
         """Transition to archived from the current artifact under its spec lock."""
@@ -1088,6 +1172,7 @@ def create_app(
         POST /approve's own gate)."""
         from mship.core.spec import InvalidTransition, validate_transition
         from mship.core.spec_approve import approval_blockers
+
         if spec.status != "needs_review" or approval_blockers(spec):
             return
         try:
@@ -1095,7 +1180,9 @@ def create_app(
         except InvalidTransition:
             return
         spec.status = "approved"
-        spec.clarification_reason = None  # an approved spec carries no pending request-changes reason
+        spec.clarification_reason = (
+            None  # an approved spec carries no pending request-changes reason
+        )
 
     @app.post("/specs/{spec_id}/verdict")
     def post_verdict(spec_id: str, body: VerdictBody):
@@ -1103,7 +1190,10 @@ def create_app(
             return _mutate_review(
                 spec_id,
                 lambda spec: set_criterion_verdict(
-                    spec, body.criterion_id, body.verdict, body.comment,
+                    spec,
+                    body.criterion_id,
+                    body.verdict,
+                    body.comment,
                 ),
                 auto_approve=True,
             )
@@ -1116,7 +1206,10 @@ def create_app(
             return _mutate_review(
                 spec_id,
                 lambda spec: set_prose_verdict(
-                    spec, body.section_id, body.verdict, body.comment,
+                    spec,
+                    body.section_id,
+                    body.verdict,
+                    body.comment,
                 ),
                 auto_approve=True,
             )
@@ -1130,7 +1223,11 @@ def create_app(
             return _mutate_review(
                 spec_id,
                 lambda spec: set_criterion_evidence(
-                    spec, body.criterion_id, kind, body.ref, body.note,
+                    spec,
+                    body.criterion_id,
+                    kind,
+                    body.ref,
+                    body.note,
                 ),
             )
         except ValueError as e:
@@ -1169,7 +1266,9 @@ def create_app(
         try:
             spec = approve_spec(spec, store, bypass_gate=body.bypass_gate)
         except ApprovalBlocked as e:
-            raise HTTPException(status_code=409, detail="cannot approve: " + "; ".join(e.blockers))
+            raise HTTPException(
+                status_code=409, detail="cannot approve: " + "; ".join(e.blockers)
+            )
         except InvalidTransition as e:
             raise HTTPException(status_code=409, detail=str(e))
         except SpecRevisionConflict as e:
@@ -1191,7 +1290,11 @@ def create_app(
             raise HTTPException(status_code=400, detail="reason must not be empty")
         try:
             spec = request_changes_spec(
-                spec, store, body.reason, log_manager=log_manager, actor="operator",
+                spec,
+                store,
+                body.reason,
+                log_manager=log_manager,
+                actor="operator",
             )
         except InvalidTransition as e:
             raise HTTPException(status_code=409, detail=str(e))
@@ -1222,8 +1325,11 @@ def create_app(
     # --- capture-write endpoints (B3): the phone Capture path over HTTP ---
 
     from mship.core.spec_draft import (
-        MissingSpec, ReviewDiscardRequired, apply_draft_transaction,
-        build_draft_prompt, new_spec,
+        MissingSpec,
+        ReviewDiscardRequired,
+        apply_draft_transaction,
+        build_draft_prompt,
+        new_spec,
     )
 
     @app.post("/specs")
@@ -1233,8 +1339,11 @@ def create_app(
         now = datetime.now(timezone.utc)
         try:
             spec = new_spec(
-                body.title, now=now, spec_id=body.id,
-                affected_repos=body.affected_repos, task_slug=body.task_slug,
+                body.title,
+                now=now,
+                spec_id=body.id,
+                affected_repos=body.affected_repos,
+                task_slug=body.task_slug,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
@@ -1243,11 +1352,15 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
         except SpecLocked:
-            raise HTTPException(status_code=409, detail=f"spec {spec.id!r} already exists but is locked")
+            raise HTTPException(
+                status_code=409, detail=f"spec {spec.id!r} already exists but is locked"
+            )
         except SpecParseError as exc:
             _raise_spec_conflict(exc)
         if created is None:
-            raise HTTPException(status_code=409, detail=f"spec {spec.id!r} already exists")
+            raise HTTPException(
+                status_code=409, detail=f"spec {spec.id!r} already exists"
+            )
         return {**spec.model_dump(mode="json"), "path": str(created)}
 
     @app.post("/specs/{spec_id}/draft")
@@ -1341,8 +1454,10 @@ def create_app(
                 f"spawn a task named {s.id!r} first, then dispatch."
             )
         return worktree_manager.spawn(
-            description=s.title, repos=list(s.affected_repos),
-            slug=s.id, workspace_root=workspace_root,
+            description=s.title,
+            repos=list(s.affected_repos),
+            slug=s.id,
+            workspace_root=workspace_root,
         ).task
 
     @app.post("/specs/{spec_id}/dispatch")
@@ -1360,9 +1475,13 @@ def create_app(
             with _dispatch_lock:
                 spec = _load_or_404(spec_id)
                 result = dispatch_spec(
-                    spec, state_manager=state_manager, store=store,
-                    spawn_fn=_serve_spawn, now=datetime.now(timezone.utc),
-                    workitems=workitems, workspace=workspace_name,
+                    spec,
+                    state_manager=state_manager,
+                    store=store,
+                    spawn_fn=_serve_spawn,
+                    now=datetime.now(timezone.utc),
+                    workitems=workitems,
+                    workspace=workspace_name,
                     workspace_root=workspace_root,
                     docs_dir=(config.docs_dir if config is not None else "docs"),
                 )
@@ -1373,14 +1492,20 @@ def create_app(
                 # 500 — mirrors PrWatcher's never-raise philosophy.
                 try:
                     _notify_dispatch(
-                        msgs=msgs, workitems=workitems, item_msg_lock=_item_msg_lock,
-                        spec=result.spec, task=result.task, handoff=result.handoff,
+                        msgs=msgs,
+                        workitems=workitems,
+                        item_msg_lock=_item_msg_lock,
+                        spec=result.spec,
+                        task=result.task,
+                        handoff=result.handoff,
                         now=datetime.now(timezone.utc),
                     )
                 except Exception:
                     logger.exception(
                         "dispatch handoff notify failed (spec=%s task=%s) — "
-                        "dispatch itself succeeded", result.spec.id, result.task.slug,
+                        "dispatch itself succeeded",
+                        result.spec.id,
+                        result.task.slug,
                     )
         except SpecLocked:
             raise HTTPException(status_code=409, detail=f"spec {spec_id!r} is locked")
@@ -1400,7 +1525,9 @@ def create_app(
     def post_thread(body: NewThreadBody):
         now = datetime.now(timezone.utc)
         text = body.text
-        subject = body.subject or (text.strip().splitlines()[0][:80] if text.strip() else "(no subject)")
+        subject = body.subject or (
+            text.strip().splitlines()[0][:80] if text.strip() else "(no subject)"
+        )
         return _thread_payload(msgs.create_thread(subject=subject, text=text, now=now))
 
     @app.post("/threads/{thread_id}/messages")
@@ -1409,7 +1536,7 @@ def create_app(
         try:
             msgs.append(thread_id, "human", body.text, now)
             thread = msgs.get(thread_id)
-        except (KeyError, ValueError):
+        except KeyError, ValueError:
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
         if thread is None:
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
@@ -1423,14 +1550,16 @@ def create_app(
             try:
                 seen_dt = datetime.fromisoformat(body.seen_at)
             except ValueError:
-                raise HTTPException(status_code=422, detail=f"invalid seen_at: {body.seen_at!r}")
+                raise HTTPException(
+                    status_code=422, detail=f"invalid seen_at: {body.seen_at!r}"
+                )
             if seen_dt.tzinfo is None:
                 seen_dt = seen_dt.replace(tzinfo=timezone.utc)
         else:
             seen_dt = datetime.now(timezone.utc)
         try:
             thread = msgs.mark_seen(thread_id, seen_dt)
-        except (KeyError, ValueError):
+        except KeyError, ValueError:
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
         return _thread_payload(thread)
 
@@ -1447,7 +1576,9 @@ def create_app(
 
     def _thread_inbox_links(threads, all_items=None):
         if all_items is None:
-            all_items, uncertain = workitems.list_tolerant_with_uncertainty(include_archived=True)
+            all_items, uncertain = workitems.list_tolerant_with_uncertainty(
+                include_archived=True
+            )
         else:
             uncertain = False
         from mship.core.spec_storage import canonical_spec_id_from_filename
@@ -1484,7 +1615,11 @@ def create_app(
         except Exception:
             tasks_by_slug = {}
         return index_thread_inbox_links(
-            threads, all_items, specs_by_id, tasks_by_slug, uncertain=uncertain,
+            threads,
+            all_items,
+            specs_by_id,
+            tasks_by_slug,
+            uncertain=uncertain,
             ambiguous_spec_ids=frozenset(ambiguous_spec_ids),
         )
 
@@ -1498,26 +1633,35 @@ def create_app(
         for thread in threads:
             link = links_by_thread[thread.id]
             classification = classify_thread(
-                thread, linked=link.work_item_id is not None or link.uncertain,
-                linked_terminal=link.terminal, now=now,
+                thread,
+                linked=link.work_item_id is not None or link.uncertain,
+                linked_terminal=link.terminal,
+                now=now,
             )
-            summaries.append({
-                "id": thread.id, "subject": thread.subject,
-                "updated_at": thread.updated_at.isoformat(),
-                "awaiting_reply": thread.awaiting_reply,
-                # Unhandled agent event (e.g. a PR merge) feeds GC's group attention rollup.
-                "awaiting_agent_event": thread.awaiting_agent_event,
-                "needs_you": thread.needs_you,
-                "needs_decision": thread.needs_decision,
-                "unseen": thread.unseen,
-                "agent_seen_at": thread.agent_seen_at.isoformat() if thread.agent_seen_at else None,
-                "last_message": thread.messages[-1].text[:120] if thread.messages else "",
-                "message_count": len(thread.messages),
-                "work_item_id": link.work_item_id,
-                "inbox_state": classification.state,
-                "archive_reason": classification.archive_reason,
-                "pinned": thread.inbox.pinned,
-            })
+            summaries.append(
+                {
+                    "id": thread.id,
+                    "subject": thread.subject,
+                    "updated_at": thread.updated_at.isoformat(),
+                    "awaiting_reply": thread.awaiting_reply,
+                    # Unhandled agent event (e.g. a PR merge) feeds GC's group attention rollup.
+                    "awaiting_agent_event": thread.awaiting_agent_event,
+                    "needs_you": thread.needs_you,
+                    "needs_decision": thread.needs_decision,
+                    "unseen": thread.unseen,
+                    "agent_seen_at": thread.agent_seen_at.isoformat()
+                    if thread.agent_seen_at
+                    else None,
+                    "last_message": thread.messages[-1].text[:120]
+                    if thread.messages
+                    else "",
+                    "message_count": len(thread.messages),
+                    "work_item_id": link.work_item_id,
+                    "inbox_state": classification.state,
+                    "archive_reason": classification.archive_reason,
+                    "pinned": thread.inbox.pinned,
+                }
+            )
         return summaries
 
     def _matches_thread_filter(
@@ -1525,14 +1669,16 @@ def create_app(
         inbox: Literal["active", "archived", "all"],
         q: str | None,
     ) -> bool:
-        return (
-            _matches_inbox_filter(summary, inbox)
-            and _matches_search(q, summary["subject"], summary["last_message"])
+        return _matches_inbox_filter(summary, inbox) and _matches_search(
+            q, summary["subject"], summary["last_message"]
         )
 
-    def _filtered_summaries(threads, inbox: Literal["active", "archived", "all"], q: str | None):
+    def _filtered_summaries(
+        threads, inbox: Literal["active", "archived", "all"], q: str | None
+    ):
         return [
-            summary for summary in _summaries(threads)
+            summary
+            for summary in _summaries(threads)
             if _matches_thread_filter(summary, inbox, q)
         ]
 
@@ -1549,11 +1695,16 @@ def create_app(
                 lambda: _filtered_summaries(msgs.list(), inbox, q)
             )
         from mship.core.message_wait import changed_since
+
         timeout = max(0.0, min(timeout, 30.0))  # cap for the relay idle-read timeout
         try:
-            since_dt = datetime.fromisoformat(since) if since else datetime.now(timezone.utc)
+            since_dt = (
+                datetime.fromisoformat(since) if since else datetime.now(timezone.utc)
+            )
         except ValueError:
-            raise HTTPException(status_code=422, detail=f"invalid since value: {since!r}")
+            raise HTTPException(
+                status_code=422, detail=f"invalid since value: {since!r}"
+            )
         if since_dt.tzinfo is None:
             since_dt = since_dt.replace(tzinfo=timezone.utc)
 
@@ -1566,34 +1717,44 @@ def create_app(
         while True:
             summaries, cursor = await asyncio.to_thread(read_updates)
             threads = [
-                summary for summary in summaries
+                summary
+                for summary in summaries
                 if _matches_thread_filter(summary, inbox, q)
             ]
             # A filtered client must remove items that changed out of its view.
             # The response keeps `threads` filter-pure; legacy clients ignore the
             # additive tombstones field, while newer clients remove these ids.
             removed_ids = [
-                summary["id"] for summary in summaries
+                summary["id"]
+                for summary in summaries
                 if not _matches_thread_filter(summary, inbox, q)
             ]
             if threads or removed_ids:
                 return {
-                    "threads": threads, "removed_ids": removed_ids,
-                    "cursor": cursor.isoformat(), "timed_out": False,
+                    "threads": threads,
+                    "removed_ids": removed_ids,
+                    "cursor": cursor.isoformat(),
+                    "timed_out": False,
                 }
             remaining = deadline - _time.monotonic()
             if remaining <= 0:
                 return {
-                    "threads": [], "removed_ids": [],
-                    "cursor": cursor.isoformat(), "timed_out": True,
+                    "threads": [],
+                    "removed_ids": [],
+                    "cursor": cursor.isoformat(),
+                    "timed_out": True,
                 }
             await asyncio.sleep(min(interval, remaining))
 
     @app.post("/threads/{thread_id}/inbox/{action}")
-    def post_thread_inbox_action(thread_id: str, action: InboxAction, body: InboxMutationBody):
+    def post_thread_inbox_action(
+        thread_id: str, action: InboxAction, body: InboxMutationBody
+    ):
         now = datetime.now(timezone.utc)
         try:
-            thread, applied = msgs.mutate_inbox(thread_id, action, body.mutation_id, now)
+            thread, applied = msgs.mutate_inbox(
+                thread_id, action, body.mutation_id, now
+            )
         except KeyError:
             raise HTTPException(status_code=404, detail=f"no thread {thread_id!r}")
         except ValueError as exc:
@@ -1632,7 +1793,10 @@ def create_app(
         except Exception:
             # Degrade, but leave a trace: a silently-empty store scan in production (e.g. a corrupt or
             # forward-incompatible file) should be alertable, not invisible.
-            logger.warning("serve: store scan degraded to default (corrupt/unreadable file?)", exc_info=True)
+            logger.warning(
+                "serve: store scan degraded to default (corrupt/unreadable file?)",
+                exc_info=True,
+            )
             return default
 
     def _workitem_index(include_archived: bool = False):
@@ -1654,13 +1818,17 @@ def create_app(
         wi = workitems.get(item_id)
         if wi is None:
             return None
-        spec = _safe(
-            lambda: next(
-                (s for s in store.list_tolerant() if s.id == wi.spec_id),
+        spec = (
+            _safe(
+                lambda: next(
+                    (s for s in store.list_tolerant() if s.id == wi.spec_id),
+                    None,
+                ),
                 None,
-            ),
-            None,
-        ) if wi.spec_id else None
+            )
+            if wi.spec_id
+            else None
+        )
         tasks = state_manager.load().tasks
         return build_workitem_index(
             [wi],
@@ -1674,12 +1842,16 @@ def create_app(
         """Enrich a thread with its WorkItem and computed inbox state."""
         data = t.model_dump(mode="json")
         # include_archived=True: this is link ownership resolution, not a user-facing listing.
-        all_items, uncertain = workitems.list_tolerant_with_uncertainty(include_archived=True)
+        all_items, uncertain = workitems.list_tolerant_with_uncertainty(
+            include_archived=True
+        )
         link = _thread_inbox_links([t])[t.id]
         data["work_item_id"] = link.work_item_id
         classification = classify_thread(
-            t, linked=link.work_item_id is not None or link.uncertain,
-            linked_terminal=link.terminal, now=now or datetime.now(timezone.utc),
+            t,
+            linked=link.work_item_id is not None or link.uncertain,
+            linked_terminal=link.terminal,
+            now=now or datetime.now(timezone.utc),
         )
         data["inbox_state"] = classification.state
         data["archive_reason"] = classification.archive_reason
@@ -1688,15 +1860,24 @@ def create_app(
             data["work_item"] = None
         else:
             summ = _summarize_item(link.work_item_id)
-            data["work_item"] = None if summ is None else {
-                "id": summ.id, "title": summ.title, "kind": summ.kind, "phase": summ.phase,
-            }
+            data["work_item"] = (
+                None
+                if summ is None
+                else {
+                    "id": summ.id,
+                    "title": summ.title,
+                    "kind": summ.kind,
+                    "phase": summ.phase,
+                }
+            )
         item_ids = {w.id for w in all_items}
         spec_ids = _safe(lambda: {s.id for s in store.list_tolerant()}, set())
         task_slugs = _safe(lambda: set(state_manager.load().tasks.keys()), set())
         for msg in data.get("messages", []):
             if msg.get("role") == "agent" and msg.get("text"):
-                msg["text"] = linkify_entities(msg["text"], item_ids, spec_ids, task_slugs)
+                msg["text"] = linkify_entities(
+                    msg["text"], item_ids, spec_ids, task_slugs
+                )
         return data
 
     @app.get("/items")
@@ -1728,10 +1909,14 @@ def create_app(
             tid = wi.thread_ids[0] if wi.thread_ids else None
             if tid is None:
                 subject = wi.title.strip() or (
-                    body.text.strip().splitlines()[0][:80] if body.text.strip() else "(no subject)"
+                    body.text.strip().splitlines()[0][:80]
+                    if body.text.strip()
+                    else "(no subject)"
                 )
                 task_slug = wi.task_slugs[0] if wi.task_slugs else None
-                thread = msgs.create_thread(subject=subject, text=body.text, now=now, task_slug=task_slug)
+                thread = msgs.create_thread(
+                    subject=subject, text=body.text, now=now, task_slug=task_slug
+                )
                 workitems.add_thread(item_id, thread.id, now=now)
                 return _thread_payload(thread, now)
             try:
@@ -1810,12 +1995,20 @@ def create_app(
 
         if body.phase is not None:
             if config is not None:
-                from mship.core.lifecycle_hooks import HookContext, HookRequiredError, run_hooks
+                from mship.core.lifecycle_hooks import (
+                    HookContext,
+                    HookRequiredError,
+                    run_hooks,
+                )
+
                 try:
                     run_hooks(
-                        f"workitem.phase.{body.phase}", HookContext(workitem_id=item_id),
-                        config=config, workspace_root=workspace_root,
-                        shell=ShellRunner(), state_manager=state_manager,
+                        f"workitem.phase.{body.phase}",
+                        HookContext(workitem_id=item_id),
+                        config=config,
+                        workspace_root=workspace_root,
+                        shell=ShellRunner(),
+                        state_manager=state_manager,
                     )
                 except HookRequiredError as e:
                     raise HTTPException(status_code=422, detail=str(e))
@@ -1829,7 +2022,9 @@ def create_app(
                 logger.warning(
                     "post_item_phase: no workspace config wired into this "
                     "serve instance — refusing workitem.phase.%s for %s "
-                    "(cannot evaluate lifecycle hooks)", body.phase, item_id,
+                    "(cannot evaluate lifecycle hooks)",
+                    body.phase,
+                    item_id,
                 )
                 raise HTTPException(
                     status_code=503,
@@ -1862,6 +2057,21 @@ def create_app(
 
     from mship.core import remote_exec
     from mship.core.run_ref import RunRefNameError, canonical_run_ref_segment
+    from mship.core.remote_tool import MAX_REQUEST_BYTES, ToolRequest, encode_tool_event
+    from mship.core.tool_process import ToolOperationRegistry
+
+    tool_operations = ToolOperationRegistry(
+        workspace_root,
+        state_dir=getattr(state_manager, "state_dir", workspace_root / ".mothership"),
+    )
+
+    def _unique_tool_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate tool request field")
+            value[key] = item
+        return value
 
     class _RemoteExecStreamingResponse(StreamingResponse):
         """Own the sync generator until HTTP streaming has fully stopped."""
@@ -1880,10 +2090,13 @@ def create_app(
         async def __call__(self, scope, receive, send):
             # Older Starlette versions in our supported FastAPI range do not
             # implement the ASGI 2.4 send-error disconnect contract.
-            spec_version = tuple(map(
-                int,
-                scope.get("asgi", {}).get("spec_version", "2.0").split("."),
-            ))
+            spec_version = tuple(
+                map(
+                    int,
+                    scope.get("asgi", {}).get("spec_version", "2.0").split("."),
+                )
+            )
+
             async def stream_response_with_disconnect():
                 try:
                     await self.stream_response(send)
@@ -1898,6 +2111,7 @@ def create_app(
             try:
                 try:
                     async with anyio.create_task_group() as task_group:
+
                         async def wrap(func):
                             await func()
                             task_group.cancel_scope.cancel()
@@ -1924,6 +2138,52 @@ def create_app(
     # A task name becomes both a `.worktrees` path segment and git/task input.
     # Canonicalize it at the authenticated endpoint before any remote work or
     # streaming response begins.
+
+    @app.post("/exec/tool")
+    async def post_tool(request: Request):
+        if config is None:
+            raise HTTPException(
+                status_code=503, detail="remote workspace not bootstrapped"
+            )
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > MAX_REQUEST_BYTES:
+                raise HTTPException(
+                    status_code=413, detail="tool request exceeds byte limit"
+                )
+            body.extend(chunk)
+        try:
+            value = json.loads(body, object_pairs_hook=_unique_tool_object)
+            operation = ToolRequest.from_dict(value)
+        except ValueError, TypeError, RecursionError:
+            # Do not serialize validation details containing private argv/env.
+            raise HTTPException(
+                status_code=400, detail="invalid tool execution request"
+            ) from None
+        cancel_event = threading.Event()
+        deps = remote_exec.RemoteExecDeps(
+            config=config,
+            shell=ShellRunner(),
+            workspace_root=workspace_root,
+            cancel_event=cancel_event,
+            operations=tool_operations,
+        )
+        nonce = secrets.token_hex(16)
+
+        def encoded_events():
+            events = remote_exec.run_tool_stream(operation, deps=deps)
+            try:
+                for event in events:
+                    yield encode_tool_event(event, nonce)
+            finally:
+                events.close()
+
+        return _RemoteExecStreamingResponse(
+            encoded_events(),
+            cancel_event=cancel_event,
+            media_type="application/octet-stream",
+            headers={"X-Mship-Exec-Nonce": nonce},
+        )
 
     @app.post("/exec/{verb}")
     async def post_exec(verb: str, body: ExecBody):
@@ -1952,6 +2212,7 @@ def create_app(
             shell=ShellRunner(),
             workspace_root=workspace_root,
             cancel_event=cancel_event,
+            operations=tool_operations,
         )
         # Per-request anti-spoof nonce (FIX 2): the task can't predict it, and
         # it's returned as a response HEADER (sent before the streamed body, so
@@ -1963,8 +2224,13 @@ def create_app(
         # The response owns the sync generator and signals its subprocess drain
         # before waiting for AnyIO's in-flight threadpool `next()` to return.
         gen = remote_exec.run_verb_stream(
-            verb, task, body.repos, body.platform,
-            kind=body.kind, deps=deps, nonce=nonce,
+            verb,
+            task,
+            body.repos,
+            body.platform,
+            kind=body.kind,
+            deps=deps,
+            nonce=nonce,
             run_ref_repos=body.run_ref_repos,
         )
         return _RemoteExecStreamingResponse(

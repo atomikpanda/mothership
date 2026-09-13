@@ -1,10 +1,12 @@
+import json
 import os
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,12 +30,59 @@ _CANCELLATION_CHECK_INTERVAL = 0.05
 _TERMINATION_GRACE_SECONDS = 1.0
 _PROC_ROOT = "/proc"
 
+_TOOL_RUNTIME_ENVIRONMENT = (
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "USER",
+    "LOGNAME",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_RUNTIME_DIR",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "ANDROID_HOME",
+    "ANDROID_SDK_ROOT",
+    "ANDROID_USER_HOME",
+    "ANDROID_AVD_HOME",
+    "JAVA_HOME",
+    "GRADLE_USER_HOME",
+    "DEVELOPER_DIR",
+    "SDKROOT",
+)
+
+
+def tool_runtime_environment() -> dict[str, str]:
+    """Select host toolchain variables, never workspace identity or credentials."""
+    environment = {
+        key: value
+        for key in _TOOL_RUNTIME_ENVIRONMENT
+        if (value := os.environ.get(key)) is not None
+    }
+    environment.setdefault("PATH", os.defpath)
+    if "HOME" not in environment:
+        environment["HOME"] = str(Path.home())
+    environment.setdefault("LANG", "C.UTF-8")
+    return environment
+
 
 def _has_owned_process_group(proc: subprocess.Popen) -> bool:
     pid = getattr(proc, "pid", None)
     if os.name == "nt" or not isinstance(pid, int) or pid <= 0:
         return False
-    return _has_owned_process_group_id(pid)
+    return (
+        _linux_group_has_executable_member(pid)
+        if sys.platform.startswith("linux")
+        else _has_owned_process_group_id(pid)
+    )
 
 
 def _read_linux_process_status(process_dir: Path) -> tuple[bytes, int]:
@@ -52,6 +101,21 @@ def ensure_cancellable_shell_supported() -> None:
         raise ShellCancellationUnsupported(
             "cancellable shell execution requires POSIX process groups; "
             f"{platform} is unsupported"
+        )
+    if not all(
+        hasattr(os, name)
+        for name in (
+            "waitid",
+            "WNOWAIT",
+            "WEXITED",
+            "WNOHANG",
+            "O_DIRECTORY",
+            "O_NOFOLLOW",
+            "fchdir",
+        )
+    ):
+        raise ShellCancellationUnsupported(
+            "cancellable shell execution requires non-reaping child observation"
         )
     if not sys.platform.startswith("linux"):
         return
@@ -96,12 +160,10 @@ def _linux_group_has_executable_member(process_group: int) -> bool:
             if not entry.name.isdigit():
                 continue
             try:
-                state, member_group = _read_linux_process_status(
-                    Path(entry.path)
-                )
+                state, member_group = _read_linux_process_status(Path(entry.path))
             except FileNotFoundError:
                 continue
-            except (OSError, IndexError, ValueError):
+            except OSError, IndexError, ValueError:
                 try:
                     member_group = os.getpgid(int(entry.name))
                 except ProcessLookupError:
@@ -129,12 +191,101 @@ def _has_owned_process_group_id(process_group: int) -> bool:
     return True
 
 
+# A trusted bootstrap avoids preexec_fn in the threaded daemon. The private,
+# unlinked control file preserves the exact environment despite interpreter
+# startup locale changes. The error FD closes on exec, just like Popen's own
+# exec-error handshake. Neither argv nor environment is placed in public logs.
+_FD_CWD_BOOTSTRAP = """
+import json, os, sys
+error_fd = int(sys.argv[3])
+os.set_inheritable(error_fd, False)
+try:
+    with os.fdopen(int(sys.argv[1]), "r", encoding="utf-8") as control:
+        payload = json.load(control)
+    directory_fd = int(sys.argv[2])
+    os.fchdir(directory_fd)
+    os.close(directory_fd)
+    os.execvpe(payload["argv"][0], payload["argv"], payload["env"])
+except BaseException as exc:
+    os.write(error_fd, str(getattr(exc, "errno", None) or 5).encode("ascii"))
+    os._exit(255)
+"""
+
+
+def _spawn_in_directory(
+    args: Sequence[str],
+    directory_fd: int,
+    env: Mapping[str, str],
+) -> subprocess.Popen[bytes]:
+    """Transfer a pinned cwd through exec without changing daemon-global cwd."""
+    error_read, error_write = os.pipe()
+    proc: subprocess.Popen[bytes] | None = None
+    try:
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as control:
+            json.dump({"argv": list(args), "env": dict(env)}, control)
+            control.flush()
+            control.seek(0)
+            proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-I",
+                    "-S",
+                    "-c",
+                    _FD_CWD_BOOTSTRAP,
+                    str(control.fileno()),
+                    str(directory_fd),
+                    str(error_write),
+                ],
+                env={},
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+                start_new_session=True,
+                pass_fds=(control.fileno(), directory_fd, error_write),
+            )
+            os.close(error_write)
+            error_write = -1
+            failure = os.read(error_read, 64)
+            if failure:
+                proc.wait()
+                error_number = int(failure)
+                raise OSError(error_number, os.strerror(error_number))
+            return proc
+    except BaseException:
+        if proc is not None:
+            if proc.returncode is None:
+                _stop_and_reap(proc, force=True)
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    stream.close()
+        raise
+    finally:
+        os.close(error_read)
+        if error_write >= 0:
+            os.close(error_write)
+
+
+def _owned_process_exited(proc: subprocess.Popen) -> bool:
+    """Observe exit without freeing the leader PID for an unrelated group."""
+    if proc.returncode is not None:
+        raise RuntimeError("owned process leader was already reaped")
+    try:
+        return (
+            os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            is not None
+        )
+    except ChildProcessError as exc:
+        raise RuntimeError("owned process identity is no longer verifiable") from exc
+
+
 def _signal_owned_process(proc: subprocess.Popen, *, force: bool = False) -> None:
     pid = getattr(proc, "pid", None)
     try:
         if os.name != "nt" and isinstance(pid, int) and pid > 0:
-            # The group can outlive and be reaped after its leader. Abnormal
-            # cleanup still owns that group, so signal it by the original pgid.
+            # A waitable leader pins its PID until the last group signal.
+            # Never recover ownership from an already-reaped numeric PGID.
+            _owned_process_exited(proc)
             os.killpg(pid, signal.SIGKILL if force else signal.SIGTERM)
             return
         if proc.poll() is not None:
@@ -145,27 +296,23 @@ def _signal_owned_process(proc: subprocess.Popen, *, force: bool = False) -> Non
 
 
 def _reap_owned_process_leader(proc: subprocess.Popen) -> None:
-    wait = getattr(proc, "wait", None)
-    if not callable(wait):
-        return
-    try:
-        wait()
-    except Exception:
-        pass
+    proc.wait(timeout=_TERMINATION_GRACE_SECONDS)
 
 
 def _wait_for_owned_process_group_quiescence(proc: subprocess.Popen) -> None:
     pid = getattr(proc, "pid", None)
     if os.name == "nt" or not isinstance(pid, int) or pid <= 0:
         return
-
-    if sys.platform.startswith("linux"):
-        while _linux_group_has_executable_member(pid):
-            time.sleep(_CANCELLATION_CHECK_INTERVAL)
-        return
-
-    while _has_owned_process_group_id(pid):
-        time.sleep(_CANCELLATION_CHECK_INTERVAL)
+    deadline = time.monotonic() + 2 * _TERMINATION_GRACE_SECONDS
+    while (
+        _linux_group_has_executable_member(pid)
+        if sys.platform.startswith("linux")
+        else _has_owned_process_group_id(pid)
+    ):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("owned process-group cleanup could not be verified")
+        time.sleep(min(_CANCELLATION_CHECK_INTERVAL, remaining))
 
 
 def _terminate_owned_process_group(
@@ -180,6 +327,7 @@ def _terminate_owned_process_group(
     """
     _signal_owned_process(proc, force=force)
     if os.name == "nt" or not _has_owned_process_group(proc):
+        _reap_owned_process_leader(proc)
         return
 
     if force:
@@ -196,6 +344,7 @@ def _terminate_owned_process_group(
             _wait_for_owned_process_group_quiescence(proc)
             return
         time.sleep(min(_CANCELLATION_CHECK_INTERVAL, remaining))
+    _reap_owned_process_leader(proc)
 
 
 def _stop_and_reap(
@@ -208,8 +357,12 @@ def _stop_and_reap(
     try:
         return proc.communicate(timeout=_TERMINATION_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
-        _signal_owned_process(proc, force=True)
-        return proc.communicate()
+        # Cleanup already reaped the leader: another group could now use its
+        # number. An escaped descendant retaining a pipe is not ours to signal.
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None:
+                pipe.close()
+        raise
 
 
 class ShellRunner:
@@ -221,7 +374,10 @@ class ShellRunner:
         return command
 
     def run(
-        self, command: str, cwd: Path, env: dict[str, str] | None = None,
+        self,
+        command: str,
+        cwd: Path,
+        env: dict[str, str] | None = None,
         timeout: float | None = None,
     ) -> ShellResult:
         """Run `command` and capture output. `timeout` (seconds) raises
@@ -317,6 +473,38 @@ class ShellRunner:
                 stdout=stdout,
                 stderr=stderr,
             )
+
+    def spawn_argv(
+        self,
+        args: Sequence[str],
+        cwd: Path | int,
+        env: Mapping[str, str],
+    ) -> subprocess.Popen[bytes]:
+        """Start a binary argv operation in a newly owned process session.
+
+        ``env`` is the complete server-selected environment.  Unlike the
+        convenience runners above, it is deliberately not merged with this
+        process's ambient environment.
+
+        An integer cwd is a borrowed directory descriptor. It is transferred
+        through a trusted exec bootstrap, never resolved back to a pathname.
+        """
+        if isinstance(cwd, int):
+            return _spawn_in_directory(args, cwd, env)
+        kwargs: dict[str, object] = {
+            "cwd": cwd,
+            "env": dict(env),
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": False,
+            "bufsize": 0,
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+        return subprocess.Popen(args, **kwargs)
 
     def run_task(
         self,

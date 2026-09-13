@@ -4,6 +4,13 @@ Some verbs are host-bound: iOS capture (`xcrun simctl`) only runs on macOS, an A
 
 This doc covers the model, how to configure it, and how to read the failure messages it produces.
 
+**Common-runner relay release gate:** #507 supplies the shared runner and the
+adapter API below. Public-relay readiness still requires the actual #506
+credential-resolution integration for source transfer, execution and cleanup,
+followed by real relay-path proof. Loopback verification and the role
+configuration examples here are not that proof. Do not add a standing-token,
+direct-network or local-execution fallback to bypass this gate.
+
 ## The model
 
 A "run host" is just another `mship` workspace, already set up (`mothership.yaml` present, repos cloned) on the machine you want the verb to actually execute on — a Mac with the right simulator, an Android box, a beefier build machine, whatever. That machine runs:
@@ -17,7 +24,7 @@ exactly like the phone-pairing flow: it dials **out** to the relay (so NAT/"some
 Your local box (the operator) then treats that URL+token as a **run-host role** and, when you pass `--remote`, POSTs to the remote's `/exec/{verb}` endpoint instead of running the task locally:
 
 - The remote **materializes the task's branch** — `git fetch` + a worktree at `.worktrees/<task>/<repo>`, mirroring the local worktree layout. Remote execution always operates on a task's branch; there's no ad-hoc remote run (the remote needs a branch to check out).
-- The remote runs the repo's go-task target (`run`/`capture`/`build`) with the **same env-var contract** as a local run.
+- The remote runs the repo's go-task target (`run`/`capture`/`build`) with the verb's existing task/capture variables, using the explicit server runtime environment described below rather than inheriting the daemon's entire environment.
 - Output streams back live on stderr (not a final blob), leaving structured command results on stdout parseable. `--quiet` suppresses progress; the remote task's exit code becomes your local process's exit code.
 - For `capture`, produced artifacts (`screen.png`, `layout.*`) are pulled home automatically.
 
@@ -120,9 +127,9 @@ Nothing secret is ever committed to `mothership.yaml` — that file only ever ho
 
 so `discover_artifacts` and anything reading captures locally (including an agent) sees them unchanged, regardless of whether the capture ran locally or on a remote host.
 
-## Known limitations (v1)
+## Known limitations
 
-These are deliberately out of scope for the first cut. Know them before you lean on `--remote` for a repo with heavier setup needs.
+These boundaries apply to remote execution:
 
 - **`symlink_dirs` / `bind_files` are not replicated on the remote worktree.** `task setup` now runs there (see "Dependencies are derived there, not copied"), so a repo whose deps come from tracked manifests works. A repo that depends on symlinked gitignored material from your source checkout still does not.
 - **Remote task stdout is streamed to your terminal verbatim.** There is no ANSI / control-sequence sanitization — the remote host is trusted. Don't point `--remote` at a host you don't control.
@@ -252,6 +259,220 @@ rather than failed. If setup fails, the run stops and you see setup's own output
 - **`symlink_dirs` / `bind_files`.** Still not replicated on the run host.
 - **Your machine.** The source is exact and the dependency environment is derived
   from it, but the run host is not a clone of your box.
+
+## Internal tool-runner API
+
+This is an adapter-facing Python API and authenticated `POST /exec/tool` route,
+not a new public shell command. Existing `run`, `build` and `capture` share its
+preparation, setup cache and process supervisor; their CLI syntax is unchanged.
+
+### Requests, preparation and results
+
+`mship.core.remote_tool.ToolRequest` accepts:
+
+- `task`, configured `repo`, and an `argv` tuple. Arguments are passed literally;
+  they are not joined into shell source.
+- `env` for explicit additions and relative `cwd` (default `"."`). The server
+  derives the worktree and rejects an absolute cwd, parent traversal, or a
+  resolved cwd outside it. This is **cwd confinement, not a filesystem sandbox**
+  for trusted project code.
+- `preparation`: `"discover"`, `"launch"` (default), or `"observe"`.
+- `source_revision` and `run_ref_repos` for certified source, plus paired
+  `owner_ref` / `generation` only for observation.
+- `max_stdout_bytes`, `max_stderr_bytes`, and `timeout_seconds`.
+
+| Policy | Source/setup behavior | Output and lifetime |
+|---|---|---|
+| `discover` | Prepare and verify task source; never invoke or update the setup cache | Require positive independent caps, at most 1 MiB stdout and 256 KiB stderr, and a finite positive timeout. Return bounded bytes, not incremental inventory fragments. |
+| `launch` | Prepare and verify source; run cached setup when needed; verify source again after setup | Stream stdout/stderr without retaining the complete output in memory. Collection caps must be `None`; an optional timeout bounds the backend process, not preceding source transfer/setup. |
+| `observe` | Validate the existing owner; no source transfer, materialization, setup, launch replacement or launch-flock acquisition | Empty argv queries status. Nonempty argv runs a separately owned observation process in the existing context. Collection caps must be `None`; timeout is optional. |
+
+`ToolResult` exposes `status`, `exit_code`, `owner_ref`, `generation`,
+`source_revision`, and binary `stdout` / `stderr`. `completed` means an ordinary
+process exit, including a nonzero exit code: require **both** `completed` and
+exit zero before parsing discovery inventory. Limit, timeout, cancellation and
+infrastructure failures do not return a partial discovery payload.
+
+Other statuses are `invalid`, `busy`, `unsupported`, `materialization_error`,
+`launch_error`, `stdout_limit`, `stderr_limit`, `timeout`, `cancelled`,
+`evidence_error`, `unknown`, `auth_error`, and `protocol_error`. `running` is
+valid in a `started` event and as the final answer to a status-only observation,
+not as a final answer to an executing request. Pre-admission failures may lack
+an owner; accepted results must preserve the full owner/generation/source
+identity. Missing or changed success identity is a protocol error.
+
+Admission is typed rather than boolean:
+`ToolOperationRegistry.admission_status(task)` returns `available`, `busy`,
+`unknown`, or `evidence_error`. `busy` means a live, verified operation owns
+that task; `unknown` means durable or in-memory ownership cannot be safely
+validated (including a restarted process that found a nonterminal record); and
+`evidence_error` means the admission evidence itself could not be read or
+validated. Only `available` admits a new launch. Never treat `unknown` or
+`evidence_error` as an invitation to replace or signal an operation.
+
+`ToolEvent.kind` is `started`, `stdout`, `stderr`, or `result`; output is binary
+`data`, and lifecycle events carry `result`. The callback must consume output
+incrementally rather than retain an unbounded event list. Setup output can
+precede the backend's `started` event.
+
+### Client entry points and downstream binding
+
+Use `mship.core.remote_dispatch.run_remote_tool` for discovery/launch that needs
+the existing exact-source preflight and transfer. Its keyword arguments are
+`request`, `task_obj`, `config`, `shell`, `conn`, `output`, optional `event_sink`,
+and optional HTTPX `transport`. It replaces caller source/ref claims with the
+certified values. Observation skips preparation and preserves the pinned
+connection and owner.
+
+`prepare_remote_source` is the shared lower-level preparation helper. It takes
+`task_obj`, `target_repos`, `config`, `shell`, `conn`, `output`, and optional
+`on_prepared`, returning `PreparedSource.run_ref_repos` and
+`PreparedSource.source_revisions`.
+
+`mship.core.remote_client.exec_tool(*, request, conn, event_sink=None,
+transport=None)` is the transport-only entry point. It sends one request to the
+already selected `RunHostConnection`, with no redirect, retry, host re-resolution
+or local fallback.
+
+For #530 Task 5, resolve the task, repo, host connection and backend argv using
+the caller's existing configuration. G1 discovery then binds as follows:
+
+```python
+from mship.core.remote_dispatch import run_remote_tool
+from mship.core.remote_tool import ToolRequest
+
+discovery = run_remote_tool(
+    request=ToolRequest(
+        task=task_obj.slug, repo=repo_name, argv=discover_argv,
+        preparation="discover", max_stdout_bytes=1024 * 1024,
+        max_stderr_bytes=256 * 1024, timeout_seconds=10,
+    ),
+    task_obj=task_obj, config=config, shell=shell, conn=conn, output=output,
+)
+if discovery.status != "completed" or discovery.exit_code != 0:
+    raise RuntimeError("remote discovery did not complete successfully")
+```
+
+G2 launch uses the same call with `preparation="launch"`, the launch argv and
+an `event_sink` callback. The call blocks for the operation's lifetime: run it
+in the caller's owned execution worker. Capture the `started` event's
+`ToolResult` alongside the selected connection, task and repo; it is the only
+binding accepted for G2 observation. Do not wait for launch to finish before
+making observations, and do not resolve a different host for an existing owner.
+Given that saved result as `started`, a status query is:
+
+```python
+observed = run_remote_tool(
+    request=ToolRequest(
+        task=task_obj.slug, repo=repo_name, argv=(), preparation="observe",
+        owner_ref=started.owner_ref, generation=started.generation,
+        source_revision=started.source_revision,
+    ),
+    task_obj=task_obj, config=config, shell=shell, conn=conn, output=output,
+)
+```
+
+Use the backend's observation argv instead of `()` to inspect the same live
+context. Cancelling that observation cannot cancel its parent. These are
+process-operation identities, not device/app session IDs or reconnect tokens.
+The examples define #530's G1/G2 binding only; #507 does not add a #530 command,
+relay integration, or fallback path.
+
+### Environment, ownership and durable evidence
+
+The server builds the tool environment from a narrow host-runtime allowlist,
+not the daemon's complete environment. Entries present on the host are retained
+in these categories:
+
+- **Tooling and user runtime:** `PATH`, `HOME`, `TERM`, `TMPDIR`, `TMP`,
+  `TEMP`, `USER`, `LOGNAME`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`,
+  `XDG_DATA_HOME`, and `XDG_RUNTIME_DIR`.
+- **Locale:** `LANG`, `LC_ALL`, and `LC_CTYPE`.
+- **Desktop session:** `DISPLAY`, `WAYLAND_DISPLAY`, and
+  `DBUS_SESSION_BUS_ADDRESS`.
+- **Android and Java:** `ANDROID_HOME`, `ANDROID_SDK_ROOT`,
+  `ANDROID_USER_HOME`, `ANDROID_AVD_HOME`, `JAVA_HOME`, and
+  `GRADLE_USER_HOME`.
+- **Apple toolchains:** `DEVELOPER_DIR` and `SDKROOT`.
+
+`PATH`, `HOME`, and `LANG` default to `os.defpath`, the server home directory,
+and `C.UTF-8` when absent. The request's explicit `env` is then applied, and
+the server-owned identity values `MSHIP_TASK`, `MSHIP_REPO`, and
+`MSHIP_SOURCE_REVISION` are applied last, so a request cannot override its
+task, repository, or certified revision. The inherited base deliberately
+excludes daemon secrets and controls: for example `MSHIP_SERVE_TOKEN`,
+`MSHIP_GH_TOKEN`, `MSHIP_GH_BROKER_URL`, `MSHIP_GH_APP_ID`,
+`MSHIP_GH_APP_KEY`, `MSHIP_WORKSPACE`, and run-host mapping variables are not
+ambient tool variables. Put task-command configuration in explicit `env`; do
+not depend on daemon credentials or control fields reaching a tool process.
+A trusted repository `env_runner` may wrap the command using positional `"$@"`
+forwarding; argv values are never interpolated into that shell source.
+
+The server-only `ToolContext(task, repo, worktree, source_revision, env_runner)`
+feeds one workspace-scoped `ToolOperationRegistry`. Its `run`, `observe`,
+`status`, and `admission_status` methods are the common owner below both wire
+adapters. Processes use stdin `DEVNULL`, binary pipes and a new POSIX session.
+Unsupported process-group ownership fails before preparation/spawn; Linux
+requires usable process-status information. Descendants that deliberately
+leave the owned process group/session are outside this contract.
+
+`ShellRunner.spawn_argv(args, cwd, env)` accepts a `Path` or a directory-FD
+`int` for `cwd`. Registry launch and observation pass a duplicated, pinned
+directory FD, not a pathname reconstructed from that FD. The internal isolated
+exec bootstrap keeps that FD private while preserving the exact argv,
+server-selected environment, binary pipes, new session, and exec-error
+reporting. A spawn factory transfers exclusive `Popen` ownership to the registry
+when it returns; it must not poll, wait, communicate with, reap, or otherwise
+supervise that process. The registry alone collects output and performs
+deadline/disconnect cleanup. `/proc/self/fd/...` is not an API or a supported
+macOS cwd mechanism.
+
+The launch root FD pins the worktree directory inode. Before a launch or
+nonempty observation executes, the registry verifies that the original
+worktree location still names that inode, then descends to the requested cwd
+descriptor-relative with no symlink following. A replacement or unverified
+root yields a typed refusal rather than running in a substituted directory.
+
+Disconnect/deadline cleanup stops and reaps the owned group and coordinates
+outstanding observers before releasing context availability. Uncertain cleanup
+is `unknown`, not successful cancellation. A durable terminal status may become
+visible while the disconnected HTTP response is still unwinding its task flock;
+a competing launch can briefly receive `busy`.
+
+Private records and separate raw stdout/stderr live beneath the configured
+workspace state directory's `remote-tool-operations/`, namespaced by canonical
+workspace and task hashes. Creation, opening, replacement and publication use
+descriptor-relative operations with no-follow checks. Generated operation
+directories are `0700`; generated records and output files are `0600`; owner,
+regular-file, link-count and privacy checks are made at native-readable safe
+checkpoints before metadata or output is trusted. Metadata publication is
+atomic and synced. The existing task journal receives only safe
+identity/status references—not argv, environment or raw output. Storage failure
+is explicit; output is not silently discarded as successful execution.
+
+After restart, terminal records are evidence only. Historical nonterminal
+owners become `unknown` and their task remains unavailable; no stored identity
+authorizes PID-only signaling, replay, or a new observation process. The runner
+does not implement automatic recovery or a reconnect scheduler. Reconcile an
+uncertain context through independently verified host maintenance, not by
+blindly clearing its admission record.
+
+The wire uses the response's `X-Mship-Exec-Nonce` and bounded length-prefixed
+JSON events, with strict base64 for bytes. Request bodies are capped at 128 KiB,
+event frames at 2 MiB, and output events at 16 KiB. Child bytes cannot become
+control records. Legacy exit/artifact framing remains supported.
+
+### Verification boundary
+
+Linux real-process loopback verification covers dirty exact-source transfer,
+discovery without setup, literal argv and environment isolation, launch/setup,
+live observation and cancellation isolation, disconnect cleanup, durable status,
+output limits, quiet deadlines, and legacy run/build/capture artifact extraction.
+The native `remote-tool-runner` spec and `remote-tool-runner-507` task journal
+record the implementation commit, test-run references, and observed proof.
+Fixture source revisions identify disposable test projects, not the runner
+implementation. This is not macOS/device testing or public-relay proof; the
+actual #506 integration and relay-path release gate above still applies.
 
 ## Troubleshooting
 

@@ -19,21 +19,37 @@ only caller: it resolves `--remote[=role]` to a `RunHostConnection` via
 `mship.core.run_host.resolve_run_host`, calls `exec_remote`, and mirrors the
 returned int as its own process exit code (`raise typer.Exit(code)`).
 """
+
 from __future__ import annotations
 
+from collections.abc import Callable
 import io
 import tarfile
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import Iterator, Optional
 
 import httpx
 
 from mship.core.remote_exec import ARTIFACT_MARKER, EXIT_MARKER
 from mship.core.run_host import RunHostConnection
+from mship.core.remote_tool import (
+    ToolEvent,
+    ToolProtocolError,
+    ToolRequest,
+    ToolResult,
+    iter_tool_events,
+)
 
 # The response header carrying the per-request anti-spoof nonce (see
 # `core/serve.py post_exec` / `core/remote_exec.py`). Read BEFORE draining the
 # body; a control line counts only if it carries this exact nonce.
+
+# Legacy verb streams are line-oriented, but an ordinary tool is allowed to
+# produce a long newline-free line.  Deliver bounded text fragments instead of
+# retaining it all; `_drive` tracks logical line starts so a later fragment
+# cannot be mistaken for a nonce-authenticated control record.
+MAX_LEGACY_LINE_BYTES = 64 * 1024
+MAX_HTTP_RAW_CHUNK_BYTES = 64 * 1024
 NONCE_HEADER = "X-Mship-Exec-Nonce"
 
 # Hard cap on the advertised artifact-tar size. The server only ever writes a
@@ -41,6 +57,17 @@ NONCE_HEADER = "X-Mship-Exec-Nonce"
 # advertised count is a bug or a hostile/compromised remote — reject it BEFORE
 # reading (no unbounded allocation / tar-bomb landing on disk). 256 MiB.
 MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
+
+
+def _raw_chunks(response: httpx.Response) -> Iterator[bytes]:
+    # HTTPX's chunk_size aggregates small reads, delaying live output until the
+    # buffer fills. Split only oversized chunks; never wait to fill a chunk.
+    for chunk in response.iter_raw():
+        if len(chunk) <= MAX_HTTP_RAW_CHUNK_BYTES:
+            yield chunk
+        else:
+            for offset in range(0, len(chunk), MAX_HTTP_RAW_CHUNK_BYTES):
+                yield chunk[offset : offset + MAX_HTTP_RAW_CHUNK_BYTES]
 
 
 class RemoteExecError(Exception):
@@ -76,9 +103,13 @@ def _http_status_message(url: str, resp: httpx.Response) -> str:
         # workspace config wired in — i.e. that machine was never bootstrapped
         # as an mship workspace (or serve started without one).
         base = f"remote workspace not bootstrapped at {url} (503)"
-        return f"{base}: {detail}" if detail else (
-            f"{base}; bootstrap that machine as an mship workspace and "
-            f"restart `mship serve --relay` there"
+        return (
+            f"{base}: {detail}"
+            if detail
+            else (
+                f"{base}; bootstrap that machine as an mship workspace and "
+                f"restart `mship serve --relay` there"
+            )
         )
     if resp.status_code == 401:
         return (
@@ -110,7 +141,7 @@ class _ChunkReader:
         self._eof = False
 
     def _fill(self) -> bool:
-        """Pull one more chunk into the buffer. Returns False at EOF."""
+        """Pull one more bounded raw chunk into the buffer."""
         if self._eof:
             return False
         try:
@@ -118,21 +149,23 @@ class _ChunkReader:
         except StopIteration:
             self._eof = True
             return False
+        if not isinstance(chunk, bytes) or len(chunk) > MAX_HTTP_RAW_CHUNK_BYTES:
+            raise RemoteExecError("remote stream emitted an oversized chunk")
         self._buf.extend(chunk)
         return True
 
     def readline(self) -> Optional[bytes]:
-        """The next newline-terminated line (newline included), or `None`
-        once the stream is exhausted with nothing left buffered. A final
-        line missing its trailing newline (a truncated stream) is still
-        returned once, unterminated — the caller decides whether that's
-        acceptable (here, it never matches a marker and so surfaces as
-        "missing __MSHIP_EXIT__ sentinel")."""
+        """Return one bounded logical-line fragment, or ``None`` at EOF."""
         while True:
             nl = self._buf.find(b"\n")
             if nl != -1:
-                line = bytes(self._buf[: nl + 1])
-                del self._buf[: nl + 1]
+                take = min(nl + 1, MAX_LEGACY_LINE_BYTES)
+                line = bytes(self._buf[:take])
+                del self._buf[:take]
+                return line
+            if len(self._buf) >= MAX_LEGACY_LINE_BYTES:
+                line = bytes(self._buf[:MAX_LEGACY_LINE_BYTES])
+                del self._buf[:MAX_LEGACY_LINE_BYTES]
                 return line
             if not self._fill():
                 if self._buf:
@@ -162,10 +195,8 @@ def _control_count(text: str) -> int:
     parts = text.split(" ", 1)
     try:
         return int(parts[1])
-    except (IndexError, ValueError):
-        raise RemoteExecError(
-            f"malformed control record from remote: {text!r}"
-        )
+    except IndexError, ValueError:
+        raise RemoteExecError(f"malformed control record from remote: {text!r}")
 
 
 def _drive(
@@ -175,11 +206,12 @@ def _drive(
     captures_dir_for: Optional[Path],
     print_fn: Callable[[str], None],
 ) -> int:
-    # A line is a CONTROL record only if it carries this request's nonce (see
-    # NONCE_HEADER). Everything else — including task stdout that literally
-    # prints `__MSHIP_EXIT__ 0` without the nonce — is passthrough output.
+    # A control record must begin a logical line. `_ChunkReader` may split a
+    # long ordinary line into bounded fragments, so a later fragment must never
+    # gain control-record meaning just because it begins a fragment.
     artifact_prefix = f"{ARTIFACT_MARKER}:{nonce} "
     exit_prefix = f"{EXIT_MARKER}:{nonce} "
+    at_line_start = True
     while True:
         line = reader.readline()
         if line is None:
@@ -188,18 +220,14 @@ def _drive(
             )
         text = line.decode("utf-8", errors="replace").rstrip("\n")
 
-        if text.startswith(artifact_prefix):
+        if at_line_start and text.startswith(artifact_prefix):
             n = _control_count(text)
             if n < 0:
-                # A negative count would slip past the cap check below and reach
-                # read_exact(-1), which reads nothing yet leaves the buffer /
-                # stream desynced (the exit sentinel never gets parsed). Refuse.
                 raise RemoteExecError(
                     f"remote advertised negative artifact byte count {n}; "
                     f"refusing to read"
                 )
             if n > MAX_ARTIFACT_BYTES:
-                # Refuse BEFORE reading — no unbounded allocation / tar-bomb.
                 raise RemoteExecError(
                     f"remote advertised {n} artifact bytes, exceeding the "
                     f"{MAX_ARTIFACT_BYTES}-byte cap; refusing to read"
@@ -207,24 +235,21 @@ def _drive(
             tar_bytes = reader.read_exact(n)
             if captures_dir_for is not None:
                 captures_dir_for.mkdir(parents=True, exist_ok=True)
-                # mode="r:" = UNCOMPRESSED only (the server writes mode="w").
-                # A gzip/xz "tar bomb" then raises tarfile.ReadError instead of
-                # being transparently decompressed. `filter="data"` still guards
-                # path traversal / unsafe members on extract.
                 try:
                     with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as tar:
                         tar.extractall(captures_dir_for, filter="data")
                 except tarfile.TarError as exc:
                     raise RemoteExecError(
-                        f"remote artifact block is not a valid uncompressed "
-                        f"tar: {exc}"
+                        f"remote artifact block is not a valid uncompressed tar: {exc}"
                     ) from exc
+            at_line_start = True
             continue
 
-        if text.startswith(exit_prefix):
+        if at_line_start and text.startswith(exit_prefix):
             return _control_count(text)
 
         print_fn(text)
+        at_line_start = line.endswith(b"\n")
 
 
 def exec_remote(
@@ -303,10 +328,12 @@ def exec_remote(
                 # HTTPX/httpcore consult the request's timeout extension when
                 # starting the response-body iterator, after headers arrive.
                 resp.request.extensions["timeout"]["read"] = None
-                reader = _ChunkReader(resp.iter_raw())
+                reader = _ChunkReader(_raw_chunks(resp))
                 return _drive(
-                    reader, nonce=nonce,
-                    captures_dir_for=captures_dir_for, print_fn=print_fn,
+                    reader,
+                    nonce=nonce,
+                    captures_dir_for=captures_dir_for,
+                    print_fn=print_fn,
                 )
     except httpx.HTTPError as exc:
         # Connection-level failure (unreachable host, DNS, timeout, dropped
@@ -318,3 +345,129 @@ def exec_remote(
             f"that machine is running `mship serve --relay` and its pairing "
             f"is still valid"
         ) from exc
+
+
+def exec_tool(
+    *,
+    request: ToolRequest,
+    conn: RunHostConnection,
+    event_sink: Callable[[ToolEvent], None] | None = None,
+    transport: httpx.BaseTransport | None = None,
+) -> ToolResult:
+    """Execute one structured tool request against the already selected host.
+
+    The request is sent once to the dedicated authenticated route.  Transport,
+    redirect, HTTP-status, and framing failures become a payload-free typed
+    result; this adapter never retries, switches routes, or invokes a local
+    fallback.  Nonterminal events are delivered to ``event_sink`` as they
+    arrive; the terminal result is delivered only after complete validation.
+    """
+    if not isinstance(request, ToolRequest):
+        return ToolResult(status="invalid")
+
+    headers = {"Authorization": f"Bearer {conn.token}"}
+    url = f"{conn.url}/exec/tool"
+    try:
+        with httpx.Client(transport=transport, follow_redirects=False) as client:
+            with client.stream(
+                "POST", url, headers=headers, json=request.to_dict()
+            ) as response:
+                if response.status_code >= 400:
+                    # Do not parse or surface an untrusted error payload: it can
+                    # contain credentials echoed by an intermediary.
+                    return ToolResult(
+                        status="auth_error"
+                        if response.status_code in {401, 403}
+                        else "protocol_error"
+                    )
+                nonce = response.headers.get(NONCE_HEADER)
+                if not nonce:
+                    return ToolResult(status="protocol_error")
+                timeout = response.request.extensions.get("timeout")
+                if isinstance(timeout, dict):
+                    timeout["read"] = None
+                final: ToolResult | None = None
+                accepted: ToolResult | None = None
+                terminal_event: ToolEvent | None = None
+                for event in iter_tool_events(
+                    _raw_chunks(response),
+                    nonce,
+                ):
+                    if request.preparation == "discover" and event.kind in {
+                        "stdout",
+                        "stderr",
+                    }:
+                        return ToolResult(status="protocol_error")
+                    result = event.result
+                    if result is not None:
+                        if (
+                            event.kind == "started"
+                            or result.status in {"running", "completed"}
+                            or accepted is not None
+                        ) and (
+                            result.owner_ref is None
+                            or result.generation is None
+                            or result.source_revision is None
+                        ):
+                            return ToolResult(status="protocol_error")
+                        if (
+                            request.owner_ref is not None
+                            and result.owner_ref is not None
+                            and (
+                                result.owner_ref != request.owner_ref
+                                or result.generation != request.generation
+                            )
+                        ):
+                            return ToolResult(status="protocol_error")
+                        if (
+                            request.source_revision is not None
+                            and result.source_revision is not None
+                            and result.source_revision != request.source_revision
+                        ):
+                            return ToolResult(status="protocol_error")
+                        if accepted is not None and (
+                            result.owner_ref != accepted.owner_ref
+                            or result.generation != accepted.generation
+                            or result.source_revision != accepted.source_revision
+                        ):
+                            return ToolResult(status="protocol_error")
+                        if event.kind == "started":
+                            if accepted is not None:
+                                return ToolResult(status="protocol_error")
+                            accepted = result
+                        if (
+                            event.kind == "result"
+                            and result.status == "completed"
+                            and accepted is None
+                            and (request.preparation != "observe" or bool(request.argv))
+                        ):
+                            return ToolResult(status="protocol_error")
+                        if (
+                            event.kind == "result"
+                            and result.status == "running"
+                            and (request.preparation != "observe" or request.argv)
+                        ):
+                            return ToolResult(status="protocol_error")
+                        if (
+                            request.preparation == "discover"
+                            and event.kind == "result"
+                            and (
+                                request.max_stdout_bytes is None
+                                or request.max_stderr_bytes is None
+                                or len(result.stdout) > request.max_stdout_bytes
+                                or len(result.stderr) > request.max_stderr_bytes
+                            )
+                        ):
+                            return ToolResult(status="protocol_error")
+                    if event_sink is not None and event.kind != "result":
+                        event_sink(event)
+                    if event.kind == "result":
+                        final = result
+                        terminal_event = event
+                if final is None or terminal_event is None:
+                    return ToolResult(status="protocol_error")
+                if event_sink is not None:
+                    event_sink(terminal_event)
+                return final
+    except httpx.HTTPError, ToolProtocolError, UnicodeError, ValueError:
+        return ToolResult(status="protocol_error")
