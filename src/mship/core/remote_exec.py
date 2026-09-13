@@ -61,7 +61,7 @@ import tarfile
 import tempfile
 import threading
 from collections.abc import Generator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterator, Protocol
 
@@ -76,6 +76,12 @@ from mship.core.config import WorkspaceConfig
 from mship.core.remote_tool import ToolContext, ToolEvent, ToolRequest, ToolResult
 from mship.core.run_ref import RunRefNameError, canonical_run_ref_segment
 from mship.core.tool_process import ToolOperationRegistry
+from mship.core.run_target.host import (
+    TARGET_BINDINGS_FILE,
+    TARGET_CONTEXT_FILE,
+    TARGET_REQUEST_FILE,
+    owner_profile_input_files,
+)
 from mship.core.run_ref import run_ref as build_run_ref
 from mship.util.shell import (
     ShellCancellationUnsupported,
@@ -775,10 +781,56 @@ def _run_verb_stream_unlocked(
     yield f"{EXIT_MARKER}:{nonce} {exit_code}\n".encode()
 
 
+def _resolve_tool_request(
+    request: ToolRequest, *, deps: RemoteExecDeps
+) -> ToolRequest | None:
+    """Resolve configured task keys and host-only profile inputs before launch."""
+    repo_config = deps.config.repos.get(request.repo)
+    if repo_config is None:
+        return None
+    try:
+        profile_inputs = {
+            TARGET_REQUEST_FILE,
+            TARGET_CONTEXT_FILE,
+            TARGET_BINDINGS_FILE,
+        } & request.input_files.keys()
+        input_files = (
+            owner_profile_input_files(
+                request.input_files,
+                task=request.task,
+                repo=request.repo,
+                config=repo_config,
+                task_key=request.task_key,
+                preparation=request.preparation,
+                source_revision=request.source_revision,
+            )
+            if request.task_key is not None or profile_inputs
+            else dict(request.input_files)
+        )
+        if request.task_key is None:
+            return replace(request, input_files=input_files)
+        actual = repo_config.tasks.get(request.task_key)
+        if actual is None:
+            return None
+        return replace(
+            request,
+            argv=("task", actual),
+            task_key=None,
+            input_files=input_files,
+        )
+    except TypeError, ValueError:
+        return None
+
+
 def run_tool_stream(
     request: ToolRequest, *, deps: RemoteExecDeps
 ) -> Generator[ToolEvent, None, None]:
     """Execute one typed tool operation without a second transport/owner."""
+    resolved = _resolve_tool_request(request, deps=deps)
+    if resolved is None:
+        yield ToolEvent("result", result=ToolResult("invalid"))
+        return
+    request = resolved
     operations = _operations(deps)
     if request.preparation == "observe":
         stream = operations.observe(

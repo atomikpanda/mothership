@@ -252,12 +252,19 @@ mship capture [--repo R] [--platform P] [--kind image|layout|all] [--out DIR] [-
 `mship run`, `mship build`, and `mship capture` keep their existing
 `--remote[=role]` entry points: bare `--remote` auto-resolves the repo's
 `run_host` (or the sole configured `run_hosts` entry), while `--remote=<role>`
-picks one explicitly. #507 adds no public CLI command; its shared typed runner
-is an internal adapter and `POST /exec/tool` API documented in
-[`remote-run.md`](remote-run.md). Public-relay use remains blocked until #506
-integrates credential resolution for source transfer, execution and cleanup and
-has real relay-path proof. This reference makes no hardware, relay, or macOS
-FD-pathname readiness claim.
+picks one explicitly.
+
+#530's profile/runtime code does **not** add `--profile`, `--host`, or
+`--target` flags to `mship run`; it does not add profile capture or profile logs
+commands; and it does not activate real Flutter, Android, iOS, browser, or
+PlatformIO backends. `mship logs` remains the existing service log tail.
+
+The shared typed runner and `POST /exec/tool` are internal adapter APIs
+documented in [`remote-run.md`](remote-run.md), not a public CLI route. The
+existing #506 public-relay boundary is unchanged: credential resolution for
+source transfer, execution, and cleanup plus real relay-path proof remain
+separate release work. This reference makes no hardware, relay, macOS, or
+device readiness claim.
 
 ## `mship finish`
 

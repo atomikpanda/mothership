@@ -6,6 +6,7 @@ list says the failure here is SILENT — an empty temporary index drops
 tracked-and-gitignored files with no error — so nothing in this file is allowed
 to be asserted against a mock.
 """
+
 import os
 import subprocess
 from pathlib import Path
@@ -29,15 +30,22 @@ def _git_env() -> dict[str, str]:
     """
     return {
         **os.environ,
-        "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
-        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
     }
 
 
 def _git(*args: str, cwd: Path) -> str:
     return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True,
+        ["git", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
         env=_git_env(),
     ).stdout.strip()
 
@@ -85,7 +93,9 @@ def test_the_synthesized_tree_is_the_working_tree(repo):
 def test_untracked_files_travel_and_gitignored_ones_do_not(repo):
     """ac11, pinned in both directions."""
     _dirty(repo)
-    files = _tree_files(repo, synthesize_commit(ShellRunner(), repo, base_sha=_head(repo)))
+    files = _tree_files(
+        repo, synthesize_commit(ShellRunner(), repo, base_sha=_head(repo))
+    )
     assert "untracked.txt" in files
     assert "ignored.txt" not in files
 
@@ -97,7 +107,9 @@ def test_a_tracked_file_that_is_also_gitignored_survives(repo):
     would then execute a tree missing a file the operator can plainly see.
     Seeding the scratch index from the base commit is what keeps it."""
     (repo / ".gitignore").write_text("ignored.txt\na.txt\n")
-    files = _tree_files(repo, synthesize_commit(ShellRunner(), repo, base_sha=_head(repo)))
+    files = _tree_files(
+        repo, synthesize_commit(ShellRunner(), repo, base_sha=_head(repo))
+    )
     assert "a.txt" in files
 
 
@@ -135,7 +147,7 @@ def test_local_state_is_identical_before_and_after(repo):
     after = snapshot()
 
     assert after == before
-    assert before["index"] == ""                     # nothing was staged
+    assert before["index"] == ""  # nothing was staged
     assert sha != before["head"]
 
 
@@ -167,8 +179,12 @@ def test_the_parent_is_the_sha_it_was_given_not_a_re_resolved_head(repo):
 def test_it_works_in_a_repo_with_no_configured_identity(tmp_path, monkeypatch):
     """`git commit-tree` needs an author; taking it from git config would make
     synthesis fail on a machine that has none. It is pinned to mship instead."""
-    for var in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
-                "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+    for var in (
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+    ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
@@ -183,12 +199,20 @@ def test_it_works_in_a_repo_with_no_configured_identity(tmp_path, monkeypatch):
 
     # The identity can only have come from synthesize_commit: nothing in this
     # repo's config supplies one.
-    assert subprocess.run(
-        ["git", "config", "user.email"], cwd=path, capture_output=True,
-        text=True, env={k: v for k, v in _git_env().items()
-                        if not k.startswith("GIT_AUTHOR")
-                        and not k.startswith("GIT_COMMITTER")},
-    ).returncode != 0
+    assert (
+        subprocess.run(
+            ["git", "config", "user.email"],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            env={
+                k: v
+                for k, v in _git_env().items()
+                if not k.startswith("GIT_AUTHOR") and not k.startswith("GIT_COMMITTER")
+            },
+        ).returncode
+        != 0
+    )
 
     sha = synthesize_commit(ShellRunner(), path, base_sha=_head(path))
     assert "mship" in _git("show", "-s", "--format=%an <%ae>", sha, cwd=path)
@@ -202,8 +226,13 @@ def test_commit_signing_cannot_block_synthesis(repo, monkeypatch):
     # tests/conftest.py's session fixture force-disables commit.gpgsign for the
     # whole suite via GIT_CONFIG_* env vars, which outrank repo config. Left in
     # place, this test would assert nothing at all.
-    for var in ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
-                "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1"):
+    for var in (
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+        "GIT_CONFIG_KEY_1",
+        "GIT_CONFIG_VALUE_1",
+    ):
         monkeypatch.delenv(var, raising=False)
 
     _git("config", "commit.gpgsign", "true", cwd=repo)
@@ -213,8 +242,11 @@ def test_commit_signing_cannot_block_synthesis(repo, monkeypatch):
     # Control: the signing config really is live on this repo — `git commit`
     # under it cannot produce a commit object.
     control = subprocess.run(
-        ["git", "commit", "-am", "would sign"], cwd=repo, capture_output=True,
-        text=True, env=_git_env(),
+        ["git", "commit", "-am", "would sign"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        env=_git_env(),
     )
     assert control.returncode != 0 and "sign" in control.stderr
 
@@ -329,7 +361,7 @@ def test_the_bearer_is_supplied_out_of_band_only(repo):
     command, _cwd, env = shell.calls[0]
 
     assert "tok-secret" not in command
-    assert "-c" not in command.split()                    # no `git -c http.extraHeader=`
+    assert "-c" not in command.split()  # no `git -c http.extraHeader=`
     assert not any(c[0].startswith("git config") for c in shell.calls)
     assert "Authorization: Bearer tok-secret" in env.values()
     assert f"http.{RECEIVE_URL}.extraHeader" in env.values()
@@ -354,7 +386,9 @@ def test_redirects_are_turned_off_for_the_push(repo):
     shell = RecordingShell()
     push_run_ref(shell, repo, conn=CONN, repo="api", task="t1", sha="abc123")
     env = shell.calls[0][2]
-    keys = {env[k]: env[k.replace("KEY", "VALUE")] for k in env if "GIT_CONFIG_KEY" in k}
+    keys = {
+        env[k]: env[k.replace("KEY", "VALUE")] for k in env if "GIT_CONFIG_KEY" in k
+    }
     assert keys["http.followRedirects"] == "false"
 
 
@@ -366,7 +400,7 @@ def test_the_header_config_appends_to_inherited_git_config_entries(monkeypatch):
     assert env["GIT_CONFIG_COUNT"] == "4"
     assert env["GIT_CONFIG_KEY_2"] == f"http.{RECEIVE_URL}.extraHeader"
     assert env["GIT_CONFIG_KEY_3"] == "http.followRedirects"
-    assert "GIT_CONFIG_KEY_0" not in env          # the inherited pair is untouched
+    assert "GIT_CONFIG_KEY_0" not in env  # the inherited pair is untouched
     assert "GIT_CONFIG_KEY_1" not in env
 
 
@@ -416,6 +450,15 @@ def test_a_failed_delete_raises(repo):
     assert "refs/mship/run/t1/api" in str(exc.value)
 
 
+def test_a_recorded_delete_is_leased_to_the_transferred_object(repo):
+    shell = RecordingShell()
+    sha = "a" * 40
+
+    delete_run_ref(shell, repo, conn=CONN, repo="api", task="t1", expected_sha=sha)
+
+    assert f"--force-with-lease=refs/mship/run/t1/api:{sha}" in shell.calls[0][0]
+
+
 # --- the same guarantees against real git ------------------------------------
 
 
@@ -427,7 +470,9 @@ def _urlmatch(env: dict[str, str], url: str) -> str:
     dict and would silently push unauthenticated."""
     return subprocess.run(
         ["git", "config", "--get-urlmatch", "http", url],
-        capture_output=True, text=True, env={**_git_env(), **env},
+        capture_output=True,
+        text=True,
+        env={**_git_env(), **env},
     ).stdout
 
 
@@ -488,7 +533,11 @@ def test_a_redirect_does_not_carry_the_bearer(repo, monkeypatch):
         conn = RunHostConnection(url=base, token="tok-live")
         with pytest.raises(RunTransferError) as exc:
             push_run_ref(
-                ShellRunner(), repo, conn=conn, repo="api", task="t1",
+                ShellRunner(),
+                repo,
+                conn=conn,
+                repo="api",
+                task="t1",
                 sha=_head(repo),
             )
 
@@ -505,15 +554,17 @@ def test_the_bearer_reaches_the_run_host_over_a_real_socket(repo, monkeypatch):
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
     with _recording_host() as (base, seen):
         conn = RunHostConnection(url=base, token="tok-live")
-        with pytest.raises(RunTransferError):     # the recorder 404s every path
+        with pytest.raises(RunTransferError):  # the recorder 404s every path
             push_run_ref(
-                ShellRunner(), repo, conn=conn, repo="api", task="t1",
+                ShellRunner(),
+                repo,
+                conn=conn,
+                repo="api",
+                task="t1",
                 sha=_head(repo),
             )
 
-    assert seen == [
-        ("/git/api/info/refs?service=git-receive-pack", "Bearer tok-live")
-    ]
+    assert seen == [("/git/api/info/refs?service=git-receive-pack", "Bearer tok-live")]
 
 
 def test_a_real_push_lands_the_ref_and_writes_the_token_to_no_config_file(tmp_path):
@@ -532,7 +583,9 @@ def test_a_real_push_lands_the_ref_and_writes_the_token_to_no_config_file(tmp_pa
     operator = tmp_path / "operator"
     subprocess.run(
         ["git", "clone", "-q", str(host_repo), str(operator)],
-        check=True, capture_output=True, env=_git_env(),
+        check=True,
+        capture_output=True,
+        env=_git_env(),
     )
     (operator / "scratch.txt").write_text("uncommitted\n")
     sha = synthesize_commit(ShellRunner(), operator, base_sha=_head(operator))
@@ -553,7 +606,8 @@ def test_a_real_push_lands_the_ref_and_writes_the_token_to_no_config_file(tmp_pa
 
     on_disk = "\n".join(
         p.read_text(errors="ignore")
-        for p in operator.rglob("*") if p.is_file() and ".git" in p.parts
+        for p in operator.rglob("*")
+        if p.is_file() and ".git" in p.parts
     )
     assert "tok-abc" not in on_disk
     assert "tok-abc" not in (operator / ".git" / "config").read_text()
@@ -573,17 +627,26 @@ class FakeTask:
 
 
 def _run_host_config(tmp_path, **extra_repos) -> WorkspaceConfig:
-    repos = {"api": RepoConfig(path=tmp_path / "api", type="service", run_host="role-x")}
+    repos = {
+        "api": RepoConfig(path=tmp_path / "api", type="service", run_host="role-x")
+    }
     repos.update(extra_repos)
     return WorkspaceConfig(workspace="t", run_hosts=["role-x"], repos=repos)
 
 
 def _store(tmp_path) -> RunHostStore:
     store = RunHostStore(tmp_path / ".mothership")
-    store.set_host(HostRegistration(
-        "role-x", ("role-x",), (), 0,
-        RunHostConnection(url="http://remote.example", token="tok-abc"), "project",
-    ), scope="project")
+    store.set_host(
+        HostRegistration(
+            "role-x",
+            ("role-x",),
+            (),
+            0,
+            RunHostConnection(url="http://remote.example", token="tok-abc"),
+            "project",
+        ),
+        scope="project",
+    )
     return store
 
 
@@ -594,8 +657,10 @@ def test_close_deletes_the_tasks_scratch_ref(tmp_path):
 
     deleted = cleanup_run_refs(
         FakeTask("t1", ["api"]),
-        config=_run_host_config(tmp_path), store=_store(tmp_path),
-        shell=shell, warn=warnings.append,
+        config=_run_host_config(tmp_path),
+        store=_store(tmp_path),
+        shell=shell,
+        warn=warnings.append,
     )
 
     assert deleted == ["api"]
@@ -612,8 +677,11 @@ def test_a_git_root_child_is_cleaned_once_via_its_parent(tmp_path):
     )
 
     deleted = cleanup_run_refs(
-        FakeTask("t1", ["api", "server"]), config=config, store=_store(tmp_path),
-        shell=shell, warn=lambda _m: None,
+        FakeTask("t1", ["api", "server"]),
+        config=config,
+        store=_store(tmp_path),
+        shell=shell,
+        warn=lambda _m: None,
     )
 
     assert deleted == ["api"]
@@ -632,7 +700,8 @@ def test_no_mapped_run_host_means_nothing_to_clean(tmp_path):
             repos={"api": RepoConfig(path=tmp_path / "api", type="service")},
         ),
         store=RunHostStore(tmp_path / ".mothership"),
-        shell=shell, warn=warnings.append,
+        shell=shell,
+        warn=warnings.append,
     )
 
     assert deleted == [] and shell.calls == [] and warnings == []
@@ -644,8 +713,11 @@ def test_a_failed_delete_warns_and_keeps_going(tmp_path):
     warnings: list[str] = []
 
     deleted = cleanup_run_refs(
-        FakeTask("t1", ["api"]), config=_run_host_config(tmp_path),
-        store=_store(tmp_path), shell=shell, warn=warnings.append,
+        FakeTask("t1", ["api"]),
+        config=_run_host_config(tmp_path),
+        store=_store(tmp_path),
+        shell=shell,
+        warn=warnings.append,
     )
 
     assert deleted == []
@@ -658,8 +730,11 @@ def test_a_task_slug_that_cannot_form_a_ref_warns_rather_than_raising(tmp_path):
     warnings: list[str] = []
 
     deleted = cleanup_run_refs(
-        FakeTask("a/b", ["api"]), config=_run_host_config(tmp_path),
-        store=_store(tmp_path), shell=shell, warn=warnings.append,
+        FakeTask("a/b", ["api"]),
+        config=_run_host_config(tmp_path),
+        store=_store(tmp_path),
+        shell=shell,
+        warn=warnings.append,
     )
 
     assert deleted == [] and shell.calls == []

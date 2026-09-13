@@ -59,6 +59,13 @@ _TERMINAL = frozenset(
 )
 
 
+@dataclass(frozen=True)
+class _PrivateInput:
+    name: str
+    device: int
+    inode: int
+
+
 @dataclass
 class _Operation:
     owner_ref: str
@@ -73,6 +80,7 @@ class _Operation:
     root_fd: int | None
     storage_fd: int | None = None
     output_fds: dict[str, int] = field(default_factory=dict)
+    private_inputs: dict[str, _PrivateInput] = field(default_factory=dict)
     proc: subprocess.Popen[bytes] | None = None
     delivery: queue.Queue[ToolEvent] = field(
         default_factory=lambda: queue.Queue(_DELIVERY_QUEUE)
@@ -459,6 +467,7 @@ class ToolOperationRegistry:
         parent: _Operation | None = None,
     ) -> str | None:
         try:
+            self._prepare_inputs(operation)
             self._prepare_output(operation)
         except OSError:
             return "evidence_error"
@@ -654,6 +663,11 @@ class ToolOperationRegistry:
             operation.terminate()  # Also handles a leader that already exited.
         except Exception:
             status = "unknown"
+        try:
+            self._discard_inputs(operation)
+        except OSError:
+            status = "unknown"
+            result = None
         if status not in _TERMINAL:
             status = "unknown"
         if result is None or result.status != status:
@@ -729,6 +743,7 @@ class ToolOperationRegistry:
     def _environment(self, operation: _Operation) -> dict[str, str]:
         environment = tool_runtime_environment()
         environment.update(operation.request.env)
+        environment.update(self._private_input_environment(operation))
         environment.update(
             {
                 "MSHIP_TASK": operation.context.task,
@@ -870,6 +885,88 @@ class ToolOperationRegistry:
         ):
             raise OSError("unsafe private operation file")
         return info
+
+    def _private_input_environment(self, operation: _Operation) -> dict[str, str]:
+        if not operation.private_inputs:
+            return {}
+        with self._operation_directory(operation) as directory_fd:
+            for private_input in operation.private_inputs.values():
+                fd = os.open(
+                    private_input.name,
+                    os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                    dir_fd=directory_fd,
+                )
+                try:
+                    info = self._check_private_file(fd)
+                    if (info.st_dev, info.st_ino) != (
+                        private_input.device,
+                        private_input.inode,
+                    ):
+                        raise OSError("private operation input was replaced")
+                finally:
+                    os.close(fd)
+        return {
+            name: str(operation.record_path.parent / private_input.name)
+            for name, private_input in operation.private_inputs.items()
+        }
+
+    def _prepare_inputs(self, operation: _Operation) -> None:
+        if not operation.request.input_files:
+            return
+        try:
+            with self._operation_directory(operation) as directory_fd:
+                for environment_name, content in operation.request.input_files.items():
+                    name = f"{operation.record_path.stem}.input-{secrets.token_hex(16)}"
+                    fd = os.open(
+                        name,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600,
+                        dir_fd=directory_fd,
+                    )
+                    try:
+                        self._full_write(fd, content.encode("utf-8"))
+                        os.fsync(fd)
+                        info = self._check_private_file(fd)
+                        private_input = _PrivateInput(
+                            name=name,
+                            device=info.st_dev,
+                            inode=info.st_ino,
+                        )
+                        operation.private_inputs[environment_name] = private_input
+                    finally:
+                        os.close(fd)
+                os.fsync(directory_fd)
+        except BaseException:
+            try:
+                self._discard_inputs(operation)
+            except OSError:
+                pass
+            raise
+
+    def _discard_inputs(self, operation: _Operation) -> None:
+        if not operation.private_inputs:
+            return
+        with self._operation_directory(operation) as directory_fd:
+            for environment_name, private_input in tuple(
+                operation.private_inputs.items()
+            ):
+                fd = os.open(
+                    private_input.name,
+                    os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                    dir_fd=directory_fd,
+                )
+                try:
+                    info = self._check_private_file(fd)
+                    if (info.st_dev, info.st_ino) != (
+                        private_input.device,
+                        private_input.inode,
+                    ):
+                        raise OSError("private operation input was replaced")
+                finally:
+                    os.close(fd)
+                os.unlink(private_input.name, dir_fd=directory_fd)
+                operation.private_inputs.pop(environment_name)
+            os.fsync(directory_fd)
 
     def _prepare_output(self, operation: _Operation) -> None:
         with self._operation_directory(operation) as directory_fd:

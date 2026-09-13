@@ -263,23 +263,45 @@ rather than failed. If setup fails, the run stops and you see setup's own output
 ## Internal tool-runner API
 
 This is an adapter-facing Python API and authenticated `POST /exec/tool` route,
-not a new public shell command. Existing `run`, `build` and `capture` share its
-preparation, setup cache and process supervisor; their CLI syntax is unchanged.
+not a public shell command. It does not change the legacy `mship run`, `build`,
+or `capture` CLI routes.
 
 ### Requests, preparation and results
 
-`mship.core.remote_tool.ToolRequest` accepts:
+`mship.core.remote_tool.ToolRequest` accepts `task`, a configured `repo`, and
+an `argv` tuple; argv values are literal arguments, never joined into shell
+source. `task_key` is an alternative to `argv`: it requires an empty `argv` and
+is resolved on the host through that repository's configured `tasks` mapping.
+An unknown key is invalid; callers cannot name an arbitrary host command through
+this field.
 
-- `task`, configured `repo`, and an `argv` tuple. Arguments are passed literally;
-  they are not joined into shell source.
-- `env` for explicit additions and relative `cwd` (default `"."`). The server
-  derives the worktree and rejects an absolute cwd, parent traversal, or a
-  resolved cwd outside it. This is **cwd confinement, not a filesystem sandbox**
-  for trusted project code.
-- `preparation`: `"discover"`, `"launch"` (default), or `"observe"`.
-- `source_revision` and `run_ref_repos` for certified source, plus paired
-  `owner_ref` / `generation` only for observation.
-- `max_stdout_bytes`, `max_stderr_bytes`, and `timeout_seconds`.
+`input_files` is a mapping of environment-style names to UTF-8 contents, not a
+mapping of caller-selected paths. Reserved host identity names
+(`MSHIP_TASK`, `MSHIP_REPO`, and `MSHIP_SOURCE_REVISION`) are rejected.
+For a profile request, the host validates `MSHIP_TARGET_REQUEST_FILE` against
+its configured profile, backend, logical task, options, and certified source
+revision, then derives its own `MSHIP_TARGET_BINDINGS_FILE`. An observation
+requires that same validated request input plus its
+`MSHIP_TARGET_CONTEXT_FILE`; context is additional recorded-owner authority,
+never a substitute for a request. A request that supplies profile inputs
+without a valid profile request, supplies context outside observation, or fails
+this configured-task validation, is invalid.
+
+The operation registry materializes accepted input contents as randomized,
+owner-private `0600` regular files under its private operation directory. Child
+environment names hold only those private file paths—never the input contents;
+the paths, contents, argv, and environment are not published to the task journal
+or result events. The registry checks file ownership and identity before use and
+removes the inputs during terminal cleanup. These files are request-scoped
+private inputs, not a provisioning channel or a persistent device/session
+binding.
+
+`ToolRequest` also accepts explicit `env`, relative `cwd` (default `"."`),
+`preparation` (`"discover"`, `"launch"` by default, or `"observe"`),
+`source_revision`, `run_ref_repos`, paired `owner_ref` / `generation` for
+observation, and output/timeout limits. The server derives the worktree and
+rejects an absolute cwd, parent traversal, or a resolved cwd outside it. This is
+**cwd confinement, not a filesystem sandbox** for trusted project code.
 
 | Policy | Source/setup behavior | Output and lifetime |
 |---|---|---|
@@ -315,68 +337,65 @@ validated. Only `available` admits a new launch. Never treat `unknown` or
 incrementally rather than retain an unbounded event list. Setup output can
 precede the backend's `started` event.
 
-### Client entry points and downstream binding
+### Source, backend, and cleanup entry points
 
-Use `mship.core.remote_dispatch.run_remote_tool` for discovery/launch that needs
-the existing exact-source preflight and transfer. Its keyword arguments are
-`request`, `task_obj`, `config`, `shell`, `conn`, `output`, optional `event_sink`,
-and optional HTTPX `transport`. It replaces caller source/ref claims with the
-certified values. Observation skips preparation and preserves the pinned
-connection and owner.
+`snapshot_remote_source(*, task_obj, target_repos, config, shell)` returns an
+immutable `SourceSnapshot` of certified source revisions. It inspects the chosen
+repositories once; dirty repositories become private synthesized Git commits,
+while clean repositories retain their inspected HEAD. The snapshot stores source
+identities rather than caller paths or a host connection.
 
-`prepare_remote_source` is the shared lower-level preparation helper. It takes
-`task_obj`, `target_repos`, `config`, `shell`, `conn`, `output`, and optional
-`on_prepared`, returning `PreparedSource.run_ref_repos` and
-`PreparedSource.source_revisions`.
+`prepare_remote_source(*, task_obj, target_repos, config, shell, conn, output,
+on_prepared=None, snapshot=None, on_transfer=None)` transfers that source and
+returns `PreparedSource(run_ref_repos, source_revisions)`. Supplying a
+`SourceSnapshot` is authoritative: preparation neither reinspects nor
+resynthesizes the local tree, so each eligible host receives the same certified
+revision. `on_transfer(git_repo, ref, sha)` runs only after a successful dirty
+source delivery.
+
+`RemoteBackendExecutor(*, task_obj, config, shell, output, store,
+event_sink=None, transport=None)` is the internal adapter that snapshots a
+repository once, prepares every already-selected eligible host, records each
+successful dirty transfer, and sends validated typed tool requests. It has no
+local fallback and does not invent a source revision after a host-local
+materialization failure.
+
+`resolve_launch(*, config, task, repo_name, profile_name, host_name, remote_role,
+target_alias, registry, preferences, execute, choose)` validates the configured
+repository/profile/backend, prepares eligible hosts through `execute.prepare`,
+discovers candidates, ranks them, and returns a `SelectedTarget`. Despite its
+name, it does not launch an application. It requires an injected executor and
+selection callback; it is not a CLI parser or caller-provisioning API.
+
+Observation uses the persisted run's launch origin as provenance, not as the
+requested follow-up operation. A configured `logs` or `capture` operation must
+also be granted by that run's stored capabilities. Request/context JSON rejects
+duplicate object members and excessive nesting before spawning any task.
+
+`record_run_ref_receipt(state_dir, *, task, host, repo, ref, sha)` records a
+successful scratch-ref transfer against the exact registered host name, scope,
+and endpoint fingerprint—never its bearer token. Existing task-close cleanup
+uses these receipts through `cleanup_run_refs`; callers may also invoke
+`cleanup_recorded_run_refs(task, *, config, store, shell, warn)` explicitly.
+Recorded refs are deleted only on the matching host with an expected-SHA lease.
+Missing/replaced hosts, changed refs, and failed cleanup retain their receipts
+and warn; recorded repositories never fall through to role-derived destinations.
+Unrecorded legacy repositories retain their existing cleanup behavior.
+If receipt persistence fails after a push, preparation attempts leased rollback
+and reports unresolved cleanup if rollback fails. This source-ref cleanup does
+not implement Task 7's device-session or selected-context teardown.
 
 `mship.core.remote_client.exec_tool(*, request, conn, event_sink=None,
 transport=None)` is the transport-only entry point. It sends one request to the
-already selected `RunHostConnection`, with no redirect, retry, host re-resolution
-or local fallback.
+already selected `RunHostConnection`, with no redirect, retry, host
+re-resolution, token fallback, or local fallback.
 
-For #530 Task 5, resolve the task, repo, host connection and backend argv using
-the caller's existing configuration. G1 discovery then binds as follows:
-
-```python
-from mship.core.remote_dispatch import run_remote_tool
-from mship.core.remote_tool import ToolRequest
-
-discovery = run_remote_tool(
-    request=ToolRequest(
-        task=task_obj.slug, repo=repo_name, argv=discover_argv,
-        preparation="discover", max_stdout_bytes=1024 * 1024,
-        max_stderr_bytes=256 * 1024, timeout_seconds=10,
-    ),
-    task_obj=task_obj, config=config, shell=shell, conn=conn, output=output,
-)
-if discovery.status != "completed" or discovery.exit_code != 0:
-    raise RuntimeError("remote discovery did not complete successfully")
-```
-
-G2 launch uses the same call with `preparation="launch"`, the launch argv and
-an `event_sink` callback. The call blocks for the operation's lifetime: run it
-in the caller's owned execution worker. Capture the `started` event's
-`ToolResult` alongside the selected connection, task and repo; it is the only
-binding accepted for G2 observation. Do not wait for launch to finish before
-making observations, and do not resolve a different host for an existing owner.
-Given that saved result as `started`, a status query is:
-
-```python
-observed = run_remote_tool(
-    request=ToolRequest(
-        task=task_obj.slug, repo=repo_name, argv=(), preparation="observe",
-        owner_ref=started.owner_ref, generation=started.generation,
-        source_revision=started.source_revision,
-    ),
-    task_obj=task_obj, config=config, shell=shell, conn=conn, output=output,
-)
-```
-
-Use the backend's observation argv instead of `()` to inspect the same live
-context. Cancelling that observation cannot cancel its parent. These are
-process-operation identities, not device/app session IDs or reconnect tokens.
-The examples define #530's G1/G2 binding only; #507 does not add a #530 command,
-relay integration, or fallback path.
+This internal surface activates neither profile CLI flags nor real backend
+implementations. In particular, #530 adds no `mship run --profile`, profile
+capture, or profile logs command; it grants no device-session authority,
+stable reconnect, or caller provisioning. The existing public relay boundary is
+unchanged: #506 relay integration and native/device evidence remain separate
+release work.
 
 ### Environment, ownership and durable evidence
 

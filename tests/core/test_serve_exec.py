@@ -2868,12 +2868,15 @@ def test_tool_discovery_authenticates_and_never_runs_setup(tmp_path, monkeypatch
     monkeypatch.setenv("MSHIP_DAEMON_SECRET", "must-not-reach-the-child")
     client, sentinel, worktree = _tool_app(tmp_path, monkeypatch)
     request = _discovery_request(source_revision="a" * 40)
-    denied = client.post("/exec/tool", json=request.to_dict())
+    payload = request.to_dict()
+    payload.pop("task_key")
+    payload.pop("input_files")
+    denied = client.post("/exec/tool", json=payload)
     assert denied.status_code == 401
     assert not sentinel.exists()
     response = client.post(
         "/exec/tool",
-        json=request.to_dict(),
+        json=payload,
         headers={"Authorization": "Bearer tool-test-token"},
     )
     assert response.status_code == 200

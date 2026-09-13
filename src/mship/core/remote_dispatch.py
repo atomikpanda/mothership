@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping
 
@@ -33,6 +34,90 @@ class PreparedSource:
         )
 
 
+@dataclass(frozen=True)
+class _DirtySource:
+    """A synthesized source object waiting for delivery to a specific host."""
+
+    git_repo: str
+    path: Path
+    branch: str
+    sha: str
+
+
+@dataclass(frozen=True)
+class SourceSnapshot:
+    """Certified source identities reusable across one or more run hosts.
+
+    The snapshot deliberately contains Git object identities, not caller paths
+    or a host connection.  It can therefore be delivered to several eligible
+    hosts even if the local working tree changes after certification.
+    """
+
+    source_revisions: Mapping[str, str]
+    _preflight: object = field(repr=False)
+    _dirty_sources: tuple[_DirtySource, ...] = field(repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "source_revisions", MappingProxyType(dict(self.source_revisions))
+        )
+        object.__setattr__(self, "_dirty_sources", tuple(self._dirty_sources))
+
+
+def snapshot_remote_source(*, task_obj, target_repos, config, shell) -> SourceSnapshot:
+    """Freeze certified source once, without sending it to a run host.
+
+    Dirty trees become immutable, private commit objects now.  Clean sources
+    retain the exact HEAD inspected here; their existing origin-push path is
+    performed later by :func:`prepare_remote_source` with that pinned SHA.
+    """
+    from mship.core import remote_preflight, run_transfer
+
+    selected = tuple(target_repos)
+    pre = remote_preflight.inspect(task_obj, shell, repos=list(selected), config=config)
+    if not pre.ok:
+        raise RemoteDispatchError(remote_preflight.blocked_message(pre))
+
+    revisions: dict[str, str] = {
+        state.repo: state.head_sha for state in pre.states if state.head_sha is not None
+    }
+    dirty_sources: list[_DirtySource] = []
+    for state in pre.dirty:
+        if state.head_sha is None or state.git_repo is None:
+            raise RemoteDispatchError(
+                "could not certify source identity for remote dispatch"
+            )
+        try:
+            sha = run_transfer.synthesize_commit(
+                shell, state.path, base_sha=state.head_sha
+            )
+        except run_transfer.RunTransferError as exc:
+            raise RemoteDispatchError(str(exc)) from None
+        dirty_sources.append(
+            _DirtySource(
+                git_repo=state.git_repo,
+                path=state.path,
+                branch=state.branch,
+                sha=sha,
+            )
+        )
+        # A git_root child shares the transferred tree. Pin every selected alias
+        # to its actual snapshot rather than leaving it at the parent HEAD.
+        for selected_state in pre.states:
+            if selected_state.git_repo == state.git_repo:
+                revisions[selected_state.repo] = sha
+
+    missing = [repo for repo in selected if repo not in revisions]
+    if missing:
+        # A successful preflight cannot normally reach this case; fail closed if
+        # a malformed/custom implementation did, instead of sending an unpinned
+        # tool request.
+        raise RemoteDispatchError(
+            "could not certify source identity for remote dispatch"
+        )
+    return SourceSnapshot(revisions, pre, tuple(dirty_sources))
+
+
 def prepare_remote_source(
     *,
     task_obj,
@@ -42,64 +127,86 @@ def prepare_remote_source(
     conn: RunHostConnection,
     output,
     on_prepared: Callable[[str], None] | None = None,
+    snapshot: SourceSnapshot | None = None,
+    on_transfer: Callable[[str, str, str], None] | None = None,
 ) -> PreparedSource:
-    """Certify and transfer exactly the selected task source before dispatch.
+    """Transfer certified source to ``conn`` and return its exact identities.
 
-    Clean commits are pushed to origin only when the preflight has certified
-    the exact HEAD; dirty trees are committed into the private run-ref namespace
-    and recorded only after that transfer succeeds.  The output text intentionally
-    matches the existing remote CLI path so capture provenance remains stable.
+    When supplied, ``snapshot`` is the complete source authority: preparation
+    does not inspect or synthesize the local tree again.  This prevents a later
+    host from receiving a different revision merely because local files changed
+    between two eligible-host transfers.
     """
     from mship.core import remote_preflight, run_transfer
     from mship.core.run_ref import RunRefNameError
 
-    pre = remote_preflight.inspect(
-        task_obj, shell, repos=list(target_repos), config=config
-    )
-    if not pre.ok:
-        raise RemoteDispatchError(remote_preflight.blocked_message(pre))
+    if snapshot is None:
+        snapshot = snapshot_remote_source(
+            task_obj=task_obj,
+            target_repos=target_repos,
+            config=config,
+            shell=shell,
+        )
 
-    revisions: dict[str, str] = {
-        state.repo: state.head_sha for state in pre.states if state.head_sha is not None
-    }
+    selected = tuple(target_repos)
+    if any(repo not in snapshot.source_revisions for repo in selected):
+        raise RemoteDispatchError(
+            "could not certify source identity for remote dispatch"
+        )
+
     run_ref_repos: list[str] = []
     prepared_snapshots: list[tuple[str, str, str]] | None = (
         [] if on_prepared is not None else None
     )
-
-    for state in pre.dirty:
+    for source in snapshot._dirty_sources:
         try:
-            sha = run_transfer.synthesize_commit(
-                shell, state.path, base_sha=state.head_sha
-            )
             ref = run_transfer.push_run_ref(
                 shell,
-                state.path,
+                source.path,
                 conn=conn,
-                repo=state.git_repo,
+                repo=source.git_repo,
                 task=task_obj.slug,
-                sha=sha,
+                sha=source.sha,
             )
         except (run_transfer.RunTransferError, RunRefNameError) as exc:
             raise RemoteDispatchError(str(exc)) from None
-        run_ref_repos.append(state.git_repo)
-        # A git_root child shares the transferred tree. Pin every selected alias
-        # to its actual snapshot rather than leaving it at the parent HEAD.
-        for selected in pre.states:
-            if selected.git_repo == state.git_repo:
-                revisions[selected.repo] = sha
+        # A receipt is never made for a failed push. If durable receipt creation
+        # fails after a successful push, roll back only this exact ref with the
+        # transferred object as a lease; a later transfer must survive.
+        if on_transfer is not None:
+            try:
+                on_transfer(source.git_repo, ref, source.sha)
+            except Exception:
+                try:
+                    run_transfer.delete_run_ref(
+                        shell,
+                        source.path,
+                        conn=conn,
+                        repo=source.git_repo,
+                        task=task_obj.slug,
+                        expected_sha=source.sha,
+                    )
+                except run_transfer.RunTransferError, RunRefNameError:
+                    raise RemoteDispatchError(
+                        "could not record the transferred source; exact run-ref cleanup "
+                        "is unresolved"
+                    ) from None
+                raise RemoteDispatchError(
+                    "could not record the transferred source; exact run ref was rolled back"
+                ) from None
+        run_ref_repos.append(source.git_repo)
         if prepared_snapshots is not None:
-            prepared_snapshots.append((state.git_repo, sha, ref))
+            prepared_snapshots.append((source.git_repo, source.sha, ref))
         output.breadcrumb(
-            f"{state.git_repo}: sent your working tree to the run host as "
-            f"{ref} ({sha[:12]}) — a throwaway run ref, not a commit on "
-            f"{state.branch}"
+            f"{source.git_repo}: sent your working tree to the run host as "
+            f"{ref} ({source.sha[:12]}) — a throwaway run ref, not a commit on "
+            f"{source.branch}"
         )
 
-    pushed, push_error = remote_preflight.push(pre, shell)
+    pushed, push_error = remote_preflight.push(snapshot._preflight, shell)
     if push_error is not None:
         raise RemoteDispatchError(push_error)
-    pushed_sha = {state.repo: state.head_sha for state in pre.to_push}
+    pushed_sha = {state.repo: state.head_sha for state in snapshot._preflight.to_push}
     for repo_name in pushed:
         sha = pushed_sha.get(repo_name)
         suffix = f" ({sha[:12]})" if sha else ""
@@ -117,21 +224,12 @@ def prepare_remote_source(
                 f"an exact working-tree snapshot ({snapshots}) was sent to the run host"
             )
         else:
-            states = [state for state in pre.states if state.repo in target_repos]
             commits = ", ".join(
-                f"{state.repo}@{(state.head_sha or 'unknown')[:12]}" for state in states
+                f"{repo}@{sha[:12]}" for repo, sha in snapshot.source_revisions.items()
             )
             on_prepared(f"task source {commits} was verified before remote dispatch")
 
-    missing = [repo for repo in target_repos if repo not in revisions]
-    if missing:
-        # A successful preflight cannot normally reach this case; fail closed if
-        # a malformed/custom implementation did, instead of sending an unpinned
-        # tool request.
-        raise RemoteDispatchError(
-            "could not certify source identity for remote dispatch"
-        )
-    return PreparedSource(tuple(run_ref_repos), revisions)
+    return PreparedSource(tuple(run_ref_repos), snapshot.source_revisions)
 
 
 def run_remote_tool(

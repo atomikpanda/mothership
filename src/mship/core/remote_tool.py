@@ -181,6 +181,8 @@ class ToolRequest:
     task: str
     repo: str
     argv: tuple[str, ...]
+    task_key: str | None = None
+    input_files: Mapping[str, str] = field(default_factory=dict, repr=False)
     env: Mapping[str, str] = field(default_factory=dict, repr=False)
     cwd: str = "."
     preparation: Literal["discover", "launch", "observe"] = "launch"
@@ -195,16 +197,37 @@ class ToolRequest:
     def __post_init__(self) -> None:
         task = _name(self.task, field_name="task")
         repo = _name(self.repo, field_name="repo")
+        task_key = (
+            None
+            if self.task_key is None
+            else _name(self.task_key, field_name="task key")
+        )
         if not isinstance(self.argv, tuple) or len(self.argv) > _MAX_ARGV_COUNT:
             _reject("invalid argv")
         argv = tuple(_text(value, field_name="argv") for value in self.argv)
-        if not argv and self.preparation != "observe":
+        if not argv and self.preparation != "observe" and task_key is None:
             _reject("argv is required")
+        if task_key is not None and argv:
+            _reject("task key requires empty argv")
         if (
-            not isinstance(self.preparation, str)
-            or self.preparation not in _PREPARATIONS
+            not isinstance(self.input_files, Mapping)
+            or len(self.input_files) > _MAX_ENV_COUNT
         ):
-            _reject("invalid preparation")
+            _reject("invalid input files")
+        input_files: dict[str, str] = {}
+        for key, value in self.input_files.items():
+            if not isinstance(key, str) or not _ENV_NAME.fullmatch(key):
+                _reject("invalid input files")
+            if key in {"MSHIP_TASK", "MSHIP_REPO", "MSHIP_SOURCE_REVISION"}:
+                _reject("invalid input files")
+            if not isinstance(value, str):
+                _reject("invalid input file content")
+            try:
+                if len(value.encode("utf-8")) > MAX_REQUEST_BYTES:
+                    _reject("invalid input file content")
+            except UnicodeError:
+                _reject("invalid input file content")
+            input_files[key] = value
         if not isinstance(self.env, Mapping) or len(self.env) > _MAX_ENV_COUNT:
             _reject("invalid environment")
         env: dict[str, str] = {}
@@ -260,6 +283,8 @@ class ToolRequest:
         object.__setattr__(self, "task", task)
         object.__setattr__(self, "repo", repo)
         object.__setattr__(self, "argv", argv)
+        object.__setattr__(self, "task_key", task_key)
+        object.__setattr__(self, "input_files", MappingProxyType(dict(input_files)))
         object.__setattr__(self, "env", MappingProxyType(dict(env)))
         object.__setattr__(self, "cwd", cwd)
         object.__setattr__(self, "run_ref_repos", run_ref_repos)
@@ -283,6 +308,8 @@ class ToolRequest:
             "task": self.task,
             "repo": self.repo,
             "argv": list(self.argv),
+            "task_key": self.task_key,
+            "input_files": dict(self.input_files),
             "env": dict(self.env),
             "cwd": self.cwd,
             "preparation": self.preparation,
@@ -297,26 +324,30 @@ class ToolRequest:
 
     @classmethod
     def from_dict(cls, data: object) -> "ToolRequest":
-        data = _object(
-            data,
-            fields=frozenset(
-                {
-                    "task",
-                    "repo",
-                    "argv",
-                    "env",
-                    "cwd",
-                    "preparation",
-                    "run_ref_repos",
-                    "source_revision",
-                    "owner_ref",
-                    "generation",
-                    "max_stdout_bytes",
-                    "max_stderr_bytes",
-                    "timeout_seconds",
-                }
-            ),
+        if not isinstance(data, Mapping):
+            _reject("invalid tool payload")
+        fields = frozenset(
+            {
+                "task",
+                "repo",
+                "argv",
+                "task_key",
+                "input_files",
+                "env",
+                "cwd",
+                "preparation",
+                "run_ref_repos",
+                "source_revision",
+                "owner_ref",
+                "generation",
+                "max_stdout_bytes",
+                "max_stderr_bytes",
+                "timeout_seconds",
+            }
         )
+        optional = frozenset({"task_key", "input_files"})
+        if set(data) - fields or not (fields - optional) <= set(data):
+            _reject("invalid tool payload")
         if not isinstance(data["argv"], list) or not isinstance(
             data["run_ref_repos"], list
         ):
@@ -325,6 +356,8 @@ class ToolRequest:
             task=data["task"],
             repo=data["repo"],
             argv=tuple(data["argv"]),
+            task_key=data.get("task_key"),
+            input_files=data.get("input_files", {}),
             env=data["env"],
             cwd=data["cwd"],
             preparation=data["preparation"],

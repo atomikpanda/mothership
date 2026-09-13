@@ -262,6 +262,9 @@ Additional keys on each entry under `repos:` (alongside `path`, `type`, `depends
 | `capture` | UI-capture config — a `platforms:` list `mship capture` can target (`--platform` required when more than one). |
 | `run_host` | Logical run-host role this repo uses for `--remote` execution (`mship build`/`capture`). Must name an entry in the workspace `run_hosts:` list. |
 | `setup_inputs` | Manifests/lockfiles whose content decides whether a **remote** run re-runs `task setup` on the run host (glob patterns, matched inside the materialized worktree). Undeclared means setup runs on first materialization only — declaring them is what enables re-run-on-change. See [`remote-run.md`](remote-run.md). |
+| `run_profiles` | Internal profile definitions. Each profile names a configured `backend`, non-empty host `roles` (all declared in workspace `run_hosts`), optional host `tags`, and JSON-compatible `options`. Defining one does not add a CLI profile command. |
+| `run_backends` | Internal backend definitions: `discover_task` and an `operations` map from operation to logical task key. Every referenced key must exist in this repo's `tasks:` mapping; the host resolves the key rather than accepting arbitrary argv. |
+| `default_run_profile` | Optional configured profile name. It must name an entry in `run_profiles`; it is not currently consumed by `mship run`, `capture`, or `logs`. |
 
 ```yaml
 repos:
@@ -286,3 +289,38 @@ repos:
     capture:
       platforms: [android, ios]    # `mship capture --platform android|ios`
 ```
+
+### Internal profile/backend configuration
+
+The following schema is accepted for adapter-driven target selection, but it
+does **not** activate a user-facing profile run, capture, or logs command, nor
+does it provision a device or backend. Keep the task keys in `tasks:` so the
+host can validate and resolve them from its own configuration:
+
+```yaml
+repos:
+  app:
+    path: app
+    type: service
+    tasks:
+      discover-targets: target-inventory
+      run-target: target-launch
+    run_backends:
+      host-tools:
+        discover_task: discover-targets
+        operations:
+          run: run-target
+    run_profiles:
+      internal-profile:
+        backend: host-tools
+        hosts:
+          roles: [android-emu-host]  # must be in workspace run_hosts
+          tags: []
+        options: {}
+    default_run_profile: internal-profile
+```
+
+Profiles and backends are strict configuration objects: unknown nested fields,
+an unknown backend, an empty host-role list, a role outside `run_hosts`, or a
+task key absent from `tasks:` rejects configuration. They remain internal until
+the separate CLI/backend and native-device work is approved and evidenced.
