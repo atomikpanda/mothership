@@ -8,6 +8,7 @@ import re
 import stat
 import tempfile
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from secrets import token_urlsafe
@@ -140,6 +141,17 @@ class AppRunRepository:
         if current.revision != expected_revision:
             raise AppRunConflict(run_id)
         self._validate_transition(current, status, owner_ref, owner_generation)
+        try:
+            updated = replace(
+                current,
+                status=status,
+                owner_ref=owner_ref,
+                owner_generation=owner_generation,
+                revision=expected_revision + 1,
+                updated_at=now,
+            )
+        except ValueError as error:
+            raise AppRunTransitionError(str(error)) from error
         statement = (
             app_runs.update()
             .where(app_runs.c.id == run_id, app_runs.c.revision == expected_revision)
@@ -153,9 +165,6 @@ class AppRunRepository:
         )
         if connection.execute(statement).rowcount != 1:
             raise AppRunConflict(run_id)
-        updated = self.get(connection, run_id)
-        if updated is None:  # pragma: no cover - guarded by the successful UPDATE.
-            raise KeyError(run_id)
         return updated
 
     def delete_for_task(

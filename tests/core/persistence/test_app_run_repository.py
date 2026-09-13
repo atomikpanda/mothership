@@ -74,6 +74,48 @@ def _run(
     )
 
 
+@pytest.mark.parametrize(
+    ("owner_ref", "owner_generation"),
+    [
+        ("", "generation-7"),
+        ("operation-42", ""),
+        ("operation-42", "generation\nprivate"),
+        ("x" * 1025, "generation-7"),
+    ],
+    ids=(
+        "empty-reference",
+        "empty-generation",
+        "control-character",
+        "oversized-reference",
+    ),
+)
+def test_invalid_owner_acknowledgement_leaves_committable_context_unchanged(
+    tmp_path: Path, owner_ref: str, owner_generation: str
+) -> None:
+    state_dir = tmp_path / ".mothership"
+    store = WorkspaceStore(state_dir)
+    with store.write(immediate=True) as transaction:
+        transaction.tasks.insert(transaction.connection, _task("task-a", "api"))
+        binding_ref = transaction.app_runs.store_private_binding({"serial": "private"})
+        original = _run(binding_ref)
+        transaction.app_runs.insert(transaction.connection, original)
+
+    with store.write(immediate=True) as transaction:
+        with pytest.raises(AppRunTransitionError):
+            transaction.app_runs.transition(
+                transaction.connection,
+                run_id=original.id,
+                expected_revision=0,
+                status="active",
+                owner_ref=owner_ref,
+                owner_generation=owner_generation,
+                now=NOW,
+            )
+
+    with WorkspaceStore(state_dir).read() as transaction:
+        assert transaction.app_runs.get(transaction.connection, original.id) == original
+
+
 def test_two_connections_cas_owner_conflict_survives_reopen(tmp_path: Path) -> None:
     state_dir = tmp_path / ".mothership"
     database = WorkspaceDatabase(state_dir)
