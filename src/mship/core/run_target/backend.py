@@ -29,6 +29,9 @@ DISCOVERY_STDERR_LIMIT = 256 * 1024
 DISCOVERY_TIMEOUT_SECONDS = 60
 HOST_BINDINGS_MAX_BYTES = 1024 * 1024
 
+# Implementations enforce BackendExecution's owner-side resource policy while
+# collecting, stop/reap their owned operation on limits, and return timeout,
+# stdout_limit, or stderr_limit without leaking partial output as diagnostics.
 BackendExecutor = Callable[[HostRegistration, BackendExecution], BackendResult]
 
 
@@ -186,16 +189,19 @@ def discover_on_host(
         request=request.model_dump(mode="json"),
         run_id=None,
         preparation="discover",
+        max_stdout_bytes=DISCOVERY_STDOUT_LIMIT,
+        max_stderr_bytes=DISCOVERY_STDERR_LIMIT,
+        timeout_seconds=DISCOVERY_TIMEOUT_SECONDS,
     )
     result = execute(host, execution)
     if result.error_code is not None:
-        return _failure(
-            host,
-            request,
-            "backend_timeout"
-            if result.error_code == "timeout"
-            else "backend_transport",
-        )
+        if result.error_code == "timeout":
+            code = "backend_timeout"
+        elif result.error_code in {"stdout_limit", "stderr_limit"}:
+            code = "backend_protocol"
+        else:
+            code = "backend_transport"
+        return _failure(host, request, code)
     if result.exit_code is None:
         return _failure(host, request, "backend_transport")
     if result.exit_code != 0:

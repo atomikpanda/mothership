@@ -272,6 +272,14 @@ class SelectedTarget:
 
 @dataclass(frozen=True)
 class BackendExecution:
+    """Owner-side execution policy, not backend-controlled request-file data.
+
+    Discovery executors must enforce the byte caps during collection and the
+    timeout across execution, stopping their owned operation on either limit.
+    Launch/observe output is streamed to the owner sink, never buffered without
+    a cap; its byte-cap fields are therefore None.
+    """
+
     task: str
     repo: str
     profile: str
@@ -281,6 +289,28 @@ class BackendExecution:
     request: dict[str, JsonValue]
     run_id: str | None
     preparation: Literal["discover", "launch", "observe"]
+    max_stdout_bytes: int | None
+    max_stderr_bytes: int | None
+    timeout_seconds: float | None
+
+    def __post_init__(self) -> None:
+        if self.preparation not in {"discover", "launch", "observe"}:
+            raise ValueError("invalid backend preparation policy")
+        if self.preparation == "discover":
+            for limit in (self.max_stdout_bytes, self.max_stderr_bytes):
+                if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+                    raise ValueError("discovery requires positive output byte caps")
+            if self.timeout_seconds is None:
+                raise ValueError("discovery requires a timeout")
+        elif self.max_stdout_bytes is not None or self.max_stderr_bytes is not None:
+            raise ValueError("launch and observe output must use the streaming sink")
+        if self.timeout_seconds is not None and (
+            isinstance(self.timeout_seconds, bool)
+            or not isinstance(self.timeout_seconds, (int, float))
+            or not math.isfinite(self.timeout_seconds)
+            or self.timeout_seconds <= 0
+        ):
+            raise ValueError("execution timeout must be finite and positive")
 
 
 @dataclass(frozen=True)
