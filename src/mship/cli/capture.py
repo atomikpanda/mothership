@@ -106,6 +106,11 @@ def register(app: typer.Typer, get_container):
         task: Optional[str] = typer.Option(None, "--task", help="Target task slug (defaults to cwd-resolved)."),
         repo: Optional[str] = typer.Option(None, "--repo", help="Which repo to capture (required for an ad-hoc capture when the workspace has >1 repo)."),
         platform: Optional[str] = typer.Option(None, "--platform", help="Platform to capture (required when the repo exposes more than one)."),
+        run_id: Optional[str] = typer.Option(
+            None,
+            "--run-id",
+            help="Capture one acknowledged profile run; never selects a device directly.",
+        ),
         kind: str = typer.Option("all", "--kind", help="Artifact kind: image | layout | all."),
         out: Optional[Path] = typer.Option(None, "--out", help="Output directory (default: .mothership/captures/<task-or-_adhoc>/<ts>-<platform>/)."),
         evidence: Optional[str] = typer.Option(
@@ -207,34 +212,85 @@ def register(app: typer.Typer, get_container):
             label = resolved_platform or "default"
             out_dir = workspace_root / ".mothership" / "captures" / out_bucket / f"{ts}-{label}"
 
-        if remote is not None:
-            from mship.cli.exec import _run_remote
+        session_observation = run_id is not None
+        if not session_observation and t is not None:
+            with container.state_manager().workspace_store.read() as transaction:
+                candidates = transaction.app_runs.list_candidates(
+                    transaction.connection, task_slug=t.slug, repo=resolved_repo
+                )
+            # Existing uncertain session metadata must fail closed rather than
+            # falling through to legacy source preparation.
+            session_observation = bool(candidates)
+
+        if remote is not None or session_observation:
+            from mship.core.remote_client import (
+                RemoteExecError,
+                exec_session_capture,
+            )
+            from mship.core.run_host import RunHostError, RunHostResolver
+            from mship.core.session_capture import (
+                SessionCaptureError,
+                select_session_capture,
+            )
             from mship.core.evidence_attach import remote_provenance_note
 
-            # Remote execution always materializes the task's branch on the
-            # remote — there's no ad-hoc remote capture (an ad-hoc capture
-            # has no task/branch for the remote to check out).
-            if t is None:
-                output.error(
-                    "--remote requires an active task: the remote "
-                    "materializes the task's branch, so there's no ad-hoc "
-                    "remote capture. Pass --task, or run capture from an "
-                    "active task's worktree."
+            if session_observation:
+                if t is None:
+                    output.error("recorded session capture requires an active task.")
+                    raise typer.Exit(code=1)
+                try:
+                    selected = select_session_capture(
+                        store=container.state_manager().workspace_store,
+                        config=config,
+                        task=t,
+                        repo_name=resolved_repo,
+                        run_id=run_id,
+                        platform=resolved_platform or "",
+                    )
+                    if remote not in {None, ""} and remote not in selected.host.roles:
+                        raise SessionCaptureError(
+                            "specified remote role does not match the recorded run host"
+                        )
+                    code = exec_session_capture(
+                        operation=selected.operation,
+                        kinds=kinds,
+                        platform=resolved_platform or "",
+                        host=selected.host,
+                        resolver=RunHostResolver(),
+                        captures_dir_for=out_dir,
+                        print_fn=output.progress,
+                    )
+                except (RemoteExecError, RunHostError, SessionCaptureError, ValueError) as e:
+                    output.error(str(e))
+                    raise typer.Exit(code=1)
+                remote_note = remote_provenance_note("session observation")
+            else:
+                from mship.cli.exec import _run_remote
+
+                # Remote execution always materializes the task's branch on the
+                # remote — there's no ad-hoc remote capture (an ad-hoc capture
+                # has no task/branch for the remote to check out).
+                if t is None:
+                    output.error(
+                        "--remote requires an active task: the remote "
+                        "materializes the task's branch, so there's no ad-hoc "
+                        "remote capture. Pass --task, or run capture from an "
+                        "active task's worktree."
+                    )
+                    raise typer.Exit(code=1)
+
+                remote_note: str | None = None
+
+                def record_preparation(source_preparation: str) -> None:
+                    nonlocal remote_note
+                    remote_note = remote_provenance_note(source_preparation)
+
+                code = _run_remote(
+                    verb="capture", remote_role=remote or "", task_obj=t,
+                    target_repos=[resolved_repo], config=config, container=container,
+                    output=output, platform=resolved_platform, kind=kind,
+                    captures_dir_for=out_dir, on_prepared=record_preparation,
                 )
-                raise typer.Exit(code=1)
-
-            remote_note: str | None = None
-
-            def record_preparation(source_preparation: str) -> None:
-                nonlocal remote_note
-                remote_note = remote_provenance_note(source_preparation)
-
-            code = _run_remote(
-                verb="capture", remote_role=remote, task_obj=t,
-                target_repos=[resolved_repo], config=config, container=container,
-                output=output, platform=resolved_platform, kind=kind,
-                captures_dir_for=out_dir, on_prepared=record_preparation,
-            )
 
             # On success, emit the SAME confirmation a local capture does
             # (respecting --json), pointing at the local landing path where

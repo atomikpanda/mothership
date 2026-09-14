@@ -2237,6 +2237,27 @@ def create_app(
     # Canonicalize it at the authenticated endpoint before any remote work or
     # streaming response begins.
 
+    def _tool_execution_dependencies(cancel_event):
+        if config is None:
+            raise HTTPException(status_code=503, detail="remote workspace not bootstrapped")
+        return remote_exec.RemoteExecDeps(
+            config=config, shell=ShellRunner(), workspace_root=workspace_root,
+            cancel_event=cancel_event, operations=tool_operations, result_store=result_store,
+            execution_provenance=trusted_execution_provenance,
+            work_item_id_for_task=_trusted_work_item_id,
+        )
+
+    async def _session_request_body(request: Request):
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > MAX_REQUEST_BYTES:
+                raise HTTPException(status_code=413, detail="session request exceeds byte limit")
+            body.extend(chunk)
+        try:
+            return json.loads(body, object_pairs_hook=_unique_tool_object)
+        except (ValueError, TypeError, RecursionError):
+            raise HTTPException(status_code=400, detail="invalid session request") from None
+
     @app.post("/exec/tool")
     async def post_tool(request: Request):
         if config is None:
@@ -2259,16 +2280,7 @@ def create_app(
                 status_code=400, detail="invalid tool execution request"
             ) from None
         cancel_event = threading.Event()
-        deps = remote_exec.RemoteExecDeps(
-            config=config,
-            shell=ShellRunner(),
-            workspace_root=workspace_root,
-            cancel_event=cancel_event,
-            operations=tool_operations,
-            result_store=result_store,
-            execution_provenance=trusted_execution_provenance,
-            work_item_id_for_task=_trusted_work_item_id,
-        )
+        deps = _tool_execution_dependencies(cancel_event)
         nonce = secrets.token_hex(16)
 
         def encoded_events():
@@ -2284,6 +2296,68 @@ def create_app(
             cancel_event=cancel_event,
             media_type="application/octet-stream",
             headers={"X-Mship-Exec-Nonce": nonce},
+        )
+
+    @app.post("/exec/session-capture")
+    async def post_session_capture(request: Request):
+        cancel_event = threading.Event()
+        deps = _tool_execution_dependencies(cancel_event)
+        value = await _session_request_body(request)
+        try:
+            if not isinstance(value, dict) or set(value) != {"operation", "kinds", "platform"}:
+                raise ValueError
+            operation = ToolRequest.from_dict(value["operation"])
+            kinds, platform = value["kinds"], value["platform"]
+            if (not isinstance(kinds, list) or not 1 <= len(kinds) <= 2
+                    or any(not isinstance(kind, str) or kind not in {"image", "layout"} for kind in kinds)
+                    or len(set(kinds)) != len(kinds)
+                    or not isinstance(platform, str) or platform not in {"android", "ios"}):
+                raise ValueError
+        except (ValueError, TypeError, RecursionError):
+            raise HTTPException(status_code=400, detail="invalid session capture request") from None
+        nonce = secrets.token_hex(16)
+        return _RemoteExecStreamingResponse(
+            remote_exec.run_observe_capture_stream(
+                operation, deps=deps, kinds=kinds, platform=platform, nonce=nonce,
+            ),
+            cancel_event=cancel_event, media_type="application/octet-stream",
+            headers={"X-Mship-Exec-Nonce": nonce},
+        )
+
+    @app.post("/exec/source-update")
+    async def post_source_update(request: Request):
+        from mship.core.session_inputs import SessionError
+        from mship.core.session_source import (
+            SessionSourceUpdateService, SourceUpdateReply, SourceUpdateRequest,
+        )
+
+        cancel_event = threading.Event()
+        deps = _tool_execution_dependencies(cancel_event)
+        value = await _session_request_body(request)
+        try:
+            operation = SourceUpdateRequest.from_dict(value)
+        except (ValueError, TypeError, RecursionError):
+            raise HTTPException(status_code=400, detail="invalid source update request") from None
+
+        def source_reply():
+            try:
+                result = SessionSourceUpdateService(deps).execute(operation)
+            except Exception:
+                try:
+                    tool_operations.release_source_update(
+                        operation.operation, operation.update_id, unknown=True,
+                    )
+                except SessionError:
+                    pass
+                result = SourceUpdateReply(
+                    update_id=operation.update_id, run_id=operation.run_id, stage="unknown",
+                    source_revision=operation.new_source_revision,
+                    profile_revision=operation.new_profile_revision, error_code="unknown",
+                )
+            yield json.dumps(result.to_dict(), separators=(",", ":")).encode("utf-8")
+
+        return _RemoteExecStreamingResponse(
+            source_reply(), cancel_event=cancel_event, media_type="application/json",
         )
 
     @app.post("/exec/{verb}")

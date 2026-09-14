@@ -18,6 +18,7 @@ from mship.core.persistence.app_run_repository import (
 from mship.core.persistence.database import WorkspaceDatabase
 from mship.core.persistence.workspace_store import WorkspaceStore
 from mship.core.run_target.models import AppRun, host_endpoint_fingerprint
+from mship.core.session_source import SourceUpdateReceipt
 from mship.core.state import Task
 
 NOW = datetime(2026, 9, 12, 22, 30, tzinfo=timezone.utc)
@@ -45,6 +46,7 @@ def _run(
     owner_ref: str | None = None,
     owner_generation: str | None = None,
     binary_provenance: dict[str, object] | None = None,
+    backend_revision: str = "adapter-r2",
 ) -> AppRun:
     return AppRun(
         id=run_id,
@@ -53,7 +55,7 @@ def _run(
         profile="ios-development",
         profile_revision="a" * 64,
         backend="flutter",
-        backend_revision="adapter-r2",
+        backend_revision=backend_revision,
         host_name="studio",
         host_scope="project",
         host_endpoint_fingerprint=host_endpoint_fingerprint(
@@ -470,3 +472,58 @@ def test_task_replace_preserves_referenced_memberships_and_rejects_removal(
     assert retained_task is not None
     assert retained_task.model_dump(mode="json") == reordered.model_dump(mode="json")
     assert retained_run is not None
+
+
+def test_source_update_cas_retains_partial_receipt_without_false_active_state(
+    tmp_path: Path,
+) -> None:
+    store = WorkspaceStore(tmp_path / ".mothership")
+    old_source = "a" * 64
+    new_source = "b" * 64
+    receipt = SourceUpdateReceipt(
+        update_id="source-update-42",
+        owner_ref="operation-42",
+        generation="generation-7",
+        old_source_revision=old_source,
+        new_source_revision=new_source,
+        stage="source-applied",
+    )
+    with store.write(immediate=True) as transaction:
+        transaction.tasks.insert(transaction.connection, _task("task-a", "api"))
+        binding_ref = transaction.app_runs.store_private_binding({"serial": "private"})
+        transaction.app_runs.insert(
+            transaction.connection,
+            _run(
+                binding_ref,
+                status="active",
+                owner_ref="operation-42",
+                owner_generation="generation-7",
+                backend_revision=old_source,
+            ),
+        )
+
+    with store.write(immediate=True) as transaction:
+        updating = transaction.app_runs.acknowledge_source_update(
+            transaction.connection,
+            run_id="run-a",
+            expected_revision=0,
+            receipt=receipt.to_dict(),
+            new_profile_revision="c" * 64,
+            now=NOW,
+        )
+        with pytest.raises(AppRunConflict):
+            transaction.app_runs.finalize_source_update(
+                transaction.connection,
+                run_id="run-a",
+                expected_revision=0,
+                receipt=receipt.with_stage("reloaded").to_dict(),
+                now=NOW,
+            )
+
+    with store.read() as transaction:
+        persisted = transaction.app_runs.get(transaction.connection, "run-a")
+    assert updating.status == "updating"
+    assert persisted is not None
+    assert persisted.status == "updating"
+    assert persisted.backend_revision == new_source
+    assert persisted.source_update_receipt == receipt.to_dict()

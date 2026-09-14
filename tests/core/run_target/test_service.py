@@ -606,3 +606,43 @@ def test_remote_executor_rejects_unknown_persisted_observation_before_remote_cal
     )
 
     assert result.error_code == "identity_lost"
+
+
+def test_session_observation_never_sends_parent_target_context(tmp_path, monkeypatch):
+    seen = []
+
+    def exec_tool(*, request, **unused):
+        seen.append(request)
+        return ToolResult(status="completed", exit_code=0)
+
+    monkeypatch.setattr("mship.core.remote_client.exec_tool", exec_tool)
+    executor, host = _stored_observation_executor(
+        tmp_path, capabilities=("run", "logs", "capture")
+    )
+    executor.config.repos["app"].run_backends["native"] = BackendConfig(
+        discover_task="targets",
+        operations={"run": "launch", "logs": "logs", "capture": "capture"},
+        session_owner="android",
+    )
+
+    result = executor(
+        host,
+        BackendExecution(
+            task="task",
+            repo="app",
+            profile="phone",
+            backend="native",
+            logical_task="capture",
+            operation="capture",
+            request=_profile_request(tmp_path, operation="capture"),
+            run_id="run",
+            preparation="observe",
+            max_stdout_bytes=None,
+            max_stderr_bytes=None,
+            timeout_seconds=5,
+        ),
+    )
+
+    assert result.error_code is None
+    assert len(seen) == 1
+    assert "MSHIP_TARGET_CONTEXT_FILE" not in seen[0].input_files

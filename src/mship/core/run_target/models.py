@@ -109,6 +109,7 @@ class RunProfile(_StrictModel):
 class BackendConfig(_StrictModel):
     discover_task: str
     operations: dict[str, str]
+    session_owner: Literal["android", "flutter"] | None = None
 
     @field_validator("discover_task")
     @classmethod
@@ -340,7 +341,7 @@ def profile_revision(
     """Fingerprint the effective definition and immutable source snapshot."""
     source = _safe_text(prepared_source_revision, field="prepared source revision")
     payload = {
-        "backend": backend.model_dump(mode="json"),
+        "backend": backend.model_dump(mode="json", exclude_none=True),
         "profile": profile.model_dump(mode="json"),
         "prepared_source_revision": source,
     }
@@ -351,14 +352,39 @@ def profile_revision(
     ).hexdigest()
 
 
-_APP_RUN_STATUSES = frozenset(("starting", "active", "stopped", "failed", "unknown"))
 _BINDING_REF = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
+_APP_RUN_STATUSES = frozenset(
+    ("starting", "active", "updating", "stopped", "failed", "unknown")
+)
+_SOURCE_UPDATE_STAGES = frozenset(
+    ("reserved", "source-applied", "context-committed", "reloaded", "unknown")
+)
 _FINGERPRINT = re.compile(r"^[0-9a-f]{64}$")
+_SOURCE_REVISION = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 
 
 def host_endpoint_fingerprint(endpoint: str) -> str:
     """Return a safe stable identity for a host endpoint without persisting credentials."""
     return sha256(_safe_text(endpoint, field="host endpoint").encode()).hexdigest()
+
+
+def _validate_source_update_receipt(receipt: dict[str, JsonValue]) -> None:
+    if not isinstance(receipt, dict) or set(receipt) != {
+        "update_id", "owner_ref", "generation", "old_source_revision",
+        "new_source_revision", "stage",
+    }:
+        raise ValueError("source update receipt is invalid")
+    for field, value in receipt.items():
+        if not isinstance(value, str):
+            raise ValueError("source update receipt is invalid")
+        _safe_text(value, field=f"source update {field}")
+    if receipt["stage"] not in _SOURCE_UPDATE_STAGES:
+        raise ValueError("source update receipt has an invalid stage")
+    if (
+        _SOURCE_REVISION.fullmatch(receipt["old_source_revision"]) is None
+        or _SOURCE_REVISION.fullmatch(receipt["new_source_revision"]) is None
+    ):
+        raise ValueError("source update receipt has an invalid source revision")
 
 
 @dataclass(frozen=True)
@@ -382,11 +408,12 @@ class AppRun:
     capabilities: tuple[str, ...]
     owner_ref: str | None
     owner_generation: str | None
-    status: Literal["starting", "active", "stopped", "failed", "unknown"]
+    status: Literal["starting", "active", "updating", "stopped", "failed", "unknown"]
     revision: int
     created_at: datetime
     updated_at: datetime
     binary_provenance: dict[str, JsonValue] | None
+    source_update_receipt: dict[str, JsonValue] | None = None
 
     def __post_init__(self) -> None:
         for field in (
@@ -426,9 +453,9 @@ class AppRun:
             raise ValueError(
                 "app run owner reference and generation must be supplied together"
             )
-        if self.status == "active" and self.owner_ref is None:
+        if self.status in {"active", "updating"} and self.owner_ref is None:
             raise ValueError(
-                "active app runs require an owner reference and generation"
+                "active or updating app runs require an owner reference and generation"
             )
         if self.owner_ref is not None:
             _safe_text(self.owner_ref, field="owner reference")
@@ -437,6 +464,8 @@ class AppRun:
             raise ValueError(
                 "binary provenance is unavailable until a trusted build identity contract exists"
             )
+        if self.source_update_receipt is not None:
+            _validate_source_update_receipt(self.source_update_receipt)
 
     def public_projection(self) -> dict[str, object]:
         """Return safe selected metadata without a binding or raw provenance."""

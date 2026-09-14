@@ -55,13 +55,19 @@ from pathlib import Path
 import errno
 import hashlib
 import io
+import json
+import os
 import re
+import secrets
 import shlex
 import shutil
+import stat
+import sys
 import tarfile
 import tempfile
 import threading
-from collections.abc import Callable, Generator, Sequence
+import time
+from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Iterator, Protocol
 
@@ -82,11 +88,29 @@ from mship.core.task_result_publication import (
     TaskResultPublisher,
 )
 from mship.core.task_results import TaskResultStore
+from mship.core.session_channel import (
+    CLAIM_TTL_SECONDS,
+    OwnerClient,
+    OwnerContext,
+    decode_private_json,
+)
+from mship.core.session_inputs import (
+    OwnerRequest,
+    SessionError,
+    identifier,
+    strict_object,
+)
+from mship.core.session_runtime import (
+    SESSION_RESERVED_INPUTS,
+    SessionPreparation,
+)
+from mship.core.run_target.models import BackendConfig, DiscoveryRequest
 from mship.core.run_target.host import (
     TARGET_BINDINGS_FILE,
     TARGET_CONTEXT_FILE,
     TARGET_REQUEST_FILE,
     owner_profile_input_files,
+    _decode_profile_json,
 )
 from mship.core.run_ref import run_ref as build_run_ref
 from mship.util.shell import (
@@ -434,15 +458,74 @@ def materialize_worktree(
         )
 
 
-def _build_artifact_tar(artifacts: list[_cap.Artifact]) -> bytes:
-    """Pack the discovered artifact files into an in-memory tar, each stored
-    at its basename (e.g. `screen.png`, `layout.json`) rather than its full
-    remote temp-dir path — that's all Task 5's client needs to know to
-    reconstruct them under its own local capture directory."""
+class _CaptureDigestReader(io.BufferedReader):
+    def __init__(self, raw: io.RawIOBase):
+        super().__init__(raw)
+        self.digest = hashlib.sha256()
+
+    def read(self, size: int | None = -1) -> bytes:
+        data = super().read(size)
+        self.digest.update(data)
+        return data
+
+
+def _build_artifact_tar(
+    artifacts: list[_cap.Artifact],
+    *,
+    directory_fd: int | None = None,
+    max_bytes: int | None = None,
+    expected_artifacts: Mapping[str, tuple[int, str]] | None = None,
+) -> bytes:
+    """Use the existing basename-only tar envelope; session reads stay fd-pinned."""
     buf = io.BytesIO()
+    total = 0
     with tarfile.open(fileobj=buf, mode="w") as tar:
         for artifact in artifacts:
-            tar.add(artifact.path, arcname=artifact.path.name)
+            if directory_fd is None:
+                tar.add(artifact.path, arcname=artifact.path.name)
+                continue
+            expected = (
+                None
+                if expected_artifacts is None
+                else expected_artifacts.get(artifact.path.name)
+            )
+            if expected is None:
+                raise OSError("capture artifact has no owner acknowledgement")
+            fd = os.open(
+                artifact.path.name,
+                os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                dir_fd=directory_fd,
+            )
+            with _CaptureDigestReader(io.FileIO(fd, "rb", closefd=True)) as stream:
+                info = os.fstat(stream.fileno())
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_nlink != 1
+                    or info.st_size <= 0
+                ):
+                    raise OSError("capture artifact is not a private regular file")
+                if info.st_size != expected[0]:
+                    raise OSError(
+                        "capture artifact size does not match owner acknowledgement"
+                    )
+                total += info.st_size
+                if max_bytes is not None and total + 32 * 1024 > max_bytes:
+                    raise OSError("capture artifacts exceed the transfer limit")
+                member = tarfile.TarInfo(artifact.path.name)
+                member.size = info.st_size
+                member.mode = 0o600
+                tar.addfile(member, stream)
+                if stream.digest.hexdigest() != expected[1]:
+                    raise OSError(
+                        "capture artifact bytes do not match owner acknowledgement"
+                    )
+                after = os.fstat(stream.fileno())
+                if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (
+                    info.st_size,
+                    info.st_mtime_ns,
+                    info.st_ctime_ns,
+                ):
+                    raise OSError("capture artifact changed while being collected")
     return buf.getvalue()
 
 
@@ -659,9 +742,7 @@ def _setup_events(
             declaration=config.host_tools,
             safe=False,
         )
-    request = ToolRequest(
-        task=prepared.task, repo=name, argv=setup_argv, env=setup_env
-    )
+    request = ToolRequest(task=prepared.task, repo=name, argv=setup_argv, env=setup_env)
     stream = _operations(deps).run(
         request,
         context,
@@ -820,7 +901,10 @@ def _host_tool_runner(
     )
     probe_context = replace(context, env_runner=None)
     events = _operations(deps).run(
-        request, probe_context, cancel_event=deps.cancel_event, spawn=deps.shell.spawn_argv
+        request,
+        probe_context,
+        cancel_event=deps.cancel_event,
+        spawn=deps.shell.spawn_argv,
     )
     result = ToolResult("protocol_error")
     try:
@@ -858,7 +942,9 @@ def _host_tool_report(
     else:
         state_dir = deps.workspace_root / ".mothership"
         identity = host_tools.server_identity(state_dir)
-        runner = lambda command: _host_tool_runner(command=command, context=context, deps=deps)
+        runner = lambda command: _host_tool_runner(
+            command=command, context=context, deps=deps
+        )
         if request.host_tools_action == "bootstrap":
             resolution = host_tools.bootstrap(
                 declaration=declaration,
@@ -900,29 +986,58 @@ def _bootstrap_host_tool_events(
         yield ToolEvent("result", result=report or ToolResult("invalid"))
         return
     identity = host_tools.server_identity(state_dir)
-    runner = lambda command: _host_tool_runner(command=command, context=context, deps=deps)
+    runner = lambda command: _host_tool_runner(
+        command=command, context=context, deps=deps
+    )
     resolution = host_tools.diagnose(
-        declaration=declaration, worktree=context.worktree, state_dir=state_dir,
-        identity=identity, task=context.task, repo=context.repo,
-        source_revision=context.source_revision, run=runner,
+        declaration=declaration,
+        worktree=context.worktree,
+        state_dir=state_dir,
+        identity=identity,
+        task=context.task,
+        repo=context.repo,
+        source_revision=context.source_revision,
+        run=runner,
     )
     if resolution.status == "healthy":
         host_tools.record_receipt(state_dir, resolution)
-        yield ToolEvent("result", result=ToolResult("completed", exit_code=0, host_tools_report=host_tools.doctor_report(resolution).safe_dict()))
+        yield ToolEvent(
+            "result",
+            result=ToolResult(
+                "completed",
+                exit_code=0,
+                host_tools_report=host_tools.doctor_report(resolution).safe_dict(),
+            ),
+        )
         return
     if resolution.status in {"invalid_configuration", "missing_mise"}:
-        yield ToolEvent("result", result=ToolResult("completed", exit_code=1, host_tools_report=host_tools.doctor_report(resolution).safe_dict()))
+        yield ToolEvent(
+            "result",
+            result=ToolResult(
+                "completed",
+                exit_code=1,
+                host_tools_report=host_tools.doctor_report(resolution).safe_dict(),
+            ),
+        )
         return
     environment = host_tools.mise_environment(
-        worktree=context.worktree, state_dir=state_dir, declaration=declaration,
-        locked=resolution.lock_digest is not None, safe=False,
+        worktree=context.worktree,
+        state_dir=state_dir,
+        declaration=declaration,
+        locked=resolution.lock_digest is not None,
+        safe=False,
     )
     install = ToolRequest(
-        task=context.task, repo=context.repo, argv=("mise", "install"),
-        env=environment, preparation="launch",
+        task=context.task,
+        repo=context.repo,
+        argv=("mise", "install"),
+        env=environment,
+        preparation="launch",
     )
     stream = _operations(deps).run(
-        install, replace(context, env_runner=None), cancel_event=deps.cancel_event,
+        install,
+        replace(context, env_runner=None),
+        cancel_event=deps.cancel_event,
         spawn=deps.shell.spawn_argv,
     )
     outcome = ToolResult("protocol_error")
@@ -940,20 +1055,28 @@ def _bootstrap_host_tool_events(
         stream.close()
     if outcome.status == "completed" and outcome.exit_code == 0:
         resolution = host_tools.diagnose(
-            declaration=declaration, worktree=context.worktree, state_dir=state_dir,
-            identity=identity, task=context.task, repo=context.repo,
-            source_revision=context.source_revision, run=runner,
+            declaration=declaration,
+            worktree=context.worktree,
+            state_dir=state_dir,
+            identity=identity,
+            task=context.task,
+            repo=context.repo,
+            source_revision=context.source_revision,
+            run=runner,
         )
         if resolution.status == "healthy":
             host_tools.record_receipt(state_dir, resolution)
     result = ToolResult(
-        "completed", exit_code=0 if resolution.status == "healthy" else 1,
+        "completed",
+        exit_code=0 if resolution.status == "healthy" else 1,
         owner_ref=None if owner is None else owner.owner_ref,
         generation=None if owner is None else owner.generation,
         source_revision=None if owner is None else owner.source_revision,
         host_tools_report=host_tools.doctor_report(resolution).safe_dict(),
     )
     yield ToolEvent("result", result=result)
+
+
 def _resolve_host_tools_for_launch(
     request: ToolRequest, context: ToolContext, *, deps: RemoteExecDeps
 ) -> ToolResult | ToolRequest | None:
@@ -970,7 +1093,9 @@ def _resolve_host_tools_for_launch(
         task=context.task,
         repo=context.repo,
         source_revision=context.source_revision,
-        run=lambda command: _host_tool_runner(command=command, context=context, deps=deps),
+        run=lambda command: _host_tool_runner(
+            command=command, context=context, deps=deps
+        ),
     )
     if resolution.status != "healthy":
         return ToolResult(
@@ -978,7 +1103,11 @@ def _resolve_host_tools_for_launch(
             exit_code=1,
             host_tools_report=host_tools.doctor_report(resolution).safe_dict(),
         )
-    actual = request.argv[1] if len(request.argv) == 2 and request.argv[0] == "task" else None
+    actual = (
+        request.argv[1]
+        if len(request.argv) == 2 and request.argv[0] == "task"
+        else None
+    )
     if actual is None:
         return None
     if any(key.startswith("MISE_") for key in request.env):
@@ -994,12 +1123,32 @@ def _resolve_host_tools_for_launch(
         argv=("mise", "exec", "--", "task", actual),
         env={**request.env, **environment},
     )
+
+
+def _session_configuration(
+    request: ToolRequest, deps: RemoteExecDeps
+) -> tuple[DiscoveryRequest, BackendConfig] | None:
+    payload = request.input_files.get(TARGET_REQUEST_FILE)
+    if payload is None:
+        return None
+    profile_request = DiscoveryRequest.model_validate(_decode_profile_json(payload))
+    repo = deps.config.repos.get(request.repo)
+    if repo is None:
+        return None
+    backend = repo.run_backends.get(profile_request.backend)
+    if backend is None or backend.session_owner is None:
+        return None
+    return profile_request, backend
+
+
 def _resolve_tool_request(
     request: ToolRequest, *, deps: RemoteExecDeps
 ) -> ToolRequest | None:
     """Resolve configured task keys and host-only profile inputs before launch."""
     repo_config = deps.config.repos.get(request.repo)
     if repo_config is None:
+        return None
+    if SESSION_RESERVED_INPUTS & (request.input_files.keys() | request.env.keys()):
         return None
     if request.host_tools_action is not None:
         if request.env or request.input_files or request.task_key is not None:
@@ -1009,6 +1158,34 @@ def _resolve_tool_request(
             return None
         return request
     try:
+        session_config = _session_configuration(request, deps)
+        parent_inputs = None
+        if session_config is not None:
+            if session_config[0].operation.startswith("source-"):
+                return None
+            if request.env or set(request.input_files) - {
+                TARGET_REQUEST_FILE,
+                TARGET_CONTEXT_FILE,
+                "MSHIP_SESSION_OPERATION_FILE",
+            }:
+                return None
+            if request.preparation == "observe":
+                if request.owner_ref is None or request.generation is None:
+                    return None
+                parent = _operations(deps).session_for_owner(
+                    task=request.task,
+                    repo=request.repo,
+                    owner_ref=request.owner_ref,
+                    generation=request.generation,
+                )
+                if parent is None:
+                    return None
+                _, parent_inputs = parent
+            action = request.input_files.get("MSHIP_SESSION_OPERATION_FILE")
+            if action is not None:
+                _decode_profile_json(action)
+        elif request.install_from_result is not None:
+            return None
         profile_inputs = {
             TARGET_REQUEST_FILE,
             TARGET_CONTEXT_FILE,
@@ -1023,6 +1200,7 @@ def _resolve_tool_request(
                 task_key=request.task_key,
                 preparation=request.preparation,
                 source_revision=request.source_revision,
+                parent_input_files=parent_inputs,
             )
             if request.task_key is not None or profile_inputs
             else dict(request.input_files)
@@ -1037,27 +1215,69 @@ def _resolve_tool_request(
             argv=("task", actual),
             task_key=None,
             input_files=input_files,
+            install_from_result=None,
         )
     except TypeError, ValueError:
         return None
 
 
 def run_tool_stream(
-    request: ToolRequest, *, deps: RemoteExecDeps
+    request: ToolRequest,
+    *,
+    deps: RemoteExecDeps,
+    capture_kinds: tuple[str, ...] | None = None,
+    capture_platform: str | None = None,
+    on_session_prepared: Callable[[OwnerContext], None] | None = None,
+    source_update_id: str | None = None,
+    owner_operation: str | None = None,
 ) -> Generator[ToolEvent, None, None]:
     """Execute one typed tool operation without a second transport/owner."""
     task_key = request.task_key
+    install_from_result = request.install_from_result
     resolved = _resolve_tool_request(request, deps=deps)
     if resolved is None:
         yield ToolEvent("result", result=ToolResult("invalid"))
         return
     request = resolved
+    try:
+        session_config = _session_configuration(request, deps)
+        if session_config is not None:
+            request = replace(request, env={"MSHIP_SESSION_PYTHON": sys.executable})
+        session = None
+        if session_config is not None and request.preparation != "discover":
+            profile_request, backend = session_config
+            session = SessionPreparation(
+                operation=profile_request.operation,
+                owner_kind=backend.session_owner or "",
+                sealed_context=request.input_files.get(TARGET_CONTEXT_FILE),
+                install=install_from_result,
+                result_store=deps.result_store,
+                capture_kinds=capture_kinds,
+                capture_platform=capture_platform,
+            )
+            if owner_operation is not None:
+                if (
+                    owner_operation != "source-release"
+                    or source_update_id is None
+                    or session.owner_kind != "flutter"
+                ):
+                    raise SessionError("invalid", "Invalid internal source operation")
+                session = replace(session, operation=owner_operation)
+        elif capture_kinds is not None or install_from_result is not None:
+            yield ToolEvent("result", result=ToolResult("invalid"))
+            return
+    except ValueError, SessionError:
+        yield ToolEvent("result", result=ToolResult("invalid"))
+        return
     operations = _operations(deps)
     if request.preparation == "observe":
         stream = operations.observe(
             request,
             cancel_event=deps.cancel_event,
             spawn=deps.shell.spawn_argv,
+            session=session,
+            on_session_prepared=on_session_prepared,
+            source_update_id=source_update_id,
         )
         try:
             yield from stream
@@ -1161,7 +1381,7 @@ def run_tool_stream(
                         ),
                         provenance=deps.execution_provenance,
                     )
-                except (OSError, ValueError):
+                except OSError, ValueError:
                     yield ToolEvent("result", result=ToolResult("evidence_error"))
                     return
                 # Server-owned values overwrite untrusted request environment.
@@ -1176,6 +1396,7 @@ def run_tool_stream(
             cancel_event=deps.cancel_event,
             spawn=deps.shell.spawn_argv,
             publish_result=publish_result,
+            session=session,
         )
         try:
             yield from stream
@@ -1194,3 +1415,271 @@ def run_tool_stream(
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         finally:
             lock_file.close()
+
+
+def source_owner_operation(
+    operation: ToolRequest,
+    owner: OwnerContext,
+    name: str,
+    payload: Mapping[str, object],
+    *,
+    deps: RemoteExecDeps,
+) -> dict[str, object]:
+    """Run one server-authenticated source handoff step, never a caller command."""
+    stages = {
+        "source-reserve": "reserved",
+        "source-commit": "context-committed",
+        "source-release": "reloaded",
+        "source-abort": "aborted",
+    }
+    if name not in stages or owner.secret is None:
+        raise SessionError("invalid", "Invalid framework source control")
+    fields = {"update_id"}
+    if name in {"source-reserve", "source-commit"}:
+        fields.add("new_source_revision")
+    data = strict_object(dict(payload), fields)
+    update_id = identifier(data["update_id"])
+    if (
+        owner.task != operation.task
+        or owner.repo != operation.repo
+        or owner.owner_ref != operation.owner_ref
+        or owner.generation != operation.generation
+    ):
+        raise SessionError("invalid", "Source control does not match recorded owner")
+    if name == "source-release":
+        found = _operations(deps).session_for_owner(
+            task=owner.task,
+            repo=owner.repo,
+            owner_ref=owner.owner_ref,
+            generation=owner.generation,
+        )
+        if found is None:
+            raise SessionError("unknown", "Framework source owner is unavailable")
+        current, inputs = found
+        target = _decode_profile_json(inputs[TARGET_CONTEXT_FILE])
+        task_keys = target.get("task_keys")
+        if (
+            not isinstance(task_keys, dict)
+            or task_keys.get("reload") != operation.task_key
+            or current.source_revision != owner.source_revision
+        ):
+            raise SessionError("invalid", "Source reload task does not match owner")
+        request_body = _decode_profile_json(inputs[TARGET_REQUEST_FILE])
+        request_body["operation"] = "reload"
+        request = ToolRequest(
+            task=owner.task,
+            repo=owner.repo,
+            argv=(),
+            task_key=operation.task_key,
+            input_files={
+                TARGET_REQUEST_FILE: json.dumps(request_body, separators=(",", ":")),
+                "MSHIP_SESSION_OPERATION_FILE": json.dumps(data, separators=(",", ":")),
+            },
+            preparation="observe",
+            owner_ref=owner.owner_ref,
+            generation=owner.generation,
+            source_revision=current.source_revision,
+        )
+        stdout = bytearray()
+        outcome = None
+        reload_claim: OwnerRequest | None = None
+
+        def prepared(context: OwnerContext) -> None:
+            nonlocal reload_claim
+            if context.request is None or context.request.operation != "source-release":
+                raise SessionError("unknown", "Source reload authorization is missing")
+            reload_claim = context.request
+
+        events = run_tool_stream(
+            request,
+            deps=deps,
+            source_update_id=update_id,
+            owner_operation="source-release",
+            on_session_prepared=prepared,
+        )
+        try:
+            for event in events:
+                if event.kind == "stdout":
+                    if len(stdout) + len(event.data) > 64 * 1024:
+                        raise SessionError(
+                            "unknown", "Source reload acknowledgement is oversized"
+                        )
+                    stdout.extend(event.data)
+                elif event.kind == "result":
+                    outcome = event.result
+        finally:
+            events.close()
+        if outcome is None or outcome.status != "completed" or outcome.exit_code != 0:
+            raise SessionError("unknown", "Source reload was not acknowledged")
+        if reload_claim is None:
+            raise SessionError("unknown", "Source reload authorization is missing")
+        owner.verify_source_reload(reload_claim, update_id)
+        result = decode_private_json(bytes(stdout))
+    else:
+        request = OwnerRequest(
+            operation_ref=secrets.token_urlsafe(24),
+            operation=name,
+            source_revision=owner.source_revision,
+            expires_at=time.time() + CLAIM_TTL_SECONDS,
+        )
+        result = OwnerClient(owner.issue(request)).call(
+            name,
+            data,
+            cancel_event=deps.cancel_event,
+            timeout=30,
+        )
+    if result != {"update_id": update_id, "stage": stages[name]}:
+        raise SessionError("unknown", "Source control acknowledgement does not match")
+    return result
+
+
+def run_observe_capture_stream(
+    operation: ToolRequest,
+    *,
+    deps: RemoteExecDeps,
+    kinds: Sequence[str],
+    platform: str,
+    nonce: str,
+) -> Generator[bytes, None, None]:
+    """Capture through one existing owner without preparing any source or app."""
+    capture_directory: Path | None = None
+    capture_fd: int | None = None
+    capture_parent_fd: int | None = None
+    capture_authority: tuple[OwnerContext, OwnerRequest] | None = None
+
+    def prepared(context: OwnerContext) -> None:
+        nonlocal capture_directory, capture_fd, capture_parent_fd
+        nonlocal capture_authority
+        request = context.request
+        if request is None or request.operation != "capture" or request.capture is None:
+            raise SessionError("invalid", "Missing owner capture grant")
+        parent = _operations(deps).session_for_owner(
+            task=context.task,
+            repo=context.repo,
+            owner_ref=context.owner_ref,
+            generation=context.generation,
+        )
+        if parent is None:
+            raise SessionError("unknown", "Capture parent is no longer available")
+        capture_authority = (parent[0], request)
+        capture_directory = request.capture.directory
+        capture_parent_fd = os.open(
+            capture_directory.parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        capture_fd = os.open(
+            capture_directory.name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=capture_parent_fd,
+        )
+        info = os.fstat(capture_fd)
+        if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise SessionError("unknown", "Capture grant directory is not private")
+
+    def cleanup() -> bool:
+        nonlocal capture_fd, capture_parent_fd
+        descriptor, parent_descriptor = capture_fd, capture_parent_fd
+        capture_fd = capture_parent_fd = None
+        if descriptor is None:
+            if parent_descriptor is not None:
+                os.close(parent_descriptor)
+            return True
+        assert capture_directory is not None and parent_descriptor is not None
+        known = True
+        try:
+            # Outputs are flat. Never recursively remove unexpected directories.
+            with os.scandir(descriptor) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        known = False
+                    else:
+                        os.unlink(entry.name, dir_fd=descriptor)
+            expected = os.fstat(descriptor)
+            actual = os.stat(
+                capture_directory.name, dir_fd=parent_descriptor, follow_symlinks=False
+            )
+            if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+                return False
+            os.rmdir(capture_directory.name, dir_fd=parent_descriptor)
+            parent_info = os.fstat(parent_descriptor)
+            current_parent = capture_directory.parent.stat(follow_symlinks=False)
+            if (current_parent.st_dev, current_parent.st_ino) != (
+                parent_info.st_dev,
+                parent_info.st_ino,
+            ):
+                return False
+            capture_directory.parent.rmdir()
+        except OSError:
+            known = False
+        finally:
+            os.close(descriptor)
+            os.close(parent_descriptor)
+        return known
+
+    code = 1
+    try:
+        if (
+            operation.preparation != "observe"
+            or operation.task_key is None
+            or operation.argv
+            or operation.install_from_result is not None
+            or platform not in {"android", "ios"}
+            or not kinds
+            or len(kinds) > 2
+            or len(set(kinds)) != len(kinds)
+            or any(kind not in _cap.ALL_KINDS for kind in kinds)
+        ):
+            raise SessionError("invalid", "Invalid session capture request")
+        result = None
+        events = run_tool_stream(
+            operation,
+            deps=deps,
+            capture_kinds=tuple(kinds),
+            capture_platform=platform,
+            on_session_prepared=prepared,
+        )
+        try:
+            for event in events:
+                if event.kind == "result":
+                    result = event.result
+        finally:
+            events.close()
+        if result is None or result.status != "completed" or result.exit_code != 0:
+            raise SessionError("unavailable", "Session capture was not acknowledged")
+        if capture_directory is None or capture_fd is None:
+            raise SessionError("unknown", "Session capture grant is unavailable")
+        expected = os.fstat(capture_fd)
+        actual = capture_directory.stat(follow_symlinks=False)
+        if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+            raise SessionError("unknown", "Session capture directory changed")
+        artifacts = _cap.discover_artifacts(capture_directory, list(kinds))
+        if {artifact.kind for artifact in artifacts} != set(kinds):
+            raise SessionError(
+                "unavailable", "Session capture omitted a requested artifact"
+            )
+        if capture_authority is None:
+            raise SessionError(
+                "unknown", "Capture owner acknowledgement is unavailable"
+            )
+        authority, capture_request = capture_authority
+        manifest = authority.verify_capture(capture_request)
+        if set(manifest) != {artifact.path.name for artifact in artifacts}:
+            raise SessionError("unknown", "Capture artifact identity changed")
+        data = _build_artifact_tar(
+            artifacts,
+            directory_fd=capture_fd,
+            max_bytes=256 * 1024 * 1024,
+            expected_artifacts=manifest,
+        )
+        if not cleanup():
+            raise SessionError(
+                "unknown", "Session capture output cleanup is incomplete"
+            )
+        yield f"{ARTIFACT_MARKER}:{nonce} {len(data)}\n".encode()
+        yield data
+        code = 0
+    except OSError, ValueError, SessionError:
+        yield b"error: selected session capture or artifact validation failed\n"
+    finally:
+        cleanup()
+    yield f"{EXIT_MARKER}:{nonce} {code}\n".encode()

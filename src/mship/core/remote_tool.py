@@ -17,6 +17,7 @@ from types import MappingProxyType
 from typing import Iterator, Literal, Mapping
 
 from mship.core.run_ref import is_run_ref_segment
+from mship.core.session_inputs import InstallFromResult, SessionError
 
 MAX_REQUEST_BYTES = 128 * 1024
 MAX_EVENT_FRAME_BYTES = 2 * 1024 * 1024
@@ -54,7 +55,7 @@ _STATUS_VALUES = frozenset(
     }
 )
 _PREPARATIONS = frozenset({"discover", "launch", "observe"})
-_EVENT_KINDS = frozenset({"started", "stdout", "stderr", "result"})
+_EVENT_KINDS = frozenset({"started", "ready", "stdout", "stderr", "result"})
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _HEX_REVISION = re.compile(r"^[0-9a-fA-F]{7,64}$")
 
@@ -207,6 +208,7 @@ class ToolRequest:
     timeout_seconds: float | None = None
     # Server-recognized host-tools operation; no caller argv may accompany it.
     host_tools_action: Literal["diagnose", "bootstrap"] | None = None
+    install_from_result: InstallFromResult | None = None
 
     def __post_init__(self) -> None:
         task = _name(self.task, field_name="task")
@@ -226,6 +228,13 @@ class ToolRequest:
         if self.host_tools_action is not None:
             if self.host_tools_action not in {"diagnose", "bootstrap"} or argv or task_key is not None:
                 _reject("invalid host tools action")
+        if self.install_from_result is not None and (
+            not isinstance(self.install_from_result, InstallFromResult)
+            or task_key is None
+            or self.preparation == "discover"
+            or self.host_tools_action is not None
+        ):
+            _reject("invalid session installation")
         if (
             not isinstance(self.input_files, Mapping)
             or len(self.input_files) > _MAX_ENV_COUNT
@@ -341,6 +350,8 @@ class ToolRequest:
         }
         if self.host_tools_action is not None:
             payload["host_tools_action"] = self.host_tools_action
+        if self.install_from_result is not None:
+            payload["install_from_result"] = self.install_from_result.to_dict()
         return payload
 
     @classmethod
@@ -365,15 +376,23 @@ class ToolRequest:
                 "max_stderr_bytes",
                 "timeout_seconds",
                 "host_tools_action",
+                "install_from_result",
             }
         )
-        optional = frozenset({"task_key", "input_files", "host_tools_action"})
+        optional = frozenset({"task_key", "input_files", "host_tools_action", "install_from_result"})
         if set(data) - fields or not (fields - optional) <= set(data):
             _reject("invalid tool payload")
         if not isinstance(data["argv"], list) or not isinstance(
             data["run_ref_repos"], list
         ):
             _reject("invalid tool payload")
+        try:
+            install = (
+                None if data.get("install_from_result") is None
+                else InstallFromResult.from_dict(data["install_from_result"])
+            )
+        except SessionError:
+            _reject("invalid session installation")
         return cls(
             task=data["task"],
             repo=data["repo"],
@@ -391,6 +410,7 @@ class ToolRequest:
             max_stderr_bytes=data["max_stderr_bytes"],
             timeout_seconds=data["timeout_seconds"],
             host_tools_action=data.get("host_tools_action"),
+            install_from_result=install,
         )
 
 
@@ -497,7 +517,7 @@ class ToolResult:
 
 @dataclass(frozen=True)
 class ToolEvent:
-    kind: Literal["started", "stdout", "stderr", "result"]
+    kind: Literal["started", "ready", "stdout", "stderr", "result"]
     data: bytes = field(default=b"", repr=False)
     result: ToolResult | None = None
 
@@ -506,13 +526,13 @@ class ToolEvent:
             _reject("invalid event kind")
         if not isinstance(self.data, bytes) or len(self.data) > MAX_OUTPUT_CHUNK_BYTES:
             _reject("invalid event data")
-        if self.kind == "started":
+        if self.kind in {"started", "ready"}:
             if (
                 self.data
                 or not isinstance(self.result, ToolResult)
                 or self.result.status != "running"
             ):
-                _reject("invalid started event")
+                _reject("invalid owner event")
         elif self.kind in {"stdout", "stderr"}:
             if self.result is not None:
                 _reject("invalid output event")

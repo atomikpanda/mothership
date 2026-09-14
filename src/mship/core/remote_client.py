@@ -33,7 +33,10 @@ import tarfile
 import tempfile
 from pathlib import Path
 from urllib.parse import quote
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from mship.core.session_source import SourceUpdateReply, SourceUpdateRequest
 
 import httpx
 
@@ -62,6 +65,7 @@ NONCE_HEADER = "X-Mship-Exec-Nonce"
 # Hard cap on the advertised artifact-tar size. The server only ever writes a
 # handful of small capture files (screen.png, layout.*), so a wildly larger
 # advertised count is a bug or a hostile/compromised remote — reject it BEFORE
+MAX_SOURCE_UPDATE_BYTES = 64 * 1024
 MAX_RESULT_METADATA_BYTES = 512 * 1024
 # reading (no unbounded allocation / tar-bomb landing on disk). 256 MiB.
 MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
@@ -399,7 +403,129 @@ def exec_remote(
                     return _drive(_ChunkReader(_raw_chunks(response)), nonce=nonce, captures_dir_for=captures_dir_for, print_fn=print_fn)
         except httpx.HTTPError:
             raise RemoteExecError("remote host is unreachable; check relay pairing and host availability") from None
-    raise RemoteExecError("remote host rejected refreshed credentials; re-enrol the host and re-pair if needed")
+def exec_session_capture(
+    *,
+    operation: ToolRequest,
+    kinds: tuple[str, ...],
+    platform: str,
+    host: HostRegistration,
+    resolver: RunHostResolver,
+    captures_dir_for: Path,
+    print_fn: Callable[[str], None] = print,
+    transport: httpx.BaseTransport | None = None,
+) -> int:
+    if (
+        operation.preparation != "observe"
+        or operation.argv
+        or operation.task_key is None
+        or set(operation.input_files) != {"MSHIP_TARGET_REQUEST_FILE"}
+        or operation.env
+        or operation.cwd != "."
+        or operation.run_ref_repos
+        or operation.owner_ref is None
+        or operation.generation is None
+        or operation.source_revision is None
+        or not kinds
+        or any(kind not in {"image", "layout"} for kind in kinds)
+        or not isinstance(platform, str)
+        or not platform
+    ):
+        raise ValueError("invalid session capture request")
+    body = {
+        "operation": operation.to_dict(),
+        "kinds": list(kinds),
+        "platform": platform,
+    }
+    for attempt in range(2):
+        active = resolver.resolve(host, force_refresh=attempt == 1)
+        url = _operation_url(host, active, "/exec/session-capture")
+        try:
+            with httpx.Client(transport=transport, follow_redirects=False) as client:
+                with client.stream(
+                    "POST", url, headers={"Authorization": f"Bearer {active.token}"}, json=body
+                ) as response:
+                    if response.status_code in {401, 403} and attempt == 0:
+                        continue
+                    if response.status_code >= 400:
+                        raise RemoteExecError(
+                            f"remote session capture was refused (HTTP {response.status_code})"
+                        )
+                    nonce = response.headers.get(NONCE_HEADER)
+                    if not nonce:
+                        raise RemoteExecError(
+                            f"remote response missing the {NONCE_HEADER} header"
+                        )
+                    timeout = response.request.extensions.get("timeout")
+                    if isinstance(timeout, dict):
+                        timeout["read"] = None
+                    return _drive(
+                        _ChunkReader(_raw_chunks(response)),
+                        nonce=nonce,
+                        captures_dir_for=captures_dir_for,
+                        print_fn=print_fn,
+                    )
+        except httpx.HTTPError:
+            raise RemoteExecError(
+                "remote host is unreachable; check relay pairing and host availability"
+            ) from None
+    raise RemoteExecError(
+        "remote host rejected refreshed credentials; re-enrol the host and re-pair if needed"
+    )
+
+
+def _bounded_response_json(response: httpx.Response) -> object:
+    payload = bytearray()
+    for chunk in _raw_chunks(response):
+        if len(payload) + len(chunk) > MAX_SOURCE_UPDATE_BYTES:
+            raise RemoteExecError("remote source-update response is too large")
+        payload.extend(chunk)
+    try:
+        return json.loads(payload)
+    except (UnicodeDecodeError, ValueError):
+        raise RemoteExecError("remote source-update response is invalid") from None
+
+
+def source_update_remote(
+    *,
+    host: HostRegistration,
+    resolver: RunHostResolver,
+    request: "SourceUpdateRequest",
+    transport: httpx.BaseTransport | None = None,
+) -> "SourceUpdateReply":
+    """Exchange one bounded source-update stage without replay after acceptance."""
+    from mship.core.session_source import SourceUpdateReply, SourceUpdateRequest
+
+    if not isinstance(request, SourceUpdateRequest):
+        raise ValueError("invalid source update request")
+    body = request.to_dict()
+    for attempt in range(2):
+        active = resolver.resolve(host, force_refresh=attempt == 1)
+        url = _operation_url(host, active, "/exec/source-update")
+        try:
+            with httpx.Client(transport=transport, follow_redirects=False) as client:
+                with client.stream(
+                    "POST", url, headers={"Authorization": f"Bearer {active.token}"}, json=body
+                ) as response:
+                    if response.status_code in {401, 403} and attempt == 0:
+                        continue
+                    if response.status_code >= 400:
+                        raise RemoteExecError(
+                            f"remote source update was refused (HTTP {response.status_code})"
+                        )
+                    value = _bounded_response_json(response)
+        except httpx.HTTPError:
+            raise RemoteExecError(
+                "remote host is unreachable; check relay pairing and host availability"
+            ) from None
+        try:
+            return SourceUpdateReply.from_dict(value)
+        except (TypeError, ValueError):
+            raise RemoteExecError("remote source-update response is invalid") from None
+    raise RemoteExecError(
+        "remote host rejected refreshed credentials; re-enrol the host and re-pair if needed"
+    )
+
+
 
 
 def _exec_tool_once(
@@ -408,6 +534,7 @@ def _exec_tool_once(
     conn: ResolvedRunHostConnection,
     workspace_id: str | None,
     event_sink: Callable[[ToolEvent], None] | None = None,
+    session_source_revision: Callable[[str, str], str | None] | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> ToolResult:
     """Execute one structured tool request against the already selected host.
@@ -493,16 +620,27 @@ def _exec_tool_once(
                             )
                         ):
                             return ToolResult(status="protocol_error")
-                        if (
-                            request.source_revision is not None
-                            and result.source_revision is not None
-                            and result.source_revision != request.source_revision
-                        ):
-                            return ToolResult(status="protocol_error")
                         if accepted is not None and (
                             result.owner_ref != accepted.owner_ref
                             or result.generation != accepted.generation
-                            or result.source_revision != accepted.source_revision
+                        ):
+                            return ToolResult(status="protocol_error")
+                        expected_source = request.source_revision
+                        if (
+                            session_source_revision is not None
+                            and accepted is not None
+                            and result.owner_ref is not None
+                            and result.generation is not None
+                        ):
+                            advanced_source = session_source_revision(
+                                result.owner_ref, result.generation
+                            )
+                            if advanced_source is not None:
+                                expected_source = advanced_source
+                        if (
+                            expected_source is not None
+                            and result.source_revision is not None
+                            and result.source_revision != expected_source
                         ):
                             return ToolResult(status="protocol_error")
                         if event.kind == "started":
@@ -558,6 +696,7 @@ def exec_tool(
     host: HostRegistration,
     resolver: RunHostResolver,
     event_sink: Callable[[ToolEvent], None] | None = None,
+    session_source_revision: Callable[[str, str], str | None] | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> ToolResult:
     """Issue one typed request, retrying only a definite pre-start auth rejection."""
@@ -576,6 +715,7 @@ def exec_tool(
             conn=active,
             workspace_id=getattr(host.connection, "workspace_id", None),
             event_sink=attempt_sink,
+            session_source_revision=session_source_revision,
             transport=transport,
         )
         if (

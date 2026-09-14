@@ -12,7 +12,7 @@ from mship.core import remote_preflight, run_transfer
 from mship.core.remote_dispatch import (
     RemoteDispatchError,
     SourceSnapshot,
-    _DirtySource,
+    _RunRefSource,
     prepare_remote_source,
     snapshot_remote_source,
 )
@@ -146,8 +146,8 @@ def test_snapshot_pins_all_selected_git_root_aliases_to_one_dirty_tree(
     )
 
 
-def _single_dirty_snapshot(tmp_path: Path) -> tuple[SourceSnapshot, _DirtySource]:
-    source = _DirtySource("app", tmp_path / "app", "task-1", "a" * 40)
+def _single_dirty_snapshot(tmp_path: Path) -> tuple[SourceSnapshot, _RunRefSource]:
+    source = _RunRefSource("app", tmp_path / "app", "task-1", "a" * 40)
     return SourceSnapshot(
         {"app": source.sha}, SimpleNamespace(to_push=[]), (source,)
     ), source
@@ -226,3 +226,44 @@ def test_receipt_failure_reports_unresolved_cleanup_when_leased_rollback_fails(
         )
 
     assert "private-token" not in str(error.value)
+
+
+def test_explicit_update_transfers_frozen_clean_source_without_pushing_origin(tmp_path):
+    repo, frozen = _repo(tmp_path)
+    _git(repo, "switch", "-c", "task-1")
+    origin = tmp_path / "origin"
+    receiver = tmp_path / "host" / "git" / "app"
+    receiver.parent.mkdir(parents=True)
+    for destination in (origin, receiver):
+        subprocess.run(["git", "init", "--bare", "-q", str(destination)], check=True)
+    _git(repo, "remote", "add", "origin", str(origin))
+    state = remote_preflight.RepoState(
+        repo="app", path=repo, branch="task-1", blocked_reason=None, detail=None,
+        dirty=False, needs_push=True, push_reason="new branch", head_sha=frozen, git_repo="app",
+    )
+    snapshot = SourceSnapshot(
+        {"app": frozen},
+        remote_preflight.Preflight(states=[state], blocked=[], to_push=[state], dirty=[]),
+        (),
+    )
+    (repo / "app.txt").write_text("later local commit\n")
+    _git(repo, "-c", "user.name=test", "-c", "user.email=test@example.invalid",
+         "commit", "-qam", "later")
+    later = _git(repo, "rev-parse", "HEAD")
+
+    class LocalGitTransport(ShellRunner):
+        def run(self, command, **kwargs):
+            # Only transport is substituted; real Git performs the actual push.
+            command = command.replace("https://fixture.invalid", (tmp_path / "host").as_uri())
+            return super().run(command, **kwargs)
+
+    prepare_remote_source(
+        task_obj=_Task(), target_repos=["app"], config=None, shell=LocalGitTransport(),
+        host=_host("https://fixture.invalid"), resolver=RunHostResolver(), output=_Output(),
+        snapshot=snapshot, run_ref_only=True,
+    )
+    assert _git(receiver, "rev-parse", "refs/mship/run/task-1/app") == frozen
+    assert _git(repo, "rev-parse", "HEAD") == later
+    assert subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", "refs/heads/task-1"], cwd=origin
+    ).returncode == 1

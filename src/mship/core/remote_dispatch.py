@@ -35,8 +35,8 @@ class PreparedSource:
 
 
 @dataclass(frozen=True)
-class _DirtySource:
-    """A synthesized source object waiting for delivery to a specific host."""
+class _RunRefSource:
+    """An immutable source object waiting for delivery to a specific host."""
 
     git_repo: str
     path: Path
@@ -55,7 +55,7 @@ class SourceSnapshot:
 
     source_revisions: Mapping[str, str]
     _preflight: object = field(repr=False)
-    _dirty_sources: tuple[_DirtySource, ...] = field(repr=False)
+    _dirty_sources: tuple[_RunRefSource, ...] = field(repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -81,7 +81,7 @@ def snapshot_remote_source(*, task_obj, target_repos, config, shell) -> SourceSn
     revisions: dict[str, str] = {
         state.repo: state.head_sha for state in pre.states if state.head_sha is not None
     }
-    dirty_sources: list[_DirtySource] = []
+    dirty_sources: list[_RunRefSource] = []
     for state in pre.dirty:
         if state.head_sha is None or state.git_repo is None:
             raise RemoteDispatchError(
@@ -94,7 +94,7 @@ def snapshot_remote_source(*, task_obj, target_repos, config, shell) -> SourceSn
         except run_transfer.RunTransferError as exc:
             raise RemoteDispatchError(str(exc)) from None
         dirty_sources.append(
-            _DirtySource(
+            _RunRefSource(
                 git_repo=state.git_repo,
                 path=state.path,
                 branch=state.branch,
@@ -130,6 +130,7 @@ def prepare_remote_source(
     on_prepared: Callable[[str], None] | None = None,
     snapshot: SourceSnapshot | None = None,
     on_transfer: Callable[[str, str, str], None] | None = None,
+    run_ref_only: bool = False,
 ) -> PreparedSource:
     """Transfer certified source to the selected host with a fresh Git bearer.
 
@@ -137,6 +138,8 @@ def prepare_remote_source(
     does not inspect or synthesize the local tree again.  This prevents a later
     host from receiving a different revision merely because local files changed
     between two eligible-host transfers.
+    ``run_ref_only`` sends clean and dirty objects directly to that host without
+    pushing a branch or preparing its active worktree.
     """
     from mship.core import remote_preflight, run_transfer
     from mship.core.run_ref import RunRefNameError
@@ -155,11 +158,26 @@ def prepare_remote_source(
             "could not certify source identity for remote dispatch"
         )
 
+    sources = (
+        {source.git_repo: source for source in snapshot._dirty_sources}
+        if run_ref_only else None
+    )
+    if sources is not None:
+        for state in snapshot._preflight.states:
+            if state.repo not in selected:
+                continue
+            if state.git_repo is None:
+                raise RemoteDispatchError("source repository identity is unavailable")
+            if state.git_repo not in sources:
+                sources[state.git_repo] = _RunRefSource(
+                    state.git_repo, state.path, state.branch,
+                    snapshot.source_revisions[state.repo],
+                )
     run_ref_repos: list[str] = []
     prepared_snapshots: list[tuple[str, str, str]] | None = (
         [] if on_prepared is not None else None
     )
-    for source in snapshot._dirty_sources:
+    for source in sources.values() if sources is not None else snapshot._dirty_sources:
         try:
             connection = resolver.resolve(host)
             ref = run_transfer.push_run_ref(
@@ -208,16 +226,17 @@ def prepare_remote_source(
             f"{source.branch}"
         )
 
-    pushed, push_error = remote_preflight.push(snapshot._preflight, shell)
-    if push_error is not None:
-        raise RemoteDispatchError(push_error)
-    pushed_sha = {state.repo: state.head_sha for state in snapshot._preflight.to_push}
-    for repo_name in pushed:
-        sha = pushed_sha.get(repo_name)
-        suffix = f" ({sha[:12]})" if sha else ""
-        output.breadcrumb(
-            f"pushed {repo_name}{suffix} so the run host sees your commits"
-        )
+    if not run_ref_only:
+        pushed, push_error = remote_preflight.push(snapshot._preflight, shell)
+        if push_error is not None:
+            raise RemoteDispatchError(push_error)
+        pushed_sha = {state.repo: state.head_sha for state in snapshot._preflight.to_push}
+        for repo_name in pushed:
+            sha = pushed_sha.get(repo_name)
+            suffix = f" ({sha[:12]})" if sha else ""
+            output.breadcrumb(
+                f"pushed {repo_name}{suffix} so the run host sees your commits"
+            )
 
     if on_prepared is not None:
         if prepared_snapshots:

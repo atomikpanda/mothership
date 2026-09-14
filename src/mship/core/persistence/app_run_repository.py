@@ -20,21 +20,31 @@ from mship.core.persistence.serialization import (
     PersistenceDecodeError,
     decode_datetime,
     decode_json,
+    decode_source_update_receipt,
     encode_datetime,
     encode_json,
+    encode_source_update_receipt,
 )
-from mship.core.run_target.models import AppRun, JsonValue
+from mship.core.run_target.models import AppRun, JsonValue, _validate_source_update_receipt
 
 _BINDING_REF = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 _MAX_BINDING_BYTES = 256 * 1024
-_CANDIDATE_STATUSES = ("starting", "active", "unknown")
+_CANDIDATE_STATUSES = ("starting", "active", "updating", "unknown")
 _TERMINAL_STATUSES = frozenset(("stopped", "failed"))
 _ALLOWED_TRANSITIONS = {
     "starting": frozenset(("active", "unknown", "stopped", "failed")),
-    "active": frozenset(("unknown", "stopped", "failed")),
+    "active": frozenset(("updating", "unknown", "stopped", "failed")),
+    "updating": frozenset(("active", "unknown", "stopped", "failed")),
     "unknown": frozenset(("stopped", "failed")),
     "stopped": frozenset(),
     "failed": frozenset(),
+}
+_SOURCE_UPDATE_ORDER = {
+    "reserved": 0,
+    "source-applied": 1,
+    "context-committed": 2,
+    "reloaded": 3,
+    "unknown": 4,
 }
 
 
@@ -167,6 +177,137 @@ class AppRunRepository:
             raise AppRunConflict(run_id)
         return updated
 
+    def record_source_update(
+        self,
+        connection: Connection,
+        *,
+        run_id: str,
+        expected_revision: int,
+        receipt: Mapping[str, JsonValue],
+        now: datetime,
+    ) -> AppRun:
+        """Durably record staged evidence without claiming a source switch."""
+        current = self._current_for_source_update(
+            connection, run_id, expected_revision, receipt
+        )
+        if current.status not in {"active", "updating"}:
+            raise AppRunTransitionError("source updates require an active run")
+        return self._cas_source_update(
+            connection,
+            current=current,
+            expected_revision=expected_revision,
+            receipt=receipt,
+            now=now,
+        )
+
+    def acknowledge_source_update(
+        self,
+        connection: Connection,
+        *,
+        run_id: str,
+        expected_revision: int,
+        receipt: Mapping[str, JsonValue],
+        new_profile_revision: str,
+        now: datetime,
+    ) -> AppRun:
+        """CAS the certified source/profile identity before the remote owner commits."""
+        current = self._current_for_source_update(
+            connection, run_id, expected_revision, receipt
+        )
+        receipt_values = self._receipt_values(receipt)
+        if (
+            current.status != "active"
+            or receipt_values["stage"] != "source-applied"
+            or current.backend_revision != receipt_values["old_source_revision"]
+        ):
+            raise AppRunTransitionError("source update acknowledgement is invalid")
+        try:
+            updated = replace(
+                current,
+                backend_revision=receipt_values["new_source_revision"],
+                profile_revision=new_profile_revision,
+                status="updating",
+                source_update_receipt=receipt_values,
+                revision=expected_revision + 1,
+                updated_at=now,
+            )
+        except ValueError as error:
+            raise AppRunTransitionError(str(error)) from error
+        statement = (
+            app_runs.update()
+            .where(app_runs.c.id == run_id, app_runs.c.revision == expected_revision)
+            .values(
+                backend_revision=updated.backend_revision,
+                profile_revision=updated.profile_revision,
+                status=updated.status,
+                source_update_receipt_json=encode_source_update_receipt(
+                    receipt_values
+                ),
+                revision=updated.revision,
+                updated_at=encode_datetime(now),
+            )
+        )
+        if connection.execute(statement).rowcount != 1:
+            raise AppRunConflict(run_id)
+        return updated
+
+    def finalize_source_update(
+        self,
+        connection: Connection,
+        *,
+        run_id: str,
+        expected_revision: int,
+        receipt: Mapping[str, JsonValue],
+        now: datetime,
+    ) -> AppRun:
+        """Acknowledge one verified reload without replaying it."""
+        current = self._current_for_source_update(
+            connection, run_id, expected_revision, receipt
+        )
+        receipt_values = self._receipt_values(receipt)
+        if (
+            current.status != "updating"
+            or receipt_values["stage"] != "reloaded"
+            or current.backend_revision != receipt_values["new_source_revision"]
+        ):
+            raise AppRunTransitionError("source update completion is invalid")
+        return self._cas_source_update(
+            connection,
+            current=current,
+            expected_revision=expected_revision,
+            receipt=receipt_values,
+            status="active",
+            now=now,
+        )
+
+    def mark_source_update_unknown(
+        self,
+        connection: Connection,
+        *,
+        run_id: str,
+        expected_revision: int,
+        receipt: Mapping[str, JsonValue],
+        now: datetime,
+    ) -> AppRun:
+        """Retain partial evidence and block normal observation after uncertainty."""
+        current = self._current_for_source_update(
+            connection, run_id, expected_revision, receipt
+        )
+        receipt_values = self._receipt_values(receipt)
+        if receipt_values["stage"] != "unknown" or current.status not in {
+            "active",
+            "updating",
+        }:
+            raise AppRunTransitionError("source update uncertainty is invalid")
+        return self._cas_source_update(
+            connection,
+            current=current,
+            expected_revision=expected_revision,
+            receipt=receipt_values,
+            status="unknown",
+            now=now,
+        )
+
     def delete_for_task(
         self, connection: Connection, task_slug: str
     ) -> tuple[str, ...]:
@@ -275,9 +416,9 @@ class AppRunRepository:
             raise AppRunTransitionError(
                 "owner reference and generation must be supplied together"
             )
-        if status == "active" and owner_ref is None:
+        if status in {"active", "updating"} and owner_ref is None:
             raise AppRunTransitionError(
-                "active app run acknowledgement requires owner identity"
+                "active or updating app run acknowledgement requires owner identity"
             )
         if current.owner_ref is not None and (
             owner_ref != current.owner_ref
@@ -286,10 +427,105 @@ class AppRunRepository:
             raise AppRunTransitionError(
                 "acknowledged app run owner identity cannot be cleared or replaced"
             )
-        if current.owner_ref is None and status != "active" and owner_ref is not None:
+        if current.owner_ref is None and status not in {"active", "updating"} and owner_ref is not None:
             raise AppRunTransitionError(
                 "owner identity may only be acknowledged by an active transition"
             )
+
+    def _receipt_values(
+        self, receipt: Mapping[str, JsonValue]
+    ) -> dict[str, JsonValue]:
+        if not isinstance(receipt, Mapping):
+            raise AppRunTransitionError("source update receipt is invalid")
+        values = dict(receipt)
+        try:
+            _validate_source_update_receipt(values)
+        except ValueError as error:
+            raise AppRunTransitionError(str(error)) from error
+        return values
+
+    def _current_for_source_update(
+        self,
+        connection: Connection,
+        run_id: str,
+        expected_revision: int,
+        receipt: Mapping[str, JsonValue],
+    ) -> AppRun:
+        current = self.get(connection, run_id)
+        if current is None:
+            raise KeyError(run_id)
+        if current.revision != expected_revision:
+            raise AppRunConflict(run_id)
+        values = self._receipt_values(receipt)
+        if (
+            current.owner_ref != values["owner_ref"]
+            or current.owner_generation != values["generation"]
+        ):
+            raise AppRunTransitionError("source update owner identity is invalid")
+        existing = current.source_update_receipt
+        if existing is not None:
+            if existing["update_id"] != values["update_id"]:
+                if existing["stage"] != "reloaded":
+                    raise AppRunTransitionError("another source update is already recorded")
+            else:
+                if any(
+                    existing[field] != values[field]
+                    for field in (
+                        "owner_ref",
+                        "generation",
+                        "old_source_revision",
+                        "new_source_revision",
+                    )
+                ):
+                    raise AppRunTransitionError("source update receipt identity changed")
+                if (
+                    existing["stage"] == "unknown"
+                    or values["stage"] != "unknown"
+                    and _SOURCE_UPDATE_ORDER[values["stage"]]
+                    < _SOURCE_UPDATE_ORDER[existing["stage"]]
+                ):
+                    raise AppRunTransitionError("source update receipt regressed")
+        return current
+
+    def _cas_source_update(
+        self,
+        connection: Connection,
+        *,
+        current: AppRun,
+        expected_revision: int,
+        receipt: Mapping[str, JsonValue],
+        now: datetime,
+        status: str | None = None,
+    ) -> AppRun:
+        receipt_values = self._receipt_values(receipt)
+        try:
+            updated = replace(
+                current,
+                status=current.status if status is None else status,
+                source_update_receipt=receipt_values,
+                revision=expected_revision + 1,
+                updated_at=now,
+            )
+        except ValueError as error:
+            raise AppRunTransitionError(str(error)) from error
+        statement = (
+            app_runs.update()
+            .where(
+                app_runs.c.id == current.id,
+                app_runs.c.revision == expected_revision,
+            )
+            .values(
+                status=updated.status,
+                source_update_receipt_json=encode_source_update_receipt(
+                    receipt_values
+                ),
+                revision=updated.revision,
+                updated_at=encode_datetime(now),
+            )
+        )
+        if connection.execute(statement).rowcount != 1:
+            raise AppRunConflict(current.id)
+        return updated
 
     def _values(self, run: AppRun) -> dict[str, object]:
         return {
@@ -315,6 +551,9 @@ class AppRunRepository:
             "created_at": encode_datetime(run.created_at),
             "updated_at": encode_datetime(run.updated_at),
             "binary_provenance_json": None,
+            "source_update_receipt_json": encode_source_update_receipt(
+                run.source_update_receipt
+            ),
         }
 
     def _decode(self, row: Mapping[str, object]) -> AppRun:
@@ -324,8 +563,15 @@ class AppRunRepository:
             provenance = (
                 None if provenance_text is None else decode_json(str(provenance_text))
             )
-            if not isinstance(capabilities, list) or not isinstance(
-                provenance, (dict, type(None))
+            source_update_receipt = decode_source_update_receipt(
+                None
+                if row["source_update_receipt_json"] is None
+                else str(row["source_update_receipt_json"])
+            )
+            if (
+                not isinstance(capabilities, list)
+                or not isinstance(provenance, (dict, type(None)))
+                or not isinstance(source_update_receipt, (dict, type(None)))
             ):
                 raise ValueError("invalid JSON field")
             return AppRun(
@@ -355,6 +601,7 @@ class AppRunRepository:
                 created_at=decode_datetime(str(row["created_at"])),  # type: ignore[arg-type]
                 updated_at=decode_datetime(str(row["updated_at"])),  # type: ignore[arg-type]
                 binary_provenance=provenance,  # type: ignore[arg-type]
+                source_update_receipt=source_update_receipt,  # type: ignore[arg-type]
             )
         except (KeyError, TypeError, ValueError) as error:
             raise PersistenceDecodeError(

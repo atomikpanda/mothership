@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from secrets import token_urlsafe
 from typing import TYPE_CHECKING, Any
 
 from mship.core.run_host import RunHostError, RunHostResolver
 from mship.core.run_host.config import HostRegistration, registration_identity
 from mship.core.run_target.backend import BackendExecutor, discover_on_host
 from mship.core.run_target.models import (
+    AppRun,
     BackendExecution,
     BackendResult,
     DiscoveryRequest,
@@ -271,8 +274,60 @@ class RemoteBackendExecutor:
             run.backend_revision,
         )
 
-    def __call__(
+    def _launch_context(
         self, host: HostRegistration, execution: BackendExecution
+    ) -> dict[str, object] | None:
+        """Load the private selection just persisted for a session parent."""
+        if execution.run_id is None:
+            return None
+        with self.store.read() as transaction:
+            run = transaction.app_runs.get(transaction.connection, execution.run_id)
+        if (
+            run is None
+            or run.task_slug != self.task_obj.slug
+            or run.task_slug != execution.task
+            or run.repo != execution.repo
+            or run.profile != execution.profile
+            or run.backend != execution.backend
+            or run.status != "starting"
+            or run.owner_ref is not None
+            or run.backend_revision != execution.request.get("backend_revision")
+            or run.profile_revision != execution.request.get("profile_revision")
+            or run.host_name != host.name
+            or run.host_scope != host.scope
+            or run.host_endpoint_fingerprint
+            != host_endpoint_fingerprint("|".join(registration_identity(host.connection)))
+        ):
+            return None
+        from mship.core.persistence.app_run_repository import PrivateBindingError
+
+        try:
+            binding = self.store.app_runs.load_private_binding(run.private_binding_ref)
+        except PrivateBindingError:
+            return None
+        return {
+            "protocol_version": run.protocol_version,
+            "run_id": run.id,
+            "task": run.task_slug,
+            "repo": run.repo,
+            "profile": run.profile,
+            "profile_revision": run.profile_revision,
+            "backend": run.backend,
+            "backend_revision": run.backend_revision,
+            "host_name": run.host_name,
+            "host_scope": run.host_scope,
+            "host_endpoint_fingerprint": run.host_endpoint_fingerprint,
+            "operation": run.operation,
+            "capabilities": list(run.capabilities),
+            "private_binding": binding,
+        }
+
+    def __call__(
+        self,
+        host: HostRegistration,
+        execution: BackendExecution,
+        *,
+        event_sink: Callable[[Any], None] | None = None,
     ) -> BackendResult:
         """Map one owner-side execution policy to the typed remote tool route."""
         from mship.core.remote_client import exec_tool
@@ -322,9 +377,12 @@ class RemoteBackendExecutor:
             if not isinstance(profile_revision_value, str):
                 return self._result(error_code="identity_lost")
             stored_profile_revision = profile_revision_value
-            input_files["MSHIP_TARGET_CONTEXT_FILE"] = json.dumps(
-                context, separators=(",", ":"), sort_keys=True
-            )
+            # Session observers authenticate only the sealed parent identity. The
+            # registry derives its context/bindings and refuses caller copies.
+            if backend.session_owner is None:
+                input_files["MSHIP_TARGET_CONTEXT_FILE"] = json.dumps(
+                    context, separators=(",", ":"), sort_keys=True
+                )
         else:
             prepared = self._prepared_host(host, execution)
             if prepared is None or prepared.failure is not None:
@@ -348,6 +406,13 @@ class RemoteBackendExecutor:
             profile_revision_value=profile_revision_value,
         ):
             return self._result(error_code="invalid")
+        if backend.session_owner is not None and execution.preparation == "launch":
+            context = self._launch_context(host, execution)
+            if context is None:
+                return self._result(error_code="identity_lost")
+            input_files["MSHIP_TARGET_CONTEXT_FILE"] = json.dumps(
+                context, separators=(",", ":"), sort_keys=True
+            )
         try:
             input_files["MSHIP_TARGET_REQUEST_FILE"] = json.dumps(
                 execution.request, separators=(",", ":"), sort_keys=True
@@ -370,13 +435,33 @@ class RemoteBackendExecutor:
         except (TypeError, ValueError, UnicodeError):
             return self._result(error_code="invalid")
 
+        session_source_revision: Callable[[str, str], str | None] | None = None
+        if (
+            backend.session_owner is not None
+            and execution.preparation == "launch"
+            and execution.run_id is not None
+        ):
+            def session_source_revision(owner_ref: str, generation: str) -> str | None:
+                with self.store.read() as transaction:
+                    current = transaction.app_runs.get(
+                        transaction.connection, execution.run_id
+                    )
+                if (
+                    current is None
+                    or current.owner_ref != owner_ref
+                    or current.owner_generation != generation
+                ):
+                    return None
+                return current.backend_revision
+
         try:
             result = exec_tool(
                 request=request,
                 host=host,
                 resolver=self._resolver,
-                event_sink=self.event_sink,
+                event_sink=self.event_sink if event_sink is None else event_sink,
                 transport=self.transport,
+                session_source_revision=session_source_revision,
             )
         except RunHostError:
             return self._result(error_code="auth_error")
@@ -398,6 +483,167 @@ class RemoteBackendExecutor:
             stderr=stderr,
         )
 
+
+    def launch_selected(
+        self,
+        selected: SelectedTarget,
+        *,
+        repo_name: str,
+        profile_name: str,
+    ) -> AppRun:
+        """Persist one selected session before launch, activating it only on ready."""
+        repo = self.config.repos.get(repo_name)
+        if repo is None or repo_name not in self.task_obj.worktrees:
+            raise TargetSelectionError("owner_unavailable", "task repository is unavailable")
+        profile = repo.run_profiles.get(profile_name)
+        if profile is None:
+            raise TargetSelectionError("profile_missing", "requested run profile is not configured")
+        backend = repo.run_backends.get(profile.backend)
+        if backend is None or "run" not in backend.operations:
+            raise TargetSelectionError(
+                "constraint_conflict", "profile backend does not support run"
+            )
+        if selected.profile_revision != profile_revision(
+            profile, backend, prepared_source_revision=selected.backend_revision
+        ):
+            raise TargetSelectionError("identity_lost", "selected profile identity changed")
+
+        now = datetime.now(timezone.utc)
+        binding_ref = self.store.app_runs.store_private_binding(selected.candidate.binding)
+        run = AppRun(
+            id=token_urlsafe(24),
+            task_slug=self.task_obj.slug,
+            repo=repo_name,
+            profile=profile_name,
+            profile_revision=selected.profile_revision,
+            backend=profile.backend,
+            backend_revision=selected.backend_revision,
+            host_name=selected.host.name,
+            host_scope=selected.host.scope,
+            host_endpoint_fingerprint=host_endpoint_fingerprint(
+                "|".join(registration_identity(selected.host.connection))
+            ),
+            safe_target_label=selected.candidate.label,
+            private_binding_ref=binding_ref,
+            operation="run",
+            protocol_version=1,
+            capabilities=selected.candidate.capabilities,
+            owner_ref=None,
+            owner_generation=None,
+            status="starting",
+            revision=0,
+            created_at=now,
+            updated_at=now,
+            binary_provenance=None,
+        )
+        with self.store.write(immediate=True) as transaction:
+            transaction.app_runs.insert(transaction.connection, run)
+
+        request = DiscoveryRequest(
+            protocol_version=1,
+            backend=profile.backend,
+            backend_revision=run.backend_revision,
+            profile=profile_name,
+            profile_revision=run.profile_revision,
+            task=run.task_slug,
+            repo=run.repo,
+            operation="run",
+            options=profile.options,
+            target_alias=None,
+        ).model_dump(mode="json")
+        execution = BackendExecution(
+            task=run.task_slug,
+            repo=run.repo,
+            profile=run.profile,
+            backend=run.backend,
+            logical_task=backend.operations["run"],
+            operation="run",
+            request=request,
+            run_id=run.id,
+            preparation="launch",
+            max_stdout_bytes=None,
+            max_stderr_bytes=None,
+            timeout_seconds=None,
+        )
+        ready_seen = False
+        ready_invalid = False
+
+        def current_transition(
+            status: str, owner_ref: str | None, generation: str | None
+        ) -> AppRun | None:
+            with self.store.write(immediate=True) as transaction:
+                current = transaction.app_runs.get(transaction.connection, run.id)
+                if current is None:
+                    return None
+                if (
+                    current.task_slug != run.task_slug
+                    or current.repo != run.repo
+                    or current.host_name != run.host_name
+                    or current.host_endpoint_fingerprint != run.host_endpoint_fingerprint
+                ):
+                    return None
+                if current.status == status:
+                    return current
+                try:
+                    return transaction.app_runs.transition(
+                        transaction.connection,
+                        run_id=current.id,
+                        expected_revision=current.revision,
+                        status=status,
+                        owner_ref=owner_ref,
+                        owner_generation=generation,
+                        now=datetime.now(timezone.utc),
+                    )
+                except (KeyError, ValueError, RuntimeError):
+                    return None
+
+        def launch_event(event: Any) -> None:
+            nonlocal ready_seen, ready_invalid
+            if self.event_sink is not None:
+                self.event_sink(event)
+            if backend.session_owner is None or getattr(event, "kind", None) != "ready":
+                return
+            result = getattr(event, "result", None)
+            owner_ref = getattr(result, "owner_ref", None)
+            generation = getattr(result, "generation", None)
+            source_revision = getattr(result, "source_revision", None)
+            if (
+                getattr(result, "status", None) != "running"
+                or not isinstance(owner_ref, str)
+                or not isinstance(generation, str)
+                or source_revision != run.backend_revision
+            ):
+                ready_invalid = True
+                current_transition("unknown", None, None)
+                return
+            activated = current_transition("active", owner_ref, generation)
+            if activated is None or activated.status != "active":
+                ready_invalid = True
+                current_transition("unknown", None, None)
+                return
+            ready_seen = True
+
+        result = self(selected.host, execution, event_sink=launch_event)
+        with self.store.read() as transaction:
+            current = transaction.app_runs.get(transaction.connection, run.id)
+        if current is None:
+            raise TargetSelectionError("identity_lost", "selected run is no longer available")
+        if backend.session_owner is not None:
+            if ready_invalid or not ready_seen:
+                status = "unknown" if result.error_code in {"identity_lost", "protocol_error"} else "failed"
+                current_transition(status, current.owner_ref, current.owner_generation)
+            elif current.status == "active":
+                terminal_status = "failed" if result.error_code is not None else "stopped"
+                current_transition(terminal_status, current.owner_ref, current.owner_generation)
+        elif result.error_code is not None:
+            current_transition("failed", None, None)
+        elif current.status == "starting" and result.owner_ref is not None:
+            current_transition("active", result.owner_ref, result.owner_generation)
+        with self.store.read() as transaction:
+            final = transaction.app_runs.get(transaction.connection, run.id)
+        if final is None:
+            raise TargetSelectionError("identity_lost", "selected run is no longer available")
+        return final
 
 def resolve_launch(
     *,

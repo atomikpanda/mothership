@@ -109,6 +109,7 @@ app_runs = Table(
     Column("created_at", Text, nullable=False),
     Column("updated_at", Text, nullable=False),
     Column("binary_provenance_json", Text),
+    Column("source_update_receipt_json", Text),
     ForeignKeyConstraint(["task_slug"], ["tasks.slug"], ondelete="RESTRICT"),
     ForeignKeyConstraint(
         ["task_slug", "repo"],
@@ -118,7 +119,7 @@ app_runs = Table(
     CheckConstraint("host_scope IN ('user', 'project')", name="host_scope"),
     CheckConstraint("protocol_version = 1", name="protocol_version"),
     CheckConstraint(
-        "status IN ('starting', 'active', 'stopped', 'failed', 'unknown')",
+        "status IN ('starting', 'active', 'updating', 'stopped', 'failed', 'unknown')",
         name="status",
     ),
     CheckConstraint(
@@ -127,7 +128,7 @@ app_runs = Table(
         name="owner_pair",
     ),
     CheckConstraint(
-        "status <> 'active' OR owner_ref IS NOT NULL",
+        "status NOT IN ('active', 'updating') OR owner_ref IS NOT NULL",
         name="active_owner_acknowledgement",
     ),
     CheckConstraint(

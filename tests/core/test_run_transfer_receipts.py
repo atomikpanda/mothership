@@ -14,7 +14,7 @@ from mship.core.config import RepoConfig, WorkspaceConfig
 from mship.core.remote_dispatch import (
     RemoteDispatchError,
     SourceSnapshot,
-    _DirtySource,
+    _RunRefSource,
     prepare_remote_source,
 )
 from mship.core.run_host import HostRegistration, RunHostConnection, RunHostResolver, RunHostStore
@@ -78,8 +78,8 @@ def test_only_successful_transfers_are_recorded_when_later_host_source_fails(
 ):
     state_dir = tmp_path / ".mothership"
     host = _host("studio", "https://studio.invalid")
-    first = _DirtySource("api", tmp_path / "api", "task-1", "a" * 40)
-    second = _DirtySource("web", tmp_path / "web", "task-1", "b" * 40)
+    first = _RunRefSource("api", tmp_path / "api", "task-1", "a" * 40)
+    second = _RunRefSource("web", tmp_path / "web", "task-1", "b" * 40)
     snapshot = SourceSnapshot(
         {"api": first.sha, "web": second.sha},
         SimpleNamespace(to_push=[]),

@@ -12,19 +12,24 @@ import os
 import queue
 import secrets
 import selectors
+import signal
 import stat
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
 from mship.core.log import LogEntry, format_log_entry
 from mship.core.remote_tool import ToolContext, ToolEvent, ToolRequest, ToolResult
+from mship.core.session_channel import CLAIM_TTL_SECONDS, OWNER_CONTEXT_FILE, OwnerClient, OwnerContext
+from mship.core.session_inputs import CaptureGrant, OwnerRequest, SessionError, identifier, source_revision as validate_source_revision
+from mship.core.session_runtime import SessionPreparation, prepare_session_install
 from mship.util.shell import (
     ShellCancellationUnsupported,
     ShellRunner,
@@ -98,6 +103,14 @@ class _Operation:
     parent_done: threading.Event | None = None
     observers: dict[threading.Event, threading.Event] = field(default_factory=dict)
     observer_lock: threading.Lock = field(default_factory=threading.Lock)
+    session_context: OwnerContext | None = None
+    session_preparation: SessionPreparation | None = None
+    capability_root: Path | None = None
+    socket_directory: Path | None = None
+    socket_directory_identity: tuple[int, int] | None = None
+    capability_identity: tuple[int, int] | None = None
+    ready_announced: bool = False
+    source_update_ref: str | None = None
 
     def request_stop(self, reason: str) -> None:
         """Serialize teardown admission with a child's final check and spawn."""
@@ -107,6 +120,7 @@ class _Operation:
 
     def terminate(self) -> None:
         """Synchronously reap the exact owned group before reporting cleanup."""
+        self.cancel_observers()
         with self.observer_lock, self.cleanup_lock:
             if self.cleanup_complete:
                 return
@@ -114,11 +128,42 @@ class _Operation:
                 self.cleanup_complete = True
                 return
             try:
+                if self.indexed and self.session_context is not None and not _owned_process_exited(self.proc):
+                    self._graceful_domain_cleanup()
                 _terminate_owned_process_group(self.proc)
             except Exception:
                 self.cleanup_error = True
                 raise
             self.cleanup_complete = True
+
+    def check_capability_root(self) -> None:
+        if self.capability_root is None:
+            return
+        info = self.capability_root.stat(follow_symlinks=False)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_mode & 0o077
+                or (info.st_dev, info.st_ino) != self.capability_identity):
+            raise OSError("private session root was replaced")
+
+    def _graceful_domain_cleanup(self) -> None:
+        """Let the domain acknowledge external cleanup before signalling its group."""
+        assert self.proc is not None and self.session_context is not None
+        deadline = time.monotonic() + 5
+        try:
+            self.check_capability_root()
+            request = OwnerRequest(
+                operation_ref=secrets.token_urlsafe(24), operation="cleanup",
+                source_revision=self.session_context.source_revision,
+                expires_at=time.time() + CLAIM_TTL_SECONDS,
+            )
+            OwnerClient(self.session_context.issue(request)).call("cleanup", {}, timeout=5)
+        except (OSError, SessionError):
+            if not _owned_process_exited(self.proc):
+                # Startup may not have opened its private listener yet. Signal the
+                # owner alone so its finally block can still use its live children.
+                os.kill(self.proc.pid, signal.SIGTERM)
+        while time.monotonic() < deadline and not _owned_process_exited(self.proc):
+            time.sleep(0.02)
 
     def leader_exited(self) -> bool:
         with self.cleanup_lock:
@@ -167,6 +212,7 @@ class ToolOperationRegistry:
         cancel_event: threading.Event | None = None,
         spawn: Callable | None = None,
         publish_result: Callable[[ToolResult], ToolResult] | None = None,
+        session: SessionPreparation | None = None,
     ) -> Generator[ToolEvent, None, None]:
         invalid = self._validate_launch(request, context)
         if invalid is not None:
@@ -197,11 +243,12 @@ class ToolOperationRegistry:
                                 context,
                                 indexed=True,
                                 publish_result=publish_result,
+                                session=session,
                             )
                             self._write_record(operation, "starting")
                             self._set_index(operation)
                             self._journal(operation, "starting")
-                        except OSError:
+                        except (OSError, SessionError):
                             rejection = ToolResult(status="evidence_error")
                         else:
                             self._operations[
@@ -229,6 +276,9 @@ class ToolOperationRegistry:
         *,
         cancel_event: threading.Event | None = None,
         spawn: Callable | None = None,
+        session: SessionPreparation | None = None,
+        on_session_prepared: Callable[[OwnerContext], None] | None = None,
+        source_update_id: str | None = None,
     ) -> Generator[ToolEvent, None, None]:
         if request.owner_ref is None or request.generation is None:
             yield _result_event(ToolResult(status="invalid"))
@@ -247,6 +297,7 @@ class ToolOperationRegistry:
                 result = ToolResult(status="invalid")
             yield _result_event(result)
             return
+        unavailable_status = "unknown"
         with self._lock:
             parent = self._operations.get((request.owner_ref, request.generation))
             if (
@@ -258,6 +309,9 @@ class ToolOperationRegistry:
                 or not self._matches_parent(request, parent)
             ):
                 unavailable = True
+            elif parent.source_update_ref != source_update_id:
+                unavailable = True
+                unavailable_status = "busy" if parent.source_update_ref is not None else "invalid"
             else:
                 unavailable = False
                 cancelled = threading.Event()
@@ -272,19 +326,28 @@ class ToolOperationRegistry:
                     else:
                         parent.observers[cancelled] = done
         if unavailable:
-            yield _result_event(ToolResult(status="unknown"))
+            yield _result_event(ToolResult(status=unavailable_status))
             return
         try:
             operation = self._new_operation(
-                request, parent.context, indexed=False, parent=parent
+                request, parent.context, indexed=False, parent=parent, session=session
             )
-        except OSError:
+        except (OSError, SessionError):
             done.set()
             with parent.observer_lock:
                 parent.observers.pop(cancelled, None)
             yield _result_event(ToolResult(status="unknown"))
             return
         operation.parent_done = done
+        if on_session_prepared is not None and operation.session_context is not None:
+            try:
+                on_session_prepared(operation.session_context)
+            except Exception:
+                self._finish(operation, "evidence_error")
+                with parent.observer_lock:
+                    parent.observers.pop(cancelled, None)
+                yield _result_event(operation.result)
+                return
         combined_cancel = _combined_cancel(cancel_event, cancelled)
         failure = self._launch(operation, spawn, combined_cancel, parent=parent)
         if failure is not None:
@@ -319,6 +382,11 @@ class ToolOperationRegistry:
                         generation=generation,
                         source_revision=operation.context.source_revision,
                     )
+                if operation.source_update_ref is not None:
+                    return ToolResult(
+                        status="busy", owner_ref=owner_ref, generation=generation,
+                        source_revision=operation.context.source_revision,
+                    )
                 return operation.result or _running_result(operation)
             record = self._read_record(task, owner_ref)
         if record is None or record.get("generation") != generation:
@@ -343,6 +411,138 @@ class ToolOperationRegistry:
             )
         except ValueError:
             return ToolResult(status="unknown")
+
+    def session_for_owner(
+        self, *, task: str, repo: str, owner_ref: str, generation: str
+    ) -> tuple[OwnerContext, dict[str, str]] | None:
+        """Return only a live parent's private inputs to internal server adapters."""
+        with self._lock:
+            parent = self._operations.get((owner_ref, generation))
+            if (parent is None or parent.session_context is None
+                    or parent.completed.is_set() or parent.stop.is_set()
+                    or parent.collection_done.is_set()):
+                return None
+            request = ToolRequest(
+                task=task, repo=repo, argv=(), preparation="observe",
+                owner_ref=owner_ref, generation=generation,
+            )
+            if not self._matches_parent(request, parent):
+                return None
+            try:
+                self._private_input_environment(parent)
+                parent.check_capability_root()
+            except OSError:
+                return None
+            return parent.session_context, dict(parent.request.input_files)
+
+    def reserve_source_update(
+        self, request: ToolRequest, update_id: str
+    ) -> tuple[ToolContext, OwnerContext, dict[str, str]]:
+        identifier(update_id)
+        with self._lock:
+            parent = self._source_parent(request)
+            if not self._matches_parent(request, parent) or not parent.ready_announced:
+                raise SessionError("unavailable", "Framework owner is not ready for this source")
+            with parent.observer_lock:
+                if parent.source_update_ref is not None:
+                    raise SessionError("busy", "Framework source update is already reserved")
+                self._private_input_environment(parent)
+                parent.check_capability_root()
+                parent.source_update_ref = update_id
+                observations = tuple(parent.observers.items())
+                for cancelled, _ in observations:
+                    cancelled.set()
+        deadline = time.monotonic() + 10
+        if any(not done.wait(max(0, deadline - time.monotonic())) for _, done in observations):
+            self.release_source_update(request, update_id, unknown=True)
+            raise SessionError("unknown", "Framework observations did not acknowledge cleanup")
+        with self._lock:
+            parent = self._source_parent(request, update_id)
+            assert parent.session_context is not None
+            return parent.context, parent.session_context, dict(parent.request.input_files)
+
+    def _source_parent(
+        self, request: ToolRequest, update_id: str | None = None
+    ) -> _Operation:
+        parent = self._operations.get((request.owner_ref, request.generation))
+        if (request.preparation != "observe" or parent is None
+                or parent.context.task != request.task or parent.context.repo != request.repo
+                or parent.session_context is None or parent.session_preparation is None
+                or parent.session_preparation.owner_kind != "flutter"
+                or parent.completed.is_set() or parent.stop.is_set()
+                or parent.collection_done.is_set() or parent.cleanup_error
+                or (update_id is not None and parent.source_update_ref != update_id)):
+            raise SessionError("unknown", "The exact framework source owner is unavailable")
+        self._check_root(parent)
+        parent.check_capability_root()
+        return parent
+
+    def commit_source_update(
+        self, request: ToolRequest, update_id: str, *,
+        source_revision: str, profile_revision: str,
+    ) -> OwnerContext:
+        validate_source_revision(source_revision)
+        if (not isinstance(profile_revision, str) or len(profile_revision) != 64
+                or any(character not in "0123456789abcdef" for character in profile_revision)):
+            raise SessionError("invalid", "Invalid committed profile identity")
+        with self._lock:
+            parent = self._source_parent(request, update_id)
+            if parent.context.source_revision != request.source_revision:
+                raise SessionError("invalid", "Source context was already advanced")
+            self._private_input_environment(parent)
+            assert parent.session_context is not None
+            next_context = replace(parent.context, source_revision=source_revision)
+            next_owner = replace(parent.session_context, source_revision=source_revision, request=None)
+            files = dict(parent.request.input_files)
+            for name in ("MSHIP_TARGET_REQUEST_FILE", "MSHIP_TARGET_CONTEXT_FILE"):
+                value = json.loads(files[name])
+                value["backend_revision"] = source_revision
+                value["profile_revision"] = profile_revision
+                files[name] = json.dumps(value, separators=(",", ":"))
+            private_updates = {
+                name: files[name]
+                for name in ("MSHIP_TARGET_REQUEST_FILE", "MSHIP_TARGET_CONTEXT_FILE")
+            }
+            private_updates[OWNER_CONTEXT_FILE] = json.dumps(
+                next_owner.to_private_dict(), separators=(",", ":")
+            )
+            try:
+                with self._operation_directory(parent) as directory_fd:
+                    for name, content in private_updates.items():
+                        previous = parent.private_inputs[name]
+                        self._publish_json(directory_fd, previous.name, content.encode("utf-8"))
+                        fd = os.open(previous.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                        try:
+                            info = self._check_private_file(fd)
+                            parent.private_inputs[name] = _PrivateInput(previous.name, info.st_dev, info.st_ino)
+                        finally:
+                            os.close(fd)
+                parent.context = next_context
+                parent.session_context = next_owner
+                parent.request = replace(parent.request, source_revision=source_revision, input_files=files)
+                parent.session_preparation = replace(
+                    parent.session_preparation, sealed_context=files["MSHIP_TARGET_CONTEXT_FILE"]
+                )
+                self._write_record(parent, "running")
+            except (OSError, KeyError, ValueError):
+                parent.request_stop("unknown")
+                raise SessionError("unknown", "Source authorization commit is incomplete") from None
+            return next_owner
+
+    def release_source_update(
+        self, request: ToolRequest, update_id: str, *, unknown: bool = False
+    ) -> None:
+        with self._lock:
+            parent = self._operations.get((request.owner_ref, request.generation))
+            if (parent is None or parent.context.task != request.task
+                    or parent.context.repo != request.repo or parent.source_update_ref != update_id):
+                raise SessionError("unknown", "The source reservation is no longer owned")
+            with parent.observer_lock:
+                if unknown:
+                    parent.reason = "unknown"
+                    parent.stop.set()
+                else:
+                    parent.source_update_ref = None
 
     def admission_status(
         self, task: str
@@ -426,6 +626,7 @@ class ToolOperationRegistry:
         indexed: bool,
         parent: _Operation | None = None,
         publish_result: Callable[[ToolResult], ToolResult] | None = None,
+        session: SessionPreparation | None = None,
     ) -> _Operation:
         owner = parent.owner_ref if parent is not None else secrets.token_urlsafe(24)
         generation = (
@@ -450,7 +651,7 @@ class ToolOperationRegistry:
         except OSError:
             os.close(root_fd)
             raise
-        return _Operation(
+        operation = _Operation(
             owner_ref=owner,
             generation=generation,
             context=context,
@@ -463,7 +664,102 @@ class ToolOperationRegistry:
             root_fd=root_fd,
             storage_fd=storage_fd,
             publish_result=publish_result,
+            session_preparation=session,
         )
+        if session is not None:
+            try:
+                self._prepare_session(operation, parent)
+            except BaseException:
+                self._remove_socket_directory(operation)
+                operation.close_context()
+                raise
+        return operation
+
+    def _prepare_session(self, operation: _Operation, parent: _Operation | None) -> None:
+        preparation = operation.session_preparation
+        assert preparation is not None
+        if parent is not None and (
+            parent.session_context is None
+            or parent.session_preparation is None
+            or parent.session_preparation.owner_kind != preparation.owner_kind
+        ):
+            raise SessionError("invalid", "No matching domain owner")
+        with self._operation_directory(operation) as directory_fd:
+            name = f"{operation.record_path.stem}.session"
+            os.mkdir(name, mode=0o700, dir_fd=directory_fd)
+            operation.capability_root = (operation.record_path.parent / name).resolve(strict=True)
+            info = operation.capability_root.stat(follow_symlinks=False)
+            operation.capability_identity = (info.st_dev, info.st_ino)
+            os.fsync(directory_fd)
+        root = operation.capability_root
+        install = (
+            None if preparation.install is None
+            else prepare_session_install(preparation.result_store, preparation.install, root)
+        )
+        capture = None
+        if preparation.capture_kinds is not None:
+            capture_path = root / "capture"
+            capture_path.mkdir(mode=0o700)
+            capture = CaptureGrant(capture_path, preparation.capture_kinds,
+                                   preparation.capture_platform or "")
+        request = OwnerRequest(
+            operation_ref=secrets.token_urlsafe(24),
+            operation=preparation.operation,
+            source_revision=operation.context.source_revision,
+            expires_at=time.time() + CLAIM_TTL_SECONDS,
+            install=install,
+            capture=capture,
+        )
+        files = dict(operation.request.input_files)
+        if parent is None:
+            socket_directory = Path(tempfile.mkdtemp(prefix="mso-")).resolve(strict=True)
+            operation.socket_directory = socket_directory
+            info = socket_directory.stat(follow_symlinks=False)
+            operation.socket_directory_identity = (info.st_dev, info.st_ino)
+            operation.session_context = OwnerContext(
+                task=operation.context.task, repo=operation.context.repo,
+                owner_ref=operation.owner_ref, generation=operation.generation,
+                source_revision=operation.context.source_revision,
+                workspace_root=self._workspace_root, worktree=operation.root_path,
+                private_root=root, socket_path=socket_directory / "owner.sock",
+                secret=secrets.token_urlsafe(32), request=request,
+            )
+            if preparation.sealed_context is None:
+                raise SessionError("invalid", "Missing server-selected target")
+            files["MSHIP_TARGET_CONTEXT_FILE"] = preparation.sealed_context
+        else:
+            assert parent.session_context is not None
+            # Verify the parent's private files before authorizing a new child.
+            self._private_input_environment(parent)
+            parent.check_capability_root()
+            operation.session_context = parent.session_context.issue(request)
+            for key in ("MSHIP_TARGET_CONTEXT_FILE", "MSHIP_TARGET_BINDINGS_FILE"):
+                if key not in parent.request.input_files:
+                    raise SessionError("unknown", "Parent target context is missing")
+                files[key] = parent.request.input_files[key]
+        operation.request = replace(operation.request, input_files=files)
+
+    @staticmethod
+    def _remove_socket_directory(operation: _Operation) -> None:
+        directory = operation.socket_directory
+        if directory is None:
+            return
+        info = directory.stat(follow_symlinks=False)
+        if (not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino)
+                != operation.socket_directory_identity):
+            raise OSError("owner socket directory was replaced")
+        # Never recursively delete: an unexpected entry preserves uncertainty.
+        socket_path = directory / "owner.sock"
+        try:
+            socket_info = socket_path.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            if not stat.S_ISSOCK(socket_info.st_mode):
+                raise OSError("owner socket was replaced")
+            socket_path.unlink()
+        directory.rmdir()
+        operation.socket_directory = None
 
     def _launch(
         self,
@@ -645,6 +941,11 @@ class ToolOperationRegistry:
                 reason = "timeout"
             else:
                 try:
+                    if operation.indexed and operation.session_context is not None and not operation.ready_announced:
+                        operation.check_capability_root()
+                        if operation.session_context.readiness_acknowledged():
+                            operation.ready_announced = True
+                            self._put(operation, ToolEvent("ready", result=_running_result(operation)))
                     if operation.leader_exited():
                         # Retain the waitable leader while stopping descendants.
                         operation.terminate()
@@ -670,6 +971,16 @@ class ToolOperationRegistry:
             operation.terminate()  # Also handles a leader that already exited.
         except Exception:
             status = "unknown"
+        if operation.indexed and operation.session_context is not None:
+            if status == "completed" and not operation.ready_announced:
+                status = "launch_error"
+            try:
+                operation.check_capability_root()
+                if not operation.session_context.cleanup_acknowledged():
+                    status = "unknown"
+                self._remove_socket_directory(operation)
+            except (OSError, SessionError):
+                status = "unknown"
         try:
             self._discard_inputs(operation)
         except OSError:
@@ -763,6 +1074,14 @@ class ToolOperationRegistry:
         environment = tool_runtime_environment()
         environment.update(operation.request.env)
         environment.update(self._private_input_environment(operation))
+        if operation.session_context is not None:
+            request = operation.session_context.request
+            if request is not None and request.capture is not None:
+                environment.update({
+                    "MSHIP_CAPTURE_DIR": str(request.capture.directory),
+                    "MSHIP_CAPTURE_KINDS": ",".join(request.capture.kinds),
+                    "MSHIP_CAPTURE_PLATFORM": request.capture.platform,
+                })
         environment.update(
             {
                 "MSHIP_TASK": operation.context.task,
@@ -930,11 +1249,16 @@ class ToolOperationRegistry:
         }
 
     def _prepare_inputs(self, operation: _Operation) -> None:
-        if not operation.request.input_files:
+        inputs = dict(operation.request.input_files)
+        if operation.session_context is not None:
+            inputs[OWNER_CONTEXT_FILE] = json.dumps(
+                operation.session_context.to_private_dict(), separators=(",", ":")
+            )
+        if not inputs:
             return
         try:
             with self._operation_directory(operation) as directory_fd:
-                for environment_name, content in operation.request.input_files.items():
+                for environment_name, content in inputs.items():
                     name = f"{operation.record_path.stem}.input-{secrets.token_hex(16)}"
                     fd = os.open(
                         name,
@@ -1081,6 +1405,10 @@ class ToolOperationRegistry:
                 "worktree": str(operation.root_path),
                 "status": status,
                 "exit_code": exit_code,
+                "session_private_root": (
+                    None if operation.session_context is None
+                    else str(operation.session_context.private_root)
+                ),
             },
             separators=(",", ":"),
         ).encode()

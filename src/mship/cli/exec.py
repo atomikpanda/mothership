@@ -184,6 +184,195 @@ def _run_remote(
         raise typer.Exit(code=1)
 
 
+def _run_profile(
+    *,
+    task_obj,
+    target_repos: list[str],
+    profile_name: str | None,
+    host_name: str | None,
+    target_alias: str | None,
+    remote_role: str | None,
+    container,
+    config,
+    output: Output,
+) -> int:
+    """Resolve, persist, and foreground one profile run through its logical task."""
+    from mship.cli.run_target import choose_profile, choose_target
+    from mship.core.run_host import RunHostStore
+    from mship.core.run_target.preferences import TargetPreferenceStore
+    from mship.core.run_target.service import RemoteBackendExecutor, resolve_launch
+
+    if task_obj is None or len(target_repos) != 1:
+        output.error("profile runs require one task-bound repository")
+        return 1
+    repo_name = target_repos[0]
+    repo = config.repos[repo_name]
+    if profile_name is None:
+        profile_name = repo.default_run_profile
+        if profile_name is None:
+            try:
+                profile_name = choose_profile(
+                    tuple(sorted(repo.run_profiles)),
+                    interactive=output.is_tty and output.human_mode,
+                    input_fn=input,
+                    output=output,
+                )
+            except Exception as error:
+                output.error(str(error))
+                return 1
+    if profile_name not in repo.run_profiles:
+        output.error("requested run profile is not configured")
+        return 1
+
+    def stream_event(event) -> None:
+        if event.kind in {"stdout", "stderr"} and event.data:
+            output.progress(event.data.decode("utf-8", "replace"))
+        elif event.kind == "ready":
+            output.progress("profile run is ready")
+
+    executor = RemoteBackendExecutor(
+        task_obj=task_obj,
+        config=config,
+        shell=container.shell(),
+        output=output,
+        store=container.state_manager().workspace_store,
+        event_sink=stream_event,
+    )
+    try:
+        selected = resolve_launch(
+            config=config,
+            task=task_obj,
+            repo_name=repo_name,
+            profile_name=profile_name,
+            host_name=host_name,
+            remote_role=remote_role or None,
+            target_alias=target_alias,
+            registry=RunHostStore(container.state_dir()),
+            preferences=TargetPreferenceStore(container.state_dir()),
+            execute=executor,
+            choose=lambda candidates: choose_target(
+                candidates,
+                profile_name=profile_name or "",
+                backend_name=repo.run_profiles[profile_name or ""].backend,
+                interactive=output.is_tty and output.human_mode,
+                input_fn=input,
+                output=output,
+            ),
+        )
+        final = executor.launch_selected(
+            selected, repo_name=repo_name, profile_name=profile_name
+        )
+    except Exception:
+        output.error("profile run could not be established")
+        return 1
+    if final.status == "unknown":
+        output.error("profile run outcome is unknown; establish a new run before observing")
+        return 1
+    if final.status == "failed":
+        output.error("profile run failed before a trusted ready acknowledgement")
+        return 1
+    return 0
+
+
+def _update_profile_run(
+    *,
+    task_obj,
+    target_repos: list[str],
+    run_id: str | None,
+    remote_role: str | None,
+    container,
+    config,
+    output: Output,
+) -> int:
+    """Transfer one new snapshot to the exact recorded Flutter owner, then reload."""
+    from mship.core.remote_client import RemoteExecError, source_update_remote
+    from mship.core.remote_dispatch import (
+        RemoteDispatchError,
+        prepare_remote_source,
+        snapshot_remote_source,
+    )
+    from mship.core.run_host import RunHostError, RunHostResolver
+    from mship.core.run_target.models import profile_revision
+    from mship.core.session_capture import SessionCaptureError, select_session_capture
+    from mship.core.session_source import SourceUpdateError, update_and_reload
+
+    if task_obj is None or len(target_repos) != 1:
+        output.error("update-and-hot-reload requires one task-bound repository")
+        return 1
+    try:
+        selected = select_session_capture(
+            store=container.state_manager().workspace_store,
+            config=config,
+            task=task_obj,
+            repo_name=target_repos[0],
+            run_id=run_id,
+            platform=None,
+            operation_name="reload",
+        )
+        if remote_role not in {None, ""} and remote_role not in selected.host.roles:
+            raise SessionCaptureError(
+                "specified remote role does not match the recorded run host"
+            )
+        repo = config.repos[selected.run.repo]
+        profile = repo.run_profiles[selected.run.profile]
+        backend = repo.run_backends[selected.run.backend]
+        if backend.session_owner != "flutter":
+            raise SessionCaptureError("recorded run is not a Flutter session")
+        if backend.operations.get("run") in repo.task_outputs:
+            raise SessionCaptureError("source updates cannot change a result-producing run")
+        snapshot = snapshot_remote_source(
+            task_obj=task_obj,
+            target_repos=[selected.run.repo],
+            config=config,
+            shell=container.shell(),
+        )
+        resolver = RunHostResolver()
+        prepared = prepare_remote_source(
+            task_obj=task_obj,
+            target_repos=[selected.run.repo],
+            config=config,
+            shell=container.shell(),
+            host=selected.host,
+            resolver=resolver,
+            output=output,
+            snapshot=snapshot,
+            run_ref_only=True,
+        )
+        revision = prepared.source_revisions.get(selected.run.repo)
+        if not isinstance(revision, str) or revision != snapshot.source_revisions.get(
+            selected.run.repo
+        ):
+            raise RemoteDispatchError(
+                "could not certify source identity for recorded Flutter run"
+            )
+        updated = update_and_reload(
+            selected.run,
+            selected.operation,
+            new_source_revision=revision,
+            new_profile_revision=profile_revision(
+                profile, backend, prepared_source_revision=revision
+            ),
+            store=container.state_manager().workspace_store,
+            exchange=lambda request: source_update_remote(
+                host=selected.host, resolver=resolver, request=request
+            ),
+        )
+    except (
+        RemoteDispatchError,
+        RemoteExecError,
+        RunHostError,
+        SessionCaptureError,
+        SourceUpdateError,
+        ValueError,
+    ):
+        output.error("source update could not be completed")
+        return 1
+    if updated.status != "active":
+        output.error("source update outcome is unknown; do not retry automatically")
+        return 1
+    output.success("updated recorded Flutter run")
+    return 0
+
 def register(app: typer.Typer, get_container):
     @app.command(name="test", rich_help_panel="Workflow")
     def test_cmd(
@@ -453,6 +642,23 @@ def register(app: typer.Typer, get_container):
         task: Optional[str] = typer.Option(
             None, "--task", help="Narrow to one task's affected repos"
         ),
+        profile: Optional[str] = typer.Option(
+            None, "--profile", help="Configured run profile for a target-aware launch."
+        ),
+        host: Optional[str] = typer.Option(
+            None, "--host", help="Constrain a profile run to one configured host."
+        ),
+        target: Optional[str] = typer.Option(
+            None, "--target", help="Constrain a profile run to a configured target alias."
+        ),
+        run_id: Optional[str] = typer.Option(
+            None, "--run-id", help="Recorded Flutter run for --update-and-hot-reload."
+        ),
+        update_and_hot_reload: bool = typer.Option(
+            False,
+            "--update-and-hot-reload",
+            help="Explicitly update source and hot reload one recorded Flutter run.",
+        ),
         remote: Optional[str] = typer.Option(
             None,
             "--remote",
@@ -513,6 +719,39 @@ def register(app: typer.Typer, get_container):
         except ValueError as e:
             output.error(str(e))
             raise typer.Exit(code=1)
+
+        if update_and_hot_reload:
+            if run_id is None or profile is not None or host is not None or target is not None:
+                output.error(
+                    "--update-and-hot-reload requires exactly --run-id and no launch selectors"
+                )
+                raise typer.Exit(code=1)
+            raise typer.Exit(
+                code=_update_profile_run(
+                    task_obj=task_obj,
+                    target_repos=target_repos,
+                    run_id=run_id,
+                    remote_role=remote,
+                    container=container,
+                    config=config,
+                    output=output,
+                )
+            )
+
+        if profile is not None or host is not None or target is not None:
+            raise typer.Exit(
+                code=_run_profile(
+                    task_obj=task_obj,
+                    target_repos=target_repos,
+                    profile_name=profile,
+                    host_name=host,
+                    target_alias=target,
+                    remote_role=remote,
+                    container=container,
+                    config=config,
+                    output=output,
+                )
+            )
 
         if remote is not None:
             code = _run_remote(
@@ -754,6 +993,12 @@ def register(app: typer.Typer, get_container):
         task: Optional[str] = typer.Option(
             None, "--task", help="Prefer this task's worktrees for cwd"
         ),
+        repo: Optional[str] = typer.Option(
+            None, "--repo", help="Constrain --run-id logs to one recorded repository."
+        ),
+        run_id: Optional[str] = typer.Option(
+            None, "--run-id", help="Tail logs from one acknowledged profile run."
+        ),
     ):
         """Tail logs for a specific service."""
         import os as _os
@@ -768,17 +1013,21 @@ def register(app: typer.Typer, get_container):
         output = Output()
         config = container.config()
 
-        if all_services and service is not None:
+        if run_id is None and all_services and service is not None:
             output.error("Pass either <service> or --all, not both.")
             raise typer.Exit(code=1)
-        if not all_services and service is None:
+        if run_id is None and not all_services and service is None:
             available = ", ".join(sorted(config.repos.keys()))
             output.error(
                 f"Service name required, or pass --all. Available: {available}."
             )
             raise typer.Exit(code=1)
 
-        targets = sorted(config.repos.keys()) if all_services else [service]
+        targets = (
+            []
+            if run_id is not None
+            else sorted(config.repos.keys()) if all_services else [service]
+        )
         for name in targets:
             if name not in config.repos:
                 available = ", ".join(sorted(config.repos.keys()))
@@ -810,6 +1059,57 @@ def register(app: typer.Typer, get_container):
             raise typer.Exit(1)
         except NoActiveTaskError, AmbiguousTaskError:
             resolved_task = None
+        if run_id is not None:
+            from mship.core.remote_client import exec_tool
+            from mship.core.run_host import RunHostResolver
+            from mship.core.session_capture import (
+                SessionCaptureError,
+                select_session_capture,
+            )
+
+            repo_name = (
+                repo
+                or service
+                or (
+                    resolved_task.affected_repos[0]
+                    if resolved_task is not None and len(resolved_task.affected_repos) == 1
+                    else None
+                )
+            )
+            if (
+                resolved_task is None
+                or repo_name is None
+                or (repo is not None and service is not None and repo != service)
+            ):
+                output.error("--run-id logs require an active task and one matching repository")
+                raise typer.Exit(code=1)
+            try:
+                selected = select_session_capture(
+                    store=state_mgr.workspace_store,
+                    config=config,
+                    task=resolved_task,
+                    repo_name=repo_name,
+                    run_id=run_id,
+                    platform=None,
+                    operation_name="logs",
+                )
+                result = exec_tool(
+                    request=selected.operation,
+                    host=selected.host,
+                    resolver=RunHostResolver(),
+                    event_sink=lambda event: (
+                        output.progress(event.data.decode("utf-8", "replace"))
+                        if event.kind in {"stdout", "stderr"} and event.data
+                        else None
+                    ),
+                )
+            except (SessionCaptureError, ValueError) as error:
+                output.error(str(error))
+                raise typer.Exit(code=1)
+            if result.status not in {"completed", "running"}:
+                output.error("recorded run logs are unavailable")
+                raise typer.Exit(code=1)
+            return
 
         for name in targets:
             repo = config.repos[name]
