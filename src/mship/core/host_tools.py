@@ -358,6 +358,9 @@ def mise_environment(
         "MISE_AUTO_INSTALL": "false",
         "MISE_EXEC_AUTO_INSTALL": "false",
     }
+    for name in ("MISE_DATA_DIR", "MISE_CACHE_DIR"):
+        if os.environ.get(name):
+            environment[name] = os.environ[name]
     if declaration.mise.manifest not in _SUPPORTED_MANIFESTS:
         environment["MISE_DEFAULT_CONFIG_FILENAME"] = declaration.mise.manifest
     if locked:
@@ -643,6 +646,12 @@ def remote_operation(
         output=output,
         event_sink=event_sink,
     )
+    fingerprint = hashlib.sha256(
+        "|".join(registration_identity(host.connection)).encode()
+    ).hexdigest()
+    identity = HostToolIdentity(
+        host.name, host.roles[0] if host.roles else "selected", host.scope, fingerprint
+    )
     raw = getattr(result, "host_tools_report", None)
     if not isinstance(raw, Mapping):
         status = {
@@ -654,11 +663,8 @@ def remote_operation(
             "unauthorized": "unauthorized",
             "workspace_unavailable": "workspace_unavailable",
         }.get(getattr(result, "status", ""), "unreachable")
-        fingerprint = hashlib.sha256(
-            "|".join(registration_identity(host.connection)).encode()
-        ).hexdigest()
         resolution = HostToolResolution(
-            HostToolIdentity(host.name, host.roles[0] if host.roles else "selected", host.scope, fingerprint),
+            identity,
             task,
             repo,
             "",
@@ -670,15 +676,13 @@ def remote_operation(
         return doctor_report(resolution)
     try:
         resolution_data = raw["resolution"]
-        reported_host = resolution_data["host"]
+        if resolution_data["task"] != task or resolution_data["repo"] != repo:
+            return None
         requirements = tuple(
             (item["id"], item["status"]) for item in resolution_data.get("requirements", [])
         )
         tools = tuple(
             (item["name"], item["version"]) for item in resolution_data.get("tools", [])
-        )
-        identity = HostToolIdentity(
-            reported_host["name"], reported_host["role"], reported_host["scope"], reported_host["endpoint_fingerprint"]
         )
         resolution = HostToolResolution(
             identity,
@@ -692,10 +696,6 @@ def remote_operation(
             requirements,
             tools,
         )
-        return HostToolDoctorReport(
-            resolution,
-            raw["category"],
-            raw["remediation"],
-        )
+        return doctor_report(resolution)
     except (KeyError, TypeError, ValueError):
         return None

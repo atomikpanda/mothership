@@ -338,11 +338,9 @@ def _run_host_edges(
     """One edge per role — declared, mapped, reachable — plus aggregate edges
     for "nothing declared" and "a bare --remote would be ambiguous".
 
-    Fix hints intentionally mirror `run_host.store.RunHostError` and
-    `remote_client._http_status_message`, so the CLI error an operator hits and
-    the topology hint they read say the same thing.
+    Fix hints use the same safe run-host error categories as execution.
     """
-    from mship.core.run_host.store import RunHostStore, _env_key
+    from mship.core.run_host.store import RunHostError, RunHostStore, _env_key
 
     declared = list(getattr(config, "run_hosts", ()) or ())
     repos = getattr(config, "repos", {}) or {}
@@ -426,17 +424,33 @@ def _run_host_edges(
         ]
         advertised_roles.update(host_role for host in safe_hosts.values() for host_role in host["roles"])
         url_env, token_env = _env_key(role, "URL"), _env_key(role, "TOKEN")
-        connection = store.connection_for_role(role, environ=env) if len(candidates) <= 1 else None
+        env_url, env_token = env.get(url_env), env.get(token_env)
+        resolution_error = None
+        try:
+            connection = (
+                store.connection_for_role(role, environ=env)
+                if len(candidates) <= 1
+                else None
+            )
+        except RunHostError:
+            # Doctor must expose an incomplete/invalid override as a safe
+            # diagnostic; execution still requires a complete credential pair.
+            connection = None
+            resolution_error = True
         if len(candidates) == 1 and connection is not None:
             entry = candidates[0]
             url = connection.url
             token = connection.token
-            file_url = entry["url"]
+            file_url = entry.get("url")
         elif not candidates and role not in policy and connection is not None:
             # Preserve the documented explicit environment-only registration.
             url = connection.url
             token = connection.token
             file_url = None
+        elif resolution_error and (env_url or env_token):
+            url = env_url
+            token = None
+            file_url = candidates[0].get("url") if len(candidates) == 1 else None
         else:
             url = None
             token = None
@@ -447,8 +461,11 @@ def _run_host_edges(
             "url_source": (f"env:{url_env}" if env.get(url_env)
                            else "file" if file_url else None),
             "token_configured": bool(token),
-            "token_source": (f"env:{token_env}" if env.get(token_env)
-                             else "file" if file_url else None),
+            "token_source": (
+                f"env:{token_env}" if token and env_token
+                else "file" if token and file_url
+                else None
+            ),
         }
         if len(candidates) == 1 and candidates[0].get("mode") == "relay":
             entry = candidates[0]

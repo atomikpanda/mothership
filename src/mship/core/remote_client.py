@@ -220,41 +220,6 @@ def _validate_result_id(value: str) -> None:
         raise ValueError("invalid task result identifier")
 
 
-def _http_status_message(url: str, resp: httpx.Response) -> str:
-    """Build an actionable message for a non-2xx `POST /exec/{verb}`
-    response. `resp` has already been `.read()` so `.json()`/`.text` are
-    safe to inspect (the streaming context manager doesn't buffer the body
-    otherwise)."""
-    detail = None
-    try:
-        body = resp.json()
-        if isinstance(body, dict):
-            detail = body.get("detail")
-    except Exception:
-        pass
-
-    if resp.status_code == 503:
-        # Task 3's `POST /exec/{verb}` 503s when the remote serve has no
-        # workspace config wired in — i.e. that machine was never bootstrapped
-        # as an mship workspace (or serve started without one).
-        base = f"remote workspace not bootstrapped at {url} (503)"
-        return (
-            f"{base}: {detail}"
-            if detail
-            else (
-                f"{base}; bootstrap that machine as an mship workspace and "
-                f"restart `mship serve --relay` there"
-            )
-        )
-    if resp.status_code == 401:
-        return (
-            f"remote host at {url} rejected the bearer token (401); the "
-            f"run-host mapping may be stale — re-run `mship run-host add "
-            f"<role>` with a fresh pair link/token"
-        )
-    if detail:
-        return f"remote exec failed ({url}): HTTP {resp.status_code}: {detail}"
-    return f"remote exec failed ({url}): HTTP {resp.status_code}"
 
 
 class _ChunkReader:

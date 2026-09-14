@@ -115,7 +115,6 @@ def register(app: typer.Typer, get_container):
         shell = container.shell()
 
         # issue 366 #6: resolve which config is live + how it resolved, to report.
-        from pathlib import Path
         config_path = container.config_path()
         config_source = None
         try:

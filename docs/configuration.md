@@ -374,8 +374,14 @@ only the declared files below the output directory and an exact ordered
 `manifest.json` projection. It cannot choose result IDs, output locations,
 retention, host provenance, or a different media type.
 
-`retention_seconds` expires private bytes while retaining immutable result
-metadata. A successful task with a missing/rejected declaration remains a
-completed producer outcome with an unavailable artifact; outcome and artifact
-availability are intentionally separate. Failed/cancelled tasks expose only
-complete outputs explicitly marked `diagnostic_on_failure: true`.
+`required` defaults to `true`; set it to `false` only for an explicitly optional
+artifact. A successful producer missing a required artifact returns
+`evidence_error` with its persisted `result_id`; its immutable producing outcome
+still records the successful process exit. Missing optional outputs remain
+unavailable without changing that terminal status. Failed/cancelled tasks expose
+only complete outputs explicitly marked `diagnostic_on_failure: true`.
+
+`retention_seconds` expires retrieval rights while retaining result metadata.
+Owner startup performs a bounded byte-retention sweep; expiry is enforced during
+retrieval even before that sweep. Producer metadata currently permits only an
+empty object. No arbitrary producer metadata or private environment is published.

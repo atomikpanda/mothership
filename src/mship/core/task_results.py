@@ -6,8 +6,11 @@ output root plus trusted execution context; this store copies complete declared
 files before that owner cleans its transient worktree.
 """
 from __future__ import annotations
+try:
+    import fcntl
+except ModuleNotFoundError:
+    fcntl = None
 
-import fcntl
 import functools
 import hashlib
 import json
@@ -75,8 +78,16 @@ class DeclaredOutput(BaseModel):
     relative_path: str
     name: str
     media_type: str
+    required: bool = True
     diagnostic_on_failure: bool = False
     max_bytes: int = _MAX_ARTIFACT_BYTES
+
+    @field_validator("required", "diagnostic_on_failure", mode="before")
+    @classmethod
+    def _boolean_policy(cls, value: bool) -> bool:
+        if not isinstance(value, bool):
+            raise ValueError("output policy must be a boolean")
+        return value
 
     @field_validator("name")
     @classmethod
@@ -96,6 +107,8 @@ class DeclaredOutput(BaseModel):
             raise ValueError("output path must not contain glob syntax")
         if any(":" in part for part in parts):
             raise ValueError("output path must not contain a device form")
+        if any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("output path contains a control character")
         return value
 
     @field_validator("media_type")
@@ -289,11 +302,14 @@ class VerifiedArtifact:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-
 def _coordinated(method):
-    """Serialize blob capture/metadata commit and retention across processes."""
+    """Serialize capture/commit and retention; fail closed without POSIX locks."""
     @functools.wraps(method)
     def wrapped(self, *args, **kwargs):
+        if fcntl is None:
+            raise PublicationError(
+                "task-result publication requires POSIX file locking"
+            )
         self._state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         lock_path = self._state_dir / "task-results.lock"
         with lock_path.open("a+") as stream:

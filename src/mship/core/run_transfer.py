@@ -287,6 +287,8 @@ def cleanup_run_refs(task, *, config, store, shell, warn) -> list[str]:
         root_config = repos.get(git_repo)
         if root_config is None:
             continue
+        if not getattr(config, "run_hosts", ()) and not getattr(root_config, "run_host", None):
+            continue
         try:
             host = resolve_run_host(None, repo=root_config, config=config, store=store)
             conn = resolver.resolve(host)

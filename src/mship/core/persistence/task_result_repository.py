@@ -97,6 +97,11 @@ class TaskResultRepository:
                 .where(
                     task_results.c.workspace_id == workspace_id,
                     task_results.c.expires_at <= encode_datetime(now),
+                    task_results.c.id.in_(
+                        select(task_result_artifacts.c.result_id).where(
+                            task_result_artifacts.c.availability == "published"
+                        )
+                    ),
                 )
                 .order_by(task_results.c.expires_at, task_results.c.id)
                 .limit(256)

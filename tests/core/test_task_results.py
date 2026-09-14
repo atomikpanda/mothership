@@ -92,3 +92,77 @@ def test_verified_stream_rejects_tampered_private_blob(tmp_path: Path):
 
     with pytest.raises(ResultIntegrityError):
         store.open_verified(result.id, artifact.id)
+
+
+@pytest.mark.parametrize("required", [True, False])
+def test_missing_output_preserves_producer_outcome_and_required_policy(tmp_path, required):
+    from mship.core.remote_tool import ToolResult
+    from mship.core.task_result_publication import TaskResultPublisher
+
+    store = _store(tmp_path)
+    declaration = TaskOutputDeclaration(
+        retention_seconds=60,
+        artifacts=(DeclaredOutput(
+            name="report", relative_path="out/report.txt",
+            media_type="text/plain", required=required,
+        ),),
+    )
+    publisher = TaskResultPublisher.prepare(
+        store=store, declaration=declaration, context=_context(tmp_path),
+        task_key="report", output_parent=tmp_path,
+    )
+    publisher.manifest_path.write_bytes(_manifest())
+    terminal = publisher.publish(ToolResult("completed", exit_code=0))
+    assert terminal.status == ("evidence_error" if required else "completed")
+    saved = store.get(terminal.result_id)
+    assert saved.outcome.status == "completed" and saved.outcome.exit_code == 0
+    assert saved.artifacts[0].availability != "published"
+
+
+def test_failed_producer_can_publish_only_declared_diagnostics(tmp_path):
+    from mship.core.remote_tool import ToolResult
+    from mship.core.task_result_publication import TaskResultPublisher
+
+    store = _store(tmp_path)
+    declaration = TaskOutputDeclaration(
+        retention_seconds=60,
+        artifacts=(DeclaredOutput(
+            name="report", relative_path="out/report.txt",
+            media_type="text/plain", diagnostic_on_failure=True,
+        ),),
+    )
+    publisher = TaskResultPublisher.prepare(
+        store=store, declaration=declaration, context=_context(tmp_path),
+        task_key="report", output_parent=tmp_path,
+    )
+    (publisher.output_root / "out").mkdir()
+    (publisher.output_root / "out/report.txt").write_bytes(b"failure diagnostic")
+    publisher.manifest_path.write_bytes(_manifest())
+    terminal = publisher.publish(ToolResult("completed", exit_code=7))
+    assert terminal.exit_code == 7
+    saved = store.get(terminal.result_id)
+    assert saved.outcome.status == "failed" and saved.outcome.exit_code == 7
+    with store.open_verified(saved.id, saved.artifacts[0].id) as lease:
+        assert os.read(lease.fd, 100) == b"failure diagnostic"
+
+
+def test_retention_sweeps_progress_past_already_expired_results(tmp_path):
+    from datetime import timedelta
+
+    store = _store(tmp_path)
+    declaration = _declaration()
+    root = store.create_output_root(tmp_path)
+    (root / "out").mkdir()
+    (root / "out/report.txt").write_bytes(b"shared retained bytes")
+    (root / "manifest.json").write_bytes(_manifest())
+    now = datetime.now(timezone.utc)
+    for index in range(257):
+        result = store.publish(
+            output_root=root, declaration=declaration, context=_context(tmp_path),
+            task_key="report", result_id=f"result-{index:024d}",
+            outcome=TaskOutcome("completed", 0, now),
+        )
+    expired_at = now + timedelta(hours=1)
+    store.expire(now=expired_at)
+    store.expire(now=expired_at)
+    assert store.get(result.id).artifacts[0].availability == "expired"
