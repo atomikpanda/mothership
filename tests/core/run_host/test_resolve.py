@@ -29,10 +29,11 @@ def test_explicit_role_wins_over_repo_and_sole_entry(tmp_path):
     config = _config(["ios-sim-host", "android-emu-host"])
     repo = _repo(run_host="ios-sim-host")
 
-    conn = resolve_run_host(
+    host = resolve_run_host(
         "android-emu-host", repo=repo, config=config, store=store
     )
-    assert conn == RunHostConnection(url="http://android", token="android-tok")
+    assert host.name == "android-emu-host"
+    assert host.connection == RunHostConnection(url="http://android", token="android-tok")
 
 
 def test_falls_back_to_repo_run_host(tmp_path):
@@ -41,8 +42,9 @@ def test_falls_back_to_repo_run_host(tmp_path):
     config = _config(["ios-sim-host", "android-emu-host"])
     repo = _repo(run_host="ios-sim-host")
 
-    conn = resolve_run_host(None, repo=repo, config=config, store=store)
-    assert conn == RunHostConnection(url="http://ios", token="ios-tok")
+    host = resolve_run_host(None, repo=repo, config=config, store=store)
+    assert host.name == "ios-sim-host"
+    assert host.connection == RunHostConnection(url="http://ios", token="ios-tok")
 
 
 def test_falls_back_to_sole_config_entry_when_no_repo_role(tmp_path):
@@ -51,8 +53,9 @@ def test_falls_back_to_sole_config_entry_when_no_repo_role(tmp_path):
     config = _config(["ios-sim-host"])
     repo = _repo(run_host=None)
 
-    conn = resolve_run_host(None, repo=repo, config=config, store=store)
-    assert conn == RunHostConnection(url="http://ios", token="ios-tok")
+    host = resolve_run_host(None, repo=repo, config=config, store=store)
+    assert host.name == "ios-sim-host"
+    assert host.connection == RunHostConnection(url="http://ios", token="ios-tok")
 
 
 def test_falls_back_to_sole_config_entry_when_repo_is_none(tmp_path):
@@ -60,8 +63,9 @@ def test_falls_back_to_sole_config_entry_when_repo_is_none(tmp_path):
     store.set_host(HostRegistration("ios-sim-host", ("ios-sim-host",), (), 0, RunHostConnection(url="http://ios", token="ios-tok"), "project"), scope="project")
     config = _config(["ios-sim-host"])
 
-    conn = resolve_run_host(None, repo=None, config=config, store=store)
-    assert conn == RunHostConnection(url="http://ios", token="ios-tok")
+    host = resolve_run_host(None, repo=None, config=config, store=store)
+    assert host.name == "ios-sim-host"
+    assert host.connection == RunHostConnection(url="http://ios", token="ios-tok")
 
 
 def test_ambiguous_when_multiple_roles_and_none_specified(tmp_path):

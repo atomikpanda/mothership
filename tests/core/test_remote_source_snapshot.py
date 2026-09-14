@@ -16,7 +16,7 @@ from mship.core.remote_dispatch import (
     prepare_remote_source,
     snapshot_remote_source,
 )
-from mship.core.run_host import RunHostConnection
+from mship.core.run_host import HostRegistration, RunHostConnection, RunHostResolver
 from mship.util.shell import ShellRunner
 
 
@@ -32,6 +32,10 @@ class _Output:
     def breadcrumb(self, message: str) -> None:
         self.messages.append(message)
 
+
+
+def _host(url: str) -> HostRegistration:
+    return HostRegistration("host", ("role",), (), 0, RunHostConnection(url, "private"), "project")
 
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(
@@ -98,19 +102,20 @@ def test_frozen_dirty_snapshot_reaches_every_host_after_local_edits(
     (repo / "app.txt").write_text("second local edit\n")
     deliveries: list[tuple[str, str]] = []
 
-    def push(shell, path, *, conn, repo, task, sha):
+    def push(shell, path, *, conn, workspace_id, repo, task, sha):
         deliveries.append((conn.url, sha))
         return f"refs/mship/run/{task}/{repo}"
 
     monkeypatch.setattr(run_transfer, "push_run_ref", push)
     output = _Output()
-    for host in ("https://one.invalid", "https://two.invalid"):
+    for endpoint in ("https://one.invalid", "https://two.invalid"):
         prepare_remote_source(
             task_obj=_Task(),
             target_repos=["app"],
             config=None,
             shell=ShellRunner(),
-            conn=RunHostConnection(host, "private"),
+            host=_host(endpoint),
+            resolver=RunHostResolver(),
             output=output,
             snapshot=snapshot,
         )
@@ -171,7 +176,8 @@ def test_receipt_failure_rolls_back_only_the_transferred_ref_with_its_lease(
             target_repos=["app"],
             config=None,
             shell=ShellRunner(),
-            conn=RunHostConnection("https://host.invalid", "private-token"),
+            host=_host("https://host.invalid"),
+            resolver=RunHostResolver(),
             output=_Output(),
             snapshot=snapshot,
             on_transfer=lambda *_args: (_ for _ in ()).throw(
@@ -180,15 +186,12 @@ def test_receipt_failure_rolls_back_only_the_transferred_ref_with_its_lease(
         )
 
     assert "private-token" not in str(error.value)
-    assert deleted == [
-        {
-            "path": source.path,
-            "conn": RunHostConnection("https://host.invalid", "private-token"),
-            "repo": "app",
-            "task": "task-1",
-            "expected_sha": source.sha,
-        }
-    ]
+    assert deleted[0]["path"] == source.path
+    assert deleted[0]["conn"].url == "https://host.invalid"
+    assert deleted[0]["repo"] == "app"
+    assert deleted[0]["task"] == "task-1"
+    assert deleted[0]["expected_sha"] == source.sha
+    assert deleted[0]["workspace_id"] is None
 
 
 def test_receipt_failure_reports_unresolved_cleanup_when_leased_rollback_fails(
@@ -213,7 +216,8 @@ def test_receipt_failure_reports_unresolved_cleanup_when_leased_rollback_fails(
             target_repos=["app"],
             config=None,
             shell=ShellRunner(),
-            conn=RunHostConnection("https://host.invalid", "private-token"),
+            host=_host("https://host.invalid"),
+            resolver=RunHostResolver(),
             output=_Output(),
             snapshot=snapshot,
             on_transfer=lambda *_args: (_ for _ in ()).throw(

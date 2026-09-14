@@ -7,7 +7,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping
 
-from mship.core.run_host import RunHostConnection
+from mship.core.run_host import HostRegistration, RunHostError, RunHostResolver
 
 
 class RemoteDispatchError(RuntimeError):
@@ -124,13 +124,14 @@ def prepare_remote_source(
     target_repos,
     config,
     shell,
-    conn: RunHostConnection,
+    host: HostRegistration,
+    resolver: RunHostResolver,
     output,
     on_prepared: Callable[[str], None] | None = None,
     snapshot: SourceSnapshot | None = None,
     on_transfer: Callable[[str, str, str], None] | None = None,
 ) -> PreparedSource:
-    """Transfer certified source to ``conn`` and return its exact identities.
+    """Transfer certified source to the selected host with a fresh Git bearer.
 
     When supplied, ``snapshot`` is the complete source authority: preparation
     does not inspect or synthesize the local tree again.  This prevents a later
@@ -160,15 +161,17 @@ def prepare_remote_source(
     )
     for source in snapshot._dirty_sources:
         try:
+            connection = resolver.resolve(host)
             ref = run_transfer.push_run_ref(
                 shell,
                 source.path,
-                conn=conn,
+                conn=connection,
+                workspace_id=getattr(host.connection, "workspace_id", None),
                 repo=source.git_repo,
                 task=task_obj.slug,
                 sha=source.sha,
             )
-        except (run_transfer.RunTransferError, RunRefNameError) as exc:
+        except (run_transfer.RunTransferError, RunRefNameError, RunHostError) as exc:
             raise RemoteDispatchError(str(exc)) from None
         # A receipt is never made for a failed push. If durable receipt creation
         # fails after a successful push, roll back only this exact ref with the
@@ -178,15 +181,17 @@ def prepare_remote_source(
                 on_transfer(source.git_repo, ref, source.sha)
             except Exception:
                 try:
+                    rollback_connection = resolver.resolve(host)
                     run_transfer.delete_run_ref(
                         shell,
                         source.path,
-                        conn=conn,
+                        conn=rollback_connection,
+                        workspace_id=getattr(host.connection, "workspace_id", None),
                         repo=source.git_repo,
                         task=task_obj.slug,
                         expected_sha=source.sha,
                     )
-                except run_transfer.RunTransferError, RunRefNameError:
+                except (run_transfer.RunTransferError, RunRefNameError, RunHostError):
                     raise RemoteDispatchError(
                         "could not record the transferred source; exact run-ref cleanup "
                         "is unresolved"
@@ -238,19 +243,13 @@ def run_remote_tool(
     task_obj,
     config,
     shell,
-    conn: RunHostConnection,
+    host: HostRegistration,
+    resolver: RunHostResolver,
     output,
     event_sink=None,
     transport=None,
 ):
-    """Prepare a typed tool request once, then execute it against ``conn``.
-
-    Discovery and launch use the same exact-source proof as legacy remote
-    commands and overwrite caller-provided source/ref claims with certified
-    values.  Observation is intentionally different: it validates only the
-    already-resolved task identity, never transfers or rematerializes source,
-    and keeps the supplied pinned connection and opaque owner pair intact.
-    """
+    """Prepare a typed request and execute it with independently resolved credentials."""
     from mship.core.remote_client import exec_tool
     from mship.core.remote_tool import ToolRequest, ToolResult
 
@@ -258,39 +257,38 @@ def run_remote_tool(
         not isinstance(request, ToolRequest)
         or task_obj is None
         or request.task != task_obj.slug
+        or request.repo not in task_obj.worktrees
     ):
         return ToolResult(status="invalid")
-    if request.repo not in task_obj.worktrees:
-        return ToolResult(status="invalid")
-
     if request.preparation == "observe":
         return exec_tool(
             request=request,
-            conn=conn,
+            host=host,
+            resolver=resolver,
             event_sink=event_sink,
             transport=transport,
         )
-
     try:
         prepared = prepare_remote_source(
             task_obj=task_obj,
             target_repos=[request.repo],
             config=config,
             shell=shell,
-            conn=conn,
+            host=host,
+            resolver=resolver,
             output=output,
         )
     except RemoteDispatchError as exc:
         output.error(str(exc))
         return ToolResult(status="materialization_error")
-
     return exec_tool(
         request=replace(
             request,
             run_ref_repos=prepared.run_ref_repos,
             source_revision=prepared.source_revisions[request.repo],
         ),
-        conn=conn,
+        host=host,
+        resolver=resolver,
         event_sink=event_sink,
         transport=transport,
     )

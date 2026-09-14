@@ -2,11 +2,11 @@
 specs/2026-07-11-remote-run-machine.md, MOS-191/MOS-203) — the counterpart to
 `core/remote_exec.py`'s serve-side `run_verb_stream`.
 
-`exec_remote` POSTs `{task, repos, platform?, kind}` to a run-host's
-`POST /exec/{verb}` (bearer-auth'd, see `mship.core.run_host.RunHostConnection`)
-and drives the streamed `application/octet-stream` response: it prints
-stdout/stderr lines live as they arrive and, for `verb == "capture"` when a
-local destination is given, extracts the artifact tar (if any) there. See
+`exec_remote` resolves a named run-host registration at the operation boundary,
+then POSTs `{task, repos, platform?, kind}` to its authenticated
+`POST /exec/{verb}` route and drives the streamed `application/octet-stream`
+response: it prints stdout/stderr lines live as they arrive and, for
+`verb == "capture"` when a local destination is given, extracts the artifact tar.
 `mship.core.remote_exec`'s module docstring for the exact wire framing this
 parses (line-per-chunk task output, an optional `__MSHIP_ARTIFACTS__:<nonce>
 <n>` + `n` raw tar bytes, and a trailing `__MSHIP_EXIT__:<nonce> <code>`
@@ -14,24 +14,25 @@ sentinel — where `<nonce>` is the per-request secret from the
 `X-Mship-Exec-Nonce` response header that stops task stdout from spoofing a
 control record).
 
-The CLI (`cli/exec.py`'s `run`/`build`, `cli/capture.py`'s `capture`) is the
-only caller: it resolves `--remote[=role]` to a `RunHostConnection` via
-`mship.core.run_host.resolve_run_host`, calls `exec_remote`, and mirrors the
-returned int as its own process exit code (`raise typer.Exit(code)`).
+The CLI (`cli/exec.py`'s `run`/`build`, `cli/capture.py`'s `capture`) resolves
+`--remote[=role]` to a registration, supplies a `RunHostResolver` to
+`exec_remote`, and mirrors the returned int as its own process exit code
+(`raise typer.Exit(code)`).
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 import io
 import tarfile
 from pathlib import Path
-from typing import Iterator, Optional
+from urllib.parse import quote
+from typing import Optional
 
 import httpx
 
 from mship.core.remote_exec import ARTIFACT_MARKER, EXIT_MARKER
-from mship.core.run_host import RunHostConnection
+from mship.core.run_host import HostRegistration, ResolvedRunHostConnection, RunHostResolver
 from mship.core.remote_tool import (
     ToolEvent,
     ToolProtocolError,
@@ -252,12 +253,21 @@ def _drive(
         at_line_start = line.endswith(b"\n")
 
 
+def _operation_url(
+    host: HostRegistration, conn: ResolvedRunHostConnection, suffix: str
+) -> str:
+    if hasattr(host.connection, "workspace_id"):
+        return f"{conn.url.rstrip('/')}/workspaces/{quote(host.connection.workspace_id, safe='')}{suffix}"
+    return f"{conn.url.rstrip('/')}{suffix}"
+
+
 def exec_remote(
     *,
     verb: str,
-    conn: RunHostConnection,
     task: str,
     repos: list[str],
+    host: HostRegistration,
+    resolver: RunHostResolver,
     platform: str | None = None,
     kind: str = "all",
     captures_dir_for: Path | None = None,
@@ -265,92 +275,39 @@ def exec_remote(
     print_fn: Callable[[str], None] = print,
     transport: httpx.BaseTransport | None = None,
 ) -> int:
-    """POST `{task, repos, platform?, kind}` to `{conn.url}/exec/{verb}`
-    (bearer-auth'd with `conn.token`) and drive the streamed response.
-
-    Prints each stdout/stderr line as it arrives (via `print_fn`, default the
-    `print` builtin). When `verb == "capture"` and `captures_dir_for` is
-    given, extracts the artifact tar (if the remote produced one) into that
-    directory — callers pass the SAME local path a local capture would use
-    (see `cli/capture.py`'s out_dir computation) so a remote capture is
-    indistinguishable on disk from a local one. `captures_dir_for` is ignored
-    (nothing to extract) for `run`/`build`, which never emit an artifact
-    block.
-
-    `run_ref_repos` (optional) names the repos this host should materialize
-    from its own local scratch ref for this task rather than from origin —
-    the operator's working tree was pushed straight to it (see
-    `mship.core.run_transfer`). Repo NAMES, not refs: the host builds the ref
-    itself from values it has already validated. Omitted from the request
-    body entirely when empty, so a clean run's wire format is unchanged.
-
-    Returns the remote task's exit code, parsed from the trailing
-    `__MSHIP_EXIT__ <code>` line — conveyed as DATA, not an HTTP error, so a
-    non-zero remote task exit is a normal return here, not a raise.
-
-    Raises `RemoteExecError` for a genuine connection failure. Task 6 gives
-    each case a specific, actionable message: a non-2xx HTTP response (a 503
-    "remote workspace not bootstrapped", a 401 stale-token, or a generic
-    status — see `_http_status_message`), a connection-level failure
-    (unreachable host/timeout — "unreachable via relay"), or a stream that
-    never produced the exit sentinel (unchanged from Task 5). `transport` is
-    an injection seam for tests (e.g. `httpx.MockTransport`); production
-    callers omit it and get a real network connection.
-    """
+    """Execute once, with one refresh/retry only for a pre-stream 401/403."""
     body: dict = {"task": task, "repos": repos, "kind": kind}
     if platform is not None:
         body["platform"] = platform
     if run_ref_repos:
         body["run_ref_repos"] = list(run_ref_repos)
-
-    headers = {"Authorization": f"Bearer {conn.token}"}
-    url = f"{conn.url}/exec/{verb}"
-
-    try:
-        # Keep response headers and HTTP error bodies bounded by HTTPX's
-        # default five-second timeout; only a valid execution body may be idle.
-        with httpx.Client(transport=transport) as client:
-            with client.stream("POST", url, headers=headers, json=body) as resp:
-                if resp.status_code >= 400:
-                    resp.read()
-                    raise RemoteExecError(_http_status_message(url, resp))
-                # Read the anti-spoof nonce from the response HEADERS before
-                # draining the body — headers arrive first, and the task can't
-                # inject into them (httpx headers are case-insensitive). Without
-                # it we can't tell a real control record from spoofed output.
-                nonce = resp.headers.get(NONCE_HEADER)
-                if not nonce:
-                    raise RemoteExecError(
-                        f"remote response missing the {NONCE_HEADER} header; "
-                        f"cannot authenticate the exit-code/artifact framing "
-                        f"(is the remote running a current mship serve?)"
-                    )
-                # HTTPX/httpcore consult the request's timeout extension when
-                # starting the response-body iterator, after headers arrive.
-                resp.request.extensions["timeout"]["read"] = None
-                reader = _ChunkReader(_raw_chunks(resp))
-                return _drive(
-                    reader,
-                    nonce=nonce,
-                    captures_dir_for=captures_dir_for,
-                    print_fn=print_fn,
-                )
-    except httpx.HTTPError as exc:
-        # Connection-level failure (unreachable host, DNS, timeout, dropped
-        # tunnel before a response was ever received) — distinct from the
-        # non-2xx case above, which raises RemoteExecError directly and so
-        # never reaches this handler.
-        raise RemoteExecError(
-            f"remote host at {url} is unreachable via relay ({exc}); check "
-            f"that machine is running `mship serve --relay` and its pairing "
-            f"is still valid"
-        ) from exc
+    for attempt in range(2):
+        active = resolver.resolve(host, force_refresh=attempt == 1)
+        url = _operation_url(host, active, f"/exec/{verb}")
+        try:
+            with httpx.Client(transport=transport, follow_redirects=False) as client:
+                with client.stream("POST", url, headers={"Authorization": f"Bearer {active.token}"}, json=body) as response:
+                    if response.status_code in {401, 403} and attempt == 0 and hasattr(host.connection, "workspace_id"):
+                        continue
+                    if response.status_code >= 400:
+                        raise RemoteExecError(f"remote execution was refused (HTTP {response.status_code})")
+                    nonce = response.headers.get(NONCE_HEADER)
+                    if not nonce:
+                        raise RemoteExecError(f"remote response missing the {NONCE_HEADER} header")
+                    timeout = response.request.extensions.get("timeout")
+                    if isinstance(timeout, dict):
+                        timeout["read"] = None
+                    return _drive(_ChunkReader(_raw_chunks(response)), nonce=nonce, captures_dir_for=captures_dir_for, print_fn=print_fn)
+        except httpx.HTTPError:
+            raise RemoteExecError("remote host is unreachable; check relay pairing and host availability") from None
+    raise RemoteExecError("remote host rejected refreshed credentials; re-enrol the host and re-pair if needed")
 
 
-def exec_tool(
+def _exec_tool_once(
     *,
     request: ToolRequest,
-    conn: RunHostConnection,
+    conn: ResolvedRunHostConnection,
+    workspace_id: str | None,
     event_sink: Callable[[ToolEvent], None] | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> ToolResult:
@@ -366,7 +323,8 @@ def exec_tool(
         return ToolResult(status="invalid")
 
     headers = {"Authorization": f"Bearer {conn.token}"}
-    url = f"{conn.url}/exec/tool"
+    workspace_prefix = f"/workspaces/{quote(workspace_id, safe='')}" if workspace_id else ""
+    url = f"{conn.url.rstrip('/')}{workspace_prefix}/exec/tool"
     try:
         with httpx.Client(transport=transport, follow_redirects=False) as client:
             with client.stream(
@@ -469,5 +427,41 @@ def exec_tool(
                 if event_sink is not None:
                     event_sink(terminal_event)
                 return final
-    except httpx.HTTPError, ToolProtocolError, UnicodeError, ValueError:
+    except (httpx.HTTPError, ToolProtocolError, UnicodeError, ValueError):
         return ToolResult(status="protocol_error")
+
+
+def exec_tool(
+    *,
+    request: ToolRequest,
+    host: HostRegistration,
+    resolver: RunHostResolver,
+    event_sink: Callable[[ToolEvent], None] | None = None,
+    transport: httpx.BaseTransport | None = None,
+) -> ToolResult:
+    """Issue one typed request, retrying only a definite pre-start auth rejection."""
+    for attempt in range(2):
+        active = resolver.resolve(host, force_refresh=attempt == 1)
+        observed_event = False
+
+        def attempt_sink(event: ToolEvent) -> None:
+            nonlocal observed_event
+            observed_event = True
+            if event_sink is not None:
+                event_sink(event)
+
+        result = _exec_tool_once(
+            request=request,
+            conn=active,
+            workspace_id=getattr(host.connection, "workspace_id", None),
+            event_sink=attempt_sink,
+            transport=transport,
+        )
+        if (
+            result.status != "auth_error"
+            or observed_event
+            or attempt == 1
+            or not hasattr(host.connection, "workspace_id")
+        ):
+            return result
+    return ToolResult(status="auth_error")

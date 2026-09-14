@@ -7,7 +7,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mship.core.run_host.config import HostRegistration
+from mship.core.run_host import RunHostError, RunHostResolver
+from mship.core.run_host.config import HostRegistration, registration_identity
 from mship.core.run_target.backend import BackendExecutor, discover_on_host
 from mship.core.run_target.models import (
     BackendExecution,
@@ -67,13 +68,12 @@ class RemoteBackendExecutor:
         self.event_sink = event_sink
         self.transport = transport
         self._snapshots: dict[str, Any] = {}
+        self._resolver = RunHostResolver(transport=transport)
         self._prepared: dict[tuple[str, str, str], _PreparedHost] = {}
 
     @staticmethod
     def _host_key(repo_name: str, host: HostRegistration) -> tuple[str, str, str]:
-        # A same-named replacement host is not the same recipient.  Including the
-        # endpoint makes a stale receipt unusable after its registry entry changes.
-        return (repo_name, host.name, host.connection.url)
+        return (repo_name, host.name, "|".join(registration_identity(host.connection)))
 
     @staticmethod
     def _result(
@@ -163,7 +163,8 @@ class RemoteBackendExecutor:
                     target_repos=[repo_name],
                     config=self.config,
                     shell=self.shell,
-                    conn=host.connection,
+                    host=host,
+                    resolver=self._resolver,
                     output=self.output,
                     snapshot=snapshot,
                     on_transfer=record_transfer,
@@ -177,7 +178,7 @@ class RemoteBackendExecutor:
                     run_ref_repos=prepared.run_ref_repos,
                     source_revision=source_revision,
                 )
-            except RemoteDispatchError, run_transfer.RunTransferError:
+            except (RemoteDispatchError, run_transfer.RunTransferError, RunHostError):
                 self._prepared[key] = _PreparedHost(
                     run_ref_repos=(),
                     source_revision=source_revision,
@@ -233,7 +234,7 @@ class RemoteBackendExecutor:
             or run.host_name != host.name
             or run.host_scope != host.scope
             or run.host_endpoint_fingerprint
-            != host_endpoint_fingerprint(host.connection.url)
+            != host_endpoint_fingerprint("|".join(registration_identity(host.connection)))
             or run.status != "active"
             or run.owner_ref is None
             or run.owner_generation is None
@@ -366,15 +367,19 @@ class RemoteBackendExecutor:
                 max_stderr_bytes=execution.max_stderr_bytes,
                 timeout_seconds=execution.timeout_seconds,
             )
-        except TypeError, ValueError, UnicodeError:
+        except (TypeError, ValueError, UnicodeError):
             return self._result(error_code="invalid")
 
-        result = exec_tool(
-            request=request,
-            conn=host.connection,
-            event_sink=self.event_sink,
-            transport=self.transport,
-        )
+        try:
+            result = exec_tool(
+                request=request,
+                host=host,
+                resolver=self._resolver,
+                event_sink=self.event_sink,
+                transport=self.transport,
+            )
+        except RunHostError:
+            return self._result(error_code="auth_error")
         stdout = result.stdout if execution.preparation == "discover" else b""
         stderr = result.stderr if execution.preparation == "discover" else b""
         if result.status in {"completed", "running"}:

@@ -17,7 +17,7 @@ from mship.core.remote_tool import (
     encode_tool_event,
     iter_tool_events,
 )
-from mship.core.run_host import RunHostConnection
+from mship.core.run_host import HostRegistration, RunHostConnection, RunHostResolver
 from mship.core.state import Task
 
 
@@ -40,6 +40,10 @@ def _request(
         **kwargs,
     )
 
+
+
+def _host(connection: RunHostConnection) -> HostRegistration:
+    return HostRegistration("host", ("role",), (), 0, connection, "project")
 
 def _frame(event: ToolEvent) -> bytes:
     return encode_tool_event(event, NONCE)
@@ -104,18 +108,14 @@ def test_exec_tool_rejects_completed_execution_without_started(
         ),
     )
 
-    result = exec_tool(
-        request=_request(preparation=preparation, argv=argv),
-        conn=RunHostConnection(url="http://remote.example", token="secret-token"),
-        event_sink=delivered.append,
-        transport=httpx.MockTransport(
-            lambda _request: httpx.Response(
-                200,
-                content=_stream(_frame(event)),
-                headers={"X-Mship-Exec-Nonce": NONCE},
-            )
-        ),
-    )
+    result = exec_tool(request=_request(preparation=preparation, argv=argv), host=_host(RunHostConnection(url="http://remote.example", token="secret-token")), resolver=RunHostResolver(), event_sink=delivered.append,
+    transport=httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            content=_stream(_frame(event)),
+            headers={"X-Mship-Exec-Nonce": NONCE},
+        )
+    ),)
 
     assert result.status == "protocol_error"
     assert delivered == []
@@ -157,12 +157,8 @@ def test_exec_tool_streams_setup_then_tool_output_without_collecting_launch_outp
             headers={"X-Mship-Exec-Nonce": NONCE},
         )
 
-    result = exec_tool(
-        request=_request(),
-        conn=RunHostConnection(url="http://remote.example", token="secret-token"),
-        event_sink=delivered.append,
-        transport=httpx.MockTransport(handler),
-    )
+    result = exec_tool(request=_request(), host=_host(RunHostConnection(url="http://remote.example", token="secret-token")), resolver=RunHostResolver(), event_sink=delivered.append,
+    transport=httpx.MockTransport(handler),)
 
     assert result.status == "completed"
     assert result.exit_code == 7
@@ -207,18 +203,14 @@ def test_exec_tool_rejects_discovery_stream_output_before_callback(kind: str):
     ]
     delivered: list[ToolEvent] = []
 
-    result = exec_tool(
-        request=_request(preparation="discover"),
-        conn=RunHostConnection(url="http://remote.example", token="secret-token"),
-        event_sink=delivered.append,
-        transport=httpx.MockTransport(
-            lambda _request: httpx.Response(
-                200,
-                content=iter(_frame(event) for event in events),
-                headers={"X-Mship-Exec-Nonce": NONCE},
-            )
-        ),
-    )
+    result = exec_tool(request=_request(preparation="discover"), host=_host(RunHostConnection(url="http://remote.example", token="secret-token")), resolver=RunHostResolver(), event_sink=delivered.append,
+    transport=httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            content=iter(_frame(event) for event in events),
+            headers={"X-Mship-Exec-Nonce": NONCE},
+        )
+    ),)
 
     assert result.status == "protocol_error"
     assert delivered == []
@@ -250,18 +242,14 @@ def test_exec_tool_accepts_bounded_discovery_result_after_started():
     ]
     delivered: list[ToolEvent] = []
 
-    result = exec_tool(
-        request=_request(preparation="discover"),
-        conn=RunHostConnection(url="http://remote.example", token="secret-token"),
-        event_sink=delivered.append,
-        transport=httpx.MockTransport(
-            lambda _request: httpx.Response(
-                200,
-                content=iter(_frame(event) for event in events),
-                headers={"X-Mship-Exec-Nonce": NONCE},
-            )
-        ),
-    )
+    result = exec_tool(request=_request(preparation="discover"), host=_host(RunHostConnection(url="http://remote.example", token="secret-token")), resolver=RunHostResolver(), event_sink=delivered.append,
+    transport=httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            content=iter(_frame(event) for event in events),
+            headers={"X-Mship-Exec-Nonce": NONCE},
+        )
+    ),)
 
     assert result.status == "completed"
     assert result.stdout == b"inventory\n"
@@ -299,18 +287,14 @@ def test_exec_tool_rejects_discovery_result_over_requested_output_cap(
     ]
     delivered: list[ToolEvent] = []
 
-    result = exec_tool(
-        request=_request(preparation="discover"),
-        conn=RunHostConnection(url="http://remote.example", token="secret-token"),
-        event_sink=delivered.append,
-        transport=httpx.MockTransport(
-            lambda _request: httpx.Response(
-                200,
-                content=iter(_frame(event) for event in events),
-                headers={"X-Mship-Exec-Nonce": NONCE},
-            )
-        ),
-    )
+    result = exec_tool(request=_request(preparation="discover"), host=_host(RunHostConnection(url="http://remote.example", token="secret-token")), resolver=RunHostResolver(), event_sink=delivered.append,
+    transport=httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            content=iter(_frame(event) for event in events),
+            headers={"X-Mship-Exec-Nonce": NONCE},
+        )
+    ),)
 
     assert result.status == "protocol_error"
     assert [event.kind for event in delivered] == ["started"]
@@ -346,18 +330,14 @@ def test_exec_tool_defers_terminal_callback_until_stream_is_validated(
     else:
         chunks.append(b"trailing bytes")
 
-    result = exec_tool(
-        request=_request(),
-        conn=RunHostConnection(url="http://remote.example", token="secret-token"),
-        event_sink=delivered.append,
-        transport=httpx.MockTransport(
-            lambda _request: httpx.Response(
-                200,
-                content=iter(chunks),
-                headers={"X-Mship-Exec-Nonce": NONCE},
-            )
-        ),
-    )
+    result = exec_tool(request=_request(), host=_host(RunHostConnection(url="http://remote.example", token="secret-token")), resolver=RunHostResolver(), event_sink=delivered.append,
+    transport=httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            content=iter(chunks),
+            headers={"X-Mship-Exec-Nonce": NONCE},
+        )
+    ),)
 
     assert result.status == "protocol_error"
     assert [event.kind for event in delivered] == ["started"]
@@ -404,12 +384,18 @@ def test_observation_uses_pinned_owner_without_source_transfer_or_local_executio
             200, content=_stream(body), headers={"X-Mship-Exec-Nonce": NONCE}
         )
 
+    host = HostRegistration(
+        "host", ("ios",), (), 0,
+        RunHostConnection(url="http://remote.example", token="secret-token"),
+        "project",
+    )
     result = run_remote_tool(
         request=request,
         task_obj=task,
         config=object(),
         shell=NoTransferShell(),
-        conn=RunHostConnection(url="http://remote.example", token="secret-token"),
+        host=host,
+        resolver=RunHostResolver(),
         output=Output(),
         transport=httpx.MockTransport(handler),
     )
@@ -430,17 +416,13 @@ def test_exec_tool_accepts_running_result_only_for_status_observation():
         ),
     )
 
-    result = exec_tool(
-        request=request,
-        conn=RunHostConnection(url="http://remote.example", token="secret-token"),
-        transport=httpx.MockTransport(
-            lambda _request: httpx.Response(
-                200,
-                content=_stream(_frame(event)),
-                headers={"X-Mship-Exec-Nonce": NONCE},
-            )
-        ),
-    )
+    result = exec_tool(request=request, host=_host(RunHostConnection(url="http://remote.example", token="secret-token")), resolver=RunHostResolver(), transport=httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            content=_stream(_frame(event)),
+            headers={"X-Mship-Exec-Nonce": NONCE},
+        )
+    ),)
 
     assert result.status == "running"
     assert result.owner_ref == "owner-abcdef"
@@ -457,17 +439,13 @@ def test_exec_tool_rejects_running_result_for_non_status_request():
         ),
     )
 
-    result = exec_tool(
-        request=_request(),
-        conn=RunHostConnection(url="http://remote.example", token="secret-token"),
-        transport=httpx.MockTransport(
-            lambda _request: httpx.Response(
-                200,
-                content=_stream(_frame(event)),
-                headers={"X-Mship-Exec-Nonce": NONCE},
-            )
-        ),
-    )
+    result = exec_tool(request=_request(), host=_host(RunHostConnection(url="http://remote.example", token="secret-token")), resolver=RunHostResolver(), transport=httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            content=_stream(_frame(event)),
+            headers={"X-Mship-Exec-Nonce": NONCE},
+        )
+    ),)
 
     assert result.status == "protocol_error"
 
@@ -485,17 +463,13 @@ def test_exec_tool_rejects_mismatched_observation_owner():
         ),
     )
 
-    result = exec_tool(
-        request=request,
-        conn=RunHostConnection(url="http://remote.example", token="secret-token"),
-        transport=httpx.MockTransport(
-            lambda _request: httpx.Response(
-                200,
-                content=_stream(_frame(event)),
-                headers={"X-Mship-Exec-Nonce": NONCE},
-            )
-        ),
-    )
+    result = exec_tool(request=request, host=_host(RunHostConnection(url="http://remote.example", token="secret-token")), resolver=RunHostResolver(), transport=httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            content=_stream(_frame(event)),
+            headers={"X-Mship-Exec-Nonce": NONCE},
+        )
+    ),)
 
     assert result.status == "protocol_error"
 
@@ -505,13 +479,9 @@ def test_exec_tool_discards_hostile_error_body_without_reading_it():
         raise AssertionError("client must not buffer an untrusted HTTP error body")
         yield b"unreachable"
 
-    result = exec_tool(
-        request=_request(),
-        conn=RunHostConnection(url="http://remote.example", token="secret-token"),
-        transport=httpx.MockTransport(
-            lambda _request: httpx.Response(500, content=hostile_body())
-        ),
-    )
+    result = exec_tool(request=_request(), host=_host(RunHostConnection(url="http://remote.example", token="secret-token")), resolver=RunHostResolver(), transport=httpx.MockTransport(
+        lambda _request: httpx.Response(500, content=hostile_body())
+    ),)
 
     assert result.status == "protocol_error"
 
@@ -537,17 +507,13 @@ def test_exec_tool_rejects_mismatched_pinned_source_revision():
         ),
     )
 
-    result = exec_tool(
-        request=request,
-        conn=RunHostConnection(url="http://remote.example", token="secret-token"),
-        transport=httpx.MockTransport(
-            lambda _request: httpx.Response(
-                200,
-                content=_stream(_frame(event)),
-                headers={"X-Mship-Exec-Nonce": NONCE},
-            )
-        ),
-    )
+    result = exec_tool(request=request, host=_host(RunHostConnection(url="http://remote.example", token="secret-token")), resolver=RunHostResolver(), transport=httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            content=_stream(_frame(event)),
+            headers={"X-Mship-Exec-Nonce": NONCE},
+        )
+    ),)
 
     assert result.status == "protocol_error"
 
@@ -565,32 +531,24 @@ def test_exec_tool_rejects_success_that_drops_accepted_identity(missing):
     else:
         identity["source_revision"] = None
     final = ToolEvent("result", result=ToolResult("completed", exit_code=0, **identity))
-    result = exec_tool(
-        request=_request(),
-        conn=RunHostConnection(url="http://remote.example", token="secret-token"),
-        transport=httpx.MockTransport(
-            lambda _request: httpx.Response(
-                200,
-                content=iter((_frame(started), _frame(final))),
-                headers={"X-Mship-Exec-Nonce": NONCE},
-            )
-        ),
-    )
+    result = exec_tool(request=_request(), host=_host(RunHostConnection(url="http://remote.example", token="secret-token")), resolver=RunHostResolver(), transport=httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            content=iter((_frame(started), _frame(final))),
+            headers={"X-Mship-Exec-Nonce": NONCE},
+        )
+    ),)
     assert result.status == "protocol_error"
 
 
 def test_exec_tool_rejects_excessively_nested_json_as_protocol_error():
     payload = b"[" * 2000 + b"0" + b"]" * 2000
     frame = f"__MSHIP_TOOL__:{NONCE} {len(payload)}\n".encode() + payload
-    result = exec_tool(
-        request=_request(),
-        conn=RunHostConnection(url="http://remote.example", token="secret-token"),
-        transport=httpx.MockTransport(
-            lambda _request: httpx.Response(
-                200,
-                content=_stream(frame),
-                headers={"X-Mship-Exec-Nonce": NONCE},
-            )
-        ),
-    )
+    result = exec_tool(request=_request(), host=_host(RunHostConnection(url="http://remote.example", token="secret-token")), resolver=RunHostResolver(), transport=httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            content=_stream(frame),
+            headers={"X-Mship-Exec-Nonce": NONCE},
+        )
+    ),)
     assert result.status == "protocol_error"

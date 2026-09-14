@@ -10,7 +10,7 @@ import pytest
 from mship.core.config import RepoConfig, WorkspaceConfig
 from mship.core.persistence.workspace_store import WorkspaceStore
 from mship.core.remote_tool import ToolResult
-from mship.core.run_host.config import HostRegistration, RunHostConnection
+from mship.core.run_host.config import HostRegistration, RunHostConnection, registration_identity
 from mship.core.run_target.models import (
     AppRun,
     BackendConfig,
@@ -140,7 +140,7 @@ def _stored_observation_executor(
             backend_revision=_SHA,
             host_name=host.name,
             host_scope=host.scope,
-            host_endpoint_fingerprint=host_endpoint_fingerprint(host.connection.url),
+            host_endpoint_fingerprint=host_endpoint_fingerprint("|".join(registration_identity(host.connection))),
             safe_target_label="Phone",
             private_binding_ref=binding_ref,
             operation="run",
@@ -325,7 +325,7 @@ def test_remote_executor_preserves_bounded_discovery_output(tmp_path, monkeypatc
         store=SimpleNamespace(state_dir=tmp_path / ".mothership"),
     )
     host = _host("mobile")
-    executor._prepared[("app", host.name, host.connection.url)] = SimpleNamespace(
+    executor._prepared[executor._host_key("app", host)] = SimpleNamespace(
         run_ref_repos=("app",), source_revision=_SHA, failure=None
     )
 
@@ -351,7 +351,7 @@ def test_remote_executor_rejects_forged_certified_request_before_remote_call(
         store=SimpleNamespace(state_dir=tmp_path / ".mothership"),
     )
     host = _host("mobile")
-    executor._prepared[("app", host.name, host.connection.url)] = SimpleNamespace(
+    executor._prepared[executor._host_key("app", host)] = SimpleNamespace(
         run_ref_repos=("app",), source_revision=_SHA, failure=None
     )
 

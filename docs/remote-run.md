@@ -4,12 +4,12 @@ Some verbs are host-bound: iOS capture (`xcrun simctl`) only runs on macOS, an A
 
 This doc covers the model, how to configure it, and how to read the failure messages it produces.
 
-**Common-runner relay release gate:** #507 supplies the shared runner and the
-adapter API below. Public-relay readiness still requires the actual #506
-credential-resolution integration for source transfer, execution and cleanup,
-followed by real relay-path proof. Loopback verification and the role
-configuration examples here are not that proof. Do not add a standing-token,
-direct-network or local-execution fallback to bypass this gate.
+**Relay credential boundary:** relay-native registrations resolve a short-lived
+bearer at each Git/HTTP boundary through the authenticated host directory.
+They do not store a standing daemon token, follow redirects, use a direct route,
+or fall back to local execution. A real relay-only dirty-source operator smoke
+test remains a release gate; examples and automated tests are not evidence for
+that physical-host gate.
 
 ## The model
 
@@ -19,9 +19,7 @@ A "run host" is just another `mship` workspace, already set up (`mothership.yaml
 mship serve --relay
 ```
 
-exactly like the phone-pairing flow: it dials **out** to the relay (so NAT/"somewhere else entirely" is fine) and is reached at a stable per-device relay URL, bearer-auth'd.
-
-Your local box (the operator) then treats that URL+token as a **run-host role** and, when you pass `--remote`, POSTs to the remote's `/exec/{verb}` endpoint instead of running the task locally:
+exactly like the phone-pairing flow: it dials **out** to the relay (so NAT/"somewhere else entirely" is fine) and is reached through a directory-selected public relay URL. Relay-mode operators never copy the daemon standing token into their registration.
 
 - The remote **materializes the task's branch** — `git fetch` + a worktree at `.worktrees/<task>/<repo>`, mirroring the local worktree layout. Remote execution always operates on a task's branch; there's no ad-hoc remote run (the remote needs a branch to check out).
 - The remote runs the repo's go-task target (`run`/`capture`/`build`) with the verb's existing task/capture variables, using the explicit server runtime environment described below rather than inheriting the daemon's entire environment.
@@ -95,6 +93,62 @@ per-role override for one already eligible host; both variables can also form a
 legacy environment-only registration. They never distribute credentials across
 a pooled role (role upper-cased, `-` → `_`).
 
+
+### Relay-native registration
+
+Direct registrations remain deliberately direct: `--url/--token` and the direct
+`--pair-link` keep their existing private `{url, token}` mapping and may use the
+documented direct environment overrides. A relay registration stores only
+`relay`, `host_id`, `workspace_id`, and the directory-selected `instance_id`;
+it never stores a public route, refresh, fleet credential, short-lived bearer,
+or daemon standing token.
+
+The relay owner first approves/enrols the host and issues the already-existing
+account link with `mship relay fleet-token --label <coordinator>
+--relay-domain <relay> --store-dir <relay-store>`. Transfer that
+`groundcontrol://add-relay?...` link over a secure out-of-band channel. On the
+coordinator, enter it only at the echo-hidden prompt:
+
+```bash
+mship run-host pair-relay
+mship run-host add studio --role ios-sim-host \
+  --relay relay.example.com --host-id <approved-host-id> \
+  --workspace-id <workspace-id>
+```
+
+`pair-relay` consumes but never mints or displays the fleet credential. A
+direct `groundcontrol://add?...` link cannot seed relay pairing. If pairing is
+missing/revoked, transfer a new account link and pair again; if directory
+selection or instance binding fails, re-enrol/approve the host or correct the
+stored identity mapping.
+
+To replace a legacy direct record, select the approved identity first and use
+the explicit preview/apply flow. It writes a private byte-for-byte backup before
+replacement; it never treats the legacy token as a refresh credential or keeps
+it as a hidden fallback:
+
+```bash
+mship run-host migrate studio --relay relay.example.com \
+  --host-id <approved-host-id> --workspace-id <workspace-id>
+mship run-host migrate studio --relay relay.example.com \
+  --host-id <approved-host-id> --workspace-id <workspace-id> --apply
+```
+
+For a relay record, every dirty-source Git push/delete and every legacy or
+typed execution independently authenticates `GET
+https://enroll.<relay>/hosts`, selects the stored host/instance, exchanges its
+refresh only with that selected HTTPS public origin at `/host/token`, and binds
+the configured workspace under `/workspaces/{workspace_id}`. Redirects are
+refused. A request may make at most one refreshed retry after a definite
+pre-start 401/403; source mutation, cleanup, accepted streams, timeouts, and
+framing/disconnect failures are never replayed.
+
+The Mac Studio retirement gate remains operator-only: do not remove its
+standing-token mapping or temporary Tailscale Serve forwarder until an operator
+has run a real relay-only dirty-source build and recorded safe route,
+source-receipt, host/workspace tool-route, completion, and coordinator
+process-tree evidence showing `gradle_or_java_build_descendant_execs: 0`.
+Loopback/unit evidence is not that gate.
 ## Using it (`--remote[=role]`)
 
 ```bash
@@ -182,12 +236,13 @@ reachable by sha. The destination is your own machine, so there is no reason for
 a third party to be in the path. **Real history goes to origin; throwaway state
 goes host to host.**
 
-The run host accepts these pushes on a purpose-built endpoint (`/git/<repo>`)
-that is bearer-authenticated with the same run-host token, accepts only repos
-that workspace declares, and accepts writes only onto the `refs/mship/run/*`
-namespace. It is not a mirror, not a remote you add by hand, and not a path for
-real history. Each run force-updates its own ref, and `mship close` deletes the
-task's scratch refs from the host.
+The run host accepts these pushes on a purpose-built endpoint: direct records
+use `/git/<repo>`, while relay records use
+`/workspaces/{workspace_id}/git/<repo>` after an independently resolved
+short-lived bearer. Both accept only declared repos and writes under
+`refs/mship/run/*`. It is not a mirror, not a remote you add by hand, and not a
+path for real history. Each run force-updates its own ref, and `mship close`
+deletes the task's scratch refs from the host.
 
 Nothing here changes what `mship finish` requires. The scratch namespace is not
 a branch, is not PR-able, and no code path merges or branches from it — so
@@ -345,10 +400,11 @@ repositories once; dirty repositories become private synthesized Git commits,
 while clean repositories retain their inspected HEAD. The snapshot stores source
 identities rather than caller paths or a host connection.
 
-`prepare_remote_source(*, task_obj, target_repos, config, shell, conn, output,
-on_prepared=None, snapshot=None, on_transfer=None)` transfers that source and
-returns `PreparedSource(run_ref_repos, source_revisions)`. Supplying a
-`SourceSnapshot` is authoritative: preparation neither reinspects nor
+`prepare_remote_source(*, task_obj, target_repos, config, shell, host, resolver,
+output, on_prepared=None, snapshot=None, on_transfer=None)` resolves a fresh
+operation credential before each source mutation and transfers that source. It
+returns `PreparedSource(run_ref_repos, source_revisions)`.
+Supplying a `SourceSnapshot` is authoritative: preparation neither reinspects nor
 resynthesizes the local tree, so each eligible host receives the same certified
 revision. `on_transfer(git_repo, ref, sha)` runs only after a successful dirty
 source delivery.
@@ -385,10 +441,11 @@ If receipt persistence fails after a push, preparation attempts leased rollback
 and reports unresolved cleanup if rollback fails. This source-ref cleanup does
 not implement Task 7's device-session or selected-context teardown.
 
-`mship.core.remote_client.exec_tool(*, request, conn, event_sink=None,
-transport=None)` is the transport-only entry point. It sends one request to the
-already selected `RunHostConnection`, with no redirect, retry, host
-re-resolution, token fallback, or local fallback.
+`mship.core.remote_client.exec_tool(*, request, host, resolver, event_sink=None,
+transport=None)` resolves a credential at the operation boundary and sends the
+typed request with redirects disabled. Relay authentication may refresh once
+only before any streamed event is accepted; there is no token fallback or local
+fallback.
 
 This internal surface activates neither profile CLI flags nor real backend
 implementations. In particular, #530 adds no `mship run --profile`, profile

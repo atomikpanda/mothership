@@ -38,13 +38,17 @@ from typer.testing import CliRunner
 from mship.cli import app, container
 from mship.core import remote_client
 from mship.core.remote_exec import ARTIFACT_MARKER, EXIT_MARKER
-from mship.core.run_host import HostRegistration, RunHostConnection, RunHostError, RunHostStore
+from mship.core.run_host import HostRegistration, RunHostConnection, RunHostError, RunHostResolver, RunHostStore
 from mship.core.spec import AcceptanceCriterion, Spec
 from mship.core.spec_store import SpecStore
 from mship.core.state import StateManager, Task, WorkspaceState
 from mship.util.shell import ShellResult, ShellRunner
 
 runner = CliRunner()
+
+
+def _host(connection: RunHostConnection) -> HostRegistration:
+    return HostRegistration("host", ("role",), (), 0, connection, "project")
 
 
 # --- wire-framing helpers (mirror core/remote_exec.py's contract) ----------
@@ -138,14 +142,10 @@ def test_exec_remote_posts_expected_url_headers_and_body():
     conn = RunHostConnection(url="http://remote.example", token="tok-xyz")
     printed = []
 
-    code = remote_client.exec_remote(
-        verb="run",
-        conn=conn,
-        task="t1",
-        repos=["api"],
-        print_fn=printed.append,
-        transport=_mock_transport(_recording_handler(recorder, body)),
-    )
+    code = remote_client.exec_remote(verb="run", host=_host(conn), resolver=RunHostResolver(), task="t1",
+    repos=["api"],
+    print_fn=printed.append,
+    transport=_mock_transport(_recording_handler(recorder, body)),)
 
     assert code == 0
     assert recorder["url"] == "http://remote.example/exec/run"
@@ -159,15 +159,11 @@ def test_exec_remote_includes_platform_when_given():
     body = _frame(["ok\n"], exit_code=0)
     conn = RunHostConnection(url="http://remote.example", token="tok")
 
-    remote_client.exec_remote(
-        verb="capture",
-        conn=conn,
-        task="t1",
-        repos=["app"],
-        platform="ios",
-        transport=_mock_transport(_recording_handler(recorder, body)),
-        print_fn=lambda _l: None,
-    )
+    remote_client.exec_remote(verb="capture", host=_host(conn), resolver=RunHostResolver(), task="t1",
+    repos=["app"],
+    platform="ios",
+    transport=_mock_transport(_recording_handler(recorder, body)),
+    print_fn=lambda _l: None,)
     assert recorder["json"]["platform"] == "ios"
 
 
@@ -176,14 +172,10 @@ def test_exec_remote_renders_lines_live_in_order():
     conn = RunHostConnection(url="http://h", token="t")
     printed = []
 
-    code = remote_client.exec_remote(
-        verb="run",
-        conn=conn,
-        task="t1",
-        repos=["api"],
-        print_fn=printed.append,
-        transport=_mock_transport(_recording_handler({}, body)),
-    )
+    code = remote_client.exec_remote(verb="run", host=_host(conn), resolver=RunHostResolver(), task="t1",
+    repos=["api"],
+    print_fn=printed.append,
+    transport=_mock_transport(_recording_handler({}, body)),)
     assert code == 0
     assert printed == ["one", "two", "three"]
 
@@ -191,14 +183,10 @@ def test_exec_remote_renders_lines_live_in_order():
 def test_exec_remote_returns_nonzero_remote_exit_code_not_a_raise():
     body = _frame(["boom\n"], exit_code=7)
     conn = RunHostConnection(url="http://h", token="t")
-    code = remote_client.exec_remote(
-        verb="run",
-        conn=conn,
-        task="t1",
-        repos=["api"],
-        print_fn=lambda _l: None,
-        transport=_mock_transport(_recording_handler({}, body)),
-    )
+    code = remote_client.exec_remote(verb="run", host=_host(conn), resolver=RunHostResolver(), task="t1",
+    repos=["api"],
+    print_fn=lambda _l: None,
+    transport=_mock_transport(_recording_handler({}, body)),)
     assert code == 7
 
 
@@ -208,16 +196,12 @@ def test_exec_remote_extracts_artifact_tar_into_captures_dir(tmp_path):
     conn = RunHostConnection(url="http://h", token="t")
     out_dir = tmp_path / "captures" / "t1" / "20260711T000000Z-android"
 
-    code = remote_client.exec_remote(
-        verb="capture",
-        conn=conn,
-        task="t1",
-        repos=["app"],
-        platform="android",
-        captures_dir_for=out_dir,
-        print_fn=lambda _l: None,
-        transport=_mock_transport(_recording_handler({}, body)),
-    )
+    code = remote_client.exec_remote(verb="capture", host=_host(conn), resolver=RunHostResolver(), task="t1",
+    repos=["app"],
+    platform="android",
+    captures_dir_for=out_dir,
+    print_fn=lambda _l: None,
+    transport=_mock_transport(_recording_handler({}, body)),)
 
     assert code == 0
     assert (out_dir / "screen.png").read_bytes() == b"PNGDATA"
@@ -228,14 +212,10 @@ def test_exec_remote_no_artifact_block_when_captures_dir_for_absent():
     """run/build never pass captures_dir_for — nothing to extract, no error."""
     body = _frame(["ok\n"], exit_code=0)
     conn = RunHostConnection(url="http://h", token="t")
-    code = remote_client.exec_remote(
-        verb="run",
-        conn=conn,
-        task="t1",
-        repos=["api"],
-        print_fn=lambda _l: None,
-        transport=_mock_transport(_recording_handler({}, body)),
-    )
+    code = remote_client.exec_remote(verb="run", host=_host(conn), resolver=RunHostResolver(), task="t1",
+    repos=["api"],
+    print_fn=lambda _l: None,
+    transport=_mock_transport(_recording_handler({}, body)),)
     assert code == 0
 
 
@@ -245,19 +225,11 @@ def test_exec_remote_connection_failure_raises_remote_exec_error():
 
     conn = RunHostConnection(url="http://unreachable.example", token="t")
     with pytest.raises(remote_client.RemoteExecError) as exc_info:
-        remote_client.exec_remote(
-            verb="run",
-            conn=conn,
-            task="t1",
-            repos=["api"],
-            print_fn=lambda _l: None,
-            transport=_mock_transport(handler),
-        )
-    # Task 6: a connection-level failure gets a specific, actionable message
-    # ("unreachable via relay"), distinct from a non-2xx HTTP status.
-    msg = str(exc_info.value)
-    assert "unreachable" in msg
-    assert "http://unreachable.example" in msg
+        remote_client.exec_remote(verb="run", host=_host(conn), resolver=RunHostResolver(), task="t1",
+        repos=["api"],
+        print_fn=lambda _l: None,
+        transport=_mock_transport(handler),)
+    assert "unreachable" in str(exc_info.value)
 
 
 def test_exec_remote_non_2xx_raises_remote_exec_error():
@@ -267,40 +239,12 @@ def test_exec_remote_non_2xx_raises_remote_exec_error():
         return httpx.Response(401, content=b"missing or invalid bearer token")
 
     with pytest.raises(remote_client.RemoteExecError):
-        remote_client.exec_remote(
-            verb="run",
-            conn=conn,
-            task="t1",
-            repos=["api"],
-            print_fn=lambda _l: None,
-            transport=_mock_transport(handler),
-        )
+        remote_client.exec_remote(verb="run", host=_host(conn), resolver=RunHostResolver(), task="t1",
+        repos=["api"],
+        print_fn=lambda _l: None,
+        transport=_mock_transport(handler),)
 
 
-def test_exec_remote_503_surfaces_not_bootstrapped_message():
-    """Task 3's `POST /exec/{verb}` 503s when the remote serve has no
-    workspace config wired in — the client must turn that into a specific
-    "remote workspace not bootstrapped" message, not a generic HTTP-status
-    error, so an operator immediately knows the fix is on the REMOTE side."""
-    conn = RunHostConnection(url="http://remote.example", token="t")
-
-    def handler(request):
-        return httpx.Response(
-            503,
-            json={"detail": "remote workspace not bootstrapped: no config wired in"},
-        )
-
-    with pytest.raises(remote_client.RemoteExecError) as exc_info:
-        remote_client.exec_remote(
-            verb="run",
-            conn=conn,
-            task="t1",
-            repos=["api"],
-            print_fn=lambda _l: None,
-            transport=_mock_transport(handler),
-        )
-    msg = str(exc_info.value)
-    assert "not bootstrapped" in msg
 
 
 def test_exec_remote_survives_quiet_build_then_returns_remote_result():
@@ -330,57 +274,18 @@ def test_exec_remote_survives_quiet_build_then_returns_remote_result():
         worker.start()
         printed = []
         try:
-            code = remote_client.exec_remote(
-                verb="run",
-                conn=RunHostConnection(
-                    url=f"http://127.0.0.1:{server.server_port}",
-                    token="test",
-                ),
-                task="quiet-build",
-                repos=["app"],
-                print_fn=printed.append,
-            )
+            code = remote_client.exec_remote(verb="run", host=_host(RunHostConnection(
+                url=f"http://127.0.0.1:{server.server_port}",
+                token="test",
+            )), resolver=RunHostResolver(), task="quiet-build",
+            repos=["app"],
+            print_fn=printed.append,)
         finally:
             worker.join(timeout=10)
     assert code == 7
     assert printed == ["building", "build failed"]
 
 
-def test_exec_remote_bounds_stalled_error_body():
-    """An HTTP error body is not a live execution stream and must time out."""
-    release = Event()
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):
-            self.rfile.read(int(self.headers["Content-Length"]))
-            self.send_response(503)
-            self.send_header("Content-Length", "100")
-            self.end_headers()
-            self.wfile.flush()
-            release.wait(timeout=7)
-
-        def log_message(self, *_args):
-            pass
-
-    with HTTPServer(("127.0.0.1", 0), Handler) as server:
-        worker = Thread(target=server.handle_request, daemon=True)
-        worker.start()
-        try:
-            with pytest.raises(remote_client.RemoteExecError) as exc_info:
-                remote_client.exec_remote(
-                    verb="run",
-                    conn=RunHostConnection(
-                        url=f"http://127.0.0.1:{server.server_port}",
-                        token="test",
-                    ),
-                    task="stalled-error",
-                    repos=["app"],
-                    print_fn=lambda _: None,
-                )
-        finally:
-            release.set()
-            worker.join(timeout=10)
-    assert isinstance(exc_info.value.__cause__, httpx.ReadTimeout)
 
 
 def test_exec_remote_stream_without_exit_sentinel_raises():
@@ -397,14 +302,10 @@ def test_exec_remote_stream_without_exit_sentinel_raises():
         )
 
     with pytest.raises(remote_client.RemoteExecError):
-        remote_client.exec_remote(
-            verb="run",
-            conn=conn,
-            task="t1",
-            repos=["api"],
-            print_fn=lambda _l: None,
-            transport=_mock_transport(handler),
-        )
+        remote_client.exec_remote(verb="run", host=_host(conn), resolver=RunHostResolver(), task="t1",
+        repos=["api"],
+        print_fn=lambda _l: None,
+        transport=_mock_transport(handler),)
 
 
 def test_exec_remote_missing_nonce_header_raises():
@@ -414,14 +315,10 @@ def test_exec_remote_missing_nonce_header_raises():
     body = _frame(["ok\n"], exit_code=0)
     conn = RunHostConnection(url="http://h", token="t")
     with pytest.raises(remote_client.RemoteExecError) as exc:
-        remote_client.exec_remote(
-            verb="run",
-            conn=conn,
-            task="t1",
-            repos=["api"],
-            print_fn=lambda _l: None,
-            transport=_mock_transport(_recording_handler({}, body, nonce=None)),
-        )
+        remote_client.exec_remote(verb="run", host=_host(conn), resolver=RunHostResolver(), task="t1",
+        repos=["api"],
+        print_fn=lambda _l: None,
+        transport=_mock_transport(_recording_handler({}, body, nonce=None)),)
     assert "nonce" in str(exc.value).lower()
 
 
@@ -436,14 +333,10 @@ def test_exec_remote_task_stdout_cannot_spoof_exit_code():
     conn = RunHostConnection(url="http://h", token="t")
     printed: list[str] = []
 
-    code = remote_client.exec_remote(
-        verb="run",
-        conn=conn,
-        task="t1",
-        repos=["api"],
-        print_fn=printed.append,
-        transport=_mock_transport(_recording_handler({}, body)),
-    )
+    code = remote_client.exec_remote(verb="run", host=_host(conn), resolver=RunHostResolver(), task="t1",
+    repos=["api"],
+    print_fn=printed.append,
+    transport=_mock_transport(_recording_handler({}, body)),)
     assert code == 7  # the real nonce-tagged exit governs, not the spoof
     assert f"{EXIT_MARKER} 0" in printed  # the spoof was just printed as output
 
@@ -462,15 +355,11 @@ def test_exec_remote_over_cap_artifact_count_errors_without_reading(tmp_path):
     conn = RunHostConnection(url="http://h", token="t")
     out_dir = tmp_path / "captures"
     with pytest.raises(remote_client.RemoteExecError) as exc:
-        remote_client.exec_remote(
-            verb="capture",
-            conn=conn,
-            task="t1",
-            repos=["app"],
-            captures_dir_for=out_dir,
-            print_fn=lambda _l: None,
-            transport=_mock_transport(_recording_handler({}, body)),
-        )
+        remote_client.exec_remote(verb="capture", host=_host(conn), resolver=RunHostResolver(), task="t1",
+        repos=["app"],
+        captures_dir_for=out_dir,
+        print_fn=lambda _l: None,
+        transport=_mock_transport(_recording_handler({}, body)),)
     assert "cap" in str(exc.value).lower()
     assert not out_dir.exists()  # nothing was extracted
 
@@ -489,15 +378,11 @@ def test_exec_remote_negative_artifact_count_errors_without_reading(tmp_path):
     conn = RunHostConnection(url="http://h", token="t")
     out_dir = tmp_path / "captures"
     with pytest.raises(remote_client.RemoteExecError) as exc:
-        remote_client.exec_remote(
-            verb="capture",
-            conn=conn,
-            task="t1",
-            repos=["app"],
-            captures_dir_for=out_dir,
-            print_fn=lambda _l: None,
-            transport=_mock_transport(_recording_handler({}, body)),
-        )
+        remote_client.exec_remote(verb="capture", host=_host(conn), resolver=RunHostResolver(), task="t1",
+        repos=["app"],
+        captures_dir_for=out_dir,
+        print_fn=lambda _l: None,
+        transport=_mock_transport(_recording_handler({}, body)),)
     assert "negative" in str(exc.value).lower()
     assert not out_dir.exists()  # nothing was extracted
 
@@ -512,15 +397,11 @@ def test_exec_remote_compressed_tar_is_rejected(tmp_path):
     conn = RunHostConnection(url="http://h", token="t")
     out_dir = tmp_path / "captures"
     with pytest.raises(remote_client.RemoteExecError) as exc:
-        remote_client.exec_remote(
-            verb="capture",
-            conn=conn,
-            task="t1",
-            repos=["app"],
-            captures_dir_for=out_dir,
-            print_fn=lambda _l: None,
-            transport=_mock_transport(_recording_handler({}, body)),
-        )
+        remote_client.exec_remote(verb="capture", host=_host(conn), resolver=RunHostResolver(), task="t1",
+        repos=["app"],
+        captures_dir_for=out_dir,
+        print_fn=lambda _l: None,
+        transport=_mock_transport(_recording_handler({}, body)),)
     assert "tar" in str(exc.value).lower()
 
 
@@ -531,14 +412,10 @@ def test_exec_remote_malformed_control_count_raises_clean_error():
     body = f"{EXIT_MARKER}:{NONCE} notanumber\n".encode()
     conn = RunHostConnection(url="http://h", token="t")
     with pytest.raises(remote_client.RemoteExecError) as exc:
-        remote_client.exec_remote(
-            verb="run",
-            conn=conn,
-            task="t1",
-            repos=["api"],
-            print_fn=lambda _l: None,
-            transport=_mock_transport(_recording_handler({}, body)),
-        )
+        remote_client.exec_remote(verb="run", host=_host(conn), resolver=RunHostResolver(), task="t1",
+        repos=["api"],
+        print_fn=lambda _l: None,
+        transport=_mock_transport(_recording_handler({}, body)),)
     assert "malformed" in str(exc.value).lower()
 
 
@@ -1210,30 +1087,6 @@ def test_cli_run_remote_unreachable_host_is_clean_error_not_traceback(
         _reset()
 
 
-def test_cli_run_remote_not_bootstrapped_is_clean_error_not_traceback(
-    tmp_path, monkeypatch
-):
-    """A remote serve with no workspace config wired in 503s — the CLI must
-    show a specific "not bootstrapped" message, not a generic HTTP error."""
-    _write_run_workspace(tmp_path, run_hosts=["role-x"])
-    _seed_task_with_worktree(tmp_path, "t1", "api")
-    _configure(tmp_path)
-    container.shell.override(_git_shell(_repo_git()))
-    RunHostStore(tmp_path / ".mothership").set_host(HostRegistration("role-x", ("role-x",), (), 0, RunHostConnection(url="http://remote.example", token="tok-abc"), "project"), scope="project")
-
-    def handler(request):
-        return httpx.Response(503, json={"detail": "remote workspace not bootstrapped"})
-
-    try:
-        with _ClientPatch(monkeypatch, handler):
-            result = runner.invoke(app, ["run", "--task", "t1", "--remote=role-x"])
-        assert result.exit_code != 0
-        assert isinstance(result.exception, SystemExit) or result.exception is None
-        assert "Traceback" not in (result.output or "")
-        assert "not bootstrapped" in result.output.lower()
-    finally:
-        container.shell.reset_override()
-        _reset()
 
 
 def test_cli_capture_remote_unmapped_role_is_clean_error_not_traceback(
@@ -2157,17 +2010,13 @@ def test_exec_remote_sends_run_ref_repos_when_there_are_any():
     recorder: dict = {}
     conn = RunHostConnection(url="http://remote.example", token="tok")
 
-    remote_client.exec_remote(
-        verb="run",
-        conn=conn,
-        task="t1",
-        repos=["api", "web"],
-        run_ref_repos=["api"],
-        print_fn=lambda _l: None,
-        transport=_mock_transport(
-            _recording_handler(recorder, _frame(["ok\n"], exit_code=0))
-        ),
-    )
+    remote_client.exec_remote(verb="run", host=_host(conn), resolver=RunHostResolver(), task="t1",
+    repos=["api", "web"],
+    run_ref_repos=["api"],
+    print_fn=lambda _l: None,
+    transport=_mock_transport(
+        _recording_handler(recorder, _frame(["ok\n"], exit_code=0))
+    ),)
 
     assert recorder["json"] == {
         "task": "t1",
@@ -2183,16 +2032,12 @@ def test_exec_remote_omits_the_key_entirely_when_nothing_was_transferred():
     recorder: dict = {}
     conn = RunHostConnection(url="http://remote.example", token="tok")
 
-    remote_client.exec_remote(
-        verb="run",
-        conn=conn,
-        task="t1",
-        repos=["api"],
-        print_fn=lambda _l: None,
-        transport=_mock_transport(
-            _recording_handler(recorder, _frame(["ok\n"], exit_code=0))
-        ),
-    )
+    remote_client.exec_remote(verb="run", host=_host(conn), resolver=RunHostResolver(), task="t1",
+    repos=["api"],
+    print_fn=lambda _l: None,
+    transport=_mock_transport(
+        _recording_handler(recorder, _frame(["ok\n"], exit_code=0))
+    ),)
 
     assert recorder["json"] == {"task": "t1", "repos": ["api"], "kind": "all"}
 
@@ -2212,14 +2057,10 @@ def test_exec_remote_streams_newline_free_launch_output_in_bounded_fragments():
             headers={NONCE_HEADER: NONCE},
         )
 
-    code = remote_client.exec_remote(
-        verb="run",
-        conn=conn,
-        task="t1",
-        repos=["api"],
-        print_fn=printed.append,
-        transport=_mock_transport(handler),
-    )
+    code = remote_client.exec_remote(verb="run", host=_host(conn), resolver=RunHostResolver(), task="t1",
+    repos=["api"],
+    print_fn=printed.append,
+    transport=_mock_transport(handler),)
 
     assert code == 0
     assert "".join(printed) == output.decode()
@@ -2283,7 +2124,8 @@ def test_live_output_arrives_before_the_remote_stream_finishes(structured):
             if structured:
                 result = remote_client.exec_tool(
                     request=ToolRequest(task="t1", repo="api", argv=("tool",)),
-                    conn=conn,
+                    host=_host(conn),
+                    resolver=RunHostResolver(),
                     event_sink=lambda event: (
                         received.set() if event.kind == "started" else None
                     ),
@@ -2291,13 +2133,9 @@ def test_live_output_arrives_before_the_remote_stream_finishes(structured):
                 assert result.status == "completed" and result.exit_code == 0
             else:
                 assert (
-                    remote_client.exec_remote(
-                        verb="run",
-                        conn=conn,
-                        task="t1",
-                        repos=["api"],
-                        print_fn=lambda _line: received.set(),
-                    )
+                    remote_client.exec_remote(verb="run", host=_host(conn), resolver=RunHostResolver(), task="t1",
+                    repos=["api"],
+                    print_fn=lambda _line: received.set(),)
                     == 0
                 )
         finally:

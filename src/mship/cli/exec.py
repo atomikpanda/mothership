@@ -131,7 +131,7 @@ def _run_remote(
     """
     from mship.core.remote_client import RemoteExecError, exec_remote
     from mship.core.remote_dispatch import RemoteDispatchError, prepare_remote_source
-    from mship.core.run_host import RunHostError, RunHostStore, resolve_run_host
+    from mship.core.run_host import RunHostError, RunHostResolver, RunHostStore, resolve_run_host
 
     if task_obj is None:
         output.error(
@@ -146,10 +146,11 @@ def _run_remote(
 
     store = RunHostStore(container.state_dir())
     try:
-        conn = resolve_run_host(role, repo=repo_for_host, config=config, store=store)
+        host = resolve_run_host(role, repo=repo_for_host, config=config, store=store)
     except RunHostError as e:
         output.error(str(e))
         raise typer.Exit(code=1)
+    resolver = RunHostResolver()
 
     try:
         prepared = prepare_remote_source(
@@ -157,7 +158,8 @@ def _run_remote(
             target_repos=target_repos,
             config=config,
             shell=container.shell(),
-            conn=conn,
+            host=host,
+            resolver=resolver,
             output=output,
             on_prepared=on_prepared,
         )
@@ -167,7 +169,8 @@ def _run_remote(
     try:
         return exec_remote(
             verb=verb,
-            conn=conn,
+            host=host,
+            resolver=resolver,
             task=task_obj.slug,
             repos=target_repos,
             platform=platform,
@@ -176,7 +179,7 @@ def _run_remote(
             run_ref_repos=list(prepared.run_ref_repos),
             print_fn=output.progress,
         )
-    except RemoteExecError as e:
+    except (RemoteExecError, RunHostError) as e:
         output.error(str(e))
         raise typer.Exit(code=1)
 

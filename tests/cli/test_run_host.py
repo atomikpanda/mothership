@@ -58,9 +58,9 @@ def test_add_via_url_token_writes_store_with_secure_perms(tmp_path):
         assert mode == 0o600
 
         raw = yaml.safe_load(path.read_text())
-        assert raw["version"] == 1
+        assert raw["version"] == 2
         assert raw["hosts"]["ios-sim-host"]["connection"] == {
-            "url": "http://10.0.0.5:8787", "token": "secret-tok",
+            "mode": "direct", "url": "http://10.0.0.5:8787", "token": "secret-tok",
         }
     finally:
         _reset()

@@ -65,9 +65,10 @@ def test_store_file_shape_is_versioned_named_host_registry(tmp_path: Path):
     store = RunHostStore(tmp_path)
     store.set_host(_host("ios-sim-host"), scope="project")
     raw = yaml.safe_load((tmp_path / "run-hosts.yaml").read_text())
-    assert raw["version"] == 1
+    assert raw["version"] == 2
     assert raw["hosts"]["ios-sim-host"]["roles"] == ["ios-sim-host"]
     assert raw["hosts"]["ios-sim-host"]["connection"] == {
+        "mode": "direct",
         "url": "http://h",
         "token": "t",
     }

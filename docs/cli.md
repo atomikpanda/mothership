@@ -242,7 +242,7 @@ is distinct from `mship export`, which builds a task review bundle.
 ```bash
 mship run [--repos a,b] [--tag t] [--remote[=role]] # start services per dependency tier
 mship logs <service>                                # tail logs for a service
-mship run-host add|list|remove                      # manage per-machine run-host connections (role -> {url, token})
+mship run-host add|list|remove|pair-relay|migrate # private direct or relay run-host identities
 mship build [--all] [--repos a,b] [--tag t] [--remote[=role]]  # `task build` across repos in dependency order
 mship capture [--repo R] [--platform P] [--kind image|layout|all] [--out DIR] [--remote[=role]]
                                                     # screenshot + layout of the running UI into files;
@@ -253,6 +253,16 @@ mship capture [--repo R] [--platform P] [--kind image|layout|all] [--out DIR] [-
 `--remote[=role]` entry points: bare `--remote` auto-resolves the repo's
 `run_host` (or the sole configured `run_hosts` entry), while `--remote=<role>`
 picks one explicitly.
+
+`run-host add` has two mutually exclusive forms. Direct setup retains
+`--url/--token` or the direct `--pair-link`. Relay setup uses only
+`--relay`, `--host-id`, and `--workspace-id` after the coordinator has consumed
+the relay owner's existing account link using the echo-hidden
+`mship run-host pair-relay` prompt. `run-host migrate NAME --relay ...` previews
+that selected directory identity until `--apply` writes a private backup and
+replaces the named direct mapping. No relay command accepts, prints, or stores a
+fleet credential, refresh credential, bearer, standing token, or mutable public
+relay URL.
 
 #530's profile/runtime code does **not** add `--profile`, `--host`, or
 `--target` flags to `mship run`; it does not add profile capture or profile logs

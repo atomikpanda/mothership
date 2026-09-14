@@ -51,7 +51,7 @@ def test_project_migration_preserves_exact_role_not_global_pool(tmp_path: Path):
     applied = store.migrate(scope="project", allowed_roles=("ios",), apply=True)
     assert applied.changed is True
     assert store.role_hosts() == {"ios": ("ios",)}
-    assert resolve_run_host("ios", repo=None, config=_config("ios"), store=store) == RunHostConnection("https://old.invalid", "old-token")
+    assert resolve_run_host("ios", repo=None, config=_config("ios"), store=store).connection == RunHostConnection("https://old.invalid", "old-token")
 
     store.set_role_hosts("ios", None)
     with pytest.raises(RunHostError, match="ambiguous"):
@@ -65,7 +65,7 @@ def test_invalid_project_override_never_uses_shadowed_user_connection(tmp_path: 
         connection=RunHostConnection("https://user.invalid", "secret"), scope="user"), scope="user")
     project_path = tmp_path / "state" / "run-hosts.yaml"
     project_path.parent.mkdir(parents=True)
-    project_path.write_text("version: 1\nhosts:\n  studio:\n    roles: [ios]\n")
+    project_path.write_text("version: 2\nhosts:\n  studio:\n    roles: [ios]\n")
 
     with pytest.raises(RunHostError, match="invalid.*project") as error:
         resolve_run_host("ios", repo=None, config=_config("ios"), store=store)

@@ -1,4 +1,4 @@
-"""Private named run-host registry management."""
+"""Private named direct and relay run-host registry management."""
 from __future__ import annotations
 
 from typing import Literal
@@ -9,67 +9,87 @@ from mship.cli.output import Output
 
 
 def register(parent: typer.Typer, get_container):
-    run_host_app = typer.Typer(
-        name="run-host", help="Manage private named run-host connections.", no_args_is_help=True,
-    )
+    run_host_app = typer.Typer(name="run-host", help="Manage private named direct or relay run hosts.", no_args_is_help=True)
 
     from mship.core.run_host.store import RunHostError
 
     def registry_failure(out: Output, error: Exception) -> None:
-        message = (
-            str(error) if isinstance(error, RunHostError)
-            else "could not read private run-host registry; fix the private file and retry"
-        )
-        out.error(message)
+        out.error(str(error) if isinstance(error, RunHostError) else "could not update private run-host state; fix the private file and retry")
         raise typer.Exit(1)
 
     def store():
         from mship.core.run_host.store import RunHostStore
         return RunHostStore(get_container().state_dir())
 
-    def connection(url: str | None, token: str | None, pair_link: str | None):
+    def resolver():
+        from mship.core.run_host.resolver import RunHostResolver
+        return RunHostResolver()
+
+    def direct_connection(url: str | None, token: str | None, pair_link: str | None):
         from mship.core.relay.pairing import parse_pair_link
-        out = Output()
         if pair_link is not None and (url is not None or token is not None):
-            out.error("pass either --url/--token or --pair-link, not both")
-            raise typer.Exit(2)
+            raise RunHostError("pass either --url/--token or --pair-link, not both")
         if pair_link is not None:
             try:
                 parsed = parse_pair_link(pair_link)
             except ValueError as exc:
-                out.error(f"invalid --pair-link: {exc}")
-                raise typer.Exit(2)
+                raise RunHostError(f"invalid --pair-link: {exc}") from None
             return parsed["url"], parsed["token"]
         if url is not None and token is not None:
             return url, token
-        out.error("provide a connection: either --url and --token together, or --pair-link")
-        raise typer.Exit(2)
+        raise RunHostError("provide a direct connection with --url and --token, or --pair-link")
+
+    @run_host_app.command("pair-relay")
+    def pair_relay():
+        """Store one already-issued relay account link without printing its credential."""
+        from mship.core.relay.pairing import parse_relay_account_link
+        from mship.core.run_host.pairing_store import RelayPairingStore
+        try:
+            link = typer.prompt("Relay account link", hide_input=True)
+            parsed = parse_relay_account_link(link)
+            RelayPairingStore().put(parsed["relay"], parsed["token"])
+        except (RunHostError, ValueError, OSError, UnicodeError) as exc:
+            registry_failure(Output(), exc)
+        Output().success("stored private relay pairing; add a selected relay run host next")
 
     @run_host_app.command("add")
     def add(
         name: str = typer.Argument(..., help="Private host name."),
         role: list[str] = typer.Option(None, "--role", help="Advertised role (repeatable; defaults to NAME)."),
         scope: Literal["user", "project"] = typer.Option("project", "--scope", help="Registration scope."),
-        url: str | None = typer.Option(None, "--url", help="Run-host base URL. Requires --token."),
-        token: str | None = typer.Option(None, "--token", help="Bearer token. Requires --url."),
-        pair_link: str | None = typer.Option(None, "--pair-link", help="Ground Control pair link."),
+        url: str | None = typer.Option(None, "--url", help="Direct run-host base URL. Requires --token."),
+        token: str | None = typer.Option(None, "--token", help="Direct bearer token. Requires --url."),
+        pair_link: str | None = typer.Option(None, "--pair-link", help="Direct Ground Control pair link."),
+        relay: str | None = typer.Option(None, "--relay", help="Relay domain for an already paired enrolled host."),
+        host_id: str | None = typer.Option(None, "--host-id", help="Approved relay directory host identity."),
+        workspace_id: str | None = typer.Option(None, "--workspace-id", help="Workspace to bind below the selected host."),
         tag: list[str] = typer.Option(None, "--tag", help="Host tag (repeatable)."),
         preference: int = typer.Option(0, "--preference", help="Host preference among equal targets."),
     ):
-        """Add or replace one complete named host entry in its chosen scope."""
-        from mship.core.run_host.config import HostRegistration, RunHostConnection
-        resolved_url, resolved_token = connection(url, token, pair_link)
-        roles = tuple(role or [name])
+        """Add a direct mapping or selected relay identity; never persist a relay credential."""
+        from mship.core.run_host.config import RunHostConnection, HostRegistration
+        relay_values = (relay, host_id, workspace_id)
+        is_relay = any(value is not None for value in relay_values)
+        is_direct = any(value is not None for value in (url, token, pair_link))
+        if is_relay and is_direct:
+            registry_failure(Output(), RunHostError("pass either direct --url/--token/--pair-link or relay --relay/--host-id/--workspace-id"))
         try:
-            store().set_host(HostRegistration(name, roles, tuple(tag or ()), preference,
-                                              RunHostConnection(resolved_url, resolved_token), scope), scope=scope)
-        except (RunHostError, OSError, UnicodeError) as exc:
+            if is_relay:
+                if not all(relay_values):
+                    raise RunHostError("relay registration requires --relay, --host-id, and --workspace-id")
+                connection = resolver().select_relay_identity(relay=relay, host_id=host_id, workspace_id=workspace_id)
+            else:
+                resolved_url, resolved_token = direct_connection(url, token, pair_link)
+                connection = RunHostConnection(resolved_url, resolved_token)
+            roles = tuple(role or [name])
+            store().set_host(HostRegistration(name, roles, tuple(tag or ()), preference, connection, scope), scope=scope)
+        except (RunHostError, OSError, UnicodeError, ValueError) as exc:
             registry_failure(Output(), exc)
-        Output().success(f"registered run-host {name!r} in {scope} scope")
+        Output().success(f"registered {'relay' if is_relay else 'direct'} run-host {name!r} in {scope} scope")
 
     @run_host_app.command("list")
     def list_cmd():
-        """List safe effective host summaries; tokens are never displayed."""
+        """List safe effective host summaries; credentials and mutable relay URLs are never displayed."""
         out = Output()
         try:
             entries = store().safe_hosts()
@@ -78,15 +98,14 @@ def register(parent: typer.Typer, get_container):
         if not entries:
             out.print("no run-hosts configured")
             return
-        out.table(title="Run hosts", columns=["Name", "Roles", "URL", "Scope"],
-                  rows=[[name, ", ".join(host["roles"]), host["url"], host["scope"]]
-                        for name, host in sorted(entries.items())])
+        rows = []
+        for name, host in sorted(entries.items()):
+            destination = host["url"] if host["mode"] == "direct" else f"{host['relay']} / {host['host_id']} / {host['workspace_id']}"
+            rows.append([name, ", ".join(host["roles"]), host["mode"], destination, host["scope"]])
+        out.table(title="Run hosts", columns=["Name", "Roles", "Mode", "Destination", "Scope"], rows=rows)
 
     @run_host_app.command("remove")
-    def remove(
-        name: str = typer.Argument(..., help="Host name to remove."),
-        scope: Literal["user", "project"] = typer.Option("project", "--scope", help="Registration scope."),
-    ):
+    def remove(name: str = typer.Argument(..., help="Host name to remove."), scope: Literal["user", "project"] = typer.Option("project", "--scope", help="Registration scope.")):
         """Remove a scoped host entry (a missing entry is a no-op)."""
         try:
             store().remove_host(name, scope=scope)
@@ -95,11 +114,7 @@ def register(parent: typer.Typer, get_container):
         Output().success(f"removed run-host {name!r} from {scope} scope")
 
     @run_host_app.command("allow-role")
-    def allow_role(
-        role: str = typer.Argument(..., help="Role whose project eligibility policy is changed."),
-        host: list[str] = typer.Option(None, "--host", help="Allowed host name (repeatable)."),
-        all_hosts: bool = typer.Option(False, "--all", help="Opt into all hosts advertising this role."),
-    ):
+    def allow_role(role: str = typer.Argument(..., help="Role whose project eligibility policy is changed."), host: list[str] = typer.Option(None, "--host", help="Allowed host name (repeatable)."), all_hosts: bool = typer.Option(False, "--all", help="Opt into all hosts advertising this role.")):
         """Set project-only role eligibility; --all removes the restriction."""
         out = Output()
         if all_hosts == bool(host):
@@ -113,21 +128,38 @@ def register(parent: typer.Typer, get_container):
 
     @run_host_app.command("migrate")
     def migrate(
-        scope: Literal["user", "project"] = typer.Option("project", "--scope", help="Legacy registry scope."),
-        apply: bool = typer.Option(False, "--apply", help="Write backup and convert the legacy registry."),
+        name: str | None = typer.Argument(None, help="Named direct host to migrate to relay mode."),
+        scope: Literal["user", "project"] = typer.Option("project", "--scope", help="Registry scope."),
+        relay: str | None = typer.Option(None, "--relay", help="Relay domain for named relay migration."),
+        host_id: str | None = typer.Option(None, "--host-id", help="Approved relay directory host identity."),
+        workspace_id: str | None = typer.Option(None, "--workspace-id", help="Workspace to bind below the selected host."),
+        apply: bool = typer.Option(False, "--apply", help="Write a private backup and make the requested migration."),
     ):
-        """Preview, then explicitly convert, a legacy private registry."""
+        """Preview then apply generic direct-format or explicit named relay migration."""
         out = Output()
-        allowed = get_container().config().run_hosts
+        relay_values = (relay, host_id, workspace_id)
         try:
-            report = store().migrate(scope=scope, allowed_roles=allowed, apply=apply)
-        except (RunHostError, OSError, UnicodeError) as exc:
+            if name is None:
+                if any(value is not None for value in relay_values):
+                    raise RunHostError("relay migration requires a named direct host")
+                report = store().migrate(scope=scope, allowed_roles=get_container().config().run_hosts, apply=apply)
+                if not report.changed:
+                    out.print(f"no legacy {scope} run-host registry needs migration")
+                elif not apply:
+                    out.print(f"would migrate {scope} registry direct hosts: {', '.join(report.hosts) or '(none)'}; rerun with --apply")
+                else:
+                    out.success(f"migrated {scope} direct registry; private backup: {report.backup_path}")
+                return
+            if not all(relay_values):
+                raise RunHostError("named relay migration requires --relay, --host-id, and --workspace-id")
+            identity = resolver().select_relay_identity(relay=relay, host_id=host_id, workspace_id=workspace_id)
+            report = store().replace_direct_with_relay(name, scope=scope, identity=identity, apply=apply)
+            safe_identity = f"{identity.relay} / {identity.host_id} / {identity.workspace_id}"
+            if apply:
+                out.success(f"migrated {name!r} to relay identity {safe_identity}; private backup: {report.backup_path}")
+            else:
+                out.print(f"would migrate {name!r} to relay identity {safe_identity}; rerun with --apply")
+        except (RunHostError, OSError, UnicodeError, ValueError) as exc:
             registry_failure(out, exc)
-        if not report.changed:
-            out.print(f"no legacy {scope} run-host registry needs migration")
-        elif not apply:
-            out.print(f"would migrate {scope} registry hosts: {', '.join(report.hosts) or '(none)'}; rerun with --apply")
-        else:
-            out.success(f"migrated {scope} registry; private backup: {report.backup_path}")
 
     parent.add_typer(run_host_app, rich_help_panel="Runtime")

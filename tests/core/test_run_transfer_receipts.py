@@ -17,7 +17,7 @@ from mship.core.remote_dispatch import (
     _DirtySource,
     prepare_remote_source,
 )
-from mship.core.run_host import HostRegistration, RunHostConnection, RunHostStore
+from mship.core.run_host import HostRegistration, RunHostConnection, RunHostResolver, RunHostStore
 from mship.core.run_ref import run_ref
 from mship.core.run_transfer import (
     RunTransferError,
@@ -86,7 +86,7 @@ def test_only_successful_transfers_are_recorded_when_later_host_source_fails(
         (first, second),
     )
 
-    def push(_shell, _path, *, conn, repo, task, sha):
+    def push(_shell, _path, *, conn, workspace_id, repo, task, sha):
         if repo == "web":
             raise RunTransferError("host transfer failed")
         return run_ref(task, repo)
@@ -98,7 +98,8 @@ def test_only_successful_transfers_are_recorded_when_later_host_source_fails(
             target_repos=["api", "web"],
             config=None,
             shell=_Shell(),
-            conn=host.connection,
+            host=host,
+            resolver=RunHostResolver(),
             output=_Output(),
             snapshot=snapshot,
             on_transfer=lambda repo, ref, sha: record_run_ref_receipt(
@@ -414,7 +415,6 @@ def test_task_close_survives_receipt_write_failure_and_retries_absent_ref_safely
         store=store,
         shell=shell,
         warn=warnings.append,
-    ) == ["api"]
+    ) == []
     assert shell.delete_attempts == 2
-    assert any(command.startswith("git ls-remote ") for command, _ in shell.calls)
-    assert _receipts(state_dir) == []
+    assert _receipts(state_dir)

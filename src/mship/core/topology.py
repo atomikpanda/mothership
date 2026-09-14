@@ -450,6 +450,23 @@ def _run_host_edges(
             "token_source": (f"env:{token_env}" if env.get(token_env)
                              else "file" if file_url else None),
         }
+        if len(candidates) == 1 and candidates[0].get("mode") == "relay":
+            entry = candidates[0]
+            edges.append(Edge(
+                kind="run_host", name=f"run_host:{role}", status="warn",
+                code=PROBE_SKIPPED,
+                detail="relay identity is configured; credential and route resolve only at operation time",
+                fix=("if resolution fails, re-pair with `mship run-host pair-relay` "
+                     "or re-enrol the selected host"),
+                facts={
+                    "role": role,
+                    "mode": "relay",
+                    "relay": entry["relay"],
+                    "host_id": entry["host_id"],
+                    "workspace_id": entry["workspace_id"],
+                },
+            ))
+            continue
 
         if len(candidates) > 1:
             edges.append(Edge(
