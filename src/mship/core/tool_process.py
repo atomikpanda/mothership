@@ -93,6 +93,7 @@ class _Operation:
     cleanup_error: bool = False
     reason: str | None = None
     result: ToolResult | None = None
+    publish_result: Callable[[ToolResult], ToolResult] | None = None
     worker: threading.Thread | None = None
     parent_done: threading.Event | None = None
     observers: dict[threading.Event, threading.Event] = field(default_factory=dict)
@@ -165,6 +166,7 @@ class ToolOperationRegistry:
         *,
         cancel_event: threading.Event | None = None,
         spawn: Callable | None = None,
+        publish_result: Callable[[ToolResult], ToolResult] | None = None,
     ) -> Generator[ToolEvent, None, None]:
         invalid = self._validate_launch(request, context)
         if invalid is not None:
@@ -191,7 +193,10 @@ class ToolOperationRegistry:
                     else:
                         try:
                             operation = self._new_operation(
-                                request, context, indexed=True
+                                request,
+                                context,
+                                indexed=True,
+                                publish_result=publish_result,
                             )
                             self._write_record(operation, "starting")
                             self._set_index(operation)
@@ -420,6 +425,7 @@ class ToolOperationRegistry:
         *,
         indexed: bool,
         parent: _Operation | None = None,
+        publish_result: Callable[[ToolResult], ToolResult] | None = None,
     ) -> _Operation:
         owner = parent.owner_ref if parent is not None else secrets.token_urlsafe(24)
         generation = (
@@ -456,6 +462,7 @@ class ToolOperationRegistry:
             root_path=root,
             root_fd=root_fd,
             storage_fd=storage_fd,
+            publish_result=publish_result,
         )
 
     def _launch(
@@ -678,6 +685,18 @@ class ToolOperationRegistry:
                 source_revision=operation.context.source_revision,
             )
         cleanup_known = status != "unknown"
+        if operation.publish_result is not None:
+            try:
+                result = operation.publish_result(result)
+                status = result.status
+            except Exception:
+                status = "evidence_error"
+                result = ToolResult(
+                    status=status,
+                    owner_ref=operation.owner_ref,
+                    generation=operation.generation,
+                    source_revision=operation.context.source_revision,
+                )
         try:
             self._sync_output(operation)
             self._write_record(operation, status, exit_code=result.exit_code)

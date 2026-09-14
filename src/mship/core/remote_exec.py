@@ -51,6 +51,7 @@ Wire contract (Task 5's client parses this):
 
 from __future__ import annotations
 
+from pathlib import Path
 import errno
 import hashlib
 import io
@@ -60,9 +61,8 @@ import shutil
 import tarfile
 import tempfile
 import threading
-from collections.abc import Generator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Iterator, Protocol
 
 try:
@@ -77,6 +77,11 @@ from mship.core import host_tools
 from mship.core.remote_tool import ToolContext, ToolEvent, ToolRequest, ToolResult
 from mship.core.run_ref import RunRefNameError, canonical_run_ref_segment
 from mship.core.tool_process import ToolOperationRegistry
+from mship.core.task_result_publication import (
+    AuthenticatedExecutionProvenance,
+    TaskResultPublisher,
+)
+from mship.core.task_results import TaskResultStore
 from mship.core.run_target.host import (
     TARGET_BINDINGS_FILE,
     TARGET_CONTEXT_FILE,
@@ -161,6 +166,9 @@ class RemoteExecDeps:
     workspace_root: Path
     cancel_event: threading.Event | None = None
     operations: ToolOperationRegistry | None = None
+    result_store: TaskResultStore | None = None
+    execution_provenance: AuthenticatedExecutionProvenance | None = None
+    work_item_id_for_task: Callable[[str], str | None] | None = None
 
 
 def _hub_dir(workspace_root: Path, task: str) -> Path:
@@ -1038,6 +1046,7 @@ def run_tool_stream(
     request: ToolRequest, *, deps: RemoteExecDeps
 ) -> Generator[ToolEvent, None, None]:
     """Execute one typed tool operation without a second transport/owner."""
+    task_key = request.task_key
     resolved = _resolve_tool_request(request, deps=deps)
     if resolved is None:
         yield ToolEvent("result", result=ToolResult("invalid"))
@@ -1128,16 +1137,52 @@ def run_tool_stream(
                 )
                 yield ToolEvent("result", result=ToolResult(status))
                 return
+        publisher: TaskResultPublisher | None = None
+        publish_result = None
+        if task_key is not None:
+            declaration = deps.config.repos[request.repo].task_outputs.get(task_key)
+            if declaration is not None:
+                if deps.result_store is None:
+                    yield ToolEvent("result", result=ToolResult("evidence_error"))
+                    return
+                try:
+                    publisher = TaskResultPublisher.prepare(
+                        store=deps.result_store,
+                        declaration=declaration,
+                        context=context,
+                        task_key=task_key,
+                        output_parent=deps.workspace_root
+                        / ".mothership"
+                        / "task-output-roots",
+                        work_item_id=(
+                            None
+                            if deps.work_item_id_for_task is None
+                            else deps.work_item_id_for_task(request.task)
+                        ),
+                        provenance=deps.execution_provenance,
+                    )
+                except (OSError, ValueError):
+                    yield ToolEvent("result", result=ToolResult("evidence_error"))
+                    return
+                # Server-owned values overwrite untrusted request environment.
+                request = replace(
+                    request,
+                    env={**request.env, **publisher.environment},
+                )
+                publish_result = publisher.publish
         stream = operations.run(
             request,
             context,
             cancel_event=deps.cancel_event,
             spawn=deps.shell.spawn_argv,
+            publish_result=publish_result,
         )
         try:
             yield from stream
         finally:
             stream.close()
+            if publisher is not None:
+                publisher.cleanup()
     except _PreparationError as exc:
         yield ToolEvent("result", result=ToolResult(exc.status))
     except ShellCancelled:

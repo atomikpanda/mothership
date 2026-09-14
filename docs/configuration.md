@@ -340,3 +340,42 @@ Profiles and backends are strict configuration objects: unknown nested fields,
 an unknown backend, an empty host-role list, a role outside `run_hosts`, or a
 task key absent from `tasks:` rejects configuration. They remain internal until
 the separate CLI/backend and native-device work is approved and evidenced.
+
+### Immutable declared task outputs
+
+An exact logical task can opt into immutable generic result publication with
+`task_outputs:`.  The key **must** be an existing key from that repository's
+`tasks:` mapping; it is never treated as a literal Taskfile target.
+
+```yaml
+repos:
+  reports:
+    path: reports
+    type: service
+    tasks:
+      publish-report: report
+    task_outputs:
+      publish-report:
+        retention_seconds: 86400
+        artifacts:
+          - name: report
+            relative_path: out/report.txt
+            media_type: text/plain
+          - name: archive
+            relative_path: out/report.zip
+            media_type: application/zip
+```
+
+Every artifact is an exact relative POSIX file path, not a directory, glob, or
+discovery rule. Names and paths are unique; media types are concrete; nested
+declaration fields are strict. The server supplies `MSHIP_OUTPUT_DIR`,
+`MSHIP_OUTPUT_DECLARATION_FILE`, and `MSHIP_OUTPUT_MANIFEST`; a producer writes
+only the declared files below the output directory and an exact ordered
+`manifest.json` projection. It cannot choose result IDs, output locations,
+retention, host provenance, or a different media type.
+
+`retention_seconds` expires private bytes while retaining immutable result
+metadata. A successful task with a missing/rejected declaration remains a
+completed producer outcome with an unavailable artifact; outcome and artifact
+availability are intentionally separate. Failed/cancelled tasks expose only
+complete outputs explicitly marked `diagnostic_on_failure: true`.

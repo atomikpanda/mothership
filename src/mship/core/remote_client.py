@@ -23,8 +23,14 @@ The CLI (`cli/exec.py`'s `run`/`build`, `cli/capture.py`'s `capture`) resolves
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+import hashlib
 import io
+import json
+import os
+import re
 import tarfile
+import tempfile
 from pathlib import Path
 from urllib.parse import quote
 from typing import Optional
@@ -56,6 +62,7 @@ NONCE_HEADER = "X-Mship-Exec-Nonce"
 # Hard cap on the advertised artifact-tar size. The server only ever writes a
 # handful of small capture files (screen.png, layout.*), so a wildly larger
 # advertised count is a bug or a hostile/compromised remote — reject it BEFORE
+MAX_RESULT_METADATA_BYTES = 512 * 1024
 # reading (no unbounded allocation / tar-bomb landing on disk). 256 MiB.
 MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
 
@@ -72,18 +79,145 @@ def _raw_chunks(response: httpx.Response) -> Iterator[bytes]:
 
 
 class RemoteExecError(Exception):
-    """A connection-level failure talking to a run-host: unreachable/timed
-    out, a non-2xx HTTP response, or a stream that ended without ever
-    producing the trailing `__MSHIP_EXIT__` sentinel (a truncated/dropped
-    connection). Distinct from a non-zero REMOTE TASK exit — that's conveyed
-    as data (the wire contract's `__MSHIP_EXIT__ <code>` line) and returned as
-    a plain int from `exec_remote`, never raised.
+    """A connection-level failure talking to a run-host.
 
-    Task 6: the message is chosen per failure so the CLI error names the
-    actual fix — see `_http_status_message` for the non-2xx cases (a 503
-    "not bootstrapped" remote vs. any other status) and `exec_remote`'s
-    `except httpx.HTTPError` for the connection-level ("unreachable via
-    relay") case."""
+    A non-zero task exit is data returned from ``exec_remote``, never raised.
+    """
+
+
+class TaskResultRetrievalError(RuntimeError):
+    """An authenticated immutable-result response was unavailable or invalid."""
+
+
+_RESULT_ID = re.compile(r"^[A-Za-z0-9_-]{24,128}$")
+
+
+def list_task_results(
+    *, host: HostRegistration, resolver: RunHostResolver, task_slug: str | None = None,
+    work_item_id: str | None = None, repo: str | None = None,
+    transport: httpx.BaseTransport | None = None,
+) -> list[dict[str, object]]:
+    """List safe immutable result summaries over the existing bearer boundary."""
+    selectors = {key: value for key, value in {
+        "task_slug": task_slug, "work_item_id": work_item_id, "repo": repo,
+    }.items() if value is not None}
+    if not selectors or any(not isinstance(value, str) or not value or len(value) > 128 for value in selectors.values()):
+        raise ValueError("invalid task result selector")
+    value = _result_json(host, resolver, "/task-results", params=selectors, transport=transport)
+    if not isinstance(value, list):
+        raise TaskResultRetrievalError("task result list is invalid")
+    return value
+
+
+def get_task_result(
+    *, host: HostRegistration, resolver: RunHostResolver, result_id: str,
+    transport: httpx.BaseTransport | None = None,
+) -> dict[str, object]:
+    _validate_result_id(result_id)
+    value = _result_json(host, resolver, f"/task-results/{result_id}", transport=transport)
+    if not isinstance(value, dict):
+        raise TaskResultRetrievalError("task result metadata is invalid")
+    return value
+
+
+def download_task_artifact(
+    *, host: HostRegistration, resolver: RunHostResolver, result_id: str, artifact_id: str,
+    expected_sha256: str, destination: Path,
+    transport: httpx.BaseTransport | None = None,
+) -> Path:
+    """Stream one selected artifact to a private temporary file and verify it."""
+    _validate_result_id(result_id)
+    _validate_result_id(artifact_id)
+    if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+        raise ValueError("invalid selected artifact digest")
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+    received = 0
+    digest = hashlib.sha256()
+    try:
+        with _result_response(
+            host, resolver, f"/task-results/{result_id}/artifacts/{artifact_id}",
+            transport=transport,
+        ) as response:
+            header_digest = response.headers.get("X-Mship-SHA256")
+            length = response.headers.get("Content-Length")
+            try:
+                expected_length = int(length) if length is not None else -1
+            except ValueError:
+                raise TaskResultRetrievalError("task result artifact is invalid") from None
+            if header_digest != expected_sha256 or not 0 <= expected_length <= 512 * 1024 * 1024:
+                raise TaskResultRetrievalError("task result artifact is invalid")
+            with os.fdopen(fd, "wb") as stream:
+                fd = -1
+                for chunk in response.iter_bytes(chunk_size=64 * 1024):
+                    received += len(chunk)
+                    if received > expected_length:
+                        raise TaskResultRetrievalError("task result artifact is invalid")
+                    digest.update(chunk)
+                    stream.write(chunk)
+                stream.flush()
+                os.fsync(stream.fileno())
+        if received != expected_length or digest.hexdigest() != expected_sha256:
+            raise TaskResultRetrievalError("task result artifact failed verification")
+        os.replace(temporary, destination)
+        return destination
+    except httpx.HTTPError:
+        raise TaskResultRetrievalError("task result retrieval failed") from None
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+@contextmanager
+def _result_response(
+    host: HostRegistration, resolver: RunHostResolver, path: str, *,
+    params: dict[str, str] | None = None,
+    transport: httpx.BaseTransport | None = None,
+) -> Iterator[httpx.Response]:
+    """Resolve the owning workspace and retry only before accepting response bytes."""
+    with httpx.Client(transport=transport, follow_redirects=False) as client:
+        for attempt in range(2):
+            active = resolver.resolve(host, force_refresh=attempt == 1)
+            with client.stream(
+                "GET", _operation_url(host, active, path), params=params,
+                headers={"Authorization": f"Bearer {active.token}"},
+            ) as response:
+                if response.status_code == 401 and attempt == 0 and hasattr(host.connection, "workspace_id"):
+                    continue
+                if response.status_code != 200:
+                    raise TaskResultRetrievalError("task result is unavailable")
+                yield response
+                return
+
+
+def _result_json(
+    host: HostRegistration, resolver: RunHostResolver, path: str, *,
+    params: dict[str, str] | None = None,
+    transport: httpx.BaseTransport | None = None,
+) -> object:
+    try:
+        with _result_response(host, resolver, path, params=params, transport=transport) as response:
+            raw = bytearray()
+            for chunk in response.iter_bytes(chunk_size=64 * 1024):
+                if len(raw) + len(chunk) > MAX_RESULT_METADATA_BYTES:
+                    raise TaskResultRetrievalError("task result metadata is too large")
+                raw.extend(chunk)
+    except httpx.HTTPError:
+        raise TaskResultRetrievalError("task result retrieval failed") from None
+    try:
+        return json.loads(raw)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        raise TaskResultRetrievalError("task result metadata is invalid") from None
+
+
+def _validate_result_id(value: str) -> None:
+    if not isinstance(value, str) or _RESULT_ID.fullmatch(value) is None:
+        raise ValueError("invalid task result identifier")
 
 
 def _http_status_message(url: str, resp: httpx.Response) -> str:

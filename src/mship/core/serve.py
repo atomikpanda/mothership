@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -402,11 +403,33 @@ def create_app(
     else:
         workitems = WorkItemStore(workspace_root / ".mothership" / "workitems")
     _item_msg_lock = threading.Lock()
+    from mship.core.persistence.workspace_store import WorkspaceStore
+    from mship.core.task_result_service import TaskResultService
+    from mship.core.task_results import (
+        ResultExpired,
+        ResultIntegrityError,
+        ResultNotFound,
+        ResultUnavailable,
+        TaskResultStore,
+    )
+
+    result_workspace_store = getattr(state_manager, "workspace_store", None)
+    if result_workspace_store is None:
+        result_workspace_store = WorkspaceStore(workspace_root / ".mothership")
+    result_store = TaskResultStore(
+        result_workspace_store.state_dir,
+        hashlib.sha256(str(workspace_root.resolve()).encode()).hexdigest(),
+        result_workspace_store.task_results,
+    )
+    result_service = TaskResultService(result_store)
 
     @asynccontextmanager
     async def _lifespan(_app):
         """Runs a `PrWatcher` sweep on an interval for the app's lifetime,
         started on ASGI startup and cancelled cleanly on shutdown."""
+        # Retention is owner-controlled at startup, never opportunistically in
+        # a retrieval request where it could race a verified stream.
+        result_service.expire()
         interval = float(
             pr_watch_interval
             if pr_watch_interval is not None
@@ -2064,6 +2087,81 @@ def create_app(
         workspace_root,
         state_dir=getattr(state_manager, "state_dir", workspace_root / ".mothership"),
     )
+    trusted_execution_provenance = None
+    identity = host_id() if callable(host_id) else host_id
+    if isinstance(identity, str):
+        try:
+            trusted_execution_provenance = remote_exec.AuthenticatedExecutionProvenance(
+                host_name=identity
+            )
+        except ValueError:
+            pass
+
+    def _trusted_work_item_id(task_slug: str) -> str | None:
+        try:
+            with result_workspace_store.read() as transaction:
+                task = transaction.tasks.get(transaction.connection, task_slug)
+        except Exception:
+            return None
+        return None if task is None else task.work_item_id
+
+    def _result_http_error(error: Exception) -> HTTPException:
+        if isinstance(error, ResultNotFound):
+            return HTTPException(status_code=404, detail="task result is unavailable")
+        if isinstance(error, ResultExpired):
+            return HTTPException(status_code=410, detail="task result has expired")
+        if isinstance(error, ResultIntegrityError):
+            return HTTPException(status_code=422, detail="task result integrity check failed")
+        if isinstance(error, ResultUnavailable):
+            return HTTPException(status_code=409, detail="task result artifact is unavailable")
+        return HTTPException(status_code=400, detail="invalid task result selector")
+
+    @app.get("/task-results")
+    def get_task_results(
+        task_slug: str | None = None,
+        work_item_id: str | None = None,
+        repo: str | None = None,
+    ):
+        try:
+            return result_service.list_results(
+                task_slug=task_slug, work_item_id=work_item_id, repo=repo
+            )
+        except (ValueError, ResultNotFound, ResultExpired, ResultUnavailable, ResultIntegrityError) as error:
+            raise _result_http_error(error) from None
+
+    @app.get("/task-results/{result_id}")
+    def get_task_result(result_id: str):
+        try:
+            return result_service.result_metadata(result_id)
+        except (ValueError, ResultNotFound, ResultExpired, ResultUnavailable, ResultIntegrityError) as error:
+            raise _result_http_error(error) from None
+
+    @app.get("/task-results/{result_id}/artifacts/{artifact_id}")
+    def get_task_result_artifact(result_id: str, artifact_id: str):
+        try:
+            lease = result_service.stream_artifact(result_id, artifact_id)
+        except (ValueError, ResultNotFound, ResultExpired, ResultUnavailable, ResultIntegrityError) as error:
+            raise _result_http_error(error) from None
+
+        def chunks():
+            try:
+                while True:
+                    chunk = os.read(lease.fd, 1024 * 1024)
+                    if not chunk:
+                        return
+                    yield chunk
+            finally:
+                lease.close()
+
+        return StreamingResponse(
+            chunks(),
+            media_type=lease.artifact.media_type,
+            headers={
+                "Content-Length": str(lease.artifact.byte_size),
+                "ETag": f'"{lease.artifact.sha256}"',
+                "X-Mship-SHA256": str(lease.artifact.sha256),
+            },
+        )
 
     def _unique_tool_object(pairs):
         value = {}
@@ -2167,6 +2265,9 @@ def create_app(
             workspace_root=workspace_root,
             cancel_event=cancel_event,
             operations=tool_operations,
+            result_store=result_store,
+            execution_provenance=trusted_execution_provenance,
+            work_item_id_for_task=_trusted_work_item_id,
         )
         nonce = secrets.token_hex(16)
 

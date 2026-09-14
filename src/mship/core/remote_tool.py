@@ -119,6 +119,14 @@ def _optional_revision(value: object) -> str | None:
     return value
 
 
+def _optional_result_id(value: object) -> str | None:
+    if value is None:
+        return None
+    value = _text(value, field_name="task result id", limit=128)
+    if re.fullmatch(r"[A-Za-z0-9_-]{24,128}", value) is None:
+        _reject("invalid task result id")
+    return value
+
 def _positive_finite(value: object, *, field_name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         _reject(f"invalid {field_name}")
@@ -393,6 +401,7 @@ class ToolResult:
     owner_ref: str | None = None
     generation: str | None = None
     source_revision: str | None = None
+    result_id: str | None = None
     stdout: bytes = field(default=b"", repr=False)
     stderr: bytes = field(default=b"", repr=False)
     # Optional server-created safe host-tools projection. Never reflects request
@@ -437,6 +446,7 @@ class ToolResult:
         object.__setattr__(self, "generation", generation)
         object.__setattr__(self, "source_revision", source_revision)
         object.__setattr__(self, "host_tools_report", report)
+        object.__setattr__(self, "result_id", _optional_result_id(self.result_id))
 
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -450,25 +460,19 @@ class ToolResult:
         }
         if self.host_tools_report is not None:
             payload["host_tools_report"] = dict(self.host_tools_report)
+        if self.result_id is not None:
+            payload["result_id"] = self.result_id
         return payload
 
     @classmethod
     def from_dict(cls, data: object) -> "ToolResult":
         if not isinstance(data, Mapping):
             _reject("invalid tool payload")
-        fields = frozenset(
-            {
-                "status",
-                "exit_code",
-                "owner_ref",
-                "generation",
-                "source_revision",
-                "stdout",
-                "stderr",
-                "host_tools_report",
-            }
-        )
-        if set(data) - fields or not (fields - {"host_tools_report"}) <= set(data):
+        fields = {
+            "status", "exit_code", "owner_ref", "generation", "source_revision",
+            "stdout", "stderr", "result_id", "host_tools_report",
+        }
+        if set(data) - fields or not (fields - {"result_id", "host_tools_report"}) <= set(data):
             _reject("invalid tool payload")
         return cls(
             status=data["status"],
@@ -487,6 +491,7 @@ class ToolResult:
                 max_bytes=MAX_DISCOVERY_STDERR_BYTES,
             ),
             host_tools_report=data.get("host_tools_report"),
+            result_id=data.get("result_id"),
         )
 
 

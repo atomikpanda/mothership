@@ -16,6 +16,7 @@ from mship.core.persistence.app_run_repository import AppRunRepository
 from mship.core.persistence.database import WorkspaceDatabase
 from mship.core.persistence.errors import LegacyMigrationRequired
 from mship.core.persistence.task_repository import TaskRepository
+from mship.core.persistence.task_result_repository import TaskResultRepository
 from mship.core.persistence.workitem_repository import WorkItemRepository
 from mship.core.state import WorkspaceState
 
@@ -26,6 +27,7 @@ class WorkspaceTransaction:
     tasks: TaskRepository
     workitems: WorkItemRepository
     app_runs: AppRunRepository
+    task_results: TaskResultRepository
 
 
 class WorkspaceStore:
@@ -41,6 +43,7 @@ class WorkspaceStore:
         self.tasks = TaskRepository()
         self.workitems = WorkItemRepository()
         self.app_runs = AppRunRepository(self.state_dir)
+        self.task_results = TaskResultRepository(self)
 
     @property
     def backend(self) -> StorageBackend:
@@ -73,6 +76,7 @@ class WorkspaceStore:
                 self.tasks,
                 self.workitems,
                 self.app_runs,
+                self.task_results,
             )
 
     @contextmanager
@@ -87,4 +91,5 @@ class WorkspaceStore:
                 self.tasks,
                 self.workitems,
                 self.app_runs,
+                self.task_results,
             )

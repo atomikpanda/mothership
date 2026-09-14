@@ -5,11 +5,12 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, field_validator, model_validator
 
-from mship.core.run_target.models import BackendConfig, RunProfile, safe_identifier
 from mship.core.evidence_store import EvidenceModeError, resolve_evidence_mode
 from mship.core.relay.config import RelayConfig
 from mship.core.host_tools import HostToolsConfig
 
+from mship.core.run_target.models import BackendConfig, RunProfile, safe_identifier
+from mship.core.task_results import TaskOutputDeclaration
 
 @dataclass(frozen=True)
 class ConfigResolution:
@@ -225,6 +226,9 @@ class RepoConfig(BaseModel):
     run_backends: dict[str, BackendConfig] = {}
     default_run_profile: str | None = None
 
+    # Strict only inside TaskOutputDeclaration; the containing workspace config
+    # retains its established compatibility with unrelated extension keys.
+    task_outputs: dict[str, TaskOutputDeclaration] = {}
     @model_validator(mode="after")
     def validate_run_target_refs(self) -> "RepoConfig":
         if self.default_run_profile is not None:
@@ -246,6 +250,12 @@ class RepoConfig(BaseModel):
             if unknown:
                 raise ValueError(
                     f"run backend {backend_name!r} references unknown logical task(s): {sorted(set(unknown))}"
+                )
+        for task_key in self.task_outputs:
+            safe_identifier(task_key, field="task output declaration key")
+            if task_key not in self.tasks:
+                raise ValueError(
+                    f"task_outputs {task_key!r} references an unknown logical task"
                 )
         return self
 

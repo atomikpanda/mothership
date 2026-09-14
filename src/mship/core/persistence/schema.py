@@ -138,6 +138,69 @@ app_runs = Table(
     Index("ix_app_runs_task_repo_status", "task_slug", "repo", "status"),
 )
 
+task_results = Table(
+    "task_results",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("workspace_id", Text, nullable=False),
+    Column("task_slug", Text, nullable=False),
+    Column("work_item_id", Text),
+    Column("repo", Text, nullable=False),
+    Column("logical_task", Text, nullable=False),
+    Column("task_key", Text, nullable=False),
+    Column("host_name", Text),
+    Column("host_role", Text),
+    Column("host_endpoint_fingerprint", Text),
+    Column("worktree_identity", Text, nullable=False),
+    Column("source_revision", Text),
+    Column("snapshot_identity", Text),
+    Column("env_runner_identity", Text),
+    Column("outcome_status", Text, nullable=False),
+    Column("exit_code", Integer),
+    Column("finished_at", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    Column("expires_at", Text, nullable=False),
+    CheckConstraint(
+        "outcome_status IN ('completed', 'failed', 'cancelled', 'infrastructure_error')",
+        name="outcome_status",
+    ),
+    CheckConstraint(
+        "(outcome_status = 'completed' AND exit_code = 0) OR "
+        "(outcome_status = 'failed' AND exit_code IS NOT NULL AND exit_code <> 0) OR "
+        "(outcome_status IN ('cancelled', 'infrastructure_error') AND exit_code IS NULL)",
+        name="outcome_exit_code",
+    ),
+    Index("ix_task_results_workspace_task", "workspace_id", "task_slug", "created_at"),
+    Index("ix_task_results_workspace_item", "workspace_id", "work_item_id", "created_at"),
+)
+
+task_result_artifacts = Table(
+    "task_result_artifacts",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("result_id", Text, ForeignKey("task_results.id", ondelete="CASCADE"), nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("name", Text, nullable=False),
+    Column("media_type", Text, nullable=False),
+    Column("byte_size", Integer),
+    Column("sha256", Text),
+    Column("availability", Text, nullable=False),
+    Column("safe_reason", Text),
+    Column("blob_locator", Text),
+    UniqueConstraint("result_id", "ordinal"),
+    CheckConstraint("ordinal >= 0", name="ordinal_non_negative"),
+    CheckConstraint(
+        "availability IN ('published', 'missing', 'rejected', 'expired')",
+        name="availability",
+    ),
+    CheckConstraint(
+        "(availability = 'published' AND byte_size IS NOT NULL AND sha256 IS NOT NULL "
+        "AND blob_locator IS NOT NULL) OR availability <> 'published'",
+        name="published_fields",
+    ),
+    Index("ix_task_result_artifacts_blob", "blob_locator"),
+)
+
 task_test_results = Table(
     "task_test_results",
     metadata,

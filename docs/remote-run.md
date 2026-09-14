@@ -571,6 +571,38 @@ Fixture source revisions identify disposable test projects, not the runner
 implementation. This is not macOS/device testing or public-relay proof; the
 actual #506 integration and relay-path release gate above still applies.
 
+
+## Immutable declared task results
+
+Typed `POST /exec/tool` requests that resolve a configured `task_key` with
+`task_outputs` receive a server-created `MSHIP_OUTPUT_DIR`, immutable
+declaration file, and producer-manifest path. On child reaping, the host copies
+only each exact declared regular file into private storage by descriptor, hashes
+it while copying, and persists a result before transient worktree/run-ref
+cleanup. This is generic media support: zero-byte `text/plain`, archives, and
+images are all valid when declared; there is no Android/package/device rule.
+
+The existing capture contract is unchanged: capture still owns
+`MSHIP_CAPTURE_DIR`, recognized capture names, nonce-framed tar transfer, and
+evidence attachment. Declared task results never emit or parse capture tar
+frames.
+
+Authenticated clients use the existing serving workspace bearer boundary:
+
+* `GET /task-results?task_slug=…`, `work_item_id=…`, or `repo=…` lists safe
+  summaries (at least one selector is required);
+* `GET /task-results/{result_id}` returns the safe immutable metadata; and
+* `GET /task-results/{result_id}/artifacts/{artifact_id}` streams exactly the
+  selected private blob only after a pinned-descriptor digest and length
+  pre-pass, with `Content-Length`, `ETag`, and `X-Mship-SHA256`.
+
+Opaque IDs are workspace-scoped. Guessed/cross-workspace IDs are 404,
+expiration is 410, unavailable artifacts are 409, and integrity failures are
+422 without filesystem, token, manifest, stdout, or endpoint disclosure.
+Consumers must select both IDs and require `outcome.status == completed`,
+`exit_code == 0`, `availability == published`, and a matching retrieved digest
+before use. They separately own platform binary verification, installation,
+session policy, and their own provenance record.
 ## Troubleshooting
 
 Start with `mship net status`. It reports every connectivity edge on this machine
